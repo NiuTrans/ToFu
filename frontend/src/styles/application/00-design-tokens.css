@@ -24,9 +24,10 @@
      THE fix for misaligned UI: all margins/padding/gaps in new code come
      from this scale. Half-steps and magic numbers are gate-rejected. */
   --space-0:0;
-  --chat-primary-background:var(--text-primary);
-  --chat-primary-ink:var(--bg-primary);
-  --chat-primary-border:transparent;
+  --chat-primary-background:var(--bg-primary);
+  --chat-primary-hover:var(--bg-hover);
+  --chat-primary-ink:var(--text-primary);
+  --chat-primary-border:var(--border);
   --chat-primary-shadow:none;
   --space-1:4px;
   --space-2:8px;
@@ -179,7 +180,7 @@
 [data-theme="tofu"]{
   --font-ui:var(--sans-body);
 
-  /* Match the existing CO-PILOT paper/ink/gold chrome, and the warm conversation paper. */
+  /* CO-PILOT keeps its established paper/ink/gold chrome independently of chat. */
   --project-surface:#faf8f3;
   --project-panel:#fff;
   --project-band:#f2ecda;
@@ -201,8 +202,8 @@
   --info-bg:rgba(94,144,174,0.12);
   --info-border:rgba(94,144,174,0.35);
   --backdrop:rgba(74,63,47,0.35);
-  --focus-ring:0 0 0 3px rgba(193,121,75,0.25);
-  --knob-shadow:0 1px 2px rgba(92,72,44,0.16);
+  --focus-ring:0 0 0 3px rgba(201,122,29,0.25);
+  --knob-shadow:0 1px 2px rgba(19,25,31,0.16);
 }
 
 /* ── Reduced motion: the whole library honors it from day one ── */

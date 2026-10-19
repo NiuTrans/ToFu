@@ -38,3 +38,43 @@ describe('terminal answer with an older checkpoint', () => {
     expect(selectTurnBlocks(blank).some(block => block.blockId === 'text:terminal')).toBe(false);
   });
 });
+
+describe('answer presentation during live generation and translation', () => {
+  function accumulator(status: TurnRecord['status']): TurnRecord {
+    return { ...turn(status), projection: {
+      content: 'I will check the file.',
+      segments: [{ type: 'text', blockId: 'text:terminal', text: 'I will check the file.',
+        terminal: true, deliverable: true }],
+    } };
+  }
+
+  it.each(['pending', 'running'] as const)(
+    'keeps the %s accumulator as narration before, during and after translation', status => {
+      const source = accumulator(status), before = JSON.stringify(source);
+      const original = selectTurnBlocks(source)[0];
+      const preview = selectTurnBlocks(source, {}, 'translated', {
+        status: 'pending', partialByRound: { 'text:terminal': '我会检查' },
+      })[0];
+      const translated = selectTurnBlocks({ ...source, projection: { ...source.projection,
+        translatedContent: '我会检查文件。', translation: { status: 'completed', model: 'translator' },
+      } })[0];
+      for (const block of [original, preview, translated]) {
+        expect(block).toMatchObject({ kind: 'text', blockId: 'text:terminal', deliverable: false });
+      }
+      expect(original).toMatchObject({ displayMarkdown: 'I will check the file.' });
+      expect(preview).toMatchObject({ displayMarkdown: '我会检查' });
+      expect(translated).toMatchObject({ displayMarkdown: '我会检查文件。' });
+      expect(JSON.stringify(source)).toBe(before);
+    });
+
+  it.each(['completed', 'interrupted', 'truncated', 'failed'] as const)(
+    'promotes only the %s turn tail without needing a text or translation change', status => {
+      const source = accumulator('running');
+      expect(selectTurnBlocks(source)[0]).toMatchObject({ deliverable: false });
+      expect(selectTurnBlocks({ ...source, status })[0]).toMatchObject({
+        blockId: 'text:terminal', deliverable: true, displayMarkdown: source.projection.content,
+      });
+      // Resume immediately removes the final-answer decoration again.
+      expect(selectTurnBlocks({ ...source, status: 'running' })[0]).toMatchObject({ deliverable: false });
+    });
+});

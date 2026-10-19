@@ -341,11 +341,15 @@ real-browser round, activity, note-group and navigation suites.
 - Explicit refresh orchestration lives in `application/conversation-refresh.ts`;
   catalog lookup, Turn hydration, retry presentation, and logging remain
   injected ports, and the command is never published as a browser global.
-- Pre-send translating/connecting presentation rides the optimistic assistant
+- Ordinary idle-send translating/connecting presentation rides the optimistic assistant
   Turn: the send pipeline re-labels that single bubble in place via
   `withOptimisticAssistantPreparation` (preparing → connecting → translating),
-  so preparation never stacks a second agent row. Only steer sends, which
-  paint no optimistic pair, fall back to the standalone status Turn owned by
+  so preparation never stacks a second agent row. Steer and queue sends use
+  `application/composer-translation-status.ts`: one message-bearing receipt
+  retains the original input while preparing/translating, then retires when
+  authoritative insertion/queue evidence takes over. They create no provisional
+  user/assistant Turns, including the idle-to-busy retry path. The degraded
+  ordinary-send bridge retains the standalone fallback owned by
   `application/send-preparation-overlay.ts`; it keys teardown to the
   conversation that initiated the send and receives catalog, transient-store,
   i18n, and scroll behavior through explicit ports.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -129,7 +130,8 @@ _vlmClearState = () => {};
 _renderTranslatingBubble = () => {};
 _removeTranslatingBubble = () => {};
 composerTranslationStatus = {
-  begin: (conversationId, kind) => ({ conversationId, kind }),
+  begin: (conversationId, kind, options) => ({ conversationId, kind, ...options }),
+  update(wait, options) { Object.assign(wait, options); },
   finish() {},
 };
 updateSendButton = () => {};
@@ -974,27 +976,97 @@ check(optimisticTurnRemovals.length === 2,
 """)
 
 
-def test_steer_keeps_the_standalone_preparation_bubble():
+@pytest.mark.parametrize('delivery_mode', ['steer', 'queue'])
+def test_lane_busy_retry_moves_preparation_to_the_same_composer_receipt(delivery_mode):
     _run_pipeline(r"""
-const statusBubbleCalls = [];
-_renderTranslatingBubble = (label) => {
-  statusBubbleCalls.push(label ?? null);
+const mode = __MODE__;
+const waits = [], commands = [], bubbles = [];
+composerTranslationStatus.begin = (conversationId, kind, options) => {
+  const wait = { conversationId, kind, ...options }; waits.push(wait); return wait;
+};
+_renderTranslatingBubble = label => bubbles.push(label);
+_buildConvSubmission = async () => ({ config: { autoTranslate: true }, settings: {} });
+showChoice = async () => mode;
+let beforeRetry = 0;
+runtimeScope.ConversationTurnStore.submitConversation = async (conv, payload, config, extra) => {
+  commands.push(extra.commandId);
+  if (commands.length === 1) {
+    beforeRetry = bubbles.length;
+    throw Object.assign(new Error('lane became busy'), { code: 'lane_busy' });
+  }
+  check(extra.injectMode === mode, 'retry lost the chosen delivery mode');
+  check(optimisticTurnUpserts.length === 2 && optimisticTurnRemovals.length === 2,
+    'retry created a second agent instead of retiring the original optimistic pair');
+  check(waits.length === 1 && waits[0].message === '补充一条约束',
+    'retry replaced the translation receipt instead of attaching the original message');
+  check(bubbles.length === beforeRetry, 'retry inserted another status agent');
+  return mode === 'steer' ? { steered: true } : { queued: true, position: 1 };
+};
+composerInput.value = '补充一条约束';
+await _submitComposerDraft();
+check(commands.length === 2 && commands[0] === commands[1], 'retry changed command identity');
+check(composerInput.value === '', 'accepted retry returned to the draft');
+""".replace('__MODE__', json.dumps(delivery_mode)))
+
+
+@pytest.mark.parametrize('delivery_mode', ['steer', 'queue'])
+def test_failed_active_send_restores_original_without_a_fake_agent(delivery_mode):
+    _run_pipeline(r"""
+activeAttempt = true;
+showChoice = async () => __MODE__;
+const finishes = [], bubbles = [];
+_renderTranslatingBubble = label => bubbles.push(label);
+composerTranslationStatus.finish = (wait, status) => finishes.push({ wait, status });
+runtimeScope.ConversationTurnStore.submitConversation = async () => { throw new Error('network unavailable'); };
+composerInput.value = '补充一条约束';
+await _submitComposerDraft();
+check(optimisticTurnUpserts.length === 0 && bubbles.length === 0,
+  'failed insertion manufactured a provisional assistant');
+check(composerInput.value === '补充一条约束', 'failed insertion lost the original draft');
+check(finishes.some(c => c.status === 'failed' && c.wait.message === '补充一条约束'),
+  'failed insertion lost its message-bearing failure receipt');
+""".replace('__MODE__', json.dumps(delivery_mode)))
+
+
+@pytest.mark.parametrize('delivery_mode', ['steer', 'queue'])
+@pytest.mark.parametrize('translate', [False, True])
+def test_active_send_keeps_one_composer_receipt_without_a_fake_agent(delivery_mode, translate):
+    _run_pipeline(r"""
+const mode = __MODE__;
+const translating = __TRANSLATE__;
+const statusBubbleCalls = [], receiptCalls = [];
+_renderTranslatingBubble = (label) => statusBubbleCalls.push(label ?? null);
+composerTranslationStatus = {
+  begin(conversationId, kind, options) {
+    const wait = { conversationId, kind, ...options };
+    receiptCalls.push({ action: 'begin', wait });
+    return wait;
+  },
+  update(wait, options) { Object.assign(wait, options); },
+  finish(wait, status) { receiptCalls.push({ action: 'finish', wait, status }); },
 };
 activeAttempt = true;
-showChoice = async () => 'steer';
-runtimeScope.ConversationTurnStore.submitConversation = async () => (
-  { steered: true, latestTurn: { turnId: 'turn-live' } }
-);
-
-composerInput.value = 'add this constraint';
+showChoice = async () => mode;
+_buildConvSubmission = async () => ({ config: { autoTranslate: translating }, settings: {} });
+runtimeScope.ConversationTurnStore.submitConversation = async () => {
+  const began = receiptCalls.filter(c => c.action === 'begin');
+  check(began.length === 1 && began[0].wait.message === '补充一条约束',
+    'the outgoing instruction lost its stable composer receipt');
+  check(began[0].wait.phase === (translating ? 'translating' : 'preparing'),
+    'the receipt phase did not follow send preparation');
+  check(optimisticTurnUpserts.length === 0 && statusBubbleCalls.length === 0,
+    'active send manufactured an assistant while waiting for acknowledgement');
+  return mode === 'steer' ? { steered: true } : { queued: true, position: 1 };
+};
+composerInput.value = '补充一条约束';
 await _submitComposerDraft();
-
-check(optimisticTurnUpserts.length === 0,
-  'steer painted a provisional user or assistant turn');
-check(statusBubbleCalls.length === 1
-  && statusBubbleCalls[0] === 'sidebar.connecting',
-  'steer lost its standalone send-preparation bubble');
-""")
+check(optimisticTurnUpserts.length === 0 && optimisticTurnRemovals.length === 0,
+  'active send created and then removed fake transcript turns');
+check(statusBubbleCalls.length === 0, 'active send used a standalone agent status bubble');
+check(receiptCalls.some(c => c.action === 'finish' && c.status === 'completed'),
+  'accepted instruction did not retire its preparation receipt');
+check(composerInput.value === '', 'accepted instruction returned to the draft');
+""".replace('__MODE__', json.dumps(delivery_mode)).replace('__TRANSLATE__', json.dumps(translate)))
 
 
 @pytest.mark.parametrize('ack', [

@@ -265,13 +265,15 @@ arbitrary return-value previews live in expanded evidence. Failure/attention
 receipts remain visible. Routine success is quiet; pending actions retain their
 own controls and status.
 
-Tofu keeps its warm rice-paper, caramel and soft-clay palette. Those existing
-brand tokens are the authority; neutralizing the surrounding UI must not turn
-Tofu into a graphite theme. New Chat consumes theme-owned primary-action tokens
-(a soft yellow fill in Tofu); the composer and quiet topbar reuse the same paper
-and ink. Message actions form an icon shelf with localized accessible names and
-native tooltips; Review keeps its visible label. Shared controls remain keyboard
-and touch accessible.
+Tofu uses the established pale gray-white canvas and restrained amber accents;
+large surfaces must not acquire a yellow cast. **Problem:** a beige canvas plus a
+yellow gradient primary button overwhelmed the brand's small warm details.
+**Decision:** recover the pre-redesign theme tokens and use a flat, lightly tinted
+New Chat navigation row with a leading plus, left-aligned label, soft border and
+visible keyboard focus. **Rejected:** both a glossy gold fill and a solid black
+CTA compete with the conversation. Message actions retain their icon shelf,
+localized accessible names and native tooltips; Review keeps its visible label.
+Shared controls remain keyboard and touch accessible.
 
 The assistant byline, narration, process labels, localized **Answer** title and
 answer text share `--conversation-reading-inset`; the avatar occupies the gutter
@@ -279,8 +281,10 @@ instead of shifting a separate grid column. The answer toolbar carries the
 existing Process disclosure and, for at least three direct Markdown headings, a
 bounded **On this page** menu (at most 32 headings). Navigation focuses the actual
 current heading; replay retains menu focus. The first answer heading is 28px on
-desktop / 22px on phones, with 16px prose. The Answer title identifies authored
-content and never declares success.
+desktop / 22px on phones, with 16px prose. The Answer title identifies settled
+authored content and never declares success. During generation every content block keeps
+the narration treatment, regardless of translation progress; only authoritative
+Turn settlement enables the answer title, hierarchy and bilingual disclosure.
 
 Opening Process presents the same demand-mounted evidence in a nonmodal native
 popover: a right-hand reading panel on desktop and a bottom sheet on phones.

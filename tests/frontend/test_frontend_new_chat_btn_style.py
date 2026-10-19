@@ -2,7 +2,7 @@
 
 The negative control poisons an in-memory copy, never shipped styles.
 Actual contrast, focus and responsive geometry are covered by timeline browser
-captures in all themes, including Tofu's warm toast surface.
+captures in all themes, including Tofu's restrained accent tint.
 """
 from pathlib import Path
 import re
