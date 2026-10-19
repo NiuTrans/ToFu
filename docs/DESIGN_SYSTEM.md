@@ -45,7 +45,7 @@ margins/paddings (gate: phase 3).
 | Spacing | `--space-0`…`--space-16` (4px base) | margins/padding/gaps; theme-invariant |
 | Font size | `--font-size-xs`…`--font-size-4xl` | consolidated from the legacy 9–16px half-step sprawl |
 | Leading/weight | `--leading-*`, `--weight-*` | tight/title/body; regular→bold |
-| Conversation measure | `--conversation-reading-measure` = 720px | Default input to the existing `--msg-measure` authority; explicit overrides continue to size shell, prose, composer and context rails together. |
+| Conversation measure | `--conversation-reading-measure` = 760px | Default input to the existing `--msg-measure` authority (about 720px of prose after the icon inset); explicit overrides continue to size shell, prose, composer and context rails together. |
 | Conversation process | `--conversation-process-*`, `--conversation-flow-gap`, `--conversation-prose-gap` | Shared 14px labels, marker/label columns, evidence inset, process density and prose separation. Touch rows use the existing large control height. |
 | Control height | `--control-h-sm/md/lg` = 28/34/42 | one height ramp → rows align by construction |
 | Motion | `--motion-fast/base/slow`, `--ease-*` | collapses to 0.01s under reduced-motion |
@@ -265,23 +265,43 @@ arbitrary return-value previews live in expanded evidence. Failure/attention
 receipts remain visible. Routine success is quiet; pending actions retain their
 own controls and status.
 
-The surrounding chat chrome uses the same vocabulary: flat ink/paper New Chat,
-quiet topbar launchers, a single softly raised composer and shared send/stop
-intent states. Retired Tofu-theme textures, beveled launcher/toolbar rules and
-warm composer overrides are removed at their source instead of counter-styled.
-Message actions form an icon shelf with localized accessible names and native
-tooltips; Review keeps its visible label. Shared controls remain keyboard and
-touch accessible. The shell-action owner now passes the strict token gate.
+Tofu keeps its warm rice-paper, caramel and soft-clay palette. Those existing
+brand tokens are the authority; neutralizing the surrounding UI must not turn
+Tofu into a graphite theme. New Chat consumes theme-owned primary-action tokens
+(a soft yellow fill in Tofu); the composer and quiet topbar reuse the same paper
+and ink. Message actions form an icon shelf with localized accessible names and
+native tooltips; Review keeps its visible label. Shared controls remain keyboard
+and touch accessible.
 
-An explicit assistant deliverable starts with a localized **Answer** rubric,
-a small accent diamond and a hairline. Its first heading is the largest text in
-the response (28px desktop / 22px phone); subsequent headings and 16px prose
-create a readable type hierarchy. The rubric identifies authored answer content,
-never declares success. Short answers, images and rich Markdown use the same
-owner. Historical Process is a compact capsule before the answer; opening it
-reveals a bounded inset reading area. Paging only appears when useful. Closing
-still unmounts evidence. Mobile metadata wraps without stealing the title's
-width; copy controls reserve their own space.
+The assistant byline, narration, process labels, localized **Answer** title and
+answer text share `--conversation-reading-inset`; the avatar occupies the gutter
+instead of shifting a separate grid column. The answer toolbar carries the
+existing Process disclosure and, for at least three direct Markdown headings, a
+bounded **On this page** menu (at most 32 headings). Navigation focuses the actual
+current heading; replay retains menu focus. The first answer heading is 28px on
+desktop / 22px on phones, with 16px prose. The Answer title identifies authored
+content and never declares success.
+
+Opening Process presents the same demand-mounted evidence in a nonmodal native
+popover: a right-hand reading panel on desktop and a bottom sheet on phones.
+The answer stays in place. One inspector is open per Surface. Back to answer and
+Escape return keyboard focus; closing unmounts evidence through the existing
+cancellation port. An engine without Popover keeps the inline disclosure.
+Pagination appears only for multiple pages, below the persistent close/header
+row. Only disclosure chrome moves into the toolbar, never Markdown or a mounted
+evidence leaf. A native menu, stable keyed nodes and the existing reader-state
+owner avoid a second transcript or panel state machine.
+
+The context rail uses the same paper/ink palette and readable 12px facts. Tool
+and workspace section headings show counts; their disclosure stays at the
+heading while entries expand below it. Four initial tool chips and three paths
+form the preview; all remaining facts are reachable by click or keyboard. The
+rail remains out of message flow, follows its existing measured free-track
+budget and scrolls within that budget. Populated rail hosts sit above later
+transparent Turn boxes so real pointer clicks reach the controls. The compact
+context line remains available when the pane cannot grant a rail track. Status
+and blocked-checklist semantics remain explicit; tool configuration categories
+use a consistent quiet fill rather than competing outline colors.
 
 Visual references reviewed: [Linear Agent](https://linear.app/docs/linear-agent)
 for quiet activity and content hierarchy; [Cursor's agents workspace](https://cursor.com/blog/cursor-3)
@@ -293,7 +313,10 @@ composition, not its brand, content order or interaction authority.
 a flat disclosure list lacks hierarchy; independent cards fragment the stream;
 a permanent second column reduces prose width and fails on phones. Adjacency
 surfaces and an explicit answer destination preserve one responsive reading
-column, stable leaves, reader choices and existing lazy owners. No duplicated
+column, stable leaves, reader choices and existing lazy owners. A floating
+inspector preserves answer geometry without permanently reserving another
+column. A brand-neutral palette was rejected because Tofu's warmth is a product
+constraint. No duplicated
 transcript, additional timers, transport or animation loop is introduced.
 
 `tests/visual/test_visual_timeline_reading.py` mounts the real selector, Surface,
@@ -302,7 +325,12 @@ shell markup. It checks chronological boundaries, label alignment, actual-surfac
 contrast, 320/390px wrapping, native keyboard disclosure, replay focus and history
 settlement in three themes. Shell captures verify layout only; live-app boot is
 owned by the existing conversation-reading shell test. Reviewed images live in
-`designs/ui-gallery/previews/timeline-*.png`. Historical-process, intent-first
+`designs/ui-gallery/previews/timeline-*.png`.
+`tests/visual/test_visual_context_rail_reading.py` checks real pointer and keyboard
+expansion, stationary controls, complete facts, pane containment and narrow-pane
+fallback in three themes and both languages. Its live-shell case checks the
+actual adaptive rail grant, prose width and composer left-edge alignment.
+Historical-process, intent-first
 and program-surface suites own neighboring interaction and lifecycle contracts.
 
 ## Verification

@@ -24,6 +24,10 @@
      THE fix for misaligned UI: all margins/padding/gaps in new code come
      from this scale. Half-steps and magic numbers are gate-rejected. */
   --space-0:0;
+  --chat-primary-background:var(--text-primary);
+  --chat-primary-ink:var(--bg-primary);
+  --chat-primary-border:transparent;
+  --chat-primary-shadow:none;
   --space-1:4px;
   --space-2:8px;
   --space-3:12px;
@@ -59,19 +63,22 @@
   --conversation-font-size-heading-1:var(--font-size-4xl);
   --conversation-font-size-heading-2:var(--font-size-3xl);
   --conversation-font-size-heading-3:var(--font-size-2xl);
-  --conversation-reading-measure:720px;
+  /* Includes the hanging icon inset; the prose itself keeps about 720px. */
+  --conversation-reading-measure:760px;
   /* Mixed chronology: shared process row, label column and evidence inset.
      Content order stays in the Surface; these tokens only set reading geometry. */
   --conversation-process-font-size:var(--font-size-lg);
   --conversation-process-row-height:var(--control-h-md);
-  --conversation-process-inset:var(--space-2);
+  --conversation-process-inset:var(--space-1);
   --conversation-process-marker:var(--space-4);
   --conversation-process-gap:var(--space-2);
   --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
   --conversation-flow-gap:var(--space-1);
   --conversation-prose-gap:var(--space-4);
   --conversation-process-radius:12px;
-  --conversation-process-shell-inset:var(--space-2);
+  --conversation-process-shell-inset:var(--space-1);
+  --conversation-reading-inset:calc(var(--conversation-process-shell-inset) + var(--conversation-process-indent) + var(--control-edge-inset));
+  --conversation-inspector-width:440px;
   --conversation-answer-gap:var(--space-8);
   --inspector-reading-measure:860px;
   --weight-regular:400;
@@ -172,7 +179,7 @@
 [data-theme="tofu"]{
   --font-ui:var(--sans-body);
 
-  /* Match the existing CO-PILOT paper/ink/gold chrome, not chat's cold canvas. */
+  /* Match the existing CO-PILOT paper/ink/gold chrome, and the warm conversation paper. */
   --project-surface:#faf8f3;
   --project-panel:#fff;
   --project-band:#f2ecda;
@@ -183,7 +190,7 @@
   --project-accent-hover:#b58936;
   --project-on-accent:#1a1814;
   /* Darkened derivatives of the tofu palette (fetch-teal / thinking amber /
-     search-blue) so text clears 4.5:1 on the cold-white canvas. */
+     search-blue) so text clears 4.5:1 on the paper canvas. */
   --success-text:#3D7263;
   --success-bg:rgba(94,158,140,0.12);
   --success-border:rgba(94,158,140,0.35);
@@ -194,8 +201,8 @@
   --info-bg:rgba(94,144,174,0.12);
   --info-border:rgba(94,144,174,0.35);
   --backdrop:rgba(74,63,47,0.35);
-  --focus-ring:0 0 0 3px rgba(201,122,29,0.25);
-  --knob-shadow:0 1px 2px rgba(19,25,31,0.16);
+  --focus-ring:0 0 0 3px rgba(193,121,75,0.25);
+  --knob-shadow:0 1px 2px rgba(92,72,44,0.16);
 }
 
 /* ── Reduced motion: the whole library honors it from day one ── */

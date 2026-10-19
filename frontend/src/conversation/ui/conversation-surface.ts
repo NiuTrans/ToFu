@@ -518,7 +518,11 @@ export function createConversationSurface(
         historyNotice?.remove();
         historyNotice = null;
       }
-      const processHost = ensurePart(content, 'turn-history-process');
+      const answerToolbar = blocksContainer.querySelector<HTMLElement>(
+        ':scope > .conversation-block--text[data-deliverable="true"] > .conversation-answer-label');
+      const processHost = directPart(content, 'turn-history-process')
+        ?? answerToolbar?.querySelector<HTMLElement>(':scope > [data-conversation-part="turn-history-process"]')
+        ?? ensurePart(content, 'turn-history-process');
       historyProcess.update(processHost, turn, historyPlan, viewportBlockBudget);
       processHost.hidden = !processHost.hasChildNodes();
       const blocksEarlier = renderBlockBoundary(content, blockTurnKey, 'earlier', blockStart);
@@ -596,7 +600,13 @@ export function createConversationSurface(
        * remains above the turn's action and finish shelves. */
       let contentPartIndex = 0;
       placeManagedAt(content, header, contentPartIndex++);
-      if (historyPlan) placeManagedAt(content, processHost, contentPartIndex++);
+      if (historyPlan && answerToolbar && !processHost.hidden) {
+        // The existing disclosure becomes an answer-toolbar action. Only its
+        // chrome moves; neither Markdown nor any evidence leaf is reparented.
+        if (processHost.parentElement !== answerToolbar) {
+          moveRetainedNodeBefore(answerToolbar, processHost, null);
+        }
+      } else if (historyPlan) placeManagedAt(content, processHost, contentPartIndex++);
       else processHost.remove();
       placeManagedAt(content, blocksEarlier, contentPartIndex++);
       placeManagedAt(content, blocksContainer, contentPartIndex++);

@@ -1,8 +1,8 @@
-"""Primary chat action uses shared ink/paper, without texture or colored glow.
+"""Primary chat action takes its surface and ink from the theme.
 
 The negative control poisons an in-memory copy, never shipped styles.
 Actual contrast, focus and responsive geometry are covered by timeline browser
-captures in all themes. The old baked-gradient contract is retired.
+captures in all themes, including Tofu's warm toast surface.
 """
 from pathlib import Path
 import re
@@ -19,22 +19,19 @@ def _primary_body(css):
                 if m.group(1).strip() == '.new-chat-btn')
 
 
-def _quiet_primary(body):
-    return ('gradient(' not in body and 'url(' not in body
-            and re.search(r'box-shadow:\s*none\s*;', body) is not None)
+def _themeable_primary(body):
+    return all(token in body for token in (
+        'background:var(--chat-primary-background)',
+        'color:var(--chat-primary-ink)',
+        'box-shadow:var(--chat-primary-shadow)'))
 
 
-def test_new_chat_action_uses_shared_contrasting_surface():
+def test_new_chat_action_preserves_theme_identity():
+    assert _themeable_primary(_primary_body(CSS.read_text()))
+
+
+def test_nc_hardcoded_primary_surface_is_flagged():
     body = _primary_body(CSS.read_text())
-    assert 'background:var(--text-primary)' in body
-    assert 'color:var(--bg-primary)' in body
-    assert _quiet_primary(body)
-
-
-def test_nc_decorative_glow_is_flagged():
-    body = _primary_body(CSS.read_text())
-    assert _quiet_primary(body)
-    poisoned = body.replace('box-shadow:none', 'box-shadow:0 0 20px rgba(193,121,75,.4)', 1)
-    assert poisoned != body and not _quiet_primary(poisoned)
-    assert not _quiet_primary(body.replace('background:var(--text-primary)',
-        'background:linear-gradient(red,blue)', 1))
+    assert _themeable_primary(body)
+    poisoned = body.replace('background:var(--chat-primary-background)', 'background:black', 1)
+    assert poisoned != body and not _themeable_primary(poisoned)

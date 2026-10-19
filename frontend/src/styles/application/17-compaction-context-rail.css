@@ -842,10 +842,10 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   max-height:none;
   box-sizing:border-box;
   min-width:0;
-  font-size:10.5px;
-  font-weight:600;
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
   line-height:1.5;
-  user-select:none;
+  user-select:text;
   /* The rail IS hit-testable: the height backstop below SCROLLS (needs the
    * pointer), paths expose their full path via hover title, and hovering
    * the rail keeps `.message:hover` true regardless (the rail is a child
@@ -861,6 +861,10 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * few and short); layout+style containment stays. `.cv-off` keeps its
  * !important win. */
 .message:has(> .turn-ctx){ content-visibility:visible; contain:layout style; }
+/* A rail travels beside later Turns. Their layout containment creates new
+ * stacking contexts: lift only populated rail hosts so those transparent
+ * sibling boxes cannot intercept the rail's disclosure buttons. */
+.message:has(> .turn-ctx:not([hidden])){ z-index:var(--z-turn-context); }
 /* While pinned, the rail's height is the follower's inline budget — no
  * class-based cap. The old fixed 60vh left the gutter beside the reply
  * empty while the rail's own facts scrolled internally. */
@@ -872,8 +876,8 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   .turn-ctx{
     display:flex;
     flex-direction:column;
-    gap:5px;
-    padding:3px 0 3px 10px;
+    gap:var(--space-4);
+    padding:var(--space-2) var(--space-1) var(--space-3) var(--space-4);
     border-radius:0;
     background:transparent;
     border:none;
@@ -882,7 +886,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
      * more rectangle competing with the message — the rail now whispers. */
     border-left:1px solid var(--border);
     /* HEIGHT DISCIPLINE, two layers. (1) CONTENT caps in info-rail.js
-     * decide what renders up-front (≤9 chips / ≤3 paths, the rest behind
+     * decide what renders up-front (≤4 chips / ≤3 paths, the rest behind
      * the "+N" click) — a typical card renders COMPLETE, which the removed
      * 132px `overflow:hidden` guillotine never allowed (it clipped ordinary
      * cards mid-WORKSPACE with no way to reach the facts — the 2026-07-28
@@ -902,7 +906,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 /* Keep the geometry measurable when no track remains; the follower clears
  * this state as soon as a later layout grants space again. */
 .turn-ctx.tctx-no-space{ visibility:hidden; pointer-events:none; }
-.turn-ctx .tctx-head{ display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-1) 6px; }
+.turn-ctx .tctx-head{ display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-2); }
 .turn-ctx .tctx-logo{ display:inline-flex; flex:0 0 auto; align-items:center; }
 .turn-ctx .tctx-logo .stg-brand-icon svg{ display:block; width:100%; height:100%; fill:currentColor; }
 /* A compact unit: short labels do not push effort to the rail edge; long
@@ -923,14 +927,14 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   white-space:nowrap;
 }
 .turn-ctx .tctx-depth{
-  font-size:8px;
+  font-size:var(--font-size-xs);
   font-weight:700;
   text-transform:uppercase;
   letter-spacing:0.04em;
   padding:0 var(--space-1);
   border-radius:5px;
   background:transparent;
-  color:#c4b5fd;
+  color:var(--text-secondary);
   border:1px solid color-mix(in srgb, currentColor 42%, transparent);
   flex:0 0 auto;
 }
@@ -939,65 +943,78 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   flex:0 0 auto;
   padding:1px 6px;
   border-radius:6px;
-  font-size:8.5px;
+  font-size:var(--font-size-xs);
   line-height:1.4;
   font-weight:700;
   text-transform:uppercase;
   letter-spacing:0.03em;
   white-space:nowrap;
   background:transparent;
-  color:#e8b04a;
+  color:var(--text-secondary);
   border:1px solid color-mix(in srgb, currentColor 42%, transparent);
 }
-[data-theme="light"] .turn-ctx .tctx-mode-badge{ color:#b45309; }
-[data-theme="tofu"] .turn-ctx .tctx-mode-badge{ color:#8a6a2a; }
 
-.turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:3px; }
+.turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:var(--space-2); }
+.turn-ctx .tctx-row + .tctx-row{ padding-top:var(--space-3); border-top:var(--control-edge-inset) solid var(--border-light); }
+.turn-ctx .tctx-row-heading{ display:flex; align-items:center; justify-content:space-between; gap:var(--space-1); min-height:var(--control-h-sm); }
+.turn-ctx .tctx-row-count{ font-weight:var(--weight-regular); font-variant-numeric:tabular-nums; color:var(--text-secondary); }
 .turn-ctx .tctx-row-h{
-  font-size:8px;
+  font-size:var(--font-size-xs);
   font-weight:700;
-  letter-spacing:0.09em;
-  text-transform:uppercase;
-  opacity:0.45;
+  display:inline-flex;
+  align-items:baseline;
+  gap:var(--space-2);
+  letter-spacing:normal;
+  color:var(--text-secondary);
 }
 .turn-ctx .tctx-chips{ display:flex; flex-wrap:wrap; gap:var(--space-1); }
 .turn-ctx .tctx-chip{
-  font-size:10px;
-  font-weight:600;
-  padding:0 6px;
-  border-radius:999px;
-  background:transparent;
-  /* Quiet outline chips: the tone color survives ONLY as the ink, and the
-   * border is the same ink at 40% via currentColor — the six candy-fill
-   * backgrounds were the noisiest element on the whole message row. */
-  border:1px solid color-mix(in srgb, currentColor 38%, transparent);
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
+  padding:var(--space-1) var(--space-2);
+  border-radius:var(--radius-xs);
+  background:var(--bg-secondary);
+  color:var(--text-secondary);
+  border:var(--control-edge-inset) solid transparent;
   white-space:nowrap;
   max-width:100%;
   overflow:hidden;
   text-overflow:ellipsis;
 }
-.turn-ctx .tctx-tone-mode  { color:#e8b04a; }
-.turn-ctx .tctx-tone-search{ color:#93c5fd; }
-.turn-ctx .tctx-tone-net   { color:#6ee7b7; }
-.turn-ctx .tctx-tone-code  { color:#d8b4fe; }
-.turn-ctx .tctx-tone-ai    { color:#5eead4; }
-.turn-ctx .tctx-tone-mcp   { color:#cbd5e1; }
 /* "+N more" — a CLICK toggle, deliberately not hover. Expanding grows the
  * rail IN FLOW, which needs no containment escape (see the block comment).
  * It is the only pointer-reactive thing in the rail. */
 .turn-ctx .tctx-more{
   pointer-events:auto;
+  display:inline-flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--space-2);
+  min-height:var(--control-h-sm);
   cursor:pointer;
-  font-size:9.5px;
-  font-weight:700;
-  padding:1px 7px;
-  border-radius:999px;
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
+  padding:var(--space-1) var(--space-2);
+  border-radius:var(--radius-sm);
   background:transparent;
-  color:var(--text-tertiary);
-  border:1px dashed rgba(148,163,184,0.45);
-  font-family:inherit;
+  color:var(--text-secondary);
+  border:var(--control-edge-inset) solid transparent;
+  flex:0 0 auto;
+  font-family:var(--font-ui);
 }
-.turn-ctx .tctx-more:hover{ color:var(--text-primary); border-color:var(--accent); }
+.turn-ctx .tctx-more::after{
+  content:'';
+  width:var(--space-2);
+  height:var(--space-2);
+  border-inline-end:var(--control-edge-inset) solid currentColor;
+  border-block-end:var(--control-edge-inset) solid currentColor;
+  transform:rotate(-45deg);
+}
+.turn-ctx .tctx-more[aria-expanded="true"]{background:var(--accent-subtle);color:var(--text-primary)}
+.turn-ctx .tctx-more[aria-expanded="true"]::after{transform:rotate(45deg)}
+.turn-ctx .tctx-more:hover{color:var(--text-primary);background:var(--bg-hover)}
+.turn-ctx .tctx-more:focus-visible{outline:var(--control-edge-inset) solid var(--accent);outline-offset:var(--space-1)}
+@media(pointer:coarse){.turn-ctx .tctx-more{min-height:var(--control-h-lg)}}
 /* The overflow group must NOT be a flex item of its own: as a single item it
  * cannot wrap internally, so its nowrap chips run straight off the rail's
  * right edge (measured +110px past the pane at 1440). `display:contents`
@@ -1005,15 +1022,12 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * and wraps exactly like the always-visible ones. */
 .turn-ctx .tctx-overflow{ display:contents; }
 .turn-ctx .tctx-overflow[hidden]{ display:none; }
-.turn-ctx .tctx-paths{ display:flex; flex-direction:column; gap:3px; }
-/* In the paths column the "+N" pill would stretch to the rail's full width
- * (column flex children stretch); keep it pill-sized like in the chips row. */
-.turn-ctx .tctx-paths .tctx-more{ align-self:flex-start; }
+.turn-ctx .tctx-paths{ display:flex; flex-direction:column; gap:var(--space-2); }
 .turn-ctx .tctx-path{
   display:flex;
   align-items:flex-start;
   gap:var(--space-1);
-  font-size:10px;
+  font-size:var(--font-size-sm);
   line-height:1.4;
   color:var(--text-secondary);
   word-break:break-all;
@@ -1026,9 +1040,8 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * borrowing the search/mcp/ai families. The branch glyph inherits the
  * chip color via currentColor. */
 .turn-ctx .tctx-tone-git{
-  color:#0e9f6e;
-  border-color:color-mix(in srgb, #0e9f6e 38%, transparent);
-  background:color-mix(in srgb, #0e9f6e 9%, transparent);
+  color:var(--text-secondary);
+  background:var(--bg-secondary);
 }
 .turn-ctx .tctx-tone-git .tctx-branch-icon{ flex:0 0 auto; }
 .turn-ctx .tctx-branch-root{
@@ -1047,9 +1060,8 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * the same "+N" toggle the other rows use — all travelling with `.tctx-stuck`.
  * Completed items FADE — never struck through. */
 .turn-ctx .tctx-tone-todo{
-  color:#0d9488;
-  border-color:color-mix(in srgb, #0d9488 38%, transparent);
-  background:color-mix(in srgb, #0d9488 9%, transparent);
+  color:var(--text-secondary);
+  background:var(--bg-secondary);
 }
 .turn-ctx .tctx-todo-count.is-done{
   color:var(--accent);
@@ -1079,7 +1091,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
    * own line, and pushes the branch row down (the "two separate pieces"). */
   min-width:0;
   align-items:center;
-  font-size:11.5px;
+  font-size:var(--font-size-sm);
   color:var(--text-primary);
 }
 .turn-ctx .tctx-todo-current .tctx-todo-text{
@@ -1103,7 +1115,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   display:flex;
   align-items:center;
   gap:4px;
-  font-size:11.5px;
+  font-size:var(--font-size-sm);
   line-height:1.45;
   color:var(--text-secondary);
   min-width:0;
@@ -1121,12 +1133,12 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   color:var(--text-tertiary);
 }
 .turn-ctx .tctx-todo-text{ min-width:0; word-break:break-word; }
-.turn-ctx .tctx-todo-completed{ opacity:.62; }
+.turn-ctx .tctx-todo-completed{ color:var(--text-secondary); }
 .turn-ctx .tctx-todo-completed .tctx-todo-mark{ color:var(--accent); }
-.turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:#b45309; }
+.turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:var(--text-primary); }
 .turn-ctx .tctx-todo-in_progress .tctx-todo-text{ color:var(--text-primary); }
-.turn-ctx .tctx-todo-blocked .tctx-todo-mark{ color:#dc2626; }
-.turn-ctx .tctx-todo-blocked .tctx-todo-text{ color:#dc2626; }
+.turn-ctx .tctx-todo-blocked .tctx-todo-mark{ color:var(--error-text); }
+.turn-ctx .tctx-todo-blocked .tctx-todo-text{ color:var(--error-text); }
 
 /* ── Fold: the rail's content as ONE line under the message header ──
  * Shown exactly when the rail track is absent (narrow pane, or the
@@ -1141,11 +1153,11 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 .tctx-fold{
   display:flex;
   align-items:center;
-  gap:5px;
-  margin-bottom:6px;
-  font-size:10px;
-  font-weight:600;
-  color:var(--text-tertiary);
+  gap:var(--space-2);
+  margin-bottom:var(--space-2);
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
+  color:var(--text-secondary);
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
@@ -1153,42 +1165,6 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 .tctx-fold .tctx-fold-dot{ width:5px; height:5px; border-radius:50%; background:var(--accent); flex:0 0 auto; opacity:.7; }
 @container chatpane (min-width: 1056px){
   .tctx-fold{ display:none; }
-}
-
-/* ── Per-theme palettes ─────────────── */
-[data-theme="light"] .turn-ctx{ background:transparent; border:none; border-left:1px solid #e8e6df; }
-[data-theme="light"] .turn-ctx .tctx-model,
-[data-theme="light"] .turn-ctx .tctx-path{ color:#4a4a58; }
-[data-theme="light"] .turn-ctx .tctx-tone-mode  { color:#b45309; }
-[data-theme="light"] .turn-ctx .tctx-tone-ai    { color:#0d9488; }
-[data-theme="light"] .turn-ctx .tctx-tone-mcp   { color:#64748b; }
-[data-theme="light"] .turn-ctx .tctx-tone-git   { color:#047857; }
-[data-theme="light"] .turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:#b45309; }
-[data-theme="light"] .turn-ctx .tctx-todo-blocked .tctx-todo-mark,
-[data-theme="light"] .turn-ctx .tctx-todo-blocked .tctx-todo-text{ color:#b91c1c; }
-
-[data-theme="tofu"] .turn-ctx{
-  background:transparent;
-  border:none;
-  box-shadow:none;
-  border-left:1px solid #e2dac8;
-}
-[data-theme="tofu"] .turn-ctx .tctx-model,
-[data-theme="tofu"] .turn-ctx .tctx-path{ color:#6a5a40; }
-[data-theme="tofu"] .turn-ctx .tctx-row-h{ color:#8a7a5e; }
-[data-theme="tofu"] .turn-ctx .tctx-depth{ color:#8a6a2a; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-ai    { color:#2f7268; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-mcp   { color:#7a6a50; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-mode  { color:#8a6a2a; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-git   { color:#3a7a54; }
-[data-theme="tofu"] .turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:#8a6a2a; }
-
-/* ── Fallback: browsers without color-mix() get a neutral hairline on the
- *    quiet outline chips/badges (same fallback family as the meniscus). ── */
-@supports not (color: color-mix(in srgb, red, blue)){
-  .turn-ctx .tctx-chip,
-  .turn-ctx .tctx-mode-badge,
-  .turn-ctx .tctx-depth{ border-color:rgba(148,163,184,0.45); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════

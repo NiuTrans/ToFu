@@ -381,6 +381,7 @@ _PROBE = """() => {
         composerW: composer ? composer.getBoundingClientRect().width : 0,
         toolbarW: toolbarW,
         railW: railW,
+        msgMeasure: parseFloat(getComputedStyle(document.querySelector('.chat-inner')).getPropertyValue('--msg-measure')),
         railGap: railGap,
         railShown: railShown,
         foldShown: shown(fold),
@@ -442,13 +443,8 @@ _EXPAND = """() => {
 #: the first expansion reports the EXPANDED geometry while claiming to be
 #: collapsed — the observation-window defect, in state rather than in time.
 _COLLAPSE = """() => {
-    document.querySelectorAll('.message.__probe .tctx-overflow').forEach(o => {
-        o.setAttribute('hidden', '');
-    });
     document.querySelectorAll('.message.__probe [data-tctx-more]').forEach(b => {
-        const o = b.parentNode.querySelector('.tctx-overflow');
-        b.setAttribute('aria-expanded', 'false');
-        if (o) b.textContent = '+' + o.children.length;
+        if (b.getAttribute('aria-expanded') === 'true') b.click();
     });
 }"""
 
@@ -658,22 +654,20 @@ def test_rail_never_clipped_in_any_pane_state(page):
     #                        a real toolbar), else the capped reading track.
     # Empirical composer invariant, measured across the sweep:
     #   • railW == 0 (no rail): the composer spans the full reading column
-    #     (avatar track + measure = 52 + 820 = 872) when the band is wide
+    #     (avatar track + the configured measure) when the band is wide
     #     enough; on a narrower band it fills the 24px side insets
     #     → min(52 + msgMeasure, pane − 48).
     #   • railW > 0 (rail granted): the reading track is capped by the rail
     #     furniture, but a real toolbar (--toolbar-w ≈ 822) outgrows that
     #     cap, so the fat-toolbar floor 52 + toolbarW wins and the composer
     #     spans avatar + toolbar, growing right (the documented escape).
-    # msgMeasure is the --msg-measure VARIABLE (820), the grid's own unit —
+    # msgMeasure is the configured --msg-measure, the grid's own unit —
     # not the rendered content-box measure, which the squeeze band shrinks.
-    _MSG_MEASURE = 820
-
     def _expected_composer(r):
         rail_w = r.get('railW', 0)
         if rail_w <= 0:
             return max(_COMPOSER_FLOOR_PX,
-                       min(52 + _MSG_MEASURE, r['paneWidth'] - 48))
+                       min(52 + r['msgMeasure'], r['paneWidth'] - 48))
         return max(_COMPOSER_FLOOR_PX, r['toolbarW'] + 52)
     composer_off = [r for r in rows
                     if r['composerW'] > 0 and r['measure'] > 0
@@ -1022,7 +1016,7 @@ def test_overflow_toggle_bounds_the_path_count(page):
     total = page.evaluate(
         "() => document.querySelectorAll('.message.__probe .tctx-path').length")
     toggles = page.evaluate(
-        "() => document.querySelectorAll('.message.__probe .tctx-paths [data-tctx-more]').length")
+        "() => document.querySelectorAll('.message.__probe .tctx-row:has(.tctx-paths) [data-tctx-more]').length")
     page.evaluate(_EXPAND)
     page.wait_for_timeout(150)
     visible_after = page.evaluate("""() => {

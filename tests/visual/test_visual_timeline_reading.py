@@ -92,7 +92,7 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
         {type:'system_note',blockId:'note',noteKind:'context-injection',reason:'active_checklist',text:'检查项：阅读层级、键盘交互、窄屏布局。',...scope,llmRound:1},
         tool('checklist','todo_write',1),
         tool('program','execute_program',2),
-        text('answer','### 让阅读沿着内容自然前进\n\n正文保持清晰的阅读节奏；思考和工具使用统一的折叠入口，需要时再展开查看。\n\n- 时间顺序保持完整。\n- 过程标题对齐，展开详情共用缩进。\n- 失败与待确认操作继续明确显示。',3,{deliverable:true,terminal:true})];
+        text('answer','### 让阅读沿着内容自然前进\n\n正文保持清晰的阅读节奏；思考和工具使用统一的折叠入口，需要时再展开查看。\n\n- 时间顺序保持完整。\n- 过程标题对齐，展开详情共用缩进。\n- 失败与待确认操作继续明确显示。\n\n### 过程随时可查\n\n在答复旁打开过程面板，可以沿着原始时间线查看证据。\n\n### 留住豆腐的温度\n\n奶油纸色、焦糖强调色和柔软的圆角，让阅读轻松一点。',3,{deliverable:true,terminal:true})];
       segments.find(s=>s.blockId==='program')._round={toolName:'execute_program',toolCallId:'program',status:'done',
         toolArgs:{code:'return await tools.read_files({path:"docs/RENDER_CONTRACT.md"});'},
         toolContent:{summary:'Renderer contract inspected'},...scope,llmRound:2};
@@ -119,8 +119,20 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     assert page.locator('[data-block-id="thinking-1"]').get_attribute('data-process-edge') == 'start'
     assert page.locator('[data-block-id="program"]').get_attribute('data-process-edge') == 'end'
     assert page.locator('[data-block-id="narration"]').get_attribute('data-process-edge') is None
-    assert page.locator('[data-block-id="answer"] .conversation-answer-label').inner_text() == '答复'
+    assert page.locator('[data-block-id="answer"] .conversation-answer-title').inner_text() == '答复'
     assert not page.locator('.user-msg .conversation-answer-label').count()
+    # Role, narration, process labels and the answer share an actual text edge.
+    alignment = page.evaluate("""()=>['.conversation-turn:not(.user-msg) .message-role',
+      '[data-block-id="intro"] .md-content', '.thinking-label',
+      '.conversation-answer-title', '[data-block-id="answer"] > .md-content > h3']
+      .map(s=>({selector:s,x:document.querySelector(s).getBoundingClientRect().left}))""")
+    assert max(x['x'] for x in alignment)-min(x['x'] for x in alignment) <= 1, alignment
+    outline = page.locator('.conversation-answer-outline')
+    outline.locator('summary').focus(); outline.locator('summary').press('Enter')
+    expect(outline.locator('nav')).to_be_visible()
+    outline.get_by_role('button', name='留住豆腐的温度').click()
+    expect(page.locator('[data-block-id="answer"] h3').last).to_be_focused()
+    expect(outline.locator('nav')).not_to_be_visible()
     # Native keyboard access and mounted reader choices survive a revision.
     summary = page.locator('.thinking-header').first
     summary.focus()
@@ -174,9 +186,20 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     page.evaluate("""()=>{const turn=state.turnsById.turn;state={...state,turnsById:{...state.turnsById,turn:{...turn,status:'completed',projectionRevision:3}}};render();}""")
     expect(page.locator('[data-block-id="answer"]')).to_be_visible()
     process = page.locator('.conversation-history-process > summary')
+    answer_y = page.locator('[data-block-id="answer"] > .md-content').bounding_box()['y']
     process.focus(); process.press('Enter')
     expect(page.locator('[data-block-id="read"]')).to_be_visible()
     expect(page.locator('.conversation-history-process__controls')).not_to_be_visible()
+    pane = page.locator('.conversation-history-process__body')
+    expect(pane).to_have_attribute('popover', 'manual')
+    expect(pane.get_by_role('button', name='回到答复')).to_be_focused()
+    assert abs(page.locator('[data-block-id="answer"] > .md-content').bounding_box()['y']-answer_y) <= 1
+    assert pane.evaluate('n=>n.scrollWidth<=n.clientWidth+1')
+    pane.get_by_role('button', name='回到答复').press('Escape')
+    expect(process).to_be_focused()
+    expect(pane).to_have_count(0)
+    process.press('Enter')
+    expect(page.locator('.conversation-history-process__body:popover-open')).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     page.screenshot(path=str(tmp_path / f'timeline-history-{theme}-{width}.png'), full_page=True)
     # A failure stays in its original slot with visible summary evidence even
@@ -210,9 +233,29 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     }""", (ROOT / 'index.html').read_text())
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     page.screenshot(path=str(tmp_path / f'timeline-shell-{theme}-{width}.png'))
-    assert page.locator('.new-chat-btn').evaluate('n=>getComputedStyle(n).backgroundImage') == 'none'
+    primary_fill = page.locator('.new-chat-btn').evaluate('n=>getComputedStyle(n).backgroundImage')
+    assert ('gradient' in primary_fill) if theme == 'tofu' else primary_fill == 'none'
+    if theme == 'tofu':
+        paper = page.evaluate('getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim().toUpperCase()')
+        assert paper == '#FAF7F0'
     assert page.locator('.conversation-turn-actions button').evaluate_all(
         'nodes=>nodes.every(n=>n.getAttribute("aria-label") && n.title)')
     page.locator('#userInput').focus()
     expect(page.locator('#userInput')).to_be_focused()
+    # One Surface has one active inspector, even when several answers expose
+    # Process. Opening another releases the previous lazy body immediately.
+    page.evaluate("""()=>{
+      const second={...state.turnsById.turn,turnId:'second',ordinal:2};
+      state={...state,turnsById:{...state.turnsById,second},laneOrder:{main:['request','turn','second']}};render();
+    }""")
+    first_process = page.locator('[data-turn-id="turn"] .conversation-history-process')
+    second_process = page.locator('[data-turn-id="second"] .conversation-history-process')
+    first_process.locator(':scope > summary').press('Enter')
+    expect(first_process.locator('.conversation-history-process__body:popover-open')).to_be_visible()
+    second_process.locator(':scope > summary').press('Enter')
+    expect(second_process.locator('.conversation-history-process__body:popover-open')).to_be_visible()
+    expect(first_process.locator('.conversation-history-process__body')).to_have_count(0)
+    assert not first_process.evaluate('n=>n.open')
+    expect(page.locator(':popover-open')).to_have_count(1)
     page.evaluate('surface.dispose()')
+    expect(page.locator(':popover-open')).to_have_count(0)

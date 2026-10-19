@@ -469,7 +469,7 @@
 /* Historical process is a quiet turn-leading disclosure. Closing unmounts
  * evidence; inner paging and scroll remain owned by HistoricalProcess. */
 .conversation-history-process {
-  margin-block: 0 var(--space-6);
+  margin-block: 0;
   color: var(--text-secondary);
   font-family: var(--font-ui);
   font-size: var(--conversation-font-size-content);
@@ -495,17 +495,17 @@
 }
 
 .conversation-history-process > summary::-webkit-details-marker { display: none; }
-.conversation-history-process > summary::before {
+.conversation-history-process > summary::after {
   content: '';
   flex: 0 0 auto;
-  width: var(--space-1);
-  height: var(--space-1);
+  width: var(--space-2);
+  height: var(--space-2);
   border-inline-end: 1px solid currentColor;
   border-block-end: 1px solid currentColor;
   transform: rotate(-45deg);
   transition: transform var(--motion-fast) ease;
 }
-.conversation-history-process[open] > summary::before { transform: rotate(45deg); }
+.conversation-history-process[open] > summary::after { transform: rotate(45deg); }
 .conversation-history-process > summary:hover {
   color: var(--text-primary);
   background: var(--bg-secondary);
@@ -533,9 +533,6 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  position: sticky;
-  top: 0;
-  z-index: 1;
   padding-block: var(--space-1) var(--space-2);
   background: var(--bg-primary);
   font-size: var(--conversation-font-size-meta);
@@ -549,4 +546,58 @@
   font-size: var(--conversation-font-size-content);
   color: var(--text-secondary);
   overflow-wrap: anywhere;
+}
+
+
+/* A non-modal reading inspector uses the native top layer. It keeps the
+ * original keyed evidence beneath its Turn for delegation and teardown. */
+.conversation-surface .conversation-answer-label > [data-conversation-part="turn-history-process"] {
+  flex: 0 0 auto;
+}
+.conversation-surface .conversation-answer-label .conversation-history-process > summary {
+  border-color: transparent;
+  background: var(--bg-secondary);
+  font-size: var(--conversation-font-size-meta);
+}
+.conversation-surface .conversation-history-process__body[popover] {
+  position: fixed;
+  inset: var(--space-16) var(--space-6) var(--space-6) auto;
+  box-sizing: border-box;
+  width: min(var(--conversation-inspector-width), calc(100vw - var(--space-12)));
+  height: auto;
+  max-height: calc(100dvh - var(--space-16) - var(--space-6));
+  margin: 0;
+  padding: var(--space-4);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--space-5);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow);
+}
+.conversation-surface .conversation-history-process__heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: var(--control-h-lg);
+  margin-block-end: var(--space-3);
+  padding-block-end: var(--space-3);
+  border-block-end: var(--control-edge-inset) solid var(--border-light);
+}
+.conversation-surface .conversation-history-process__heading > strong {
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-semibold);
+}
+@media (max-width: 720px) {
+  .conversation-surface .conversation-history-process__body[popover] {
+    inset: auto var(--space-2) var(--space-2);
+    width: calc(100vw - var(--space-4));
+    max-height: 78dvh;
+    border-radius: var(--space-5);
+  }
 }

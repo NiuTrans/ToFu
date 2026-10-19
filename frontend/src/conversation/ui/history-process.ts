@@ -112,6 +112,7 @@ function restore(container: HTMLElement, state: ReaderState, restoreFocus: boole
 export class HistoricalProcess {
   private states = new Map<string, ReaderState>();
   private mounted = new Map<HTMLElement, { release: () => void; update: (plan: HistoricalTurnPlan, budget: number) => void }>();
+  private closeInspector: (() => void) | null = null;
   constructor(private readonly remove: (node: HTMLElement) => void,
     private readonly render: (node: HTMLElement, blocks: readonly Block[]) => void,
     private readonly suspendFollow: () => void) {}
@@ -135,21 +136,65 @@ export class HistoricalProcess {
     const disclosure = details;
     let body: HTMLElement | null = null;
     const release = () => {
+      if (this.closeInspector === close) this.closeInspector = null;
       if (!body) return;
       reader.scrollTop = body.scrollTop;
       remember(body, reader);
       this.remove(body); body = null;
+    };
+    const close = (restoreFocus = false) => {
+      if (restoreFocus) summary!.focus();
+      reader.open = false; disclosure.open = false; release();
+      if (this.closeInspector === close) this.closeInspector = null;
     };
     const paint = (navigation = false) => {
       if (!disclosure.open) { release(); return; }
       const restoreFocus = !body || body.contains(host.ownerDocument.activeElement);
       if (body) { reader.scrollTop = navigation ? 0 : body.scrollTop; remember(body, reader); }
       if (navigation) reader.focus = null;
-      if (!body) { body = host.ownerDocument.createElement('section'); body.className = 'conversation-history-process__body'; disclosure.append(body); }
+      if (!body) {
+        this.closeInspector?.(); this.closeInspector = close;
+        body = host.ownerDocument.createElement('section');
+        body.className = 'conversation-history-process__body';
+        body.setAttribute('role', 'region');
+        body.setAttribute('aria-label', t('conversation.processInspector'));
+        const bar = host.ownerDocument.createElement('header');
+        bar.className = 'conversation-history-process__heading';
+        const title = host.ownerDocument.createElement('strong');
+        title.textContent = t('conversation.processInspector');
+        bar.append(title, createButton({ label: t('conversation.backToAnswer'),
+          variant: 'ghost', size: 'sm', onClick: () => close(true) }, host.ownerDocument));
+        body.append(bar);
+        body.addEventListener('keydown', event => {
+          if (event.key !== 'Escape' || event.defaultPrevented) return;
+          event.preventDefault(); event.stopPropagation(); close(true);
+        });
+        disclosure.append(body);
+        const pane = body;
+        // Native top layer preserves ancestry/delegation and escapes chat's
+        // content-visibility/scroll containment without moving live evidence.
+        // A non-modal inspector leaves the answer usable. Older engines keep
+        // the same disclosure inline; disposal invalidates the queued mount.
+        if (typeof pane.showPopover === 'function') {
+          pane.setAttribute('popover', 'manual');
+          queueMicrotask(() => {
+            if (body === pane && pane.isConnected && disclosure.open
+                && !pane.matches(':popover-open')) {
+              pane.showPopover();
+              if (host.ownerDocument.activeElement === summary) {
+                pane.querySelector<HTMLButtonElement>('.conversation-history-process__heading > button')?.focus({ preventScroll: true });
+              }
+            }
+          });
+        }
+      }
+      body.setAttribute('aria-label', t('conversation.processInspector'));
+      body.querySelector('.conversation-history-process__heading > strong')!.textContent = t('conversation.processInspector');
+      body.querySelector('.conversation-history-process__heading > button')!.textContent = t('conversation.backToAnswer');
       reader.start = Math.max(0, Math.min(reader.start, Math.max(0, currentPlan.process.length - 1)));
       const end = Math.min(currentPlan.process.length, reader.start + currentBudget);
       let controls = body.querySelector<HTMLElement>(':scope > nav');
-      if (!controls) { controls = host.ownerDocument.createElement('nav'); body.prepend(controls); }
+      if (!controls) { controls = host.ownerDocument.createElement('nav'); body.querySelector('header')!.after(controls); }
       controls.className = 'conversation-history-process__controls';
       controls.setAttribute('aria-label', t('conversation.historyProcessPages'));
       // A complete page needs no disabled pagination chrome. Keep the same
@@ -185,7 +230,8 @@ export class HistoricalProcess {
     disclosure.open = reader.open;
     paint();
     this.mounted.set(host, {
-      release: () => { release(); disclosure.removeEventListener('toggle', toggle); summary!.removeEventListener('click', click); this.mounted.delete(host); },
+      release: () => { release(); if (this.closeInspector === close) this.closeInspector = null;
+        disclosure.removeEventListener('toggle', toggle); summary!.removeEventListener('click', click); this.mounted.delete(host); },
       update: (next, nextBudget) => { currentPlan = next; currentBudget = Math.min(MAX_PROCESS_BLOCKS, nextBudget);
         summary!.textContent = t('conversation.historyProcess', { n: next.process.length }); paint(); },
     });
