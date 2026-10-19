@@ -16,7 +16,7 @@
 }
 
 .conversation-surface .conversation-block--text:has(> .conversation-answer-label) > .conversation-block-copy {
-  top: 0;
+  top: calc(var(--control-h-lg) + var(--space-6));
   background: var(--bg-primary);
 }
 

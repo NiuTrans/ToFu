@@ -1,4 +1,9 @@
 {
+  "turnCtx.showMore": "Show {count} more",
+  "turnCtx.showLess": "Show less",
+  "conversation.answerOutline": "On this page",
+  "conversation.processInspector": "Execution timeline",
+  "conversation.backToAnswer": "Back to answer",
   "conversation.answer": "Answer",
   "projectScope.partial": "Only the most recent {limit} revocable grants are shown. Revoke older tasks from task history. Stop project requires a complete target set.",
   "projectCoordination.history.label": "Task history",

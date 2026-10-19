@@ -1,4 +1,9 @@
 {
+  "turnCtx.showMore": "展开 {count} 项",
+  "turnCtx.showLess": "收起详情",
+  "conversation.answerOutline": "章节目录",
+  "conversation.processInspector": "执行过程",
+  "conversation.backToAnswer": "回到答复",
   "conversation.answer": "答复",
   "projectScope.partial": "仅显示最近 {limit} 条可撤销授权。更早的工作可从任务历史逐项撤销；停止整个项目需要完整目标清单。",
   "projectCoordination.history.label": "任务历史",

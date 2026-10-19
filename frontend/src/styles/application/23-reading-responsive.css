@@ -23,6 +23,7 @@
 
 .conversation-surface .message.user-msg .message-header {
   margin-block: 0 var(--space-2);
+  padding-inline-start: 0;
 }
 
 .conversation-surface .message.user-msg .conversation-turn-blocks > .conversation-block {

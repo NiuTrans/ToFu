@@ -27,6 +27,7 @@ import {
   actionIcon,
 } from './icons';
 import { textFor } from './localized-copy';
+import { updateAnswerNavigation } from './answer-navigation';
 
 import { liveStatusPhase, presentLivePhaseLabel } from '../../presentation/live-phase';
 
@@ -111,8 +112,8 @@ export function renderTextBlock(
       answerLabel = node.ownerDocument.createElement('div');
       answerLabel.className = 'conversation-answer-label';
     }
-    answerLabel.textContent = textFor(ports, 'conversation.answer', 'Answer');
-    node.insertBefore(answerLabel, body);
+    updateAnswerNavigation(answerLabel, body, ports);
+    if (answerLabel.nextElementSibling !== body) node.insertBefore(answerLabel, body);
   } else answerLabel?.remove();
   /* Assistant text blocks carry their own copy affordance: the turn-level
    * Copy only holds the final answer (projection.content), so mid-turn

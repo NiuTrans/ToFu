@@ -82,13 +82,13 @@ def test_conversation_reading_hierarchy_and_disclosure(frontend_visual_page, tmp
     thinking.press('Enter')
     assert not frame.locator('.thinking-text').is_visible()
     thinking.evaluate('(node)=>node.blur()')
-    answer = frame.locator('[data-block-id="deliverable"] .md-content')
+    answer = frame.locator('[data-block-id="deliverable"] > .md-content')
     assert answer.is_visible()
     assert frame.locator('.conversation-turn.message').count() == 2
     assert answer.locator('.code-header .copy-btn').is_visible()
     assert answer.locator('.table-header .copy-btn').is_visible()
     geometry = frame.evaluate("""() => {
-      const answer=document.querySelector('[data-block-id=deliverable] .md-content');
+      const answer=document.querySelector('[data-block-id=deliverable] > .md-content');
       const summary=document.querySelector('.thinking-header');
       const style=getComputedStyle(answer),process=getComputedStyle(summary);
       return {width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,
@@ -159,10 +159,12 @@ def test_reading_measure_in_the_live_application_shell(page, tmp_path, width):
       const box=document.querySelector('.input-inner');
       return {width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,
         measure:parseFloat(getComputedStyle(document.querySelector('.chat-inner')).getPropertyValue('--msg-measure')),
+        readingToken:parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--conversation-reading-measure')),
         composer:box.getBoundingClientRect().width,toolbar:parseFloat(box.style.getPropertyValue('--toolbar-w'))};
     }""")
     assert geometry['scroll'] <= geometry['width'] + 1
-    assert geometry['measure'] == 720
+    assert geometry['measure'] == geometry['readingToken']
+    assert 700 <= geometry['measure'] <= 800
     if width == 1180:
         assert geometry['toolbar'] >= geometry['measure']
         assert geometry['composer'] >= geometry['measure']

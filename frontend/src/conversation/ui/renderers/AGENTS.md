@@ -12,6 +12,7 @@ This directory owns content projection into the Surface-provided node:
 | `plan-blocks.ts` | Proposed-plan and execution evidence |
 | `compaction-block.ts` | Compaction receipt and shared token-flow subprojection |
 | `text-blocks.ts` | Prose, reasoning disclosure, translation and live status |
+| `answer-navigation.ts` | Retained answer toolbar and bounded navigation over the current Markdown headings |
 | `tool-blocks.ts` | Tool, program and injection projection |
 | `tool-effect-notice.ts` | Shared uncertainty notice from effect metadata and Turn lifecycle; no retry authority |
 | `activity-block.ts` | Chronology-local activity rows |

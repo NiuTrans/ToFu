@@ -37,15 +37,19 @@
 /* One calm reading column: compact identity at the left, prose on the page. */
 
 .conversation-surface .conversation-turn.message {
-  grid-template-columns: var(--control-h-md) minmax(0, 1fr) var(--rail-w);
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) var(--rail-w);
   column-gap: var(--space-3);
   margin-bottom: var(--space-10);
   overflow: visible;
 }
 
 .conversation-surface .conversation-turn.message > .conversation-turn-avatar.message-avatar {
-  width: 34px;
-  height: 34px;
+  position: absolute;
+  inset-block-start: var(--space-2);
+  inset-inline-start: var(--space-2);
+  width: var(--space-5);
+  height: var(--space-5);
   margin-top: 0;
   opacity: 1;
   color: var(--accent);
@@ -55,21 +59,25 @@
 }
 
 .conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
-  max-width: 32px;
-  max-height: 32px;
+  max-width: var(--space-5);
+  max-height: var(--space-5);
 }
 
 .conversation-surface .conversation-turn-content.message-content {
+  grid-column: 1;
   overflow: visible;
   max-width: var(--msg-measure);
   min-width: 0;
   font-size: var(--conversation-font-size-body);
 }
 
+.conversation-surface .conversation-turn > .conversation-turn-context-rail { grid-column: 2; }
+
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
-  min-height: 20px;
-  margin: var(--space-1) 0 var(--space-4);
+  min-height: var(--control-h-md);
+  padding-inline-start: var(--conversation-reading-inset);
+  margin: 0 0 var(--space-3);
   gap: var(--space-2);
   line-height: 1.25;
 }
@@ -109,6 +117,17 @@
 
 .conversation-surface .conversation-turn-blocks > .conversation-block {
   margin: 0;
+}
+
+/* One hanging icon gutter: role, narration, answer rubric, headings and
+ * process labels all share a single reading baseline. */
+.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text {
+  box-sizing: border-box;
+  padding-inline-start: var(--conversation-reading-inset);
+}
+
+.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-actions, .conversation-turn-footer, .conversation-block--live-status) {
+  padding-inline-start: var(--conversation-reading-inset);
 }
 
 /* One spacing owner, including the demand-mounted historical process body.

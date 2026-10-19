@@ -49,8 +49,8 @@ html[data-rail] .folder-quickadd{display:none}
 .sidebar-header-actions .action-btn{width:30px;height:30px}
 .sidebar-action-row{display:flex;gap:6px;padding:var(--space-3) var(--space-4);align-items:stretch}
 /* One flat primary action; no texture, bevel or animated icon rotation. */
-.new-chat-btn{flex:1;min-height:var(--control-h-lg);padding:var(--space-2) var(--space-4);margin:0;background:var(--text-primary);color:var(--bg-primary);border:var(--control-edge-inset) solid transparent;border-radius:var(--conversation-process-radius);font-family:var(--font-ui);font-size:var(--font-size-lg);font-weight:var(--weight-medium);cursor:pointer;box-shadow:none;display:flex;align-items:center;gap:var(--space-2);justify-content:center;transition:background var(--motion-fast) var(--ease-standard)}
-.new-chat-btn:hover{background:color-mix(in srgb,var(--text-primary) 86%,var(--bg-primary))}
+.new-chat-btn{flex:1;min-height:var(--control-h-lg);padding:var(--space-2) var(--space-4);margin:0;background:var(--chat-primary-background);color:var(--chat-primary-ink);border:var(--control-edge-inset) solid var(--chat-primary-border);border-radius:var(--conversation-process-radius);font-family:var(--font-ui);font-size:var(--font-size-lg);font-weight:var(--weight-medium);cursor:pointer;box-shadow:var(--chat-primary-shadow);display:flex;align-items:center;gap:var(--space-2);justify-content:center;transition:background var(--motion-fast) var(--ease-standard)}
+.new-chat-btn:hover{filter:brightness(.97)}
 .new-chat-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .new-chat-btn:active{opacity:.9}
 /* new-folder-btn removed — folders use tab bar with "+" button */

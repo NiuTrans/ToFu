@@ -106,7 +106,7 @@ chronology; no leaf is moved into a new wrapper. Visual density never changes bl
 reader-owned disclosure, actionable states or lazy result ownership. Historical
 pagination is visible only when there is earlier or later content to navigate.
 
-**Problem:** round number, call count and a routine "response returned" label were the primary collapsed content, hiding the assistant's actual narration. A long checklist explanation also competed with the header in flex layout. **Decision:** settled assistant history is **final-answer first**. The Surface selects the last explicit terminal/deliverable text and its accepted attempt/task/model-round scope; earlier final-looking text from older attempts is process, not the answer. Other durable deliverables remain outside. Completed status alone is not a success claim. Tool results, exit codes, refusal reasons and diagnostic evidence remain inspectable inside Process. Problem: the repeated outer tool-result receipt list overwhelmed the answer. Decision: remove that list; one compact, initially collapsed Process row sits immediately after the Turn header and before its answer. It uses a compact capsule with a small chevron and item count; its bounded reading area mounts only on expansion. Alternative rejected: merely hiding the repeated receipt list retains duplicate DOM and presentation policy.
+**Problem:** round number, call count and a routine "response returned" label were the primary collapsed content, hiding the assistant's actual narration. A long checklist explanation also competed with the header in flex layout. **Decision:** settled assistant history is **final-answer first**. The Surface selects the last explicit terminal/deliverable text and its accepted attempt/task/model-round scope; earlier final-looking text from older attempts is process, not the answer. Other durable deliverables remain outside. Completed status alone is not a success claim. Tool results, exit codes, refusal reasons and diagnostic evidence remain inspectable inside Process. Problem: the repeated outer tool-result receipt list overwhelmed the answer. Decision: remove that list; one compact, initially collapsed Process disclosure sits in the explicit answer toolbar (or before the answer in a renderer without that toolbar). Its label includes an item count and a trailing chevron; its bounded reading area mounts only on expansion. Alternative rejected: merely hiding the repeated receipt list retains duplicate DOM and presentation policy.
 
 `ui/history-process.ts` owns one native `details` per historical presentation
 identity. Thinking, intermediate narration, tools/programs, notes and diagnostic
@@ -118,6 +118,18 @@ bounded content page (the existing viewport-derived block budget, maximum 200),
 with explicit previous/next content buttons. Pages replace, not append, leaves.
 Inner scrolling is contained and has no external block/turn window sentinels or
 history intents. Outer navigation continues to select actual turns, not tools.
+
+The Process body uses a native nonmodal popover when supported, preserving its
+Turn ancestry for delegated events while escaping scroll/paint containment. It
+floats at the right on desktop and at the bottom on narrow screens, without
+moving the answer. The existing history owner permits one open inspector per
+Surface; close/Escape restores focus and releases lazy leaves. The queued top
+layer mount checks identity, connectivity and open state before acting, so
+unmount/disposal cannot revive a detached panel. Unsupported browsers retain the
+inline native disclosure. The answer toolbar is retained across replay; the
+optional heading menu in `renderers/answer-navigation.ts` reads current direct
+Markdown headings, caps controls at 32, and navigates/focuses within that answer.
+There is no new document listener, timer, transport or transcript cache.
 
 Live, failed, waiting-command/approval, interactive and background-unresolved
 turns retain their actionable stream; an unresolved action overrides a settled

@@ -299,13 +299,13 @@
    * all: `_collectTools()` emits one chip per connected MCP server, which
    * can be dozens. The rail's box is bounded by the message's own height
    * (styles.css `.turn-ctx` is out of flow, `max-height:100%`) and
-   * SCROLLS, so the cap is about glanceability, not geometry — 9 keeps a
-   * typical setup (a few feature toggles + a few MCP servers) fully
-   * visible while the geometry guard's 10-tool probe stays gated.
+   * SCROLLS, so the cap is about glanceability, not geometry — 4 gives a
+   * useful preview without turning a large MCP catalog into a wall of badges.
+   * The count and stationary disclosure expose all remaining entries.
    * Expansion is a click (not hover) because a hover overlay would have
    * to escape `.message`'s content-visibility paint containment — exactly
    * the carve-out this redesign deleted. */
-  const _MAX_VISIBLE_CHIPS = 9;
+  const _MAX_VISIBLE_CHIPS = 4;
 
   /** Max workspace paths rendered up-front; extra roots collapse behind
    * the same "+N" toggle as chips (the delegated click handler only asks
@@ -471,13 +471,14 @@
       const shown = tools.slice(0, _MAX_VISIBLE_CHIPS).map(_chip).join('');
       const rest = tools.slice(_MAX_VISIBLE_CHIPS);
       let overflow = '';
+      let toggle = '';
       if (rest.length) {
-        overflow =
-          '<span class="tctx-overflow" hidden>' + rest.map(_chip).join('') + '</span>' +
-          '<button type="button" class="tctx-more" data-tctx-more="1"' +
-          ' aria-expanded="false">+' + rest.length + '</button>';
+        overflow = '<span class="tctx-overflow" hidden>' + rest.map(_chip).join('') + '</span>';
+        toggle = '<button type="button" class="tctx-more" data-tctx-more="1"' +
+          ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: rest.length})) + '</button>';
       }
-      rows.push('<div class="tctx-row"><span class="tctx-row-h">' + _esc(t('turnCtx.toolsLabel')) + '</span>' +
+      rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
+        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span>' + toggle + '</div>' +
         '<div class="tctx-chips">' + shown + overflow + '</div></div>');
     }
     if (roots.length) {
@@ -491,13 +492,14 @@
       const shownPaths = roots.slice(0, _MAX_VISIBLE_PATHS).map(_path).join('');
       const restPaths = roots.slice(_MAX_VISIBLE_PATHS);
       let pathOverflow = '';
+      let pathToggle = '';
       if (restPaths.length) {
-        pathOverflow =
-          '<div class="tctx-overflow" hidden>' + restPaths.map(_path).join('') + '</div>' +
-          '<button type="button" class="tctx-more" data-tctx-more="1"' +
-          ' aria-expanded="false">+' + restPaths.length + '</button>';
+        pathOverflow = '<div class="tctx-overflow" hidden>' + restPaths.map(_path).join('') + '</div>';
+        pathToggle = '<button type="button" class="tctx-more" data-tctx-more="1"' +
+          ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: restPaths.length})) + '</button>';
       }
-      rows.push('<div class="tctx-row"><span class="tctx-row-h">' + _esc(t('turnCtx.workspaceLabel')) + '</span>' +
+      rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
+        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span>' + pathToggle + '</div>' +
         '<div class="tctx-paths">' + shownPaths + pathOverflow + '</div></div>');
     }
     /* ── Git branch + checklist rows ── LIVE rows (rebuilt in place by
@@ -559,7 +561,7 @@
         if (opening) hidden.removeAttribute('hidden');
         else hidden.setAttribute('hidden', '');
         btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
-        btn.textContent = opening ? '−' : '+' + hidden.children.length;
+        btn.textContent = opening ? t('turnCtx.showLess') : t('turnCtx.showMore', {count: hidden.children.length});
       }
     }
     ev.stopPropagation();
@@ -678,8 +680,11 @@
          * by its one-line host. The CSS cap becomes none — the geometry,
          * not an arbitrary vh, is the budget. Out-of-flow + the clamp keep
          * the no-row-inflation and continuous-handoff contracts intact. */
-        const visibleTop = hostTop + off;
-        const maxH = Math.max(0, Math.round(nextTop - visibleTop - 1));
+        // Use the same tenth-pixel translation that was applied above.
+        // Rounding the remaining height independently opens a visible seam
+        // at handoff when localized text gives the rail fractional height.
+        const visibleTop = hostTop + (off > 0 ? Math.round(off * 10) / 10 : 0);
+        const maxH = Math.max(0, nextTop - visibleTop);
         rail.style.maxHeight = maxH + 'px';
         /* max-height:0 still paints padding/borders. Suppress that sliver,
          * without display:none/hidden (which would drop this rail from the
