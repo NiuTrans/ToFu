@@ -74,7 +74,6 @@ const ATTEMPT_EVENT_DOCUMENT_IDENTITY: &str = "attempt_events";
 const PROJECTION_HEAD_DOCUMENT_IDENTITY: &str = "turn_projection_heads";
 
 mod text_tail;
-#[cfg(test)]
 pub(crate) mod execution_frame;
 mod sync_attempt_reference;
 
@@ -478,6 +477,7 @@ struct ProjectionHeadDescriptor {
     patch_count: usize,
     patch_bytes: usize,
     text_tail: Option<text_tail::TextTail>,
+    frame_witness: Option<execution_frame::ProjectionWitness>,
 }
 
 fn invalid_data(message: &str) -> io::Error {
@@ -2579,6 +2579,15 @@ fn projection_head_from_document(
         .filter(|value| *value <= MAX_TURN_PROJECTION_PATCH_BYTES)
         .ok_or_else(|| invalid_data("Turn projection head bytes are malformed"))?;
     let text_tail = raw.get("textTail").map(text_tail::TextTail::decode).transpose()?;
+    let frame_witness = match raw.get("frameWitness") {
+        Some(raw) => execution_frame::ProjectionWitness::decode(raw,
+            document.get("projectionRevision").and_then(Value::as_u64)
+                .ok_or_else(|| invalid_data("Turn frame revision is malformed"))?)?,
+        None => None,
+    };
+    if frame_witness.is_some() && text_tail.is_some() {
+        return Err(invalid_data("Turn frame witness cannot cross a text tail"));
+    }
     let expected_revision = base_revision.checked_add(patch_count as u64)
         .and_then(|value| value.checked_add(text_tail.as_ref().map_or(0, |tail| tail.revisions)));
     if (patch_count == 0) != (patch_bytes == 0)
@@ -2603,6 +2612,7 @@ fn projection_head_from_document(
         patch_count,
         patch_bytes,
         text_tail,
+        frame_witness,
     }))
 }
 
@@ -2616,6 +2626,10 @@ fn projection_head_value(head: &ProjectionHeadDescriptor) -> Value {
     });
     if let Some(tail) = &head.text_tail {
         value["textTail"] = serde_json::to_value(tail).expect("bounded text descriptor is JSON safe");
+    }
+    if let Some(witness) = &head.frame_witness {
+        value["frameWitness"] = serde_json::to_value(witness)
+            .expect("bounded frame witness is JSON safe");
     }
     value
 }
@@ -2836,6 +2850,11 @@ fn materialize_projection_head(
         return Err(invalid_data("Turn projection patch byte witness differs"));
     }
     text_tail::materialize(database, transaction, conversation_id, turn_id, head, &mut projection)?;
+    if let Some(witness) = &head.frame_witness {
+        witness.verify(&projection,
+            document.get("actor").and_then(Value::as_str).unwrap_or("assistant"),
+            document.get("status").and_then(Value::as_str).unwrap_or("running"))?;
+    }
     document.insert("projection".to_owned(), Value::Object(projection));
     document.remove("_projectionHead");
     Ok(())
@@ -10578,7 +10597,7 @@ fn update_attempt_turn_lifecycle(
                 base_revision: current.base_revision,
                 patch_count: next_count,
                 patch_bytes: next_bytes,
-                text_tail: None,
+                text_tail: None, frame_witness: None,
             };
             store_projection_head_patch(
                 database,
@@ -10604,7 +10623,7 @@ fn update_attempt_turn_lifecycle(
                 base_revision: next_revision,
                 patch_count: 0,
                 patch_bytes: 0,
-                text_tail: None,
+                text_tail: None, frame_witness: None,
             };
             store_projection_checkpoint(
                 database,
@@ -13617,13 +13636,28 @@ pub(crate) fn event_record(
     transaction: &mut AuthorityTransaction,
     request: &EventRecordRequest,
 ) -> io::Result<Vec<u8>> {
+    event_record_mode(database, transaction, request, true)
+}
+
+#[cfg(test)]
+fn event_record_unframed(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest) -> io::Result<Vec<u8>>
+{
+    event_record_mode(database, transaction, request, false)
+}
+
+fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest, allow_frame_witness: bool) -> io::Result<Vec<u8>>
+{
     if request.slim && request.projection_patch.is_some() {
         return Err(invalid_input("Slim Turn events cannot carry a projection patch"));
     }
     let text_append = text_tail::classify(request);
+    let frame_candidate = allow_frame_witness && text_append.is_none()
+        && execution_frame::classify_patch(request);
     let _load_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_LOAD);
     let Some((loaded_attempt, loaded_turn)) = load_event_record_state(
-        database, transaction, request, text_append.is_none(),
+        database, transaction, request, text_append.is_none() && !frame_candidate,
     )? else {
         return encode_response(&json!({"applied": false}));
     };
@@ -13664,7 +13698,11 @@ pub(crate) fn event_record(
             request, &loaded_attempt.conversation_id, &turn_id)?,
         None => None,
     };
-    if text_append.is_some() && text_update.is_none() {
+    let frame_update = if frame_candidate && !starts_attempt {
+        execution_frame::append_from_witness(database, transaction, &loaded_turn,
+            request, &loaded_attempt.conversation_id, &turn_id)?
+    } else { None };
+    if (text_append.is_some() || frame_candidate) && text_update.is_none() && frame_update.is_none() {
         if let Some(head) = &loaded_turn.projection_head {
             materialize_projection_head(database, transaction, &mut turn, head)?;
         }
@@ -13677,7 +13715,7 @@ pub(crate) fn event_record(
 
     drop(_load_stage);
     let _projection_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_PROJECTION);
-    let (mut next_projection, mut replay_patch) = if text_update.is_some() {
+    let (mut next_projection, mut replay_patch) = if text_update.is_some() || frame_update.is_some() {
         (Map::new(), request.projection_patch.clone()
             .ok_or_else(|| invalid_input("Turn text append requires a patch"))?)
     } else if request.slim && request.projection_patch.is_none() {
@@ -13778,8 +13816,9 @@ pub(crate) fn event_record(
             .get("createdAt")
             .and_then(Value::as_u64)
             .ok_or_else(|| invalid_data("attempt recovery timestamp is malformed"))?;
-        projection_bytes = match &text_update {
-            Some(update) => update.projection_bytes,
+        projection_bytes = match text_update.as_ref().map(|u| u.projection_bytes)
+            .or_else(|| frame_update.as_ref().map(|u| u.projection_bytes)) {
+            Some(bytes) => bytes,
             None => serde_json::to_vec(&next_projection)
                 .map_err(|_| invalid_data("turn projection cannot be encoded"))?.len(),
         };
@@ -13861,133 +13900,21 @@ pub(crate) fn event_record(
         &turn, &next_projection, projection_bytes, &attempt, request.terminal,
     )?;
 
-    let replay_patch_bytes = serde_json::to_vec(&replay_patch)
-        .map_err(|_| invalid_data("Turn projection patch cannot be encoded"))?
-        .len();
-    let next_projection_head = if let Some(update) = &text_update {
+    let mut next_projection_head = if let Some(update) = &text_update {
         Some(update.head.clone())
-    } else if request.terminal {
-        retire_event_projection_head(
-            database,
-            transaction,
-            &loaded_attempt.conversation_id,
-            &turn_id,
-            loaded_turn.projection_head.as_ref(),
-        )?;
-        None
-    } else if let Some(current) = &loaded_turn.projection_head {
-        let next_count = current
-            .patch_count
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("Turn projection patch count overflows"))?;
-        let next_bytes = current
-            .patch_bytes
-            .checked_add(replay_patch_bytes)
-            .ok_or_else(|| invalid_data("Turn projection patch bytes overflow"))?;
-        if current.text_tail.is_none() && next_count <= MAX_TURN_PROJECTION_HEAD_PATCHES
-            && next_bytes <= MAX_TURN_PROJECTION_PATCH_BYTES
-        {
-            let next_head = ProjectionHeadDescriptor {
-                head_id: current.head_id.clone(),
-                attempt_id: current.attempt_id.clone(),
-                base_revision: current.base_revision,
-                patch_count: next_count,
-                patch_bytes: next_bytes,
-                text_tail: None,
-            };
-            store_projection_head_patch(
-                database,
-                transaction,
-                &loaded_attempt.conversation_id,
-                &turn_id,
-                &next_head,
-                &replay_patch,
-                request.now_ms,
-            )?;
-            Some(next_head)
-        } else {
-            retire_event_projection_head(
-                database,
-                transaction,
-                &loaded_attempt.conversation_id,
-                &turn_id,
-                Some(current),
-            )?;
-            let checkpoint_head = ProjectionHeadDescriptor {
-                head_id: projection_head_id(&request.attempt_id, next_revision),
-                attempt_id: request.attempt_id.clone(),
-                base_revision: next_revision,
-                patch_count: 0,
-                patch_bytes: 0,
-                text_tail: None,
-            };
-            store_projection_checkpoint(
-                database,
-                transaction,
-                &loaded_attempt.conversation_id,
-                &turn_id,
-                &checkpoint_head,
-                &next_projection,
-                request.now_ms,
-            )?;
-            Some(checkpoint_head)
-        }
+    } else if let Some(update) = &frame_update {
+        Some(update.head.clone())
     } else {
-        let previous_projection_bytes = serde_json::to_vec(&previous_projection)
-            .map_err(|_| invalid_data("Turn projection cannot be encoded"))?
-            .len();
-        let next_projection_bytes = serde_json::to_vec(&next_projection)
-            .map_err(|_| invalid_data("Turn projection cannot be encoded"))?
-            .len();
-        if previous_projection_bytes > MAX_TURN_PROJECTION_INLINE_LIVE_BYTES
-            || next_projection_bytes > MAX_TURN_PROJECTION_INLINE_LIVE_BYTES
-        {
-            // A wire patch may exceed the compact-head chain budget. Fold
-            // directly into a checkpoint at the new revision in that case;
-            // never publish a head its reader would reject on the next read.
-            let fold = replay_patch_bytes > MAX_TURN_PROJECTION_PATCH_BYTES;
-            let base_revision = if fold {
-                next_revision
-            } else {
-                previous_revision
-            };
-            let head = ProjectionHeadDescriptor {
-                head_id: projection_head_id(&request.attempt_id, base_revision),
-                attempt_id: request.attempt_id.clone(),
-                base_revision,
-                patch_count: if fold { 0 } else { 1 },
-                patch_bytes: if fold { 0 } else { replay_patch_bytes },
-                text_tail: None,
-            };
-            store_projection_checkpoint(
-                database,
-                transaction,
-                &loaded_attempt.conversation_id,
-                &turn_id,
-                &head,
-                if fold {
-                    &next_projection
-                } else {
-                    &previous_projection
-                },
-                request.now_ms,
-            )?;
-            if !fold {
-                store_projection_head_patch(
-                    database,
-                    transaction,
-                    &loaded_attempt.conversation_id,
-                    &turn_id,
-                    &head,
-                    &replay_patch,
-                    request.now_ms,
-                )?;
-            }
-            Some(head)
-        } else {
-            None
-        }
+        store_event_projection(database, transaction, request, &loaded_attempt.conversation_id,
+            &turn_id, previous_revision, next_revision, loaded_turn.projection_head.as_ref(),
+            &previous_projection, &next_projection, &replay_patch)?
     };
+    if frame_candidate && text_update.is_none() && frame_update.is_none() {
+        if let Some(head) = &mut next_projection_head {
+            head.frame_witness = execution_frame::ProjectionWitness::mint(&next_projection,
+                next_revision, turn.get("actor").and_then(Value::as_str).unwrap_or("assistant"), &request.status)?;
+        }
+    }
     if let Some(head) = &next_projection_head {
         turn.insert("projection".to_owned(), json!({}));
         turn.insert("_projectionHead".to_owned(), projection_head_value(head));
@@ -14068,6 +13995,141 @@ pub(crate) fn event_record(
         conversation_id: &loaded_attempt.conversation_id, turn: &turn,
         attempt: &attempt, projection: &next_projection, projection_bytes,
         replay_patch, starts_attempt,
+    })
+}
+
+// One physical checkpoint/patch-chain policy for ordinary events and frames.
+// The caller supplies the exact materialized before/after states when needed;
+// unchanged bounded head chains append their original replay patch only.
+fn store_event_projection(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest, conversation_id: &str, turn_id: &str,
+    previous_revision: u64, next_revision: u64, current_head: Option<&ProjectionHeadDescriptor>,
+    previous_projection: &Map<String, Value>, next_projection: &Map<String, Value>,
+    replay_patch: &Map<String, Value>,
+) -> io::Result<Option<ProjectionHeadDescriptor>> {
+    let replay_patch_bytes = serde_json::to_vec(replay_patch)
+        .map_err(|_| invalid_data("Turn projection patch cannot be encoded"))?.len();
+    Ok(if request.terminal {
+        retire_event_projection_head(
+            database,
+            transaction,
+            conversation_id,
+            turn_id,
+            current_head,
+        )?;
+        None
+    } else if let Some(current) = current_head {
+        let next_count = current
+            .patch_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("Turn projection patch count overflows"))?;
+        let next_bytes = current
+            .patch_bytes
+            .checked_add(replay_patch_bytes)
+            .ok_or_else(|| invalid_data("Turn projection patch bytes overflow"))?;
+        if current.text_tail.is_none() && next_count <= MAX_TURN_PROJECTION_HEAD_PATCHES
+            && next_bytes <= MAX_TURN_PROJECTION_PATCH_BYTES
+        {
+            let next_head = ProjectionHeadDescriptor {
+                head_id: current.head_id.clone(),
+                attempt_id: current.attempt_id.clone(),
+                base_revision: current.base_revision,
+                patch_count: next_count,
+                patch_bytes: next_bytes,
+                text_tail: None, frame_witness: None,
+            };
+            store_projection_head_patch(
+                database,
+                transaction,
+                conversation_id,
+                turn_id,
+                &next_head,
+                &replay_patch,
+                request.now_ms,
+            )?;
+            Some(next_head)
+        } else {
+            retire_event_projection_head(
+                database,
+                transaction,
+                conversation_id,
+                turn_id,
+                Some(current),
+            )?;
+            let checkpoint_head = ProjectionHeadDescriptor {
+                head_id: projection_head_id(&request.attempt_id, next_revision),
+                attempt_id: request.attempt_id.clone(),
+                base_revision: next_revision,
+                patch_count: 0,
+                patch_bytes: 0,
+                text_tail: None, frame_witness: None,
+            };
+            store_projection_checkpoint(
+                database,
+                transaction,
+                conversation_id,
+                turn_id,
+                &checkpoint_head,
+                &next_projection,
+                request.now_ms,
+            )?;
+            Some(checkpoint_head)
+        }
+    } else {
+        let previous_projection_bytes = serde_json::to_vec(&previous_projection)
+            .map_err(|_| invalid_data("Turn projection cannot be encoded"))?
+            .len();
+        let next_projection_bytes = serde_json::to_vec(&next_projection)
+            .map_err(|_| invalid_data("Turn projection cannot be encoded"))?
+            .len();
+        if previous_projection_bytes > MAX_TURN_PROJECTION_INLINE_LIVE_BYTES
+            || next_projection_bytes > MAX_TURN_PROJECTION_INLINE_LIVE_BYTES
+        {
+            // A wire patch may exceed the compact-head chain budget. Fold
+            // directly into a checkpoint at the new revision in that case;
+            // never publish a head its reader would reject on the next read.
+            let fold = replay_patch_bytes > MAX_TURN_PROJECTION_PATCH_BYTES;
+            let base_revision = if fold {
+                next_revision
+            } else {
+                previous_revision
+            };
+            let head = ProjectionHeadDescriptor {
+                head_id: projection_head_id(&request.attempt_id, base_revision),
+                attempt_id: request.attempt_id.clone(),
+                base_revision,
+                patch_count: if fold { 0 } else { 1 },
+                patch_bytes: if fold { 0 } else { replay_patch_bytes },
+                text_tail: None, frame_witness: None,
+            };
+            store_projection_checkpoint(
+                database,
+                transaction,
+                conversation_id,
+                turn_id,
+                &head,
+                if fold {
+                    &next_projection
+                } else {
+                    &previous_projection
+                },
+                request.now_ms,
+            )?;
+            if !fold {
+                store_projection_head_patch(
+                    database,
+                    transaction,
+                    conversation_id,
+                    turn_id,
+                    &head,
+                    &replay_patch,
+                    request.now_ms,
+                )?;
+            }
+            Some(head)
+        } else {
+            None
+        }
     })
 }
 

@@ -20,6 +20,10 @@ fn seed(database: &mut AuthorityDatabase, bytes: usize) -> u64 {
 
 fn seed_with_evidence(database: &mut AuthorityDatabase, evidence: String) -> u64 {
     let projection = json!({"content":"before", "thinking":"", "largeStableEvidence":evidence});
+    seed_projection(database, projection, true)
+}
+
+fn seed_projection(database: &mut AuthorityDatabase, projection: Value, runtime: bool) -> u64 {
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
     append_settled(database, &mut tx, &AppendSettledRequest {
         conversation_id: CONVERSATION.into(), actor:"assistant".into(), status:"pending".into(),
@@ -38,7 +42,7 @@ fn seed_with_evidence(database: &mut AuthorityDatabase, evidence: String) -> u64
     first.projection = projection;
     first.task_event = None;
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
-    let response: Value = serde_json::from_slice(&event_record(database, &mut tx, &first).unwrap()).unwrap();
+    let response: Value = serde_json::from_slice(&event_record_mode(database, &mut tx, &first, runtime).unwrap()).unwrap();
     database.commit(tx).unwrap();
     response["projection_revision"].as_u64().unwrap()
 }
@@ -420,3 +424,6 @@ fn execution_frame_timing_leg() {
         "request_profile_every":0,"recovery_profile":0,
         "measured":"one IR prepare + one strict commit","reopened_each_sample":true}));
 }
+
+#[path = "turn_execution_frame_runtime_tests.rs"]
+mod runtime_tests;

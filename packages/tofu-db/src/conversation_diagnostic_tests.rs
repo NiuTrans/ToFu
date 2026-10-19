@@ -76,7 +76,7 @@ fn seed(db: &mut AuthorityDatabase, projection: Value, patched: bool) -> Value {
                 base_revision: 1,
                 patch_count: 1,
                 patch_bytes: serde_json::to_vec(&patch).unwrap().len(),
-                text_tail: None,
+                text_tail: None, frame_witness: None,
             };
             let checkpoint_key = projection_checkpoint_key(&tx, "conv", id, &head.head_id).unwrap();
             restore(
