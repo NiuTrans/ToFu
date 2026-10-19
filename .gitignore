@@ -128,6 +128,7 @@ __pycache__/
 !/benchmarks/embedded_process_recovery.py
 !/benchmarks/conversation_compare.py
 !/benchmarks/tofudb_context_read.py
+!/benchmarks/tofudb_context_progression.py
 !/benchmarks/tofudb_cached_read.py
 !/benchmarks/tofudb_context_controls.py
 !/benchmarks/harness_sqlite_reference.rs
@@ -141,6 +142,15 @@ __pycache__/
 !/benchmarks/harness_graph/Cargo.lock
 !/benchmarks/harness_graph/src/
 !/benchmarks/harness_graph/tests/
+!/benchmarks/domain_roots/
+/benchmarks/domain_roots/*
+!/benchmarks/domain_roots/AGENTS.md
+!/benchmarks/domain_roots/README.md
+!/benchmarks/domain_roots/Cargo.toml
+!/benchmarks/domain_roots/Cargo.lock
+!/benchmarks/domain_roots/measure.py
+!/benchmarks/domain_roots/src/
+!/benchmarks/domain_roots/tests/
 !/benchmarks/live_pipeline.py
 
 !/benchmarks/conversation_snapshot_cpu.py
