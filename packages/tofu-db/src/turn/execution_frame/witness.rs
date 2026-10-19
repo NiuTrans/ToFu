@@ -27,6 +27,54 @@ pub(in crate::turn) struct ProjectionWitness {
     guidance_repair_free: bool,
 }
 
+/// Transaction-local no-op proof, minted only by the shared normalizer on
+/// the actual materialized projection. It is never serialized or accepted from
+/// a request. Callers retain it only beside that unchanged revision's value.
+#[derive(Clone)]
+pub(in crate::turn) struct VerifiedStableSegments {
+    revision: u64,
+    actor: String,
+    status: String,
+}
+
+impl VerifiedStableSegments {
+    fn matches(&self, revision: u64, actor: &str, status: &str) -> bool {
+        self.revision == revision && self.actor == actor && self.status == status
+    }
+}
+
+pub(in crate::turn) fn normalize_for_patch(
+    projection: &Map<String, Value>,
+    revision: u64,
+    actor: &str,
+    status: &str,
+    verified: Option<&VerifiedStableSegments>,
+) -> io::Result<(Map<String, Value>, Option<VerifiedStableSegments>)> {
+    if let Some(proof) = verified.filter(|proof| proof.matches(revision, actor, status)) {
+        return Ok((projection.clone(), Some(proof.clone())));
+    }
+    let stable = crate::turn_projection_segments::stabilize_for_patch(projection, actor, status)?;
+    let proof = (stable == *projection).then(|| VerifiedStableSegments {
+        revision,
+        actor: actor.to_owned(),
+        status: status.to_owned(),
+    });
+    Ok((stable, proof))
+}
+
+fn normalization_dependency(key: &str) -> bool {
+    matches!(
+        key,
+        "segments"
+            | "content"
+            | "thinking"
+            | "toolRounds"
+            | "fileChanges"
+            | "modifiedFileList"
+            | "modifiedFiles"
+    )
+}
+
 fn size(value: &impl Serialize) -> io::Result<usize> {
     serde_json::to_vec(value)
         .map(|v| v.len())
@@ -49,11 +97,57 @@ impl FieldWitness {
 }
 
 impl ProjectionWitness {
+    #[cfg(test)]
     pub(in crate::turn) fn mint(
         projection: &Map<String, Value>,
         revision: u64,
         actor: &str,
         status: &str,
+    ) -> io::Result<Option<Self>> {
+        Self::mint_with_stability(projection, revision, actor, status, false)
+    }
+
+    pub(in crate::turn) fn mint_after_patch(
+        projection: &Map<String, Value>,
+        revision: u64,
+        actor: &str,
+        status: &str,
+        previous_stable: Option<&VerifiedStableSegments>,
+        patch: &Map<String, Value>,
+    ) -> io::Result<Option<Self>> {
+        // The shared normalizer's proof survives only an admitted delta that
+        // leaves every one of its inputs unchanged, with the same actor/status.
+        let stable = revision.checked_sub(1).is_some_and(|previous| {
+            previous_stable.is_some_and(|proof| proof.matches(previous, actor, status))
+                && patch.get("baseRevision").and_then(Value::as_u64) == Some(previous)
+                && patch.get("targetRevision").and_then(Value::as_u64) == Some(revision)
+                && patch
+                    .get("operations")
+                    .and_then(Value::as_array)
+                    .is_some_and(|operations| {
+                        operations.iter().all(|operation| {
+                            operation
+                                .get("path")
+                                .and_then(Value::as_array)
+                                .and_then(|path| path.first())
+                                .and_then(Value::as_str)
+                                .is_some_and(|key| !normalization_dependency(key))
+                        })
+                    })
+        });
+        Self::mint_with_stability(projection, revision, actor, status, stable)
+    }
+
+    pub(in crate::turn) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn mint_with_stability(
+        projection: &Map<String, Value>,
+        revision: u64,
+        actor: &str,
+        status: &str,
+        stable_segments_verified: bool,
     ) -> io::Result<Option<Self>> {
         let mut fields = BTreeMap::new();
         for (key, value) in projection {
@@ -78,8 +172,8 @@ impl ProjectionWitness {
         }
         // The shared helpers, not a caller's flag or field type, establish
         // that these semantic repairs have nothing left to do.
-        witness.stable_segments =
-            crate::turn_projection_segments::stabilize_for_patch(projection, actor, status)
+        witness.stable_segments = stable_segments_verified
+            || crate::turn_projection_segments::stabilize_for_patch(projection, actor, status)
                 .is_ok_and(|stable| stable == *projection);
         witness.guidance_repair_free =
             super::require_guidance_repair_free_projection(projection).is_ok();
@@ -137,7 +231,7 @@ impl ProjectionWitness {
         projection: &Map<String, Value>,
         actor: &str,
         status: &str,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<VerifiedStableSegments>> {
         if projection.len() != self.fields.len() {
             return Err(invalid_data("Turn frame fields differ"));
         }
@@ -151,15 +245,14 @@ impl ProjectionWitness {
         {
             return Err(invalid_data("Turn frame guidance proof differs"));
         }
-        if self.stable_segments
-            && self.actor == actor
-            && self.status == status
-            && !crate::turn_projection_segments::stabilize_for_patch(projection, actor, status)
-                .is_ok_and(|stable| stable == *projection)
-        {
-            return Err(invalid_data("Turn frame segment proof differs"));
+        if self.stable_segments && self.actor == actor && self.status == status {
+            let proof = normalize_for_patch(projection, self.revision, actor, status, None)
+                .ok()
+                .and_then(|(_, proof)| proof)
+                .ok_or_else(|| invalid_data("Turn frame segment proof differs"))?;
+            return Ok(Some(proof));
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -252,19 +345,10 @@ pub(in crate::turn) fn append_from_witness(
         .map_err(|_| invalid_input("Turn projection patch is invalid"))?;
     for operation in operations {
         let key = operation["path"][0].as_str().unwrap();
-        let normalization_dependency = matches!(
-            key,
-            "segments"
-                | "content"
-                | "thinking"
-                | "toolRounds"
-                | "fileChanges"
-                | "modifiedFileList"
-                | "modifiedFiles"
-        );
+
         // A stable-segment request normalizes its *old* state before applying
         // its delta. A changed dependency invalidates the proof for next time.
-        if normalization_dependency {
+        if normalization_dependency(key) {
             witness.stable_segments = false;
         }
         match operation["op"].as_str().unwrap() {
