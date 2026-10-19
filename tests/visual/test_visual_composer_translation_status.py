@@ -30,7 +30,8 @@ def translation_receipt_server(tmp_path):
         server.shutdown(); server.server_close(); thread.join()
 
 @pytest.mark.parametrize('width', [390, 1280])
-def test_composer_translation_receipt(translation_receipt_server, browser, tmp_path, width):
+@pytest.mark.parametrize('theme', ['tofu', 'light', 'dark'])
+def test_composer_translation_receipt(translation_receipt_server, browser, tmp_path, width, theme):
     bundle = tmp_path / 'translation-status.js'
     result = subprocess.run([str(ROOT / 'scripts/vite_test_bundle.mjs'),
         str(ROOT / 'frontend/src/conversation/application/composer-translation-status.ts'),
@@ -41,6 +42,7 @@ def test_composer_translation_receipt(translation_receipt_server, browser, tmp_p
     page = browser.new_page(viewport={'width': width, 'height': 900})
     try:
         page.goto(translation_receipt_server, wait_until='domcontentloaded')
+        page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
         page.wait_for_selector('.input-box')
         page.add_script_tag(content=bundle.read_text())
         page.evaluate('''() => {
@@ -50,7 +52,8 @@ def test_composer_translation_receipt(translation_receipt_server, browser, tmp_p
             now: () => receiptClock, activeConversationId: () => receiptActive,
             label: key => ({'translationWait.send':'翻译 / 提交中…',
               'translationWait.completed':'处理完成', 'translationWait.failed':'翻译失败', 'translationWait.waited':'等待',
-              'translationWait.modelPending':'模型以返回结果为准'})[key] || key});
+              'translationWait.modelPending':'模型以返回结果为准',
+              'send.preparing':'正在发送补充消息…'})[key] || key});
           window.receiptWait = receipt.begin('visual-conv','send');
         }''')
         page.wait_for_selector('.composer-translation-status')
@@ -61,6 +64,29 @@ def test_composer_translation_receipt(translation_receipt_server, browser, tmp_p
         page.evaluate("receipt.finish(receiptWait,'completed','deepseek-v4-flash-yourprovider')")
         # Successful attribution belongs to the durable message. Only pending
         # work and unresolved failure/cancellation stay in the composer.
+        assert page.locator('.composer-translation-status').count() == 0
+        # Insertion progress stays next to the composer. The original text and
+        # receipt node survive phase updates while the next draft stays usable.
+        page.evaluate("""()=>{
+          receiptWait=receipt.begin('visual-conv','send', {phase:'preparing',
+            message:'补充一下：保留浅灰白底色，只用少量柔和的橙色点缀。'.repeat(6)});
+          window.pendingReceipt=document.querySelector('.composer-translation-status');
+        }""")
+        page.locator('textarea').fill('继续补充的草稿')
+        page.locator('textarea').focus()
+        page.evaluate("receipt.update(receiptWait,{phase:'translating'})")
+        assert page.locator('.composer-translation-status').count() == 1
+        assert page.locator('.composer-translation-status').evaluate('n=>n===pendingReceipt')
+        assert page.locator('.composer-translation-message').inner_text().startswith('补充一下：')
+        assert '模型以返回结果为准' not in page.locator('.composer-translation-status').inner_text()
+        assert page.locator('textarea').evaluate('n=>n===document.activeElement')
+        assert page.locator('textarea').input_value() == '继续补充的草稿'
+        assert page.locator('.composer-translation-status').evaluate('n=>n.scrollWidth<=n.clientWidth+1')
+        insertion = page.locator('.composer-translation-status').bounding_box()
+        assert insertion and insertion['height'] < 100
+        assert insertion['x'] >= 0 and insertion['x'] + insertion['width'] <= width + 1
+        page.locator('.input-area').screenshot(path=str(tmp_path / f'insertion-receipt-{theme}-{width}.png'))
+        page.evaluate("receipt.finish(receiptWait,'completed')")
         assert page.locator('.composer-translation-status').count() == 0
         page.evaluate("receiptWait=receipt.begin('visual-conv','send');receiptClock=4600;"
                       "receipt.finish(receiptWait,'failed','deepseek-v4-flash-yourprovider')")

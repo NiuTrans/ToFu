@@ -117,6 +117,15 @@ export function selectTurnBlocks(
      * empty body between the header and the status surface. */
     if ((block.kind === 'text' || block.kind === 'thinking')
         && !block.displayMarkdown.trim()) return [];
+    // The live accumulator is named text:terminal and carries deliverable=true
+    // even before the model decides whether to call another tool. Only settled
+    // Turn authority can promote it to answer chrome (including the bilingual
+    // disclosure). Translation timing never grants that identity. Keep the
+    // source flags untouched; this projected bit also invalidates keyed DOM
+    // equality when settlement/resume changes status without changing prose.
+    if (block.kind === 'text' && block.deliverable && !settled) {
+      return [{ ...block, deliverable: false }];
+    }
     return [block];
   });
   addProgramBlocks(turn, blocks, claims, diagnostics);

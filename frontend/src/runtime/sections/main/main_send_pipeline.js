@@ -254,8 +254,7 @@ function _removeOptimisticUserTurn(conv, turnIds) {
 /**
  * Re-label the optimistic assistant container in place as the send command
  * advances (connecting → translating), so preparation never stacks a second
- * agent bubble. Returns false when this send has no optimistic pair (steer),
- * letting the caller fall back to the standalone status bubble.
+ * agent bubble. Active-lane insertions use the composer receipt instead.
  */
 function _updateOptimisticAssistantPhase(conv, turnId, phase, label) {
   if (!conv || !turnId
@@ -533,10 +532,9 @@ async function _submitComposerDraft() {
   let translationWait = null;
   let accepted = false;
   let userStopped = false;
-  /* Optimistic pair: an ordinary/queued command paints the user input and
-   * its stable assistant container before the round trip. A steer is an
-   * injection block on the already-live assistant Turn, so it must never
-   * manufacture even a provisional transcript Turn. */
+  /* Only an ordinary idle send starts an optimistic conversation pair.
+   * Steer/queue preparation belongs to the shared composer receipt; the
+   * existing live assistant must never gain a fabricated successor. */
   _clearCapturedComposerDraft(draft);
   let optimisticTurnIds = [];
   let optimisticEchoCleared = true;
@@ -546,9 +544,16 @@ async function _submitComposerDraft() {
     _removeOptimisticUserTurn(conv, optimisticTurnIds);
   };
   const showOptimisticEcho = (deliveryMode) => {
-    if (deliveryMode === 'steer') {
+    if (deliveryMode === 'steer' || deliveryMode === 'queue') {
       optimisticTurnIds = [];
       optimisticEchoCleared = true;
+      _removeTranslatingBubble(convId);
+      const presentation = {
+        message: draftProjection.content,
+        phase: willTranslate ? 'translating' : 'preparing',
+      };
+      if (translationWait) composerTranslationStatus.update(translationWait, presentation);
+      else translationWait = composerTranslationStatus.begin(convId, 'send', presentation);
       return;
     }
     optimisticTurnIds = _showOptimisticUserTurn(conv, draftProjection);
@@ -558,7 +563,9 @@ async function _submitComposerDraft() {
     if (_updateOptimisticAssistantPhase(conv, optimisticTurnIds[1], phase, label)) {
       return;
     }
-    /* Steer sends paint no optimistic pair; keep the standalone bubble. */
+    // Insertion preparation already has a stable, message-bearing receipt.
+    if (translationWait?.message !== undefined) return;
+    // A degraded ordinary-send bridge may still need the existing fallback.
     if (activeConvId !== convId) return;
     if (phase === 'translating') {
       _renderTranslatingBubble();
@@ -600,7 +607,8 @@ async function _submitComposerDraft() {
     if (willTranslate) {
       conv._translating = true;
 
-      translationWait = composerTranslationStatus.begin(convId, 'send');
+      if (translationWait) composerTranslationStatus.update(translationWait, { phase: 'translating' });
+      else translationWait = composerTranslationStatus.begin(convId, 'send');
       conv._translateAborted = false;
       conv._translateAbortCtrl = sendStart.controller;
       showSendPreparation('translating', t('sidebar.translating'));

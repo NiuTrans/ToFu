@@ -1,5 +1,5 @@
 /**
- * Construct the optimistic local Turn pair of a composer submission — the
+ * Construct the optimistic local Turn pair of an ordinary idle submission — the
  * user bubble and its stable assistant container render before the command
  * round-trips.
  *
