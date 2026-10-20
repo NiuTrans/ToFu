@@ -315,6 +315,7 @@ def http_search_get(
     timeout: int = 12,
     headers: dict | None = None,
     on_ratelimit_retry: bool = False,
+    request_get: Callable | None = None,
 ) -> list:
     """Shared HTTP envelope for scraping search engines.
 
@@ -342,6 +343,10 @@ def http_search_get(
     on_ratelimit_retry : bool
         If ``True`` and HTTP 202 is returned, sleep 0.6 s and retry once
         (DDG rate-limit behavior). Other engines set it to ``False``.
+    request_get : callable, optional
+        Transport port for an engine with a distinct HTTP protocol requirement.
+        Receives the same endpoint, params, headers and selected proxy mapping,
+        plus a shared monotonic deadline; retries and parsing stay here.
 
     Returns
     -------
@@ -377,7 +382,13 @@ def http_search_get(
     #    budget the caller already has, never pushing past its deadline. Only
     #    the HTML-engine envelope is throttled — the JSON vertical path uses a
     #    separate http_get and stays unthrottled. ──
-    host_throttle.wait(name, max_wait=float(timeout))
+    cfg = get_config()
+    request_deadline = None
+    if request_get is not None:
+        budget = cfg.search_deadline_secs if cfg.search_deadline_secs > 0 else 20.0
+        request_deadline = time.monotonic() + min(20.0, budget)
+    host_throttle.wait(name, max_wait=min(float(timeout), max(0.0, request_deadline - time.monotonic()))
+                       if request_deadline is not None else float(timeout))
 
     hdrs = headers or HEADERS
 
@@ -385,9 +396,15 @@ def http_search_get(
         kw = {'params': params, 'headers': hdrs, 'timeout': timeout}
         if proxies_kwarg is not None:
             kw['proxies'] = proxies_kwarg
+        if request_get is not None:
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout('Search HTTP request budget exhausted')
+            kw['timeout'] = min(float(timeout), remaining)
+            kw['deadline'] = request_deadline
+            return request_get(url, **kw)
         return search_session.get(url, **kw)
 
-    cfg = get_config()
     # ── Adaptive proxy plan: one attempt when no proxy is configured (identical
     #    to the historical env-only path), else the failover chain (proxy chain
     #    → direct) in sticky-learned order. See search/proxy_mode.py. ──
@@ -418,13 +435,16 @@ def http_search_get(
             # Rate-limit retry (DDG-specific, opt-in) — same network path.
             if on_ratelimit_retry and resp.status_code == 202:
                 logger.info('%s 202 (rate-limited), retry in 0.6s: %s', tag, query[:80])
-                time.sleep(0.6)
+                delay = 0.6
+                if request_deadline is not None:
+                    delay = min(delay, max(0.0, request_deadline - time.monotonic()))
+                time.sleep(delay)
                 resp = _get(proxies_kwarg)
 
             # HTTP 202 accepts a request but is not a completed search. DDG
             # also uses it for its challenge flow. The one retry above may
             # recover; another 202 must not teach proxy learning "success".
-            if resp.status_code == 202 or not resp.ok:
+            if resp.status_code != 200:
                 return ('status', resp.status_code)
 
             response_headers = getattr(resp, 'headers', {}) or {}

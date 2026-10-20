@@ -2,6 +2,7 @@
 
 from urllib.parse import parse_qs, unquote, urlparse
 
+from tofu_search.http_client import _search_http2_get
 from tofu_search.log import get_logger
 from tofu_search.search._common import clean_text, http_search_get, make_result, soup_of
 
@@ -135,6 +136,7 @@ def search_ddg_html(query, max_results=6, freshness=''):
         params=params,
         query=query,
         parser=_parse_ddg_html,
+        request_get=_search_http2_get,
         max_results=max_results,
         on_ratelimit_retry=True,  # DDG HTML often returns 202 on first try
     )
