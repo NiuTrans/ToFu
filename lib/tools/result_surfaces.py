@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping
 from xml.etree import ElementTree
 
+from lib.tools.result_projection_json import dump_projection_json, load_projection_json
 from lib.tools.result_surfaces_generated import CONTRACT
 
 LIMITS = CONTRACT['limits']
@@ -27,6 +28,11 @@ def _text(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
+def _report_text(value):
+    """Keep parsed numeric tokens numeric; only actual report strings unwrap."""
+    return value if type(value) is str else dump_projection_json(value)
+
+
 def _agent_report(value, _depth=0):
     """Unwrap only a recognized native report; keep every producer field."""
     if not isinstance(value, dict) or _depth > LIMITS['jsonScanDepth']:
@@ -34,34 +40,33 @@ def _agent_report(value, _depth=0):
     reports = CONTRACT['reportFields']
     collection_keys = CONTRACT['reportCollectionFields']
     collections = {key: value[key] for key in collection_keys if isinstance(value.get(key), list)}
-    if any(isinstance(row, dict) and any(isinstance(row.get(k), str) for k in reports)
+    if any(isinstance(row, dict) and any(type(row.get(k)) is str for k in reports)
            for rows in collections.values() for row in rows):
         # Mixed batches retain unknown/running/error entries rather than
         # omitting status or manufacturing successful final reports.
-        lines = [f'{key}: {_text(item)}' for key, item in value.items()
+        lines = [f'{key}: {_report_text(item)}' for key, item in value.items()
                  if key not in collections]
         for key, rows in collections.items():
             if not rows:
                 lines.append(f'{key}: []')
             for index, row in enumerate(rows):
-                lines.extend((f'\n## {key}[{index}]', _agent_report(row, _depth + 1) or _text(row)))
+                lines.extend((f'\n## {key}[{index}]', _agent_report(row, _depth + 1) or _report_text(row)))
         return '\n'.join(lines)
-    if not any(isinstance(value.get(key), str) for key in reports):
+    if not any(type(value.get(key)) is str for key in reports):
         return None
     # The producer's outer status alone is not agent completion. Retain it,
     # agent_status, error and partial_output separately and without promotion.
-    lines = [f'{key}: {_text(item)}' for key, item in value.items() if key not in reports]
+    lines = [f'{key}: {_report_text(item)}' for key, item in value.items() if key not in reports]
     for key in reports:
         if key not in value:
             continue
         item = value[key]
-        lines.extend((f'\n## {key}', item if isinstance(item, str) else _text(item)))
+        lines.extend((f'\n## {key}', _report_text(item)))
     return '\n'.join(lines)
 
 
 def _spawn_receipt(source):
     """Native launch handle only: objectives remain in canonical/UI metadata."""
-    from lib.tools.result_projection_json import load_projection_json, dump_projection_json
     try:
         value = load_projection_json(source)
     except (ValueError, TypeError, RecursionError, OverflowError):
@@ -83,7 +88,7 @@ def _spawn_receipt(source):
 
 def _send_message_receipt(source):
     """Compact legacy exact-run receipts only; stable assignment handles stay actionable."""
-    from lib.tools.result_projection_json import JSONNumber, load_projection_json
+    from lib.tools.result_projection_json import JSONNumber
     try:
         value = load_projection_json(source)
     except (ValueError, TypeError, RecursionError, OverflowError):
@@ -133,17 +138,22 @@ def project_model_source(tool_name, source):
 
     def project_one(text):
         try:
-            value = json.loads(text)
-        except (ValueError, RecursionError):
+            value = load_projection_json(text)
+            if isinstance(value, dict) and value.get('status') == 'error':
+                return None
+            return _agent_report(value)
+        except (ValueError, TypeError, RecursionError, OverflowError):
             return None
-        if isinstance(value, dict) and value.get('status') == 'error':
-            return None
-        return _agent_report(value)
 
     report = project_one(source)
     if report is not None:
         return report
     if policy == 'agent_report_sections':
+        # A whole JSON document that did not qualify above remains opaque.
+        # Its interior lines are not independent native poll reports: rewriting
+        # them can destroy typed errors, unknown shapes or duplicate-key data.
+        if source.lstrip().startswith(('{', '[')):
+            return source
         # poll composes text headers and one-line native JSON outcomes. Only
         # recognized report objects change; task/command/status lines are exact.
         lines = []

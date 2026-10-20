@@ -508,6 +508,31 @@ views. Frontend report cards render safe Markdown; JSON errors keep the generic
 verbatim viewer. XML completion reports share their current/historical tags
 with the same authority.
 
+**Report evidence fidelity.** Problem: a separate ordinary JSON parse rounded
+report metadata, converted finite exponent tokens to infinity or zero, and
+silently selected one value from duplicate keys. The poll line formatter could
+also rewrite a nested report inside an otherwise opaque error/array document.
+Decision: report projection shares the numeric-token-preserving JSON parser and
+serializer used by native artifact/gateway views. Only actual JSON strings
+qualify as report text; numeric fields and unknown nested values preserve their
+validated tokens. Duplicate keys, nonfinite constants and unsupported/deep shapes
+retain the original source. Whole JSON objects/arrays that do not qualify are
+never scanned as independent poll sections; native poll headers still delimit
+one-line report receipts. Canonical retention and output-budget authority stay
+unchanged. Alternatives rejected: float/Decimal normalization changes evidence;
+dropping ambiguous fields hides source defects; formatting arbitrary nested lines
+can erase error structure. Verify `tests/tools/test_agent_report_fidelity.py`,
+including canonical retention and the sealed OpenAI, Anthropic and Responses
+request bodies. These are offline request-shape checks, not provider execution.
+
+A 2026-10-21 Python 3.12.13 local comparison kept ordinary report views
+byte-identical. Seven alternating 200-call samples measured single-report
+projection at 14.74 / 20.67 microseconds and a 16-report batch at 208.71 / 278.44
+microseconds (before / after). Peak traced temporary allocation for the batch
+was 219,289 / 223,497 bytes. This is the measured cost of preserving numeric
+tokens, not a request latency, RSS or billed-token claim. Projection adds no
+cache, retained history, thread or durable record owner.
+
 **Alternatives rejected:** returning every internal field wastes context;
 flattening every JSON result can destroy cursors, shapes and machine-readable
 semantics; persisting another debug copy creates a second lifecycle and source
