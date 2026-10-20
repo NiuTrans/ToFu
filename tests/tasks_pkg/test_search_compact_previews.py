@@ -32,6 +32,7 @@ def corpus(kind):
         for i in range(40)]
     results._search_diag = {'reason': 'no_usable_evidence',
                             'engine_errors': {'bing': 'network_error'},
+                            'engine_warnings': {'SearXNG': ['upstream_unavailable']},
                             'engine_ok': ['google'],
                             'unverified_count': 40,
                             'unverified_candidates': results._unverified_candidates}
@@ -80,6 +81,8 @@ def test_serial_streaming_cache_and_settled_round_retain_full_evidence(monkeypat
     assert sum(seen[:2 if batch else 1]) == 20_000
     assert len(str(serial)) < 32_000  # metadata/diagnostics are outside body budget
     assert 'bing' in serial and 'Vertical Search' in serial
+    assert 'SearXNG=upstream_unavailable' in serial
+    assert 'SearXNG=upstream_unavailable' in streamed
     if batch:
         assert '=== Search: other fact ===' in serial
     if kind == 'pages':

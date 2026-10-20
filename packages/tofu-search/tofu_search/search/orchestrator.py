@@ -174,6 +174,7 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     engine_counts = {}
     engine_timings = {}
     engine_errors = {}
+    engine_warnings = {}
     engine_unavailable = {}
     engine_empty = []
 
@@ -416,6 +417,10 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                 engine_elapsed = time.time() - step1_t0
                 try:
                     r = fut.result()
+                    warnings = [code for code in getattr(r, 'coverage_warnings', ())
+                                if code in ('upstream_unavailable', 'instance_failures')]
+                    if warnings:
+                        engine_warnings[tag] = warnings
                     unavailable = getattr(r, 'unavailable_reason', '')
                     if unavailable:
                         engine_unavailable[tag] = unavailable
@@ -844,6 +849,7 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     diag.update({
         'engine_ok': list(engine_counts), 'engine_empty': engine_empty,
         'engine_errors': engine_errors, 'engine_unavailable': engine_unavailable,
+        'engine_warnings': engine_warnings,
         'deadline_hit': _deadline_hit,
         'site_constraints': [scope for _, scope in constraint_scopes],
         'constraint_rejected': constraint_rejected,

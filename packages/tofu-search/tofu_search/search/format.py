@@ -40,6 +40,11 @@ def format_search_for_tool_response(
                 f"Search coverage: result-bearing engines={','.join(active) or 'none'}; "
                 f"failed={','.join(failed) or 'none'}; unavailable={','.join(unavailable) or 'none'}; empty={','.join(empty) or 'none'}. "
                 "Coverage is not exhaustive.")
+        if search_diag.get('engine_warnings'):
+            details = '; '.join(f"{engine}={','.join(codes)}"
+                                for engine, codes in sorted(search_diag['engine_warnings'].items()))
+            quality_lines.append(
+                f"Partial engine coverage: {details}. Coverage is not exhaustive.")
         if search_diag.get('constraint_rejected'):
             quality_lines.append(
                 f"Excluded {search_diag['constraint_rejected']} candidates violating site constraints; "

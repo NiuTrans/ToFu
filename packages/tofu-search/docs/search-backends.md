@@ -5,6 +5,10 @@ names: it is independent coverage, a stable machine-readable interface, bounded
 latency, and an operating model that does not make every ChatUI request depend
 on one public volunteer instance.
 
+The product constraint is free search without mandatory API keys or paid
+services. Reliability and deployment boundaries live in
+[Free search reliability](free-search.md).
+
 | Project | What it adds | Decision for tofu-search |
 |---|---|---|
 | [SearXNG](https://github.com/searxng/searxng) | Actively maintained metasearch with a documented [HTTP search API](https://docs.searxng.org/dev/search_api.html) and adapters for Mwmbl, OpenAlex, PubMed, GitHub, Marginalia, YaCy and many others | **Preferred optional aggregation layer.** A self-host set with `TOFU_SEARCH_SEARXNG_URL` is tried first. Empty `TOFU_SEARCH_SEARXNG_ENGINES` respects that instance's enabled engines. Direct DDG/Brave/Bing/Marginalia paths remain independent fallbacks. |
@@ -45,8 +49,8 @@ claims that one provider outperforms another.
 
 | Source | Useful capability | Current tofu-search boundary |
 |---|---|---|
-| [Exa Search](https://exa.ai/docs/reference/search) | Query-specific highlights alongside source identity | Deterministic source passages feed both ranking and model context; no Exa adapter is implied. |
-| [Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search) | Multiple relevant chunks per source and explicit search-depth choices | Complementary passages share the existing output budget; optional service/depth selection still needs its own provider contract. |
+| [Exa Search](https://exa.ai/docs/reference/search) | Query-specific highlights alongside source identity | Reuse the evidence-selection pattern locally; no paid adapter is included. |
+| [Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search) | Multiple relevant chunks per source and explicit search-depth choices | Complementary local passages share the existing output budget without a service dependency. |
 | [Firecrawl Search](https://docs.firecrawl.dev/features/search) | Search with optional extraction of result pages | The existing overlapping search/fetch pipeline owns this lifecycle; importing a second crawler would duplicate ownership. |
 | [Crawl4AI Fit Markdown](https://docs.crawl4ai.com/core/fit-markdown/) | Query-aware content filtering separately from raw content | Source bodies remain intact while query-focused spans enter the ranker and tool preview. |
 | [WebCode](https://exa.ai/blog/webcode) and [ATLAS](https://exa.ai/blog/atlas-benchmark) | Evaluate coding search and search-intensive multi-hop/entity tasks beyond a single SERP | Relevant external benchmark candidates; tofu-search has not been evaluated on them here. Provider-authored results are not neutral proof of superiority. |

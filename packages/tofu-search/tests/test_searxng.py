@@ -7,8 +7,8 @@ orchestrator classified SearXNG as engine_empty ("no matches") instead of
 engine_errors. The harness web_search summary showed "the rest returned no
 matches" — a dead engine masquerading as a survivor.
 
-Contract (mirrors _common.http_search_get): [] ONLY for a genuine no-match
-or a circuit-breaker skip; total blockage RAISES requests.RequestException.
+Contract: plain [] ONLY for a genuine no-match; unavailable skips carry
+metadata and total blockage RAISES requests.RequestException.
 """
 
 import pytest
@@ -18,6 +18,8 @@ import tofu_search.config as _config
 from tofu_search.search._common import _EngineCircuit
 from tofu_search.search.engines import searxng
 
+pytestmark = pytest.mark.unit
+
 
 class FakeResp:
     def __init__(self, status_code=200, text='', content_type='text/html',
@@ -26,6 +28,7 @@ class FakeResp:
         self.text = text
         self.headers = {'content-type': content_type}
         self._json_data = json_data
+        self.closed = False
 
     @property
     def ok(self):
@@ -34,10 +37,20 @@ class FakeResp:
     def json(self):
         return self._json_data or {}
 
+    def iter_content(self, chunk_size):
+        import json
+        yield (json.dumps(self._json_data).encode() if self._json_data is not None
+               else self.text.encode())
+
+    def close(self):
+        self.closed = True
+
 
 _ANUBIS = ('<html><head><title>Making sure you&#39;re not a bot!</title></head>'
            '<body>challenge</body></html>')
-_REAL_EMPTY_PAGE = '<html><body>%s</body></html>' % ('no results here ' * 60)
+_REAL_EMPTY_PAGE = ('<div id="results"><div id="urls">'
+                    '<div class="dialog-error-block" role="alert">'
+                    '<p>No results for this query.</p></div></div></div>')
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +58,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(_config, '_global_config', _config.SearchConfig(
         searxng_url='', searxng_instances=['https://a.invalid', 'https://b.invalid']))
     monkeypatch.setattr(searxng, 'engine_circuit', _EngineCircuit())
+    monkeypatch.setattr(searxng.random, 'shuffle', lambda values: None)
 
 
 def test_all_429_raises_not_empty(monkeypatch):
