@@ -166,6 +166,16 @@ prior results into arguments: the model must inspect a prerequisite result
 before supplying dependent arguments. Both interfaces use the same task
 catalog, contracts, approvals, replay ledger and execution pipeline.
 
+Each gateway child is an explicit occurrence, including identical calls in one
+batch. Problem: applying the physical provider-response repetition guard to
+this host-constructed batch discarded later children and manufactured empty
+successful receipts. Decision: the shared parser has a host-only repetition
+policy; gateway batches retain every child while provider responses keep their
+existing guard. Ordinary contract/authority checks and freshness-aware read
+reuse still apply. Alternatives rejected: copying the first receipt invents
+execution evidence for writes; dropping receipts silently changes batch shape.
+Verify `test_gateway_child_occurrences.py` and `test_tool_call_flood_admission.py`.
+
 Explicit `on` enables the local `execute_program` action alongside ordinary
 tools. Where discovery already exposes `execute_tools`, it remains a JSON-only
 recovery path. Existing explicit `on` settings remain explicit; only absent or
