@@ -23,6 +23,12 @@ fn cursor_max() -> usize {
         .as_u64()
         .expect("cursor limit") as usize
 }
+fn signed_cursor(raw: &str) -> bool {
+    raw.split_once('.').is_some_and(|(prefix, _)| {
+        Some(prefix) == CONTRACT["cursor"]["currentPrefix"].as_str()
+            || Some(prefix) == CONTRACT["cursor"]["legacyPrefix"].as_str()
+    })
+}
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|_| invalid_data("tool-result query encoding failed"))
 }
@@ -63,7 +69,7 @@ pub(crate) fn validate_input(cursor: &Value, selector: &str) -> io::Result<()> {
     if cursor.as_u64().is_none()
         && !cursor.as_str().is_some_and(|s| {
             s.len() <= cursor_max()
-                && (s.is_empty() || s.bytes().all(|b| b.is_ascii_digit()) || s.starts_with("trq1."))
+                && (s.is_empty() || s.bytes().all(|b| b.is_ascii_digit()) || signed_cursor(s))
         })
     {
         return Err(invalid_input("Invalid continuation cursor"));
@@ -219,18 +225,30 @@ struct Position {
     expiry: u64,
     partial: bool,
 }
-fn sign(key: &[u8], binding: &Value, position: &Position) -> io::Result<String> {
-    let bytes = encode(&(binding, position))?;
+fn scoped_mac(key: &[u8], binding: &Value, bytes: &[u8]) -> io::Result<Hmac<Sha256>> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key).map_err(|_| invalid_data("Invalid cursor key"))?;
-    mac.update(&bytes);
-    let signature: String = mac
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let token = format!("trq1.{}.{signature}", URL_SAFE_NO_PAD.encode(bytes));
+    let domain = CONTRACT["cursor"]["authentication"]["domain"]
+        .as_str()
+        .expect("cursor signing domain");
+    mac.update(domain.as_bytes());
+    mac.update(b"\0");
+    mac.update(&encode(binding)?);
+    mac.update(b"\0");
+    mac.update(bytes);
+    Ok(mac)
+}
+fn sign(key: &[u8], binding: &Value, position: &Position) -> io::Result<String> {
+    let bytes = encode(position)?;
+    let signature = scoped_mac(key, binding, &bytes)?.finalize().into_bytes();
+    let prefix = CONTRACT["cursor"]["currentPrefix"]
+        .as_str()
+        .expect("current cursor prefix");
+    let token = format!(
+        "{prefix}.{}.{}",
+        URL_SAFE_NO_PAD.encode(bytes),
+        URL_SAFE_NO_PAD.encode(signature)
+    );
     if token.len() > cursor_max() {
         return Err(invalid_input("Continuation metadata too large"));
     }
@@ -248,6 +266,9 @@ fn decode(
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| raw.to_string());
+    if string.len() > cursor_max() {
+        return Err(fail());
+    }
     if string.is_empty() || string.bytes().all(|c| c.is_ascii_digit()) {
         let skip: usize = if string.is_empty() {
             0
@@ -263,31 +284,41 @@ fn decode(
         });
     }
     let mut split = string.split('.');
-    if split.next() != Some("trq1") {
-        return Err(fail());
-    }
+    let prefix = split.next().ok_or_else(fail)?;
     let bytes = URL_SAFE_NO_PAD
         .decode(split.next().ok_or_else(fail)?)
         .map_err(|_| fail())?;
     let signature = split.next().ok_or_else(fail)?;
-    if split.next().is_some()
-        || signature.len() != 64
-        || !signature.bytes().all(|b| b.is_ascii_hexdigit())
-    {
+    if split.next().is_some() {
         return Err(fail());
     }
-    let signature: Vec<u8> = (0..64)
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&signature[i..i + 2], 16).map_err(|_| fail()))
-        .collect::<io::Result<_>>()?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| fail())?;
-    mac.update(&bytes);
-    mac.verify_slice(&signature).map_err(|_| fail())?;
-    let (scope, position): (Value, Position) =
-        serde_json::from_slice(&bytes).map_err(|_| fail())?;
-    if scope != *binding
-        || position.r.len() > bound("depth") + 1
-        || position.r.iter().any(|i| *i >= bound("scanNodes"))
+    let position: Position = if Some(prefix) == CONTRACT["cursor"]["currentPrefix"].as_str() {
+        let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| fail())?;
+        scoped_mac(key, binding, &bytes)?
+            .verify_slice(&signature)
+            .map_err(|_| fail())?;
+        serde_json::from_slice(&bytes).map_err(|_| fail())?
+    } else if Some(prefix) == CONTRACT["cursor"]["legacyPrefix"].as_str() {
+        if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(fail());
+        }
+        let signature: Vec<u8> = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&signature[i..i + 2], 16).map_err(|_| fail()))
+            .collect::<io::Result<_>>()?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| fail())?;
+        mac.update(&bytes);
+        mac.verify_slice(&signature).map_err(|_| fail())?;
+        let (scope, position): (Value, Position) =
+            serde_json::from_slice(&bytes).map_err(|_| fail())?;
+        if scope != *binding {
+            return Err(fail());
+        }
+        position
+    } else {
+        return Err(fail());
+    };
+    if position.r.len() > bound("depth") + 1 || position.r.iter().any(|i| *i >= bound("scanNodes"))
     {
         return Err(fail());
     }
@@ -567,7 +598,7 @@ pub(crate) fn run(
         .filter(|doc| doc.expires_at_ms > now)
         .is_none()
     {
-        if raw.as_str().is_some_and(|s| s.starts_with("trq1.")) {
+        if raw.as_str().is_some_and(signed_cursor) {
             return Err(invalid_input("Continuation root unavailable"));
         }
         return Ok(None);
@@ -811,6 +842,65 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cursor_vectors() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/tool_result_cursor_protocol.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn cursor_versions_authenticate_scope_and_replay_exact_positions() {
+        let fixture = cursor_vectors();
+        let key: Vec<u8> = serde_json::from_value(fixture["keyBytes"].clone()).unwrap();
+        let binding = &fixture["binding"];
+        let position: Position =
+            serde_json::from_value(fixture["native"]["position"].clone()).unwrap();
+        let now = fixture["nowMs"].as_u64().unwrap();
+        let current = sign(&key, binding, &position).unwrap();
+        assert_eq!(
+            current,
+            fixture["native"]["currentCursor"].as_str().unwrap()
+        );
+        for version in ["legacyCursor", "currentCursor"] {
+            let cursor = &fixture["native"][version];
+            assert_eq!(decode(&key, binding, cursor, true, now).unwrap(), position);
+            assert!(decode(&[255; 32], binding, cursor, true, now).is_err());
+            assert!(decode(&key, binding, cursor, true, position.expiry).is_err());
+            for index in 0..5 {
+                let mut changed = binding.clone();
+                changed[index] = if index == 0 {
+                    json!(8)
+                } else {
+                    json!("changed")
+                };
+                assert!(decode(&key, &changed, cursor, true, now).is_err());
+            }
+        }
+        let mut expanded = binding.clone();
+        expanded[3] = json!("🙂".repeat(200));
+        expanded[4] = json!(format!("/{}", "段".repeat(1023)));
+        let longer_scope = sign(&key, &expanded, &position).unwrap();
+        assert_eq!(longer_scope.len(), current.len());
+        assert_ne!(longer_scope, current);
+        assert!(decode(&key, binding, &json!(format!("{current}=")), true, now).is_err());
+        assert!(decode(
+            &key,
+            binding,
+            &json!(current.replacen("trq2.", "trq1.", 1)),
+            true,
+            now,
+        )
+        .is_err());
+        let invalid = Position {
+            r: vec![bound("scanNodes")],
+            ..position
+        };
+        let signed = sign(&key, binding, &invalid).unwrap();
+        assert!(decode(&key, binding, &json!(signed), true, now).is_err());
+    }
+
     fn put(database: &mut AuthorityDatabase, text: &str, media: &str) -> String {
         let mut transaction = database.begin(7, 11).unwrap();
         let result: Value = serde_json::from_slice(

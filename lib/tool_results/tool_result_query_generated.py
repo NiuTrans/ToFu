@@ -42,7 +42,19 @@ CONTRACT = {'version': 1,
             'numericCursor': 'zero only',
             'scope': 'text_only',
             'coverage': ['complete', 'incomplete', 'unavailable']},
- 'cursor': {'format': 'trq1.base64url-json.hmac-sha256',
+ 'cursor': {'format': 'trq2.base64url-json.base64url-hmac-sha256',
+            'currentPrefix': 'trq2',
+            'legacyPrefix': 'trq1',
+            'legacyFormat': 'trq1.base64url-json.hmac-sha256',
+            'authentication': {'domain': 'tofu.tool-result-query/trq2',
+                               'framing': 'UTF-8 domain, NUL byte, compact UTF-8 JSON binding '
+                                          'array in binds order, NUL byte, exact position '
+                                          'payload bytes',
+                               'payload': 'current format carries only position; legacy format '
+                                          'carries [binding,position]',
+                               'encoding': 'current payload and 32-byte MAC use canonical '
+                                           'unpadded base64url; legacy MAC remains lowercase '
+                                           'hexadecimal'},
             'binds': ['owner', 'artifactRef', 'operation', 'query', 'selector'],
             'position': 'bounded immutable root-relative route, segment codepoint offset, '
                         'logical output offset, earliest observed expiry; native cursors also '

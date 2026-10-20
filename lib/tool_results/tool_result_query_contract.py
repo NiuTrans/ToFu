@@ -5,6 +5,8 @@ from uuid import UUID
 from lib.tool_results.tool_result_query_generated import CONTRACT
 LIMITS = CONTRACT['limits']
 MEDIA_TYPE = CONTRACT['manifestMediaType']
+SIGNED_CURSOR_PREFIXES = tuple(
+    CONTRACT['cursor'][name] + '.' for name in ('currentPrefix', 'legacyPrefix'))
 
 
 def retention_limits():

@@ -123,7 +123,10 @@ export const TOOL_RESULT_SURFACES = {
   },
   "artifactProjectionReplayCursor": {
     "field": "resumeCursor",
-    "formatPrefix": "trq1.",
+    "formatPrefixes": [
+      "trq1.",
+      "trq2."
+    ],
     "viewTruncatedField": "outputTruncated"
   },
   "reportFields": [

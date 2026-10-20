@@ -21,6 +21,36 @@ a key require an artifact publication/import or that maintenance round before
 signed queries; reads never silently create a new write transaction. Query memory
 and work use the shared scan/manifest/depth limits; results remain bounded per page.
 
+Cursor encoding: **Problem:** repeating the full query binding in every cursor
+consumed model context and could exceed the 2,048-character cursor limit for a
+valid Unicode selector or search term. **Decision:** new `trq2` cursors carry
+only the existing bounded position. The unchanged private key authenticates the
+complete owner/root/operation/query/selector binding as well as the position.
+`cursor.authentication` defines the domain-separated HMAC-SHA256 framing;
+compact UTF-8 JSON binds Unicode without escaping it into repeated cursor text.
+The full 32-byte MAC and payload use canonical unpadded base64url. Route, seek,
+observed-expiry and authority checks remain unchanged. No alias store, additional
+record, cache, key rotation or retention change is introduced.
+
+Both authorities still verify previously issued `trq1` cursors with their
+original framing and key. Updated handlers accept both formats, and model-view
+projection recognizes both without dropping required continuations. A prior
+reader cannot consume newly issued `trq2` values; upgrade the reading authority
+before issuing them. Existing numeric read offsets and zero search cursors keep
+their prior behavior. **Alternatives rejected:** shrinking valid query/selector
+limits removes capability; shortening an existing signed token breaks its MAC;
+per-cursor aliases add persistent lifecycle state; shorter MACs discard integrity
+bits unnecessarily. Shared synthetic protocol vectors, live Unicode pagination,
+wrong-binding/key/expiry refusal and source-matched native tests cover this change.
+
+A 2026-10-21 component measurement compared 24 paginated plain/canonical
+read/search pages across both disposable authorities, with three repetitions.
+Next-cursor tokens fell 53.0% on SQLite and 52.9% on TofuDB. After normalizing only
+the freshly generated canonical `resultId`, exact `o200k_base` model-view totals
+fell from 5,034 to 3,831 on SQLite (23.9%) and from 5,118 to 3,873 on TofuDB (24.3%).
+All remaining non-cursor page fields, including body, provenance and coverage,
+matched. These are sample payload savings, not whole-task cost or latency claims.
+
 Problem: clipping search quotations to fit the response budget could remove the
 matched term while retaining a cursor that had already consumed those hits.
 Decision: the handler retries the same immutable query/cursor with a smaller
@@ -66,7 +96,7 @@ unsigned cursors and future cursor formats retain the original replay value.
 An omitted replay cursor does not mean offset zero. Existing canonical capture
 and owned retention provide later compaction recovery; this adds no cursor
 store, cache, new query or persistent record class. **Alternatives rejected:**
-short cursor aliases add another lifecycle; shortening signed values invalidates
+short cursor aliases add another lifecycle; trimming existing signed values invalidates
 them; removing the next-page cursor prevents continuation.
 
 A 48-page component measurement used three repetitions of plain/canonical,
