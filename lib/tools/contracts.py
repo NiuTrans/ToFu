@@ -570,9 +570,10 @@ def clamp_arguments_to_schema(
 ) -> tuple[Any, list[tuple[str, str]]]:
     """Clamp numeric arguments to their declared bounds, returning repairs.
 
-    An out-of-range ``limit``/``max_chars``/``cursor`` is a sizing wish,
-    never identity data: the schema already states the only sensible value,
-    so clamping loses no information and saves a full rejection round-trip.
+    Sizing fields such as ``limit``/``max_chars`` can use declared bounds
+    without a rejection round-trip. Navigation, revision and authorization
+    values must instead be excluded through ``clamp_exempt``: a schema bound
+    cannot choose an evidence version or delegated allowance for the caller.
     Strings over ``maxLength`` are truncated ONLY for top-level keys in
     ``truncatable`` (pure-display captions); identity/content strings (todo
     ids, edit anchors, file content) must never be truncated. Top-level keys
@@ -613,14 +614,20 @@ def clamp_arguments_to_schema(
         return value, []
 
 
-# Top-level parameters whose out-of-range values are SEMANTIC errors, not
-# sizing wishes: silently moving a navigation cursor would answer a
-# different question than the model asked, so rejection must preserve the
-# chance to re-derive the intended position. (get_conversation.before=-1 is
-# pinned rejected by tests; its before=0 sibling is a measured
-# non-destructive sentinel repaired by a dedicated omission pass upstream.)
+# Shared by static repair and request-document repair. These are exact
+# navigation/authority values, not output sizing wishes. Exempting a container
+# also preserves nested dependency/rework revision pins. Invalid values reach
+# final contract validation unchanged so the caller can obtain correct evidence
+# or choose an allowance, instead of silently changing an authorized action.
+# get_conversation.before=0 has its separate, non-destructive omission repair.
 NEVER_CLAMP_PARAMS: dict[str, frozenset[str]] = {
     "get_conversation": frozenset({"before"}),
+    "dispatch_project_assignment": frozenset({"expected_revision"}),
+    "review_project_work": frozenset({"result_revision"}),
+    "delegate_project_work": frozenset({
+        "max_tokens", "max_model_requests", "max_tool_calls",
+        "dependencies", "rework_of",
+    }),
 }
 
 

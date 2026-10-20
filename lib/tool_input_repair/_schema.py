@@ -43,6 +43,7 @@ def _schema_owner_modules():
     import lib.tools.browser as browser
     import lib.tools.code_exec as code_exec
     import lib.tools.conversation as conversation
+    import lib.tools.coordinator as coordinator
     import lib.tools.human_guidance as human_guidance
     import lib.tools.image_edit as image_edit
     import lib.tools.image_gen as image_gen
@@ -63,6 +64,7 @@ def _schema_owner_modules():
         browser,
         code_exec,
         conversation,
+        coordinator,
         human_guidance,
         image_edit,
         image_gen,
@@ -89,9 +91,9 @@ def _schema_owner_modules():
 def _build_schema_index() -> dict[str, dict[str, Any]]:
     """Walk declared schema owners and return the repair schema index.
 
-    The map is built once at import time. New tools added later won't be
-    seen until the process restarts; that matches how every other tool
-    registry in this codebase works (PROJECT_TOOL_NAMES, etc.).
+    The map is built lazily on first use. Changes to static declarations
+    require a process restart; request-owned execution documents still
+    provide the final validation boundary for dynamic tools.
 
     Returns an empty dict on any failure — repair becomes a no-op rather
     than blocking startup.
