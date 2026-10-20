@@ -37,7 +37,9 @@ tool half-visible (callable but undocumented, or documented but unrouted):
    (or `.special(...)` for synthetic/internal tools like `__code_exec__`).
 2. Declare the JSON schema/spec in the registry's spec owner
    (`lib/tools/registry/_build.py`, exported by `_builtin_specs.py`) with capability, side-effect
-   class, approval requirement, timeout, and result budget.
+   class, approval requirement, timeout, and result budget. Register a new static
+   schema owner in `lib/tool_input_repair/_schema.py` so repair and error hints
+   consume the same declarations; verify `test_all_static_schema_modules_are_indexed`.
 3. Regenerate the inventory: `python3 scripts/gen_tool_inventory.py`
    (drift-gated by `make contracts-check`).
 4. Verify: the focused handler test, then
@@ -49,3 +51,7 @@ tool half-visible (callable but undocumented, or documented but unrouted):
 Run registry and inventory checks, then focused schema/handler tests and the
 unified gateway settlement/isolation tests. Add write, MCP, browser, or
 long-agent budget tests for the affected capability.
+
+Argument repair must preserve semantic values through both static and
+request-document paths. `tests/tools/test_coordinator_argument_repair.py`
+covers exact revision/dependency pins, delegated limits and actionable rejection.

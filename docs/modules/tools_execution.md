@@ -71,6 +71,21 @@ Registry assembly produces one v2 document per executable name. Argument ingesti
 
 Stable gateway schemas follow registry/model-config assembly, which also freezes their `ToolContractV2` documents; a request never advertises `search_tools`/`execute_tools` without its execution document. Names use provider-safe ASCII, preserving `mcp__server-name__tool-name` while rejecting whitespace, path separators, dots, and Unicode lookalikes.
 
+**Coordinator input recovery — Problem:** the repair index omitted the canonical
+Coordinator schemas, leaving stringified inputs unrepaired and error hints
+incomplete. The general bounds pass could also change revision `0` to `1` or
+alter a delegated allowance before authoritative validation. **Decision:** index
+the existing schema owner and share `NEVER_CLAMP_PARAMS` across static and
+request-document repair. Exact assignment/result revisions, dependency/rework
+pins and delegation limits survive unchanged; invalid values are rejected with
+the expected shape so the model can correct them. Type-only repairs remain
+audited, and output page sizes retain their bounded repair. **Alternatives:**
+duplicating schemas creates drift; evaluating request-gated registry builders
+would add live owner/storage dependencies to repair discovery; choosing the
+nearest valid revision or allowance invents semantics. Specifications:
+`tests/tools/test_coordinator_argument_repair.py` and the static-schema coverage
+guard in `tests/tools/test_tool_input_repair.py`.
+
 Wire schema preflight validates every request's mutable source. Problem: the unchanged ordinary-provider projection repeated the same recursive validation within one call. Decision: reuse that call's successful source check only when the projection returns the identical object; changed projections and Kimi's distinct final dialect still receive full wire validation. Absent optional schema children skip generic mapping checks. Alternative rejected: retaining cross-request identity results could accept a catalog mutated after validation. Nested schemas, copy-on-projection, diagnostic isolation and current-request validation remain covered by `tests/tools/test_wire_schema_admission.py` and `tests/tools/test_wire_tools_sanitize.py`; this grants no execution authority. Assembly/compilation failure clears tool authority and continues text-only. Paper report/Q&A epochs stamp `degradedReason`: side effects fail closed without aborting main generation. Every agentic Paper owner enters through one guarded chassis: three identical call+world rounds halt before a fourth duplicate execution; independently, finite token and actual-dispatch envelopes reserve the last admitted call for tool-less synthesis even when provider usage is absent or every call differs, and a provider that returns calls after authority removal halts before execution. Halted work fails and synchronous abort raises into its lifecycle without publishing partial artifacts, while interactive tasks alone may receive an explicit aborted outcome for partial display.
 
 `None` is an explicit read-compatible adapter state for standalone legacy callers outside a production-owned tool epoch; it is not equivalent to an empty map, which rejects every call. Production timer polls and research-only paper runners validate against the exact post-policy schemas sent to the model. Full report/QA/deepen runners freeze a two-layer epoch once per run — bounded wire visibility plus a larger server-owned executable catalog; both layers and the gateway documents come from one registry snapshot, so a search hit cannot drift to a different schema or permission epoch. Contract compilation failure removes the unattended tool surface, and rejection remains `rejected`, never `done`. Paper epochs omit `ask_human` and every registry-declared `confirmation_tools` capability: a headless engine cannot mint the attended, one-use receipt those handlers require. Ordinary writes retain the explicit audited unattended auto-apply policy.
