@@ -166,6 +166,17 @@ prior results into arguments: the model must inspect a prerequisite result
 before supplying dependent arguments. Both interfaces use the same task
 catalog, contracts, approvals, replay ledger and execution pipeline.
 
+**Program scope in model guidance.** Problem: independently shortened code and
+legacy-program descriptions dropped different execution constraints. Decision:
+both program schema factories prepend one shared scope statement: task
+permissions and approvals still apply; the guest has no ambient imports,
+timers, files, processes or network, and external effects use `tools.*`.
+Authoring guidance remains separate, and the JSON-only batch description keeps
+its own surface. This describes existing execution behavior; it adds no
+permission gate. Alternatives rejected: restoring one draft alone leaves the
+other entry point able to drift; separate copies repeat the same ownership
+problem. Verify `test_program_schema_scope.py`, program policy and guest tests.
+
 Each gateway child is an explicit occurrence, including identical calls in one
 batch. Problem: applying the physical provider-response repetition guard to
 this host-constructed batch discarded later children and manufactured empty
