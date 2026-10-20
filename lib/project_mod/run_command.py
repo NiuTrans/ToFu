@@ -1480,7 +1480,16 @@ def _network_probe_execution_source(command):
     return command.replace(original, planned, 1)
 
 
-def command_write_lease_claims(base, command, *, _owned_formatter_paths=None):
+# Unparsed operands of these only create or replace members inside the cwd (or
+# write a named output), never the cwd directory itself. Their fallback cwd
+# claim is scheduling—not evidence that internal lease storage is a target.
+_CWD_CONTENT_COMMANDS = frozenset({
+    'curl', 'wget', 'tar', 'zip', 'unzip',
+})
+
+
+def command_write_lease_claims(base, command, *, _owned_formatter_paths=None,
+                               _approximated_tree_paths=None):
     """Resolve typed (scope, path) writes for both runner and outer dispatch.
 
     Verified literal regular-file target sets claim FILE, not their cwd.
@@ -1492,6 +1501,11 @@ def command_write_lease_claims(base, command, *, _owned_formatter_paths=None):
     followed by ``&&`` can drop its old cwd: failure then prevents the mutation.
     Other shell control shapes retain fallback cwd claims, and earlier writes
     never disappear when a later cd changes the execution directory.
+
+    A TREE claim invented for an unclassified writer approximates its cwd; it is
+    not a proven recursive replacement. Those paths are reported through
+    ``_approximated_tree_paths`` so admission does not read an ancestor of
+    internal lease storage as a requested deletion.
     """
     from .command_analysis import (
         _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts, command_segment_words,
@@ -1520,6 +1534,10 @@ def command_write_lease_claims(base, command, *, _owned_formatter_paths=None):
         return ()
 
     claims = {('tree', root)} if SHELL_PREFIX else set()
+
+    def approximated(path):
+        if _approximated_tree_paths is not None:
+            _approximated_tree_paths.add(os.path.realpath(path))
     cwds = {root}
     fallback_cwds = set()
     spans = _split_pipeline_spans(source)
@@ -1625,6 +1643,8 @@ def command_write_lease_claims(base, command, *, _owned_formatter_paths=None):
                     claims.update(scope.writer_claims())
                 continue
             claims.add(('tree', cwd))
+            if words and os.path.basename(words[0]) in _CWD_CONTENT_COMMANDS:
+                approximated(cwd)
             for target in command_segment_literal_targets(segment):
                 claims.add(('tree', os.path.realpath(os.path.join(cwd, target))))
         previous_separator = next_separator
@@ -1678,7 +1698,9 @@ def _with_command_writer(function):
                 and recorded_command_source(command) is None):
             command = harden_git_inspections(command)
         owned_paths = set()
-        claims = command_write_lease_claims(base, command, _owned_formatter_paths=owned_paths)
+        approximated_tree_paths = set()
+        claims = command_write_lease_claims(base, command, _owned_formatter_paths=owned_paths,
+                                          _approximated_tree_paths=approximated_tree_paths)
         # Mixed/opaque writers never inherit a formatter's observation authority.
         if any(scope != 'file' or path not in owned_paths for scope, path in claims):
             owned_paths.clear()
@@ -1694,7 +1716,8 @@ def _with_command_writer(function):
         with ExitStack() as stack:
             try:
                 stack.enter_context(workspace_claims_lease(claims,
-                    timeout=wait_timeout, cancel_event=cancel))
+                    timeout=wait_timeout, cancel_event=cancel,
+                    approximated_tree_paths=approximated_tree_paths))
                 if cancel.is_set():
                     raise WorkspaceLeaseCancelled('Workspace lease admission cancelled')
                 if command_write_lease_claims(base, command) != claims:

@@ -306,3 +306,49 @@ def test_mkdir_traversal_protects_intermediate_peer_checkout(repo, tmp_path, rou
     assert 'Command was not started' in result
     assert not (peer / 'transient').exists()
     assert not (tmp_path / 'outside').exists()
+
+
+@pytest.mark.parametrize('route', ['runner', 'dispatch'])
+def test_download_and_extract_beside_internal_lease_storage_is_admitted(
+        tmp_path, monkeypatch, route):
+    """A conservative cwd claim for content writers is scheduling, not deletion.
+
+    ``tar``/``curl`` unparsed operands create members inside the cwd. Claiming
+    that cwd must not read as a request to replace its parent's lease storage.
+    """
+    namespace = tmp_path / 'internal-leases'
+    namespace.mkdir(mode=0o700)
+    monkeypatch.setattr(leases, '_tree_lock_namespace', lambda: namespace)
+    (tmp_path / 'payload').write_text('data\n')
+    source = f'cd {shlex.quote(str(tmp_path))} && tar cf bundle.tar payload && ls bundle.tar'
+    assert commands.command_write_lease_claims(str(tmp_path), source) == (('tree', str(tmp_path)),)
+    result = run(tmp_path, route, source)
+    assert '[exit code: 0]' in result, result
+    assert (tmp_path / 'bundle.tar').is_file()
+    assert namespace.is_dir()
+
+
+@pytest.mark.parametrize('route', ['runner', 'dispatch'])
+@pytest.mark.parametrize('tail', ['find . -delete', 'rm -rf .'])
+def test_unparsed_tree_removal_beside_lease_storage_still_refused(
+        tmp_path, monkeypatch, route, tail):
+    namespace = tmp_path / 'internal-leases'
+    namespace.mkdir(mode=0o700)
+    monkeypatch.setattr(leases, '_tree_lock_namespace', lambda: namespace)
+    (tmp_path / 'payload').write_text('data\n')
+    result = run(tmp_path, route, f'cd {shlex.quote(str(tmp_path))} && {tail}')
+    assert '[workspace-protected-namespace]' in result, result
+    assert 'Command was not started' in result
+    assert (tmp_path / 'payload').read_text() == 'data\n'
+    assert namespace.is_dir()
+
+
+def test_explicit_tree_scope_never_borrows_cwd_approximation(tmp_path, monkeypatch):
+    namespace = tmp_path / 'internal-leases'
+    namespace.mkdir(mode=0o700)
+    monkeypatch.setattr(leases, '_tree_lock_namespace', lambda: namespace)
+    with pytest.raises(leases.WorkspaceLeaseNamespaceError):
+        with leases.workspace_claims_lease(
+                [('tree', str(namespace))],
+                approximated_tree_paths=[str(namespace)]):
+            pytest.fail('explicit lease-storage removal was admitted')

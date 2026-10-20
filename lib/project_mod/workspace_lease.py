@@ -970,18 +970,23 @@ def _tree_target_node(target):
 
 
 @contextlib.contextmanager
-def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None):
+def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None,
+                               allow_namespace_ancestor=False):
     """Fence a real recursive destructive/lifecycle target and descendants.
 
     Unlike root leases this also works on non-Git/prospective directories.
     Descendants advertise shared ancestor keys, including checkout, Git-dir
     and common-dir paths, without scans or a second ownership registry.
+
+    ``allow_namespace_ancestor`` serves conservative command-cwd claims whose
+    effects were never classified: the scope schedules opaque work, so an
+    ancestor relation to internal lease storage is not evidence of deletion.
     """
     deadline = _wait_deadline(timeout)
     _check_cancelled(path, cancel_event)
     lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
     target = os.path.realpath(lexical)
-    _protect_lease_namespace(target, tree=True)
+    _protect_lease_namespace(target, tree=not allow_namespace_ancestor)
     try:
         chain = _checkout_chain(target)
     except (OSError, UnicodeError) as error:
@@ -1005,12 +1010,17 @@ def workspace_tree_write_lease(path, *, timeout=0.0, cancel_event=None):
         yield
 
 
-def _physical_claim_plan(claims, neutral):
+def _physical_claim_plan(claims, neutral, approximated=frozenset()):
     """Expand implicit barriers once; merge stronger claims on identical keys.
 
     Logical ordering alone cannot prevent TREE(A)+ROOT(B) from inverting
     ROOT(A)+TREE(B). All callers sharing a multi-target transaction admit the
     complete physical set before public-scope validation or filesystem reads.
+
+    ``approximated`` names tree targets that stand for unclassified command
+    effects (the command's cwd), not a proven recursive replacement. They keep
+    the namespace refusal only when they are the namespace itself, because the
+    claim schedules opaque work instead of asserting deletion.
     """
     physical = {}
     evidence = []
@@ -1036,7 +1046,7 @@ def _physical_claim_plan(claims, neutral):
         lexical = os.path.abspath(os.path.expanduser(os.fspath(path)))
         target = os.path.realpath(lexical)
         if scope == 'tree':
-            _protect_lease_namespace(target, tree=True)
+            _protect_lease_namespace(target, tree=target not in approximated)
         elif scope == 'file':
             _protect_lease_namespace(target)
         chain = _checkout_chain(target)
@@ -1089,13 +1099,18 @@ def _physical_claim_plan(claims, neutral):
 
 
 @contextlib.contextmanager
-def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None):
+def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None,
+                           approximated_tree_paths=()):
     """Atomically admit a complete ordered multi-target effect set.
 
     This is the batching boundary for Edit and shell transactions.
     The existing registry/flocks still own every descriptor. Public single-
     target scopes remain usable; multi-target callers must not acquire their
     hidden barriers one logical scope at a time.
+
+    ``approximated_tree_paths`` lists command-cwd tree claims derived from
+    unclassified writers. ``workspace_claims_lease`` still fences them, but
+    only identified write targets keep the destructive-ancestor refusal.
     """
     deadline = _wait_deadline(timeout)
     _check_cancelled('workspace effects', cancel_event)
@@ -1107,8 +1122,11 @@ def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None):
         if scope not in {'root', 'file', 'metadata', 'tree'}:
             raise ValueError('Unknown workspace effect scope: ' + str(scope))
     neutral = _tree_lock_namespace()
+    approximated = frozenset(
+        os.path.realpath(os.path.expanduser(os.fspath(path)))
+        for path in approximated_tree_paths)
     try:
-        physical, evidence = _physical_claim_plan(claims, neutral)
+        physical, evidence = _physical_claim_plan(claims, neutral, approximated)
     except (OSError, UnicodeError) as error:
         raise WorkspaceBusyError(f'Cannot resolve workspace effects: {error}') from error
     apis = {'root': workspace_write_lease, 'file': workspace_file_write_lease,
@@ -1126,6 +1144,14 @@ def workspace_claims_lease(claims, *, timeout=0.0, cancel_event=None):
                     or (scope == 'tree' and _tree_target_node(target) != node)):
                 raise WorkspaceBusyError('Workspace target changed while waiting for admission: ' + lexical)
         for scope, path in sorted(claims, key=lease_claim_order):
+            remaining = _wait_remaining(deadline)
+            if scope == 'tree':
+                stack.enter_context(workspace_tree_write_lease(
+                    path, timeout=remaining, cancel_event=cancel_event,
+                    allow_namespace_ancestor=(
+                        os.path.realpath(os.path.expanduser(os.fspath(path)))
+                        in approximated)))
+                continue
             stack.enter_context(apis[scope](path,
-                timeout=_wait_remaining(deadline), cancel_event=cancel_event))
+                timeout=remaining, cancel_event=cancel_event))
         yield

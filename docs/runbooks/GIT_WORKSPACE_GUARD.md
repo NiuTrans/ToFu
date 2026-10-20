@@ -650,7 +650,17 @@ unknown ownership; a lock-file inode is not holder evidence.
   resolve it: use supported explicit targets or a narrower cwd. Actual
   namespace removal remains forbidden. The typed exception retains the
   existing `WorkspaceBusyError` base for other lease consumers, but the command
-  wrapper no longer suggests a conflict/retry for this case.
+  wrapper no longer suggests a conflict/retry for this case. The refusal applies
+  to *identified* tree effects. A TREE claim synthesized from an unclassified
+  writer's cwd (`curl`, `wget`, `tar`, `zip`, `unzip` writing members there) is
+  a scheduling scope, not evidence that the directory itself will be replaced;
+  it keeps the refusal only when the claim *is* the lease namespace. Removal-
+  capable utilities (`rm`, `find`, `mv`, `rsync`, …) keep the ancestor refusal
+  for their unparsed cwd. Explicit scopes and every other caller pass no
+  approximation, so actual namespace removal and `rm -rf /` stay refused.
+  Alternatives rejected: exempting all `/tmp` claims (drops real tree-removal
+  refusal there) and refusing every conservative cwd claim (blocks ordinary
+  downloads into a directory that merely contains the lease storage).
 - File-write/edit tools admit all resolved target file effects in one combined
   transaction before preimage reads, then recheck any known conversation
   freshness token **after acquisition**.
