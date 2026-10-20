@@ -32,8 +32,20 @@ _RESULT_RESERVE_BYTES = 1024
 def validate_request(value):
     required = {'model', 'provider_id', 'instruction', 'project_root', 'output_root',
                 'config', 'thinking', 'timeout_seconds', 'artifact_max_bytes'}
-    if not isinstance(value, dict) or set(value) != required:
+    optional = {'conversation_id', 'tool_schemas'}
+    if (not isinstance(value, dict) or not required <= set(value)
+            or set(value) - required - optional):
         raise ValueError('Application trial requires the exact documented request fields')
+    if 'conversation_id' in value and (not isinstance(value['conversation_id'], str)
+            or not _IDENTIFIER.fullmatch(value['conversation_id'])):
+        raise ValueError('Invalid explicit conversation identity')
+    if 'tool_schemas' in value:
+        schemas = value['tool_schemas']
+        if not isinstance(schemas, list) or any(not isinstance(row, dict) for row in schemas):
+            raise ValueError('Explicit tool schemas must be a JSON array of objects')
+        # The application remains the tool schema/permission authority. Freeze
+        # only JSON declarations here; no evaluator handlers are installed.
+        json.dumps(schemas, allow_nan=False)
     model = value['model']
     if (not isinstance(model, dict) or set(model) != {'creator_id', 'model_id'}
             or any(not isinstance(v, str) or not _IDENTIFIER.fullmatch(v) for v in model.values())
@@ -149,7 +161,8 @@ def run_trial(request, api, *, settlement_seconds=30):
     """Run once, preserve failures, and prove terminal readback from storage."""
     request = validate_request(request)
     artifacts = _Artifacts(request['output_root'], request['artifact_max_bytes'] - _RESULT_RESERVE_BYTES)
-    correlation = 'benchmark-' + uuid.uuid4().hex
+    request_id = 'benchmark-' + uuid.uuid4().hex
+    correlation = request.get('conversation_id', request_id)
     task_id, terminal, admission_attempted = None, False, False
     report = {'contractVersion': 'tofu.application-trial/v1', 'formal_score': None,
               'trialState': 'failed', 'conversationId': correlation,
@@ -160,10 +173,12 @@ def run_trial(request, api, *, settlement_seconds=30):
         artifacts.write('storage-start.json', storage)
         config = {**request['config'], 'projectPath': request['project_root'],
                   'thinking': request['thinking'], 'disableModelFallback': True}
+        if 'tool_schemas' in request:
+            config['_explicitToolSchemas'] = request['tool_schemas']
         body = {'model': request['model'], 'routing': {'preferred_provider_id': request['provider_id']},
                 'messages': [{'role': 'user', 'content': request['instruction']}],
                 'config': config, 'async': True, 'conversation_id': correlation,
-                'id': correlation, 'timeout_s': request['timeout_seconds']}
+                'id': request_id, 'timeout_s': request['timeout_seconds']}
         deadline = time.monotonic() + request['timeout_seconds']
         admission_attempted = True
         admission = api.call('/api/v4/agent/run', body, timeout=_remaining_timeout(deadline))
@@ -202,7 +217,7 @@ def run_trial(request, api, *, settlement_seconds=30):
         else:
             raise TimeoutError('Application trial deadline exceeded')
         artifacts.write('runtime-evidence.json', project_agent_evidence(state,
-            model=request['model']['model_id'], provider_id=request['provider_id'], requested_id=correlation))
+            model=request['model']['model_id'], provider_id=request['provider_id'], requested_id=request_id))
         settle_deadline = time.monotonic() + settlement_seconds
         while True:
             try:
@@ -217,7 +232,7 @@ def run_trial(request, api, *, settlement_seconds=30):
                 raise TimeoutError('Durable terminal readback did not converge')
             time.sleep(0.25)
         artifacts.write('durable-evidence.json', project_agent_evidence(durable,
-            model=request['model']['model_id'], provider_id=request['provider_id'], requested_id=correlation))
+            model=request['model']['model_id'], provider_id=request['provider_id'], requested_id=request_id))
         if _storage_identity(api) != storage:
             raise ValueError('Storage authority changed during the trial')
         report['durableReadbackVerified'] = True
@@ -232,6 +247,10 @@ def run_trial(request, api, *, settlement_seconds=30):
         if admission_attempted and task_id is None:
             report['cleanupVerified'] = False
             try:
+                if 'conversation_id' in request:
+                    # A reused conversation can already contain someone else's
+                    # task. Its presence cannot identify this lost admission.
+                    raise ValueError('Unresolved admission in reused conversation')
                 rows = api.call('/api/v4/tasks/by-conv/' + correlation + '?limit=2').get('tasks', [])
                 if len(rows) == 1 and isinstance(rows[0].get('id'), str) and _IDENTIFIER.fullmatch(rows[0]['id']):
                     task_id = rows[0]['id']

@@ -92,6 +92,30 @@ def test_production_request_and_exact_durable_readback(tmp_path):
     assert not api.cancelled
 
 
+def test_reused_conversation_retains_explicit_inputs_and_native_tool_declarations(tmp_path):
+    request = request_for(tmp_path)
+    request.update(conversation_id='owned-facts-context', tool_schemas=[])
+    api = Application()
+    report = run_trial(request, api)
+    assert report['trialState'] == 'completed'
+    body = next(body for path, body in api.calls if path == '/api/v4/agent/run')
+    assert body['conversation_id'] == 'owned-facts-context'
+    assert body['id'] != body['conversation_id']
+    assert body['messages'] == [{'role': 'user', 'content': request['instruction']}]
+    assert body['config']['_explicitToolSchemas'] == []
+    assert 'tools' not in body
+    assert json.loads((tmp_path / 'evidence/request.json').read_text()) == request
+
+
+def test_lost_admission_in_reused_conversation_cannot_cancel_a_preexisting_task(tmp_path):
+    request = request_for(tmp_path)
+    request['conversation_id'] = 'owned-facts-context'
+    api = Application(mode='lost_admission')
+    report = run_trial(request, api, settlement_seconds=0)
+    assert report['cleanupVerified'] is False and report['taskId'] is None
+    assert not api.cancelled and not any('/by-conv/' in path for path, _ in api.calls)
+
+
 @pytest.mark.parametrize('mode', ['wrong_store', 'old_server', 'provider_drift',
                                  'foreign_event', 'stuck_cursor', 'durable_mismatch', 'missing_durable'])
 def test_invalid_authority_or_evidence_cannot_complete(tmp_path, mode):
