@@ -147,6 +147,19 @@ They may use a real browser or an isolated module harness. Tests that rebuild
 deleted classic file graphs, concatenate independently bundled registries, or
 publish private owners onto `window` do not describe the shipped application.
 
+Build toolchain decision: CI previously selected Node 20 while locked Vitest
+required Node 22.12 or a supported newer major. `.node-version` now owns the
+Node line used by repository dependency-install jobs. `package.json` declares
+accepted versions, its lockfile metadata must agree, and `.npmrc` enables
+[npm engine enforcement](https://docs.npmjs.com/cli/v10/using-npm/config/#engine-strict)
+before an incompatible install can appear successful. The
+[setup-node version-file input](https://github.com/actions/setup-node/blob/v4/docs/advanced-usage.md#node-version-file)
+keeps CI and release builds on that same selection. Alternatives rejected:
+independent workflow literals drift; suppressing engine errors leaves the
+declared build environment unverified. `tests/meta/test_frontend_node_toolchain.py`
+checks selection, enforcement and package/lock parity; strict `npm ci` and
+`npm run check:frontend` exercise the selected runtime and locked dependencies.
+
 Run these before the frontend test lane:
 
 ```bash

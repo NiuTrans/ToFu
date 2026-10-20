@@ -357,10 +357,14 @@ extension ZIP** instead; a remote browser cannot read the server's filesystem.
 
 ## Develop and release
 
-Requirements are Python 3.12 and Node 20.19.x:
+Requirements are Python 3.12 and a compatible Node.js runtime. Use the version
+line in [`.node-version`](.node-version) for repository builds; supported
+versions are declared in [`package.json`](package.json). `npm ci` rejects
+incompatible project or dependency engine requirements.
 
 ```bash
 uv sync --frozen --extra dev
+npm ci
 npm run check:frontend
 uv run make test-unit
 ```
