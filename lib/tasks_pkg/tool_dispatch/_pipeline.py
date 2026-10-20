@@ -329,6 +329,32 @@ def _completed_tools_until_cancel(futures, task, deadline):
             yield future
 
 
+def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
+                                   *, round_num, reason):
+    """Recover omitted executor receipts without waiting, retrying or resettling."""
+    for future, (call_id, name, _generation) in futures.items():
+        if call_id in tool_results or not future.done():
+            continue
+        try:
+            # The common executor has validated the handler's occurrence.
+            # Keep ownership anchored to the submitted Future's identity.
+            _returned_id, content, is_search = future.result()
+            tool_results[call_id] = (content, is_search)
+            logger.warning(
+                '[Task %s] conv=%s Recovered completed tool=%s tc_id=%s '
+                'round=%d after %s; handler was not repeated',
+                task['id'][:8], task.get('convId', ''), name, call_id,
+                round_num, reason)
+        except Exception as error:
+            logger.warning(
+                '[Task %s] conv=%s Tool=%s tc_id=%s completed with error '
+                'at round=%d after %s: %s',
+                task['id'][:8], task.get('convId', ''), name, call_id,
+                round_num, reason, error)
+            tool_results[call_id] = (f'Tool execution error: {error}', False)
+            tool_verdicts[call_id] = 'error'
+
+
 def _drain_cancelled_tool_workers(task, futures):
     """Release scoped resources before allowing the task to become terminal.
 
@@ -1857,6 +1883,33 @@ def _append_settled_mcp_image_message(
     appended_tool_msgs.append(tool_msg)
 
 
+def _missing_tool_result(task, name, call_id, round_entry):
+    """Describe a collection failure without guessing absence or effect outcome."""
+    from lib.tools.effect_recovery import effect_recovery_policy
+    from lib.tools.result_envelope import typed_tool_error
+
+    policy = effect_recovery_policy(task.get('_toolContractDocumentsByName'), name)
+    effect = (round_entry or {}).get('executionEffect')
+    retryable = policy in {'read_only', 'idempotent'} and (
+        effect is None or isinstance(effect, dict) and effect.get('recovery') == policy)
+    if retryable:
+        next_action = (
+            'The declared recovery policy permits retry through the normal tool '
+            'gateway and its authorization checks. Continue independent authorized '
+            'work if result collection fails again.')
+    else:
+        next_action = (
+            'Inspect the existing operation status or durable receipt before '
+            'repeating this call; its effects are unconfirmed. Continue independent '
+            'authorized work and report any unresolved outcome.')
+    return typed_tool_error(
+        'tool_result_missing', retryable=retryable, next_action=next_action,
+        message=f'The harness did not collect a result for tool "{name}" '
+                f'(call "{call_id}"). Tool availability and execution outcome '
+                'cannot be inferred from the missing receipt.',
+    ).to_envelope_text()
+
+
 def _append_ordered_tool_replay(
     _appended_tool_msgs, _cache,
     _idempotent_tools, _program_messages_to_settle, _round_results_for_budget, _settle_current,
@@ -1869,18 +1922,15 @@ def _append_ordered_tool_replay(
         if tc_id in tool_results:
             tool_content, is_search = tool_results[tc_id]
         else:
-            # SHOULD-NOT-HAPPEN: every dispatch branch above is expected to
-            # populate tool_results[tc_id]. If a tc_id reaches here unfilled,
-            # a dispatch branch silently skipped writing its result — the model
-            # would get a misleading "Unknown tool" with no trace of the real
-            # cause. Log it so the silent-skip is diagnosable (§2 zero-silent-failure).
+            # Completed Futures have already been harvested. No receipt remains
+            # from which to infer tool availability or an external effect.
             logger.warning(
                 '[Task %s] conv=%s tool result missing for tool=%s tc_id=%s '
-                'round=%d — no dispatch branch populated it; returning '
-                'Unknown-tool fallback to LLM (should not happen)',
+                'round=%d — returning a typed collection failure',
                 tid, task.get('convId', '') if task else '',
                 fn_name, tc_id, round_num)
-            tool_content, is_search = (f'Unknown tool: {fn_name}', False)
+            tool_content, is_search = (
+                _missing_tool_result(task, fn_name, tc_id, round_entry), False)
             tool_verdicts[tc_id] = 'error'
         if is_search:
             _append_search_result_text(all_search_results_text, tool_content)
@@ -2935,25 +2985,13 @@ def execute_tool_pipeline(
                     exc_info=True)
 
                 # Harvest results from futures that completed but weren't
-                # yielded by as_completed before the TimeoutError was raised.
-                # Without this, completed-but-unyielded results are silently
-                # lost and fall through to 'Unknown tool' in the post-phase.
+                # yielded before the TimeoutError was raised. A published
+                # verdict always wins over later worker completion.
+                _harvest_completed_tool_results(
+                    _futures, task, tool_results, tool_verdicts,
+                    round_num=round_num, reason='collector timeout')
                 for fut, (fut_tc_id, fut_fn_name, _generation) in _futures.items():
-                    if fut.done():
-                        if fut_tc_id not in tool_results:
-                            try:
-                                ret_tc_id, tool_content, is_search = fut.result()
-                                tool_results[ret_tc_id] = (tool_content, is_search)
-                                logger.info(
-                                    '[Task %s] conv=%s Recovered completed tool %s (tc_id=%s) after timeout',
-                                    tid, task.get('convId', ''), fut_fn_name, fut_tc_id)
-                            except Exception as e:
-                                logger.warning(
-                                    '[Task %s] conv=%s Tool %s (tc_id=%s) completed with error after timeout: %s',
-                                    tid, task.get('convId', ''), fut_fn_name, fut_tc_id, e)
-                                tool_results[fut_tc_id] = (f'Tool execution error: {e}', False)
-                                tool_verdicts[fut_tc_id] = 'error'
-                    else:
+                    if fut_tc_id not in tool_results:
                         fut.cancel()
                         tool_results[fut_tc_id] = (f'Tool execution timed out: {fut_fn_name}', False)
                         tool_verdicts[fut_tc_id] = 'error'
@@ -2973,6 +3011,13 @@ def execute_tool_pipeline(
             if task.get('aborted') and not _timed_out:
                 _drain_cancelled_tool_workers(task, _futures)
             _pool.shutdown(wait=not _timed_out, cancel_futures=True)
+
+    if len(tool_results) < len(parsed_tcs):
+        # A collector may omit a terminal Future. Reuse its executor receipt
+        # before classifying the gap; do not enter handlers or add a new wait.
+        _harvest_completed_tool_results(
+            _futures, task, tool_results, tool_verdicts,
+            round_num=round_num, reason='collector gap')
 
     # ══════════════════════════════════════════
     #  Post-phase: Add tool messages in original order
