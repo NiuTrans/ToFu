@@ -14,7 +14,7 @@ from tofu_search.search.orchestrator import SearchResultList
 pytestmark = pytest.mark.unit
 
 
-def search(monkeypatch, rows, arm='tofu'):
+def search(monkeypatch, rows, arm='tofu', *, include_source_trace=False):
     if arm == 'tofu':
         import tofu_search
         monkeypatch.setattr(tofu_search, 'perform_web_search', lambda *a, **kw: rows)
@@ -43,7 +43,8 @@ def search(monkeypatch, rows, arm='tofu'):
         operation_state.setattr(worker.os, 'environ', dict(worker.os.environ))
         try:
             return worker.operation({'arm': arm, 'operation': 'search', 'query': 'technical manual',
-                                     'proxy': '', 'seed': 1, 'region': 'us-en'})
+                                     'proxy': '', 'seed': 1, 'region': 'us-en',
+                                     'include_source_trace': include_source_trace})
         finally:
             worker.random.setstate(random_state)
 
@@ -115,3 +116,18 @@ def test_observed_quote_over_length_limit_has_an_independent_failure_reason():
     assert result['facts']['introduced']['quote_observed'] is True
     assert result['facts']['introduced']['quote_length_valid'] is False
     assert not result['passed']
+
+
+def test_raw_trace_is_opt_in_bounded_and_never_promotes_candidates(monkeypatch):
+    rows = SearchResultList([{'url': 'https://manual.example/display'}])
+    raw = [{'url': f'https://reference.example/{i}?text=' + '\U0001d49c' * 2000}
+           for i in range(40)]
+    rows._engine_breakdown = {'engine': raw + [{'url': 'https://user:password@example.test/'}]}
+    assert 'source_trace' not in search(monkeypatch, rows)
+    output = search(monkeypatch, rows, include_source_trace=True)
+    assert [r['url'] for r in output['results']] == ['https://manual.example/display']
+    trace = output['source_trace']
+    assert trace['truncated'] and len(json.dumps(trace, ensure_ascii=False).encode()) <= 64 * 1024
+    assert trace['candidates']
+    assert all(r['url'] in {x['url'] for x in raw} for r in trace['candidates'])
+    assert 'password' not in json.dumps(trace)

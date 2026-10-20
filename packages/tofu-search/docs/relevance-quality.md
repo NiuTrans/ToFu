@@ -249,3 +249,9 @@ dispatch and tool-surface evidence. Model accounting, unavailable search,
 unsupported citations and incomplete runs remain separate observations.
 The default command is offline; live model/network execution requires `--live`.
 This small retrieval diagnostic does not certify product-wide superiority.
+
+The separate [community source probe](../../../evaluations/search_quality/source-probe.md)
+uses pinned external questions and URL annotations, with topic-balanced sampling
+before retrieval. It measures recorded-source coverage and optional first-result
+fetch availability through the same free workers. It uses no reference answers
+or model grading; neither a source hit nor nonempty text establishes an answer.

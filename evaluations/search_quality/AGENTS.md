@@ -9,6 +9,11 @@ Changing questions, predicates, adapters or budgets starts a new cohort.
 Keep reference answers out of model prompts and equal tool schemas in both arms.
 Never promote these four tasks into a search leadership claim.
 
+`source_corpus.py` pins external source annotations; `source_probe.py` reuses
+the disposable workers for a separate model-free coverage probe. Read
+`source-probe.md`; reference-URL hits are not answer or relevance grades.
+Verify `tests/evaluations/test_search_source_probe.py` for this entry point.
+
 Verify `tests/evaluations/test_search_quality.py`,
 `tests/evaluations/test_search_candidate_projection.py` and the native HTTP tests in
 `tests/evaluations/test_programmatic_pilot.py`; the default CLI is offline.
