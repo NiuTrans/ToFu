@@ -56,6 +56,22 @@ _session_reaper: threading.Thread | None = None
 _session_wake = threading.Event()
 
 
+def _native_shell(environment: dict) -> str | None:
+    """Resolve the account's shell, not a cron/service launcher's SHELL."""
+    if os.name == 'nt':
+        return None
+    import pwd
+    try:
+        account_shell = pwd.getpwuid(os.getuid()).pw_shell
+    except (KeyError, OSError):
+        account_shell = ''
+    for shell in (account_shell, environment.get('SHELL', '')):
+        if (shell and Path(shell).name in ('bash', 'zsh', 'fish', 'sh', 'dash')
+                and Path(shell).is_file()):
+            return shell
+    return None
+
+
 def _child_environment(environment: dict, home: Path) -> dict:
     child = {key: value for key, value in environment.items()
              if key not in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN')
@@ -64,6 +80,10 @@ def _child_environment(environment: dict, home: Path) -> dict:
         child['TOFU_CODEX_NATIVE_HOME'] = environment['CODEX_HOME']
     child['HOME'] = str(home)
     child['PWD'] = str(home)
+    shell = _native_shell(environment)
+    if shell:
+        # Also includes account-shell changes in the hashed launcher revision.
+        child['SHELL'] = shell
     return child
 
 
@@ -119,20 +139,16 @@ def _launch(environment: dict, home: Path) -> list[str] | None:
     # integrated with its process-tree supervisor.
     if os.name == 'nt':
         return None
-    if os.name != 'nt':
-        shell = environment.get('SHELL', '')
-        if not shell:
-            import pwd
-            shell = pwd.getpwuid(os.getuid()).pw_shell
-        # User shell startup is trusted local configuration, never bridge input.
-        if Path(shell).name in ('bash', 'zsh', 'fish', 'sh', 'dash') and Path(shell).is_file():
-            fixed = 'exec codex app-server --listen stdio://'
-            if environment.get('CODEX_HOME'):
-                # An explicit operator/test override remains authoritative;
-                # shell startup still discovers the installed command's PATH.
-                fixed = ('exec env CODEX_HOME="$TOFU_CODEX_NATIVE_HOME" '
-                         'codex app-server --listen stdio://')
-            return [shell, '-ic', fixed]
+    shell = _native_shell(environment)
+    # User shell startup is trusted local configuration, never bridge input.
+    if shell:
+        fixed = 'exec codex app-server --listen stdio://'
+        if environment.get('CODEX_HOME'):
+            # An explicit operator/test override remains authoritative;
+            # shell startup still discovers the installed command's PATH.
+            fixed = ('exec env CODEX_HOME="$TOFU_CODEX_NATIVE_HOME" '
+                     'codex app-server --listen stdio://')
+        return [shell, '-ic', fixed]
     executable = shutil.which('codex', path=environment.get('PATH', os.defpath))
     return [executable, 'app-server', '--listen', 'stdio://'] if executable else None
 
@@ -432,6 +448,9 @@ def _source_revision(environment: dict, home: Path, context: dict) -> tuple:
               Path('/etc/bash.bashrc'),
               Path('/Library/Managed Preferences/com.openai.codex.plist'),
               home / 'Library/Preferences/com.openai.codex.plist']
+    shell = _native_shell(environment)
+    if shell:
+        paths.append(Path(shell))
     executable = shutil.which('codex', path=environment.get('PATH', os.defpath))
     if executable:
         paths.append(Path(executable))

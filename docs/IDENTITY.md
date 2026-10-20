@@ -79,6 +79,17 @@ Codex through the OS user's interactive shell on POSIX, then obtains the actual
 environment variable or scan other users' credentials. An unavailable native
 command cannot silently select an unrelated stale default login.
 
+Problem: background launchers can supply `SHELL=/bin/sh` and a minimal PATH,
+selecting an obsolete or broken Codex ahead of the user's working installation.
+Decision: resolve the current OS account's registered shell first, using the
+environment shell only when no supported account shell is available. Run its
+interactive setup and include that selection in metadata-cache provenance.
+An explicit `CODEX_HOME` still wins after shell setup; deployments launched
+outside a Codex session must pass that setting when their intended native login
+uses a non-default home. Alternatives rejected: hardcoding installation paths,
+scanning alternative credential directories, or borrowing a stale default login
+after a native-command failure.
+
 Metadata revalidation reuses one serialized native app-server session instead
 of rerunning the interactive shell and initialize on every cache expiry. It
 re-reads native config and requirements; it never requests account renewal.

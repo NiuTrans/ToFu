@@ -26,6 +26,9 @@ def _token(account='account-a', expired=False):
 @pytest.fixture
 def native(tmp_path, monkeypatch):
     """A synthetic installed Codex, including its OS shell configuration."""
+    import pwd
+    from types import SimpleNamespace
+    monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_shell='/bin/bash'))
     home = tmp_path / 'home'; home.mkdir()
     root = tmp_path / 'actual-login'; root.mkdir()
     auth = root / 'auth.json'; auth.write_text(json.dumps(_token())); auth.chmod(0o600)
@@ -105,6 +108,41 @@ def test_automatically_uses_native_command_home_and_safe_symlink(native):
     assert 'refresh_token' not in snapshot
     assert 'CODEX_HOME' not in native['env']
     assert 'account/read' not in [e['event'] for e in _events(native)]
+
+
+@pytest.mark.parametrize('service_shell', ['/bin/sh', '/bin/dash', ''])
+def test_service_environment_discovers_the_os_account_login(native, service_shell):
+    broken_bin = native['home'] / 'service-bin'
+    broken_bin.mkdir()
+    broken = broken_bin / 'codex'
+    broken.write_text('#!/bin/sh\nexit 1\n')
+    broken.chmod(0o700)
+    environment = {**native['env'], 'SHELL': service_shell,
+                   'PATH': str(broken_bin) + ':/usr/bin:/bin'}
+
+    snapshot = read_local_login(environment=environment)
+
+    assert snapshot.get('account_id') == 'account-a', snapshot
+    assert snapshot.get('access_token')
+    assert 'refresh_token' not in snapshot
+    assert 'account/read' not in [event['event'] for event in _events(native)]
+
+
+def test_account_shell_lookup_failure_uses_environment_shell(native, monkeypatch):
+    import pwd
+    def unavailable(uid):
+        raise KeyError(uid)
+    monkeypatch.setattr(pwd, 'getpwuid', unavailable)
+    assert _read(native)['account_id'] == 'account-a'
+
+
+def test_account_shell_change_invalidates_cached_native_metadata(native, monkeypatch):
+    import pwd
+    from types import SimpleNamespace
+    assert _read(native)['account_id'] == 'account-a'
+    monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_shell='/bin/sh'))
+    assert command.command_context(environment=native['env']) == {
+        'shared_login_issue': 'codex_command_missing'}
 
 
 def test_concurrent_reads_share_one_probe_but_follow_file_replacement(native):
