@@ -131,3 +131,15 @@ paraphrases or establish that a source is true. A live comparison must measure
 retrieval coverage, stale/blocked sources, source correctness, latency and
 downstream task completion with a fixed agent/model and comparable budgets.
 Neither this benchmark nor green unit tests establish community leadership.
+
+### Agent retrieval diagnostic
+
+[`evaluations/search_quality`](../../../evaluations/search_quality/README.md)
+compares free Tofu/DDGS retrieval through the application's existing agent
+runtime. It freezes four multilingual public tasks, one model/provider,
+identical search/fetch schemas and budgets, and a common Tofu fetcher.
+Success requires observed source quotations and reference matches, with actual
+dispatch and tool-surface evidence. Model accounting, unavailable search,
+unsupported citations and incomplete runs remain separate observations.
+The default command is offline; live model/network execution requires `--live`.
+This small retrieval diagnostic does not certify product-wide superiority.
