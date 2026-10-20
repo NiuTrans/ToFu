@@ -74,6 +74,14 @@ the apparently stale PID file loses the live owner; accepting arbitrary matching
 process names weakens checkout ownership. Subprocess tests launch and control
 the same checkout through both paths and verify idempotency and teardown.
 
+**Manager signal handling.** Problem: group termination and watchdog forwarding
+can deliver SIGTERM twice while the first handler is writing its log, causing
+buffered-I/O reentrancy. Decision: record the first signal, request HTTP-loop
+shutdown once, and log the receipt after the loop has returned and cleanup has
+run. Alternative rejected: logging inside each handler can interrupt the same
+writer before shutdown is even requested. The regression injects both signals
+and refuses any logging from the signal callback.
+
 对 live worker 执行 `stop` / `restart` 会中断在途任务：交互终端必须确认，非交互
 调用必须消费用户在 Tofu UI 中批准的一次性 `shutdown` / `restart` 记录。服务本来
 就未运行时，`stop` 保持幂等且不要求批准；`status`、`doctor`、`logs` 均为只读。

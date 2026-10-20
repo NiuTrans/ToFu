@@ -872,9 +872,16 @@ def build_server():
 def main():
     httpd = build_server()
     reload_request = None
+    shutdown_signal = None
 
     def _shutdown(signum, _frame):
-        logger.info('Received signal %s — shutting down supervisor.', signum)
+        nonlocal shutdown_signal
+        # Group termination can reach us directly and through the watchdog.
+        # Signal handlers may interrupt a buffered log write on this thread;
+        # record intent once and emit its receipt after the serving loop exits.
+        if shutdown_signal is not None:
+            return
+        shutdown_signal = signum
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -886,6 +893,9 @@ def main():
     finally:
         reload_request = getattr(httpd, 'reload_request', None)
         httpd.server_close()
+        if shutdown_signal is not None:
+            logger.info(
+                'Received signal %s — shutting down supervisor.', shutdown_signal)
         logger.info('Supervisor stopped.')
     if reload_request:
         script = os.path.abspath(__file__)

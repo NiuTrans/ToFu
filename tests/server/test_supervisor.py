@@ -31,6 +31,51 @@ import supervisor_protocol
 pytestmark = pytest.mark.unit
 
 
+def test_repeated_shutdown_signals_defer_logging_and_close_once(monkeypatch):
+    """Group SIGTERM plus watchdog forwarding must not reenter buffered I/O."""
+    handlers = {}
+    in_signal = False
+    shutdown_calls = []
+    closed = []
+    logs = []
+    stopped = threading.Event()
+
+    class FakeServer:
+        def serve_forever(self):
+            nonlocal in_signal
+            try:
+                in_signal = True
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            finally:
+                in_signal = False
+            assert stopped.wait(2), 'signal did not wake the serving loop'
+
+        def shutdown(self):
+            shutdown_calls.append(True)
+            stopped.set()
+
+        def server_close(self):
+            closed.append(True)
+
+    def log_info(message, *args):
+        if in_signal and threading.current_thread() is threading.main_thread():
+            raise RuntimeError('reentrant call inside buffered log writer')
+        logs.append((message, args))
+
+    monkeypatch.setattr(supervisor, 'build_server', FakeServer)
+    monkeypatch.setattr(
+        supervisor.signal, 'signal',
+        lambda signum, callback: handlers.__setitem__(signum, callback))
+    monkeypatch.setattr(supervisor.logger, 'info', log_info)
+
+    supervisor.main()
+
+    assert shutdown_calls == [True]
+    assert closed == [True]
+    assert sum('Received signal' in message for message, _ in logs) == 1
+
+
 # ── fixtures ──────────────────────────────────────────────────────────
 
 def _make_project(tmp_path, with_scripts=True):
