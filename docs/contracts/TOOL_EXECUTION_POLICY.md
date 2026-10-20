@@ -294,6 +294,23 @@ budget/evidence record: stable status, summary, at most 64 structured items,
 cursor, truncation, byte counts, freshness/evidence ID, and typed recovery. It
 is not copied wholesale into provider tool messages.
 
+Problem: a normally returned error could lose its execution verdict when
+serialized, leaving a successful card/cache/audit despite failed canonical
+evidence. Decision: host-generated typed errors carry failure metadata through
+both serializers; the shared executor and settlement consume that metadata.
+MCP's protocol error flag takes precedence over prose prefixes. Successful
+responses containing error examples remain data. A failed batch child or an
+incomplete source/view does not fail a successfully completed outer operation.
+Alternatives rejected: parsing arbitrary result JSON or matching message text
+would misclassify documents; changing only a display adapter would leave direct
+consumers and canonical receipts inconsistent.
+Redaction preserves a producer envelope only while its complete source remains
+that same valid envelope with the same status. Independent raw sources never
+inherit a view's envelope authority. Typed error code, retryability and recovery
+advice survive budgeting without repeating the error inside generic items.
+Verify `tests/tasks_pkg/test_tool_outcome_finality.py` and
+`tests/tools/test_canonical_tool_result_pipeline.py`.
+
 Settlement splits the record once. Complete text remains text; complete structured success uses its compact JSON value; partial/error results retain only actionable non-empty fields. Constant recovery plumbing (`observation: "new"`, `historicalRecovery: false`, the single-valued `kind: "source"`) stays server-side and is re-inflated from class defaults when the sparse projection is read back; so are source-recovery arguments that would merely restate the still-adjacent tool call — only genuinely narrowed replay queries (`read_files` slices) project `recovery.arguments`, and the constant `cursor: "0"` never projects at all. The bounded `v1` sidecar carries evidence outside provider messages. Artifact-policy tools expose at most 8,000 tokens and store recoverable overflow in the owner-scoped content-addressed repository. Source-policy tools may use the otherwise-idle 24,000-token round allowance and never copy overflow into that repository; the aggregate sibling ceiling stays 24,000 tokens.
 
 `grep_search` source recovery states exactly what was withheld. A capped or

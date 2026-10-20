@@ -70,8 +70,15 @@ def _settle_mcp_round_display(round_entry, meta, underlying, args,
         logger.debug('[MCP] settle link refresh failed for %s: %s',
                      underlying, e)
 
-    if isinstance(tool_content, str) and tool_content.startswith(
-            ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected')):
+    from lib.mcp.result_content import MCPToolResult
+    if isinstance(tool_content, MCPToolResult):
+        failed = bool(tool_content.is_error)
+    else:
+        # Legacy transport strings have no protocol receipt. Normalized
+        # results may contain these exact words as successfully read data.
+        failed = isinstance(tool_content, str) and tool_content.startswith(
+            ('❌', 'MCP Error', 'MCP tool error', 'MCP server not connected'))
+    if failed:
         round_entry['status'] = 'error'
 
 

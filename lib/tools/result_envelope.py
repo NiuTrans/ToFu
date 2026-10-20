@@ -409,16 +409,23 @@ class ToolResultEnvelopeV2:
 
     def to_envelope_text(self) -> str:
         """Serialize the complete internal evidence envelope."""
-        from lib.tools.result_value import TrustedResultText
-        return TrustedResultText(_compact_json(self.to_dict()), envelope=True)
+        from lib.tools.result_value import TrustedResultText, capture_result
+        text = _compact_json(self.to_dict())
+        canonical = capture_result(text, execution_status='error') if self.error else None
+        return TrustedResultText(text, canonical=canonical, envelope=True)
 
     def to_model_text(self) -> str:
         """Serialize only the sparse semantic projection visible to the model."""
-        return _model_projection(self.to_dict())[0]
+        text = _model_projection(self.to_dict())[0]
+        if self.error is not None:
+            from lib.tools.result_value import TrustedResultText, capture_result
+            return TrustedResultText(
+                text, canonical=capture_result(text, execution_status='error'))
+        return text
 
     def with_visible_bytes(self) -> "ToolResultEnvelopeV2":
         """Return a copy whose model-visible UTF-8 size is exact."""
-        size = len(self.to_model_text().encode("utf-8", errors="replace"))
+        size = len(_model_projection(self.to_dict())[0].encode("utf-8", errors="replace"))
         return self if self.visible_bytes == size else replace(
             self, visible_bytes=size)
 

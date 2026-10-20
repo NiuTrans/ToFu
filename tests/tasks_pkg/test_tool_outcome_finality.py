@@ -195,3 +195,190 @@ def test_direct_executor_consumers_keep_one_final_audit(fails, observations):
     assert during_handler == []
     assert len(observations[1]) == 1
     assert observations[1][0]['outcome'] == ('error' if fails else 'ok')
+
+
+def returned_failure(kind):
+    from lib.mcp.result_content import MCPToolResult
+    from lib.tools.result_envelope import typed_tool_error
+    from lib.tools.result_value import TrustedResultText, capture_result
+
+    if kind == 'mcp':
+        return MCPToolResult('upstream unavailable', is_error=True)
+    if kind == 'canonical':
+        return TrustedResultText('upstream unavailable', canonical=capture_result(
+            'upstream unavailable', execution_status='error'))
+    error = typed_tool_error('upstream_unavailable', retryable=True,
+                             next_action='Retry this read after recovery.',
+                             message='upstream unavailable')
+    return (error.to_model_text() if kind == 'typed_model'
+            else error.to_envelope_text())
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
+@pytest.mark.parametrize('kind', ['mcp', 'canonical', 'typed_model', 'typed_envelope'])
+def test_returned_failure_agrees_across_settlement_and_retry(mode, kind, observations):
+    calls = []
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        calls.append(call_id)
+        content = returned_failure(kind)
+        _finalize_tool_round(task, number, row, [{'content': content}])
+        return call_id, content, False
+
+    task = task_for(handler, mode)
+    for index in range(2):
+        row, messages, settled = dispatch(
+            task, call_id=f'returned-{index}', round_num=index)
+        assert row['status'] == 'error'
+        assert row['_runtimeState'] == 'error'
+        assert settled[0].execution_status == 'error'
+        assert 'upstream unavailable' in messages[0]['content']
+        if kind.startswith('typed_'):
+            from lib.tools.result_envelope import tool_result_error
+            error = tool_result_error(messages[0]['content'])
+            assert error.code == 'upstream_unavailable'
+            assert error.retryable is True
+            if kind == 'typed_model':
+                assert json.loads(messages[0]['content']) == json.loads(
+                    returned_failure(kind))
+    assert calls == ['returned-0', 'returned-1']
+    complete = [event for event in observations[0]
+                if event['type'] == 'tool_complete']
+    assert [event['status'] for event in complete] == ['error', 'error']
+    assert [audit['outcome'] for audit in observations[1]] == ['error', 'error']
+
+
+@pytest.mark.parametrize('kind', ['mcp', 'canonical', 'typed_model', 'typed_envelope'])
+def test_direct_executor_recognizes_returned_failure(kind, observations):
+    from lib.tasks_pkg.executor import _execute_tool_one
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        content = returned_failure(kind)
+        _finalize_tool_round(task, number, row, [{'content': content}])
+        return call_id, content, False
+
+    task = task_for(handler)
+    _, row, _ = _build_tool_round_entry('fetch_url', {}, 'direct', '{}', 1, False)
+    _execute_tool_one(task, {}, 'fetch_url', 'direct', {}, 1, row, {}, None, False)
+    assert row['status'] == 'error'
+    assert row['_runtimeState'] == 'error'
+    assert [audit['outcome'] for audit in observations[1]] == ['error']
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
+@pytest.mark.parametrize('kind', ['typed_model', 'typed_envelope'])
+def test_error_shaped_document_is_successful_data_and_remains_cacheable(
+        mode, kind, observations):
+    # Identical bytes read from a file/API are data, without the host carrier.
+    content = str(returned_failure(kind))
+    calls = []
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        calls.append(call_id)
+        _finalize_tool_round(task, number, row, [{'content': content}])
+        return call_id, content, False
+
+    task = task_for(handler, mode)
+    for index in range(2):
+        row, messages, settled = dispatch(
+            task, call_id=f'document-{index}', round_num=index)
+        assert row['status'] == 'done'
+        assert settled[0].execution_status == 'ok'
+        assert json.loads(messages[0]['content']) == json.loads(content)
+    assert calls == ['document-0']
+    assert [audit['outcome'] for audit in observations[1]] == ['ok', 'ok']
+
+
+@pytest.mark.parametrize('prior_verdict', ['rejected', 'aborted'])
+def test_returned_error_preserves_explicit_non_success_verdict(prior_verdict, observations):
+    from lib.tasks_pkg.executor import _execute_tool_one
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        content = returned_failure('typed_model')
+        _finalize_tool_round(task, number, row, [{'content': content}], status=prior_verdict)
+        return call_id, content, False
+
+    task = task_for(handler)
+    _, row, _ = _build_tool_round_entry('fetch_url', {}, 'direct', '{}', 1, False)
+    _execute_tool_one(task, {}, 'fetch_url', 'direct', {}, 1, row, {}, None, False)
+    assert row['status'] == prior_verdict
+    assert [audit['outcome'] for audit in observations[1]] == [prior_verdict]
+
+
+def test_returned_error_survives_presentation_failure(monkeypatch, observations):
+    from lib.tasks_pkg.executor import _execute_tool_one
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        return call_id, returned_failure('typed_model'), False
+
+    def broken_event(*args):
+        raise OSError('display channel unavailable')
+
+    monkeypatch.setattr('lib.tasks_pkg.executor._finalize.append_event', broken_event)
+    task = task_for(handler)
+    _, row, _ = _build_tool_round_entry('fetch_url', {}, 'direct', '{}', 1, False)
+    _, content, _ = _execute_tool_one(
+        task, {}, 'fetch_url', 'direct', {}, 1, row, {}, None, False)
+    assert row['status'] == 'error' and row['_runtimeState'] == 'error'
+    assert 'upstream unavailable' in content
+    assert 'display channel unavailable' not in content
+    assert [audit['outcome'] for audit in observations[1]] == ['error']
+
+
+@pytest.mark.parametrize('kind', ['partial', 'batch'])
+def test_incomplete_view_or_failed_child_does_not_fail_the_outer_operation(kind, observations):
+    from lib.tools.result_envelope import ToolResultEnvelopeV2
+    from lib.tools.result_value import CanonicalReceipt, capture_result, compose_result
+
+    if kind == 'partial':
+        content = ToolResultEnvelopeV2(
+            status='partial', summary='bounded preview', truncated=True).to_envelope_text()
+    else:
+        child = CanonicalReceipt(
+            name='fetch_url', call_id='child', output='failed child',
+            canonical=capture_result('failed child', execution_status='error'))
+        content = compose_result(json.dumps({'results': [child]}), [child])
+    calls = []
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        calls.append(call_id)
+        _finalize_tool_round(task, number, row, [{'content': content}])
+        return call_id, content, False
+
+    task = task_for(handler)
+    for index in range(2):
+        row, _, settled = dispatch(
+            task, call_id=f'outer-{index}', round_num=index)
+        assert row['status'] == 'done'
+        assert settled[0].execution_status == 'ok'
+    assert calls == ['outer-0']
+    assert [audit['outcome'] for audit in observations[1]] == ['ok', 'ok']
+
+
+@pytest.mark.parametrize('is_error', [False, True])
+def test_mcp_protocol_flag_controls_display_and_adapter_log(
+        is_error, monkeypatch, observations, caplog):
+    from lib.mcp.result_content import MCPToolResult
+    from lib.tasks_pkg.handlers._adapter import simple_call
+    from lib.tasks_pkg.handlers.mcp import _settle_mcp_round_display
+
+    monkeypatch.setattr('lib.mcp.project_names.ingest_tool_result', lambda *a, **k: None)
+    monkeypatch.setattr('lib.tasks_pkg.tool_display.compose_mcp_display',
+                        lambda *a, **k: ('Remote read', None))
+    monkeypatch.setattr('lib.tasks_pkg.tool_display._mcp._mcp_links', lambda *a, **k: {})
+    content = MCPToolResult(
+        'upstream unavailable' if is_error else 'MCP Error examples from the manual',
+        is_error=is_error)
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        return simple_call(
+            task, name, arguments, number, row, call_id,
+            executor=lambda *args: content, source='MCP',
+            post_build=lambda meta, result, args: _settle_mcp_round_display(
+                row, meta, 'mcp__example__read', args, result, user_id=1))
+
+    with caplog.at_level('INFO', logger='lib.tasks_pkg.handlers._adapter'):
+        row, _, settled = dispatch(task_for(handler))
+    assert row['status'] == ('error' if is_error else 'done')
+    assert settled[0].execution_status == ('error' if is_error else 'ok')
+    assert ('returned an error result' in caplog.text) is is_error

@@ -29,6 +29,43 @@ def test_unknown_json_items_siblings_and_contract_marker_are_data():
     assert json.loads(split_tool_result_delivery(view).model_text) == payload
 
 
+@pytest.mark.parametrize('serialization', ['to_model_text', 'to_envelope_text'])
+def test_host_error_serialization_preserves_status_without_changing_wire_bytes(
+        serialization):
+    from lib.tools.result_envelope import typed_tool_error
+    from lib.tools.result_value import posthook_result
+
+    error = typed_tool_error('read_unavailable', retryable=True,
+                             next_action='Retry the read after recovery.',
+                             message='SECRET unavailable')
+    text = getattr(error, serialization)()
+    assert capture_result(text).execution_status == 'error'
+    assert capture_result(str(text)).execution_status == 'ok'
+    redacted = posthook_result(text, lambda value: value.replace('SECRET', 'redacted'))
+    assert capture_result(redacted).execution_status == 'error'
+    delivered = split_tool_result_delivery(_budget.budget_tool_result_v2(
+        'fetch_url', redacted, user_id=1))
+    assert json.loads(delivered.model_text) == json.loads(
+        error.to_model_text().replace('SECRET', 'redacted'))
+    assert error.visible_bytes == len(error.to_model_text().encode('utf-8'))
+    assert json.loads(text)['status'] == 'error'
+
+
+def test_redacting_budgeted_error_shaped_data_never_promotes_its_envelope_marker():
+    from lib.tools.result_envelope import typed_tool_error
+    from lib.tools.result_value import posthook_result
+
+    document = str(typed_tool_error(
+        'sample', retryable=False, next_action='SECRET example',
+        message='This is a documented error response.').to_envelope_text())
+    first = _budget.budget_tool_result_v2('read_files', document, user_id=1)
+    redacted = posthook_result(first, lambda value: value.replace('SECRET', 'redacted'))
+    delivered = split_tool_result_delivery(_budget.budget_tool_result_v2(
+        'read_files', redacted, user_id=1))
+    assert capture_result(redacted).execution_status == 'ok'
+    assert json.loads(delivered.model_text) == json.loads(document.replace('SECRET', 'redacted'))
+
+
 def test_native_screenshot_not_encoded_or_mutated():
     image = {'__screenshot__': True, 'dataUrl': 'data:image/png;base64,SECRET',
              '_text_fallback': 'screen', '_modelReplaySources': ['tofu-media:owned']}

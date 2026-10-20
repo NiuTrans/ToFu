@@ -118,6 +118,26 @@ class CapturedToolResult:
                 'parts': [p.manifest() for p in self.parts],
                 'children': [{'name': c.name, 'callId': c.call_id, 'artifactRef': c.artifact_ref} for c in self.children]}
 
+
+def tool_result_failure_verdict(content):
+    """Read host/protocol execution metadata, never infer failure from payload JSON.
+
+    Only the outer operation owns its verdict. A completed batch can retain
+    failed children, and partial source/retention coverage is not execution failure.
+    """
+    value = (content if isinstance(content, CapturedToolResult)
+             else getattr(content, 'canonical', None))
+    if isinstance(value, CapturedToolResult):
+        return {
+            'error': 'error', 'failed': 'error', 'cancelled': 'aborted',
+            'aborted': 'aborted', 'rejected': 'rejected',
+        }.get(value.execution_status)
+    from lib.mcp.result_content import MCPToolResult
+    if isinstance(content, MCPToolResult) and content.is_error:
+        return 'error'
+    return None
+
+
 def capture_result(content: Any, *, execution_status=None, source_coverage=None):
     existing = content if isinstance(content, CapturedToolResult) else getattr(content, 'canonical', None)
     if isinstance(existing, CapturedToolResult):
@@ -193,10 +213,24 @@ def posthook_result(content, hook):
     if parts == value.parts and children == value.children and (
             projection is None or projection == str(content)):
         return content
+    # A producer envelope that is also its complete source can remain an
+    # envelope after redaction. Budgeted views with independent raw sources
+    # cannot: their sources may themselves contain lookalike JSON markers.
+    envelope = False
+    if (isinstance(content, TrustedResultText) and content.envelope
+            and not value.children and len(value.parts) == 1
+            and value.parts[0].text == str(content)
+            and value.parts[0].kind == parts[0].kind == 'json'):
+        before, after = json.loads(value.parts[0].text), json.loads(parts[0].text)
+        from lib.tools.result_envelope import TOOL_RESULT_CONTRACT_VERSION
+        envelope = (isinstance(before, dict) and isinstance(after, dict)
+                    and before.get('contractVersion') == after.get('contractVersion')
+                    == TOOL_RESULT_CONTRACT_VERSION
+                    and before.get('status') == after.get('status'))
     value = replace(value, parts=parts, children=children, artifact_ref='', artifact_owner=0)
     if projection is None:
         projection = value.text()
-    return TrustedResultText(projection, canonical=value)
+    return TrustedResultText(projection, canonical=value, envelope=envelope)
 
 def _text_chunks(text: str):
     """Slice on code-point boundaries without splitting a UTF-8 byte sequence."""
