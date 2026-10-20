@@ -61,6 +61,10 @@ class WorkspaceLeaseCancelled(WorkspaceBusyError):
     """Admission cancelled before the protected operation could begin."""
 
 
+class WorkspaceLeaseNamespaceError(WorkspaceBusyError):
+    """The declared write scope covers internal lease storage, independent of holders."""
+
+
 _WRITE = 'write'
 _FILE_BARRIER = 'file-write'
 _READ = 'read'
@@ -715,7 +719,7 @@ def _protect_lease_namespace(target, *, tree=False):
     namespace = os.path.realpath(_tree_lock_namespace())
     shared = os.path.commonpath((target, namespace))
     if shared == namespace or (tree and shared == target):
-        raise WorkspaceBusyError('Internal workspace lease namespace cannot be mutated: ' + target)
+        raise WorkspaceLeaseNamespaceError('Internal workspace lease namespace cannot be mutated: ' + target)
 
 
 @contextlib.contextmanager

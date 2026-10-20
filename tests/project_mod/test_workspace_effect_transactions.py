@@ -87,10 +87,10 @@ def test_internal_neutral_namespace_cannot_be_destructively_admitted(tmp_path, m
     neutral.mkdir(mode=0o700)
     monkeypatch.setattr(leases, '_tree_lock_namespace', lambda: neutral)
     target = {'self': neutral, 'ancestor': tmp_path, 'descendant': neutral / 'lock'}[offset]
-    with pytest.raises(leases.WorkspaceBusyError, match='Internal workspace lease namespace'):
+    with pytest.raises(leases.WorkspaceLeaseNamespaceError, match='Internal workspace lease namespace'):
         with leases.workspace_tree_write_lease(target):
             pytest.fail('neutral lock namespace could be retired')
-    with pytest.raises(leases.WorkspaceBusyError, match='Internal workspace lease namespace'):
+    with pytest.raises(leases.WorkspaceLeaseNamespaceError, match='Internal workspace lease namespace'):
         with leases.workspace_file_write_lease(neutral / 'lock'):
             pytest.fail('neutral lock inode could be rebound')
     clean()

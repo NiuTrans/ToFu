@@ -1270,11 +1270,11 @@ def _regular_command_file(path, cwd, *, must_exist=False, allow_missing_parents=
         return None
 
 
-def _literal_file_writer_target(segment, cwd):
-    """Narrow one declared writer to a FILE claim, else keep ROOT authority.
+def _literal_file_writer_targets(segment, cwd):
+    """Narrow declared writers to verified FILE claims, else keep ROOT authority.
 
     Do not reuse the lossy snapshot target heuristic for this decision. Only
-    static supported argv/flags and a single verified regular leaf qualify.
+    static supported argv/flags and verified regular leaves qualify.
     Opaque runtime + a simple output redirect retains the existing opaque
     scheduling policy; the redirect is not proof of its program's write set.
     """
@@ -1310,8 +1310,9 @@ def _literal_file_writer_target(segment, cwd):
                 or _segment_needs_command_writer(before, cwd)):
             return None
         targets = parsed_targets.targets
-        return (_regular_command_file(targets[0], cwd, allow_missing_parents=True)
-                if len(targets) == 1 else None)
+        target = (_regular_command_file(targets[0], cwd, allow_missing_parents=True)
+                  if len(targets) == 1 else None)
+        return (target,) if target is not None else None
     if _has_dynamic_shell_syntax(segment):
         return None
     words = parsed_targets.words
@@ -1326,12 +1327,14 @@ def _literal_file_writer_target(segment, cwd):
         if (operands is None or len(operands) != 2
                 or _regular_command_file(operands[0], cwd, must_exist=True) is None):
             return None
-    elif name not in {'touch', 'tee', 'truncate', 'sort'}:
-        return None  # moves/deletes/backups/editors/trees retain ROOT
-    if not parsed_targets.complete or len(parsed_targets.targets) != 1:
+    elif name not in {'touch', 'tee', 'truncate', 'sort', 'sed'}:
+        return None  # moves/deletes/backups/opaque editors/trees retain ROOT
+    if (not parsed_targets.complete or not parsed_targets.targets
+            or (name != 'sed' and len(parsed_targets.targets) != 1)):
         return None
-    target = parsed_targets.targets[0]
-    return _regular_command_file(target, cwd)
+    targets = tuple(_regular_command_file(target, cwd, must_exist=name == 'sed')
+                    for target in parsed_targets.targets)
+    return targets if all(target is not None for target in targets) else None
 
 
 def _git_shell_output_claims(segment, cwd):
@@ -1610,9 +1613,9 @@ def command_write_lease_claims(base, command, *, _owned_formatter_paths=None):
             if filesystem_claims is not None:
                 claims.update(filesystem_claims)
                 continue
-            file_target = _literal_file_writer_target(segment, cwd)
-            if file_target is not None:
-                claims.add(('file', file_target))
+            file_targets = _literal_file_writer_targets(segment, cwd)
+            if file_targets is not None:
+                claims.update(('file', target) for target in file_targets)
                 continue
             if is_git:
                 scope = git_scopes.get(start)
@@ -1659,7 +1662,8 @@ def _with_command_writer(function):
     from contextlib import ExitStack
     from lib.project_mod.tool_admission import Cancellation, admission_timeout
     from lib.project_mod.workspace_lease import (
-        WorkspaceBusyError, WorkspaceLeaseCancelled, workspace_claims_lease,
+        WorkspaceBusyError, WorkspaceLeaseCancelled, WorkspaceLeaseNamespaceError,
+        workspace_claims_lease,
     )
     signature = inspect.signature(function)
 
@@ -1698,6 +1702,10 @@ def _with_command_writer(function):
                             'Re-read the workspace and reconcile; command was not started.')
             except WorkspaceLeaseCancelled as error:
                 return f'Error [workspace-lease-cancelled]: {error}. Command was not started.'
+            except WorkspaceLeaseNamespaceError as error:
+                return (f'Error [workspace-protected-namespace]: {error}. Command was not started. '
+                        'The write scope overlaps internal lease storage; waiting will not resolve it. '
+                        'Use supported explicit file targets or a narrower working directory.')
             except WorkspaceBusyError as error:
                 return (f'Error [workspace-busy]: {error}. Command was not started; '
                         'retry after the conflicting lease finishes.')

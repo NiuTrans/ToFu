@@ -491,6 +491,30 @@ observed median **0.017 ms**, maximum **0.027 ms**; not a network-volume guarant
   targets instead. The parser is still cooperative, not a sandbox for embedded
   programs or wholly dynamic destinations. Specs:
   `tests/project_mod/test_audited_command_admission.py`.
+- **Bounded substitutions coordinate their files.** Problem: target discovery
+  recognized `sed -i` operands, but writer admission discarded that evidence and
+  claimed the entire cwd. A simple edit beside internal lease storage therefore
+  looked like removal of the storage itself. Decision:
+  `command_analysis.literal_sed_effects` owns the maintained substitution
+  grammar for readonly classification, target discovery and file admission.
+  Literal punctuation delimiters, ordinary pre-operand flags, `--`, and
+  individually proven `-e`/`--expression` programs share that proof.
+  No-suffix inplace edits acquire all verified existing regular target files
+  together, including multiple/outside-cwd operands. These claims remain live
+  through the entire supervised command chain; a following opaque interpreter
+  gains no separate readonly or write-set guarantee.
+  Escapes, addresses, script files, additional commands, execute/write flags,
+  backups, option permutation and unknown options retain conservative admission.
+  Symlinks, hardlinks, metadata and unverified leaves cannot borrow FILE scope.
+  [GNU sed's option contract](https://www.gnu.org/software/sed/manual/html_node/Command_002dLine-Options.html)
+  includes temporary replacement and optional backups; a named inplace operand
+  alone is not evidence that every effect is confined to that file.
+  Alternatives rejected: exempting `/tmp`, treating every inplace editor as a
+  file-only writer, or maintaining another argv parser in the runner.
+  Real-process specifications in `test_sed_write_admission.py` demonstrate
+  unrelated file-writer overlap, all-target exclusion before snapshot/spawn,
+  native substitution results, and release after both success and refusal.
+  This adds no worker, cache or persistent lock namespace.
 - **Opaque commands** such as pytest/make/npm/python interpreters do not acquire
   an automatic writer or reader lease when no checkout mutation is identified.
   They can overlap each other and cooperative writers, receive no automatic
@@ -619,6 +643,14 @@ unknown ownership; a lock-file inode is not holder evidence.
   again before admitting the body. Contended waits probe at most every 50 ms;
   uncontended paths do not sleep. Commands distinguish `workspace-busy` from
   `workspace-lease-cancelled` and state that the command was not started.
+- A write scope covering internal neutral lease storage raises
+  `WorkspaceLeaseNamespaceError`; command entry points report
+  `workspace-protected-namespace` before snapshots or execution. This is a
+  static scope refusal, not evidence of a competing holder. Waiting does not
+  resolve it: use supported explicit targets or a narrower cwd. Actual
+  namespace removal remains forbidden. The typed exception retains the
+  existing `WorkspaceBusyError` base for other lease consumers, but the command
+  wrapper no longer suggests a conflict/retry for this case.
 - File-write/edit tools admit all resolved target file effects in one combined
   transaction before preimage reads, then recheck any known conversation
   freshness token **after acquisition**.

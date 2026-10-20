@@ -487,24 +487,97 @@ def _independent_runtime_command(command):
     return bool(segments)
 
 
-def is_literal_sed_filter(arguments):
-    """Prove only one bounded slash-delimited substitution has no write effect.
+def _literal_sed_substitution(program):
+    """Prove a bounded substitution cannot execute or name another output.
 
-    No script files, extra programs, in-place options, escapes, addresses or
-    execute/write flags qualify. Unsupported sed grammar remains opaque.
+    Delimiters are literal ASCII punctuation. Escapes, addresses and compound
+    programs remain opaque; w/e flags must never borrow file-only evidence.
     """
+    if (not 4 <= len(program) <= 4096 or not program.startswith('s')
+            or any(char in program for char in '\\\r\n\0')):
+        return False
+    delimiter = program[1]
+    if not '!' <= delimiter <= '~' or delimiter.isalnum():
+        return False
+    parts = program.split(delimiter)
+    return len(parts) == 4 and re.fullmatch(r'[gpIMim0-9]*', parts[3]) is not None
+
+
+def literal_sed_effects(arguments):
+    """Return (inplace, input paths) only for complete bounded substitutions.
+
+    This is the shared evidence for filters, target discovery and FILE leases.
+    Options precede operands; -e/--expression may supply multiple individually
+    proven programs. Suffix backups, script files, unknown flags, escapes and
+    option permutation remain unresolved. Resolution still verifies each leaf.
+    """
+    programs, operands = [], []
+    inplace, options = False, True
     index = 0
-    while index < len(arguments) and arguments[index] in {
-            '-n', '-E', '-r', '--quiet', '--silent', '--posix'}:
+    while index < len(arguments):
+        arg = arguments[index]
         index += 1
-    if index < len(arguments) and arguments[index] == '--':
-        index += 1
-    if index == len(arguments):
-        return False
-    program = arguments[index]
-    if len(program) > 4096 or not re.fullmatch(r's/[^/\\\r\n]*/[^/\\\r\n]*/[gpIM0-9]*', program):
-        return False
-    return all(not operand.startswith('-') for operand in arguments[index + 1:])
+        if arg == '--':
+            options = False
+            break
+        if arg in {'--quiet', '--silent', '--regexp-extended', '--separate',
+                   '--unbuffered', '--null-data', '--posix'}:
+            continue
+        if arg in {'--in-place', '--in-place='}:
+            inplace = True
+            continue
+        if arg == '--expression':
+            if index == len(arguments):
+                return None
+            programs.append(arguments[index])
+            index += 1
+            continue
+        if arg.startswith('--expression='):
+            programs.append(arg.partition('=')[2])
+            continue
+        if arg.startswith('--'):
+            return None
+        if arg.startswith('-') and arg != '-':
+            position = 1
+            while position < len(arg):
+                flag = arg[position]
+                position += 1
+                if flag == 'e':
+                    program = arg[position:]
+                    if not program:
+                        if index == len(arguments):
+                            return None
+                        program = arguments[index]
+                        index += 1
+                    programs.append(program)
+                    break
+                if flag == 'i':
+                    if position != len(arg):
+                        return None  # -iSUFFIX (including -iE) creates a backup.
+                    inplace = True
+                elif flag not in 'nErsuz':
+                    return None
+            continue
+        operands.append(arg)
+        break
+    operands.extend(arguments[index:])
+    if options and any(operand.startswith('-') for operand in operands):
+        return None  # Do not depend on GNU option permutation or its environment.
+    if not programs:
+        if not operands:
+            return None
+        programs.append(operands.pop(0))
+    if not all(_literal_sed_substitution(program) for program in programs):
+        return None
+    if inplace and not operands:
+        return None
+    return inplace, tuple(operands)
+
+
+def is_literal_sed_filter(arguments):
+    """Prove the maintained sed grammar has no file write effect."""
+    effects = literal_sed_effects(arguments)
+    return effects is not None and not effects[0]
 
 
 def command_segment_formatter_writes(source):
@@ -1498,34 +1571,12 @@ def command_segment_targets(source):
             targets.extend(operands)
         return _CommandTargets(tuple(words), tuple(targets), complete)
     if base == 'sed':
-        inplace, program_option, operands = False, False, []
-        index, options = 0, True
-        while index < len(args):
-            arg = args[index]
-            index += 1
-            if options and arg == '--':
-                options = False
-            elif options and arg in {'-e', '-f', '--expression', '--file'}:
-                if index >= len(args):
-                    return uncertain()
-                index += 1
-                program_option = True
-            elif options and (arg.startswith(('--expression=', '--file='))
-                              or (arg.startswith(('-e', '-f')) and len(arg) > 2)):
-                program_option = True
-            elif options and (arg.startswith('--in-place')
-                              or (arg.startswith('-') and not arg.startswith('--') and 'i' in arg[1:])):
-                inplace = True
-            elif options and arg.startswith('-'):
-                if arg not in {'-n', '-r', '-E', '-s', '-u', '-z', '--quiet', '--silent',
-                               '--regexp-extended', '--separate', '--unbuffered', '--null-data'}:
-                    return uncertain()
-            else:
-                operands.append(arg)
+        effects = literal_sed_effects(args)
+        if effects is None:
+            return uncertain()
+        inplace, operands = effects
         if inplace:
-            targets.extend(operands if program_option else operands[1:])
-        elif not is_literal_sed_filter(args):
-            return _CommandTargets(tuple(words), tuple(targets), False)
+            targets.extend(operands)
         return _CommandTargets(tuple(words), tuple(targets), complete)
     if base.endswith('awk'):
         files = _awk_inplace_operands(args)

@@ -299,6 +299,10 @@ def test_mkdir_traversal_protects_intermediate_peer_checkout(repo, tmp_path, rou
     assert ('tree', str(peer / 'transient')) in claims, claims
     with held(peer):
         result = run(repo, route, source)
-    assert '[workspace-busy]' in result, result
+    # Absolute parent traversal retains ancestor scopes; namespace protection
+    # refuses that scope before waiting on the peer's actual lease.
+    expected = '[workspace-protected-namespace]' if absolute else '[workspace-busy]'
+    assert expected in result, result
+    assert 'Command was not started' in result
     assert not (peer / 'transient').exists()
     assert not (tmp_path / 'outside').exists()
