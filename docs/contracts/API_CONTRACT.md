@@ -918,17 +918,24 @@ gates may skip a directive regex only when they are a semantic superset of that
 pattern. Sources containing Python regex's four special Unicode ASCII-case
 equivalents (`İ`, `ı`, `ſ`, `K`) always take the full regex path.
 
-All seven agentic Paper workflows additionally carry a task-local token and
-actual-dispatch envelope. The last admitted dispatch receives no tools and is
-reserved for synthesis; unmetered provider responses still consume dispatch
-admission. A provider response containing tool calls after authority removal
-halts before any such call executes with `agent_budget_ignored`. Report meta,
+Paper agent loops carry no default spend or dispatch envelope. Every stage is
+bounded by the shared call+world no-progress breaker, the user's Stop, and the
+selected model's context window. Tools are never withdrawn mid-run to force an
+ending: a tool-less round invites the model to print a tool call as prose, which
+has no structured `tool_calls` and therefore reads as a completed answer.
+A caller that still declares a cumulative envelope (a research action freezes
+one in its `logical_budget`) is refused with a typed
+`PaperAgentBudgetExceeded` before the next paid dispatch, so an over-budget run
+fails with an attributable error instead of a degraded artifact. Report meta,
 Q&A/Deepen terminal events, Recommend interpretation/terminal events, and
 Insight results expose the additive `agentUsageV1` object where applicable.
 Its stable v1 fields include `calls`, `agent_dispatches`, token/cache counts,
 `agent_token_budget`, `agent_dispatch_budget`, pricing coverage/cost,
-`forced_final_reason`, and `budget_ignored`. Survey/Ideate retain the same
-fields inside their durable `usage` stage snapshots.
+`forced_final_reason`, and `budget_ignored`. Zero budgets mean unbounded; the
+`forced_final_reason` and `budget_ignored` fields stay empty/false on new runs
+and remain in the shape because durable checkpoints and stage snapshots carry
+it. Survey/Ideate retain the same fields inside their durable `usage` stage
+snapshots.
 
 ### 2.18 WorkUnit projection (production tasks)
 
