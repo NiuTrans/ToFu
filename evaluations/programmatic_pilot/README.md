@@ -117,6 +117,13 @@ reply is never resubmitted; the caller attempts owner-scoped recovery by its
 fresh conversation correlation and refuses later work unless settlement is
 verified. Failed and partial runs retain records and cleanup evidence.
 
+Problem: an explicit admission rejection was treated as a lost reply, leaving
+an invented live-task obligation. Decision: the native API's definitive 400,
+401, 403, 404, 405, 413, 415, 422 and 429 rejections propagate without task
+reconciliation. Timeouts (including HTTP 408), server failures and malformed
+success receipts remain ambiguous. Alternative rejected: clearing every HTTP
+failure can abandon a task accepted before its response was lost.
+
 A separate, explicitly forced capability probe requires an actual
 `local_javascript` / `quickjs-wasm` program and an exact 64-bit integer result.
 It gates paired trials and never counts as natural adoption. This also detects

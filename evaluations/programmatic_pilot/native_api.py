@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import time
 from types import SimpleNamespace
+from urllib.error import HTTPError
 import uuid
 
 from evaluations.application_api import JsonAPI
@@ -200,7 +201,13 @@ class HTTPRuntime:
             admission = self.api.call('/api/v4/agent/run', body)
             execution = HTTPExecution(self, admission, timeout_s, names,
                                       expected_catalog_count=len(custom_tools))
-        except Exception:
+        except Exception as exc:
+            # These native API responses explicitly reject admission. They
+            # cannot own a task. Timeouts, lost replies and server failures
+            # remain ambiguous and must take the existing reconciliation path.
+            if isinstance(exc, HTTPError) and exc.code in {
+                    400, 401, 403, 404, 405, 413, 415, 422, 429}:
+                raise
             # Never resubmit after an ambiguous POST. Stop the pilot unless the
             # owned correlation lookup proves the accepted task has settled.
             self.ambiguous_admission = True

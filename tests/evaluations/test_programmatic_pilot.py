@@ -495,6 +495,61 @@ def test_native_pilot_lost_admission_reply_never_retries_and_recovers_only_owned
     assert runtime.in_flight == 0
 
 
+@pytest.mark.parametrize('status', [400, 401, 403, 404, 405, 413, 415, 422, 429])
+def test_native_pilot_explicit_admission_rejection_does_not_invent_live_task(status):
+    from urllib.error import HTTPError
+    from evaluations.programmatic_pilot.native_api import HTTPRuntime
+    from evaluations.programmatic_pilot.workloads import tool_schemas
+
+    class RejectedAPI:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, path, body=None):
+            self.calls.append(path)
+            if path == '/api/v4/agent/run':
+                raise HTTPError(path, status, 'Admission rejected', {}, None)
+            raise AssertionError('A rejected request has no task to reconcile')
+
+    api = RejectedAPI()
+    runtime = HTTPRuntime(api, {'creator_id': 'example', 'model_id': 'example'})
+    with pytest.raises(HTTPError) as caught:
+        runtime.start([], config=config('direct', 'medium'), custom_tools=tool_schemas(),
+                      custom_tools_mode='exclusive', trajectory='tofu-native',
+                      request_id='rejected-admission', timeout_s=10)
+    assert caught.value.code == status
+    assert runtime.in_flight == 0
+    runtime.close()
+    assert api.calls == ['/api/v4/agent/run']
+
+
+@pytest.mark.parametrize('status', [408, 500, 502, 503, 504])
+def test_native_pilot_ambiguous_http_failure_still_requires_reconciliation(status):
+    from urllib.error import HTTPError
+    from evaluations.programmatic_pilot.native_api import HTTPRuntime
+    from evaluations.programmatic_pilot.workloads import tool_schemas
+
+    class UnknownAPI:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, path, body=None):
+            self.calls.append(path)
+            raise HTTPError(path, status, 'Unknown admission outcome', {}, None)
+
+    api = UnknownAPI()
+    runtime = HTTPRuntime(api, {'creator_id': 'example', 'model_id': 'example'})
+    with pytest.raises(HTTPError):
+        runtime.start([], config=config('direct', 'medium'), custom_tools=tool_schemas(),
+                      custom_tools_mode='exclusive', trajectory='tofu-native',
+                      request_id='unknown-admission', timeout_s=10)
+    assert runtime.in_flight == 1
+    assert len(api.calls) == 2
+    assert '/by-conv/' in api.calls[-1]
+    with pytest.raises(RuntimeError, match='has not settled'):
+        runtime.close()
+
+
 @pytest.mark.parametrize('program', [True, False])
 def test_native_pilot_capability_gate_rejects_legacy_or_missing_program_evidence(tmp_path, program):
     import asyncio
