@@ -12,7 +12,7 @@ import re
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
-CONTRACT = 'tofu.search-agent-diagnostic/v3'
+CONTRACT = 'tofu.search-agent-diagnostic/v4'
 ARMS = ('tofu', 'ddgs')
 DDGS_VERSION = '9.16.0'
 MAX_CALLS = 8
@@ -211,8 +211,8 @@ def score(task, content, calls):
         facts[key] = {
             'answer_matches': bool(valid and re.fullmatch(rule['answer'], normalized(row['value']), re.I)),
             'primary_host': host in task['hosts'],
-            'quote_observed': bool(8 <= len(quote) <= 350
-                                   and any(quote in page for page in pages.get(url, []))),
+            'quote_length_valid': 8 <= len(quote) <= 350,
+            'quote_observed': bool(quote and any(quote in page for page in pages.get(url, []))),
             'quote_reference_matches': bool(quote and all(
                 re.search(pattern, quote, re.I) for pattern in rule['quote']))}
         facts[key]['passed'] = all(facts[key].values())
