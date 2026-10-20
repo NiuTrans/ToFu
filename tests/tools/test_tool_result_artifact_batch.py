@@ -138,6 +138,39 @@ def test_batch_budget_keeps_all_identities_fair_bodies_and_resume_cursors(
         map(lambda item: len(item['content']), value['items'])) <= 4
 
 
+@pytest.mark.parametrize('operation', ['read_tool_artifact', 'search_tool_artifact'])
+def test_batch_metadata_refusal_keeps_request_identity(monkeypatch, operation):
+    import lib.tasks_pkg.handlers.tool_result_artifacts as handler
+    from jsonschema import Draft202012Validator
+
+    monkeypatch.setattr(handler, '_RESPONSE_TOKEN_BUDGET', 1_200)
+    monkeypatch.setattr(handler, '_count_tokens', lambda text, _model: len(text))
+    results = [{
+        'index': index, 'status': 'ok', 'artifactRef': f'tool-result:{index}',
+        'coverage': 'incomplete', 'truncated': True,
+        'nextCursor': 'trq1.' + 'x' * 800,
+        'resumeCursor': 'trq1.original',
+        **({'content': 'exact evidence', 'offset': 0}
+           if operation == 'read_tool_artifact' else {
+               'query': f'needle-{index}', 'items': [
+                   {'offset': 0, 'text': 'exact evidence',
+                    'artifactRef': f'tool-result:{index}'}]}),
+    } for index in range(3)]
+    value = json.loads(handler._fit_batch_to_budget(operation, results, ''))
+
+    Draft202012Validator(handler._CONTRACTS[operation].decoded_result_schema).validate(value)
+    assert value['status'] == 'partial_failure'
+    assert [item['index'] for item in value['items']] == [0, 1, 2]
+    assert [item['artifactRef'] for item in value['items']] == [
+        item['artifactRef'] for item in results]
+    if operation == 'search_tool_artifact':
+        assert [item['query'] for item in value['items']] == [
+            item['query'] for item in results]
+    assert all(item['error']['code'] == 'response_metadata_too_large'
+               and 'nextCursor' not in item for item in value['items'])
+    assert len(handler._serialize(value)) <= 1_200
+
+
 def test_legacy_single_read_response_shape_is_unchanged(monkeypatch):
     class Repository:
         def read_range(self, **kwargs):

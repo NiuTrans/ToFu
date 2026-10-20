@@ -21,6 +21,18 @@ a key require an artifact publication/import or that maintenance round before
 signed queries; reads never silently create a new write transaction. Query memory
 and work use the shared scan/manifest/depth limits; results remain bounded per page.
 
+Problem: clipping search quotations to fit the response budget could remove the
+matched term while retaining a cursor that had already consumed those hits.
+Decision: the handler retries the same immutable query/cursor with a smaller
+match count until complete quotations fit. Source references, offsets, coverage,
+and the resulting continuation remain exactly as returned by the authority.
+If even one hit or the page metadata cannot fit, the existing explicit refusal
+retains the request's reference, query and batch index; it exposes no misleading
+continuation. Alternatives rejected: shortening text or dropping hits locally
+strands evidence behind a signed cursor; exceeding the response budget causes
+the continuation result itself to spill. This can require more pages, but each
+successful page remains usable evidence.
+
 Verify both selected authorities with `tests/tools/test_tool_result_query_backends.py`,
 SQL cursor budgets with `tests/tools/test_tool_result_query_canonical.py`, and native
 artifact/migration neighbors. Task quote admission additionally verifies
