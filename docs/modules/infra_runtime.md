@@ -218,6 +218,26 @@ exhausted reserve refuses compiler spawn. Alternatives rejected: extending the
 whole preparation deadline or bypassing identity/library verification. Compiler
 concurrency remains derived from launch CPU and memory headroom.
 
+**Source-build compiler selection (2026-10-20).** Problem: a restart refused
+with `cc1: error: -Werror=date-time: no option -Wdate-time` after compiling
+~190 crates. Cargo applies `.cargo/config.toml` `[env]` only to variables
+absent from its environment, and the preparation child synthesized `CC` from
+the first `cc`/`gcc`/`clang` on PATH, so it silently outranked the crate's own
+devtoolset pin and the image's gcc 4.8 failed inside `libmimalloc-sys` instead
+of at preflight. Decision: the crate's declared `[env] CC` is the first
+candidate, PATH candidates follow, and a candidate is accepted only after
+compiling a one-line program with `-Wdate-time` — the flag cc-rs adds for
+libmimalloc-sys. The check runs in the build child only, on the deployment
+PATH, and never mutates the caller's environment or the tree. Alternatives
+rejected: trusting file existence and executability (what the failing image
+provided), hardcoding a devtoolset path (breaks portable launches), letting
+cargo's own use of the pin suffice (it does not, because `CC` was already
+set), and removing the `-Wno-error=date-time` workaround (upstream owns it).
+Refusal is actionable: install gcc 4.9 or newer, or provide a matching
+artifact. Verification: `tests/server/test_native_engine_update.py`
+pin-priority, unusable-pin fallback and refusal cases, plus a real isolated
+`--prepare-only` build on the affected host.
+
 **Updater Git executable admission.** Problem: the first Git on PATH may exist but fail to load on the host ABI, hiding the boot source fingerprint. Decision: the updater probes PATH candidates in order with `git --version` (3s timeout each), then Windows install locations, and caches the first runnable Git for the process lifetime. No repository operation is retried on another binary. Alternative rejected: trusting file existence preserves the ABI failure; hardcoding a host-specific Git path breaks portable launches. If no candidate runs, the ordinary Git command failure remains visible to its caller.
 
 **Late HTTP/2 body and TLS-close containment.** Problem: an early response may remove an ASGI stream before its trailing DATA arrives; upstream dispatch then raises `KeyError`, breaking other requests on that connection. Decision: an instance-owned lazy event adapter drops only dispatch to removed ASGI streams and acknowledges their bytes once. Live stream events and protocol parsing remain upstream-owned; HTTP/2 upgrades install the same guard on their next read. TLS shutdown additionally contains only `APPLICATION_DATA_AFTER_CLOSE_NOTIFY` when the writer is already closing, after upstream timer teardown. Other TLS errors propagate. Alternatives rejected: patching installed/global protocol classes loses ownership; swallowing every protocol/TLS error hides real faults; raising on late bytes breaks an otherwise valid early-response connection. Repeated real TLS cancellation and flow-credit/other-stream tests own this seam.
