@@ -204,14 +204,33 @@ def _dispatch_admitted_tool_one(
     if handler is None:
         context.settle_once('error')
         round_entry['_runtimeState'] = 'error'
-        unregister_context(context)
+        round_entry['status'] = 'error'
+        round_entry['_cacheableResult'] = False
         logger.warning('[Executor] Unknown tool requested: %s', fn_name)
-        return (
-            tc_id,
-            f'Error: unknown tool "{fn_name}". This tool is not registered. '
-            'Verify the tool name against the available tool list and retry.',
-            False,
-        )
+        try:
+            from lib.agent_core.publication import ChildPublicationRevoked
+            from lib.tools.result_envelope import typed_tool_error
+            content = typed_tool_error(
+                'tool_unavailable', retryable=False,
+                message=f'Error: unknown tool "{fn_name}". This tool is not '
+                        'registered in the current execution scope and was not executed.',
+                next_action='Check the current available tool list and select a '
+                            'registered tool. Continue independent authorized work.',
+            ).to_envelope_text()
+            try:
+                _finalize_tool_round(
+                    task, rn, round_entry,
+                    [{'type': 'error', 'content': content, 'toolName': fn_name}],
+                    status='error',
+                )
+            except ChildPublicationRevoked:
+                raise
+            except Exception:
+                logger.debug('[Executor] Unavailable-tool presentation failed for %s',
+                             fn_name, exc_info=True)
+            return tc_id, content, False
+        finally:
+            unregister_context(context)
 
     try:
         try:
