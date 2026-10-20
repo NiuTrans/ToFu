@@ -1,78 +1,106 @@
 {
   "snapshot_date": "2026-10-20",
-  "repository_head_at_capture": "b4b9cc99346dfe33c2bb158b0522e6b7f7d654c7",
+  "repository_head_at_capture": "a50bee171839b200bae460d69dd80b28ff9ae4fa",
   "authority_note": "Exact source hashes identify the inspected shared-checkout contracts. The manuscript is background. No runtime changes or benchmark reruns were performed for poster production.",
-  "user_scope": "Current technology, TofuDB, design tradeoffs and researcher fit; actual community-poster references; replace feature descriptions with mechanism figures and scoped measurement tables. Include all three institutional logos.",
+  "user_scope": "Replace basic cache discussion with synchronous/asynchronous tool management and persistent sub-agents. Preserve current TofuDB mechanisms and scoped measurements, community-inspired academic layout, and all three official institutional logos.",
   "claims": [
     {
-      "id": "research_workbench",
-      "claim": "PDF/arXiv grounded reading, code and external tools, LaTeX/Overleaf writing and build/review connect through the shared harness. This is a workflow illustration, not an end-to-end evaluation.",
+      "id": "sync_async_lifecycle",
+      "claim": "Ordinary tools are model-synchronous. Background commands and Swarm children return pending handles; poll unifies inspection/wait and kill scopes command/child cancellation. A handle is not a success result.",
       "source_files": [
         {
-          "path": "docs/modules/ingest_media.md",
-          "sha256": "0a89c37128dea92fd46a9fb544228ff390d75d9ae229da35eaabc0ef732ea2d4"
+          "path": "lib/tools/poll.py",
+          "sha256": "8e19fee5ef06ff7d8dd48aff79803b37d42edc6f3d6995e1758012c4602a82b7"
         },
         {
-          "path": "docs/ARCHITECTURE.md",
-          "sha256": "c80d9d0e9bf4136f1e795a8e6d4207a1a8e747c45b0c815d132d13f29adad6b5"
-        }
-      ]
-    },
-    {
-      "id": "context_layers",
-      "claim": "L0 recoverable previews, L1 cache-aware working-view trimming, and L2 semantic summary retain recoverable underlying evidence.",
-      "source_files": [
-        {
-          "path": "docs/CONTEXT_COMPACTION.md",
-          "sha256": "37fccd5e5ac8cc7af0cc22ff27318cdbfa6bc491ded67201efcc726942e4954b"
+          "path": "docs/modules/task_engine.md",
+          "sha256": "830ea44fdef56a9106a26682ed67e9766d214bfc17f8412f074a58f3f8229391"
         },
         {
-          "path": "docs/LLM_COST_OPTIMIZATION.md",
-          "sha256": "a9480d6e9a37ea47e1d9ceefb63710761ebf05ed9abd353e324ccae2d90e827f"
+          "path": "docs/modules/tools_execution.md",
+          "sha256": "efa7e3b1ac2523be5fcdaeaeffd0697217d878781cac1b5093a8e45aacfbd04c"
         }
       ]
     },
     {
-      "id": "request_inspection",
-      "claim": "Request Inspector records context source, placement, token budget and inclusion reason; receipts do not prove model consumption.",
+      "id": "command_handoff",
+      "claim": "Eligible local foreground commands hand off after 60 seconds of actual subprocess time without being killed. Foreground handoff is process-local; explicit local background launch is required for restart records and reattachment.",
       "source_files": [
         {
-          "path": "docs/CONTEXT_INJECTIONS.md",
-          "sha256": "2da86e7d963d8c8d055486bbab81092bb11826d4ea3822aeaf578b0a48394434"
-        }
-      ]
-    },
-    {
-      "id": "cache_cost_trace",
-      "claim": "The displayed pair is the 2026-09-01 adjacent request trace: 56412/158 and 57143/163 input/output; cache 19%/97%; CNY1.7261/0.2899. The ratio is 5.95, observational, not an ablation.",
-      "source_files": [
-        {
-          "path": "docs/LLM_COST_OPTIMIZATION.md",
-          "sha256": "a9480d6e9a37ea47e1d9ceefb63710761ebf05ed9abd353e324ccae2d90e827f"
-        }
-      ]
-    },
-    {
-      "id": "compaction_economics",
-      "claim": "Context policy compares expected future savings to summary and cached-prefix rebuild costs.",
-      "source_files": [
-        {
-          "path": "docs/LLM_COST_OPTIMIZATION.md",
-          "sha256": "a9480d6e9a37ea47e1d9ceefb63710761ebf05ed9abd353e324ccae2d90e827f"
+          "path": "lib/tasks_pkg/handlers/_background_command.py",
+          "sha256": "f9a760ab6d6342b96ada822b39ed543f5f3cce3e124d6173e4b4270c21e28e73"
         },
         {
-          "path": "docs/CONTEXT_BUDGET_POLICY.md",
-          "sha256": "7a4f9f430752ff35a550e91abc98e4c60abc5b313b65ff57d84a7f425f6a932d"
+          "path": "docs/modules/task_engine.md",
+          "sha256": "830ea44fdef56a9106a26682ed67e9766d214bfc17f8412f074a58f3f8229391"
         }
       ]
     },
     {
-      "id": "programmatic_tools",
-      "claim": "Explicit opt-in enables isolated WASM JavaScript. tools.invoke returns full decoded data; filtering and returning evidence is valid. Ordinary/JSON tools remain default; subcalls preserve authority; semantic judgment returns to the model. The three rows are labeled illustrative.",
+      "id": "completion_delivery",
+      "claim": "Completions use owned queue/inbox publication and receipt identity. Active turns consume them at complete round boundaries. Required running/unread child outcomes remain delivery dependencies after provider completion; callbacks wake eligible continuation, without polling-only model turns.",
       "source_files": [
         {
-          "path": "docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md",
-          "sha256": "9e50dafeb39e8f88d9a309af3665ad837857c22066726b51fe79ed6ec7b7c1f1"
+          "path": "lib/tasks_pkg/handlers/_background_command.py",
+          "sha256": "f9a760ab6d6342b96ada822b39ed543f5f3cce3e124d6173e4b4270c21e28e73"
+        },
+        {
+          "path": "docs/RETAINED_AGENTS.md",
+          "sha256": "8119d10af276b44f86e50702d11cc1e79a3418a2480e6f63bde534ce5da4bf15"
+        },
+        {
+          "path": "docs/AGENT_LIFECYCLE.md",
+          "sha256": "e5be13bfd82b17e6d094db2963cb3b9a6f8958e3d893f220690a61e2a0ce56dc"
+        }
+      ]
+    },
+    {
+      "id": "retained_identity",
+      "claim": "Explicit create/promote yields a scoped durable identity. A later ordinary child restores its saved working dialogue under fresh caller authority. Final working messages and result commit before returning idle, with no idle resident worker. Temporary spawn remains default.",
+      "source_files": [
+        {
+          "path": "docs/RETAINED_AGENTS.md",
+          "sha256": "8119d10af276b44f86e50702d11cc1e79a3418a2480e6f63bde534ce5da4bf15"
+        },
+        {
+          "path": "lib/swarm/retained.py",
+          "sha256": "4b1c122c4db8825f6411ff29d93110fbbcddc5eff7342cc98884c67737be6027"
+        },
+        {
+          "path": "lib/swarm/retained_repository.py",
+          "sha256": "6fc2c6b95b5a7461ee7de94b0472968a4331426954ee68edd7102300bbf772c0"
+        }
+      ]
+    },
+    {
+      "id": "retained_messages",
+      "claim": "Stable messaging activates an idle persistent identity or steers its busy assignment. One active assignment per identity; separate identities can execute in parallel. Exact-run messaging is passive and does not start a new assignment.",
+      "source_files": [
+        {
+          "path": "docs/RETAINED_AGENTS.md",
+          "sha256": "8119d10af276b44f86e50702d11cc1e79a3418a2480e6f63bde534ce5da4bf15"
+        },
+        {
+          "path": "docs/AGENT_LIFECYCLE.md",
+          "sha256": "e5be13bfd82b17e6d094db2963cb3b9a6f8958e3d893f220690a61e2a0ce56dc"
+        }
+      ]
+    },
+    {
+      "id": "retained_recovery_scope",
+      "claim": "Unknown launch acknowledgements retain the claim until reconciliation; reset/abandon fences late memory writes. Restart continuation requires explicit lineage, scope, cancellation and resolved effect evidence. Persistence is not an exactly-once external effect guarantee.",
+      "source_files": [
+        {
+          "path": "docs/RETAINED_AGENTS.md",
+          "sha256": "8119d10af276b44f86e50702d11cc1e79a3418a2480e6f63bde534ce5da4bf15"
+        },
+        {
+          "path": "docs/AGENT_LIFECYCLE.md",
+          "sha256": "e5be13bfd82b17e6d094db2963cb3b9a6f8958e3d893f220690a61e2a0ce56dc"
+        },
+        {
+          "path": "lib/swarm/retained_launch.py",
+          "sha256": "b6576d40497d03c781daba979dfa33ea8731ec6b0cbd8b2d08c011dc8be9de8a"
         }
       ]
     },
@@ -196,8 +224,9 @@
     "pdf": "One A0 page; embedded fonts; bounds, overlaps and glyph coverage; inspect actual PDF raster.",
     "svg": "Independent Chromium rendering and geometry checks; inspect image.",
     "qr": "Decode QR from the final PDF at 300 dpi and match the exact GitHub URL.",
-    "data": "Displayed control cells checked against the later source table; observed cache costs checked against the recorded trace."
+    "data": "All 24 displayed latency cells retained from the documented later four-arm control; no new measurements, timeline durations, or lifecycle speedups claimed.",
+    "visual": "Inspect the PDF and independent SVG, including tool swimlanes, cross-assignment context reuse and the unchanged TofuDB measurement table."
   },
   "revision": "Substantial redesign after author feedback: official affiliations, real workspace image, current Inspector component, explicit mechanisms and tradeoffs.",
-  "displayed_data_sha256": "9664ec58b272c95d38b5854f7969e1827e06824de7bbba237b05d20ecd820e7a"
+  "displayed_data_sha256": "26530c562559f4cf68f39d71a1444fed576d57d4b778997d8ca7cb89c512859b"
 }
