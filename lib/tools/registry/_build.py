@@ -17,6 +17,8 @@ had. Heavy schema imports stay inside the builders (called at request time).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from lib.log import get_logger
 
 from lib.tools.registry._spec import (
@@ -441,9 +443,31 @@ def _freeze_empty_mcp_wire(ctx: ToolContext) -> list[dict] | None:
     return freeze_wire_definitions(ctx.cfg['_mcpSelectionScopeId'], [])
 
 
+def _mcp_read_only_by_name(tools: list[dict], snapshot) -> dict[str, bool]:
+    """Bind read recovery to unique live metadata for the assembled schema."""
+    definitions = {
+        (tool.get('function') or {}).get('name'): tool for tool in tools}
+    read_only = {}
+    for row in snapshot:
+        if not isinstance(row, Mapping):
+            continue
+        name = row.get('namespaced_name')
+        if not isinstance(name, str) or name not in definitions:
+            continue
+        if name in read_only:
+            # Ambiguous declarations cannot establish repeatability.
+            read_only[name] = False
+            continue
+        read_only[name] = (
+            row.get('read_only_hint') is True
+            and row.get('openai_def') == definitions[name])
+    return read_only
+
+
 def _build_mcp(ctx: ToolContext) -> list[dict]:
     # Clear prior assembly grants even when a reused context is disconnected.
     ctx.cfg['_mcpAllowedToolCatalog'] = []
+    ctx.cfg['_mcpToolReadOnlyByName'] = {}
     ctx.cfg['_mcpToolSearchTextByName'] = {}
     ctx.cfg['_mcpActiveToolNames'] = []
     if ctx.owner_user_id < 1 or not ctx.cfg.get('mcpEnabled', True):
@@ -499,6 +523,8 @@ def _build_mcp_live(
                 # part of the task authority catalog even when only a small
                 # native-schema subset is visible on the initial wire.
                 ctx.cfg['_mcpAllowedToolCatalog'] = mcp_tools
+                ctx.cfg['_mcpToolReadOnlyByName'] = _mcp_read_only_by_name(
+                    mcp_tools, snapshot)
                 # Keep rich MCP discovery metadata beside the schemas. It is
                 # consumed by local retrieval only and must never be copied
                 # into the provider-visible function definitions.
@@ -620,6 +646,7 @@ def _build_mcp_live(
     except Exception as exc:
         # Assembly may have published a partial catalog before the outage.
         ctx.cfg['_mcpAllowedToolCatalog'] = []
+        ctx.cfg['_mcpToolReadOnlyByName'] = {}
         ctx.cfg['_mcpToolSearchTextByName'] = {}
         ctx.cfg['_mcpActiveToolNames'] = []
         if adaptive and frozen is None:

@@ -1034,6 +1034,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                 authority.extend(tool for tool in contributed
                                  if _schema_name(tool) not in known)
         active_mcp = set(ctx.cfg.get('_mcpActiveToolNames') or [])
+        mcp_read_only = ctx.cfg.get('_mcpToolReadOnlyByName') or {}
         mcp_search_text = ctx.cfg.get('_mcpToolSearchTextByName') or {}
         native_contracts = {
             str(getattr(contract, 'name', '')): contract
@@ -1081,16 +1082,25 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                 contract = native_contracts.get(name)
                 if contract is None:
                     from lib.tools.contracts import adapt_legacy_tool_contract
+                    is_write = name in spec.write_tools
+                    is_idempotent = name in spec.idempotent_tools
+                    if spec.key == 'mcp' and name not in spec.compatibility_tools:
+                        # Dynamic names are absent from the static wrapper
+                        # partitions. Only matching live metadata proves read
+                        # recovery; unproven calls retain write reconciliation.
+                        is_write = not (
+                            isinstance(mcp_read_only, Mapping)
+                            and mcp_read_only.get(name) is True)
+                        is_idempotent = False
                     contract = adapt_legacy_tool_contract(
                         tool,
                         namespace=namespace,
                         search_metadata=tuple(
                             part for part in search_parts if part),
-                        permission=(
-                            'write' if name in spec.write_tools else 'read'),
+                        permission='write' if is_write else 'read',
                         idempotency=(
-                            'idempotent' if name in spec.idempotent_tools else
-                            'non_idempotent' if name in spec.write_tools else
+                            'idempotent' if is_idempotent else
+                            'non_idempotent' if is_write else
                             'read_only'),
                         ptc_eligible=name in spec.programmatic_tools,
                         result_recovery=str(

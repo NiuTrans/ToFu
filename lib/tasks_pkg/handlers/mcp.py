@@ -16,6 +16,24 @@ from lib.tasks_pkg.handlers._adapter import simple_call
 logger = get_logger(__name__)
 
 
+def _mcp_failure_content(error):
+    """Leave operational failure/effect settlement with the common executor."""
+    from concurrent.futures import CancelledError
+    from lib.mcp.client._errors import (
+        _is_call_timeout_error, _is_transport_dead_error, _safe_text,
+    )
+    if isinstance(error, CancelledError):
+        raise error
+    if _is_call_timeout_error(error):
+        # SDK protocol timeouts need not inherit Python's TimeoutError.
+        # Normalize that category so the shared execution policy owns retry
+        # advice and unknown write outcomes for both MCP entry paths.
+        raise TimeoutError(_safe_text(error)) from error
+    if _is_transport_dead_error(error):
+        raise error
+    return f'MCP tool error: {_safe_text(error)}'
+
+
 def _settle_mcp_round_display(round_entry, meta, underlying, args,
                               tool_content, *, user_id):
     """Settle-time display upgrade for an MCP round — runs AFTER execution.
@@ -110,7 +128,7 @@ def _run_progressive_mcp(fn_name, fn_args, *, task=None):
     except Exception as e:
         logger.error('[MCP:Progressive] %s failed: %s', fn_name, e,
                      exc_info=True)
-        return f'MCP tool error: {e}'
+        return _mcp_failure_content(e)
 
 
 @tool_registry.handler(
@@ -181,7 +199,7 @@ def _run_mcp(fn_name, fn_args, *, task=None):
         return call_with_file_receipts(bridge, fn_name, fn_args, task=task or {})
     except Exception as e:
         logger.error('[MCP] %s failed: %s', fn_name, e, exc_info=True)
-        return f'MCP tool error: {e}'
+        return _mcp_failure_content(e)
 
 
 def handle_mcp_tool(
