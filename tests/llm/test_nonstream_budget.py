@@ -12,7 +12,7 @@ def transport(monkeypatch):
     module=importlib.import_module('lib.llm.chat')
     from lib.desktop import egress
     monkeypatch.setattr(egress,'route_request',lambda *a,**k:'direct')
-    monkeypatch.setattr(module,'retry_wait',lambda n:0)
+    monkeypatch.setattr('lib.llm._transport.retry_wait',lambda n:0)
     return module
 
 def task(cap=10000):
@@ -95,8 +95,8 @@ def test_learned_limit_recursion_keeps_account_and_unknown_failure(transport,mon
         return SimpleNamespace(status_code=400,headers={},content=b'synthetic token limit',
                                text='synthetic token limit',encoding='utf-8')
     monkeypatch.setattr(transport,'http_post',send)
-    monkeypatch.setattr(transport,'_parse_token_limit_from_error',lambda *a:16)
-    monkeypatch.setattr(transport,'_learn_model_limit',lambda *a:None)
+    monkeypatch.setattr('lib.model_info._parse_token_limit_from_error',lambda *a:16)
+    monkeypatch.setattr('lib.model_info._learn_model_limit',lambda *a:None)
     with pytest.raises(ModelBudgetAdmissionDenied):invoke(transport,model_budget_admission(owner),max_retries=0)
     assert len(seen)==1
     assert owner['_executionBudget'].consumption_snapshot()==(0,0,False)

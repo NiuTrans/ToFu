@@ -3,62 +3,31 @@
 
 Public API:
   - chat(messages, model=None, ...) → (content_text, usage_dict)
+
+The package imports this definition eagerly to keep its same-name export stable.
+Provider and HTTP dependencies load at invocation. The local http_post entry
+preserves the transport fault-injection seam while deferring the HTTP import.
 """
 
 import json
 import re
 import uuid
 
-import requests
-
 import lib as _lib
-from lib.llm._transport import (
-    CONNECT_TIMEOUT,
-    MAX_STREAM_RETRIES,
-    abortable_sleep,
-    chat_url,
-    headers,
-    retry_wait,
-)
-from lib.llm.body import build_body
-from lib.llm.cache import add_cache_breakpoints
-from lib.llm.llm_errors import (
-    _ERR_BODY_LIMIT,
-    ContentFilterError,
-    EndpointUnreachableError,
-    InvalidImageError,
-    PermissionError_,
-    PromptTooLongError,
-    RateLimitError,
-    RequestTransportError,
-    StreamOnlyError,
-    SubscriptionConnectionError,
-    _RETRYABLE,
-    _classify_http_error,
-    _has_outbound_credential,
-    decode_error_body,
-    provider_error_http_status,
-)
-from lib.cost import canonicalize_usage_cache_keys
 from lib.log import get_logger
-from lib.model_info import (
-    _learn_model_limit,
-    _parse_token_limit_from_error,
-    is_claude,
-)
-from lib.subscription_quota import USAGE_QUOTA_KEY, record_codex_quota
-from lib.http_transport.client import http_post
-
 from lib.llm.diagnostic_timing import current_timing, timed_call, timed_stage, timing_stage
+from lib.llm.nonstream_budget import budgeted_nonstream_chat
 
 logger = get_logger(__name__)
 
 
-from lib.llm.nonstream_budget import budgeted_nonstream_chat
+def http_post(*args, **kwargs):
+    """Delegate lazily to the shared HTTP owner, retaining transport injection."""
+    from lib.http_transport.client import http_post as send
+    return send(*args, **kwargs)
 
 
 @budgeted_nonstream_chat
-
 @timed_stage('chat_total')
 def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          thinking_enabled=None, preset='low', effort=None, extra=None,
@@ -88,8 +57,44 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         RateLimitError, PermissionError_, ContentFilterError,
         RetryableAPIError, PromptTooLongError, Exception
     """
+    import requests
+
+    from lib.llm._transport import (
+        CONNECT_TIMEOUT,
+        MAX_STREAM_RETRIES,
+        abortable_sleep,
+        chat_url,
+        headers,
+        retry_wait,
+        transport_owner_scope,
+    )
+    from lib.llm.body import build_body
+    from lib.llm.cache import add_cache_breakpoints
+    from lib.llm.llm_errors import (
+        _ERR_BODY_LIMIT,
+        ContentFilterError,
+        EndpointUnreachableError,
+        InvalidImageError,
+        PermissionError_,
+        PromptTooLongError,
+        RateLimitError,
+        RequestTransportError,
+        StreamOnlyError,
+        SubscriptionConnectionError,
+        _RETRYABLE,
+        _classify_http_error,
+        _has_outbound_credential,
+        decode_error_body,
+        provider_error_http_status,
+    )
+    from lib.cost import canonicalize_usage_cache_keys
+    from lib.model_info import (
+        _learn_model_limit,
+        _parse_token_limit_from_error,
+        is_claude,
+    )
+    from lib.subscription_quota import USAGE_QUOTA_KEY, record_codex_quota
     model = model or _lib.LLM_MODEL
-    from lib.llm._transport import transport_owner_scope
     _owner_scope = transport_owner_scope(owner_user_id)
     _anthropic = (api_protocol == 'anthropic')
     _responses = (api_protocol == 'responses')

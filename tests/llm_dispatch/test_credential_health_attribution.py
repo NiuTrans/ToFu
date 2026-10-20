@@ -4,7 +4,9 @@ Uses isolated durable stats and real Slots; transports fail without network.
 Legacy telemetry and model/request failures must never poison sibling models.
 """
 import asyncio
+import importlib
 import json
+import threading
 
 import pytest
 
@@ -185,6 +187,48 @@ class Dispatcher:
 
     def summarize_slots(self, *args, **kwargs):
         return 'synthetic candidates'
+
+
+def test_race_after_child_import_sends_and_settles_each_slot(stats, monkeypatch):
+    importlib.import_module('lib.llm.chat')
+    from lib.llm import chat
+    from lib.llm_dispatch import api
+
+    assert callable(chat)
+    ks, _ = stats
+    slots = [make_slot(), make_slot('key-b')]
+    for slot in slots:
+        slot.base_url = 'https://example.invalid/v1'
+    monkeypatch.setattr(api, 'get_dispatcher', lambda: Dispatcher(slots))
+    monkeypatch.setattr('lib.desktop.egress.route_request', lambda *a, **k: 'direct')
+    both_sending = threading.Barrier(2, timeout=15)
+    requests = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {'choices': [{'message': {'content': 'race succeeded'},
+                                 'finish_reason': 'stop'}],
+                    'usage': {'prompt_tokens': 10, 'completion_tokens': 3}}
+
+    def post(*args, **kwargs):
+        requests.append(json.loads(kwargs['data']))
+        both_sending.wait()
+        return Response()
+
+    monkeypatch.setattr('lib.http_transport.client.http_post', post)
+    messages = [{'role': 'user', 'content': 'test'}]
+    text, usage = api.dispatch_fastest(messages, owner_user_id=17)
+    assert text == 'race succeeded'
+    assert usage['_dispatch']['mode'] == 'race'
+    assert len(requests) == 2
+    assert all(request['model'] == 'test-model' for request in requests)
+    for slot in slots:
+        assert slot.inflight == 0
+        assert slot.total_errors == 0
+        assert ks.get_today_stats(PROVIDER, slot.key_name)['success'] == 1
 
 
 @pytest.mark.parametrize('lane', ['chat', 'stream', 'async_stream', 'fastest'])

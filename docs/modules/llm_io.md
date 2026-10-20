@@ -4,6 +4,18 @@ This domain compiles owner-authorized v2 routes, emits canonical requests, and n
 
 ## Ownership
 
+Package import stability: Problem: importing the `lib.llm.chat` child before
+accessing the lazy package export replaced the callable with a module, breaking
+nonstream dispatch. Decision: explicitly re-export the lightweight `chat`
+definition; it imports provider and HTTP dependencies at invocation. The public
+signature, decorators, child import path and package monkeypatch seam stay intact.
+Other package exports remain lazy. The existing module HTTP fault-injection seam
+delegates lazily to the shared client; retry/model metadata fixtures use their
+owning modules. Alternatives rejected: eager HTTP initialization
+taxes startup; module-class interception hides ordinary import behavior; changing
+individual callers leaves the public entry point broken. Import-order, cold-start,
+real racing-dispatch and nonstream accounting tests cover this boundary.
+
 Fallback continuity attribution: Problem: a destination protocol refusing native history hid the primary availability failure behind a non-retryable internal error. Decision: retain the primary error, model and reasoning policy when the typed `mandatory_continuity_unrepresentable` check blocks fallback before ingress; record `fallbackDetail`, `fallbackFailureStage` and `fallbackProviderReached` separately. Keep automatic recovery exhausted and preserve manual retry semantics. Alternative rejected: dropping native history or retrying arbitrary pool models would erase continuity or repeat an incompatible request. Other conversion defects remain attributed to the fallback. `test_fallback_continuity_attribution.py` exercises the real body builder/converter and unchanged tool history.
 
 | Concern | Owner |

@@ -19,7 +19,7 @@ _HEAVY_MODULES = (
     'lib.llm_dispatch._api_chat',
     'lib.llm_dispatch._api_stream',
     'lib.llm_dispatch._api_multi',
-    'lib.llm.chat',
+    'lib.http_transport.client',
     'lib.llm.stream',
     'lib.llm.astream',
     'lib.llm._transport',
@@ -62,7 +62,8 @@ def test_llm_package_import_does_not_load_transports():
         'import sys\n'
         'import lib.llm\n'
         'loaded = [name for name in ('
-        "'lib.llm.chat', 'lib.llm.stream', 'lib.llm.astream', 'lib.llm._transport'"
+        "'requests', 'lib.http_transport.client', 'lib.llm.stream', "
+        "'lib.llm.astream', 'lib.llm._transport'"
         ') if name in sys.modules]\n'
         'assert not loaded, loaded\n'
     )

@@ -54,7 +54,6 @@ def network(monkeypatch):
     monkeypatch.setattr(_transport, 'async_abortable_sleep', asleep)
     monkeypatch.setattr('lib.llm.stream.abortable_sleep', sleep)
     monkeypatch.setattr('lib.llm.astream.async_abortable_sleep', asleep)
-    monkeypatch.setattr(importlib.import_module('lib.llm.chat'), 'retry_wait', lambda attempt: 0.25)
 
     def before_send():
         state.sends += 1

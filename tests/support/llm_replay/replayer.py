@@ -218,14 +218,11 @@ class ReplaySession:
     # ── installation ─────────────────────────────────────────────────
 
     def install(self, monkeypatch) -> 'ReplaySession':
-        """Patch the three lazy-import transport seams.
+        """Patch the three transport seams and the public nonstream export.
 
-        ``lib.llm.chat`` is BOTH a submodule and a lazy package-facade
-        function export: importing the submodule rebinds the package
-        attribute to the module object, so the submodules are imported first
-        (object-form patches for their attributes) and the package facade
-        string patch lands LAST — otherwise ``from lib.llm import chat``
-        could still resolve to the unpatched module.
+        The package explicitly re-exports the lightweight ``chat`` function.
+        Patch both that binding and the child module's function so direct
+        transport callers and dispatch callers share the same replay session.
         """
         import importlib
         astream_mod = importlib.import_module('lib.llm.astream')

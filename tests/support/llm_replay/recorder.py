@@ -239,8 +239,8 @@ class Recorder:
 
         The wrapped functions default to the REAL transports (live record
         mode); tests may inject deterministic fakes for offline fixture
-        authoring.  Patch order mirrors ``ReplaySession.install`` (submodule
-        imports first, the ``lib.llm.chat`` package facade last).
+        authoring. As in ``ReplaySession.install``, patch both the child
+        function and its package export for direct and dispatched callers.
         """
         import importlib
         astream_mod = importlib.import_module('lib.llm.astream')

@@ -26,6 +26,9 @@ cache/protocol translation remain later stages. Preserve diagnostics and latches
 - Diagnostic values and request archives follow docs/LOGGING.md. Preserve
   their resource bounds, fault-injection seams and deterministic fake transports.
 - Optional provider dependencies load lazily; no import-time network calls.
+- `chat.py` exposes the lightweight definition imported by the package facade;
+  load its provider/HTTP dependencies at invocation. Verify import order and
+  startup boundaries in `test_llm_startup_boundary.py`.
 - Sealed request ingress honors an injected model-budget port. Sync/async
   attempt scopes must settle it once; abandoned unsent plans void their lease.
   Input confirmation requires a verified provider outcome. Sealed requests
