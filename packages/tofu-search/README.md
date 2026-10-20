@@ -12,6 +12,10 @@ stays dependency-free when used standalone.
 
 ## Features
 
+- **Free core**: no paid search API or account is required. SearXNG recovers
+  through configured instances when initial evidence is weak, preserves partial
+  results and reports lost upstream coverage. See
+  [free search reliability](docs/free-search.md) for limits and verification.
 - **Multi-engine search (parallel)**: DuckDuckGo (HTML + API), Brave, Bing,
   SearXNG, Marginalia. Native site capabilities are **explicit only**: use
   `engines=['Site:catalog']` with a registered site provider, or

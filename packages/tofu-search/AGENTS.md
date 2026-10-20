@@ -27,6 +27,7 @@ the only host integration boundary.
 admission, ranking and excerpts; `passages.py` preserves original source spans.
 Quality contracts and the offline measurement command live in
 `docs/relevance-quality.md`; regression fixtures do not prove live superiority.
+Free source admission and metasearch recovery are owned by `docs/free-search.md`.
 
 Run `uv run --package tofu-search pytest packages/tofu-search/tests`, then the
 root search bridge/runtime and monorepo contract tests for integration changes.

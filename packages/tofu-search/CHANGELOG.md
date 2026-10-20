@@ -11,6 +11,13 @@
 
 ## Unreleased
 
+- Preserve free search as the core: no required paid APIs or credentials.
+- Recover beyond weak SearXNG instance results without changing queries or
+  source scope. Retain partial evidence and expose upstream/instance coverage
+  warnings through the shared formatter and host observation pipeline.
+- Validate SearXNG JSON and genuine HTML empty states, distinguish challenge
+  and upstream failures, avoid repeating valid JSON searches as HTML, and bound
+  decoded response bytes and remaining-budget attempts with explicit closure.
 - Treat outstanding HTTP 202 responses, explicit Cloudflare challenge headers
   and small DDG challenge forms as unavailable engine coverage, not empty search
   success. Preserve bounded retries, configured alternate paths and real empty

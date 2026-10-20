@@ -49,11 +49,13 @@ def test_searxng_prefers_self_host_and_respects_its_engine_config(monkeypatch):
         ok = True
         status_code = 200
         headers = {'content-type': 'application/json'}
-        text = '{}'
+        @staticmethod
+        def iter_content(chunk_size):
+            yield b'{"results":[{"url":"https://hit.example/a","title":"hit"}]}'
 
         @staticmethod
-        def json():
-            return {'results': [{'url': 'https://hit.example/a', 'title': 'hit'}]}
+        def close():
+            pass
 
     def fake_get(url, **kwargs):
         calls.append((url, kwargs.get('params', {})))
@@ -75,11 +77,9 @@ def test_searxng_configured_engines_survive_html_fallback(monkeypatch):
         ok = False
         status_code = 403
         headers = {'content-type': 'text/html'}
-        text = ''
-
         @staticmethod
-        def json():
-            return {}
+        def close():
+            pass
 
     def fake_get(url, **kwargs):
         calls.append(kwargs.get('params', {}))
