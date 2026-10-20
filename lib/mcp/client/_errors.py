@@ -23,6 +23,12 @@ _MCP_STDERR_TAIL_BYTES = 8192
 #: but nothing found (the name fallback then carries classification).
 _MCP_ERROR_TYPES: tuple[type, ...] | None = None
 
+# SDK-synthesized request failures, shared by supported MCP SDK majors.
+# Their codes survive message rewording/localization; other protocol codes
+# describe peer responses and must not inherit transport semantics from prose.
+_MCP_CONNECTION_CLOSED = -32000
+_MCP_REQUEST_TIMEOUT = -32001
+
 
 def _safe_text(exc: BaseException) -> str:
     """``str(exc)`` with a guard — classifiers must never raise.
@@ -104,6 +110,9 @@ def _is_transport_dead_error(exc: BaseException) -> bool:
     real tool error behind an endless reconnect cycle.
     """
     leaf = _unwrap_exception_group(exc)
+    code = _jsonrpc_error_code(leaf)
+    if code is not None:
+        return code == _MCP_CONNECTION_CLOSED
     # anyio stream-lifecycle errors are the canonical "pipe is gone" signals.
     name = type(leaf).__name__
     if name in (
@@ -171,11 +180,13 @@ def _is_call_timeout_error(exc: BaseException) -> bool:
       - ``concurrent.futures.TimeoutError`` / ``asyncio.TimeoutError`` /
         builtin ``TimeoutError`` raised by the outer ``future.result(...)``;
       - the SDK's protocol error (``McpError`` in v1, ``MCPError`` in v2)
-        whose text reports "Timed out while waiting for response" (the
-        ``read_timeout_seconds`` path), matched by ``isinstance`` against the
-        real class rather than by its name — see :func:`_mcp_error_types`.
+        carrying REQUEST_TIMEOUT. Only when its structured code is absent do
+        the SDK type and legacy timeout wording supply a compatibility signal.
     """
     leaf = _unwrap_exception_group(exc)
+    code = _jsonrpc_error_code(leaf)
+    if code is not None:
+        return code == _MCP_REQUEST_TIMEOUT
     if isinstance(leaf, (TimeoutError, asyncio.TimeoutError)):
         return True
     sdk_types = _mcp_error_types()
@@ -209,7 +220,7 @@ def _jsonrpc_error_code(exc: BaseException) -> int | None:
     """
     leaf = _unwrap_exception_group(exc)
     code = getattr(getattr(leaf, 'error', None), 'code', None)
-    return code if isinstance(code, int) else None
+    return code if type(code) is int else None
 
 
 def _is_peer_answered_error(exc: BaseException) -> bool:

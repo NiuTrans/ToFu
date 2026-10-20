@@ -56,6 +56,7 @@ from lib.mcp.client._state import _pkg
 from lib.mcp.client._errors import (
     MCPConnectError,
     _is_call_timeout_error,
+    _is_peer_answered_error,
     _is_transport_dead_error,
     _read_stderr_tail,
     _unwrap_exception_group,
@@ -145,6 +146,15 @@ def _schema_hash(tool) -> str:
                    'inputSchema': _tool_input_schema(tool),
                    'annotations': annotations,
                }))
+
+
+def _automatic_read_replay_identity(info):
+    """Freeze the current read declaration without copying its schema per call."""
+    if not isinstance(info, dict) or info.get('read_only_hint') is not True:
+        return None
+    identity = tuple(info.get(key) for key in (
+        'server_name', 'tool_name', 'namespaced_name', 'schema_hash'))
+    return identity if all(isinstance(value, str) and value for value in identity) else None
 
 
 def _tool_result_is_error(result) -> bool:
@@ -1847,7 +1857,7 @@ class MCPBridge:
         *,
         timeout_override: int | None = None,
         cancel=None,
-        retry_on_disconnect: bool = True,
+        retry_on_disconnect: bool | None = None,
     ) -> str:
         """Execute an MCP tool call and return the result as a string.
 
@@ -1858,8 +1868,10 @@ class MCPBridge:
                 user-owned calls omit it and retain the server/default policy.
             cancel: Optional owner signal exposing is_set(); stops the active
                 SDK request without counting cancellation as a health failure.
-            retry_on_disconnect: Whether an ambiguous transport failure may
-                replay this call after reconnect. Application documents opt out.
+            retry_on_disconnect: None permits automatic replay only for an
+                unchanged, enabled, explicitly read-only declaration. True is
+                a trusted host opt-in to repeat this exact call; False disables
+                reconnect replay. Application documents explicitly opt out.
 
         Returns:
             Tool result as a string (text content extracted from MCP response).
@@ -1870,6 +1882,8 @@ class MCPBridge:
         """
         if cancel is not None and cancel.is_set():
             raise CancelledError('MCP call cancelled')
+        if retry_on_disconnect is not None and type(retry_on_disconnect) is not bool:
+            raise ValueError('MCP retry_on_disconnect must be a boolean or None')
         parsed = parse_namespaced_name(namespaced_name)
         if parsed is None:
             raise ValueError(f'Invalid MCP tool name: {namespaced_name}')
@@ -1946,16 +1960,19 @@ class MCPBridge:
                           timeout=timeout)
                 return (
                     f'MCP Error: server {server_name!r} is degraded — '
-                    f'{streak} consecutive call timeouts (each waited '
-                    f'{timeout}s). The call was not attempted. This usually '
-                    f'means the tool runs longer than the server\'s per-call '
-                    f'timeout; do not retry blindly.'
+                    f'{streak} consecutive call timeouts '
+                    f'(configured call budget: {str(timeout) + "s" if timeout else "none"}). '
+                    'The call was not attempted. Inspect server health or review '
+                    'its configured call deadline before retrying.'
                 )
 
         logger.info('[MCP:Call] %s.%s(args=%s) timeout=%s',
                     server_name, tool_name, str(arguments)[:200],
                     f'{timeout}s' if timeout else 'none')
 
+        replay_identity = (
+            _automatic_read_replay_identity(info) if retry_on_disconnect is None else None)
+        may_replay = retry_on_disconnect is True or replay_identity is not None
         t0 = time.time()
         try:
             result = self._run_async(
@@ -1972,25 +1989,12 @@ class MCPBridge:
             # the mismatch between a long-poll tool and the transport cap is
             # greppable. NOT treated as a transport-dead error (reconnecting
             # wouldn't help a tool that simply runs longer than its budget).
-            if _is_call_timeout_error(e):
-                with self._lock:
-                    new_streak = self._timeout_streak.get(server_name, 0) + 1
-                    self._timeout_streak[server_name] = new_streak
-                logger.warning(
-                    '[MCP:Call] %s.%s TIMED OUT after %.1fs (budget=%ds, '
-                    'consecutive=%d). If this tool legitimately runs longer '
-                    'than %ds, raise its per-server "timeout" in '
-                    'mcp_servers.json.',
-                    server_name, tool_name, elapsed, timeout, new_streak, timeout,
-                )
-                audit_log('mcp_call_timeout', server=server_name,
-                          tool=tool_name, timeout=timeout,
-                          elapsed=round(elapsed, 1), consecutive=new_streak)
+            if self._record_call_failure(server_name, tool_name, e, timeout, t0):
                 raise
-            # If the call failed because the transport is dead (subprocess
-            # crashed / idle-dropped), transparently reconnect once and
-            # retry — the user should never have to manually reconnect.
-            if retry_on_disconnect and _is_transport_dead_error(e):
+            # A dead transport does not prove that a delivered write failed.
+            # Restore and repeat reads automatically; other repeats require a
+            # trusted host's explicit policy, never a tool argument or name.
+            if may_replay and _is_transport_dead_error(e):
                 logger.warning(
                     '[MCP:Call] %s.%s hit dead transport after %.1fs (%s) — '
                     'reconnecting and retrying once',
@@ -2002,6 +2006,19 @@ class MCPBridge:
                     logger.error('[MCP:Call] reconnect of %s failed: %s',
                                  server_name, re, exc_info=True)
                     raise e from re
+                if cancel is not None and cancel.is_set():
+                    raise CancelledError('MCP call cancelled during reconnect')
+                with self._lock:
+                    current = self._tool_index.get(namespaced_name)
+                    disabled = tool_name in self._disabled_tools_for(server_name)
+                    declaration_changed = (
+                        retry_on_disconnect is None
+                        and _automatic_read_replay_identity(current) != replay_identity)
+                if disabled or declaration_changed:
+                    logger.warning(
+                        '[MCP:Call] %s.%s reconnected without replay: '
+                        'the enabled read declaration changed', server_name, tool_name)
+                    raise
                 try:
                     result = self._run_async(
                         self._async_call_tool(new_handle, tool_name, arguments, timeout),
@@ -2016,7 +2033,10 @@ class MCPBridge:
                         server_name, tool_name, len(result), elapsed,
                     )
                     return result
+                except CancelledError:
+                    raise
                 except Exception as e2:
+                    self._record_call_failure(server_name, tool_name, e2, timeout, t0)
                     logger.error('[MCP:Call] %s.%s still failing after reconnect: %s',
                                  server_name, tool_name, e2, exc_info=True)
                     raise
@@ -2030,6 +2050,25 @@ class MCPBridge:
         logger.info('[MCP:Call] %s.%s returned %d chars in %.1fs',
                     server_name, tool_name, len(result), elapsed)
         return result
+
+    def _record_call_failure(self, server_name, tool_name, error, timeout, started_at):
+        """Settle health for either attempt; a peer answer ends a timeout streak."""
+        if _is_call_timeout_error(error):
+            elapsed = time.time() - started_at
+            with self._lock:
+                streak = self._timeout_streak.get(server_name, 0) + 1
+                self._timeout_streak[server_name] = streak
+            logger.warning(
+                '[MCP:Call] %s.%s TIMED OUT after %.1fs (budget=%s, consecutive=%d). '
+                'Inspect server health or review its configured call deadline.',
+                server_name, tool_name, elapsed, f'{timeout}s' if timeout else 'none', streak,
+            )
+            audit_log('mcp_call_timeout', server=server_name, tool=tool_name,
+                      timeout=timeout, elapsed=round(elapsed, 1), consecutive=streak)
+            return True
+        if _is_peer_answered_error(error):
+            self._reset_timeout_streak(server_name)
+        return False
 
     def call_tool_document(self, namespaced_name: str, arguments: dict[str, Any], *,
                            timeout: int | None = None, cancel=None) -> Any:
