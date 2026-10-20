@@ -20,6 +20,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable
 
+from lib.llm.llm_errors import LocalRequestPreparationError
 from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
 
 from tests.support.llm_replay.normalize import (
@@ -37,8 +38,16 @@ from tests.support.llm_replay.script import (
 
 __all__ = ['ReplaySession', 'ScenarioDriftError']
 
-class ScenarioDriftError(AssertionError):
-    """The live request sequence diverged from the recorded script."""
+class ScenarioDriftError(LocalRequestPreparationError, AssertionError):
+    """Local replay validation failed before any provider I/O.
+
+    Preserve assertion identity for test callers while using the dispatcher's
+    existing neutral failure boundary: retrying a stale fixture cannot repair
+    it and must not cool down credentials or consume fallback attempts.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, stage='replay_validation')
 
 
 class ReplaySession:
