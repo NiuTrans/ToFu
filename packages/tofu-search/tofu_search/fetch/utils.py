@@ -16,9 +16,9 @@ from urllib.parse import urlparse
 import requests
 import urllib3
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from tofu_search.config import get_config
+from tofu_search.fetch.request_budget import FetchRetry
 
 # Suppress InsecureRequestWarning for SSL-fallback retries
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -111,9 +111,9 @@ class _SSRFGuardAdapter(HTTPAdapter):
         return super().send(request, **kwargs)
 
 
-_retry_strategy = Retry(
+_retry_strategy = FetchRetry(
     total=2,                    # 最多重试2次（共3次请求）
-    read=0,                     # ← 禁止 read-timeout 重试（8s 都读不出来，重试也白搭）
+    read=0,                     # do_request admits one read retry within its shared budget
     connect=2,                  # 连接失败可以重试（可能是瞬时网络抖动）
     backoff_factor=0.5,         # 重试间隔: 0.5s, 1s
     status_forcelist=[429, 500, 502, 503, 504],

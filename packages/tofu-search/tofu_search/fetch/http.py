@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 import requests as _requests_mod
 
 from tofu_search.config import get_config
+from tofu_search.fetch.request_budget import (
+    RequestBudgetExceeded,
+    request_budget,
+    request_timeout,
+)
 from tofu_search.fetch.utils import (
     _HAS_LEGACY_SSL,
     _fetch_cache,
@@ -72,11 +77,23 @@ def do_request(url, timeout, verify=True, legacy_ssl=False, deadline_ts=None):
     Non-2xx responses raise HttpError so the caller can branch on status.
 
     Args:
-        deadline_ts: Optional absolute ``time.time()`` deadline that bounds the
-            body-download loop. The internal ``timeout*3`` wall-time cap is
-            reduced to whichever comes first, so a caller enforcing a per-URL
-            budget can stop a slow trickle-download early.
+        deadline_ts: Optional absolute ``time.time()`` deadline. Retries,
+            socket-phase timeouts and body checks share the lesser of this
+            deadline and ``timeout*3``; no later attempt starts after expiry.
+            An already-running socket read is still cooperative, not hard-cancelled.
     """
+    seconds = timeout * 3
+    if deadline_ts is not None:
+        seconds = min(seconds, deadline_ts - time.time())
+    try:
+        with request_budget(seconds):
+            return _perform_request(url, timeout, verify, legacy_ssl, deadline_ts)
+    except RequestBudgetExceeded as error:
+        raise _requests_mod.exceptions.Timeout(str(error)) from None
+
+
+def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
+    """Existing response/proxy owner, inside the caller's request budget."""
     cfg = get_config()
     if legacy_ssl and _HAS_LEGACY_SSL:
         sess = _session_legacy_ssl
@@ -103,7 +120,7 @@ def do_request(url, timeout, verify=True, legacy_ssl=False, deadline_ts=None):
     plan = proxy_mode_manager.attempt_plan(host_key, cfg)
 
     def _open(proxies_kwarg, extra_headers=None):
-        kw = {'timeout': (min(timeout, 8), timeout), 'stream': True,
+        kw = {'timeout': request_timeout(timeout), 'stream': True,
               'allow_redirects': True, 'verify': verify}
         if extra_headers:
             kw['headers'] = extra_headers

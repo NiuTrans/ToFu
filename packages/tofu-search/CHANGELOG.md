@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.2
+
+- Recover once from pre-body read failures, including proxy CONNECT response
+  timeouts, through the existing anonymous GET adapter and selected route.
+  Keep the existing total retry limit and share one remaining time budget
+  across retries, redirects and socket phases. Successful requests add no hop.
+- Stop retries and `Retry-After` waits that cannot fit the remaining budget;
+  preserve received HTTP failure statuses and close their responses. Reject
+  expired calls before dispatch. In-flight reads remain cooperatively bounded.
+
 ## 0.12.1
 
 - Require Trafilatura 2.3.1 or newer for source-faithful HTML extraction:
