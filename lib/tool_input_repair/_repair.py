@@ -22,12 +22,14 @@ from lib.log import audit_log, get_logger
 from lib.tools.contracts import NEVER_CLAMP_PARAMS, clamp_arguments_to_schema
 from lib.tool_input_repair._schema import (
     RepairLog,
+    _array_item_schema,
     _expected_types,
     _required_keys,
     _schemas,
 )
 from lib.tool_input_repair._salvage import _try_schema_array_salvage
 from lib.tool_input_repair._transform import (
+    _apply_item_param_aliases,
     _apply_param_aliases,
     _apply_structural_transform,
 )
@@ -316,6 +318,11 @@ def validate_then_repair(
         # Must run BEFORE the type-walk so a renamed key is type-checked too.
         repaired, _alias_log = _apply_param_aliases(tool_name, repaired, expected)
         log.extend(_alias_log)
+        # Same rename one level down, so a per-item ``new_string`` recovers
+        # into ``content`` instead of being reported as missing.
+        repaired, _item_alias_log = _apply_item_param_aliases(
+            tool_name, repaired)
+        log.extend(_item_alias_log)
 
     for key, exp_type in expected.items():
         if key not in repaired:
@@ -469,7 +476,19 @@ def schema_hint(tool_name: str) -> str:
     parts = []
     for key, t in expected.items():
         mark = '*' if key in required else ''
-        parts.append(f'{key}{mark}({t})')
+        item = _array_item_schema(tool_name, key) if t == 'array' else None
+        if item is None:
+            parts.append(f'{key}{mark}({t})')
+            continue
+        # A bare `edits(array)` does not tell the recovery round which keys
+        # each item needs — the rejected `edits[0]` had anchor+operation but
+        # no content, and the hint named only the top-level array.
+        item_types, item_required = item
+        need = ', '.join(
+            f'{k}({v})' for k, v in item_types.items() if k in item_required)
+        parts.append(
+            f'{key}{mark}(array of objects'
+            + (f'; each item needs: {need}' if need else '') + ')')
     req_list = ', '.join(sorted(required)) if required else 'none'
     return (
         f'`{tool_name}` expects a JSON object — keys: {", ".join(parts)} '

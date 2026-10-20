@@ -17,7 +17,7 @@ from typing import Any
 
 from lib.log import get_logger
 
-from lib.tool_input_repair._schema import RepairLog
+from lib.tool_input_repair._schema import RepairLog, _array_item_schema
 
 logger = get_logger(__name__)
 
@@ -94,6 +94,79 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
     # carries {skill, args?} — ``args`` stays inert.
     'load_skill': {'name': 'skill_id', 'skill': 'skill_id'},
 }
+
+
+# Same alias problem one level DEEPER: the top-level keys are right, but each
+# ``edits[]`` item carries another harness's item keys. Claude Code *Edit*
+# emits ``{file_path, old_string, new_string}`` per item, so ``content`` is
+# reported missing while the replacement text sits in ``new_string`` — a
+# recoverable value the top-level pass cannot see. Item schemas never set
+# ``additionalProperties: false``, so the alias key also survives validation
+# and only the canonical key is reported missing — the observed retry loop.
+_ITEM_PARAM_ALIASES: dict[str, dict[str, dict[str, str]]] = {
+    # tool -> array param -> {alias: canonical item key}
+    'edit_file': {'edits': {
+        'file_path': 'path', 'filepath': 'path', 'filename': 'path',
+        'filePath': 'path',
+        'old_string': 'anchor', 'old_str': 'anchor', 'oldText': 'anchor',
+        'oldString': 'anchor',
+        'new_string': 'content', 'new_str': 'content', 'newText': 'content',
+        'newString': 'content',
+        'replaceAll': 'replace_all',
+    }},
+    # ``apply_diffs`` is already owned by _transform_multiedit_to_apply_diffs.
+}
+
+
+def _apply_item_param_aliases(
+    tool_name: str, args: dict[str, Any],
+) -> tuple[dict[str, Any], RepairLog]:
+    """Rename wrong-harness keys inside one array param's object items.
+
+    Same guards as :func:`_apply_param_aliases`, applied per item: rename only
+    when the canonical item key is ABSENT, the alias key is NOT itself a
+    declared item property, and the item is an object. Non-list values are
+    left to the type walk.
+
+    Returns:
+        ``(args, log)`` with ``(f'{array_key}[{i}].{canonical}',
+        'item_param_alias')`` entries. Empty when nothing matched.
+    """
+    alias_map = _ITEM_PARAM_ALIASES.get(tool_name)
+    if not alias_map:
+        return args, []
+    log: RepairLog = []
+    for array_key, item_aliases in alias_map.items():
+        items = args.get(array_key)
+        item_schema = _array_item_schema(tool_name, array_key)
+        if not isinstance(items, list) or item_schema is None:
+            continue
+        expected, _required = item_schema
+        # Copy-on-write: the caller's items stay untouched (see the
+        # ``validate_then_repair`` no-mutation contract).
+        repaired_items = None
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            renames = [
+                (alias, canonical)
+                for alias, canonical in item_aliases.items()
+                if canonical in expected and alias in item
+                and canonical not in item and alias not in expected
+            ]
+            if not renames:
+                continue
+            if repaired_items is None:
+                repaired_items = list(items)
+            renamed = dict(item)
+            for alias, canonical in renames:
+                renamed[canonical] = renamed.pop(alias)
+                log.append((f'{array_key}[{index}].{canonical}',
+                            'item_param_alias'))
+            repaired_items[index] = renamed
+        if repaired_items is not None:
+            args[array_key] = repaired_items
+    return args, log
 
 
 def _apply_param_aliases(
@@ -214,6 +287,54 @@ def _transform_multiedit_to_apply_diffs(
 _EDIT_FILE_ENVELOPE_PASSTHROUGH_KEYS = ('allow_outside_workspace',)
 
 
+def _distribute_shared_edit_path(
+    edits: list[Any], shared_path: str,
+) -> tuple[list[Any], bool]:
+    """Give each edit its file path when the batch names exactly ONE file.
+
+    Models routinely encode "same file as the rest of this batch" as an empty
+    or omitted per-item ``path``: Claude Code *MultiEdit* carries one top-level
+    ``file_path``, and the native single-file tools carry one path for the whole
+    payload. Our batch schema declares ``path`` on every item with
+    ``minLength: 1``, so those calls were rejected for a blank path and the
+    model had to re-emit the whole batch — measured repeatedly across models
+    (26 live rejections, all recovered on the next round).
+
+    Fill ONLY from a path the CALL itself already declares: the envelope's
+    shared path, or the single distinct non-empty item path. A multi-file batch
+    with a blank path stays fail-closed — guessing which of several files was
+    meant is not repair, it is a wrong-file write. The read gate, write
+    freshness and unique-anchor match still decide whether the filled path is
+    actually writable.
+    """
+    declared = [edit.get('path') for edit in edits if isinstance(edit, dict)]
+    if isinstance(shared_path, str) and shared_path.strip():
+        path = shared_path
+    else:
+        unique = list(dict.fromkeys(
+            value for value in declared
+            if isinstance(value, str) and value.strip()))
+        if len(unique) != 1:
+            return edits, False
+        path = unique[0]
+    distributed = False
+    filled: list[Any] = list(edits)
+    for index, edit in enumerate(filled):
+        if not isinstance(edit, dict):
+            continue
+        current = edit.get('path')
+        if isinstance(current, str):
+            if current.strip():
+                continue
+        elif current is not None:
+            continue  # non-string path is a type error, not a hole to fill
+        updated = dict(edit)
+        updated['path'] = path
+        filled[index] = updated
+        distributed = True
+    return filled, distributed
+
+
 def _transform_legacy_edit_to_edit_file(
     args: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
@@ -287,6 +408,13 @@ def _transform_legacy_edit_to_edit_file(
             unified['replace_all'] = edit['replaceAll']
         normalized.append(unified)
 
+    # The envelope's shared path is not a declared top-level key, so it is
+    # dropped from ``out`` below; every edit that still lacks a path inherits
+    # it (or the batch's single distinct item path) BEFORE that drop, or the
+    # call fails contract validation for a path the model did supply.
+    normalized, _paths_filled = _distribute_shared_edit_path(
+        normalized, shared_path)
+
     out = {'edits': normalized}
     if args.get('description'):
         out['description'] = args['description']
@@ -299,7 +427,7 @@ def _transform_legacy_edit_to_edit_file(
     for key in _EDIT_FILE_ENVELOPE_PASSTHROUGH_KEYS:
         if key in args:
             out[key] = args[key]
-    return out, changed
+    return out, changed or _paths_filled
 
 
 def _transform_todo_write_nested_envelope(

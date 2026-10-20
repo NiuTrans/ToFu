@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lib.tool_input_repair import resolve_tool_name, validate_then_repair  # noqa: E402
+from lib.tool_input_repair import (  # noqa: E402
+    resolve_tool_name, schema_hint, validate_then_repair)
 from lib.tool_input_repair._schema import _schemas  # noqa: E402
 from lib.tools.contracts import (  # noqa: E402
     ToolContractError,
@@ -634,6 +635,152 @@ def test_todo_write_multi_element_outer_list_not_unwrapped():
     assert out['todos'][0] == {'todos': [], 'id': ''}
     assert ('todo_write', 'structural_transform') not in log
 
+
+def test_edit_file_item_keys_from_claude_edit_are_renamed():
+    """A per-item ``new_string`` is a real value: rename it into ``content``
+    instead of rejecting the call for a missing argument it already holds."""
+    args = {
+        'description': 'x',
+        'edits': [{'file_path': 'a.py', 'operation': 'replace',
+                   'old_string': 'foo', 'new_string': 'bar'}],
+    }
+    out, log = validate_then_repair('edit_file', args)
+    assert out['edits'] == [{'path': 'a.py', 'operation': 'replace',
+                             'anchor': 'foo', 'content': 'bar'}]
+    assert args['edits'] == [{'file_path': 'a.py', 'operation': 'replace',
+                              'old_string': 'foo', 'new_string': 'bar'}]
+    assert log == [('edits[0].path', 'item_param_alias'),
+                   ('edits[0].anchor', 'item_param_alias'),
+                   ('edits[0].content', 'item_param_alias')]
+
+
+def test_edit_file_item_alias_never_clobbers_a_canonical_key():
+    out, log = validate_then_repair('edit_file', {
+        'description': 'x',
+        'edits': [{'path': 'a.py', 'operation': 'replace', 'anchor': 'foo',
+                   'content': 'keep', 'new_string': 'other'}],
+    })
+    assert out['edits'][0]['content'] == 'keep'
+    assert log == []
+
+
+def test_edit_file_item_alias_stays_noop_without_a_recoverable_value():
+    """Nothing to rename means nothing to repair — the contract round must
+    still report ``content`` missing rather than invent a replacement."""
+    args = {'description': 'x', 'edits': [
+        {'path': 'a.py', 'operation': 'replace', 'anchor': 'foo'}]}
+    out, log = validate_then_repair('edit_file', args)
+    assert log == []
+    assert 'content' not in out['edits'][0]
+
+
+def _ingest_edit_file(args_dict):
+    import json as _json
+    from lib.tool_input_repair import ingest_tool_call
+    from lib.tools.project import PROJECT_TOOL_EDIT_FILE
+
+    return ingest_tool_call(
+        {'id': 'tc1', 'function': {
+            'name': 'edit_file', 'arguments': _json.dumps(args_dict)}},
+        emit_audit=False,
+        contract_documents_by_name={'edit_file': adapt_legacy_tool_contract(
+            PROJECT_TOOL_EDIT_FILE).search_document()})
+
+
+def test_edit_file_claude_item_keys_survive_contract_validation():
+    """The reported failure: the replacement text WAS supplied, only under
+    Claude Code's item key — the call must execute, not be rejected."""
+    result = _ingest_edit_file({
+        'description': 'Add bar',
+        'edits': [{'file_path': 'a.py', 'operation': 'replace',
+                   'old_string': 'foo', 'new_string': 'bar'}],
+    })
+    assert result.parse_error is None
+    assert result.fn_args['edits'][0]['content'] == 'bar'
+    assert ('edits[0].content', 'item_param_alias') in result.repair_log
+
+
+def test_edit_file_envelope_path_reaches_every_edit():
+    """A shared top-level ``path`` used to be discarded while items that
+    already declared ``operation`` were left pathless — the call was then
+    rejected for a file the model HAD supplied."""
+    result = _ingest_edit_file({
+        'description': 'Wire main',
+        'path': 'src/app.py',
+        'edits': [{'operation': 'replace', 'anchor': 'foo', 'content': 'bar'}],
+    })
+    assert result.parse_error is None
+    assert result.fn_args['edits'][0]['path'] == 'src/app.py'
+    assert ('edit_file', 'structural_transform') in result.repair_log
+
+
+def test_edit_file_blank_item_path_inherits_the_batch_single_file():
+    """Blank per-item paths are how models spell "same file as this batch"
+    (26 live rejections, every one recovered by re-sending the same edits).
+    With exactly one file named, the blank is unambiguous."""
+    result = _ingest_edit_file({
+        'description': 'Wire main',
+        'edits': [
+            {'path': 'src/app.py', 'operation': 'replace',
+             'anchor': 'foo', 'content': 'bar'},
+            {'path': '', 'operation': 'insert_after',
+             'anchor': 'baz', 'content': 'qux'},
+        ],
+    })
+    assert result.parse_error is None
+    assert [edit['path'] for edit in result.fn_args['edits']] == [
+        'src/app.py', 'src/app.py']
+
+
+def test_edit_file_blank_item_path_in_multi_file_batch_fails_closed():
+    """Two files named means the blank cannot be resolved: picking one would
+    write a file the model may not have meant."""
+    result = _ingest_edit_file({
+        'description': 'Wire two',
+        'edits': [
+            {'path': 'a.py', 'operation': 'replace',
+             'anchor': 'foo', 'content': 'bar'},
+            {'path': 'b.py', 'operation': 'replace',
+             'anchor': 'foo', 'content': 'bar'},
+            {'path': '', 'operation': 'replace',
+             'anchor': 'foo', 'content': 'bar'},
+        ],
+    })
+    assert result.parse_error is not None
+    assert result.fn_args['edits'][2]['path'] == ''
+
+
+def test_edit_file_all_blank_paths_fails_closed_without_guessing():
+    """No file is named anywhere in the call, so nothing may be inferred —
+    the rejection stays honest and the recovery round supplies the path."""
+    result = _ingest_edit_file({
+        'description': 'Wire main',
+        'edits': [{'path': '', 'operation': 'replace',
+                   'anchor': 'foo', 'content': 'bar'}],
+    })
+    assert result.parse_error is not None
+    assert 'edits[0].path' in result.parse_error
+
+def test_edit_file_rejection_names_the_missing_item_key_and_item_shape():
+    """When nothing is recoverable the retry must say WHICH item key is
+    missing and what a complete item looks like."""
+    result = _ingest_edit_file({
+        'description': 'Add bar',
+        'edits': [{'path': 'a.py', 'operation': 'replace', 'anchor': 'foo'}],
+    })
+    assert result.parse_error is not None
+    assert 'content' in result.parse_error
+    assert '$.edits[0]' in result.parse_error
+    assert 'each item needs:' in result.parse_error
+
+def test_schema_hint_names_required_keys_of_array_items():
+    """Top-level `edits(array)` left the recovery round guessing which item
+    key was missing; the hint must name the item shape."""
+    hint = schema_hint('edit_file')
+    assert 'each item needs:' in hint
+    for key in ('path(string)', 'operation(string)', 'anchor(string)',
+                'content(string)'):
+        assert key in hint
 
 def test_todo_write_contract_rejection_carries_schema_hint():
     """The recovery round must see the expected shape, not a bare path —

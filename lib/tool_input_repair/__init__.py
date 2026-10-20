@@ -43,6 +43,22 @@ canonical schema keys (e.g. Claude Code's *Edit* keys
 ``{file_path, old_string, new_string}`` → ``apply_diff``'s
 ``{path, search, replace}``). This is what stops the empty ``File not found:``
 failure when the model calls the right tool with another harness's arg names.
+The same rename runs one level DEEPER for batch edits
+(:func:`_apply_item_param_aliases`), where a per-item ``new_string`` is renamed
+to ``content`` instead of producing a spurious
+``missing_required_arguments`` rejection for text the call already carries.
+Item schemas do not forbid extra keys, so without the rename the alias key
+survives validation and only the canonical key is reported missing — a retry
+loop the model cannot break, since it believes it already sent the value.
+
+The ``edit_file`` structural transform closes the other half of that batch
+shape: a call that names its file ONCE — in an envelope ``path``/``file_path``
+or in the batch's only non-blank item path — and leaves the remaining items
+with an empty or omitted ``path``. Each such item inherits that single
+declared file (:func:`_distribute_shared_edit_path`) instead of failing
+``minLength: 1`` and forcing a full re-emission of the batch. A batch naming
+TWO files keeps the blank item failing closed: picking one would write a file
+the model may not have meant.
 
 After key aliasing but before the per-value type-walk, one constrained-value
 repair handles ``zero_cursor_omission``: the optional, exclusive, 1-based
