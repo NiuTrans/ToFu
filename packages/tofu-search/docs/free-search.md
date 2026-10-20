@@ -91,6 +91,47 @@ failure accounting, deadline exhaustion and snippet/URL fidelity. Package tests
 reject unmocked HTTPX network attempts even when product error handling catches
 them, so a blocked live request cannot masquerade as an offline regression pass.
 
+## Anonymous page-fetch recovery
+
+Problem: urllib3 classifies a timeout waiting for a proxy's CONNECT response
+as a read error. The old `read=0` policy abandoned those attempts after eight
+seconds, before TLS or an origin GET. Increasing the connection wait to 24
+seconds did not reliably recover the observed failures. Status retries could
+also sleep for an origin's arbitrarily long `Retry-After` value.
+
+Decision: `fetch/request_budget.py` supplies the existing pooled adapter's
+retry policy and request-owned socket timeout. Anonymous `do_request` GETs may
+recover one pre-body read failure per HTTP hop, within the existing total of
+two retries. Successful responses and non-retryable statuses add no attempt;
+body-transfer failures retain their existing failure/decoding behavior. The
+configured proxy plan, TLS verification, redirect address checks and byte caps
+keep their current owners. No engine, paid service, persistent state, pool or
+background worker is added.
+
+One monotonic request context bounds successive attempts to the lesser of
+`timeout * 3` and the caller's absolute deadline. Retry clones and redirects
+use the remaining time, and no later attempt starts after it expires. An
+unaffordable status retry returns the received HTTP status for normal response
+closure; affordable `Retry-After` delays are honored. The context resets on
+every exit and does not change concurrent calls or direct shared-session users,
+including the separate publication-date prefix lookup.
+
+These remain cooperative bounds. Requests/urllib3 socket timeouts cannot
+hard-cancel a running read or body drain; body chunk checks and the outer
+caller's lifecycle still apply. A persistently failing route can spend more
+of the original budget before returning failure. No global retry count is
+increased to hide that latency tradeoff. See the official
+[Requests timeout semantics](https://requests.readthedocs.io/en/latest/user/advanced/#timeouts)
+and [urllib3 timeout and retry contracts](https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html).
+
+Alternatives considered: raising the fixed connect timeout prolonged observed
+failures without reliable recovery; mutating shared adapter settings would mix
+concurrent callers; an outer retry loop would duplicate urllib3's counts and
+response ownership. Tests use owned local HTTP servers to exercise recovery,
+status preservation/closure, expired redirects, truncated bodies and concurrent
+deadlines. Alternating live probes must retain every failure and phase timing;
+successful recovery on one route does not establish overall search superiority.
+
 ## SearXNG response and recovery contract
 
 Problem: accepting the first nonempty response let generic listings prevent

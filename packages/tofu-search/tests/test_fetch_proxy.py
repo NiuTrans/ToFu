@@ -143,7 +143,12 @@ def test_body_deadline_raises_timeout_and_closes_responses(monkeypatch, decode_r
         monkeypatch.setattr(original, 'iter_content', broken_content)
     responses = iter([original, retry])
     session = _use(monkeypatch, lambda proxies: next(responses))
-    monkeypatch.setattr(fetch_http.time, 'time', lambda: 10.0)
+    clock = [8.0]
+    monkeypatch.setattr(fetch_http.time, 'time', lambda: clock[0])
+    def delayed_content(_chunk):
+        clock[0] = 10.0
+        yield b'content'
+    monkeypatch.setattr(retry if decode_retry else original, 'iter_content', delayed_content)
     with pytest.raises(requests.exceptions.Timeout, match='body deadline'):
         fetch_http.do_request(_URL, timeout=5, deadline_ts=9.0)
     assert original.closed
