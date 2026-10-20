@@ -30,6 +30,7 @@ def source_fingerprint(root):
     files = sorted((root / 'packages/tofu-search/tofu_search').rglob('*.py'))
     files += sorted((root / 'evaluations/search_quality').glob('*.py'))
     files += [root / p for p in (
+        'packages/tofu-search/pyproject.toml',
         'evaluations/programmatic_pilot/native_api.py', 'evaluations/application_api.py',
         'lib/agent_core/run_contract.py', 'lib/project_mod/process_group.py')]
     return digest({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
