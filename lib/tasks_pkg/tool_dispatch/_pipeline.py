@@ -577,6 +577,7 @@ def _settle_tool_result(
     settled_results: dict[str, Any] | None = None,
     pending_envelopes: dict[str, Any] | None = None,
     canonical_content: Any = None,
+    produced_cache_entry: Any = None,
 ) -> Any:
     """Settle ONE tool call: budget its result, stamp the round, emit
     ``tool_complete``. Returns the final (budgeted) content for the message.
@@ -691,8 +692,8 @@ def _settle_tool_result(
         # settlement boundary so a later authorized call can observe recovery.
         if isinstance(round_entry, dict):
             round_entry['_cacheableResult'] = False
-        if fn_name in idempotent_tools:
-            cache.pop(_make_cache_key(fn_name, fn_args), None)
+        if _sync_key is not None and produced_cache_entry is not None:
+            _discard_tool_result_cache_entry(task, _sync_key, produced_cache_entry)
     if isinstance(tool_content, str):
         tool_content = TrustedResultText(tool_content, canonical=captured_result,
                                          envelope=isinstance(tool_content, TrustedResultText) and tool_content.envelope)
@@ -829,7 +830,8 @@ def _settle_tool_result(
     # so the rich UI-replay path is unchanged. Producer sidecars in slots 8–9
     # are consumed here: the cache then owns the final internal envelope and
     # must not retain a second preview/omission representation.
-    if isinstance(tool_content, str) and fn_name in idempotent_tools:
+    if (captured_result.execution_status == 'ok'
+            and isinstance(tool_content, str) and fn_name in idempotent_tools):
         _cached_entry = _producer_cache_entry
         if (_cached_entry is not None
                 and isinstance(_cached_entry, (tuple, list))
@@ -2141,6 +2143,7 @@ def execute_tool_pipeline(
     # complete results through the task dict.
     _settled_results: dict[str, Any] = {}
     _pending_envelopes: dict[str, Any] = {}
+    _produced_cache_entries: dict[str, Any] = {}
     task.pop('_settled_tool_results', None)  # repair pre-C234 live task state
 
     def _settle_current(*args: Any, **kwargs: Any) -> Any:
@@ -2149,6 +2152,7 @@ def execute_tool_pipeline(
         kwargs['unchanged_receipt_tools'] = unchanged_receipt_tools
         kwargs['settled_results'] = _settled_results
         kwargs['pending_envelopes'] = _pending_envelopes
+        kwargs['produced_cache_entry'] = _produced_cache_entries.get(args[2])
         return _settle_tool_result(*args, **kwargs)
     # Auto-apply default (2026-08-21 policy): writes do NOT require approval
     # unless the user explicitly switched this conversation to Manual
@@ -2942,9 +2946,17 @@ def execute_tool_pipeline(
                                     _pi_search_diag)
                                 if _pi_projection is not None:
                                     _pi_cache_entry += (_pi_projection,)
-                                _store_tool_result_cache_entry(
-                                    task, _pi_cache_key, _pi_cache_entry,
-                                    generation=_start_generation)
+                                # Retain this occurrence's actual publication,
+                                # including a freshness wrapper, before another
+                                # pipeline can replace the same query receipt.
+                                with _tool_receipt_lock(task):
+                                    previous = _cache.get(_pi_cache_key)
+                                    _store_tool_result_cache_entry(
+                                        task, _pi_cache_key, _pi_cache_entry,
+                                        generation=_start_generation)
+                                    published = _cache.get(_pi_cache_key)
+                                    if published is not None and published is not previous:
+                                        _produced_cache_entries[ret_tc_id] = published
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                              'insert_content', 'insert_contents',

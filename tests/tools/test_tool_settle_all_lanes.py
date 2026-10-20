@@ -118,6 +118,34 @@ def _mk_tc(tc_id: str, fn_name: str, seq: int, *, parse_err=None, args=None):
             round_entry, parse_err)
 
 
+@pytest.mark.parametrize('publish_during_settlement', [False, True])
+@pytest.mark.parametrize('same_payload', [False, True])
+def test_failed_occurrence_cannot_evict_a_successful_sibling_receipt(
+        rec, monkeypatch, publish_during_settlement, same_payload):
+    from lib.tasks_pkg.tool_dispatch import _pipeline as pipeline
+    from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key, _store_tool_result_cache_entry
+    from lib.tools.result_envelope import typed_tool_error
+    task = _mk_task(config={'tools': {'resultEnvelope': 'legacy'}})
+    parsed = _mk_tc('failed', 'fetch_url', 1)
+    failure = typed_tool_error('source_failed', retryable=False,
+        next_action='Use another source.', message='source failed').to_envelope_text()
+    key = _make_cache_key('fetch_url', {})
+    # Identical bytes can be a successful document from another occurrence.
+    success = (str(failure) if same_payload else 'successful sibling', False)
+    def publish(*args):
+        _store_tool_result_cache_entry(task, key, success)
+        return failure
+    if publish_during_settlement:
+        monkeypatch.setattr(pipeline, 'run_post_hooks', publish)
+    else:
+        publish()
+    pipeline._settle_tool_result(task, 'fetch_url', 'failed', {}, parsed[4], parsed[5],
+        failure, idempotent_tools={'fetch_url'}, cache=task.setdefault('_tool_result_cache', {}),
+        tid=task['id'], round_num=0, settled_results={})
+    assert parsed[5]['status'] == 'error'
+    assert task['_tool_result_cache'].get(key) is success
+
+
 def test_compacting_one_result_cannot_overwrite_a_later_identical_query(rec, monkeypatch):
     from lib.tasks_pkg.tool_dispatch import _pipeline as pipeline
     from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key, _store_tool_result_cache_entry
@@ -136,6 +164,29 @@ def test_compacting_one_result_cannot_overwrite_a_later_identical_query(rec, mon
         tid=task['id'], round_num=0, settled_results={})
     assert content == 'first compact'
     assert task['_tool_result_cache'][key] is newer
+
+
+@pytest.mark.parametrize('replaced', [False, True])
+def test_failed_settlement_withdraws_only_its_own_published_receipt(rec, monkeypatch, replaced):
+    from lib.tasks_pkg.tool_dispatch import _pipeline as pipeline
+    from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key, _store_tool_result_cache_entry
+    task = _mk_task(config={'tools': {'resultEnvelope': 'legacy'}})
+    parsed = _mk_tc('failed', 'fetch_url', 1)
+    key = _make_cache_key('fetch_url', {})
+    produced = ('handler response before final verdict', False)
+    newer = ('successful sibling', False)
+    _store_tool_result_cache_entry(task, key, produced)
+    def fail_projection(*args):
+        if replaced:
+            _store_tool_result_cache_entry(task, key, newer)
+        return produced[0]
+    monkeypatch.setattr(pipeline, 'run_post_hooks', fail_projection)
+    pipeline._settle_tool_result(task, 'fetch_url', 'failed', {}, parsed[4], parsed[5],
+        produced[0], idempotent_tools={'fetch_url'}, cache=task['_tool_result_cache'],
+        tid=task['id'], round_num=0, settled_results={}, produced_cache_entry=produced,
+        terminal_status='error')
+    assert parsed[5]['status'] == 'error'
+    assert task['_tool_result_cache'].get(key) is (newer if replaced else None)
 
 
 class _Recorder:
