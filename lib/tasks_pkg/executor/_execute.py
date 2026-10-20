@@ -336,6 +336,10 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
         f'Arguments received: {arg_preview}'
     )
     content = uncertain_effect_error(round_entry, err_msg)
+    if isinstance(exc, TimeoutError) and content == err_msg:
+        from lib.tasks_pkg.executor._effects import tool_timeout_result
+        content = tool_timeout_result(
+            task, fn_name, round_entry, message=err_msg)
     if isinstance(exc, _InvalidToolHandlerResult) and content == err_msg:
         from lib.tools.result_envelope import typed_tool_error
         content = typed_tool_error(
