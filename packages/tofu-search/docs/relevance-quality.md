@@ -193,6 +193,33 @@ retrieval coverage, stale/blocked sources, source correctness, latency and
 downstream task completion with a fixed agent/model and comparable budgets.
 Neither this benchmark nor green unit tests establish community leadership.
 
+`benchmarks/search_html_reference.py` scores previously frozen `<case>.md`
+outputs against a local Mozilla Readability `test-pages/<case>/expected.html`
+corpus, retaining source/reference/output hashes and optional input-manifest
+hashes. It performs no retrieval or model calls. Missing output cases remain
+in the denominator as failures; incomplete reference corpora refuse scoring.
+
+**Problem:** inserting a separator between every HTML text node splits words
+across inline tags and can penalize faithful extraction. **Decision:** metric
+version 2 separates DOM blocks but preserves inline continuations, applying
+the same HTML text rule to references and rendered Markdown. It records parser
+versions and refuses to overwrite reports. **Alternatives rejected:** stripping
+all tags without block boundaries joins separate words; editing scores or
+reference labels after a result obscures the measurement error. Retain older
+reports under their original definitions and rescore identical bytes separately.
+
+```bash
+python benchmarks/search_html_reference.py \
+  --corpus /tmp/readability-corpus --outputs /tmp/frozen-extractions \
+  --out /tmp/html-word-overlap-v2.json
+```
+
+This is Unicode word overlap, not semantic entailment or field completeness.
+It does not model CSS/JavaScript visibility or segment CJK into linguistic
+words. Article-oriented references and an average score can hide omitted facts
+or extra bylines; inspect individual cases and preserve separate agent results.
+Verify `tests/meta/test_search_html_reference.py` before comparing measurements.
+
 ### Agent retrieval diagnostic
 
 [`evaluations/search_quality`](../../../evaluations/search_quality/README.md)

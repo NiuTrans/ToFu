@@ -120,6 +120,7 @@ __pycache__/
 /benchmarks/*
 !/benchmarks/AGENTS.md
 !/benchmarks/search_relevance.py
+!/benchmarks/search_html_reference.py
 !/benchmarks/desktop_runtime.py
 !/benchmarks/conversation_concurrency.py
 !/benchmarks/conversation_concurrency_contract.json
