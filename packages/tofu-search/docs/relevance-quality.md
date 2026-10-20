@@ -79,10 +79,36 @@ body evidence is evaluated separately and can establish relevance later.
 
 **Alternatives rejected:** blocking a host would also suppress genuine articles;
 requiring every search snippet to answer the question would discard useful
-discovery leads. Replacing all snippet scores with equal upstream/local rank
-votes can cancel opposing orderings and regress stronger lexical matches. The
-query-only check changes the observation evidence boundary instead, with no
+discovery leads. Rank votes cannot establish that query-only metadata contains
+useful evidence. The query-only check owns that observation boundary, with no
 model, external service or new worker. It is not a general spam or truth detector.
+
+**Problem:** snippet BM25 scores depend on metadata wording and the candidate
+pool. Adding a small fixed multiple of engine rank can let keyword-heavy
+metadata overwhelm useful upstream placement even after relevance admission.
+
+**Decision:** for pools with no fetched body and at least one upstream rank,
+combine the existing upstream reciprocal-rank sum with one local lexical rank
+vote, `1 / (60 + rank)`. The collector and local ranker share the same offset,
+following [reciprocal rank fusion](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion).
+Local ranks retain the current lexical scorer and bounded source hints. Only
+positive lexical evidence admits rank votes; engine counts do not add a second
+consensus bonus. Equal fused scores prefer the local lexical rank, then original
+position. Existing entity and domain diversity apply afterward. Pools with any
+fetched body, no upstream ranks or no query subject retain their current policy.
+
+The same owner ranks snippets before fetching, so this can change which URLs
+receive the existing fetch budget. It adds no service, worker, model call or
+budget. `tests/test_snippet_rank_fusion.py` and the public small-pool tests cover
+upstream placement, query-only uncertainty, zero-evidence candidates, fetched
+bodies and explicit `rerank=False`.
+
+**Alternatives rejected:** a raw-score multiplier needs calibration across
+different queries and metadata lengths; engine-only ordering discards local
+evidence. Equal rank sums with arrival-order ties can restore a weaker first
+result when the upstream and lexical orders oppose each other. Lexical tie
+ordering preserves the stronger match in that case. Engine agreement remains
+a retrieval signal, not independent verification or an answer-quality grade.
 
 **Problem:** a fixed document prefix can hide the answer even after a successful
 fetch. Search operators, navigation inventories and repeated text can consume

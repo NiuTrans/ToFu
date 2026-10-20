@@ -47,7 +47,7 @@ from tofu_search.search.engines.searxng import search_searxng
 from tofu_search.search.engines.xhs import search_xhs, xhs_search_available
 from tofu_search.search.prefetch_gate import partition_fetchable
 from tofu_search.search.quality import annotate_relevance, matches_site_constraints, site_scopes
-from tofu_search.search.rerank import rerank_by_bm25
+from tofu_search.search.rerank import RRF_RANK_OFFSET, rerank_by_bm25
 
 logger = get_logger(__name__)
 
@@ -328,7 +328,7 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                         (r.get('sources') or []) + [source]))
                     r['engine_count'] = max(
                         len(r['sources']), int(r.get('engine_count') or 1))
-                    r['rrf_score'] = float(r.get('rrf_score') or 0.0) + 1.0 / (60 + rank)
+                    r['rrf_score'] = float(r.get('rrf_score') or 0.0) + 1.0 / (RRF_RANK_OFFSET + rank)
                     r['source_rank'] = rank
                     seen_results[key] = r
                     unique_results.append(r)
@@ -341,7 +341,7 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                     sources = kept.setdefault('sources', [kept.get('source', 'Unknown')])
                     if source not in sources:
                         sources.append(source)
-                        kept['rrf_score'] = float(kept.get('rrf_score') or 0.0) + 1.0 / (60 + rank)
+                        kept['rrf_score'] = float(kept.get('rrf_score') or 0.0) + 1.0 / (RRF_RANK_OFFSET + rank)
                     kept['engine_count'] = max(
                         len(sources), int(kept.get('engine_count') or 1),
                         int(r.get('engine_count') or 1))

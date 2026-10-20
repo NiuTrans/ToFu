@@ -141,9 +141,13 @@ jsonschema>=4.18
 # >=0.12.5: rank small candidate pools through the public search boundary.
 # SOFT floor for startup; later relevant results no longer remain below the
 # earliest candidate solely because the pool fits within the result limit.
-# >=0.12.7: recover one unpublished worker startup without repeating tool work.
+# >=0.12.6: query-only collection descriptions stay uncertain and recoverable.
 # SOFT floor for startup; question repetition alone no longer claims relevance.
-tofu-search>=0.12.7
+# >=0.12.7: snippet rank fusion preserves upstream placement and lexical ties.
+# SOFT floor for startup; upstream consensus needs lexical evidence to promote.
+# >=0.12.8: recover one unpublished worker startup without repeating tool work.
+# SOFT floor for startup; persistent refusal preserves successful siblings.
+tofu-search>=0.12.8
 trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches

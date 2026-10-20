@@ -1,4 +1,4 @@
-"""BM25 reranking over query-focused body evidence and SERP fields.
+"""Body-evidence BM25 and reciprocal-rank fusion for snippet-only candidates.
 
 Operates on LLM-cleaned full page content (``full_content``) when available,
 falling back to ``title — snippet`` for results that were not fetched.
@@ -39,8 +39,10 @@ BM25_B = 0.75
 # scans the whole extracted body so late evidence has equal opportunity.
 _MAX_RERANK_CHARS = 8_000
 
-# Search-engine rank/consensus and successful extraction are useful weak
-# signals, but lexical relevance and authority must remain dominant.
+# The engine collector and snippet-only fusion share the same rank scale.
+RRF_RANK_OFFSET = 60
+
+# Fetched-body ranking retains lexical scores with weak upstream priors.
 RRF_WEIGHT = 8.0
 CONTENT_AVAILABLE_BOOST = 0.25
 
@@ -179,10 +181,13 @@ def _diversify_by_domain(
 
 
 def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
-    """Rerank search results by BM25 score of query vs document content.
+    """Rank body evidence with BM25; fuse native and local snippet ranks.
 
     Uses the ``full_content`` field when available, falling back to
     ``title + snippet`` for results that lack fetched content.
+    Snippet-only pools with upstream ranks combine rank votes instead of raw
+    BM25 scores. Missing upstream ranks or any fetched body retain the original
+    scoring policy. Equal fused scores prefer the stronger local lexical rank.
 
     Pure Python, no external API calls — typically completes in <10ms.
 
@@ -207,6 +212,8 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
         return results[:top_k]
 
     query_terms = set(query_tokens)
+    fuse_snippet_ranks = (not any(result.get('full_content') for result in results)
+                          and any(result.get('rrf_score') for result in results))
 
     # Tokenize all documents
     doc_texts = [_build_doc_text(r, query) for r in results]
@@ -252,9 +259,10 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
             # Engine agreement and extraction success also require some query
             # evidence. A popular/fetched unrelated page must not outrank an
             # answer or reserve an entity-diversification slot.
-            score += float(result.get('rrf_score') or 0.0) * RRF_WEIGHT
-            engine_count = max(1, int(result.get('engine_count') or 1))
-            score += min(0.9, math.log2(engine_count) * 0.3)
+            if not fuse_snippet_ranks:
+                score += float(result.get('rrf_score') or 0.0) * RRF_WEIGHT
+                engine_count = max(1, int(result.get('engine_count') or 1))
+                score += min(0.9, math.log2(engine_count) * 0.3)
             if result.get('full_content'):
                 score += CONTENT_AVAILABLE_BOOST
 
@@ -262,6 +270,18 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
 
     # Sort by score descending, break ties by original position
     scored.sort(key=lambda x: (-x[0], x[1]))
+
+    if fuse_snippet_ranks:
+        # One local vote uses the same units as the upstream rank sum. Native
+        # order and local evidence can cancel, so tied fusion scores keep the
+        # stronger lexical result first, including small candidate pools.
+        lexical_positions = {index: rank for rank, (_, index, _) in enumerate(scored, 1)}
+        scored = [
+            (float(result.get('rrf_score') or 0.0) + 1.0 / (RRF_RANK_OFFSET + rank)
+             if score > 0 else 0.0, index, result)
+            for rank, (score, index, result) in enumerate(scored, 1)
+        ]
+        scored.sort(key=lambda x: (-x[0], lexical_positions[x[1]], x[1]))
 
     diversified = _diversify_by_entity(subject, scored, top_k)
     if diversified is not None:
@@ -271,7 +291,8 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
 
     elapsed = time.time() - t0
     scores_str = ', '.join(f'#{item[1]}:{item[0]:.3f}' for item in scored[:top_k])
-    logger.info('[Rerank] BM25 %d->%d results in %.1fms. div=%s Top-%d (idx:score): %s  query=%r',
+    logger.info('[Rerank] %s %d->%d results in %.1fms. div=%s Top-%d (idx:score): %s  query=%r',
+                'BM25+RRF' if fuse_snippet_ranks else 'BM25',
                 len(results), top_k, elapsed * 1000, diversified is not None,
                 top_k, scores_str, query[:60])
 
