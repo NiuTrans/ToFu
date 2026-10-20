@@ -409,11 +409,12 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
       2. emits ``phase:retrying`` with the attempt/backoff detail (the same
          transient-status contract the inner stream-retry path uses);
       3. sleeps the backoff (interruptible by user abort);
-      4. resets the per-turn task accumulators to a clean 'running' state
-         (mirroring ``_run_single_turn``) while KEEPING ``task['messages']`` —
-         which already holds every completed tool round as history, so the
-         re-run resumes after them and never double-executes a tool;
-      5. re-invokes :func:`run_task`.
+      4. carries forward paid usage, restores the pristine invocation input,
+         and resets per-invocation accumulators to a clean 'running' state;
+      5. re-enters the existing invocation owner.
+
+    Whole-turn regeneration is admitted only before any tool entry. Completed
+    tool histories are not replayed by this path.
 
     Returns True iff a retry was launched (caller must ``return`` without
     finalizing).  Returns False when the error is not auto-retryable, the
@@ -1156,9 +1157,8 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
 
     # ── Turn-level auto-retry over TRANSIENT terminal errors ──
     # Before finalizing a failed turn, check whether the settled error is a
-    # transient transport/dispatch failure worth transparently re-running the
-    # WHOLE turn for (429 / no_slot / timeout / network / premature_close /
-    # abnormal_stop / server_offline / tool_timeout).  If so — and the budget
+    # transient transport/dispatch failure admitted by the shared retry policy.
+    # If so — and the budget
     # is not exhausted and the caller didn't opt out — reset per-turn state,
     # tell the client to clear the partial bubble (retry_reset), back off, and
     # re-run run_task.  This spares the user from manually clicking Retry on

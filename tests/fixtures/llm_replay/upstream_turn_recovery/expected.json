@@ -1,0 +1,5 @@
+{
+  "status": "done",
+  "content": "The request completed after the temporary provider outage.",
+  "retry_count": 1
+}

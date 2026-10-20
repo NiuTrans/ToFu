@@ -75,14 +75,19 @@ def test_exploding_env_degrades_to_fallback_with_warning():
 def test_execute_dispatches_through_the_seam(monkeypatch):
     from types import SimpleNamespace
     from lib.tasks_pkg.executor import _execute, _resolver
-    calls=[];states=[];released=[]
+    from lib.tasks_pkg.tool_runtime.context import ToolExecutionContext
+    calls=[];released=[]
     def handler(*args):return 'seam-call','seam-result',False
     def lookup(name,entry):calls.append((name,entry));return handler
     monkeypatch.setattr(_resolver,'resolver_for',lambda task:SimpleNamespace(lookup=lookup))
-    context=SimpleNamespace(cancellation_requested=False,settle_once=states.append)
+    task={'id':'seam-task','config':{},'_userId':71}
+    entry={'tStart':0}
+    context=ToolExecutionContext(
+        task=task,round_num=1,tool_call_id='seam-call',tool_name='seam-tool',
+        owner_user_id=71,round_entry=entry)
     monkeypatch.setattr(_execute,'context_for_task',lambda *args,**kwargs:context)
     monkeypatch.setattr(_execute,'unregister_context',released.append)
-    entry={'tStart':0}
-    result=_execute._execute_tool_one({'id':'seam-task','config':{}}, {},'seam-tool','seam-call',{},1,entry,{},None,False)
+    result=_execute._execute_tool_one(task, {},'seam-tool','seam-call',{},1,entry,{},None,False)
     assert result==('seam-call','seam-result',False)
-    assert calls==[('seam-tool',entry)] and states==['done'] and released==[context]
+    assert calls==[('seam-tool',entry)] and released==[context]
+    assert context.terminal_state==entry['_runtimeState']=='done'

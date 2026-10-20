@@ -114,7 +114,9 @@ class TestRunTaskDelegation:
     def test_round_dispatch_closes_prefetch_on_every_exit(self):
         import lib.tasks_pkg.orchestrator._root_agent_loop as _root_agent_loop
 
-        src = inspect.getsource(_root_agent_loop._RootLoopHooks.dispatch)
+        dispatch = inspect.getsource(_root_agent_loop._RootLoopHooks.dispatch)
+        assert 'return self._dispatch_open_round(round_num, round_tools)' in dispatch
+        src = inspect.getsource(_root_agent_loop._RootLoopHooks._dispatch_open_round)
         assert 'finally:' in src
         assert 'stream_accumulator.close(' in src
         assert src.index('run_llm_call_with_fallback(') \

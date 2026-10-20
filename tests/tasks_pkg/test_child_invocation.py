@@ -453,7 +453,10 @@ def test_conversation_child_keeps_root_tool_discovery_but_not_human_approval(mon
         assert enabled and returned == visible
         assert _known_tool_names(child) == {
             'read_files', 'spawn_agents', 'fixture_hidden', 'search_tools',
-            'execute_tools', 'execute_program'}
+            'execute_tools'}
+        # Program execution requires the declared program tier; ordinary tool
+        # discovery does not grant it implicitly to a child.
+        assert 'execute_program' not in _known_tool_names(child)
         assert child['_toolSearchMode'] == 'on'
         assert child['_toolScriptSafeByName']['fixture_hidden']
         assert child['_executableToolNamespaceByName']['fixture_hidden'] == 'fixture'

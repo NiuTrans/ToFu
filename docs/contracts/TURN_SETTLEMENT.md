@@ -587,6 +587,37 @@ execution batch may supersede the old blocker. Alternatives rejected: treating
 `retryable` as permission to replay immediately, asking the model to invent a
 magic stopping token, or converting a tool refusal into successful settlement.
 
+Whole-turn regeneration uses that same `automatic_recovery_blocker` before
+spending an attempt or clearing presentation. Problem: the error classifier
+marked provider 5xx and temporary gateway failures as retryable
+`upstream_error`, while the outer retry policy omitted that kind; it also
+ignored explicit manual/condition-change metadata on otherwise transient kinds.
+Decision: eligible `upstream_error` failures join the existing bounded
+whole-turn policy, and all eligible kinds obey the common typed blocker.
+The configured inner gateway wait still defaults to waiting for recovery or
+owner cancellation. If it exits, the existing whole-turn allowance, opt-out,
+Stop, partial-reply protection and before-tool-entry guard govern regeneration.
+Paid usage is carried forward, pristine input is restored, and ordinary
+invocation owners run each admitted attempt with one terminal settlement.
+Alternatives rejected:
+changing error taxonomy hides the provider cause; raising inner budgets does
+not repair outer-policy drift; a separate retry loop forks lifecycle ownership.
+Verify `test_upstream_auto_recovery.py` and the real invocation/dispatch/storage
+scenarios in `tests/llm/test_upstream_turn_replay.py`.
+
+Announced model rounds must close before outer recovery or terminal failure.
+Problem: dispatch exceptions bypassed normal round settlement, leaving an open
+round across the retry reset or final error. Decision: the root adapter closes
+the announced round when model dispatch/preparation raises, after dispatch
+cleanup, then propagates the original exception. A failed close propagates as
+an event-delivery failure, retaining the dispatch cause and blocking provider
+replay. Successful dispatch keeps normal settlement ownership. Alternatives
+rejected: treating `retry_reset` as an implicit close weakens durable event
+pairing and leaves non-retried failures open; a second retry loop or persistent
+round-state flag duplicates lifecycle ownership. Verify
+`tests/tasks_pkg/test_model_round_failure_boundary.py` and the replay scenarios
+above, including explicit retry opt-out.
+
 Build-specific verification: `tofudb_native_parity_20261001.json`.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

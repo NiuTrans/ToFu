@@ -75,6 +75,28 @@ CASES: dict[str, tuple[dict, str]] = {
     'browser_check': ({'tab_id': '7', 'selector': '#subscribe', 'checked': False}, '#subscribe'),
     'browser_select_option': ({'tab_id': '7', 'selector': '#region', 'option': 'Europe'}, 'Europe'),
     'consider_project_message': ({'message_id': 'message-7', 'decision': 'accepted', 'note': 'Run scoped parser check', 'expected_revision': 1}, 'Run scoped parser check'),
+    'create_conversation': ({
+        'title': 'Review parser migration', 'idempotency_key': 'create-7',
+    }, 'Review parser migration'),
+    'dispatch_project_assignment': ({
+        'assignment_id': 'assignment-7', 'expected_revision': 2,
+    }, 'assignment-7'),
+    'delegate_project_work': ({
+        'title': 'Parser review', 'brief': 'Inspect parser changes and report failing cases',
+        'idempotency_key': 'delegate-7',
+    }, 'Inspect parser changes and report failing cases'),
+    'cancel_project_work': ({'assignment_id': 'assignment-7'}, 'assignment-7'),
+    'review_project_work': ({
+        'assignment_id': 'assignment-7', 'result_revision': 2,
+        'decision': 'rework', 'note': 'Repair the missing timeout case',
+    }, 'Repair the missing timeout case'),
+    'finish_project_request': ({
+        'report_turn_id': 'report-turn-7', 'outcome': 'complete',
+    }, 'report-turn-7'),
+    'report_to_user': ({
+        'title': 'Parser verified', 'message': 'All parser checks passed',
+        'kind': 'delivery', 'idempotency_key': 'report-7',
+    }, 'All parser checks passed'),
     'evolution_explore': ({'action': 'read', 'program_id': 'program-7'}, 'program-7'),
     'manage_agents': ({'action': 'create', 'name': 'Parser reviewer', 'objective': 'Inspect parser changes'}, 'Inspect parser changes'),
     'publish_response_file': ({'path': 'reports/audit.pdf', 'title': 'Audit'}, 'reports/audit.pdf'),

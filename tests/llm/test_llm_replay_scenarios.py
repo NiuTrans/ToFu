@@ -608,6 +608,12 @@ def test_parallel_tools_timeout(tmp_path, monkeypatch):
     slow_content = tool_messages.get(expected['slow_call_id'], '')
     assert expected['timeout_sentinel'] in slow_content, (
         f'slow call did not settle as the timeout sentinel: {slow_content!r}')
+    # The model receives typed recovery instructions for a declared read-only
+    # timeout; retaining only the old summary loses the replay decision.
+    slow_failure = json.loads(slow_content)
+    assert slow_failure['code'] == 'tool_execution_timeout'
+    assert slow_failure['retryable'] is True
+    assert 'normal tool gateway and authorization checks' in slow_failure['nextAction']
     fast_content = tool_messages.get(expected['fast_call_id'], '')
     assert 'FAST-FILE-BODY' in fast_content, (
         f'fast call lost its real read result: {fast_content!r}')

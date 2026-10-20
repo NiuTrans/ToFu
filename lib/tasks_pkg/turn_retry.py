@@ -1,47 +1,15 @@
-"""Turn-level automatic retry — self-healing over transient terminal errors.
+"""Bounded automatic regeneration after transient provider/dispatch failures.
 
-Tofu already has deep *intra-turn* resilience: the SSE layer retries premature
-/ zero-byte / empty-stop stream anomalies up to 16× (see
-``lib/tasks_pkg/stream_handler.py``), ``_llm_call_with_fallback`` transparently
-swaps to a fallback model, and ``PromptTooLongError`` triggers reactive
-compaction.  But once a turn *settles* into ``status='error'`` — even when the
-typed error envelope is flagged ``retryable`` (``ratelimit`` / ``no_slot`` /
-``timeout`` / ``network`` / ``premature_close`` / ``abnormal_stop`` /
-``server_offline`` / ``tool_timeout``) — the conversation just stops and waits
-for the user to click Retry.
+``should_auto_retry_turn`` is a pure decision shared by normal and fatal task
+finalization. Eligible error kinds use the existing Turn recovery blocker,
+attempt budget and caller opt-out. Explicit manual/condition-change policy,
+protocol failures and exhausted automatic budgets cannot be retried here.
 
-A user firing many parallel conversations then has to babysit each one: a
-transient 429 or a gateway hiccup on any single turn strands it.  This module
-adds the missing layer: a **bounded turn-level auto-retry** so the runtime
-re-runs a settled-but-transiently-failed turn on its own, and only surfaces the
-error for manual intervention once the budget is exhausted.
-
-Design
-------
-* PURE decision logic here (``should_auto_retry_turn``); the orchestrator owns
-  the re-run mechanics (reset per-turn accumulators, emit ``phase:retrying`` +
-  ``retry_reset``, sleep, re-enter the loop).  Keeping the verdict pure makes
-  it unit-testable without a DB / route harness (the project's NC-bite habit).
-* Only the ``_AUTO_RETRY_KINDS`` set is eligible — the transient transport /
-  dispatch failures where re-running the SAME request is genuinely likely to
-  succeed.  Persistent kinds (``quota`` / ``permission`` / ``content_filter`` /
-  ``invalid_image`` / ``prompt_too_long`` / ``model_limit`` / ``internal`` /
-  ``dispatch_exhausted``) are NEVER auto-retried — a re-run would just re-fail
-  and waste tokens; those still surface immediately for the user to act on.
-* Bounded: ``_AUTO_TURN_RETRY_MAX`` attempts, exponential backoff with jitter,
-  interruptible by user abort.  This sits ABOVE the inner per-round retry
-  budgets, so the two compose (inner retries exhaust → turn errors → at most a
-  few whole-turn re-runs).
-* Opt-out: ``cfg['disableAutoTurnRetry'] == True`` forces no auto-retry
-  (headless benchmarks that must observe the raw error, mirroring
-  ``disableModelFallback``).
-
-The re-run replays from ``task['messages']``, which by the time the orchestrator
-reaches finalization holds every COMPLETED tool round as history (the error
-break falls through to the ``task['messages'] = messages`` write-back before
-finalize).  A transient error fires at the LLM-stream boundary — BEFORE any
-tool executes in the failing round — so re-running never double-executes a
-side-effecting tool; the model simply resumes after the last committed round.
+The orchestrator owns execution: it admits regeneration only before tool
+entry, preserves paid usage and restores the pristine invocation input.
+Owner cancellation and retained partial replies keep their existing guards.
+Backoff, events, recursive invocation and terminal settlement are not duplicated
+in this policy module. Inner transport retries retain their own lifecycles.
 """
 
 from __future__ import annotations
@@ -67,6 +35,7 @@ _AUTO_RETRY_KINDS = frozenset({
     'premature_close',  # gateway cut the SSE stream (inner retries exhausted)
     'abnormal_stop',    # missing finish marker (inner retries exhausted)
     'server_offline',   # transient server-side unavailability
+    'upstream_error',   # typed 5xx / gateway outage after inner recovery exits
     'tool_timeout',     # repeated tool-execution timeouts — often transient
 })
 
@@ -127,7 +96,7 @@ def should_auto_retry_turn(error_envelope, attempt: int,
     ----------
     error_envelope : dict | None
         The typed error envelope on ``task['error']`` (see
-        ``lib/error_envelope.py``).  ``None`` / non-dict → no retry.
+        ``lib/error_envelope/``).  ``None`` / non-dict → no retry.
     attempt : int
         How many whole-turn auto-retries have ALREADY happened (0 on the
         first failure).  The next attempt would be ``attempt + 1``.
@@ -139,7 +108,8 @@ def should_auto_retry_turn(error_envelope, attempt: int,
     -------
     (retry, backoff_seconds)
         ``retry`` is True iff the envelope's kind is auto-retryable, the
-        caller opted in, and the budget is not yet exhausted.  When True,
+        shared recovery policy permits it, the caller has not opted out,
+        and the budget is not yet exhausted. When True,
         ``backoff_seconds`` is how long to wait before the re-run; when
         False it is 0.0.
     """
@@ -149,15 +119,15 @@ def should_auto_retry_turn(error_envelope, attempt: int,
     if not isinstance(error_envelope, dict):
         return False, 0.0
 
-    # Some inner recovery loops already exhausted a wall-clock-aware retry
-    # budget. Re-running the whole turn resets their phase counter and can
-    # multiply a bounded failure into an hour-long unattended loop. The error
-    # remains manually retryable; this marker only prevents automatic replay.
-    if error_envelope.get('autoRetryExhausted'):
-        return False, 0.0
-
     kind = error_envelope.get('kind')
     if kind not in _AUTO_RETRY_KINDS:
+        return False, 0.0
+
+    # Settlement, child wakes and this retry path must agree on typed blockers.
+    # A transient kind alone cannot override explicit manual/condition-change
+    # recovery or restart an exhausted automatic budget.
+    from lib.turn_lifecycle import automatic_recovery_blocker
+    if automatic_recovery_blocker(error_envelope) is not None:
         return False, 0.0
 
     cap = auto_turn_retry_max(cfg)

@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "error_kind": "upstream_error",
+  "status_code": 503,
+  "retry_count": 1
+}
