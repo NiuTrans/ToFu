@@ -1,0 +1,4 @@
+reportlab==4.4.4
+PyMuPDF==1.24.11
+Pillow==12.3.0
+qrcode==8.2

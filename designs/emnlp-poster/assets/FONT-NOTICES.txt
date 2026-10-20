@@ -1,0 +1,7 @@
+Inter: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
+
+Inter: https://openfontlicense.org
+
+Newsreader: Copyright 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader)
+
+Newsreader: http://scripts.sil.org/OFL

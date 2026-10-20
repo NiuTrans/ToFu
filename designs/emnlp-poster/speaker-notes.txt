@@ -1,0 +1,116 @@
+TOFU — EMNLP 2026
+English presentation notes
+
+30-SECOND OPENING
+
+Tofu is an agent you can work with and a harness you can experiment on.
+Our focus is what surrounds the model: which evidence enters its context,
+which steps can run as code, and which facts must survive beyond the prompt.
+You can inspect those choices in the workbench, modify their policies, and
+follow the resulting execution evidence. TofuDB is one part of that design:
+it makes verified continuation a storage operation instead of repeatedly
+reconstructing and validating everything above the database.
+
+90-SECOND WALK-THROUGH
+
+The question behind Tofu is: what would an agent look like if the harness
+itself were a research instrument?
+
+First, look at context. We externalize bulky outputs, trim cold results, and
+summarize older history. But fewer tokens alone are not the objective. If a
+rewrite destroys a warm provider cache, it can cost more. The current policy
+considers the expected lifetime and cost of the working context. You can
+inspect the request, injected context, and recorded usage.
+
+Second, many tool steps are deterministic glue. A program can call a tool,
+filter its results, and pass them to the next tool without asking the model
+to perform each data transformation. That program runs in an isolated WASM
+environment. Each sub-call still passes through the ordinary execution and
+permission checks. If a decision needs semantic judgment, it returns to
+the model with evidence.
+
+Third, shrinking a prompt must not erase the system's record of its work.
+TofuDB understands a continuation as an owned, verified operation. After
+certifying a prefix, it can check the terminal boundary and new suffix instead
+of hashing every earlier header again. Changes to old evidence invalidate
+that certificate. Restart revalidates it. This is a specific reduction in
+repeated work, with explicit correctness obligations.
+
+We want researchers to use the assistant for their work and then ask:
+what happens if I change this context, tool, or orchestration policy?
+That is the invitation at the bottom of the poster.
+
+WHY TRY TOFU IF I ALREADY USE CODEX OR OPENCODE?
+
+Those are capable systems, and open source, MCP, skills, or model choice alone
+do not make Tofu unique. The proposed fit is a research workflow in which you
+want to inspect and modify the orchestration around the model while keeping
+a usable assistant and paper workbench. The poster highlights the integration
+of context decisions, programmatic execution, and agent-aware storage as the
+research surface. It is an invitation to inspect and evaluate that fit, not
+a claim that the other systems lack each feature or that Tofu wins every task.
+
+WHY NOT JUST USE SQLITE?
+
+SQLite already has transactions, WAL recovery and snapshot isolation.
+You can build agent checkpoints and effect journals on it. These are not
+sufficient reasons to write a database.
+
+The native TofuDB case is narrower: specialize the semantic operations used by
+long-running agents, remove redundant history scans and data copying, and
+preserve exact evidence at the same boundary. A Rust semantic layer over
+SQLite is a legitimate alternative. Native versus Python Sidecar measurements
+combine language, transport and database effects; they do not isolate B-tree
+performance. Tofu keeps SQLite and PostgreSQL behind the same semantic contract.
+
+The cost is owning another engine's recovery, migration, integrity, backup and
+fault testing. The current documentation includes counterexamples where an
+in-process SQLite control is faster. Do not claim universal native superiority.
+
+WHAT EXACTLY DOES “3 HEADER CHECKS” MEAN?
+
+It is the logical verification work for an extension by two completed Turns,
+after the previous prefix has been certified within the same open authority
+epoch: the existing terminal boundary and the two added headers. The focused
+fixtures use 8, 128 and 2,048 retained Turns. First certification visits the full
+prefix. Earlier semantic edits invalidate the certificate. Reopen requires
+revalidation, and selected output must still be materialized. It does not mean
+the entire agent task or an arbitrary full-history read takes constant time.
+
+DOES CONTEXT COMPACTION DELETE THE CONVERSATION?
+
+The model's working view and the durable record have different responsibilities.
+The current request can omit or summarize old evidence while preserving
+recoverable source and the relevant archive/continuation receipts. In the
+current compaction contract, durable adoption precedes switching to an accepted
+working view. Retention still has an explicit lifecycle; this is not a promise
+of unlimited storage.
+
+IS PROGRAMMATIC TOOL EXECUTION AN AUTHORIZATION BYPASS?
+
+No. The task's executable catalog remains the authority. Tool search teaches
+the model a tool's schema; it does not grant permission. Every nested call
+passes through ordinary schema, permission, approval and execution checks.
+An isolated program has no ambient host filesystem, process or direct network
+access. This does not make effects from allowed tools harmless.
+
+DO THESE MECHANISMS EXPLAIN THE OLD BENCHMARK RESULTS?
+
+We do not claim that. The manuscript's historical task-level results evaluate
+a particular system and model configuration. This poster covers newer
+engineering mechanisms and their design rationale. A causal explanation needs
+controlled ablations, including cost and cache receipts and preserved task
+quality. Storage microbenchmarks alone cannot establish task success.
+
+SUGGESTED LIVE DEMO (CHECK BEFORE THE SESSION)
+
+Use an intentionally prepared, non-sensitive research project.
+Open a captured request in Request Inspector, inspect the actual context
+and a tool receipt, and show the corresponding policy source. Explain one
+concrete policy change and its verification. Show the paper reader as the
+research surface. If demonstrating restart or failure handling, use a
+disposable fixture with already verified recovery semantics; do not imply
+that unknown external effects can always be replayed safely.
+
+Keep the demo local to the prepared fixture. Never show credentials, private
+user conversations, or unreviewed production logs to the audience.
