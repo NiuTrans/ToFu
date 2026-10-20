@@ -23,6 +23,9 @@ use crate::generated_tofudb_ir::{
 use crate::stream::{StreamEvent, StreamKey};
 use crate::versioned_document::{self, PutRequest};
 
+#[path = "project_brain_recovery.rs"]
+pub(crate) mod recovery;
+
 const LOGICAL_NAMESPACE: &str = "project_brain_projects";
 const STREAM_DOMAIN: &str = "project_brain";
 const EVENT_CHUNK_MAGIC: &[u8; 8] = b"TDBPBE01";
@@ -245,6 +248,7 @@ fn save_projection(
         let previous_key = updated_index_key(transaction, project_key, previous_updated_at)?;
         database.entity_delete(transaction, previous_key)?;
     }
+    recovery::save_summary(database, transaction, project_key, projection)?;
     let current_key = updated_index_key(transaction, project_key, timestamp)?;
     database.entity_put(transaction, current_key, project_key.as_bytes().to_vec())?;
     Ok(())
@@ -870,6 +874,7 @@ pub(crate) fn list_active(
                 .map_err(|_| invalid_data("Project Brain updated index is malformed"))?;
             // Legacy update indexes may repeat projects across page boundaries.
             if !seen_projects.insert(project_key.to_owned()) { continue; }
+            if recovery::can_skip(database, transaction, project_key)? { continue; }
             let projection = load_projection(database,transaction,project_key)?;
             let work_items = public_work_items(&projection,true)?;
             if !work_items.is_empty() {
@@ -948,6 +953,7 @@ pub(crate) fn recovery_snapshot(
         if !seen_projects.insert(project_key) {
             continue;
         }
+        if recovery::can_skip(database, transaction, project_key)? { continue; }
         let projection = load_projection(database, transaction, project_key)?;
         let work_items = public_work_items(&projection, true)?;
         if !work_items.is_empty() {
@@ -1416,6 +1422,7 @@ fn retire_scope_physical_state(
         project_key,
         None,
     )?;
+    recovery::remove_summary(database, transaction, project_key)?;
     let checkpoint_document_key = checkpoint_key(transaction, project_key)?;
     if database
         .entity_get(transaction, &checkpoint_document_key)?

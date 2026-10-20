@@ -92,10 +92,22 @@ open keeps source service ready and maintenance retries automatically. Settings
 admit a new base with the same generated geometry policy. Observe
 `system.metrics.searchGarbageCollector` and free inodes as well as free bytes.
 The 24-generation orphan regression reclaims 24 / 27 loose files while retaining
-live hits and reopen integrity. Runtime object size is 2,480 bytes including the
+live hits and reopen integrity. Runtime object size is 2,496 bytes including the
 opened index; collector size is 376 bytes plus one reserved 1 MiB driver stack.
 A 200-call host probe measured 37.37 microseconds median for statvfs. These are
 synthetic mounting/host measurements, not production throughput or RSS claims.
+
+Restart recovery now uses [deferred search opening](STORAGE_TOFUDB.md) and
+[header-bound Project Brain summaries](STORAGE.md#restart-readiness-and-recovery).
+Search opening retains only one candidate on the existing maintenance worker,
+plus a shared atomic stop token; cold I/O holds neither request nor source mutex.
+Project summaries cost 40 logical value bytes per project, plus entity keys/index
+framing; their one owner cursor is at most 42 value bytes. Retirement removes the
+project summary; legacy backfill ends with one complete marker. It hydrates at most
+one historical document per round and retains no document cache. A deterministic
+reopened 24-project / 14,942,208-byte history fixture measured 119,345 microseconds
+and 54 VFS reads through legacy fallback versus 749 microseconds and 3 reads with
+summaries. This isolates hydration work, not cold production mount latency.
 
 `maintenance.rs` retains independent per-scope retry feedback: Problem — other
 maintenance resets idle cadence and can repeatedly rescan a failing index.

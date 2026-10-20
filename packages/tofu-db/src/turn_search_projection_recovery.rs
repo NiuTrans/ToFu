@@ -1,5 +1,5 @@
 //! Startup recovery for the disposable search index, never the source authority.
-//! Entry point: open. Dependencies: AuthorityDatabase, directory lease, RealVfs.
+//! Entry point: open_until. Dependencies: AuthorityDatabase, directory lease, RealVfs.
 //! One exclusively created sibling stages replacement; errors preserve evidence
 //! and cannot accumulate unbounded generations of failed recovery directories.
 
@@ -11,8 +11,8 @@ use crate::authority::AuthorityDatabase;
 use crate::engine::acquire_lease;
 use crate::vfs::{sync_directory_barrier, RealVfs};
 
-pub(super) fn open(data_dir: &Path) -> io::Result<AuthorityDatabase> {
-    match AuthorityDatabase::open(data_dir) {
+pub(super) fn open_until(data_dir: &Path, should_stop: &dyn Fn() -> bool) -> io::Result<AuthorityDatabase> {
+    match AuthorityDatabase::open_with_vfs_until(data_dir, std::sync::Arc::new(RealVfs), should_stop) {
         Ok(database) => Ok(database),
         Err(error) if error.kind() == io::ErrorKind::InvalidData => rebuild(data_dir, error),
         Err(error) => Err(error),
@@ -189,7 +189,7 @@ mod tests {
                 let document: serde_json::Value = serde_json::from_slice(&readiness).unwrap();
                 assert_eq!(
                     document["resourceBudget"]["searchProjectionAvailable"],
-                    true
+                    false
                 );
             }
             assert_eq!(fs::read(source.join("CONTROL")).unwrap(), source_control);

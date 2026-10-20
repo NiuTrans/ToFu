@@ -318,6 +318,7 @@ struct SchedulerState {
 }
 
 struct Shared {
+    stop: Arc<std::sync::atomic::AtomicBool>,
     scopes: Vec<MaintenanceScope>,
     config: MaintenanceSchedulerConfig,
     state: Mutex<SchedulerState>,
@@ -393,6 +394,7 @@ impl MaintenanceScheduler {
             return Err(invalid_input("maintenance scopes exceed admission bounds"));
         }
         let shared = Arc::new(Shared {
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: scopes.into_iter().collect(),
             config,
             state: Mutex::new(SchedulerState {
@@ -416,6 +418,13 @@ impl MaintenanceScheduler {
                 .overlay_trigger
                 .set(guard.entity_overlay_soft_trigger());
         }
+        if let Some(projection) = &search_projection {
+            // Install only cancellation metadata, retaining poison as the
+            // worker's retryable index failure. Optional search health must
+            // not prevent source maintenance or service startup.
+            projection.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                .install_stop(Arc::clone(&shared.stop));
+        }
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
             .name("tofu-db-maintenance".to_owned())
@@ -434,6 +443,7 @@ impl MaintenanceScheduler {
     }
 
     pub fn stop_and_join(&self) -> io::Result<MaintenanceMetrics> {
+        self.shared.stop.store(true, std::sync::atomic::Ordering::Release);
         {
             let mut state = self
                 .shared
@@ -458,6 +468,7 @@ impl MaintenanceScheduler {
 
 impl Drop for MaintenanceScheduler {
     fn drop(&mut self) {
+        self.shared.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut state) = self.shared.state.lock() {
             state.stopping = true;
         }
@@ -517,7 +528,9 @@ fn run_worker(
     let mut search_pressure = crate::fsync_stats::foreground_hotness_sampler();
     // Exactly one bounded entry per admitted scope; dropped with this worker.
     let mut search_retries = vec![SearchRetryState::default(); shared.scopes.len()];
-    let mut round_deadline: Option<Instant> = None;
+    // Deferred search activation starts on this already-owned worker, after
+    // readiness, without waiting for an unrelated retention idle interval.
+    let mut round_deadline = search_projection.map(|_| Instant::now());
     let mut next_overlay_poll = Instant::now();
     loop {
         enum Wake {
@@ -652,6 +665,7 @@ fn run_worker(
                             Backoff::Keep,
                         )
                     }
+                    Err(_) if shared.stop.load(std::sync::atomic::Ordering::Acquire) => return,
                     Err(error) => {
                         let delay = search_retries[scope_index].failed(Instant::now(), shared.config.idle_interval);
                         let failures = search_retries[scope_index].consecutive_failures;
@@ -670,6 +684,20 @@ fn run_worker(
             }
         }
         if shared.state.lock().map(|state| state.stopping).unwrap_or(true) { return; }
+        let recovery_did_work = match crate::project_brain::recovery::backfill(database, scope,
+            &|| shared.stop.load(std::sync::atomic::Ordering::Acquire)) {
+            Ok(committed) => {
+                if committed { update_metrics(shared, |metrics| {
+                    metrics.committed_transactions = metrics.committed_transactions.saturating_add(1);
+                }, Backoff::Keep); }
+                committed
+            }
+            Err(error) => {
+                crate::engine_log::warn("project_recovery_backfill", &format!("summary backfill deferred: {error}"));
+                false
+            }
+        };
+        if shared.stop.load(std::sync::atomic::Ordering::Acquire) { return; }
         match run_round(database, scope, shared.config.history_retained_segments) {
             RoundOutcome::ForegroundBusy => update_metrics(
                 shared,
@@ -688,7 +716,7 @@ fn run_worker(
                 |metrics| {
                     metrics.no_work_rounds = metrics.no_work_rounds.saturating_add(1);
                 },
-                if search_did_work {
+                if search_did_work || recovery_did_work {
                     Backoff::Reset
                 } else {
                     Backoff::Increase

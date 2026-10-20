@@ -4,7 +4,51 @@ Native backend contract. Common authority, ownership and transaction rules remai
 in [Storage](STORAGE.md); maintenance lives in [Storage operations](STORAGE_OPERATIONS.md).
 Embedded response ownership and codec compatibility: [FFI response boundary](TOFUDB_EMBEDDED_RESPONSE.md). Immutable entity-page formats: [page storage](TOFUDB_ENTITY_PAGES.md).
 
-Search-index startup recovery: **Problem:** a disposable projection with CONTROL beyond its WAL prevented the healthy source authority from serving after restart. **Decision:** only projection `InvalidData` opens rebuild under an exclusive index lease, stage one fresh sibling, publish it by rename, and reclaim the old index after verifying replacement open. Busy/permission/I/O errors and source integrity failures remain terminal. Both fresh and reopened projections disable write overlays. Search remains indexing until existing source-admission/backfill fences complete. **Alternatives rejected:** relaxing source WAL validation risks acknowledged user data; repeated retries cannot recreate missing index bytes; timestamped corrupt copies leak disk. A failed publication retains one bounded `.startup-recovery` sibling for diagnosis rather than overwriting it. Recovery adds no resident worker and retains at most the previous index plus one fresh replacement. The 1,018,861,619-byte restart-failure fixture rebuilt to an 8,192-byte index before `storage.ready`; source admission uses the existing budgeted worker. Verification: `turn_search_projection::recovery::tests`, `turn_search_worker`, and `tests/startup_integrity.rs` (source integrity remains fail-closed).
+Search-index startup recovery — **Problem:** the 2026-10-20 restart spent
+32.648 s opening the source and 164.150 s opening its disposable search index;
+the previous process also exceeded its 30 s stop grace during maintenance.
+A damaged index had separately prevented a healthy source from serving.
+
+**Decision:** source recovery remains mandatory. Daemon and embedded startup
+construct a deferred search handle without index I/O. The existing maintenance
+worker opens it after owner registration, outside the search request mutex;
+foreground search reports retryable `database_unavailable` until admission.
+The readiness resource budget reports availability at boot, not current index
+health. Existing bounded retries handle temporary index failures. Only index
+`InvalidData` triggers the established exclusive-lease rebuild: one fresh sibling,
+rename publication, verified replacement, then retirement of the old index.
+Busy/permission/I/O errors never delete or rebuild it; source integrity failures
+still prevent readiness. Failed replacement keeps one bounded
+`.startup-recovery` sibling for diagnosis. Both fresh and reopened indexes disable
+write overlays; source UUID, owner admission and exact dirty-token ACKs remain
+mandatory before searchable publication.
+
+The same maintenance stop token interrupts index recovery between phases,
+records and catalog segments, and posting updates between grams/documents and
+before commit. Uncommitted work is abandoned; the previous published generation
+remains readable. An admitted durability operation completes normally. Joined
+shutdown can then checkpoint both stores instead of waiting through unrelated
+indexing. One already-running filesystem call is still subject to its filesystem
+latency. No worker, detached cleanup or replacement source authority is added.
+
+**Alternatives rejected:** waiting for optional indexes delays every user operation;
+shorter kill timeouts leave avoidable WAL replay; accepting partial indexes as empty
+READY results hides missing hits; relaxing source recovery risks acknowledged data.
+Verification: `turn_search_runtime`, `turn_search_projection`, `turn_search_worker`,
+`daemon_process`, and `startup_integrity`. A local process test held the index lease
+through startup: ready plus authenticated Hello took 18 ms, search recovered 262 ms
+after lease release, and joined stop took 628 ms. These are synthetic local-volume
+measurements, not a production restart speedup.
+
+Inline-only WAL recovery — **Problem:** any nonempty WAL triggered a full packed
+payload catalog traversal even when its transactions contained no physical block
+references. **Decision:** skip this lookup only after decoding that fact; existing
+root point reads, WAL framing, acknowledged-prefix checks and replay remain intact.
+Malformed or referenced records retain their normal validation. The deterministic
+64-segment fixture dropped from 71 to 7 opens, with exact durable-root and sequence
+readback. Treating all WALs as inline or trusting unverified catalog metadata was
+rejected. Engine recovery/fault matrices and cancellation at every recovery
+boundary guard the decision.
 
 ## WAL generation-bound acknowledgements
 

@@ -1212,6 +1212,29 @@ The SQL orphan probe reads only root task status with each backend's JSON operat
 `tests/storage/test_storage_warmup_executor.py`, `tests/project_mod/test_project_brain_recovery_pagination.py`,
 `tests/storage/test_boot_recovery_probe.py`.
 
+Native Project Brain recovery — **Problem:** the 2026-10-20 startup spent 29.078 s
+paging project recovery snapshots; checking active work materialized large terminal
+history documents. **Decision:** `project_brain_recovery.rs` maintains one 40-byte
+summary per project in the generated `project_brain_recovery_v1` namespace. The
+summary binds its active-work bit to SHA-256 of the exact stored document header,
+including its version/blob identity. Project mutation publishes both in the same
+transaction; retirement removes both. Only a matching negative summary skips full
+hydration. Missing, malformed or stale summaries use the original complete read;
+active work still passes the existing durable startup reconciliation.
+
+Legacy summaries are filled on the existing maintenance worker, at most 1,000
+index rows and one historical projection per round. It reads a pinned replica
+outside the writer lock, then rechecks the exact header and owner cursor before
+publishing. Summary and cursor commit atomically through maintenance writes and do
+not generate logical-outbox business events. There is one bounded cursor per
+registered tenant/owner, no new worker or full-history cache. Queries stay read-only;
+the first upgraded restart can still pay legacy hydration until backfill completes.
+**Alternatives rejected:** skipping all terminal-looking projects without a version
+fence could hide newly active work; rewriting every old document on startup repeats
+the delay; deferring active settlement beyond readiness admits orphaned work.
+Verification: `project_brain` lifecycle/relink/outbox tests and recovery-summary
+stale-source, cancellation, cross-owner and commit-fault tests.
+
 ## Operations and verification
 
 Operational tooling, backup/recovery, maintenance, projection checkpoints and

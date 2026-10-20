@@ -1073,6 +1073,7 @@ def _load() -> dict:
         or project_brain.get("checkpointNamespace") != "project_brain_checkpoints"
         or project_brain.get("eventIndexNamespace") != "project_brain_event_positions"
         or project_brain.get("updatedIndexNamespace") != "project_brain_by_updated_desc"
+        or project_brain.get("recoverySummaryNamespace") != "project_brain_recovery_v1"
         or project_brain.get("streamDomain") != "project_brain"
         or project_brain.get("maximumProjectKeyCharacters") != 4096
         or project_brain.get("collectionAdmission") != "complete-owner-scoped-project-history-without-count-quota"
@@ -2028,6 +2029,7 @@ def _render() -> str:
         f'pub const PROJECT_BRAIN_CHECKPOINT_NAMESPACE: &str = "{project_brain["checkpointNamespace"]}";',
         f'pub const PROJECT_BRAIN_EVENT_INDEX_NAMESPACE: &str = "{project_brain["eventIndexNamespace"]}";',
         f'pub const PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE: &str = "{project_brain["updatedIndexNamespace"]}";',
+        f'pub const PROJECT_BRAIN_RECOVERY_NAMESPACE: &str = "{project_brain["recoverySummaryNamespace"]}";',
         "pub const MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS: usize = "
         f"{project_brain['maximumProjectKeyCharacters']};",
         "pub const MAX_PROJECT_BRAIN_NARRATIVE_TEXT_BYTES: usize = "

@@ -191,3 +191,5 @@ mod checkpoint_runtime;
 mod daemon_checkpoint;
 
 mod query_result_cache;
+#[cfg(test)]
+mod test_stop_vfs;

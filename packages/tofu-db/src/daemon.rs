@@ -642,7 +642,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     let blob_codec_pool = Some(authority.blob_codec_pool_observer()?);
     let published_queries = authority.enable_published_queries()?;
     let database = Arc::new(Mutex::new(authority));
-    let search_projection = crate::engine_log::lifecycle_step("startup_timing", "search_projection_open", || {
+    let search_projection = crate::engine_log::lifecycle_step("startup_timing", "search_projection_prepare", || {
         config.search_projection_dir.as_ref().map(|path| {
         let projection = TurnSearchProjection::open_or_defer(
             path, config.resource_budget.search_projection_maximum_bytes_per_owner, authority_uuid,
@@ -665,29 +665,12 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         address.port(),
         authority_uuid,
         &config,
-        search_projection.as_ref().is_some_and(|index| index.lock().is_ok_and(|index| index.available())),
+        search_projection.as_ref().is_some_and(|index| index.try_lock().is_ok_and(|index| index.available())),
     )?;
     // Bounded page-cache warm-up off the readiness path: sequential payload
     // reads convert cold network-volume fault-in into mount readahead so the
     // client's warm-up pass and first user reads complete in seconds.
     let _prefetch = crate::prefetch::start(config.data_dir.clone());
-    // Creation happens only after readiness is durable on the control pipe;
-    // the worker itself waits one full interval before its first root read.
-    let maintenance = config
-        .scope
-        .tenant_id
-        .map(|tenant_id| {
-            MaintenanceScope::new(tenant_id, config.scope.owner_id).and_then(|scope| {
-                MaintenanceScheduler::start_with_search(
-                    Arc::clone(&database),
-                    search_projection.clone(),
-                    vec![scope],
-                    config.maintenance,
-                )
-            })
-        })
-        .transpose()?;
-    let maintenance_observer = maintenance.as_ref().map(MaintenanceScheduler::observer);
     // Packing staged blocks into payload segments costs an 8 MiB write +
     // fsync; doing it here keeps that latency off every rotation commit.
     // TOFU_DB_PACK_BYTES_PER_SECOND paces that write rate (0/unset =
@@ -791,6 +774,22 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     // apply.
     let authority_watch = crate::authority_watch::AuthorityContentionWatch::start(&database, foreground_admissions)?;
     let authority_watch_observer = Some(authority_watch.observer());
+    // Register every index/GC owner before maintenance may start cold I/O.
+    let maintenance = config
+        .scope
+        .tenant_id
+        .map(|tenant_id| {
+            MaintenanceScope::new(tenant_id, config.scope.owner_id).and_then(|scope| {
+                MaintenanceScheduler::start_with_search(
+                    Arc::clone(&database),
+                    search_projection.clone(),
+                    vec![scope],
+                    config.maintenance,
+                )
+            })
+        })
+        .transpose()?;
+    let maintenance_observer = maintenance.as_ref().map(MaintenanceScheduler::observer);
     let control_observers = crate::control_ops::ControlObservers {
         canonical_json_cache,
         wal_write_buffer: wal_barrier_driver.as_ref().map(|(barrier, _)| barrier.clone()),
@@ -811,7 +810,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         wal_flush_interval_milliseconds: Some(config.wal_flush_interval.as_millis() as u64),
         resource_budget: Some(resource_budget_json(
             &config,
-            search_projection.as_ref().is_some_and(|index| index.lock().is_ok_and(|index| index.available())),
+            search_projection.as_ref().is_some_and(|index| index.try_lock().is_ok_and(|index| index.available())),
         )),
     };
     // The run consumes both Arcs; the shutdown tail retires their WAL
@@ -1378,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn supervised_serve_opens_configured_disposable_search_projection() {
+    fn supervised_serve_admits_deferred_search_before_immediate_parent_eof() {
         let directory = tempfile::tempdir().unwrap();
         let authority = directory.path().join("authority");
         let projection = directory.path().join("absent-parent/nested/projection");
@@ -1399,9 +1398,8 @@ mod tests {
         );
         assert_eq!(
             document["resourceBudget"]["searchProjectionAvailable"],
-            true
+            false
         );
-        assert!(projection.join("CONTROL").exists());
     }
     #[cfg(unix)]
     #[test]

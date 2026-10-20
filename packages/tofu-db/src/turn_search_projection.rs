@@ -118,6 +118,7 @@ pub(crate) struct OpenTurnSearchProjection {
     // validated the source UUID or checked the authority's pending work.
     admission_source: Option<uuid::Uuid>,
     admitted_owners: std::collections::BTreeSet<(u64, u64)>,
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -705,6 +706,7 @@ fn emit_text_grams(
     maximum_logical_bytes_per_owner: u64,
     gram_delta: &mut i64,
     emission: &mut GramEmission,
+    stop: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> io::Result<()> {
     if emission.excluded || emission.tripped {
         return Ok(());
@@ -714,6 +716,7 @@ fn emit_text_grams(
     let mut grams = Vec::new();
     visit_posting_grams(lowered, |gram| grams.push(gram_digest(gram)));
     for gram in grams {
+        check_search_stop(stop)?;
         if !emission.seen.insert(gram) {
             continue;
         }
@@ -751,12 +754,14 @@ fn retract_text_grams(
     gram_delta: &mut i64,
     ops: &mut usize,
     seen: &mut std::collections::HashSet<[u8; 32]>,
+    stop: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> io::Result<()> {
     let generation_id = generation_dictionary::lookup(database, transaction, generation_digest)?
         .ok_or_else(|| invalid_data("search generation dictionary assignment is missing"))?;
     let mut grams = Vec::new();
     visit_posting_grams(lowered, |gram| grams.push(gram_digest(gram)));
     for gram in grams {
+        check_search_stop(stop)?;
         if *ops >= GRAM_REMOVE_OP_CAP {
             return Ok(());
         }
@@ -861,7 +866,17 @@ fn write_usage(
     )
 }
 
+fn check_search_stop(stop: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> io::Result<()> {
+    if stop.as_ref().is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire)) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "search maintenance stopped before publication"));
+    }
+    Ok(())
+}
+
 impl OpenTurnSearchProjection {
+    pub(crate) fn install_stop(&mut self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.stop = Some(stop);
+    }
     /// Fence all owners before publishing the projection to daemon/embedded
     /// request dispatch. Maintenance validates each source binding and refreshes
     /// coverage under the projection mutex before admitting that owner. No
@@ -943,6 +958,7 @@ impl OpenTurnSearchProjection {
         }
         self.database
             .entity_put(&mut transaction, stored_key, value)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         self.admitted_owners.insert((tenant, owner));
         Ok(())
@@ -997,6 +1013,7 @@ impl OpenTurnSearchProjection {
         build.source_incomplete = true;
         self.database
             .entity_put(&mut transaction, stored_key, encode_build(&build)?)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok(())
     }
@@ -1072,6 +1089,7 @@ impl OpenTurnSearchProjection {
         let gram_key = gram_state_key(&transaction)?;
         self.database
             .entity_put(&mut transaction, gram_key, vec![GRAM_STATE_BUILDING])?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok((activation, true))
     }
@@ -1096,6 +1114,7 @@ impl OpenTurnSearchProjection {
             let stored_key = gram_state_key(&transaction)?;
             self.database
                 .entity_put(&mut transaction, stored_key, vec![GRAM_STATE_READY])?;
+            check_search_stop(&self.stop)?;
             self.database.commit(transaction)?;
         }
         Ok(())
@@ -1125,6 +1144,7 @@ impl OpenTurnSearchProjection {
         marker[1] = 1;
         self.database
             .entity_put(&mut transaction, format_key, marker)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok(())
     }
@@ -1163,6 +1183,7 @@ impl OpenTurnSearchProjection {
         write_usage(&self.database, &mut transaction, next_usage)?;
         self.database
             .entity_put(&mut transaction, build_key, encode_build(&build)?)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok(())
     }
@@ -1183,16 +1204,22 @@ impl OpenTurnSearchProjection {
             maximum_logical_bytes_per_owner,
             admission_source: None,
             admitted_owners: std::collections::BTreeSet::new(),
+            stop: None,
         })
     }
 
     pub fn open(data_dir: &Path, maximum_logical_bytes_per_owner: u64) -> io::Result<Self> {
+        Self::open_until(data_dir, maximum_logical_bytes_per_owner, &|| false)
+    }
+
+    pub(crate) fn open_until(data_dir: &Path, maximum_logical_bytes_per_owner: u64,
+        should_stop: &dyn Fn() -> bool) -> io::Result<Self> {
         if maximum_logical_bytes_per_owner == 0 {
             return Err(invalid_input("search projection budget must be positive"));
         }
         Ok(Self {
             database: {
-                let mut database = recovery::open(data_dir).map_err(|error| {
+                let mut database = recovery::open_until(data_dir, should_stop).map_err(|error| {
                     io::Error::new(
                         error.kind(),
                         format!("search projection startup failed: {error}"),
@@ -1206,6 +1233,7 @@ impl OpenTurnSearchProjection {
             maximum_logical_bytes_per_owner,
             admission_source: None,
             admitted_owners: std::collections::BTreeSet::new(),
+            stop: None,
         })
     }
 
@@ -1226,6 +1254,7 @@ impl OpenTurnSearchProjection {
             maximum_logical_bytes_per_owner,
             admission_source: None,
             admitted_owners: std::collections::BTreeSet::new(),
+            stop: None,
         })
     }
 
@@ -1234,18 +1263,24 @@ impl OpenTurnSearchProjection {
         vfs: Arc<dyn Vfs>,
         maximum_logical_bytes_per_owner: u64,
     ) -> io::Result<Self> {
+        Self::open_with_vfs_until(data_dir, vfs, maximum_logical_bytes_per_owner, &|| false)
+    }
+
+    pub(crate) fn open_with_vfs_until(data_dir: &Path, vfs: Arc<dyn Vfs>,
+        maximum_logical_bytes_per_owner: u64, should_stop: &dyn Fn() -> bool) -> io::Result<Self> {
         if maximum_logical_bytes_per_owner == 0 {
             return Err(invalid_input("search projection budget must be positive"));
         }
         Ok(Self {
             database: {
-                let mut database = AuthorityDatabase::open_with_vfs(data_dir, vfs)?;
+                let mut database = AuthorityDatabase::open_with_vfs_until(data_dir, vfs, should_stop)?;
                 database.set_write_overlay_enabled(false);
                 database
             },
             maximum_logical_bytes_per_owner,
             admission_source: None,
             admitted_owners: std::collections::BTreeSet::new(),
+            stop: None,
         })
     }
 
@@ -1323,6 +1358,7 @@ impl OpenTurnSearchProjection {
         self.database
             .entity_put(&mut transaction, build_key, encode_build(&build)?)?;
         write_usage(&self.database, &mut transaction, usage)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok(())
     }
@@ -1364,6 +1400,7 @@ impl OpenTurnSearchProjection {
         let mut gram_delta = 0i64;
         let mut added_bytes = 0u64;
         for document in documents {
+            check_search_stop(&self.stop)?;
             validate_identity(&document.turn_id, "invalid search turn ID", MAX_ID_BYTES)?;
             if document.search_text.len() > MAX_SEARCH_TEXT_BYTES
                 || document.search_text.chars().count() > CHUNK_CHARACTERS
@@ -1444,6 +1481,7 @@ impl OpenTurnSearchProjection {
                 self.maximum_logical_bytes_per_owner,
                 &mut gram_delta,
                 &mut emission,
+                &self.stop,
             )?;
         }
         if emission.tripped {
@@ -1468,6 +1506,7 @@ impl OpenTurnSearchProjection {
         self.database
             .entity_put(&mut transaction, build_key, encode_build(&build)?)?;
         write_usage(&self.database, &mut transaction, next_usage)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok(())
     }
@@ -1553,6 +1592,7 @@ impl OpenTurnSearchProjection {
                     self.maximum_logical_bytes_per_owner,
                     &mut gram_delta,
                     &mut emission,
+                &self.stop,
                 )?;
                 if emission.tripped {
                     let stored_key = gram_state_key(&transaction)?;
@@ -1586,6 +1626,7 @@ impl OpenTurnSearchProjection {
             .entity_put(&mut transaction, active_key, encoded_header)?;
         self.database.entity_delete(&mut transaction, build_key)?;
         write_usage(&self.database, &mut transaction, usage)?;
+        check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok(())
     }
@@ -1645,6 +1686,7 @@ impl OpenTurnSearchProjection {
         }
         if removed {
             write_usage(&self.database, &mut transaction, usage)?;
+            check_search_stop(&self.stop)?;
             self.database.commit(transaction)?;
         }
         Ok(removed)
@@ -1692,6 +1734,7 @@ impl OpenTurnSearchProjection {
                 gram_delta,
                 &mut ops,
                 &mut seen,
+                &self.stop,
             )?;
             retract_text_grams(
                 &self.database,
@@ -1701,6 +1744,7 @@ impl OpenTurnSearchProjection {
                 gram_delta,
                 &mut ops,
                 &mut seen,
+                &self.stop,
             )?;
         }
         let (mut start, end) = generation_range(
@@ -1715,6 +1759,7 @@ impl OpenTurnSearchProjection {
                     .entity_scan(transaction, &start, &end, GRAM_RETIRE_SCAN_BATCH)?;
             let row_count = rows.len();
             for (_, raw) in &rows {
+                check_search_stop(&self.stop)?;
                 let meta = decode_meta(raw)?;
                 if meta.conversation_id != conversation_id || meta.generation != generation {
                     return Err(invalid_data("search generation digest collision"));
@@ -1733,6 +1778,7 @@ impl OpenTurnSearchProjection {
                     gram_delta,
                     &mut ops,
                     &mut seen,
+                    &self.stop,
                 )?;
             }
             if row_count < GRAM_RETIRE_SCAN_BATCH {
@@ -1831,6 +1877,48 @@ mod tests {
     use tempfile::tempdir;
 
     const BUDGET: u64 = 16 * 1024 * 1024;
+
+    #[test]
+    fn stop_during_posting_updates_rolls_back_and_allows_clean_checkpoint() {
+        use crate::test_stop_vfs::StopVfs;
+        use crate::vfs::Vfs;
+        use std::path::Path;
+        for phase in ["append", "publish"] {
+            let vfs = Arc::new(StopVfs::new());
+            vfs.create_dir(Path::new("/index")).unwrap();
+            let mut projection = OpenTurnSearchProjection::initialize_with_vfs(
+                Path::new("/index"), vfs.clone(), BUDGET).unwrap();
+            let text: String = (0..200).map(|i| format!("oldneedle word{i:04} ")).collect();
+            replace(&mut projection, 11, "conversation", "old", 1, &[document("old-turn", 1, &text)]);
+            projection.checkpoint_wal_window_for_shutdown().unwrap();
+            projection.begin_conversation_rebuild(7, 11, "conversation", "new", 2).unwrap();
+            if phase == "publish" {
+                projection.append_conversation_page(7, 11, "conversation", "new",
+                    &[document("new-turn", 1, "newneedle")]).unwrap();
+            }
+            projection.database.configure_hot_data_caches(0, 0).unwrap();
+            projection.install_stop(Arc::clone(&vfs.stop));
+            vfs.arm(if phase == "append" { 15 } else { 3 });
+            let result = if phase == "append" {
+                projection.append_conversation_page(7, 11, "conversation", "new",
+                    &[document("new-turn", 1, &text.replace("oldneedle", "newneedle"))])
+            } else {
+                projection.finalize_conversation_rebuild(7, 11, "conversation", "new")
+            };
+            assert!(vfs.stop.load(std::sync::atomic::Ordering::Acquire), "{phase} did not reach injected read: {}", vfs.reads());
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted, "{phase}");
+            assert!(vfs.reads() < 40, "{phase} kept scanning after stop: {}", vfs.reads());
+            assert_eq!(projection.search(&request(11, "oldneedle")).unwrap().len(), 1);
+            assert!(projection.search(&request(11, "newneedle")).unwrap().is_empty());
+            // The stop token stays set: checkpoint is a distinct durability
+            // operation and must remain usable after cancelled search work.
+            projection.checkpoint_wal_window_for_shutdown().unwrap();
+            drop(projection);
+            let reopened = OpenTurnSearchProjection::open_with_vfs(Path::new("/index"), vfs, BUDGET).unwrap();
+            assert_eq!(reopened.search(&request(11, "oldneedle")).unwrap().len(), 1);
+            assert!(reopened.search(&request(11, "newneedle")).unwrap().is_empty());
+        }
+    }
 
     fn document(turn_id: &str, ordinal: u64, text: &str) -> TurnSearchDocument {
         TurnSearchDocument {

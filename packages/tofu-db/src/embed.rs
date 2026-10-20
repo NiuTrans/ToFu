@@ -242,20 +242,6 @@ impl EmbeddedRuntime {
             schema_ids: vec![STORAGE_SCHEMA_VERSION],
             auth_token: config.auth_token,
         })?;
-        let maintenance = config
-            .scope
-            .tenant_id
-            .map(|tenant_id| {
-                MaintenanceScope::new(tenant_id, config.scope.owner_id).and_then(|scope| {
-                    MaintenanceScheduler::start_with_search(
-                        Arc::clone(&database),
-                        search_projection.clone(),
-                        vec![scope],
-                        config.maintenance,
-                    )
-                })
-            })
-            .transpose()?;
         let background_packer = if std::env::var_os("TOFU_DB_DISABLE_BACKGROUND_PACK").is_some() {
             None
         } else {
@@ -322,6 +308,20 @@ impl EmbeddedRuntime {
         // authority wedged by one holder is otherwise invisible to every
         // observer-handled health signal.
         let authority_watch = crate::authority_watch::AuthorityContentionWatch::start(&database, foreground_admissions)?;
+        let maintenance = config
+            .scope
+            .tenant_id
+            .map(|tenant_id| {
+                MaintenanceScope::new(tenant_id, config.scope.owner_id).and_then(|scope| {
+                    MaintenanceScheduler::start_with_search(
+                        Arc::clone(&database),
+                        search_projection.clone(),
+                        vec![scope],
+                        config.maintenance,
+                    )
+                })
+            })
+            .transpose()?;
         let control_observers = crate::control_ops::ControlObservers {
             canonical_json_cache,
         wal_write_buffer: Some(barrier.clone()),
@@ -345,7 +345,7 @@ impl EmbeddedRuntime {
             wal_flush_interval_milliseconds: Some(config.wal_flush_interval.as_millis() as u64),
             resource_budget: Some(crate::daemon::resource_budget_json(
                 &config,
-                search_projection.as_ref().is_some_and(|index| index.lock().is_ok_and(|index| index.available())),
+                search_projection.as_ref().is_some_and(|index| index.try_lock().is_ok_and(|index| index.available())),
             )),
         };
         Ok(Self {

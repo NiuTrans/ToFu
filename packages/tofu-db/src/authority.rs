@@ -409,7 +409,14 @@ impl AuthorityDatabase {
     }
 
     pub fn open_with_vfs(data_dir: &Path, vfs: Arc<dyn Vfs>) -> io::Result<Self> {
-        let entities = EntityDatabase::open_with_vfs(data_dir, vfs)?;
+        Self::open_with_vfs_until(data_dir, vfs, &|| false)
+    }
+
+    pub(crate) fn open_with_vfs_until(
+        data_dir: &Path, vfs: Arc<dyn Vfs>, should_stop: &dyn Fn() -> bool,
+    ) -> io::Result<Self> {
+        let engine = Engine::open_with_vfs_until(data_dir, vfs, should_stop)?;
+        let entities = EntityDatabase::open_engine(engine)?;
         Ok(Self {
             entities,
             event_read_epoch: Uuid::new_v4(),

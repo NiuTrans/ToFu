@@ -1676,6 +1676,7 @@
       "checkpointNamespace": "project_brain_checkpoints",
       "eventIndexNamespace": "project_brain_event_positions",
       "updatedIndexNamespace": "project_brain_by_updated_desc",
+      "recoverySummaryNamespace": "project_brain_recovery_v1",
       "streamDomain": "project_brain",
       "maximumProjectKeyCharacters": 4096,
       "maximumNarrativeTextBytes": 720,

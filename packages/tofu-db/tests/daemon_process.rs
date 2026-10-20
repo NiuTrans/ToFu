@@ -13,6 +13,85 @@ use tofu_db::generated_storage_operations::STORAGE_SCHEMA_VERSION;
 use tofu_db::protocol::{read_frame, write_frame, Hello, Message, PROTOCOL_VERSION};
 
 #[test]
+fn busy_search_projection_does_not_gate_requests_and_recovers_after_lease_release() {
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use tofu_db::protocol::Request;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("authority");
+    let projection = directory.path().join("search");
+    let mut database = AuthorityDatabase::initialize(&source).unwrap();
+    let key = EntityKey::new(7, 11, "record", b"restart-sentinel").unwrap();
+    let mut transaction = database.begin(7, 11).unwrap();
+    database.entity_put(&mut transaction, key.clone(), b"durable source".to_vec()).unwrap();
+    database.commit(transaction).unwrap();
+    drop(database);
+    let held_projection = AuthorityDatabase::initialize(&projection).unwrap();
+    let secret = "synthetic-search-restart-test-token-0123456789";
+    let started = Instant::now();
+    let mut child = Command::new(common::native_binary())
+        .args(["serve", "--data-dir"]).arg(&source)
+        .args(["--search-projection-dir"]).arg(&projection)
+        .args(["--owner-id", "11", "--tenant-id", "7"])
+        .env("TOFU_STORAGE_TOKEN", secret)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        let _ = sender.send(line);
+    });
+    let readiness = receiver.recv_timeout(Duration::from_secs(5));
+    if readiness.is_err() { child.kill().unwrap(); }
+    reader.join().unwrap();
+    let readiness: serde_json::Value = serde_json::from_str(&readiness.unwrap()).unwrap();
+    assert_eq!(readiness["type"], "storage.ready", "{readiness}");
+    assert_eq!(readiness["resourceBudget"]["searchProjectionAvailable"], false);
+    let mut client = TcpStream::connect(("127.0.0.1", readiness["port"].as_u64().unwrap() as u16)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    write_frame(&mut client, &Message::Hello(Hello {
+        correlation_id: [1; 16], minimum_version: PROTOCOL_VERSION, maximum_version: PROTOCOL_VERSION,
+        schema_ids: vec![STORAGE_SCHEMA_VERSION], auth_token: derive_auth_token(secret.as_bytes()).unwrap(),
+    })).unwrap();
+    let Message::Response(hello) = read_frame(&mut client).unwrap() else { panic!("missing Hello"); };
+    assert_eq!(hello.status, 0);
+    let ready_ms = started.elapsed().as_millis();
+    let search = |client: &mut TcpStream| {
+        write_frame(client, &Message::Request(Request {
+            correlation_id: [2; 16], deadline_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 + 2000,
+            owner_id: 11, tenant_id: Some(7), command_id: None, schema_id: STORAGE_SCHEMA_VERSION,
+            operation: "conversation.search".into(), payload: br#"{"user_id":11,"query":"needle","page":true}"#.to_vec(),
+        })).unwrap();
+        let Message::Response(response) = read_frame(client).unwrap() else { panic!("missing search response"); };
+        response
+    };
+    let unavailable = search(&mut client);
+    assert_eq!(unavailable.error_code.as_deref(), Some("database_unavailable"));
+    assert!(unavailable.retryable);
+    drop(held_projection);
+    let recovery = Instant::now();
+    loop {
+        let response = search(&mut client);
+        if response.status == 0 { break; }
+        assert!(response.retryable && recovery.elapsed() < Duration::from_secs(10), "{response:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let recovery_ms = recovery.elapsed().as_millis();
+    drop(client);
+    let stopping = Instant::now();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stopping.elapsed() < Duration::from_secs(5));
+    let shutdown_ms = stopping.elapsed().as_millis();
+    let reopened = AuthorityDatabase::open(&source).unwrap();
+    let mut transaction = reopened.begin(7, 11).unwrap();
+    assert_eq!(reopened.entity_get(&mut transaction, &key).unwrap().unwrap(), b"durable source");
+    eprintln!("deferred_search ready_and_hello_ms={ready_ms} retry_recovery_ms={recovery_ms} shutdown_ms={shutdown_ms}");
+}
+
+#[test]
 fn read_only_daemon_reopens_do_not_accumulate_unpublished_payload_segments() {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};

@@ -618,6 +618,20 @@ impl Engine {
     }
 
     pub fn open_with_vfs(data_dir: &Path, vfs: Arc<dyn Vfs>) -> io::Result<Self> {
+        Self::open_with_vfs_until(data_dir, vfs, &|| false)
+    }
+
+    /// Cooperative open cancellation is checked between complete recovery
+    /// operations. Durable validation and publication keep their existing owner.
+    pub(crate) fn open_with_vfs_until(
+        data_dir: &Path, vfs: Arc<dyn Vfs>, should_stop: &dyn Fn() -> bool,
+    ) -> io::Result<Self> {
+        let check_cancelled = || {
+            if should_stop() {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "storage open cancelled"))
+            } else { Ok(()) }
+        };
+        check_cancelled()?;
         use crate::recovery_profile::{Phase, Work};
         let mut profile = crate::recovery_profile::RecoveryProfile::from_environment();
         if vfs.metadata(data_dir)? != FileKind::Directory {
@@ -658,6 +672,7 @@ impl Engine {
         // catalogs. Delay even unconfirmed-tail truncation until replay admits
         // all durable references, preserving evidence on any failed open.
         profile.advance(Phase::WalScan);
+        check_cancelled()?;
         let selected = crate::wal::scan_selected_generation_chain(
             data_dir, &state, &mut wal, Arc::clone(&vfs),
         )?;
@@ -669,6 +684,7 @@ impl Engine {
             profile.set_work(Work::WalPayloadBytes, recovery.records.iter().map(|record| record.payload.len() as u64).sum());
         }
         profile.advance(Phase::BlockCatalog);
+        check_cancelled()?;
         let blocks = Arc::new(BlockStore::open_with_vfs(data_dir, Arc::clone(&vfs))?);
         let payload_manifest = match state.payload_manifest_block_id {
             Some(manifest_block_id) => {
@@ -683,13 +699,18 @@ impl Engine {
         // per-block recovery path, never drops a WAL reference.
         profile.set_work(Work::PayloadSegments, payload_manifest.as_ref().map_or(0, |manifest| manifest.segments.len() as u64));
         profile.advance(Phase::RecoveryIds);
+        check_cancelled()?;
         let mut recovery_ids = BTreeSet::new();
+        let mut has_payload_references = false;
         recovery_ids.extend(state.history_manifest_block_id);
         recovery_ids.extend(state.authority_state_root.flatten());
         for record in &recovery.records {
+            check_cancelled()?;
             if recovery_ids.len() == crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS { break; }
             // Replay below remains the authority for malformed/ambiguous tails.
             let Ok((envelope, _, _)) = TransactionEnvelope::decode_with_carried(&record.payload) else { break; };
+            has_payload_references |= !envelope.block_ids.is_empty()
+                || matches!(envelope.authority_state_update, Some(Some(_)));
             for id in &envelope.block_ids {
                 if recovery_ids.len() < crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS {
                     recovery_ids.insert(*id);
@@ -701,14 +722,16 @@ impl Engine {
         }
         profile.set_work(Work::SelectedRecoveryIds, recovery_ids.len() as u64);
         profile.advance(Phase::PackedLookup);
-        let mut carried_recovery = if recovery.records.is_empty() {
-            // A checkpointed authority has no WAL payloads to classify. Load
-            // its roots by verified point reads; catalog size must not tax open.
+        check_cancelled()?;
+        let mut carried_recovery = if !has_payload_references {
+            // Inline-only WAL deltas need the same verified root point reads
+            // as an empty window. Unrelated packed history must not tax open.
             Default::default()
         } else {
-            blocks.prepare_carried_recovery(recovery_ids)?
+            blocks.prepare_carried_recovery_until(recovery_ids, should_stop)?
         };
         profile.advance(Phase::HistoryCatalog);
+        check_cancelled()?;
         let history_manifest = match state.history_manifest_block_id {
             Some(manifest_block_id) => {
                 let manifest = HistoryManifest::decode(&blocks.get_for_recovery(manifest_block_id, &carried_recovery)?)?;
@@ -732,13 +755,16 @@ impl Engine {
         }
 
         profile.advance(Phase::PayloadReplay);
+        check_cancelled()?;
         let mut keep_records = recovery.records.len();
         let mut committed = Vec::with_capacity(recovery.records.len());
         for (index, record) in recovery.records.iter().enumerate() {
+            check_cancelled()?;
             let (envelope, carried, authority_state_carried) =
                 TransactionEnvelope::decode_with_carried(&record.payload)?;
             let mut truncate_here = false;
             for (slot, block_id) in envelope.block_ids.iter().enumerate() {
+                check_cancelled()?;
                 match carried.get(slot).and_then(Option::as_ref) {
                     // Reuse a byte-verified published segment copy; otherwise
                     // stage the carried payload without probing loose files.
@@ -836,6 +862,7 @@ impl Engine {
         drop(carried_recovery);
         profile.set_work(Work::ReplayedTransactions, committed.len() as u64);
         profile.advance(Phase::WitnessPublish);
+        check_cancelled()?;
         if keep_records != recovery.records.len() || recovery.truncated_bytes > 0 {
             if keep_records < predecessor_record_count {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "sealed WAL replay lost its durable prefix"));
@@ -916,6 +943,7 @@ impl Engine {
             state = next;
         }
         profile.advance(Phase::RuntimeInit);
+        check_cancelled()?;
         let control = Arc::new(Mutex::new(control));
         let mut engine = Self {
             data_dir: data_dir.to_owned(),
@@ -964,6 +992,7 @@ impl Engine {
         // retired as a side effect of finishing their predecessor.
         if let Some(sealed) = engine.state.sealed_log.clone() {
             profile.advance(Phase::SealedPrepare);
+            check_cancelled()?;
             let split = engine.committed.partition_point(|transaction| transaction.sequence <= sealed.terminal_sequence);
             let successor = engine.committed.split_off(split);
             engine.unstaged_history_bytes = engine.committed.iter().map(transaction_history_bytes).sum();
@@ -975,11 +1004,14 @@ impl Engine {
             engine.committed = successor;
             engine.unstaged_history_bytes = engine.committed.iter().map(transaction_history_bytes).sum();
             profile.advance(Phase::SealedEncode);
+            check_cancelled()?;
             let outcome = encode_rotation_segments(&snapshot);
             profile.advance(Phase::SealedPublish);
+            check_cancelled()?;
             engine.finish_rotation_checkpoint(snapshot, outcome)?;
         }
         profile.advance(Phase::Finish);
+        check_cancelled()?;
         profile.complete();
         Ok(engine)
     }

@@ -267,6 +267,67 @@
     }
 
     #[test]
+    fn inline_only_wal_does_not_walk_unrelated_cold_payload_catalog() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let mut references = Vec::new();
+        for index in 0..64 {
+            let payload = format!("cold catalog entry {index}").into_bytes();
+            let id = BlockId::for_payload(&payload);
+            let segment = engine.blocks.payload_segment_store().unwrap()
+                .create(Uuid::new_v4(), vec![id], |_| Ok(payload.clone())).unwrap();
+            references.push(PayloadSegmentReference::new(segment.metadata(),
+                segment.first_block_id(), segment.last_block_id()).unwrap());
+        }
+        let manifest = PayloadManifest::new(references).unwrap();
+        let manifest_id = engine.blocks.put(&manifest.encode().unwrap()).unwrap();
+        let root = engine.blocks.put(b"verified loose authority root").unwrap();
+        engine.commit_references_with_authority_state(b"root", &[], Some(root)).unwrap();
+        engine.checkpoint().unwrap();
+        engine.state.payload_manifest_block_id = Some(manifest_id);
+        engine.state.generation += 1;
+        engine.control.lock().unwrap().publish(&engine.state).unwrap();
+        engine.commit(b"inline WAL has no physical payload references").unwrap();
+        drop(engine);
+        vfs.arm_fault(None).unwrap();
+        let reopened = Engine::open_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        assert_eq!(reopened.read_block(root).unwrap(), b"verified loose authority root");
+        let opens = vfs.trace().unwrap().iter().filter(|op| **op == Operation::Open).count();
+        assert!(opens < 12, "clean open traversed cold catalog: {opens} opens");
+        assert_eq!(reopened.state().durable_sequence, 2);
+        eprintln!("inline_only_wal_reopen cold_segments=64 opens={opens}");
+    }
+
+    #[test]
+    fn cancelled_recovery_at_every_boundary_preserves_acknowledged_history_and_root() {
+        use std::cell::Cell;
+        let seed = prepared_simulated_vfs();
+        drop(checkpointed_history_with_active_wal(seed.clone()));
+        let baseline = Arc::new(seed.fork_durable().unwrap());
+        let checks = Cell::new(0);
+        drop(Engine::open_with_vfs_until(Path::new("/data"), baseline, &|| {
+            checks.set(checks.get() + 1);
+            false
+        }).unwrap());
+        assert!(checks.get() > 12);
+        for at in 1..=checks.get() {
+            let vfs = Arc::new(seed.fork_durable().unwrap());
+            let seen = Cell::new(0);
+            let result = Engine::open_with_vfs_until(Path::new("/data"), vfs.clone(), &|| {
+                seen.set(seen.get() + 1);
+                seen.get() >= at
+            });
+            assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Interrupted, "boundary {at}");
+            vfs.crash().unwrap();
+            let reopened = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+            assert_eq!(reopened.state().durable_sequence, 4);
+            assert_eq!(reopened.read_block(reopened.state().authority_state_root.flatten().unwrap()).unwrap(),
+                b"active-authority-root");
+            assert_eq!(reopened.transaction_snapshot().unwrap().iter().map(|tx| tx.sequence).collect::<Vec<_>>(),
+                vec![1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
     fn committed_sequence_survives_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let authority;

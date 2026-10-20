@@ -270,6 +270,7 @@ pub const PROJECT_BRAIN_DOCUMENT_NAMESPACE: &str = "project_brain_documents";
 pub const PROJECT_BRAIN_CHECKPOINT_NAMESPACE: &str = "project_brain_checkpoints";
 pub const PROJECT_BRAIN_EVENT_INDEX_NAMESPACE: &str = "project_brain_event_positions";
 pub const PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE: &str = "project_brain_by_updated_desc";
+pub const PROJECT_BRAIN_RECOVERY_NAMESPACE: &str = "project_brain_recovery_v1";
 pub const MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS: usize = 4096;
 pub const MAX_PROJECT_BRAIN_NARRATIVE_TEXT_BYTES: usize = 720;
 pub const PROJECT_BRAIN_EVENT_CHECKPOINT_THRESHOLD: u64 = 1200;

@@ -26,8 +26,9 @@ process-global accumulator, source payload, path, tenant or operation label.
 
 A serving process can open both the primary authority and a native search
 projection. Each is a separate `Engine::open` report. Never assume one report
-per process or merge their work counters. For sequential startup, bind each
-report to its enclosing existing `startup_timing` step; ambiguous/interleaved
+per process or merge their work counters. Bind source reports to `startup_timing` / `authority_open` and deferred search
+reports to `background_timing` / `search_projection_open`. Startup
+`search_projection_prepare` constructs only the handle. Ambiguous/interleaved
 spans or reports outside a known owner do not establish primary attribution.
 
 The fixed phase vocabulary partitions elapsed time, rather than nesting spans:

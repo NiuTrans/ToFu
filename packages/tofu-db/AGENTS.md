@@ -406,9 +406,12 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   `contracts/conversation_search_v2.json` through `gen_tofudb_ir_contract.py`;
   the index design record is in `docs/STORAGE_TOFUDB.md`.
 - `src/turn_search_runtime.rs` owns capacity admission and retryable deferred
-  opening; `search_volume.rs` consumes generated geometry policy. The opened
+  opening off the request mutex on the existing maintenance worker; `search_volume.rs` consumes generated geometry policy. The opened
   codec is crate-private. Source and index reuse `OnlineGcDatabase` ports and
   the same collector; verify `turn_search_runtime` and online-GC fault suites.
+- `project_brain_recovery.rs` owns header-bound active-work summaries and
+  bounded replica backfill; project writes share their existing transaction.
+  Verify stale-source, cross-owner, cancellation and atomic cursor/summary faults.
 - `artifact_query.rs` is the shared canonical tool-result read/search owner.
   Policy comes from `contracts/tool_result_query_v1.json`; typed result manifests,
   owner-private signed route cursors and verified raw blob ranges stay in this

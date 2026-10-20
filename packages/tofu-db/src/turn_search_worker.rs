@@ -331,6 +331,7 @@ fn process_turn_search_batch_with_control(
 ) -> io::Result<TurnSearchWorkerMetrics> {
     let mut metrics = TurnSearchWorkerMetrics::default();
     if should_stop() { return Ok(metrics); }
+    TurnSearchProjection::open_in_background(projection)?;
     let Some(database) = try_authority(authority, &mut metrics)? else {
         return Ok(metrics);
     };

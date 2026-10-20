@@ -1175,8 +1175,15 @@ impl BlockStore {
         Ok((manifest.clone(), self.installed_payload_catalog_publication.load(Ordering::Acquire)))
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_carried_recovery(
         &self, ids: BTreeSet<BlockId>,
+    ) -> io::Result<CarriedRecoveryLookup> {
+        self.prepare_carried_recovery_until(ids, &|| false)
+    }
+
+    pub(crate) fn prepare_carried_recovery_until(
+        &self, ids: BTreeSet<BlockId>, should_stop: &dyn Fn() -> bool,
     ) -> io::Result<CarriedRecoveryLookup> {
         if ids.len() > crate::generated_tofudb_ir::MAX_RECOVERY_PACKED_LOCATIONS {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "recovery location budget exceeded"));
@@ -1188,7 +1195,8 @@ impl BlockStore {
         let (manifest, publication) = self.payload_catalog_snapshot()?;
         if let Some(manifest) = manifest {
             let mut verified_routes = crate::payload_routing::PayloadRouting::default();
-            let mut filter = self.scan_packed_filter(&manifest, Some(&mut lookup), Some(&mut verified_routes));
+            let mut filter = self.scan_packed_filter_until(&manifest, Some(&mut lookup), Some(&mut verified_routes), should_stop);
+            if should_stop() { return Err(io::Error::new(io::ErrorKind::Interrupted, "recovery catalog scan cancelled")); }
             filter.covered_catalog_publication = publication;
             let store = self.payload_segments.as_ref();
             let routing = crate::payload_routing::PayloadRouting::build(&manifest, store, &verified_routes,
@@ -2531,8 +2539,17 @@ impl BlockStore {
     /// where it always did.
     fn scan_packed_filter(
         &self, manifest: &PayloadManifest,
+        recovery: Option<&mut CarriedRecoveryLookup>,
+        routes: Option<&mut crate::payload_routing::PayloadRouting>,
+    ) -> PackedBlockFilter {
+        self.scan_packed_filter_until(manifest, recovery, routes, &|| false)
+    }
+
+    fn scan_packed_filter_until(
+        &self, manifest: &PayloadManifest,
         mut recovery: Option<&mut CarriedRecoveryLookup>,
         mut routes: Option<&mut crate::payload_routing::PayloadRouting>,
+        should_stop: &dyn Fn() -> bool,
     ) -> PackedBlockFilter {
         let total_blocks = manifest
             .segments
@@ -2543,6 +2560,7 @@ impl BlockStore {
         if let Some(store) = self.payload_segments.as_ref() {
             let mut remaining_route_bytes = store.routing_budget_bytes();
             for reference in &manifest.segments {
+                if should_stop() { return PackedBlockFilter::empty(); }
                 match store.open_segment(reference.segment_id) {
                     Ok(segment) => {
                         if validate_open_segment(&segment, reference).is_err()
