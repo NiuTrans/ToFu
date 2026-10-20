@@ -1,4 +1,8 @@
-"""Exercise lifecycle retention at the shared final provider-wire boundary."""
+"""Retain lifecycle controls through default batches and explicit programs.
+
+Exercise the shared final provider-wire boundary. A stale program-tier hint
+cannot turn the default auto policy into a JavaScript opt-in.
+"""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -14,7 +18,8 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def _without_cache_projection(monkeypatch):
+def _default_policy_without_cache_projection(monkeypatch):
+    monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
     # Cache markers are transport metadata, not part of canonical schemas.
     monkeypatch.setattr('lib.llm._sse_core.add_cache_breakpoints',
                         lambda *args, **kwargs: None)
@@ -87,15 +92,18 @@ def _assert_canonical(body, controls=(POLL_TOOL, KILL_TOOL)):
 
 
 @pytest.mark.parametrize('search_mode', ['local', 'off'])
-@pytest.mark.parametrize('programmatic_mode,exposure,tier', [
-    ('off', 'additive', 'program'),
-    ('auto', 'additive', 'program'),
-    ('auto', 'gateway_only', 'program'),
-    ('auto', 'gateway_only', 'batch'),
+@pytest.mark.parametrize('programmatic_mode,exposure,tier,expected_gateway', [
+    ('off', 'additive', 'program', None),
+    ('auto', 'additive', 'program', 'execute_tools'),
+    ('auto', 'gateway_only', 'program', 'execute_tools'),
+    ('auto', 'gateway_only', 'batch', 'execute_tools'),
+    ('on', 'additive', 'program', 'execute_program'),
+    ('on', 'gateway_only', 'program', 'execute_program'),
+    ('on', 'gateway_only', 'batch', 'execute_tools'),
 ])
 @pytest.mark.parametrize('stale_wire', [False, True])
 def test_wire_controls_survive_routing_ptc_and_tiny_budget(
-        search_mode, programmatic_mode, exposure, tier, stale_wire):
+        search_mode, programmatic_mode, exposure, tier, expected_gateway, stale_wire):
     body = _body(stale_wire=stale_wire)
     body.update({
         '_tool_search_mode': search_mode,
@@ -109,9 +117,10 @@ def test_wire_controls_survive_routing_ptc_and_tiny_budget(
     assert body == before
     _assert_canonical(plan.body)
     names = set(_functions(plan.body))
-    if programmatic_mode != 'off':
+    if expected_gateway:
         assert plan.programmatic_backend == 'local'
-        assert ('execute_program' if tier == 'program' else 'execute_tools') in names
+        assert expected_gateway in names
+    assert ('execute_program' in names) is (expected_gateway == 'execute_program')
     if search_mode == 'local' and exposure != 'gateway_only':
         assert 'search_tools' in names
     if search_mode == 'local' or exposure == 'gateway_only':
@@ -183,8 +192,12 @@ def test_legacy_direct_request_and_empty_authority_are_distinct():
 
 @pytest.mark.parametrize('native_exposure', ['routed', 'full'])
 @pytest.mark.parametrize('lean', [False, True])
+@pytest.mark.parametrize('programmatic_mode,expected_gateways', [
+    ('auto', {'execute_tools'}),
+    ('on', {'execute_tools', 'execute_program'}),
+])
 def test_real_assembly_reaches_gateway_only_wire_with_canonical_controls(
-        native_exposure, lean):
+        native_exposure, lean, programmatic_mode, expected_gateways):
     from lib.tools.registry import ToolContext, assemble_tool_list
 
     ctx = ToolContext(
@@ -202,7 +215,7 @@ def test_real_assembly_reaches_gateway_only_wire_with_canonical_controls(
         '_tool_discovery_policy_by_name': ctx.discovery_policy_by_name,
         '_frontend_selected_tool_names': list(ctx.frontend_selected_tool_names),
         '_tool_search_mode': 'local', '_tool_schema_budget_tokens': 1,
-        '_programmatic_tool_calling': 'auto',
+        '_programmatic_tool_calling': programmatic_mode,
         '_programmatic_eligible_tools': ['read_files'],
         '_programmatic_exposure': 'gateway_only',
     }
@@ -211,31 +224,41 @@ def test_real_assembly_reaches_gateway_only_wire_with_canonical_controls(
     assert plan.programmatic_backend == 'local'
     assert body == before
     _assert_canonical(plan.body)
-    assert set(_functions(plan.body)) == {'poll', 'kill', 'execute_tools', 'execute_program'}
+    assert set(_functions(plan.body)) == {'poll', 'kill'} | expected_gateways
 
 
-def test_read_only_worker_authority_cannot_regain_stale_lifecycle_controls():
+@pytest.mark.parametrize('programmatic_mode,expected_gateways', [
+    ('auto', {'execute_tools'}),
+    ('on', {'execute_tools', 'execute_program'}),
+])
+def test_read_only_worker_authority_cannot_regain_stale_lifecycle_controls(
+        programmatic_mode, expected_gateways):
     from lib.swarm.routing import read_only_swarm_tools
 
     body = _body()
     body['_executable_tool_catalog'] = read_only_swarm_tools(
         {}, body['_executable_tool_catalog'])
     body.update({
-        '_programmatic_tool_calling': 'auto',
+        '_programmatic_tool_calling': programmatic_mode,
         '_programmatic_eligible_tools': ['lookup_0'],
         '_programmatic_exposure': 'gateway_only',
     })
     plan = _request(body)
     assert plan.programmatic_backend == 'local'
-    assert set(_functions(plan.body)) == {'execute_tools', 'execute_program'}
+    assert set(_functions(plan.body)) == expected_gateways
 
 
-def test_gateway_only_hidden_count_does_not_count_persistent_controls():
+@pytest.mark.parametrize('programmatic_mode,expected_gateway', [
+    ('auto', 'execute_tools'),
+    ('on', 'execute_program'),
+])
+def test_gateway_only_hidden_count_does_not_count_persistent_controls(
+        programmatic_mode, expected_gateway):
     body = _body()
     decision = {}
     body.update({
         '_tool_search_mode': 'off',
-        '_programmatic_tool_calling': 'auto',
+        '_programmatic_tool_calling': programmatic_mode,
         '_programmatic_eligible_tools': ['lookup_0'],
         '_programmatic_exposure': 'gateway_only',
         '_tool_orchestration_decision_sink': decision,
@@ -245,7 +268,7 @@ def test_gateway_only_hidden_count_does_not_count_persistent_controls():
         api_protocol='openai')
     _assert_canonical(plan.body)
     assert decision['programmaticHiddenDirectToolCount'] == 18
-    assert set(_functions(plan.body)) == {'poll', 'kill', 'execute_program'}
+    assert set(_functions(plan.body)) == {'poll', 'kill', expected_gateway}
 
 
 @pytest.mark.parametrize('search_mode', ['off', 'auto'])

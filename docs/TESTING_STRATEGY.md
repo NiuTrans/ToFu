@@ -35,6 +35,12 @@ authority. Program-execution tests explicitly select
 and disabled-policy cases remain separate assertions. These are required
 fixture inputs, not reasons to weaken production admission or change defaults.
 
+Final-wire lifecycle fixtures cover default batching and explicit JavaScript
+separately. Problem: an old `_programmatic_tier=program` hint was treated as
+opt-in evidence. Decision: exercise `auto` and `on` through real projection while
+retaining canonical controls, revocation and hidden-count assertions. Reinstating
+hint authority or weakening those assertions would hide a policy regression.
+
 1. Reproduce and run the smallest test at the owning boundary.
 2. Run neighboring contract tests when data crosses a module/process boundary.
 3. Regenerate and check artifacts when a source contract changes.
