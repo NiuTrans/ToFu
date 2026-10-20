@@ -13,6 +13,21 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def _ordinary_project_role(monkeypatch):
+    """These observer fixtures belong to an unbound, owner-scoped project."""
+    def read_binding(repository, project_path):
+        assert repository.user_id == 1
+        assert project_path == '/project'
+        return {'projectPath': project_path, 'conversationId': '',
+                'revision': 0, 'availability': 'unbound'}
+
+    monkeypatch.setattr(
+        'lib.conversations.project_coordination.ProjectCoordinationRepository.read',
+        read_binding)
+
+
 _MUTABLE_OBSERVERS = (
     'get_conversation', 'list_artifacts',
     'list_conversations', 'motion_video_check', 'motion_video_env_check',

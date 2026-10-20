@@ -75,7 +75,7 @@ def test_program_search_uses_same_evidence(records):
     _, content, _ = handler.handle_execute_tools(
         task, {}, 'execute_tools', 'program-1', {
             'program': 'return catalog.search("steer_agent_run");'},
-        1, {'llmRound': 32}, {}, None, False)
+        1, {'llmRound': 32}, {'tools': {'programmaticCalling': 'on'}}, None, False)
     assert json.loads(content)['status'] == 'ok'
     row, = records
     assert row['source'] == 'catalog.search' and row['llm_round'] == 32
@@ -90,7 +90,7 @@ def test_program_retrieval_exception_is_audited_and_still_fails(records, monkeyp
         handler.handle_execute_tools(
             {'model': 'fixture', '_executable_tool_catalog': [tool('read_files')]},
             {}, 'execute_tools', 'program-1', {'program': 'return catalog.search("read");'},
-            1, {'llmRound': 32}, {}, None, False)
+            1, {'llmRound': 32}, {'tools': {'programmaticCalling': 'on'}}, None, False)
     row, = records
     assert row['source'] == 'catalog.search' and row['reason'] == 'retrieval_exception'
     assert row['exception_type'] == 'RuntimeError' and row['fail_open'] is False
