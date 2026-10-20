@@ -283,10 +283,13 @@ PostgreSQL 是同一存储契约后的显式分布式选项。首次登录后请
 
 ## 开发与发布
 
-要求 Python 3.12 和 Node 20.19.x：
+开发环境需要 Python 3.12；仓库构建使用 [`.node-version`](.node-version)
+指定的 Node.js 版本系列，可用范围见 [`package.json`](package.json)。
+`npm ci` 会拒绝不符合项目或依赖运行时要求的环境。
 
 ```bash
 uv sync --frozen --extra dev
+npm ci
 npm run check:frontend
 uv run make test-unit
 ```
