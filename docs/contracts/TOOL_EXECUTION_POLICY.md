@@ -124,6 +124,25 @@ sample of 2,000 active contexts measured about 171 bytes per fence; separate
 100/1,000/2,000-cycle create/close/unregister samples each retained 208 traced
 bytes and zero active contexts. The durable round projection added zero bytes.
 
+**Result collection recovery.** Problem: an omitted completed Future discarded
+an available executor receipt and the final fallback claimed the tool was
+unknown. Decision: the pipeline harvests missing terminal Future receipts before
+ordered replay, using the same recovery path after a collector deadline. It
+neither waits again nor re-enters handlers, and an already collected verdict
+always wins. Canonical capture, result budgeting, search accumulation and ordered
+model delivery keep their existing owners. If no receipt can be recovered,
+`tool_result_missing` identifies a collection failure without asserting tool
+absence or changing effect evidence. Retry guidance uses the existing
+`ToolContractV2.effectRecovery` policy; missing, contradictory or changed
+execution evidence requires outcome inspection. Every new call still passes
+normal authorization, and independent work may continue. Alternatives rejected:
+repeating the handler may duplicate effects; interpreting a missing result as
+tool absence sends the model toward the wrong repair; treating all missing
+results as safely retryable invents execution authority. Recovery borrows the
+current invocation's Future/result maps and adds no pool, retained registry or
+durable metadata. Verify `tests/tasks_pkg/test_tool_result_collection.py` for
+original success/failure, sibling ordering, search evidence and recovery policy.
+
 
 Root MCP authority refreshes before each request through ordinary owner/policy
 assembly on detached carriers. Only names in the root's initial MCP candidate
