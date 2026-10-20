@@ -12,6 +12,20 @@ import tofu_search.providers as _providers
 
 
 @pytest.fixture(autouse=True)
+def _reject_unmocked_httpx_network(monkeypatch):
+    """Fail even if the product catches an unexpected offline-test request."""
+    import httpx
+
+    attempts = []
+    def reject(self, request):
+        attempts.append(request.method)
+        raise AssertionError('Unmocked HTTPX network request in offline search test')
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', reject)
+    yield
+    assert not attempts, 'Offline test reached the real HTTPX network transport'
+
+
+@pytest.fixture(autouse=True)
 def _reset_global_config():
     """Snapshot and restore the global SearchConfig around every test.
 

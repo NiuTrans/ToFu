@@ -316,6 +316,7 @@ def http_search_get(
     headers: dict | None = None,
     on_ratelimit_retry: bool = False,
     request_get: Callable | None = None,
+    alternate_urls: tuple[str, ...] = (),
 ) -> list:
     """Shared HTTP envelope for scraping search engines.
 
@@ -347,6 +348,11 @@ def http_search_get(
         Transport port for an engine with a distinct HTTP protocol requirement.
         Receives the same endpoint, params, headers and selected proxy mapping,
         plus a shared monotonic deadline; retries and parsing stay here.
+    alternate_urls : tuple, optional
+        Same-engine endpoints using the same query parameters and parser.
+        Recover endpoint-specific outages within one deadline. A configured
+        alternate replaces the same-endpoint 202 retry; proxy connection and
+        authentication failures still belong to the network-path owner.
 
     Returns
     -------
@@ -384,26 +390,28 @@ def http_search_get(
     #    separate http_get and stays unthrottled. ──
     cfg = get_config()
     request_deadline = None
-    if request_get is not None:
+    if request_get is not None or alternate_urls:
         budget = cfg.search_deadline_secs if cfg.search_deadline_secs > 0 else 20.0
         request_deadline = time.monotonic() + min(20.0, budget)
     host_throttle.wait(name, max_wait=min(float(timeout), max(0.0, request_deadline - time.monotonic()))
                        if request_deadline is not None else float(timeout))
 
     hdrs = headers or HEADERS
+    endpoint_urls = tuple(dict.fromkeys((url, *alternate_urls)))
 
-    def _get(proxies_kwarg):
+    def _get(endpoint, proxies_kwarg):
         kw = {'params': params, 'headers': hdrs, 'timeout': timeout}
         if proxies_kwarg is not None:
             kw['proxies'] = proxies_kwarg
-        if request_get is not None:
+        if request_deadline is not None:
             remaining = request_deadline - time.monotonic()
             if remaining <= 0:
                 raise requests.Timeout('Search HTTP request budget exhausted')
             kw['timeout'] = min(float(timeout), remaining)
+        if request_get is not None:
             kw['deadline'] = request_deadline
-            return request_get(url, **kw)
-        return search_session.get(url, **kw)
+            return request_get(endpoint, **kw)
+        return search_session.get(endpoint, **kw)
 
     # ── Adaptive proxy plan: one attempt when no proxy is configured (identical
     #    to the historical env-only path), else the failover chain (proxy chain
@@ -416,8 +424,8 @@ def http_search_get(
     last_exc: Exception | None = None
     last_http_status: int | None = None
 
-    def _attempt(mode, proxies_kwarg):
-        """One network-path attempt → a fine-grained outcome tuple.
+    def _attempt_endpoint(mode, proxies_kwarg, endpoint):
+        """One endpoint on one network path → a fine-grained outcome tuple.
 
         ('results', list) — HTTP ok, parser found results (genuine success)
         ('empty',  None)  — HTTP ok, small unchallenged body, zero results
@@ -430,16 +438,16 @@ def http_search_get(
                             make a slow endpoint fast
         """
         try:
-            resp = _get(proxies_kwarg)
+            resp = _get(endpoint, proxies_kwarg)
 
             # Rate-limit retry (DDG-specific, opt-in) — same network path.
-            if on_ratelimit_retry and resp.status_code == 202:
+            if on_ratelimit_retry and len(endpoint_urls) == 1 and resp.status_code == 202:
                 logger.info('%s 202 (rate-limited), retry in 0.6s: %s', tag, query[:80])
                 delay = 0.6
                 if request_deadline is not None:
                     delay = min(delay, max(0.0, request_deadline - time.monotonic()))
                 time.sleep(delay)
-                resp = _get(proxies_kwarg)
+                resp = _get(endpoint, proxies_kwarg)
 
             # HTTP 202 accepts a request but is not a completed search. DDG
             # also uses it for its challenge flow. The one retry above may
@@ -472,6 +480,31 @@ def http_search_get(
         except Exception as e:
             logger.error('%s error via %s: %s', tag, mode, e, exc_info=True)
             return ('fatal', e)
+
+    def _attempt(mode, proxies_kwarg):
+        """Try only endpoint outages on this route; observe the engine once."""
+        outcome = ('fatal', requests.Timeout('Search HTTP request budget exhausted'))
+        for index, endpoint in enumerate(endpoint_urls):
+            if index:
+                if time.monotonic() >= request_deadline:
+                    return ('fatal', requests.Timeout('Search HTTP request budget exhausted'))
+                kind, payload = outcome
+                if on_ratelimit_retry and kind == 'status' and payload == 202:
+                    time.sleep(min(0.6, max(0.0, request_deadline - time.monotonic())))
+                host_throttle.wait(name, max_wait=max(0.0, request_deadline - time.monotonic()))
+            outcome = _attempt_endpoint(mode, proxies_kwarg, endpoint)
+            kind, payload = outcome
+            # A slow/challenged origin can have a healthy same-engine
+            # alternate. A failed proxy or invalid request needs its existing
+            # path/error policy, not a second request to the same proxy.
+            recoverable = (
+                kind == 'soft'
+                or (kind == 'status' and payload in _RETRYABLE_STATUSES and payload != 407)
+                or (kind == 'fatal' and isinstance(payload, requests.ReadTimeout))
+            )
+            if not recoverable:
+                break
+        return outcome
 
     def _race(attempts):
         """Race the remaining network paths CONCURRENTLY; first genuine

@@ -55,6 +55,35 @@ actual negotiated protocol, outcomes and failures in alternating fresh
 processes. Small paired probes establish compatibility on the measured route,
 not broad search-quality superiority.
 
+### Same-engine endpoint recovery
+
+Problem: DDG HTML and Lite can fail independently on the same configured route.
+A working Lite response uses a different table layout; treating it as HTML
+results loses its evidence.
+
+Decision: the common HTTP envelope admits DDG Lite as an alternate for the
+existing `DDG-HTML` engine. Read timeouts, challenges and retryable origin
+statuses may advance to it. Proxy connection/authentication errors keep the
+existing route policy. A completed result or genuine empty stops recovery.
+The alternate replaces the repeated HTML request after HTTP 202; both endpoints
+share the query, freshness, throttle, selected proxy and original deadline.
+Neither endpoint creates another engine vote, worker pool, cookie session or
+paid dependency. The envelope observes one final engine outcome.
+
+The browser and HTTP paths use one parser for both layouts. Lite snippets stop
+at the next result so one page cannot inherit another page's evidence. Ads are
+excluded, and only DDG's redirect URLs are unwrapped, once: percent escapes and
+ordinary destination query parameters must survive.
+
+Alternatives rejected: restarting a budget for Lite, reporting it as an
+independent source, repeating completed searches, or adding a separate retry
+loop outside the common transport owner. DDG's two no-JS surfaces are described
+in the [SearXNG engine reference](https://github.com/searxng/searxng/blob/master/searx/engines/duckduckgo.py).
+`tests/test_ddg_endpoint_recovery.py` covers public delivery, source constraints,
+failure accounting, deadline exhaustion and snippet/URL fidelity. Package tests
+reject unmocked HTTPX network attempts even when product error handling catches
+them, so a blocked live request cannot masquerade as an offline regression pass.
+
 ## SearXNG response and recovery contract
 
 Problem: accepting the first nonempty response let generic listings prevent

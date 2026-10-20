@@ -1,19 +1,39 @@
-"""tofu_search/search/engines/ddg.py — DuckDuckGo HTML lite + Instant Answer API."""
+"""DuckDuckGo HTML/Lite parsing and anonymous search entry points.
 
-from urllib.parse import parse_qs, unquote, urlparse
+Entries: search_ddg_html, search_ddg_api and parse_ddg_html_text.
+The common HTTP envelope owns endpoint recovery, routing and attempt budgets.
+"""
+
+from urllib.parse import parse_qs, urlparse
 
 from tofu_search.http_client import _search_http2_get
-from tofu_search.log import get_logger
 from tofu_search.search._common import clean_text, http_search_get, make_result, soup_of
-
-logger = get_logger(__name__)
 
 __all__ = ['search_ddg_html', 'search_ddg_api', 'parse_ddg_html_text']
 
 
+def _result_url(raw_url):
+    """Unwrap DDG navigation once without changing destination URL escapes."""
+    url = 'https:' + raw_url if raw_url.startswith('//') else raw_url
+    try:
+        parsed = urlparse(url)
+        if parsed.hostname in ('duckduckgo.com', 'www.duckduckgo.com',
+                                'html.duckduckgo.com', 'lite.duckduckgo.com'):
+            if parsed.path == '/y.js':
+                return None
+            if parsed.path.rstrip('/') == '/l':
+                url = parse_qs(parsed.query).get('uddg', [''])[0]
+                parsed = urlparse(url)
+        if parsed.scheme in ('http', 'https') and parsed.hostname:
+            return url
+    except ValueError:
+        pass
+    return None
+
+
 def parse_ddg_html_text(html: str, *, max_results: int | None = None,
                         source: str = 'DuckDuckGo') -> list[dict]:
-    """Parse a raw DuckDuckGo lite HTML string into result dicts.
+    """Parse DuckDuckGo's HTML or Lite layouts into the same result dicts.
 
     Shares the exact bs4 selector logic of the in-engine parser, but accepts
     a plain HTML string instead of a ``requests`` response — so a host that
@@ -22,7 +42,7 @@ def parse_ddg_html_text(html: str, *, max_results: int | None = None,
     same parsing quality as the server-side engine, without re-implementing it.
 
     Args:
-        html: Raw HTML of an ``html.duckduckgo.com/html/`` results page.
+        html: Raw HTML of a DDG HTML or Lite results page.
         max_results: Cap on the number of results returned (None ⇒ no cap).
         source: ``source`` field stamped on each result dict.
 
@@ -31,21 +51,11 @@ def parse_ddg_html_text(html: str, *, max_results: int | None = None,
     """
     results = []
     soup = soup_of(html or '')
-    for a in soup.select('a.result__a[href]'):
+    for a in soup.select('a.result__a[href], a.result-link[href]'):
         if max_results is not None and len(results) >= max_results:
             break
-        raw_url = a['href']
-        if '/y.js?' in raw_url and 'ad_' in raw_url:
-            continue
-        url = raw_url
-        if 'uddg=' in raw_url:
-            try:
-                url = unquote(parse_qs(urlparse(raw_url).query).get('uddg', [raw_url])[0])
-            except Exception as e:
-                logger.debug('[Search] uddg URL decode failed: %s (%s)', raw_url[:100], e)
-        if raw_url.startswith('//'):
-            url = 'https:' + url if url.startswith('//') else url
-        if not url.startswith('http'):
+        url = _result_url(a['href'])
+        if not url or a.find_parent(class_='result--ad') is not None:
             continue
         title = a.get_text(' ', strip=True)
         snippet = ''
@@ -54,39 +64,27 @@ def parse_ddg_html_text(html: str, *, max_results: int | None = None,
             snip = block.select_one('.result__snippet')
             if snip:
                 snippet = snip.get_text(' ', strip=True)
+        elif 'result-link' in a.get('class', ()):
+            row = a.find_parent('tr')
+            # Lite places the snippet in following table rows. Stop before
+            # the next result, including ads, so missing snippets cannot
+            # borrow another source's evidence.
+            for sibling in row.next_siblings if row else ():
+                if getattr(sibling, 'name', None) != 'tr':
+                    continue
+                if sibling.select_one('a.result-link'):
+                    break
+                snip = sibling.select_one('.result-snippet')
+                if snip:
+                    snippet = snip.get_text(' ', strip=True)
+                    break
         results.append(make_result(title, snippet, url, source))
     return results
 
 
 def _parse_ddg_html(resp):
-    """Parse DuckDuckGo lite HTML response into result dicts (bs4 selectors)."""
-    results = []
-    soup = soup_of(resp.text)
-    for a in soup.select('a.result__a[href]'):
-        raw_url = a['href']
-        if '/y.js?' in raw_url and 'ad_' in raw_url:
-            continue
-        # DDG wraps the destination in a uddg= redirect param.
-        url = raw_url
-        if 'uddg=' in raw_url:
-            try:
-                url = unquote(parse_qs(urlparse(raw_url).query).get('uddg', [raw_url])[0])
-            except Exception as e:
-                logger.debug('[Search] uddg URL decode failed: %s (%s)', raw_url[:100], e)
-        if raw_url.startswith('//'):
-            url = 'https:' + url if url.startswith('//') else url
-        if not url.startswith('http'):
-            continue
-        title = a.get_text(' ', strip=True)
-        # The snippet anchor lives in the same result block.
-        snippet = ''
-        block = a.find_parent(class_='result')
-        if block:
-            snip = block.select_one('.result__snippet')
-            if snip:
-                snippet = snip.get_text(' ', strip=True)
-        results.append(make_result(title, snippet, url, 'DuckDuckGo'))
-    return results
+    """Use the same parser for HTTP and browser-provided search evidence."""
+    return parse_ddg_html_text(resp.text)
 
 
 def _build_ddg_api_parser(query):
@@ -137,6 +135,7 @@ def search_ddg_html(query, max_results=6, freshness=''):
         query=query,
         parser=_parse_ddg_html,
         request_get=_search_http2_get,
+        alternate_urls=('https://lite.duckduckgo.com/lite/',),
         max_results=max_results,
         on_ratelimit_retry=True,  # DDG HTML often returns 202 on first try
     )
