@@ -19,6 +19,25 @@ import tomllib
 from .contracts import DDGS_VERSION, PAGE_CHARS, RESULTS, SNIPPET_CHARS, python_tree_digest, url_key
 
 
+def source_trace(groups, *, url_field='url'):
+    """Bound raw source observations for opt-in diagnostics, never fetch authority."""
+    candidates, used, truncated = [], 512, False
+    for engine, rows in groups.items():
+        for row in rows:
+            url = row.get(url_field, '')
+            if not isinstance(url, str) or len(url) > 4000 or not url_key(url):
+                continue
+            item = {'engine': str(engine)[:80], 'url': url}
+            size = len(json.dumps(item, ensure_ascii=False).encode()) + 1
+            if len(candidates) >= 256 or used + size > 64 * 1024:
+                truncated = True
+                continue
+            candidates.append(item)
+            used += size
+    return {'candidates': candidates, 'truncated': truncated,
+            'scope': 'Raw engine observations; not ranked results or fetch authority'}
+
+
 def search_observation(rows, *, url_field='url', snippet_field='snippet'):
     """Keep discovery candidates and safe diagnostics within the shared budget.
 
@@ -117,7 +136,10 @@ def operation(request):
         with DDGS(proxy=proxy or None, timeout=10, verify=True) as engine:
             rows = engine.text(request['query'], region=request['region'],
                                safesearch='moderate', max_results=RESULTS, backend='auto')
-        return search_observation(rows, url_field='href', snippet_field='body')
+        observation = search_observation(rows, url_field='href', snippet_field='body')
+        if request.get('include_source_trace') is True:
+            observation['source_trace'] = source_trace({'DDGS-auto': rows}, url_field='href')
+        return observation
     from tofu_search import SearchConfig, fetch_page_content, get_playwright_pool, perform_web_search
     from tofu_search.config import bind_call_config
     cfg = SearchConfig(proxy_url=proxy, proxy_dual_attempt=False,
@@ -127,7 +149,11 @@ def operation(request):
         if request['operation'] == 'search' and arm == 'tofu':
             rows = perform_web_search(request['query'], max_results=RESULTS,
                                       fetch_pages=False, filter_pages=False, config=cfg)
-            return search_observation(rows)
+            observation = search_observation(rows)
+            if request.get('include_source_trace') is True:
+                observation['source_trace'] = source_trace(
+                    getattr(rows, '_engine_breakdown', None) or {'returned': rows})
+            return observation
         if request['operation'] == 'fetch':
             diag = {}
             with bind_call_config(cfg):

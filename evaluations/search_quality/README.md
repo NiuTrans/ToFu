@@ -1,5 +1,8 @@
 # Free search in a real agent
 
+For a separate model-free, topic-balanced recorded-source diagnostic, see
+[`source-probe.md`](source-probe.md). Its coverage results are not agent scores.
+
 Problem: engine availability and synthetic ranking scores do not establish
 whether an agent can find supported answers. Decision: use one configured
 application's production agent loop with exactly two client tools, swapping
