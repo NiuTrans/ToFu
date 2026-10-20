@@ -447,13 +447,15 @@ def test_lost_write_result_retains_uncertainty_in_every_failure_surface(observat
 
 def test_declared_timeout_overrules_early_success_and_is_not_cached(monkeypatch, observations):
     calls = []
+    timers = []
 
     class ImmediateTimer:
         def __init__(self, delay, callback):
             self.callback = callback
+            timers.append(self)
 
         def start(self):
-            self.callback()
+            pass
 
         def cancel(self):
             pass
@@ -461,13 +463,13 @@ def test_declared_timeout_overrules_early_success_and_is_not_cached(monkeypatch,
     monkeypatch.setattr(
         'lib.tasks_pkg.tool_dispatch._heartbeat.threading.Timer', ImmediateTimer)
     monkeypatch.setattr('lib.tools.registry.declared_tool_timeout_ms', lambda name: 1)
-    monkeypatch.setattr(
-        'lib.tasks_pkg.tool_runtime.active_context_for_call',
-        lambda *args, **kwargs: SimpleNamespace(request_resource_cancellation=lambda: None))
 
     def handler(task, tc, name, call_id, arguments, number, row, *rest):
         calls.append(call_id)
         _finalize_tool_round(task, number, row, [{'content': 'late output'}])
+        # Expire after actual entry/presentation. Keep the real runtime context
+        # so this checks timeout precedence, not an unrelated observer error.
+        timers[-1].callback()
         return call_id, 'late output', False
 
     task = task_for(handler)
