@@ -97,6 +97,11 @@ calls, both clocks, identical fixtures/instrumentation and unchanged sources.
 
 ## Verification
 
+`search_html_reference.py` scores frozen extraction outputs against external
+HTML references. Its text-boundary metric is owned by the search package's
+`docs/relevance-quality.md`; verify `tests/meta/test_search_html_reference.py`.
+Keep prior metric versions and missing-output cases in their original reports.
+
 `http_h2_credit.py` separates handled cancellation from blocked response DATA:
 exhaust both H2 windows, grant connection credit only, keep SSE paused, then
 verify RST cleanup and reuse. Run meta/test_http_h2_credit and paired actual
