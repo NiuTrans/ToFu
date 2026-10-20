@@ -1,90 +1,146 @@
 TOFU — EMNLP 2026
-English speaking notes for the current-system poster
+Asynchronous tools, persistent collaborators, and durable state
 
 30-SECOND OPENING
 
-ToFu connects papers, code and manuscript writing with an agent harness you
-can inspect and change. The poster follows three engineering decisions: how
-much context the model sees, which data transformations run beside the tools,
-and how a long history is reconstructed from storage. TofuDB makes verified
-continuation a storage operation. We show the mechanisms and their tradeoffs,
-including a case where the SQL control is faster.
+A research task mixes quick file reads, long experiments and parallel agents.
+ToFu gives background work a handle and delivers its result separately, so the
+main agent can keep working. A useful child can also become a persistent
+colleague: later assignments reuse its saved working context, while no worker
+stays resident between assignments. TofuDB supports the growing history below
+these lifecycles with native context reads and verified continuation.
 
 90-SECOND WALK-THROUGH
 
-Start with the central loop. Research applications share a runtime. Complete
-results and accepted task state are kept separately from the model's current
-view. The context composer can expose a recoverable preview, trim the working
-view, or summarize older history. Request Inspector records what was injected,
-where it came from, its token budget and the reason for inclusion.
+Start with the swimlanes. Normal tools return one result. A background command
+or a Swarm child returns a handle and continues independently. The main agent
+can do other work, inspect or wait through poll, or stop one command or child
+through kill. A pending handle is not a successful outcome. Completed evidence
+enters the delivery path and is incorporated at a model-round boundary. A
+finished provider turn may still have required child results awaiting delivery;
+optional exploration does not have to hold up those required dependencies.
 
-The cache table explains why fewer tokens alone are a poor cost objective.
-These are two adjacent observed requests: nearly the same input and output
-size, but 19% versus 97% cache reads and a 5.95-fold cost ratio. This is not an
-ablation and not a claimed compaction saving. It motivates weighing future
-savings against the summary cost and the disruption of a cached prefix.
+The second figure follows one colleague through two assignments. It first reads
+a paper and explains the method. Its working dialogue and result are committed,
+and the identity becomes idle. Later, asking that same colleague to design an
+ablation restores its context instead of creating a fresh worker with no
+knowledge of the previous exploration. State survives between assignments;
+a worker is present only when there is work. Current model, tool and budget
+authority are bound anew, rather than inherited as permissions from old text.
 
-The program example shows deterministic filtering beside a tool. The complete
-rows are available to isolated JavaScript; the model gets the selected failure
-evidence. This is an illustrative transformation, not a measured token saving.
-Programs require explicit opt-in. Ordinary and JSON tools remain the default,
-and every subcall retains its normal permission checks. Semantic judgment goes
-back to the model.
+An idle persistent colleague can be activated with a message. A busy colleague
+receives steering in its current owned assignment. The same identity admits
+one active assignment; different identities can work in parallel. The child
+commits its final working context before returning to idle. Lost launch replies
+and late completions have explicit reconciliation and generation checks.
 
-The bottom section follows the same principle into storage. The native context
-reader avoids redundant serialization and parsing. After authenticating a
-prefix, continuation can validate the terminal and the new suffix. A two-turn
-extension checks three headers in the tested histories. Compaction commits the
-accepted view, archive and receipt before switching model context. Finally,
-read the latency table: most displayed native paths are faster, but SQL objects
-win on full reads of escaped evidence. That distinction matters.
+The bottom section explains the storage cost this creates. TofuDB builds exact
+model context at the storage boundary and avoids redundant JSON work. An
+authenticated continuation reuses the unchanged history prefix. The table shows
+scoped storage measurements and includes a case where SQL objects are faster.
+These mechanisms support durable research workflows without a claim that every
+agent task is faster or that a new physical database is the only option.
 
-WHY TRY TOFU IF I ALREADY USE CODEX OR OPENCODE?
+SYNCHRONOUS VS ASYNCHRONOUS TOOLS
 
-The fit is a researcher who wants paper and writing tools connected to a
-modifiable runtime, with context decisions, tool execution and continuation
-available as experimental surfaces. Open source, model choice, MCP and skills
-alone are not exclusive advantages; those systems are capable and extensible.
-We invite researchers to use the workbench for a real task and inspect or alter
-the harness while preserving the surrounding application workflow. The poster
-makes no unsupported claim that competitors lack any single component.
+Ordinary tools remain model-synchronous: one returned result. Progress frames
+are presentation, not extra successful results. Explicit local
+run_command(background=true) returns pending work with a handle. A foreground
+local shell command can also hand off after 60 seconds of actual subprocess
+time, or through an authorized per-command handoff; the process is not killed.
+Automatic handoff excludes stdin-waiting, no-subprocess and unattended/headless
+calls. Foreground handoff remains tied to the current server process.
 
-WHY A TOFUDB LAYER? WHY NOT SQLITE?
+Only explicit local background launch writes the restart record directory,
+file-backed output and wrapper exit sentinel needed to reattach a still-running
+process or recover its finished result after a server restart. This is not a
+promise to rerun a dead external command. Remote-worktree explicit background
+is rejected before execution. There is no model-authored run_command timeout;
+Stop/kill own cancellation and process cleanup.
 
-SQLite already has transactions, WAL recovery and snapshots. Those properties
-do not justify writing a new physical engine. The concrete motivation is to
-remove repeated work at the application/storage boundary: reconstruct exact
-model context, validate a growing history incrementally, and acknowledge durable
-progress through one semantic operation. The four-arm control keeps this claim
-honest. It compares production Rust TofuDB to the same Python SQL semantic
-implementation exposed as a Sidecar, in-process JSON, or in-process objects.
-It does not isolate Rust from Python or the engine from its adapter.
+poll uses the same interface for command, agent and cross-conversation task
+handles. A no-ID poll is an immediate snapshot. A handle wait is clamped to
+60 seconds and returns the running snapshot if capped; results remain readable.
+For multiple Swarm child handles, mode=any/all controls the wait. kill targets
+background commands or running Swarm children; another conversation's task must
+be stopped through that conversation. Controls remain subject to the live
+executable catalog, scope and permissions.
 
-In the 1 KiB fixture, continuation takes 0.173 ms in native versus 1.032 ms
-through the SQL Sidecar and 0.675 ms through in-process SQL objects. For the
-64 KiB escaped full read, SQL objects take 22.220 ms versus native 29.799 ms.
-A Rust semantic layer on SQLite remains a legitimate alternative. These are
-storage-operation results, not measured increases in completed agent tasks.
+COMPLETION, INTEGRATION AND DELIVERY
 
-WHAT EXACTLY DOES “3 HEADER CHECKS” MEAN?
+Background acceptance is pending. Completion evidence has an owned durable
+queue/inbox route with duplicate-identity handling and receipt publication.
+An active turn consumes available evidence at a complete round boundary. Ending
+the foreground turn does not itself terminate detached work. Required running
+or unread children remain delivery dependencies; existing completion callbacks,
+not extra model rounds just to poll, wake eligible continuation. Normal budget,
+cancellation and unattended-continuation gates still apply.
 
-An authenticated, same-epoch continuation checks the terminal and two added
-headers. Focused fixtures retain N = 8, 128 and 2,048 turns. Initial certification
-scans the prefix; earlier semantic edits invalidate reuse; an authority reopen
-requires reauthentication. Advancing checkpoint saves have the same suffix-work
-property. Full selected output must still be materialized. This is not a claim
-that arbitrary full-history reads or whole agent tasks take constant time.
+Receiving a child result establishes delivery to parent context, not that the
+parent has synthesized it correctly or that the user's entire goal is complete.
+The swimlane positions are schematic, not measured duration or speedup.
 
-DATA AND PRESENTATION SCOPE
+PERSISTENT COLLEAGUES
 
-The latency table selects the six XFS rows of the later eight-case four-arm
-matrix recorded on 2026-10-19. Each cell is P50 over two fresh processes with
-200 requests each. The full matrix has 12,800 exactly validated responses. The
-host had 63 affinity CPUs, Python 3.12.13 and SQLite 3.53.4. Full reads were warm
-authority context rebuilds. Measurements were not rerun for poster production.
+manage_agents create stores an idle scoped identity. promote copies a settled
+child's working checkpoint. assign reserves the identity atomically, launches
+an ordinary child with its saved dialogue plus the new objective, and binds the
+current caller's model/tools/policy/budget. Completion commits saved dialogue
+and result before releasing to idle. Ordinary spawn_agents remains temporary
+by default. Ownership is project- or conversation-scoped, with tenant and owner
+checks. Retention is an explicit choice.
 
-The manuscript supplies the title and author roster. This poster shows current
-system mechanisms; the old SWE-bench results are not used to explain them.
-The institutional marks are official assets from Northeastern University,
-NiuTrans Research and YourProvider LongCat. Community posters inform the composition
-but none of their scientific content or figures is part of the ToFu poster.
+Stable-ID messaging may activate an idle retained colleague or steer its busy
+assignment. Exact-run messaging only steers that exact invocation and never
+wakes a new one. A lost launch acknowledgement retains busy ownership until
+reconciled; absence of a callback does not authorize another worker. Reset or
+abandon changes the generation and fences a stale worker's memory publication.
+Old dialogue is context, not an execution grant.
+
+Restart restores durable identities and evidence. In-flight continuation is
+permitted only under the accepted original attempt/Continue lineage, current
+scope and cancellation checks, and a resolved effect frontier. Unknown external
+effects do not get silently replayed. Persistence is not universal exactly-once
+execution or unrestricted autonomous restart.
+
+WHY TRY TOFU ALONGSIDE AN EXISTING CODING AGENT?
+
+The research fit is a workspace that connects paper reading, experimentation
+and writing to an inspectable execution system: long work remains controllable,
+completion is separate from acceptance, and a useful specialist can retain its
+own working context across assignments. The poster demonstrates these concrete
+mechanisms rather than claiming competitors lack async tools, memory or
+extensibility. Its integration and behavior are the invitation to try it.
+
+WHY TOFUDB? WHAT DOES THE TABLE ESTABLISH?
+
+Durable agent identities, pending outcomes, receipts and transcripts require
+storage. TofuDB's particular case is reducing repeated work at that boundary:
+native model-context materialization and authenticated incremental continuation.
+SQLite already provides transactions, WAL recovery and snapshots; those facts
+alone do not establish that a separate physical engine is necessary.
+
+The table retains six XFS cases from the later four-arm semantic control:
+production Rust TofuDB and the same Python SQL implementation via a Sidecar,
+in-process JSON, or in-process objects. Each cell is P50 over two fresh processes
+with 200 samples each. The full eight-case matrix, recorded 2026-10-19, has
+12,800 exactly validated responses. Full reads are warm-authority context reads,
+not cold startup. Rust/Python and physical-engine contributions are not isolated.
+No measurements were rerun for poster production.
+
+For 1 KiB evidence, native continuation is 0.173 ms vs 1.032 ms in the Sidecar
+and 0.675 ms in SQL objects. For the escaped full read, SQL objects win at
+22.220 ms vs native 29.799 ms. This is workload-specific storage evidence.
+
+Three header checks means the authenticated terminal plus two new headers,
+verified at N=8,128,2048 retained turns for same-epoch reads and advancing saves.
+First certification scans the prefix; semantic edits invalidate reuse; reopening
+requires reauthentication. Selected output still has to be materialized.
+
+POSTER PRODUCTION
+
+The manuscript supplies title, authors, affiliations and mascot. Official marks
+are Northeastern University, NiuTrans Research and YourProvider LongCat. Finished
+SWE-agent, SWE-smith and SEED posters informed the visual structure; their
+scientific content and diagrams are not reused. The prior cache-cost discussion
+and result-filtering example are not part of this revision.

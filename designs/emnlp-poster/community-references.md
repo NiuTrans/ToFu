@@ -19,15 +19,14 @@ Its dense three-column prose is not appropriate for the intended demo discussion
 
 ## Resulting editorial decisions
 
-- The poster's largest figure explains the common research runtime. It is
-  original vector artwork, with distinct colors for durable state, request
-  context and execution.
-- Two concrete examples explain the technical choices: adjacent request costs
-  with different cache shares, and explicitly illustrative tool-result filtering.
-- TofuDB combines its continuation and adoption mechanisms with a six-row,
-  four-arm measurement table. The SQL-object win is visible alongside native
-  wins. Historical benchmark scores are not substituted for this evidence.
-- The three institutional marks are retained in their official colors. They
-  share a masthead with the manuscript's authors and ToFu mascot.
-- The print master is rendered and inspected directly; community screenshots
-  are reference material only and are not embedded in the ToFu poster.
+- The main figure is an original execution swimlane for the main agent, a long
+  command and a sub-agent. It distinguishes pending handles from final outcomes
+  and shows the completion inbox instead of an unannotated architecture box.
+- A second figure follows a persistent colleague across two assignments. The
+  saved identity/dialogue is visually separate from each ordinary child run.
+- TofuDB combines continuation and adoption diagrams with the six-row four-arm
+  measurement table, including the SQL-object win. Timeline geometry carries
+  no measured latency claim. Cache economics are outside this composition.
+- The official institutional marks retain their original colors. Scientific
+  diagrams are original, editable vector artwork; reference posters are not
+  embedded in the ToFu poster.

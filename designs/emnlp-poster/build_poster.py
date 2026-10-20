@@ -151,7 +151,7 @@ def draw_pdf(scene, destination):
                       pageCompression=1, initialFontName="body", initialFontSize=27)
     c.setTitle("ToFu: A White-Box, Token-Efficient Agent Harness for Researchers")
     c.setAuthor("Junhao Ruan, Yuan Ge, Bei Li and collaborators")
-    c.setSubject("EMNLP 2026 current-system poster: context, execution, and TofuDB")
+    c.setSubject("EMNLP 2026 current-system poster: asynchronous tools, persistent sub-agents, and TofuDB")
     # Select a bundled font before the first text object, avoiding unused Helvetica.
     c.setFont("body", 27)
     for a in scene.items:
@@ -221,8 +221,8 @@ def draw_svg(scene, destination):
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}mm" '
            f'height="{HEIGHT}mm" viewBox="0 0 {WIDTH} {HEIGHT}" role="img">'
            '<title>ToFu: A White-Box, Token-Efficient Agent Harness for Researchers</title>'
-           '<desc>English A0 poster about inspectable context, programmable tool '
-           'execution, and TofuDB incremental continuation. All prose is editable text.</desc>',
+           '<desc>English A0 poster about synchronous and asynchronous tools, persistent '
+           'sub-agents, and TofuDB incremental continuation. All prose is editable text.</desc>',
            "<defs><style>"]
     for name, filename in FONT_FILES.items():
         data = base64.b64encode((ASSETS/filename).read_bytes()).decode()

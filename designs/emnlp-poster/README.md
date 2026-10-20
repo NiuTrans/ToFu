@@ -6,22 +6,22 @@ contracts and recorded measurements supply the technical content.
 
 ## Design decision
 
-**Problem.** Feature descriptions and large unannotated UI screenshots did not
-explain the harness's technical contribution. A conference poster needs a
-legible mechanism, concrete examples and evidence that can be discussed.
+**Problem.** Research work mixes fast tools, long commands and reusable
+specialists. Visitors need to understand who owns running work, how results
+return, and what a child agent retains across assignments.
 
 **Decision.** Use the finished SWE-agent, SWE-smith and SEED posters as visual
-references, recorded in `community-references.md`. Organize the page around one
-original runtime figure, two technical examples and a continuous TofuDB section
-with a four-arm data table. The white/green section structure has semantic blue
-(context) and orange (execution) accents. Official affiliation marks remain in
+references, recorded in `community-references.md`. Organize the page around a
+tool-execution swimlane, a persistent colleague across two assignments, and a
+continuous TofuDB section with a four-arm data table. The white/green structure
+uses blue for child agents/context and orange for commands. Affiliation marks remain in
 their original colors. All scientific labels and table values are editable.
 
-**Alternatives considered.** A leaderboard-centered poster would explain little
-about current mechanisms. A feature checklist would imply unsupported competitor
-gaps. The previous screenshot-heavy composition left the main technical argument
-in captions. A prose-heavy three-column template would make the demo difficult
-to scan. The retained composition uses both diagrams and scoped numerical data.
+**Alternatives considered.** Basic cache economics and deterministic filtering
+do not explain the lifecycle contribution. A benchmark leaderboard would offer
+little mechanism, and a feature checklist would imply unverified competitor
+gaps. The retained composition separates identity, execution and result delivery,
+then uses scoped storage measurements for the lower-level evidence.
 
 ## Source map
 
@@ -58,10 +58,18 @@ print master. `tofu-poster-A4-proof.pdf` is a reduced contact proof only.
 
 ## Scientific scope
 
-The cache-cost table is an observed pair of adjacent requests, not a causal
-compaction ablation. Program filtering is labeled illustrative; local JavaScript
-requires explicit opt-in. Request receipts explain dispatch decisions, not
-provider billing or proof of model consumption.
+The execution timeline is illustrative: bar lengths are not latency data.
+Ordinary tools remain synchronous; shell commands and Swarm children have
+explicit async lifecycles. Pending handles are not success receipts. Foreground
+command handoff is process-local; restart reattachment requires explicit local
+background launch. Required children can remain delivery dependencies after a
+provider turn completes.
+
+Persistent identities and saved dialogue survive between assignments without
+an idle resident worker. Current execution authority is rebound on each
+assignment. Retention is explicit; ordinary temporary children are not retained
+automatically. Lost acknowledgements and uncertain effects require reconciliation.
+This is not a universal exactly-once or autonomous-restart guarantee.
 
 The TofuDB table uses the later four-arm semantic controls, including a native
 loss on escaped full reads. Rust/Python and engine effects are not isolated.
