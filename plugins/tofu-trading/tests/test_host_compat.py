@@ -62,47 +62,90 @@ def test_background_threads_have_operational_names():
     assert unnamed == []
 
 
-def test_broad_exception_handlers_log_reraise_or_forward_failure():
-    package = Path(__file__).parents[1] / "tofu_trading"
+def _carries_error_value(value, name):
+    """Recognize the original error in an explicit returned outcome carrier."""
+    if name is None:
+        return False
+    if isinstance(value, ast.Name):
+        return value.id == name
+    if isinstance(value, (ast.Tuple, ast.List)):
+        return any(_carries_error_value(item, name) for item in value.elts)
+    if isinstance(value, ast.Dict):
+        return any(_carries_error_value(item, name) for item in value.values)
+    return False
+
+
+def _silent_broad_handlers(source, path):
+    """Return locations missing a visible failure observation/propagation port."""
     log_methods = {
         "debug", "info", "warning", "error", "exception", "critical", "log"
     }
     silent = []
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        broad = node.type is None or (
+            isinstance(node.type, ast.Name)
+            and node.type.id in {"Exception", "BaseException"}
+        )
+        if not broad:
+            continue
+        handler = ast.Module(body=node.body, type_ignores=[])
+        logged = any(
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr in log_methods
+            for call in ast.walk(handler)
+            if isinstance(call, ast.Call)
+        )
+        reraises = any(
+            isinstance(item, ast.Raise) and item.exc is None
+            for item in ast.walk(handler)
+        )
+        # A Future is an explicit error port, not a swallowed exception.
+        # The generated kernel also delegates initializer failure to its
+        # one failed-Future owner, verified by the shared lifecycle suite.
+        forwarded = any(
+            isinstance(call.func, ast.Attribute)
+            and (call.func.attr == "set_exception" or (
+                path.name == "_worker_executor.py"
+                and call.func.attr == "_fail_initializer"))
+            for call in ast.walk(handler)
+            if isinstance(call, ast.Call)
+        )
+        forwarded = forwarded or any(
+            isinstance(item, ast.Return) and _carries_error_value(item.value, node.name)
+            for item in ast.walk(handler)
+        )
+        if not logged and not reraises and not forwarded:
+            silent.append(node.lineno)
+    return silent
+
+
+@pytest.mark.parametrize('statement,visible', [
+    ('return error', True),
+    ('return (), error', True),
+    ("return {'failure': error}", True),
+    ('return None', False),
+    ('return False', False),
+    ('return str(error)', False),
+    ("return {'failure': None}", False),
+    ('return lambda: error', False),
+    ('raise', True),
+    ('future.set_exception(error)', True),
+    ('logger.exception("failed")', True),
+])
+def test_broad_exception_guard_recognizes_explicit_error_outcomes(statement, visible):
+    source = f'def run():\n    try:\n        work()\n    except Exception as error:\n        {statement}\n'
+    assert bool(_silent_broad_handlers(source, Path('fixture.py'))) is not visible
+
+
+def test_broad_exception_handlers_log_reraise_or_forward_failure():
+    package = Path(__file__).parents[1] / "tofu_trading"
+    silent = []
     for path in package.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ExceptHandler):
-                continue
-            broad = node.type is None or (
-                isinstance(node.type, ast.Name)
-                and node.type.id in {"Exception", "BaseException"}
-            )
-            if not broad:
-                continue
-            handler = ast.Module(body=node.body, type_ignores=[])
-            logged = any(
-                isinstance(call.func, ast.Attribute)
-                and call.func.attr in log_methods
-                for call in ast.walk(handler)
-                if isinstance(call, ast.Call)
-            )
-            reraises = any(
-                isinstance(item, ast.Raise) and item.exc is None
-                for item in ast.walk(handler)
-            )
-            # A Future is an explicit error port, not a swallowed exception.
-            # The generated kernel also delegates initializer failure to its
-            # one failed-Future owner, verified by the shared lifecycle suite.
-            forwarded = any(
-                isinstance(call.func, ast.Attribute)
-                and (call.func.attr == "set_exception" or (
-                    path.name == "_worker_executor.py"
-                    and call.func.attr == "_fail_initializer"))
-                for call in ast.walk(handler)
-                if isinstance(call, ast.Call)
-            )
-            if not logged and not reraises and not forwarded:
-                silent.append(f"{path.relative_to(package)}:{node.lineno}")
+        silent.extend(f'{path.relative_to(package)}:{line}' for line in
+                      _silent_broad_handlers(path.read_text(encoding='utf-8'), path))
     assert silent == []
 
 
