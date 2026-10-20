@@ -26,6 +26,15 @@ they are deliberately few and high value.
 
 ## Iteration ladder
 
+Focused tool fixtures retain real admission before the handler under test.
+Fixtures with a conversation and project path supply an owner-checked project
+binding through the repository read port; an ordinary conversation can declare
+an unbound result. Missing fixture storage is not evidence of ordinary project
+authority. Program-execution tests explicitly select
+`tools.programmaticCalling=on` when their subject requires JavaScript; default
+and disabled-policy cases remain separate assertions. These are required
+fixture inputs, not reasons to weaken production admission or change defaults.
+
 1. Reproduce and run the smallest test at the owning boundary.
 2. Run neighboring contract tests when data crosses a module/process boundary.
 3. Regenerate and check artifacts when a source contract changes.
