@@ -608,6 +608,7 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/gen_native_verdict_policy.py
 
 !/scripts/gen_native_loop_policy.py
+!/scripts/fetch_chatgpt_share.py
 
 # Generated visual-test screenshots — never commit.
 /tests/visual/output/
