@@ -249,3 +249,7 @@ def test_unstarted_parallel_tool_failure_uses_the_normal_settlement_lane(monkeyp
     replies=[row for row in messages if row.get('role')=='tool']
     assert len(replies)==1
     assert 'injected physical thread failure' in str(replies[0])
+    from lib.tools.result_envelope import tool_result_error
+    error = tool_result_error(replies[0]['content'])
+    assert error is not None and error.code == 'tool_execution_failed'
+    assert not error.retryable and 'repair' in error.next_action

@@ -16,7 +16,7 @@ from lib.log import get_logger
 from lib.tasks_pkg.executor._finalize import _finalize_tool_round
 from lib.tasks_pkg.tool_runtime import context_for_task, unregister_context
 from lib.tasks_pkg.executor._effects import (
-    begin_tool_effect, finish_tool_effect, uncertain_effect_error,
+    begin_tool_effect, finish_tool_effect, uncertain_effect_error, tool_exception_result,
 )
 
 logger = get_logger(__name__)
@@ -336,10 +336,6 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
         f'Arguments received: {arg_preview}'
     )
     content = uncertain_effect_error(round_entry, err_msg)
-    if isinstance(exc, TimeoutError) and content == err_msg:
-        from lib.tasks_pkg.executor._effects import tool_timeout_result
-        content = tool_timeout_result(
-            task, fn_name, round_entry, message=err_msg)
     if isinstance(exc, _InvalidToolHandlerResult) and content == err_msg:
         from lib.tools.result_envelope import typed_tool_error
         content = typed_tool_error(
@@ -350,6 +346,8 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
                 'authorized work can continue.'),
             message=err_msg,
         ).to_envelope_text()
+    elif not isinstance(exc, _InvalidToolHandlerResult):
+        content = tool_exception_result(task, fn_name, round_entry, exc, message=err_msg)
     if round_entry is not None:
         # Handler presentation can precede receipt decoding or cleanup. A
         # subsequent exception still owns the final execution verdict.

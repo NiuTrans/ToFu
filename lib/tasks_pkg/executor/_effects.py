@@ -1,6 +1,7 @@
 """Tool occurrence effect evidence at the common handler boundary.
 
-Entry: begin_tool_effect, finish_tool_effect, uncertain_effect_error, tool_timeout_result.
+Entry: begin_tool_effect, finish_tool_effect, uncertain_effect_error,
+tool_timeout_result, tool_exception_result.
 Policy: docs/contracts/TOOL_EFFECT_RECOVERY.md.
 Conversation attempts use their event commit barrier; registered children use
 their existing task-result checkpoint. Storage-free calls keep process scope.
@@ -172,6 +173,66 @@ def _unknown_effect_error(effect, message):
     ).to_envelope_text()
 
 
+def _repeatable_effect(task, tool_name, round_entry):
+    """Current declarations and captured entry evidence must agree on replay."""
+    policy = effect_recovery_policy(task.get('_toolContractDocumentsByName'), tool_name)
+    effect = (round_entry or {}).get('executionEffect')
+    repeatable = policy in {'read_only', 'idempotent'} and (
+        effect is None or isinstance(effect, dict) and effect.get('recovery') == policy)
+    return repeatable, effect
+
+
+def tool_exception_result(task, tool_name, round_entry, exception, *, message=None):
+    """Project an already-caught execution error, without dispatch or settlement.
+
+    Exception types identify the failure; prose never grants retry or argument
+    correction. Unknown effects take precedence over environment diagnostics.
+    Existing owners still decide which exceptions must propagate as fatal.
+    """
+    from lib.tools.result_envelope import typed_tool_error
+    from lib.llm.llm_errors import AbortedError
+    from concurrent.futures import CancelledError
+
+    message = message or f'Tool "{tool_name}" failed with {type(exception).__name__}: {exception}'
+    if isinstance(exception, TimeoutError):
+        return tool_timeout_result(task, tool_name, round_entry, message=message)
+    repeatable, effect = _repeatable_effect(task, tool_name, round_entry)
+    if (not repeatable and isinstance(effect, dict) and effect.get('operationId')
+            and effect.get('state') in {'entered', 'unknown', 'returned'}):
+        return _unknown_effect_error(effect, message)
+
+    retryable = False
+    if isinstance(exception, (AbortedError, CancelledError)):
+        code = 'tool_execution_cancelled'
+        action = 'Respect the cancellation; do not resume this operation automatically.'
+    elif isinstance(exception, PermissionError):
+        code = 'tool_permission_denied'
+        action = ('Check the reported access requirement and current authorized scope, '
+                  'or use another available authorized tool. Do not bypass access controls.')
+    elif isinstance(exception, (FileNotFoundError, NotADirectoryError)):
+        code = 'tool_resource_missing'
+        action = ('Locate the required resource in the current workspace or service, '
+                  'or repair the reported environment before another attempt.')
+    elif isinstance(exception, ConnectionError):
+        code = 'tool_connection_failed'
+        retryable = repeatable
+        action = ('The declared recovery policy permits retry through the normal tool '
+                  'gateway and authorization checks, or use another available source.'
+                  if repeatable else
+                  'Check connectivity and reconcile the prior outcome before another attempt; '
+                  'do not repeat this operation automatically.')
+    else:
+        code = 'tool_execution_failed'
+        action = ('Inspect and repair the reported runtime or environment failure, '
+                  'or use another available tool; do not blindly repeat the same call.')
+    if not isinstance(exception, (AbortedError, CancelledError)):
+        if not repeatable and not isinstance(exception, ConnectionError):
+            action += ' Verify the prior outcome before repeating the operation.'
+        action += ' Continue independent authorized work.'
+    return typed_tool_error(code, retryable=retryable, next_action=action,
+                            message=message).to_envelope_text()
+
+
 def tool_timeout_result(task, tool_name, round_entry, *, content=None, message=None):
     """Classify a deadline using host evidence, without retrying or settling work.
 
@@ -184,10 +245,7 @@ def tool_timeout_result(task, tool_name, round_entry, *, content=None, message=N
     if (isinstance(content, TrustedResultText) and content.envelope
             and tool_result_error(content) is not None):
         return content
-    policy = effect_recovery_policy(task.get('_toolContractDocumentsByName'), tool_name)
-    effect = (round_entry or {}).get('executionEffect')
-    retryable = policy in {'read_only', 'idempotent'} and (
-        effect is None or isinstance(effect, dict) and effect.get('recovery') == policy)
+    retryable, effect = _repeatable_effect(task, tool_name, round_entry)
     message = message or f'Tool execution timed out: {tool_name}'
     if (not retryable and isinstance(effect, dict) and effect.get('operationId')
             and effect.get('state') in {'entered', 'unknown', 'returned'}):

@@ -333,7 +333,7 @@ def _completed_tools_until_cancel(futures, task, deadline):
 
 
 def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
-                                   *, round_num, reason):
+                                   *, round_num, reason, items_by_id):
     """Recover omitted executor receipts without waiting, retrying or resettling."""
     for future, (call_id, name, _generation) in futures.items():
         if call_id in tool_results or not future.done():
@@ -354,7 +354,10 @@ def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
                 'at round=%d after %s: %s',
                 task['id'][:8], task.get('convId', ''), name, call_id,
                 round_num, reason, error)
-            tool_results[call_id] = (f'Tool execution error: {error}', False)
+            from lib.tasks_pkg.executor._effects import tool_exception_result
+            item = items_by_id.get(call_id)
+            tool_results[call_id] = (tool_exception_result(
+                task, name, item[5] if item is not None else None, error), False)
             tool_verdicts[call_id] = 'error'
 
 
@@ -3016,7 +3019,10 @@ def execute_tool_pipeline(
                                 '[Task %s] conv=%s Tool %s (tc_id=%s) execution failed at round %d model=%s',
                                 tid, task.get('convId', ''), fut_fn_name, fut_tc_id, round_num, model, exc_info=True)
 
-                        tool_results[fut_tc_id] = (f'Tool execution error: {e}', False)
+                        from lib.tasks_pkg.executor._effects import tool_exception_result
+                        item = _parallel_by_id.get(fut_tc_id)
+                        tool_results[fut_tc_id] = (tool_exception_result(
+                            task, fut_fn_name, item[5] if item is not None else None, e), False)
                         tool_verdicts[fut_tc_id] = 'error'
             except (TimeoutError, _FuturesTimeoutError):
                 _timed_out = True
@@ -3032,7 +3038,7 @@ def execute_tool_pipeline(
                 # verdict always wins over later worker completion.
                 _harvest_completed_tool_results(
                     _futures, task, tool_results, tool_verdicts,
-                    round_num=round_num, reason='collector timeout')
+                    round_num=round_num, reason='collector timeout', items_by_id=_parallel_by_id)
                 for fut, (fut_tc_id, fut_fn_name, _generation) in _futures.items():
                     if fut_tc_id not in tool_results:
                         fut.cancel()
@@ -3062,7 +3068,7 @@ def execute_tool_pipeline(
         # before classifying the gap; do not enter handlers or add a new wait.
         _harvest_completed_tool_results(
             _futures, task, tool_results, tool_verdicts,
-            round_num=round_num, reason='collector gap')
+            round_num=round_num, reason='collector gap', items_by_id=_parallel_by_id)
 
     # ══════════════════════════════════════════
     #  Post-phase: Add tool messages in original order
