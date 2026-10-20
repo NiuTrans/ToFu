@@ -63,6 +63,27 @@ will quote the evidence correctly.
 
 ## Ranking and excerpts
 
+**Problem:** a collection description can repeat every word of a question while
+adding only instructions to browse posts or watch reels. Complete lexical overlap
+then misrepresents the metadata as useful subject evidence.
+
+**Decision:** `search/quality.py` treats a narrow, explicit English collection
+template as uncertain when both title and snippet cover the complete query
+subject and their remaining words supply only a collection action, media kind
+and boilerplate. At least three query terms are required. The novelty check
+keeps raw normalized words, including negations and spelled-out numbers; any
+additional name, value, qualification or unsupported wording keeps the existing
+classification. Source text is never rewritten. `sources.serp.query_echo_only`
+explains the uncertainty, and the URL remains available for follow-up. Fetched
+body evidence is evaluated separately and can establish relevance later.
+
+**Alternatives rejected:** blocking a host would also suppress genuine articles;
+requiring every search snippet to answer the question would discard useful
+discovery leads. Replacing all snippet scores with equal upstream/local rank
+votes can cancel opposing orderings and regress stronger lexical matches. The
+query-only check changes the observation evidence boundary instead, with no
+model, external service or new worker. It is not a general spam or truth detector.
+
 **Problem:** a fixed document prefix can hide the answer even after a successful
 fetch. Search operators, navigation inventories and repeated text can consume
 ranking weight or the model's evidence budget. Returning a small candidate

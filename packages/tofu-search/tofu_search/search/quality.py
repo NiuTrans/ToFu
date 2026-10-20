@@ -154,6 +154,36 @@ def _script_families(text):
     return families
 
 
+_COLLECTION_ACTIONS = frozenset({'watch', 'browse', 'explore', 'discover', 'search'})
+_COLLECTION_KINDS = frozenset({'reels', 'videos', 'posts', 'photos', 'images', 'results', 'clips'})
+_COLLECTION_WORDS = _COLLECTION_ACTIONS | _COLLECTION_KINDS | frozenset({
+    'a', 'an', 'and', 'about', 'around', 'for', 'from', 'in', 'of', 'on', 'the',
+    'to', 'with', 'people', 'world', 'related', 'popular', 'trending', 'short', 'more',
+})
+
+
+def _query_only_collection(result, query):
+    """Recognize query repetition plus English collection boilerplate only.
+
+    Require complete subject coverage in both fields and a collection action
+    and kind beyond the query itself. Keep raw normalized words for the novelty
+    check: stop-word removal would erase new negations or spelled-out numbers.
+    Any additional name, value, qualification or unsupported wording fails open.
+    """
+    terms = query_terms(query)
+    if len(terms) < 3:
+        return False
+    title = str(result.get('title') or '')
+    snippet = str(result.get('snippet') or '')
+    if not (terms <= set(_tokenize(title)) and terms <= set(_tokenize(snippet))):
+        return False
+    subject_words = set(_normalized(query_subject(query)).split()) | terms
+    title_extra = set(_normalized(title).split()) - subject_words
+    snippet_extra = set(_normalized(snippet).split()) - subject_words
+    return bool(snippet_extra & _COLLECTION_ACTIONS and snippet_extra & _COLLECTION_KINDS
+                and not (title_extra | snippet_extra) - _COLLECTION_WORDS)
+
+
 def classify_relevance(result, query):
     """Return explainable lexical observations, never semantic judgments.
 
@@ -163,6 +193,9 @@ def classify_relevance(result, query):
     as subject evidence. The returned mapping is JSON-serializable.
     """
     serp = _classify_source(query, f"{result.get('title') or ''}\n{result.get('snippet') or ''}")
+    if _query_only_collection(result, query):
+        serp['status'] = 'unverified'
+        serp['query_echo_only'] = True
     body = _classify_source(query, fetched_body(result))
     content = result.get('full_content') or ''
     links = content.split(_LINKS_HEADER, 1)[1] if _LINKS_HEADER in content else ''
