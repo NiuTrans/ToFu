@@ -126,6 +126,57 @@ def test_handler_search_budget_retains_authority_quotes_and_cursors(
     assert resumed['items'][0]['offset'] > page['items'][-1]['offset']
 
 
+@pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
+@pytest.mark.parametrize('more_pages', [False, True])
+def test_model_cursor_projection_preserves_owned_source_and_continuation(
+        repo, storage, name, more_pages):
+    from lib.agent_core.storage_errors import StorageError
+    from lib.tasks_pkg.compaction._budget import budget_tool_result_v2
+    from lib.tools.result_envelope import split_tool_result_delivery
+
+    reference = manifest(repo, [{'kind': 'text', 'text': 'needle 中文🙂\n' * 8}],
+                         ttl=120000)
+    if name == 'read_tool_artifact':
+        def query(cursor):
+            return repo.read_range(user_id=1, artifact_ref=reference, offset=cursor,
+                                   limit=17 if more_pages else 65536)
+    else:
+        def query(cursor):
+            return repo.search(user_id=1, artifact_ref=reference, cursor=cursor,
+                               query='needle', limit=1 if more_pages else 20)
+    page = {'status': 'ok', **query(0)}
+    assert page['truncated'] is more_pages
+    source = json.dumps(page, ensure_ascii=False, separators=(',', ':'))
+    envelope = budget_tool_result_v2(name, source, user_id=1)
+    delivery = split_tool_result_delivery(envelope)
+    model = json.loads(delivery.model_text)
+
+    assert 'resumeCursor' not in model
+    assert model.get('nextCursor') == page['nextCursor']
+    assert delivery.evidence['viewCoverage'] == 'complete'
+    assert delivery.evidence['retentionCoverage'] == 'complete'
+    retained_ref = delivery.evidence['artifactRef']
+    if more_pages and name == 'read_tool_artifact':
+        storage.stop()
+        storage.start()
+    retained = repo.read_range(user_id=1, artifact_ref=retained_ref, limit=65536)
+    assert json.loads(retained['content']) == page
+    try:
+        denied = repo.read_range(user_id=2, artifact_ref=retained_ref)
+    except StorageError as error:
+        assert error.code == 'database_forbidden' and not error.retryable
+    else:
+        assert denied is None
+    assert query(page['resumeCursor']) == {key: value for key, value in page.items()
+                                          if key != 'status'}
+    if more_pages:
+        resumed = query(model['nextCursor'])
+        if name == 'read_tool_artifact':
+            assert resumed['offset'] > page['offset']
+        else:
+            assert resumed['items'][0]['offset'] > page['items'][-1]['offset']
+
+
 def test_selector_media_and_missing_children_are_explicit(repo):
     root = manifest(repo, [{'kind': 'text', 'text': 'not JSON'},
         {'kind': 'json', 'text': '{"a/b":{"~":[1,"中"]}}'},

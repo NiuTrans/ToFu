@@ -1,4 +1,4 @@
-"""Only declared native artifact defaults may disappear from a model view."""
+"""Only declared defaults and complete-view replay cursors may be omitted."""
 import json
 import pytest
 from lib.tools.artifact_result_projection import project_artifact_result
@@ -62,11 +62,12 @@ def test_partial_page_keeps_all_defaults_and_exact_signed_continuation(flag):
     assert projected == value
 
 
-def test_nondefault_gaps_resume_and_child_refs_all_survive():
+def test_clipped_view_keeps_nondefault_gaps_resume_and_child_refs():
     matches = [{'offset': 12, 'text': 'Exact\nquote "', 'artifactRef': REF},
                {'offset': 9007199254740993, 'text': 'Different child', 'artifactRef': OTHER}]
     value = page(items=matches, resumeCursor='trq1.original', nextCursor='trq1.next',
-                 unavailable=[{'artifactRef': OTHER, 'reason': 'expired'}])
+                 unavailable=[{'artifactRef': OTHER, 'reason': 'expired'}],
+                 outputTruncated=True)
     projected = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
     assert restore_defaults(projected) == value
     assert projected['items'] == matches
@@ -109,18 +110,91 @@ def test_unknown_tool_does_not_gain_artifact_projection():
     assert project_artifact_result('custom_tool', raw(page())) is None
 
 
-def test_budget_delivery_retains_original_decoded_source_and_complete_view(monkeypatch):
-    value = page()
+@pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
+@pytest.mark.parametrize('more_pages', [False, True])
+@pytest.mark.parametrize('coverage', ['complete', 'incomplete'])
+def test_exact_page_omits_replay_cursor_without_changing_evidence_or_continuation(
+        name, more_pages, coverage):
+    value = page(name, resumeCursor='trq1.opaque-original.signature',
+                 nextCursor='trq1.opaque-next.signature' if more_pages else None,
+                 truncated=more_pages, coverage=coverage)
+    source = raw(value)
+    result = json.loads(project_artifact_result(name, source))
+    assert 'resumeCursor' not in result
+    restored = restore_defaults(result)
+    restored.pop('resumeCursor', None)
+    assert restored == {key: item for key, item in value.items() if key != 'resumeCursor'}
+    assert json.loads(source) == value
+    if more_pages:
+        assert result['nextCursor'] == value['nextCursor']
+        assert result['truncated'] is True
+
+
+@pytest.mark.parametrize('clipped', [True, None, 'false', 0, {}])
+def test_clipped_or_unknown_view_state_keeps_exact_replay_cursor(clipped):
+    value = page(resumeCursor='trq1.opaque-original.signature', outputTruncated=clipped)
+    result = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
+    assert result['resumeCursor'] == value['resumeCursor']
+
+
+@pytest.mark.parametrize('cursor', ['0', 'future-v2.opaque', '', None, {'cursor': 'opaque'}])
+def test_unsigned_or_unknown_replay_cursor_is_not_interpreted(cursor):
+    value = page(resumeCursor=cursor)
+    result = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
+    assert result['resumeCursor'] == cursor
+
+
+def test_mixed_batch_preserves_errors_and_each_independent_next_cursor():
+    pages = [
+        page(index=0, resumeCursor='trq1.start-a', nextCursor='trq1.next-a', truncated=True),
+        {'index': 1, 'status': 'error', 'error': {'code': 'artifact_unavailable'},
+         'resumeCursor': 'trq1.error-context'},
+        page(index=2, resumeCursor='trq1.start-b', artifactRef=OTHER),
+    ]
+    result = json.loads(project_artifact_result('search_tool_artifact', raw({
+        'status': 'partial_failure', 'items': pages})))
+    assert [item['index'] for item in result['items']] == [0, 1, 2]
+    assert result['items'][1] == pages[1]
+    assert result['items'][0]['nextCursor'] == 'trq1.next-a'
+    assert 'resumeCursor' not in result['items'][0]
+    assert 'resumeCursor' not in result['items'][2]
+    assert result['items'][2]['artifactRef'] == OTHER
+
+
+@pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
+def test_budget_delivery_retains_original_decoded_source_and_complete_view(monkeypatch, name):
+    value = page(name, resumeCursor='trq1.original', nextCursor='trq1.next',
+                 truncated=True)
     saved = []
     def persist(canonical, *, user_id):
         saved.append((user_id, canonical.text()))
         return 'tool-result:' + 'c' * 64
     monkeypatch.setattr('lib.tools.result_value.persist_result', persist)
     source = raw(value)
-    envelope = budget_tool_result_v2('search_tool_artifact', source, user_id=42)
+    envelope = budget_tool_result_v2(name, source, user_id=42)
     delivery = split_tool_result_delivery(envelope)
-    assert restore_defaults(json.loads(delivery.model_text)) == value
+    model = json.loads(delivery.model_text)
+    assert 'resumeCursor' not in model
+    assert restore_defaults(model) == {key: item for key, item in value.items()
+                                       if key != 'resumeCursor'}
     assert saved == [(42, source)]
     assert json.loads(envelope.canonical.text()) == value
     assert delivery.evidence['viewCoverage'] == 'complete'
     assert not delivery.evidence['truncated']
+
+
+@pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
+def test_retention_failure_is_explicit_and_keeps_live_source_and_next_page(monkeypatch, name):
+    value = page(name, resumeCursor='trq1.original', nextCursor='trq1.next',
+                 truncated=True)
+
+    def unavailable(*args, **kwargs):
+        raise OSError('isolated retention failure')
+
+    monkeypatch.setattr('lib.tools.result_value.persist_result', unavailable)
+    envelope = budget_tool_result_v2(name, raw(value), user_id=42)
+    delivery = split_tool_result_delivery(envelope)
+    assert delivery.evidence['retentionCoverage'] == 'unavailable'
+    assert 'Canonical retention unavailable' in delivery.model_text
+    assert 'trq1.next' in delivery.model_text
+    assert json.loads(envelope.canonical.text()) == value

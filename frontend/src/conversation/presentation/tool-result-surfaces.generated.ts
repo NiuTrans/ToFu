@@ -119,8 +119,12 @@ export const TOOL_RESULT_SURFACES = {
     "nextCursor": null,
     "truncated": false,
     "outputTruncated": false,
-    "unavailable": [],
-    "resumeCursor": "0"
+    "unavailable": []
+  },
+  "artifactProjectionReplayCursor": {
+    "field": "resumeCursor",
+    "formatPrefix": "trq1.",
+    "viewTruncatedField": "outputTruncated"
   },
   "reportFields": [
     "final_answer",

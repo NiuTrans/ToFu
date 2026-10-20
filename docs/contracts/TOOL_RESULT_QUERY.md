@@ -33,6 +33,28 @@ strands evidence behind a signed cursor; exceeding the response budget causes
 the continuation result itself to spill. This can require more pages, but each
 successful page remains usable evidence.
 
+Model-view replay cursor decision: **Problem:** opaque cursors can dominate short
+results even after empty defaults are removed. **Decision:** the declared
+`artifactProjectionReplayCursor` policy keeps the signed page-start cursor in
+canonical evidence and decoded program results, and omits it only from an
+unclipped model view. `nextCursor` still advances the source; source pagination
+does not mean the delivered page was clipped. Clipped or unknown view states,
+unsigned cursors and future cursor formats retain the original replay value.
+An omitted replay cursor does not mean offset zero. Existing canonical capture
+and owned retention provide later compaction recovery; this adds no cursor
+store, cache, new query or persistent record class. **Alternatives rejected:**
+short cursor aliases add another lifecycle; shortening signed values invalidates
+them; removing the next-page cursor prevents continuation.
+
+A 48-page component measurement used three repetitions of plain/canonical,
+terminal/paginated read/search results on disposable SQLite and native TofuDB
+authorities. Before/after views differed only by the replay cursor; exact
+`o200k_base` counts fell from 11,220 to 6,776 tokens on SQLite (39.6%) and from
+11,428 to 6,858 on TofuDB (40.0%). Encoded bytes fell 30.1% and 30.5%.
+These are model-view payload savings for that sample, not whole-task cost or
+latency claims. The backend projection tests additionally verify retained
+original JSON, restart recovery, owner denial and unchanged next-page progress.
+
 Verify both selected authorities with `tests/tools/test_tool_result_query_backends.py`,
 SQL cursor budgets with `tests/tools/test_tool_result_query_canonical.py`, and native
 artifact/migration neighbors. Task quote admission additionally verifies
