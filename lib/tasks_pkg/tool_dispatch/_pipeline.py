@@ -636,6 +636,9 @@ def _settle_tool_result(
         canonical_content if canonical_content is not None else tool_content,
         execution_status=terminal_status,
         source_coverage='partial' if (producer_metadata or {}).get('truncated') else (producer_metadata or {}).get('sourceCoverage'))
+    if terminal_status is None:
+        from lib.tools.result_value import tool_result_failure_verdict
+        terminal_status = tool_result_failure_verdict(captured_result)
     if captured_result.execution_status != 'ok':
         # A failed observation is not a reusable result. In particular, a
         # declared timeout can replace an otherwise successful worker return

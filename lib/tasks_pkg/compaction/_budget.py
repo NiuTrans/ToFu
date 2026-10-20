@@ -706,6 +706,21 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
         value['cursor'] = '0'  # Canonical manifests never use preview byte offsets.
     if canonical.execution_status != 'ok':
         value['status'] = 'error'
+        # A host-owned failure may already be a sparse typed error. Preserve
+        # its recovery fields instead of burying them inside generic items.
+        # Execution metadata grants this interpretation; JSON shape alone
+        # never changes a successful document read into a failed tool call.
+        from lib.tools.result_envelope import tool_result_error
+        error = tool_result_error(content) if isinstance(content, TrustedResultText) else None
+        if error is not None:
+            from dataclasses import asdict
+            value['error'] = asdict(error)
+            payload = json.loads(content)
+            if (set(payload) <= {'status', 'code', 'message', 'retryable',
+                                 'nextAction', 'next_action'}
+                    and value.get('items') == [payload]):
+                value['items'] = []
+                value['summary'] = error.message or error.code
     value.update(resultId=canonical.result_id, executionStatus=canonical.execution_status,
                  sourceCoverage=canonical.source_coverage,
                  retentionCoverage=value.get('retentionCoverage',

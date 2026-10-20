@@ -28,10 +28,14 @@ def _audit_direct_executor_outcome(task, round_entry, *, status=None):
         return
     if status is None:
         runtime_state = round_entry.get('_runtimeState')
-        if runtime_state in ('error', 'cancelled'):
-            status = 'aborted' if runtime_state == 'cancelled' else 'error'
+        status = round_entry.get('status')
+        if runtime_state == 'cancelled':
+            status = 'aborted'
+        elif status in ('error', 'aborted', 'rejected', 'unanswerable'):
+            pass
+        elif runtime_state == 'error':
+            status = 'error'
         else:
-            status = round_entry.get('status')
             if status in (None, 'searching', 'executing'):
                 status = 'done'
     from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
@@ -222,7 +226,23 @@ def _dispatch_admitted_tool_one(
             raise
 
         finish_tool_effect(round_entry, returned=True)
-        state = 'cancelled' if context.cancellation_requested else 'done'
+        from lib.tools.result_value import tool_result_failure_verdict
+        verdict = tool_result_failure_verdict(result[1])
+        if verdict and round_entry.get('status') not in {
+                'error', 'aborted', 'rejected', 'unanswerable'}:
+            round_entry['status'] = verdict
+            round_entry['_cacheableResult'] = False
+            try:
+                _finalize_tool_round(
+                    task, rn, round_entry,
+                    round_entry.get('results') or [
+                        {'type': 'error', 'content': result[1], 'toolName': fn_name}],
+                    status=verdict)
+            except Exception as exc:
+                logger.debug('[Executor] Returned failure presentation failed '
+                             'for %s: %s', fn_name, exc)
+        state = ('cancelled' if context.cancellation_requested or verdict == 'aborted'
+                 else 'error' if verdict else 'done')
         context.settle_once(state)
         round_entry['_runtimeState'] = state
         return result

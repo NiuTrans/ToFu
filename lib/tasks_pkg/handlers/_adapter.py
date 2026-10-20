@@ -121,9 +121,14 @@ def simple_call(
     # never fire. Detect the well-known error sentinels and emit a WARNING that
     # names the tool, so a recurring MCP/desktop failure is visible in app.log
     # (and now mineable) instead of hiding behind a green "completed".
-    _is_err_result = isinstance(tool_content, str) and tool_content.lstrip()[:40].startswith((
-        '❌', 'Error', 'MCP Error', 'MCP tool error', 'MCP server not connected',
-        'Desktop Agent Error', 'Failed'))
+    from lib.mcp.result_content import MCPToolResult
+    from lib.tools.result_value import TrustedResultText, tool_result_failure_verdict
+    _is_err_result = bool(tool_result_failure_verdict(tool_content))
+    if not isinstance(tool_content, (MCPToolResult, TrustedResultText)):
+        _is_err_result = _is_err_result or (
+            isinstance(tool_content, str) and tool_content.lstrip()[:40].startswith((
+                '❌', 'Error', 'MCP Error', 'MCP tool error', 'MCP server not connected',
+                'Desktop Agent Error', 'Failed')))
     if _is_err_result:
         logger.warning('[Task %s] [%s] %s returned an error result in %.1fs '
                        '(result_len=%d): %.200s',
