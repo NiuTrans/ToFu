@@ -161,8 +161,10 @@ def test_programmatic_search_has_same_browser_availability(monkeypatch):
     _, content, _ = tool_gateway.handle_execute_tools(
         task, {}, 'execute_tools', 'browser-program',
         {'program': 'return catalog.search("browser_list_tabs");'},
-        1, {'llmRound': 0}, {}, None, False)
-    result = json.loads(content)['program']['result']
+        1, {'llmRound': 0}, {'tools': {'programmaticCalling': 'on'}}, None, False)
+    program = json.loads(content)['program']
+    assert program['status'] == 'ok', program
+    result = program['result']
     assert result['capability_availability'][0]['reason_code'] == (
         'browser_extension_disconnected')
     assert result['items'] == []
