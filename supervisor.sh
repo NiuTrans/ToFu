@@ -41,7 +41,10 @@
 set -euo pipefail
 umask 077  # manager/worker logs are owner-only by logging contract
 
-BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# One checkout has one lifecycle owner, even when a terminal's logical PWD
+# uses a symlink alias. Launch argv, PID-file checks and control commands must
+# all use the same physical path.
+BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PY="${TOFU_SUPERVISOR_PYTHON:-$(command -v python3)}"
 UNIT_NAME="tofu-supervisor.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"

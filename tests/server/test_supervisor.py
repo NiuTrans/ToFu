@@ -732,6 +732,52 @@ def supervisor_owner_lease():
 
 @_needs_bash_setsid
 @pytest.mark.serial
+@pytest.mark.parametrize('launch_via_alias', [False, True])
+def test_daemon_checkout_alias_preserves_lifecycle_ownership(
+        tmp_path, supervisor_owner_lease, launch_via_alias):
+    """A checkout alias must address the same watchdog, never a second owner."""
+    proj = _make_sh_project(tmp_path)
+    alias = tmp_path / 'checkout-alias'
+    alias.symlink_to(proj, target_is_directory=True)
+    launch_path, control_path = (alias, proj) if launch_via_alias else (proj, alias)
+    env = dict(
+        os.environ,
+        TOFU_SUPERVISOR_PROJECTS=str(proj),
+        TOFU_SUPERVISOR_PYTHON=sys.executable,
+        TOFU_SUPERVISOR_OWNER_PID=supervisor_owner_lease,
+    )
+
+    def invoke(path, command):
+        return subprocess.run(
+            ['bash', './supervisor.sh', command],
+            cwd=path, env={**env, 'PWD': str(path)},
+            capture_output=True, text=True, timeout=30)
+
+    pid = None
+    try:
+        launched = invoke(launch_path, 'daemon')
+        assert launched.returncode == 0, launched.stderr
+        pid = _read_pid(proj)
+        assert pid is not None
+
+        status = invoke(control_path, 'status')
+        assert f'RUNNING (pid={pid},' in status.stdout
+
+        joined = invoke(control_path, 'daemon')
+        assert joined.returncode == 0, joined.stderr
+        assert _read_pid(proj) == pid
+
+        stopped = invoke(control_path, 'stop')
+        assert stopped.returncode == 0, stopped.stderr
+        assert not (proj / 'data' / 'supervisor.pid').exists()
+        assert not server_manager.pid_is_alive(pid)
+        pid = None
+    finally:
+        _kill_group(pid)
+
+
+@_needs_bash_setsid
+@pytest.mark.serial
 def test_daemon_watchdog_retires_after_explicit_owner_exits(tmp_path):
     """The self-healing shell must not restart an owner-retired manager."""
     proj = _make_sh_project(tmp_path)

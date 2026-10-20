@@ -60,6 +60,20 @@ python serverctl.py status
 python serverctl.py doctor
 ```
 
+`setsid` 只隔离终端会话，不会迁出启动者的 systemd cgroup。若从 IDE 启动，
+IDE 的 `KillMode=control-group` 仍能同时终止 watchdog、manager、worker 和存储；
+应由独立服务或已安装的 cron 恢复入口启动管理链，并核对各进程
+`/proc/<pid>/cgroup` 不再属于 IDE 服务。仅有 watchdog 不代表已有外部恢复，
+`install-recovery` 安装的每分钟检查和开机检查仍须存在。
+
+**Manager checkout identity.** Problem: a symlinked terminal working directory
+made the shell report a live watchdog as absent and could start a competing
+watchdog against the same PID file. Decision: resolve the checkout's physical
+path before launch and every lifecycle lookup. Alternatives rejected: deleting
+the apparently stale PID file loses the live owner; accepting arbitrary matching
+process names weakens checkout ownership. Subprocess tests launch and control
+the same checkout through both paths and verify idempotency and teardown.
+
 对 live worker 执行 `stop` / `restart` 会中断在途任务：交互终端必须确认，非交互
 调用必须消费用户在 Tofu UI 中批准的一次性 `shutdown` / `restart` 记录。服务本来
 就未运行时，`stop` 保持幂等且不要求批准；`status`、`doctor`、`logs` 均为只读。
