@@ -16,6 +16,9 @@ history/policy/tool-prefix evidence for Continue; its focused regressions are
 optional rewrite ROI, and `_pressure.py` tries one detached L1 candidate before
 L2. Their contract is `docs/CONTEXT_BUDGET_POLICY.md`; verify with
 `test_compaction_pressure_policy.py` and `test_route_context_budget.py`.
+`_context_lifecycle.py` validates manual admission through the captured
+ConversationStore. The host policy lives in `lib/conversations/compaction_policy.py`;
+verify manual-engine, coordinator-lifecycle and core-boundary tests.
 
 ## Editing rules
 

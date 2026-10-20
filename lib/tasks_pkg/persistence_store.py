@@ -1,4 +1,4 @@
-"""Sidecar-backed persistence adapter used by the reusable agent core.
+"""Host persistence adapter used by the reusable agent core.
 
 Transcript reads return a derived, v1-shaped view of normalized turns. Every
 transcript mutation remains semantic and narrow: projection patch or atomic
@@ -7,7 +7,8 @@ replace API.
 
 Entry point: :class:`DefaultConversationStore`, resolved through
 ``lib.agent_core.store.get_conversation_store``.
-Dependencies: semantic operations from ``lib.storage`` and the turn lifecycle.
+Dependencies: selected ``lib.storage`` authority, owned conversation policy,
+and the turn lifecycle.
 """
 
 from __future__ import annotations
@@ -256,6 +257,19 @@ class DefaultConversationStore:
             int(metadata.get("rev") or 0),
         )
 
+    def manual_compaction_rejection(self, conv_id, *, user_id, messages=()):
+        """Read application policy using this adapter's owned authority."""
+        from lib.conversations.compaction_policy import manual_compaction_rejection
+        from lib.conversations.repository import ConversationRepository
+        from lib.conversations.project_coordination import ProjectCoordinationRepository
+
+        conversations = ConversationRepository(_storage_client)
+        return manual_compaction_rejection(
+            conv_id, user_id=user_id, messages=messages,
+            conversations=conversations,
+            bindings=ProjectCoordinationRepository(
+                user_id, client=_storage_client, conversations=conversations))
+
     def compact_turn_transcript(
         self,
         conv_id,
@@ -268,18 +282,10 @@ class DefaultConversationStore:
     ):
         """Atomically apply a semantic compaction to normalized turns."""
 
-        from lib.tasks_pkg.compaction._context_lifecycle import (
-            ManualCompactionRefused, manual_compaction_rejection,
-        )
-        from lib.conversations.repository import ConversationRepository
-        from lib.conversations.project_coordination import ProjectCoordinationRepository
+        from lib.tasks_pkg.compaction._context_lifecycle import ManualCompactionRefused
 
-        conversations = ConversationRepository(_storage_client)
-        rejection = manual_compaction_rejection(
-            conv_id, user_id=user_id, messages=current_messages,
-            conversations=conversations,
-            bindings=ProjectCoordinationRepository(
-                user_id, client=_storage_client, conversations=conversations))
+        rejection = self.manual_compaction_rejection(
+            conv_id, user_id=user_id, messages=current_messages)
         if rejection:
             raise ManualCompactionRefused(rejection)
         payload = _build_turn_compaction_payload(

@@ -389,6 +389,9 @@ class _Store:
         self.rev = 0
     def load_transcript(self, cid, *, user_id):
         return (list(self.messages), self.updated_at, self.rev)
+    def manual_compaction_rejection(self, cid, *, user_id, messages=()):
+        # This streaming fixture contains ordinary, never-coordinated Turns.
+        return None
     def compact_turn_transcript(
             self, cid, current, compacted, expected_rev, *, command_id,
             user_id):
