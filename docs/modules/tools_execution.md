@@ -135,6 +135,14 @@ Remote content is untrusted tool output. Resource links, text, images, audio, `s
 - Artifact references are owner-scoped, expiring, content-addressed, and never reveal a database or filesystem path.
 - MCP/plugin/custom-tool adapters cannot bypass visibility or egress policy.
 - Generated inventory derives from the live registry.
+- Inventory descriptions are authored in `frontend/src/i18n/locales/{en,zh}.json`
+  and delivered through the generated locale catalogs. Problem: checking only
+  currently visible rows misses descriptions for inactive, data-backed tools.
+  Decision: require nonempty translations for every declared built-in family
+  and tool, plus dynamically emitted built-in rows; verify the shipped catalog
+  through inventory rendering and translated search. Alternatives rejected:
+  duplicating a static tool list drifts from the registry, while requiring
+  translations for arbitrary external tools prevents useful escaped fallbacks.
 ## 工具结果保真边界
 正文/结构化 payload/媒体/执行状态先进入 canonical capture；envelope 只生成展示视图。内部组合不能从 `toolContent`、preview 或字符串中的 artifact 标记重建源；未知 JSON 字段都只是应用数据。 **Model-view decision:** Problem—launch handles repeat objectives, message sends echo bookkeeping, and gateway JSON escapes child text/transport counters. Decision—`contracts/tool_result_surfaces_v1.json` opts in spawn, send-message, artifact-query and gateway model formats after capture and before unchanged budgets. Exact native send-message success receipts project only an honest submission/consumption outcome; failure, unknown-field and malformed receipts pass through. Authored content belongs to the frontend argument view, while receipt identities remain canonical for reconciliation (`tests/tools/test_compact_send_message_receipt.py`). Alternatives rejected—recursive empty-field stripping loses domain semantics; producer truncation loses evidence; smaller source budgets hide useful code. Unknown shapes/fields, owner/approval/failure boundaries, signed continuation and media remain unchanged; raw/decoded program values stay canonical. Verify `tests/tools/test_compact_spawn_receipt.py`, `test_artifact_result_projection.py`, `test_gateway_result_projection.py`, `test_compact_gateway_delivery.py`, and real Chromium `tests/visual/test_visual_compact_swarm_receipt.py`; fixed-input measurement lives in `benchmarks/tool_result_projection.py`.
 - `resultId` 标识一次捕获，摘要只做校验/去重；内联/落库均保留有序 child 边界及 name/callId/resultId/终态，父批次不重复索引子预览。首次完整内联后缩小预算，必须补建源引用或明确不可恢复；终态变更不得复用旧成功 manifest。 Gateway model views retain ordered child identity/status, output/error text, warnings, repairs, delegation and recovery; only declared transport counters are omitted. Text resembling JSON is never reinterpreted as typed program values. Spawn views omit repeated objectives; complete agents remain in frontend-only `results[].swarmLaunchReceipt`, while newer durable snapshots retain priority and old handle recovery remains supported.

@@ -12,11 +12,13 @@ Registered built-in tools: **118**; compatibility-only: **11**. Current means a 
 | write tool with no approval preview | 0 | specialized or generic argument disclosure must be available |
 | no UI label | 88 | the raw tool name is shown in the activity line |
 | no reachable handler | 0 | schema advertised to the model but nothing executes it |
-| description cannot disambiguate | 4 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
-| confusable tool pairs | 2 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
+| description cannot disambiguate | 6 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
+| confusable tool pairs | 3 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
 
 Tools whose description cannot disambiguate:
 
+- `get_conversation` — first sentence near-duplicates a same-category sibling
+- `list_conversations` — first sentence near-duplicates a same-category sibling
 - `desktop_read_file` — first sentence near-duplicates a same-category sibling
 - `desktop_write_file` — first sentence near-duplicates a same-category sibling
 - `read_artifact` — first sentence near-duplicates a same-category sibling
@@ -26,6 +28,7 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 
 - [swarm] `read_artifact` vs `store_artifact` — overlap 0.83, shared: artifact, data, read, shared, store
 - [desktop] `desktop_read_file` vs `desktop_write_file` — overlap 0.57, shared: computer, file, local, user
+- [conversation] `get_conversation` vs `list_conversations` — overlap 0.5, shared: conversation, explicitly, information, past, user
 
 ## Built-in tools
 
@@ -60,11 +63,11 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | browser_site | browser | browser | current | SET | ✓ |  |  | ✓ | specialized |  |  |  |  |  | ? |
 | browser_type | browser | browser | current | SET | ✓ |  |  | ✓ | specialized |  |  |  |  |  | ? |
 | consider_project_message | conversation | project_integration | current | SET | ✓ |  |  |  | generic |  |  |  |  |  | ? |
-| get_conversation | conversation | conv_ref | current | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
+| get_conversation | conversation | conv_ref | current | SET |  |  |  |  |  |  |  |  |  |  |  |
 | get_project_messages | conversation | project_integration | current | SET |  |  |  |  |  |  |  |  |  |  | ? |
 | integration_checkpoint | conversation | project_integration | current | SET |  |  |  |  |  |  |  |  |  |  | ? |
 | integration_submit | conversation | project_integration | current | SET |  |  |  |  |  |  |  |  |  |  | ? |
-| list_conversations | conversation | conv_ref | current | SET |  |  |  |  |  |  |  |  |  |  | ✓ |
+| list_conversations | conversation | conv_ref | current | SET |  |  |  |  |  |  |  |  |  |  |  |
 | send_project_message | conversation | project_integration | current | SET | ✓ |  |  |  | generic |  |  |  |  |  | ? |
 | await_project_workers | coordination | coordinator | current | SET |  |  | ✓ |  |  |  |  |  |  |  | ? |
 | cancel_project_work | coordination | coordinator | current | SET | ✓ |  | ✓ | ✓ | specialized |  |  |  |  |  | ? |
