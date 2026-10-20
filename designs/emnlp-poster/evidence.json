@@ -1,6 +1,6 @@
 {
   "snapshot_date": "2026-10-20",
-  "repository_head_at_capture": "dc7e8edaf323fe4318db495cb4a722fea7ff56fa",
+  "repository_head_at_capture": "f9333d8c02f721e8ba878631607e4f44cdd97b67",
   "authority_note": "Current shared working files, including concurrent uncommitted changes, are the technical reference. Hashes identify exact inspected bytes; HEAD alone is not a complete source snapshot. No runtime implementation was modified or benchmark rerun for this poster.",
   "user_scope": "The manuscript is background only; show the latest Tofu technology and reasons for researchers to try it. Include TofuDB; avoid a benchmark-centered story.",
   "claims": [
@@ -48,7 +48,7 @@
     },
     {
       "id": "programmatic_tools",
-      "claim": "An isolated WASM JavaScript program can call task-admitted tools and process results. Each call retains authority checks. Incomplete results hand back to the model.",
+      "claim": "Explicit opt-in exposes execute_program. Isolated WASM JavaScript can aggregate complete tool results before returning selected evidence; subcalls retain ordinary authority checks. Local auto mode retains ordinary/JSON tools, and semantic judgments return to the model.",
       "source_files": [
         {
           "path": "docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md",
@@ -129,6 +129,16 @@
           "sha256": "929d32e04a6933f41e2d98cddea763eb38387330841b7b1bd2ab21dce911b490"
         }
       ]
+    },
+    {
+      "id": "durable_compaction_adoption",
+      "claim": "Summary, archive and receipt commit before changing the model working view. Compaction preserves the original recoverable evidence.",
+      "source_files": [
+        {
+          "path": "docs/CONTEXT_COMPACTION.md",
+          "sha256": "37fccd5e5ac8cc7af0cc22ff27318cdbfa6bc491ded67201efcc726942e4954b"
+        }
+      ]
     }
   ],
   "manuscript": {
@@ -139,7 +149,8 @@
       "author roster",
       "affiliations",
       "mascot",
-      "historical framing"
+      "historical framing",
+      "paper-reader screenshot (historical interface, labeled)"
     ],
     "historical_scores_displayed": false
   },
@@ -196,17 +207,23 @@
     {
       "file": "assets/Newsreader-500.ttf",
       "sha256": "8ab4e2f1bbf983f46eb5f356235d0bd76c1c1579d7d2ca21f38bcc464d7980dd"
+    },
+    {
+      "file": "assets/JetBrainsMono-Regular.ttf",
+      "sha256": "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3"
     }
   ],
   "verification": {
-    "pdf": "A0 portrait, one page, four used font faces embedded, zero raster images, no missing glyphs or text overlaps.",
-    "svg": "Independently rendered in Chromium; embedded fonts loaded, no text outside page.",
+    "pdf": "A0 portrait, one page; embedded Inter regular/semibold/bold and JetBrains Mono; vector scientific diagram and logos where supplied; four raster figures/marks; no text overlaps or missing glyphs.",
+    "svg": "Independently rendered with Chromium, including embedded fonts and image assets; geometry and visual inspection required.",
     "qr": "Decoded from a 300-dpi crop of the final PDF; exact target matched.",
     "visual": "Final PDF and SVG inspected side by side; headline, mechanisms, TofuDB panel and footer checked.",
     "limitations": [
       "No physical print proof",
       "RGB PDF, not certified PDF/X or CMYK",
       "No runtime or benchmark acceptance is implied"
-    ]
-  }
+    ],
+    "assets": "Official mark provenance and hashes are in asset-sources.json. Inspector fixture values are explicitly illustrative."
+  },
+  "revision": "Substantial redesign after author feedback: official affiliations, real workspace image, current Inspector component, explicit mechanisms and tradeoffs."
 }

@@ -3,8 +3,9 @@ English presentation notes
 
 30-SECOND OPENING
 
-Tofu is an agent you can work with and a harness you can experiment on.
-Our focus is what surrounds the model: which evidence enters its context,
+Tofu brings the paper workflow and the agent runtime into one research
+workspace. You can read papers, inspect the requests behind an answer, and
+change the harness policies that produce them. Our focus is which evidence enters its context,
 which steps can run as code, and which facts must survive beyond the prompt.
 You can inspect those choices in the workbench, modify their policies, and
 follow the resulting execution evidence. TofuDB is one part of that design:
@@ -22,7 +23,8 @@ rewrite destroys a warm provider cache, it can cost more. The current policy
 considers the expected lifetime and cost of the working context. You can
 inspect the request, injected context, and recorded usage.
 
-Second, many tool steps are deterministic glue. A program can call a tool,
+Second, many tool steps are deterministic glue. With code programs explicitly
+enabled, a program can call a tool,
 filter its results, and pass them to the next tool without asking the model
 to perform each data transformation. That program runs in an isolated WASM
 environment. Each sub-call still passes through the ordinary execution and
@@ -38,7 +40,8 @@ repeated work, with explicit correctness obligations.
 
 We want researchers to use the assistant for their work and then ask:
 what happens if I change this context, tool, or orchestration policy?
-That is the invitation at the bottom of the poster.
+The two interface panels show the connection: a supplied paper-workspace
+screenshot, and the current CONTEXT renderer with clearly labeled example data.
 
 WHY TRY TOFU IF I ALREADY USE CODEX OR OPENCODE?
 
@@ -101,6 +104,13 @@ a particular system and model configuration. This poster covers newer
 engineering mechanisms and their design rationale. A causal explanation needs
 controlled ablations, including cost and cache receipts and preserved task
 quality. Storage microbenchmarks alone cannot establish task success.
+
+WHAT IS SHOWN IN THE INTERFACE FIGURES?
+
+The paper-reader screenshot comes from the author's manuscript archive. The
+CONTEXT panel runs the current production renderer, icons, disclosure control
+and styles with a synthetic checklist receipt. Its 86-token value is an
+illustration, not an experimental result or a captured private request.
 
 SUGGESTED LIVE DEMO (CHECK BEFORE THE SESSION)
 

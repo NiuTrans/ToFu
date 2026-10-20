@@ -1,132 +1,94 @@
-# Tofu · EMNLP 2026 poster
+# ToFu · EMNLP 2026 poster
 
-An English A0 portrait poster about the current Tofu system, built for a
-research audience. The manuscript supplies the title, authors, affiliations,
-and original mascot. Current implementation contracts supply the technical story.
+An English A0 portrait poster (841 × 1189 mm) about Tofu's current agent
+harness. The PDF is the print master. The manuscript supplies the title,
+author roster, affiliations, mascot and paper-reader screenshot; current
+implementation contracts supply the technical discussion.
 
-**Problem.** A benchmark-centered poster would give little insight into why a
-researcher should try another agent harness, and historical scores do not
-establish the cause of an improvement.
+## Editorial and visual decision
 
-**Decision.** Lead with “Use the agent. Study the harness.” Show three mechanisms:
-cache-aware context decisions, programmatic tool execution, and TofuDB's
-certified continuation frontier. Give TofuDB the largest figure, including its
-maintenance cost and the continued validity of SQLite. Close with a concrete
-research workflow and a verified project QR code.
+**Problem.** A slogan-heavy product page does not give conference visitors
+concrete reasons to try a research harness. Historical benchmark gains do not
+explain newer engineering mechanisms, and omitting institutional marks hides
+the collaboration behind the work.
 
-**Alternatives considered.** A feature checklist would obscure the mechanisms;
-a leaderboard would repeat the paper; a database-only poster would lose the
-research workbench; an exhaustive architecture graph would be difficult to read
-at a poster session. No competitor capability is claimed to be absent.
+**Decision.** Use a formal white and blue institutional masthead, large sans-serif
+title, real paper-workspace screenshot, and the current production CONTEXT
+renderer. Connect these to context reduction, optional programmatic tool use,
+and TofuDB's native context reconstruction and certified continuation. Give
+both the mechanism and its tradeoff. The code sample uses JetBrains Mono.
 
-## Files
+**Alternatives considered.** A leaderboard would repeat old results without
+causal evidence. A feature comparison would imply unverified competitor gaps.
+An abstract architecture-only poster would hide the usable research workspace.
+A complete unannotated screenshot would make technical details unreadable.
+The CONTEXT component therefore uses public synthetic data, explicitly labeled.
 
-- `output/tofu-poster-A0.pdf`: **print master**, one page, 841 × 1189 mm.
-- `output/tofu-poster-preview.png`: lightweight preview of the actual PDF.
-- `output/tofu-poster-detail.png`: larger PDF render for close inspection.
-- `output/tofu-poster-A4-proof.pdf`: reduced contact proof; not the print master.
-- `output/tofu-poster-editable.svg`: text and diagrams remain editable; fonts are
-  embedded with `@font-face`. Editors that ignore embedded web fonts can install
-  the TTF files in `assets/`. The PDF remains the visual reference.
-- `output/poster-text.txt`: accessible plain-text companion.
-- `output/scene.json`: exact shared vector scene, in millimetres and points.
-- `output/preflight.json`: checks of the exported PDF, not only its source.
-- `speaker-notes.txt`: English pitch and substantive discussion answers.
-- `evidence.json`: source hashes, claim boundaries, and design references.
+The official marks are Northeastern University (China), the NiuTrans Research
+GitHub organization, and YourProvider LongCat. `asset-sources.json` records exact
+sources and hashes. The NiuTrans mark is the organization's official avatar;
+the adjacent English name is editable type. Marks retain their original colors.
+They are affiliation assets, not newly created or AI-redrawn logos.
 
-## Build
+## Source and deliverables
 
-Python 3.12 was used. In a dedicated environment:
+- `layout.py`: copy, physical composition and diagrams.
+- `build_poster.py`: shared vector scene, PDF/SVG export and print preflight.
+- `capture_inspector.py`: actual production CONTEXT renderer with a synthetic
+  receipt. Its source hashes and values are recorded alongside the PNG.
+- `verify_exports.py`: independent Chromium SVG render, text bounds and QR
+  decode from the final PDF at 300 dpi.
+- `evidence.json`: claim-to-source mapping and scientific boundaries.
+- `asset-sources.json`: institutional marks and screenshot provenance.
+- `speaker-notes.txt`: English introduction and technical discussion notes.
+- `assets/`: official marks, supplied images and licensed fonts. JetBrains Mono
+  has its own OFL notice; Inter/Newsreader notices are retained.
+- `output/tofu-poster-A0.pdf`: one-page print master.
+- `output/tofu-poster-editable.svg`: editable text and vector diagrams, with
+  fonts and raster assets embedded. Install bundled fonts if an editor ignores
+  SVG web fonts; compare with the PDF after editing.
+- `output/tofu-poster-preview.png`: actual PDF preview.
+- `output/tofu-poster-A4-proof.pdf`: reduced contact proof.
+- `output/preflight.json`, `svg-preflight.json`, `qr-verification.json`: checks.
+- `output/proof-*.png`: close views of the exported PDF.
+
+## Reproduction
+
+Use a dedicated Python environment with `requirements.txt`. Rendering does not
+open an application database, call a model, or require network access.
 
 ```sh
-python -m pip install -r requirements.txt
 python build_poster.py --output-dir output
 ```
 
-The build is local and network-free. It never opens a Tofu application database.
-Text wraps with the actual bundled font metrics. PDF and SVG share coordinates,
-line breaks, colors, and drawings. The mascot is imported from the author's PDF
-as vector artwork; the QR code is generated from the verified project URL.
+Independent verification additionally uses Playwright, Chromium and zxing-cpp:
 
-The bundled static font instances have distinct PostScript identities, so PDF
-libraries cannot collapse different weights onto one face. To refresh these
-assets from the repository's fonts, install fontTools with WOFF2 support and run
-`prepare_fonts.py --font-source ../../frontend/src/styles/fonts`. This optional
-preparation step is not needed for an ordinary poster rebuild.
+```sh
+python verify_exports.py --browser /path/to/chromium --output-dir output
+```
 
-Change copy and layout in `make_scene()` inside `build_poster.py`, then rebuild.
-Review the actual PDF render after edits. All dimensions in the scene are
-millimetres; all text sizes are points.
+The checked-in Inspector PNG makes UI recapture optional. To refresh it, point
+at a Tofu checkout with its existing esbuild dependency and a compatible Node:
 
-## Scientific scope
+```sh
+python capture_inspector.py --repo /path/to/tofu \
+  --node /path/to/node --browser /path/to/chromium
+```
 
-`evidence.json` records the inspected working-file hashes because the shared
-checkout contained concurrent changes; a Git HEAD alone would not identify the
-complete technical reference. Runtime code was not modified, and historical
-benchmarks or database experiments were not rerun for this design task.
+`PLAYWRIGHT_NODEJS_PATH` can select the same compatible Node for Playwright.
+The capture bundles production renderer functions, icons and disclosure helpers;
+only the framing container and example receipt belong to the poster. It starts
+a temporary static server, reads no private sessions and shuts the server down.
 
-The prefix diagram shows **header verification work**, after a storage-minted
-certificate, within one authority-open epoch. An initial certification scans the
-full prefix. Later reads verify the terminal boundary and new suffix. Earlier
-semantic changes invalidate the certificate; restart requires revalidation.
-Materializing selected output still costs work proportional to that output.
-The diagram does not promise constant-time history reconstruction, free recovery,
-universal speedups over SQL, or better task success.
+## Scientific and print scope
 
-The three context-layer bars are schematic, not measured token counts. The
-closing workflow is a suggested demonstration, not a newly measured user study.
-“Inspect” refers to transmitted requests and recorded execution evidence, not a
-claim to recover a model's private internal reasoning.
+The 8/128/2,048-turn example reports logical header work from the documented
+fixtures. It is neither end-to-end agent speed nor proof of general database
+superiority. Same-epoch certification, edit invalidation, first/reopen scans and
+output materialization remain explicit. Local code programs require opt-in.
+Request receipts are append/decision records, not provider billing or proof that
+a model consumed a particular source. The paper-reader screenshot is historical;
+the poster labels it, and current technical claims have separate sources.
 
-## Print and editing notes
-
-The [EMNLP 2026 specification](https://2026.emnlp.org/poster-printing/) requires
-A0 portrait PDF. The print master uses embedded fonts and vector diagrams.
-Body copy is mostly 24–29 pt; references and author-role notes are smaller.
-
-Export checks cover page count, physical size, font embedding, missing glyphs,
-text boundaries, pairwise text overlap, and raster-image count. The PNG previews
-are rendered from the exported PDF. These checks do not certify PDF/X, CMYK
-conversion, a printer's bleed requirements, or physical color reproduction.
-No physical print proof has been made. Print at **100% / actual size**, using
-the A0 master. The A4 file is for a desk review.
-
-The design reviewed
-[K-Dense's poster workflow](https://github.com/K-Dense-AI/scientific-agent-skills/blob/main/skills/latex-posters/SKILL.md)
-and
-[Academic Poster Generation](https://github.com/ZLHe0/Skill-ML-Conference-Poster-Creation/blob/main/SKILL.md)
-for physical typography, editable figures and export inspection. The composition,
-copy, diagrams, and rendering code are original to this task; no external poster
-template, generation service, or image model was used.
-
-## Production environment findings
-
-These were environment/integration limitations, not defects in Tofu runtime:
-
-1. `mtskills --version` and an independent `node --version` failed because the
-   default Node binary requires newer glibc/libstdc++. A compatible pre-existing
-   Node binary reached SkillHub SSO, but the authentication step did not finish.
-   Public author-owned skill repositories supplied the design references.
-   SkillHub catalog coverage therefore remains incomplete; the poster is unaffected.
-2. Deferred-tool discovery returned `unsupported call` for the exposed search
-   tool. The existing execution tool's documented metadata interface located the
-   installed plugin-search capability. That read-only search succeeded. No new
-   plugin was installed and no design was uploaded.
-3. The shared environment's PyMuPDF wheel required a newer glibc. A separate local
-   dependency directory used compatible PyMuPDF 1.24.11 and ReportLab 4.4.4.
-   A first unconstrained Pillow dependency attempted a source build without JPEG
-   headers; retaining the already-working Pillow and pinning compatible
-   dependencies resolved rendering without modifying the application environment.
-4. Shell downloads of optional new fonts failed through the host network path.
-   The poster instead uses Tofu's existing Inter and Newsreader fonts, preserving
-   the product typography and avoiding a new network dependency. Their static
-   instances and licenses are included.
-
-The first export caught an unused unembedded Helvetica resource and missing
-glyphs in a font subset. The generator now sets its initial embedded font
-explicitly and validates glyph coverage before export; vector arrows and
-supported author markers replace the unsupported glyphs.
-Independent SVG/PDF rendering also exposed an exporter alias: variable-font
-instancing had retained identical internal PostScript names across weights.
-`prepare_fonts.py` assigns distinct names, and the build now refuses aliased
-fonts and checks that all used faces survive PDF export.
+Inspect the final PDF and independent SVG render. The exports are RGB, not a
+certified PDF/X or CMYK proof. No physical printer proof has been performed.

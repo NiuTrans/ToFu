@@ -1,0 +1,47 @@
+{
+  "kind": "production-component-with-synthetic-data",
+  "fixture": [
+    {
+      "registryId": "active_checklist",
+      "source": "task.todo_state",
+      "necessity": "required_continuity",
+      "reason": "Restore the accepted checklist.",
+      "tokens": 86,
+      "injected": true,
+      "placement": "tail"
+    }
+  ],
+  "not_a_measured_request": true,
+  "geometry_css_pixels": {
+    "x": 0,
+    "y": 0,
+    "width": 560,
+    "height": 381.359375
+  },
+  "sources": [
+    {
+      "path": "frontend/src/runtime/sections/core/debug_panel.js",
+      "sha256": "6b61e819e1ba98dabf5ef4a5cfc37f34f95d4572ea5e429efd3bf8a3d337d0c8"
+    },
+    {
+      "path": "frontend/src/features/diagnostics-message-disclosure.ts",
+      "sha256": "095a77be353cc5ea85f1772af95aff7bbc824b88ed4851ed16e7984b4655a834"
+    },
+    {
+      "path": "frontend/src/icons.ts",
+      "sha256": "559f64c23fec90cafd65024c227f4ad6b58da6b48a0b6119c9210b328fdadd2a"
+    },
+    {
+      "path": "frontend/src/html-safety.ts",
+      "sha256": "850a891b33dd570beba546028eeb574940e201953c03d5ec5b08f87ef75f9cda"
+    },
+    {
+      "path": "static/styles.css",
+      "sha256": "3a661b8af9950a5cf4fffb2d0bc86196e5600f0b4281b95eb09f93391ca9bec1"
+    },
+    {
+      "path": "frontend/src/styles/application/02-inspector-shell.css",
+      "sha256": "73e4a6d47939781371bc28a8d89c34c7423f4317d9b2a31c96e48d73a49c5b1b"
+    }
+  ]
+}

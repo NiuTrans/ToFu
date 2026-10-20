@@ -14,6 +14,7 @@ import base64
 import html
 import json
 import math
+import mimetypes
 import re
 from pathlib import Path
 
@@ -28,8 +29,8 @@ ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
 MM = 72 / 25.4
 WIDTH, HEIGHT = 841.0, 1189.0
-INK = "#193731"
-PAPER = "#FBF7EE"
+INK = "#142C49"
+PAPER = "#FFFFFF"
 MUTED = "#50645C"
 RULE = "#CECFC0"
 TEAL = "#1C7166"
@@ -37,7 +38,7 @@ MINT = "#C9E6D0"
 PALE = "#E8EEDF"
 ORANGE = "#B54C2E"
 PEACH = "#F4E2D2"
-WHITE = "#FFFDF7"
+WHITE = "#FFFFFF"
 DARK_LINE = "#57766B"
 URL = "https://github.com/NiuTrans/ToFu"
 
@@ -47,6 +48,7 @@ FONT_FILES = {
     "bold": "Inter-700.ttf",
     "serif": "Newsreader-400.ttf",
     "serif_medium": "Newsreader-500.ttf",
+    "mono": "JetBrainsMono-Regular.ttf",
 }
 FONT_STYLES = {
     "body": ("Tofu Poster Inter", 400),
@@ -54,6 +56,7 @@ FONT_STYLES = {
     "bold": ("Tofu Poster Inter", 700),
     "serif": ("Tofu Poster Newsreader", 400),
     "serif_medium": ("Tofu Poster Newsreader", 500),
+    "mono": ("JetBrains Mono", 400),
 }
 for font_name, file_name in FONT_FILES.items():
     pdfmetrics.registerFont(TTFont(font_name, str(ASSETS / file_name)))
@@ -114,11 +117,14 @@ class Scene:
                                    color=color, width=measured, tag=tag))
         return y+(len(lines)-1)*leading
 
-    def label(self, text, x, y, color=MUTED, size=18):
-        self.text(text, x, y, size=size, font="medium", color=color, tag="label")
+    def label(self, text, x, y, color=MUTED, size=18, align="left"):
+        self.text(text, x, y, size=size, font="medium", color=color, tag="label", align=align)
 
     def logo(self, x, y, w, h):
         self.items.append(dict(kind="logo", x=x, y=y, w=w, h=h))
+
+    def asset(self, filename, x, y, w, h):
+        self.items.append(dict(kind="asset", filename=filename, x=x, y=y, w=w, h=h))
 
     def qr(self, x, y, size):
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=4)
@@ -133,174 +139,7 @@ class Scene:
                     self.rect(x+col*module, y+row*module, module, module, INK)
 
 
-def make_scene():
-    s = Scene()
-    s.rect(0, 0, WIDTH, HEIGHT, PAPER)
-    s.rect(0, 0, WIDTH, 5, INK)
-    s.logo(29, 22, 30, 34)
-    s.text("ToFu", 68, 52, 76, "serif_medium")
-    s.label("EMNLP 2026  /  SYSTEM DEMO", 561, 32, size=19)
-    s.label("CURRENT SYSTEM · OCTOBER 2026", 561, 44, size=16)
-    s.text("A White-Box, Token-Efficient Agent Harness for Researchers",
-           29, 78, 31, "medium")
-
-    s.text("Use the agent.", 27, 122, 96, "serif")
-    s.text("Study the harness.", 27, 161, 96, "serif", ORANGE)
-    s.text("A research workbench where context, tool execution, and durable state "
-           "are inspectable design choices.",
-           564, 110, 29, width=244, leading=13.2)
-    s.text("Junhao Ruan¹²* · Yuan Ge¹* · Bei Li²+ · Yongjing Yin² · Yuchun Fan¹² · Xin Chen²",
-           29, 189, 21, "medium")
-    s.text("Jingang Wang² · Chenglong Wang¹³ · Jingbo Zhu¹³ · Tong Xiao¹³#",
-           29, 200, 21, "medium")
-    s.text("¹ Northeastern University    ² LongCat RSI, YourProvider    ³ NiuTrans Research",
-           29, 215, 20, color=MUTED)
-    s.line(29, 235, 812, 235, INK, 0.65)
-
-    # Two technical stories share a reading row, without a repeated card grid.
-    s.label("01   CONTEXT ENGINEERING", 29, 256, ORANGE)
-    s.text("Make context a decision.", 29, 280, 42, "serif_medium")
-    s.text("Choose what enters the next request.\nKeep original evidence recoverable.",
-           29, 300, 27, width=366, leading=12)
-    s.line(421, 252, 421, 490, RULE, 0.4)
-    s.label("02   PROGRAMMABLE EXECUTION", 447, 256, ORANGE)
-    s.text("Let code handle the glue.", 447, 280, 42, "serif_medium")
-    s.text("Discover tools on demand. Run joins,\nfilters, and branches in isolated JavaScript.",
-           447, 300, 27, width=365, leading=12)
-
-    # Three layers of context, with deliberately non-quantitative evidence marks.
-    steps = [
-        (29, "Externalize", "Large outputs", PEACH, 10),
-        (159, "Trim", "Cold tool results", PALE, 6),
-        (289, "Summarize", "Older context", MINT, 3),
-    ]
-    for x, title, caption, fill, bars in steps:
-        s.rect(x, 331, 113, 48, fill)
-        for i in range(bars):
-            bx = x+9+i*8.2
-            s.rect(bx, 342, 5.2, 19, TEAL if i < 3 else MUTED)
-        s.text(title, x, 394, 27, "medium")
-        s.text(caption, x, 407, 21, color=MUTED)
-    s.arrow(146, 354, 155, 354, MUTED, 0.55)
-    s.arrow(276, 354, 285, 354, MUTED, 0.55)
-    s.label("THE TRADEOFF", 29, 430, TEAL, 17)
-    s.text("A smaller prompt can cost more if it breaks a warm cache. "
-           "Compaction weighs future savings against summary and cache-rebuild costs.",
-           29, 447, 25, width=369, leading=11.8)
-    s.text("Inspect: request · injections · cache reads · cost",
-           29, 488, 20, "medium", TEAL)
-
-    # One program surrounds multiple tool calls; authority remains at each call.
-    s.rect(447, 331, 365, 77, PALE)
-    s.label("MODEL", 459, 346, size=16)
-    s.label("ISOLATED WASM PROGRAM", 524, 346, TEAL, 16)
-    s.label("MODEL", 772, 346, size=16)
-    s.rect(458, 362, 42, 27, WHITE, RULE)
-    s.text("Plan", 479, 379, 24, "medium", align="center")
-    s.arrow(503, 376, 518, 376)
-    s.rect(521, 356, 234, 39, WHITE, TEAL, 0.5)
-    for x, name in [(532, "call"), (601, "filter"), (677, "return")]:
-        s.text(name, x, 380, 25, "medium")
-    s.arrow(574, 376, 593, 376)
-    s.arrow(647, 376, 669, 376)
-    s.arrow(758, 376, 770, 376)
-    s.text("Read", 790, 379, 24, "medium", align="center")
-    s.text("Every sub-call retains its permission checks and execution receipt.",
-           447, 429, 25, width=365, leading=11.8)
-    s.text("Uncertain decisions return to the model;\nfailed or partial results stop the chain.",
-           447, 459, 25, width=365, leading=11.8)
-    s.text("Inspect: nested calls · receipts · returned evidence",
-           447, 488, 20, "medium", TEAL)
-
-    # Main technical centerpiece: evidence/working-view separation and frontier.
-    s.rect(18, 516, 805, 377, INK)
-    s.label("03   AGENT-AWARE STORAGE", 39, 539, MINT)
-    s.text("Why build TofuDB?", 38, 567, 61, "serif", WHITE)
-    s.text("Long tasks need more than a transcript.", 39, 589, 32, color=MINT)
-
-    s.text("The model needs a small working view.\n\n"
-           "The system needs exact history, committed progress, and evidence "
-           "for what can safely continue.",
-           39, 622, 27, color=WHITE, width=242, leading=12.8)
-    s.label("CORE IDEA", 39, 727, MINT, 17)
-    s.text("Let storage verify\nwhich history\ncan be reused.",
-           39, 751, 39, "serif", WHITE, leading=17)
-
-    s.line(309, 615, 309, 792, DARK_LINE, 0.4)
-    s.label("VERIFY WHAT CHANGED", 332, 621, MINT, 18)
-    s.label("Certified earlier prefix", 332, 640, WHITE, 22)
-    s.label("Boundary", 612, 640, WHITE, 20)
-    s.label("New turns", 705, 640, WHITE, 20)
-    for i in range(7):
-        x = 332+i*35
-        s.rect(x, 650, 29, 36, "#2F5146", DARK_LINE, 0.3)
-        for y in (660, 666, 672):
-            s.line(x+6, y, x+22, y, "#769087", 0.65)
-    s.text("…", 585, 673, 30, color=MINT)
-    s.rect(612, 650, 63, 36, MINT)
-    s.text("last", 643.5, 673, 25, "medium", INK, align="center")
-    for x, label in [(697, "+1"), (751, "+2")]:
-        s.rect(x, 650, 45, 36, "#F0D0AF")
-        s.text(label, x+22.5, 673, 25, "medium", INK, align="center")
-    s.line(332, 697, 604, 697, MINT, 0.55)
-    s.line(332, 692, 332, 697, MINT, 0.55)
-    s.line(604, 692, 604, 697, MINT, 0.55)
-    s.text("Reuse the certified prefix", 332, 712, 22, color=MINT)
-    s.line(612, 697, 796, 697, "#F0D0AF", 0.55)
-    s.line(612, 692, 612, 697, "#F0D0AF", 0.55)
-    s.line(796, 692, 796, 697, "#F0D0AF", 0.55)
-    s.text("Verify boundary + suffix", 612, 712, 22, color="#F0D0AF")
-
-    s.text("N retained turns + 2 new", 332, 744, 29, "medium", WHITE)
-    s.arrow(469, 741, 487, 741, WHITE, 0.6)
-    s.text("3 header checks*", 495, 744, 29, "medium", WHITE)
-    s.text("Edits to earlier task evidence invalidate the certificate.\n"
-           "Reopening the database requires full revalidation.",
-           332, 763, 24, color=MINT, leading=11.5, width=463)
-    s.text("* After certification, until the database is reopened.\n"
-           "Header counts do not establish an end-to-end speedup.",
-           332, 787, 18, color=MINT, leading=8)
-    s.line(39, 813, 800, 813, DARK_LINE, 0.4)
-    s.label("WHY NATIVE?", 39, 830, MINT, 17)
-    s.text("Remove repeated history scans and JSON copies across the "
-           "storage/application boundary.",
-           39, 847, 25, color=WHITE, width=351, leading=11.8)
-    s.label("THE COST", 445, 830, MINT, 17)
-    s.text("Own recovery, migrations and fault testing.\n"
-           "SQLite remains a supported, meaningful baseline.",
-           445, 847, 25, color=WHITE, width=355, leading=11.8)
-    s.text("Native TofuDB, SQLite and PostgreSQL share a semantic storage contract.",
-           39, 881, 21, color=MINT)
-
-    # Closing row expresses audience fit as a concrete research workflow.
-    s.label("04   A WORKBENCH YOU CAN EXPERIMENT ON", 29, 923, ORANGE)
-    s.text("Bring a research question. Change the system.", 29, 949, 46, "serif_medium")
-    stages = [
-        (29, "Read a paper", "Grounded Q&A\nin the paper reader"),
-        (231, "Inspect a run", "Actual requests,\ncontext and tool traces"),
-        (433, "Change a policy", "Context, models,\ntools or orchestration"),
-        (635, "Check the result", "Inspect evidence;\nverify with tests"),
-    ]
-    for index, (x, title, caption) in enumerate(stages):
-        s.line(x, 966, x+177, 966, TEAL, 1.0)
-        s.label(f"0{index+1}", x, 983, TEAL, 17)
-        s.text(title, x, 1000, 29, "medium")
-        s.text(caption, x, 1017, 24, color=MUTED, leading=11.5)
-        if index < 3:
-            s.arrow(x+181, 999, x+194, 999, TEAL, 0.6)
-    s.text("Ask us to inspect a live request—and change its context policy.",
-           29, 1061, 31, "serif_medium")
-
-    s.line(29, 1085, 812, 1085, INK, 0.65)
-    s.text("Try Tofu. Bring your model.", 29, 1118, 46, "serif_medium")
-    s.text("github.com/NiuTrans/ToFu", 29, 1139, 29, "medium", TEAL)
-    s.text("MIT licensed · Self-hosted · Model adapters · MCP + skills",
-           29, 1157, 22, color=MUTED)
-    s.text("* Equal contribution    + Project leader    # Corresponding author",
-           29, 1175, 15, color=MUTED, tag="credit")
-    s.qr(739, 1097, 69)
-    s.label("CODE + GET STARTED", 739, 1174, size=13)
-    return s
+from layout import make_scene
 
 
 def rgb(value):
@@ -310,7 +149,7 @@ def rgb(value):
 def draw_pdf(scene, destination):
     c = canvas.Canvas(str(destination), pagesize=(WIDTH*MM, HEIGHT*MM),
                       pageCompression=1, initialFontName="body", initialFontSize=27)
-    c.setTitle("ToFu — Use the agent. Study the harness.")
+    c.setTitle("ToFu: A White-Box, Token-Efficient Agent Harness for Researchers")
     c.setAuthor("Junhao Ruan, Yuan Ge, Bei Li and collaborators")
     c.setSubject("EMNLP 2026 current-system poster: context, execution, and TofuDB")
     # Select a bundled font before the first text object, avoiding unused Helvetica.
@@ -347,8 +186,8 @@ def draw_pdf(scene, destination):
                 p.lineTo(x*MM, (HEIGHT-y)*MM)
             p.close()
             c.drawPath(p, stroke=0, fill=1)
-    c.linkURL(URL, (29*MM, (HEIGHT-1160)*MM, 490*MM, (HEIGHT-1124)*MM), relative=0)
-    c.linkURL(URL, (739*MM, (HEIGHT-1166)*MM, 808*MM, (HEIGHT-1097)*MM), relative=0)
+    c.linkURL(URL, (32*MM, (HEIGHT-1178)*MM, 335*MM, (HEIGHT-1160)*MM), relative=0)
+    c.linkURL(URL, (745*MM, (HEIGHT-1179)*MM, 810*MM, (HEIGHT-1114)*MM), relative=0)
     c.showPage()
     c.save()
     # Import the supplied mascot as vector PDF, never as a screenshot.
@@ -359,6 +198,16 @@ def draw_pdf(scene, destination):
             r = fitz.Rect(a["x"]*MM, a["y"]*MM,
                           (a["x"]+a["w"])*MM, (a["y"]+a["h"])*MM)
             doc[0].show_pdf_page(r, logo, 0, keep_proportion=True, overlay=True)
+        elif a["kind"] == "asset":
+            r = fitz.Rect(a["x"]*MM, a["y"]*MM,
+                          (a["x"]+a["w"])*MM, (a["y"]+a["h"])*MM)
+            path = ASSETS/a["filename"]
+            if path.suffix == ".svg":
+                with fitz.open(path) as vector:
+                    with fitz.open("pdf", vector.convert_to_pdf()) as converted:
+                        doc[0].show_pdf_page(r, converted, 0, keep_proportion=True)
+            else:
+                doc[0].insert_image(r, filename=str(path), keep_proportion=True)
     doc.subset_fonts()
     temporary = destination.with_suffix(".final.pdf")
     doc.save(temporary, garbage=4, deflate=True)
@@ -370,7 +219,7 @@ def draw_pdf(scene, destination):
 def draw_svg(scene, destination):
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}mm" '
            f'height="{HEIGHT}mm" viewBox="0 0 {WIDTH} {HEIGHT}" role="img">'
-           '<title>ToFu: Use the agent. Study the harness.</title>'
+           '<title>ToFu: A White-Box, Token-Efficient Agent Harness for Researchers</title>'
            '<desc>English A0 poster about inspectable context, programmable tool '
            'execution, and TofuDB incremental continuation. All prose is editable text.</desc>',
            "<defs><style>"]
@@ -378,7 +227,8 @@ def draw_svg(scene, destination):
         data = base64.b64encode((ASSETS/filename).read_bytes()).decode()
         out.append(f"@font-face{{font-family:'tofu_{name}';src:url(data:font/ttf;base64,{data}) "
                    f"format('truetype');font-weight:{FONT_STYLES[name][1]};}}")
-    out.append("</style></defs>")
+    # Match ReportLab's explicit unkerned string metrics and literal code glyphs.
+    out.append("text{font-kerning:none;font-variant-ligatures:none;}</style></defs>")
     for a in scene.items:
         if a["kind"] == "text":
             family, weight = FONT_STYLES[a["font"]]
@@ -405,6 +255,12 @@ def draw_svg(scene, destination):
             body = raw[raw.index(">")+1:raw.rindex("</svg>")]
             out.append(f'<svg x="{a["x"]}" y="{a["y"]}" width="{a["w"]}" height="{a["h"]}" '
                        f'viewBox="{viewbox}" preserveAspectRatio="xMidYMid meet">{body}</svg>')
+        elif a["kind"] == "asset":
+            path = ASSETS/a["filename"]
+            mime = mimetypes.guess_type(path)[0]
+            data = base64.b64encode(path.read_bytes()).decode()
+            out.append(f'<image x="{a["x"]}" y="{a["y"]}" width="{a["w"]}" height="{a["h"]}" '
+                       f'href="data:{mime};base64,{data}" preserveAspectRatio="xMidYMid meet"/>')
     out.append("</svg>")
     destination.write_text("\n".join(out), encoding="utf-8")
 
@@ -437,8 +293,8 @@ def inspect_pdf(scene, pdf_path, output):
     expected = [a for a in scene.items if a["kind"] == "text"]
     actual_text = page.get_text()
     # Extraction may normalize typographic ligatures; compare stable text anchors.
-    for anchor in ["Use the agent.", "Study the harness.", "Why build TofuDB?",
-                   "3 header checks", "SQLite remains a supported",
+    for anchor in ["A White-Box, Token-Efficient", "Northeastern University",
+                   "NiuTrans Research", "YourProvider LongCat RSI", "3 header checks",
                    "github.com/NiuTrans/ToFu"]:
         if anchor not in actual_text:
             failures.append(f"Missing PDF text: {anchor}")
@@ -463,7 +319,7 @@ def inspect_pdf(scene, pdf_path, output):
                   minimum_main_body_pt=min(a["size"] for a in expected if a["tag"] == "body"),
                   text_overlaps=text_overlaps, failures=failures,
                   qr_target=URL, print_master=pdf_path.name,
-                  notes=["Vector figures and mascot; no scientific data rasterization.",
+                  notes=["Vector text, diagrams, QR and mascot; official logos and a supplied product screenshot.",
                          "RGB PDF; no PDF/X, CMYK, or printer proof certification.",
                          "A screen preview and full-size PDF must be visually inspected."])
     (output/"preflight.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
@@ -485,7 +341,7 @@ def main():
     args = parser.parse_args()
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    scene = make_scene()
+    scene = make_scene(Scene)
     for item in scene.items:
         if item["kind"] != "text":
             continue
