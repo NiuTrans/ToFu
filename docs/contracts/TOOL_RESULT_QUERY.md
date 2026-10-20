@@ -51,6 +51,30 @@ fell from 5,034 to 3,831 on SQLite (23.9%) and from 5,118 to 3,873 on TofuDB (24
 All remaining non-cursor page fields, including body, provenance and coverage,
 matched. These are sample payload savings, not whole-task cost or latency claims.
 
+Query recovery: **Problem:** the handler labeled every storage protocol failure
+as `invalid_cursor`, losing invalid-selector and expired-evidence causes and
+their recovery actions. Other permanent storage failures were marked retryable.
+**Decision:** the shared `failures` table declares query refusal codes,
+retryability and model guidance. SQL raises those typed storage failures; native
+query errors retain their type through semantic execution and the storage wire.
+The handler and tool error declarations consume that same table. Correcting a
+selector or restarting at cursor 0 reads retained evidence and never re-executes
+its producer. Expired/missing continuation evidence stays distinct from malformed
+input, and a failed batch item does not discard following successful items.
+
+Unclassified storage protocol failures remain storage failures; their text cannot
+establish a cursor diagnosis. Known storage errors retain their retryability,
+while unexpected exceptions receive no speculative retry promise. Diagnostics
+remain in host logs; model feedback uses declared, bounded recovery advice.
+An older engine without the new codes gets this generic storage-failure handling.
+There is no new retry loop, record, key, pool or background work; successful
+query payloads and existing scan/owner/expiry fences are unchanged.
+**Alternatives rejected:** parsing localized exception text creates a second
+taxonomy; retrying every rejection wastes calls; repeating a producer creates a
+new observation and may duplicate effects. Verify `test_artifact_query_recovery`
+on both authorities, shared storage-error wire tests and native semantic error
+classification, alongside cursor, budget and batch contracts.
+
 Problem: clipping search quotations to fit the response budget could remove the
 matched term while retaining a cursor that had already consumed those hits.
 Decision: the handler retries the same immutable query/cursor with a smaller

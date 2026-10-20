@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 from lib.log import get_logger
+from lib.agent_core.storage_errors import StorageError
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
@@ -157,25 +158,35 @@ def _parse_cursor(arguments: dict) -> int | str:
     except (TypeError, ValueError) as exc:
         raise ToolContractError(
             'invalid_cursor', 'cursor must be a non-negative integer or a returned continuation cursor',
-            path='$.cursor') from exc
+            path='$.cursor', retryable=False,
+            next_action=CONTRACT['failures']['invalid_cursor']['nextAction']) from exc
     if cursor < 0:
         raise ToolContractError(
-            'invalid_cursor', 'cursor must be non-negative', path='$.cursor')
+            'invalid_cursor', 'cursor must be non-negative', path='$.cursor',
+            retryable=False, next_action=CONTRACT['failures']['invalid_cursor']['nextAction'])
     return cursor
 
 
 def _error_result(exc: Exception) -> dict:
     if isinstance(exc, ToolContractError):
         return {"status": "error", "error": exc.to_dict()}
-    if getattr(exc, 'code', '') == 'database_protocol_error':
-        return {'status': 'error', 'error': {'code': 'invalid_cursor', 'retryable': False}}
+    if isinstance(exc, StorageError):
+        for code, failure in CONTRACT['failures'].items():
+            if exc.code == failure['storageCode']:
+                return {'status': 'error', 'error': {
+                    'code': code, 'retryable': failure['retryable'],
+                    'nextAction': failure['nextAction']}}
     logger.warning('[ToolArtifact] owner-scoped read failed: %s', exc, exc_info=True)
+    retryable = isinstance(exc, StorageError) and exc.retryable
     return {
         "status": "error",
         "error": {
             "code": "artifact_store_unavailable",
-            "retryable": True,
-            "nextAction": "Retry this read once; do not re-execute the source tool to recover historical evidence.",
+            "retryable": retryable,
+            "nextAction": (
+                "Retry this read once; do not re-execute the source tool to recover historical evidence."
+                if retryable else
+                "The artifact store could not complete this read. Continue independent work and report the storage failure; do not repeat the source tool to recover historical evidence."),
         },
     }
 

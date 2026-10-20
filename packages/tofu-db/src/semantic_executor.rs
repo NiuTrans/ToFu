@@ -60,6 +60,7 @@ const DESKTOP_PREFERENCE_KEY: &[u8] = b"preference";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticExecutionError {
     InvalidPayload,
+    ToolResultQuery(&'static str, bool),
     DiagnosticInvalidPayload,
     DiagnosticUnsupported,
     NotFound,
@@ -88,6 +89,7 @@ impl SemanticExecutionError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidPayload => "database_protocol_error",
+            Self::ToolResultQuery(code, _) => code,
             Self::DiagnosticInvalidPayload => "database_invalid_payload",
             Self::DiagnosticUnsupported => "database_unsupported",
             Self::NotFound => "database_not_found",
@@ -113,6 +115,7 @@ impl SemanticExecutionError {
         matches!(
             self,
             Self::StorageUnavailable | Self::ResourceExhausted | Self::CapacityBusy
+                | Self::ToolResultQuery(_, true)
         )
     }
 }
@@ -148,6 +151,9 @@ impl fmt::Display for SemanticExecutionError {
 impl std::error::Error for SemanticExecutionError {}
 
 pub(crate) fn map_storage_error(error: io::Error) -> SemanticExecutionError {
+    if let Some((code, retryable)) = crate::artifact::query::failure_classification(&error) {
+        return SemanticExecutionError::ToolResultQuery(code, retryable);
+    }
     if crate::engine::is_rotation_backpressure(&error) {
         return SemanticExecutionError::CapacityBusy;
     }

@@ -115,6 +115,7 @@ _SIDECAR_SHARED_MODULES = frozenset({
     "lib.tool_results.tool_round_identity",
     "lib.agent_core.output_settlement",
     "lib.agent_core.storage_errors",
+    "lib.tool_results.tool_result_query_generated",
     "lib.agent_core.generated_task_event_delivery_contract",
     "lib.agent_core.generated_task_event_delivery_profile",
     "lib.orchestration.contract_schema",
