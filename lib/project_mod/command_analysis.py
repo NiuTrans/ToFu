@@ -1426,6 +1426,42 @@ def command_segment_output_targets(source):
     return _CommandTargets(tuple(words), tuple(redirects), complete)
 
 
+def command_segment_discardable_redirect_split(source):
+    """Split trailing output redirects that open no file from the command.
+
+    Returns ``(core, suffix)`` when every redirect is ``/dev/null`` or a
+    descriptor dup AND all of them trail the last word. A redirect in the
+    middle of a command, or any named output file, stays unresolved (None) so
+    callers keep ordinary writer admission.
+    """
+    if not source or not source.strip() or '\n' in source or '\r' in source:
+        return None  # A heredoc body is executable sh; it is never a redirect.
+    outputs = command_segment_output_targets(source)
+    if not outputs.complete or outputs.targets or not outputs.words:
+        return None
+    try:
+        tokens = _shell_words(source, strict=True, redirects=True)
+    except ValueError:
+        return None
+    # Input redirects and heredocs stay in the command: a here-document body is
+    # shell source, not a discarded descriptor.
+    first = next((index for index, token in enumerate(tokens)
+                  if token.text in {'>', '>>', '<>'}
+                  and source[token.start:token.end] == token.text), None)
+    if first is None:
+        return None
+    split_at = tokens[first].start
+    if (first and tokens[first - 1].text.isdigit()
+            and tokens[first - 1].end == split_at):
+        split_at = tokens[first - 1].start  # Adjacent IO descriptor digit.
+    core, suffix = source[:split_at].strip(), source[split_at:].strip()
+    if not core or not suffix or '\n' in core or '<' in suffix:
+        return None
+    tail = command_segment_output_targets(suffix)
+    if not tail.complete or tail.targets or tail.words:
+        return None  # Not redirect-only: a word follows the redirect.
+    return core, suffix
+
 def command_segment_targets(source):
     """Bounded literal utility writes; incomplete parses retain candidate roots.
 
