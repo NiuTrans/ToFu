@@ -23,11 +23,22 @@ def _task():
 
 
 def test_successful_dispatch_calibrates_next_final_admission(monkeypatch):
+    from lib.acceptance import turns
     from lib.tasks_pkg.compaction import _prompt_admission as admission
     from lib.tasks_pkg.compaction import _tokens as tokens
     from lib.tasks_pkg.llm_fallback import _usage as usage
     import lib.token_counter
     task = _task()
+    requirement_reads = []
+
+    def no_additional_requirements(conversation_id, turn_id, attempt_id, task_id,
+                                   *, principal):
+        requirement_reads.append((conversation_id, turn_id, attempt_id, task_id,
+                                  principal.require_owner(context='test requirements')))
+        return None
+
+    # Keep real final admission/identity checks; this unit fixture owns no DB.
+    monkeypatch.setattr(turns, 'read_execution_requirements', no_additional_requirements)
     counts = iter([45_000, 53_878])
     monkeypatch.setattr(lib.token_counter, 'count_tokens',
                         lambda *a, **k: {'tokens': next(counts), 'method': 'tiktoken'})
@@ -50,6 +61,7 @@ def test_successful_dispatch_calibrates_next_final_admission(monkeypatch):
     assert second['method'].endswith('+cal')
     assert messages == [{'role': 'user', 'content': 'current work'}]
     assert '_rawEstimateTokens' not in task['_lastPromptAdmission']
+    assert requirement_reads == [('conversation', 'turn', 'attempt', 'task', 1)] * 2
 
 
 def test_discarded_billed_attempt_does_not_calibrate_authoring_prompt(monkeypatch):

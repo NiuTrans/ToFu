@@ -547,26 +547,40 @@ def test_recent_files_excludes_reconstructible_tool_result_artifacts():
     assert _extract_recently_accessed_files(msgs) == ['lib/real.py']
 
 
-def test_recent_files_requires_success_for_modern_identified_calls():
-    def identified(call_id, path):
-        return _a('', tool_calls=[{
-            'id': call_id,
-            'function': {
-                'name': 'read_files',
-                'arguments': json.dumps({'reads': [{'path': path}]}),
-            },
-        }])
+def _identified_read(call_id, path):
+    return _a('', tool_calls=[{
+        'id': call_id,
+        'function': {
+            'name': 'read_files',
+            'arguments': json.dumps({'reads': [{'path': path}]}),
+        },
+    }])
 
+
+def _successful_read(call_id, path):
+    # Use the public file-read receipt shape; arbitrary prose proves no read.
+    return {'role': 'tool', 'tool_call_id': call_id,
+            'content': f'File: {path} (lines 1-1 of 1)\n1 | file contents'}
+
+
+def test_recent_files_requires_success_for_modern_identified_calls():
     msgs = [
-        identified('ok', 'src/ok.py'),
-        {'role': 'tool', 'name': 'read_files', 'tool_call_id': 'ok',
-         'content': 'src/ok.py: 1 line'},
-        identified('failed', 'src/missing.py'),
+        _identified_read('ok', 'src/ok.py'),
+        _successful_read('ok', 'src/ok.py'),
+        _identified_read('failed', 'src/missing.py'),
         {'role': 'tool', 'name': 'read_files', 'tool_call_id': 'failed',
          'content': 'Error: File not found'},
-        identified('unsettled', 'src/not-run.py'),
+        _identified_read('unsettled', 'src/not-run.py'),
     ]
     assert _extract_recently_accessed_files(msgs) == ['src/ok.py']
+
+
+def test_recent_files_unverified_prose_does_not_prove_a_read():
+    msgs = [
+        _identified_read('unknown', 'src/unknown.py'),
+        {'role': 'tool', 'tool_call_id': 'unknown', 'content': 'file contents'},
+    ]
+    assert _extract_recently_accessed_files(msgs) == []
 
 
 def test_recent_files_recognizes_failed_results_without_repeated_tool_name():
@@ -594,20 +608,10 @@ def test_recent_files_recognizes_failed_results_without_repeated_tool_name():
 
 
 def test_recent_files_pairs_each_recycled_call_id_occurrence():
-    def read_call(path):
-        return _a('', tool_calls=[{
-            'id': 'recycled',
-            'function': {
-                'name': 'read_file',
-                'arguments': json.dumps({'path': path}),
-            },
-        }])
-
     msgs = [
-        read_call('src/old-success.py'),
-        {'role': 'tool', 'tool_call_id': 'recycled',
-         'content': 'file contents'},
-        read_call('src/latest-failed.py'),
+        _identified_read('recycled', 'src/old-success.py'),
+        _successful_read('recycled', 'src/old-success.py'),
+        _identified_read('recycled', 'src/latest-failed.py'),
         {'role': 'tool', 'tool_call_id': 'recycled',
          'content': 'Error: File not found'},
     ]
@@ -615,38 +619,18 @@ def test_recent_files_pairs_each_recycled_call_id_occurrence():
 
 
 def test_recent_files_unsettled_recycled_id_does_not_erase_prior_success():
-    def read_call(path):
-        return _a('', tool_calls=[{
-            'id': 'recycled',
-            'function': {
-                'name': 'read_file',
-                'arguments': json.dumps({'path': path}),
-            },
-        }])
-
     msgs = [
-        read_call('src/old-success.py'),
-        {'role': 'tool', 'tool_call_id': 'recycled',
-         'content': 'file contents'},
-        read_call('src/latest-unsettled.py'),
+        _identified_read('recycled', 'src/old-success.py'),
+        _successful_read('recycled', 'src/old-success.py'),
+        _identified_read('recycled', 'src/latest-unsettled.py'),
     ]
     assert _extract_recently_accessed_files(msgs) == ['src/old-success.py']
 
 
 def test_recent_files_recycled_id_never_borrows_nonadjacent_result():
-    def read_call(path):
-        return _a('', tool_calls=[{
-            'id': 'recycled',
-            'function': {
-                'name': 'read_file',
-                'arguments': json.dumps({'path': path}),
-            },
-        }])
-
     msgs = [
-        read_call('src/not-run.py'),
+        _identified_read('recycled', 'src/not-run.py'),
         {'role': 'user', 'content': 'interrupt the tool protocol'},
-        {'role': 'tool', 'tool_call_id': 'recycled',
-         'content': 'unrelated late contents'},
+        _successful_read('recycled', 'src/not-run.py'),
     ]
     assert _extract_recently_accessed_files(msgs) == []
