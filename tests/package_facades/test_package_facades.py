@@ -357,9 +357,10 @@ class TestFlaskRouteRegistration:
 class TestNoStaleFiles:
     def test_no_stale_monoliths(self):
         import os
-        # lib/search + lib/fetch are gone: search/fetch were extracted into the
-        # standalone tofu_search package (consumed via lib/search/search_bridge.py).
-        # Neither the monolith files nor the old packages should remain — but a
+        # Search/fetch engines live in the standalone tofu_search package.
+        # lib/search is now the retained host-adapter namespace (see
+        # docs/modules/tools_execution.md), so it is not a retired engine path.
+        # Neither the monolith files nor the retired fetch package remain — but a
         # leftover dir containing ONLY a __pycache__ (stale .pyc, never shipped)
         # doesn't count: the export strips __pycache__.
         def _has_real_content(path):
@@ -369,7 +370,7 @@ class TestNoStaleFiles:
                 return any(name != '__pycache__' for name in os.listdir(path))
             return False
 
-        for path in ['lib/search.py', 'lib/search', 'lib/fetch',
+        for path in ['lib/search.py', 'lib/fetch',
                      'lib/browser.py', 'lib/browser_advanced.py',
                      'lib/pdf_parser.py', 'lib/skills.py']:
             assert not _has_real_content(path), f'Stale path still exists: {path}'
