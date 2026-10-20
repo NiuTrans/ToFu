@@ -1,13 +1,13 @@
 //! Native Chat-compatible stream owner over bounded SSE framing. No model
 //! routing, credential, transport retry or tool execution authority lives here.
 use crate::tool_assembly::{Assembly, Delta, Error as AssemblyError};
-use crate::tool_policy::{normalize_caller, FloodError, FloodGuard};
+use crate::tool_policy::normalize_caller;
 use crate::{
     execution_contract::{
         classify_stream, ProviderStreamState, StreamFacts, DEFAULT_IDENTICAL_TOOL_CALLS,
         GATEWAY_LIMIT_MAX_CHARS, GATEWAY_LIMIT_PHRASES, INTERNAL_TOOL_PREFIXES,
         MAX_CONSECUTIVE_PARSE_ERRORS, MAX_TOOL_CALL_ID_CHARS, MAX_TOOL_CALL_INDEX,
-        TOOL_FLOOD_ENVELOPE_JSON,
+        MAX_IDENTICAL_TOOL_CALLS, MIN_IDENTICAL_TOOL_CALLS, TOOL_FLOOD_ENVELOPE_JSON,
     },
     sse::{Error as FramingError, Framer},
 };
@@ -92,7 +92,6 @@ struct Accumulator {
     malformed: u64,
     parse_errors: usize,
     failure: Option<Error>,
-    flood: FloodGuard,
 }
 impl Accumulator {
     fn reserve(&mut self, n: usize) -> Result<(), Error> {
@@ -314,8 +313,7 @@ impl Accumulator {
                             .as_ref()
                             .map_or(0, |v| serde_json::to_vec(v).unwrap().len()),
                 )?;
-                let position = self
-                    .tools
+                self.tools
                     .feed(Delta {
                         index,
                         id,
@@ -329,18 +327,6 @@ impl Accumulator {
                         AssemblyError::Capacity => Error::ToolLimit,
                         AssemblyError::CallerChanged => Error::InvalidToolCaller,
                     })?;
-                let slot = &self.tools.calls[&position];
-                if slot.arguments.trim_end().ends_with('}') {
-                    self.flood
-                        .observe_parts(
-                            position as usize,
-                            &slot.name,
-                            &slot.arguments,
-                            slot.caller.as_ref(),
-                            false,
-                        )
-                        .map_err(flood_error)?;
-                }
             }
         }
         Ok(false)
@@ -355,6 +341,8 @@ impl ChatStream {
     pub fn new(budget: Budget) -> Result<Self, Error> {
         Self::with_tool_limit(budget, DEFAULT_IDENTICAL_TOOL_CALLS)
     }
+    /// Compatibility constructor: the retired signature limit validates only.
+    /// Equal arguments never suppress or reject distinct provider positions.
     pub fn with_tool_limit(budget: Budget, identical_limit: usize) -> Result<Self, Error> {
         Self::with_tool_names(budget, identical_limit, Arc::new(BTreeSet::new()))
     }
@@ -363,7 +351,9 @@ impl ChatStream {
         identical_limit: usize,
         names: Arc<BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        if budget.event_bytes == 0 || budget.output_bytes == 0 || budget.tool_calls == 0 {
+        if budget.event_bytes == 0 || budget.output_bytes == 0 || budget.tool_calls == 0
+            || !(MIN_IDENTICAL_TOOL_CALLS..=MAX_IDENTICAL_TOOL_CALLS).contains(&identical_limit)
+        {
             return Err(Error::InvalidBudget);
         }
         Ok(Self {
@@ -381,7 +371,6 @@ impl ChatStream {
                 malformed: 0,
                 parse_errors: 0,
                 failure: None,
-                flood: FloodGuard::new(identical_limit, budget.tool_calls).map_err(flood_error)?,
             },
             closed: false,
         })
@@ -459,18 +448,9 @@ impl ChatStream {
             .acc
             .malformed
             .saturating_add(self.framer.drain_issues().count);
-        let mut a = self.acc;
+        let a = self.acc;
         let mut tools = Vec::new();
-        for (index, call) in a.tools.calls {
-            a.flood
-                .observe_parts(
-                    index as usize,
-                    &call.name,
-                    &call.arguments,
-                    call.caller.as_ref(),
-                    true,
-                )
-                .map_err(flood_error)?;
+        for call in a.tools.calls.into_values() {
             if INTERNAL_TOOL_PREFIXES
                 .iter()
                 .any(|prefix| call.name.starts_with(prefix))
@@ -554,17 +534,6 @@ impl ChatStream {
             done_seen: a.done,
             malformed_frames: a.malformed,
         })
-    }
-}
-
-fn flood_error(error: FloodError) -> Error {
-    match error {
-        FloodError::Flood { count, limit, .. } => Error::ToolFlood { count, limit },
-        FloodError::PositionLimit => Error::ToolLimit,
-        FloodError::InvalidBudget => Error::InvalidBudget,
-        FloodError::ArgumentsTooDeep | FloodError::InvalidArguments => {
-            Error::UnsupportedToolArguments
-        }
     }
 }
 

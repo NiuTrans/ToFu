@@ -499,7 +499,7 @@ class TestStreamingToolAccumulator:
 
     @pytest.mark.parametrize('same_arguments', [False, True])
     def test_duplicate_stream_id_preserves_distinct_final_occurrences(self, same_arguments):
-        """Physical repeats collapse; distinct calls never share an early row."""
+        """Every response position owns an independent row, even with equal arguments."""
         from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
         from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls
 
@@ -543,16 +543,12 @@ class TestStreamingToolAccumulator:
         )
         acc.inject_into_cache(task)  # deterministic pool shutdown
 
-        expected = 1 if same_arguments else 2
-        assert len(parsed) == expected
-        assert len(task['toolRounds']) == expected
-        assert parsed[0][5]['toolCallId'] == 'provider-reused-id'
-        if same_arguments:
-            assert assistant['_flood_collapsed']
-        else:
-            assert parsed[0][5] is not parsed[1][5]
-            assert parsed[1][5]['toolCallId'] == 'provider-reused-id'
-            assert [call[3]['path'] for call in parsed] == ['a.txt', 'b.txt']
+        assert len(parsed) == 2
+        assert len(task['toolRounds']) == 2
+        assert parsed[0][5] is not parsed[1][5]
+        assert [row[5]['toolCallId'] for row in parsed] == ['provider-reused-id'] * 2
+        assert [call[3]['path'] for call in parsed] == [
+            'a.txt', 'a.txt' if same_arguments else 'b.txt']
 
     def test_conflicting_same_attempt_call_id_is_reminted_before_announce(self):
         """Different response positions may never share one early mutable row."""

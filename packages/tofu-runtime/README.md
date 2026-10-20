@@ -118,15 +118,20 @@ classification, custom enterprise trust roots, dynamic proxy policy, HTTP/2
 interop certification, callbacks, durable adapters and full protocol/tool policy
 remain pending. No end-to-end performance improvement is claimed.
 
-`tool_policy.rs` now owns response-position flood admission and normalized caller
-authority. Threshold defaults/ranges, caller bounds and the public flood error
-projection derive from the retained Python authorities. Live program callers may
-be provisional; execution/replay must require a resolved identity. Caller changes
-within a native slot fail closed. Named retransmissions retain one argument body.
-`ChatStream::with_tool_limit` and HTTP request `identical_tool_limit` preserve
-explicit overrides; the stdin CLI accepts an optional final `IDENTICAL_LIMIT`.
+`tool_policy.rs` owns normalized caller authority and lossless argument/approval
+identity. Caller bounds and public legacy error projections derive from Python.
+Live program callers may be provisional; execution/replay requires a resolved
+identity. Caller changes within a native slot fail closed. Named same-slot
+retransmissions retain one argument body; distinct positions keep equal inputs.
 
-Signature hashing preserves large integers, float/int distinctions, Python's
+Signature-based stream admission is retired. `ChatStream::with_tool_limit`,
+HTTP `identical_tool_limit` and the CLI's optional `IDENTICAL_LIMIT` retain their
+historical validation range for compatibility, but do not change response
+occurrences. The legacy `FloodGuard` library helper and frozen range constants
+remain source-compatible; live streams never invoke that helper. See the
+[execution policy](../../docs/contracts/TOOL_EXECUTION_POLICY.md) for migration.
+
+The legacy helper's signature hashing preserves large integers, float/int distinctions, Python's
 nonfinite JSON constants, sorted keys and last-wins duplicate keys without
 retaining parameter trees. Arrays stream into one hash state; each retained
 position/signature uses fixed digests. 2,400 actual Python observations and 26
@@ -155,7 +160,7 @@ namespaced functions. Prefix lookup uses the sorted catalog range instead of sca
 Name joining follows the dispatched catalog; absent a
 catalog it uses the canonical no-arguments-started fallback. Invalid indices/IDs
 retain malformed evidence while recovering through the unindexed owner. Known
-internal transport prefixes are filtered only after flood admission. Empty
+internal transport prefixes are filtered during final projection. Empty
 provider IDs/names remain faithful diagnostic output for the later schema gate.
 Opaque `extra_content` survives assembly and final projection.
 

@@ -178,11 +178,10 @@ other entry point able to drift; separate copies repeat the same ownership
 problem. Verify `test_program_schema_scope.py`, program policy and guest tests.
 
 Each gateway child is an explicit occurrence, including identical calls in one
-batch. Problem: applying the physical provider-response repetition guard to
-this host-constructed batch discarded later children and manufactured empty
-successful receipts. Decision: the shared parser has a host-only repetition
-policy; gateway batches retain every child while provider responses keep their
-existing guard. Ordinary contract/authority checks and freshness-aware read
+batch. Problem: content-based repetition guards discarded later children and
+manufactured empty successful receipts. Decision: the common parser preserves
+every position for both gateway batches and provider responses; no host-only
+bypass is needed. Ordinary contract/authority checks and freshness-aware read
 reuse still apply. Alternatives rejected: copying the first receipt invents
 execution evidence for writes; dropping receipts silently changes batch shape.
 Verify `test_gateway_child_occurrences.py` and `test_tool_call_flood_admission.py`.

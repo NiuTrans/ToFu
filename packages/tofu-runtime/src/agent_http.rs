@@ -18,6 +18,7 @@ pub struct Configuration {
     pub template: Map<String, Value>,
     pub budget: Budget,
     pub request_bytes: usize,
+    /// Retired v1 input: accepted/validated for compatibility; never removes calls.
     pub identical_tool_limit: Option<usize>,
 }
 pub struct HttpProvider<'a> {
@@ -48,12 +49,12 @@ impl<'a> HttpProvider<'a> {
             || c.budget.event_bytes == 0
             || c.budget.output_bytes == 0
             || c.budget.tool_calls == 0
-            || crate::tool_policy::FloodGuard::new(
-                c.identical_tool_limit
-                    .unwrap_or(crate::execution_contract::DEFAULT_IDENTICAL_TOOL_CALLS),
-                c.budget.tool_calls,
-            )
-            .is_err()
+            || !(crate::execution_contract::MIN_IDENTICAL_TOOL_CALLS
+                ..=crate::execution_contract::MAX_IDENTICAL_TOOL_CALLS)
+                .contains(
+                    &c.identical_tool_limit
+                        .unwrap_or(crate::execution_contract::DEFAULT_IDENTICAL_TOOL_CALLS),
+                )
         {
             return Err(
                 json!({"kind":"agent_http_configuration","message":"native provider configuration refused"}),

@@ -104,37 +104,22 @@ create-to-run, not pure executor residence. Specs:
 
 ## Repeated tool-call evidence
 
-Problem: a locally rejected tool flood looked like a service outage, and the
-ordinary SSE log did not establish whether repeated calls came from upstream
-or canonical slot reconstruction. Decision: classify `ProviderToolCallFloodError`
-as `tool_loop` with a specific response-limit message and manual retry policy.
-It does not trigger fallback, automatic turn replay, or route-health penalties.
-Silently deduplicating calls was rejected because equal inputs can represent
-independent effects; relaxing the guard would allow unbounded generation.
+Problem: content-identical calls can represent independent effects. Signature-based
+rejection/collapse previously stopped streams before terminal usage and could lose
+operations. Decision: new provider attempts preserve each response position and
+never emit signature-flood rejection or salvage markers. Stable-slot retransmission
+and slot-splitting diagnostics remain with the stream assembly owner; logging does
+not decide execution identity. See the [execution policy](contracts/TOOL_EXECUTION_POLICY.md).
 
-Each streamed rejection records bounded `toolCallEvidence` on the typed error
-and one WARNING in the normal incident pipeline. It includes the request
-`traceId`, canonical matched position count, distinct call-ID count, at most
-six position samples, and parser index/name/split counters. Anthropic native
-start identities independently supply wire position count/samples and replayed
-start count. Only equal counts with distinct IDs establish `origin=provider_wire`;
-other protocols report `canonical_response`, which makes no claim about the
-wire origin. Provider-wire evidence cannot distinguish model generation from
-internal gateway conversion. No argument body, ID value, prompt or tool result
-is included in this evidence. The native parser adds one integer replay counter;
-all other work occurs on rejection and reuses existing request-owned state.
-An isolated Python 3.12 probe of 33 native calls with tracing enabled took
-7.87 ms, retained 79,552 bytes of complete parser state (80,651 peak), and
-serialized 350 bytes of rejection evidence. This is an incident cost, not a
-new pool/cache or a per-token log. Existing stream/incident retention caps apply.
-
-When raw capture exists, `rawArchiveRef` links archive/task/turn/attempt/round
-and trace identities. It identifies a capture attempt, not proof that storage
-succeeded or that retention has not expired. The existing archive catalog is
-the authority for availability, integrity and truncation. A guard rejection
-interrupts an HTTP 200 response; a partial archive is therefore expected and
-does not imply transport failure. The anomaly ring also flushes on rejection
-using existing per-file/retention bounds; input fragments remain omitted.
+Historical `ProviderToolCallFloodError` remains `tool_loop` with manual retry only:
+it does not trigger fallback, automatic turn replay or route-health penalties.
+Existing `toolCallEvidence` and `rawArchiveRef` records remain readable. Their
+position counts and redacted parser counters cannot establish whether a model or
+an upstream gateway generated the repetitions. An archive reference identifies a
+capture attempt, not proof of successful storage or continued retention; the
+archive catalog remains the availability/integrity/truncation authority.
+Alternatives rejected: continuing to log each identical input as an incident
+mislabels legitimate actions; dumping arguments or IDs creates sensitive-data noise.
 
 The conversation inspector's `--request-evidence` flag follows the selected
 authenticated application API to show references for the last four referenced

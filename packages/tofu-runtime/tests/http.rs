@@ -66,6 +66,32 @@ async fn listener() -> (TcpListener, String) {
     let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
     (listener, endpoint)
 }
+async fn assert_peer_disconnected(stream: &mut TcpStream) {
+    let mut byte = [0];
+    let closed = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+        .await.expect("retired request retained its physical connection");
+    // Discarding an unread response may produce RST instead of FIN. Both
+    // prove closure; data, timeout and unrelated I/O errors still fail.
+    assert!(matches!(&closed, Ok(0))
+        || matches!(&closed, Err(error)
+            if error.kind() == std::io::ErrorKind::ConnectionReset),
+        "cancelled peer remained live: {closed:?}");
+}
+#[tokio::test]
+async fn peer_disconnect_fixture_accepts_fin_and_reset() {
+    for reset in [false, true] {
+        let (listener, _) = listener().await;
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (mut accepted, _) = listener.accept().await.unwrap();
+        if reset {
+            peer.set_linger(Some(Duration::ZERO)).unwrap();
+        } else {
+            peer.shutdown().await.unwrap();
+        }
+        drop(peer);
+        assert_peer_disconnected(&mut accepted).await;
+    }
+}
 async fn read_request(stream: &mut TcpStream) {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
@@ -109,8 +135,7 @@ async fn cancellation_interrupts_silent_body_and_releases_admission() {
         let (mut s, _) = listener.accept().await.unwrap();
         read_request(&mut s).await;
         s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-        let mut b = [0; 1];
-        assert_eq!(s.read(&mut b).await.unwrap(), 0);
+        assert_peer_disconnected(&mut s).await;
     });
     let transport = Transport::new(&url, None, policy()).unwrap();
     let cancel = Cancellation::new();
@@ -140,8 +165,7 @@ async fn silent_stream_times_out_but_terminal_drain_timeout_preserves_success() 
                     .await
                     .unwrap();
             }
-            let mut b = [0; 1];
-            assert_eq!(s.read(&mut b).await.unwrap(), 0);
+            assert_peer_disconnected(&mut s).await;
         });
         let transport = Transport::new(&url, None, policy()).unwrap();
         let result = transport.execute(request(), &Cancellation::new()).await;
@@ -246,9 +270,7 @@ async fn header_timeout_and_unbounded_wait_stop_close_the_peer_and_allow_next_at
             let (mut socket, _) = listener.accept().await.unwrap();
             read_request(&mut socket).await;
             arrived.send(()).unwrap();
-            let mut byte = [0];
-            assert_eq!(tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
-                .await.unwrap().unwrap(), 0, "retired request retained its physical connection");
+            assert_peer_disconnected(&mut socket).await;
             let (mut next, _) = listener.accept().await.unwrap();
             read_request(&mut next).await;
             reply(&mut next, WIRE).await;
@@ -295,8 +317,7 @@ async fn already_cancelled_demand_never_sends_a_second_request() {
         read_request(&mut s).await;
         s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
         ready_tx.send(()).unwrap();
-        let mut b = [0; 1];
-        assert_eq!(s.read(&mut b).await.unwrap(), 0);
+        assert_peer_disconnected(&mut s).await;
     });
     let transport = std::sync::Arc::new(Transport::new(&url, None, policy()).unwrap());
     let first_cancel = Cancellation::new();
@@ -357,7 +378,7 @@ fn task_stop_wakes_silent_http_and_publishes_aborted_once() {
     let stop = task.clone();
     // Stop before the client consumes response headers may close with TCP RST.
     // Both EOF and reset attest closure; timeout/other I/O failures still fail.
-    let server=runtime.spawn(async move{let(mut socket,_)=listener.accept().await.unwrap();read_request(&mut socket).await;socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();assert!(stop.request_abort(7,"user_stop").unwrap());let mut byte=[0];let closed=socket.read(&mut byte).await;assert!(matches!(&closed,Ok(0))||matches!(&closed,Err(error) if error.kind()==std::io::ErrorKind::ConnectionReset),"cancelled peer remained live: {closed:?}");});
+    let server=runtime.spawn(async move{let(mut socket,_)=listener.accept().await.unwrap();read_request(&mut socket).await;socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();assert!(stop.request_abort(7,"user_stop").unwrap());assert_peer_disconnected(&mut socket).await;});
     let transport = {
         let _entered = runtime.enter();
         Transport::new(&url, None, policy()).unwrap()

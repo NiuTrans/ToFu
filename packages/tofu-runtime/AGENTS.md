@@ -147,10 +147,12 @@ explicit proxy, H2 cause preservation, HTTP/1 upload Stop and healthy-connection
 isolation before changing it. cli_agent::Input scans only appended bytes and
 retains that cursor across cancelled frame futures; keep large-input stdio proof.
 
-`tool_policy.rs` owns position-based flood admission and caller normalization.
-Run its actual Python oracle and provider/HTTP neighbors; preserve numeric kinds,
-large integers, signature revisions, explicit limits and no automatic retry on
-flood. `retryable` still permits manual retry; `autoRetryExhausted` fences automation.
+`tool_policy.rs` owns caller normalization and lossless argument/approval identity.
+Provider/tool assembly preserves distinct occurrences regardless of equal inputs;
+verify `tool_policy`, `tool_assembly`, provider/HTTP and native file-recovery tests.
+Legacy guard/limit APIs and error envelopes retain source/wire compatibility only;
+see TOOL_EXECUTION_POLICY.md for retirement. Preserve numeric kinds, large integers,
+argument/authority checks and no automatic retry of historical flood errors.
 
 `tool_assembly.rs` owns response-local occurrence/index/name reconciliation.
 Verify `tests/tool_assembly.rs` against the actual Python oracle, including shared
