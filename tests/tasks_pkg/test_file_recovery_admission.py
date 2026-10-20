@@ -18,6 +18,16 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def scenario(tmp_path, monkeypatch):
     task=make_task();task.update(convId='conv',_attemptId='attempt',_turnId='turn')
+    # This fixture is an ordinary project conversation. Supply its independent
+    # role lookup so recovery assertions reach file admission without a live DB.
+    def unbound_project(repository, project_path):
+        assert repository.user_id == task['_userId']
+        assert project_path == str(tmp_path)
+        return {'projectPath': project_path, 'conversationId': '',
+                'revision': 0, 'availability': 'unbound'}
+    monkeypatch.setattr(
+        'lib.conversations.project_coordination.ProjectCoordinationRepository.read',
+        unbound_project)
     reference=dict(conversationId='conv',turnId='turn',operationId='a'*32,
                    ownerScope=turn_image_owner_scope(1,'conv'))
     source=dict(toolName='write_file',taskId='producer',attemptId='old',status='aborted',
