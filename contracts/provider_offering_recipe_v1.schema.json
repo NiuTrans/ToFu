@@ -64,6 +64,12 @@
           "uniqueItems": true,
           "description": "Provider wire ids tried for this logical model."
         },
+        "request_faces": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "string", "minLength": 1},
+          "description": "Per-wire face override: {wire id: face name}. Absent means the entry's own face (or the family rule) applies to every wire id. Needed when a gateway serves one spelling only through a specific provider selector, while the logical model's other spellings use the default face."
+        },
         "enabled": {"type": "boolean"},
         "capabilities": {
           "type": "array",

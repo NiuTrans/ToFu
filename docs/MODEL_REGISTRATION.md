@@ -321,6 +321,54 @@ long-context tiers. The YourProvider AIGC gateway serves the public wire id
 `不支持的模型类型`). Do not pin `X-Custom-Header` or Kunlun
 serving aliases on that provider template; gray cells are temporary (see
 `bundles/yourprovider/provider_templates/yourprovider.json` `_extra_headers_note`).
+The YourProvider AIGC gateway serves the public wire id
+`gpt-6.1-sol` (live probe 2026-10-19: HTTP 429 per-model RPM, not 400
+`不支持的模型类型`). Do not pin `X-Custom-Header`: it selects a named
+gray cell, and when `your-header-value` was decommissioned on 2026-09-21
+the whole provider 502'd on both faces (see
+`bundles/yourprovider/provider_templates/yourprovider.json` `_extra_headers_note`).
+
+Kunlun serving aliases (2026-10-20): a *deployment* selector is acceptable
+where a gray *cell* is not, because it names a live deployment instead of a
+temporary cell, and it must stay scoped to one face. Measured on App `**0733`
+for `gpt-6.1-sol`:
+
+| request | result |
+|---|---|
+| `/v1/openai/native`, `gpt-6.1-sol` | 429 per-model RPM (repeated at 0/20/40/60s, plus one global `96/96` concurrency 429) |
+| `/v1/responses`, `gpt-6.1-sol` | same RPM wall |
+| `/v1/responses`, `gpt-6.1-sol` + `x-context-provider: kunlun` | 400 `该模型在 provider 下无可用账号` |
+| `/v1/openai/native`, `kunlunbedrock.gpt-6.1-sol-m17` | 400 `配置不存在` |
+| `/v1/responses`, `kunlunbedrock.gpt-6.1-sol-m17` | 200 + `invalid_prompt` `配置不存在` |
+| `/v1/responses`, `kunlunbedrock.gpt-6.1-sol-m17` + selector | 200, streams; tool calls and `reasoning.encrypted_content` intact |
+
+So the selector belongs to the *deployment*, not the account: it lives on a
+face (`faces.kunlun`) and reaches only the wire ids that name it in the
+recipe's `request_faces` map. Three consequences, each enforced by tests in
+`tests/providers/test_provider_face_per_wire.py` and
+`bundles/yourprovider/tests/test_yourprovider_served_catalog_sync.py`:
+
+* the alias is a SECOND entry of the Offering's `request_ids`; the public id
+  stays first, so a retired `-m17` revision costs one probe verdict and never
+the model;
+* the selector must not be lifted to the provider (or another face) — with it,
+every model not served under that selector answers 400;
+* that endpoint rejects sampling (`temperature` → 400 `Unsupported parameter`),
+  declared as `faces.kunlun.inference_profile.sampling.temperature='omit'`
+  because that is where it was measured.
+
+A card installed **before** the kunlun pin exists (the 2026-10-20 user's
+case) holds only the public wire. Template-supply convergence is insert-only,
+so it would never revisit the existing Offering — and the new kunlun face URL
+(`/v1`) also breaks the template fingerprint, skipping the access entirely.
+`_backfill_request_faces` closes that: it treats a selector-only face as
+optional during fingerprint matching, creates the missing kunlun Connection
+(deterministic id) with its `x-context-provider` header and
+`sampling.temperature='omit'` profile, grants it to the access credentials,
+and appends the alias Deployment onto the existing Offering. Existing wires,
+connections and credential exclusions are never modified; the pass is
+idempotent. Specification:
+`tests/model_routing/test_template_supply_sync.py::test_face_pinned_alias_is_backfilled_onto_existing_offering`.
 Specifications:
 `tests/model_routing/test_subscription_registration_research.py`,
 `tests/oauth/test_codex_catalog.py`, and
@@ -708,9 +756,28 @@ request name is not in its exclusion list — so two request names sharing a
 ModelRef (`glm-5.3` vs `glm-53-yourprovider`) toggle independently. Toggling a
 cell adds/removes that wire's exclusion; the model grant itself is minted
 when the first cell is enabled and dropped when the last reachable cell is
-disabled. The adjacent probe pip describes that exact credential × request
-name. Neither implies the other. Manually added/catalog-listed request
+disabled. A mint excludes every sibling request name without a positive
+verdict, matching the automatic path, so enabling one cell never lights up the
+rest of its column. The adjacent probe pip describes that exact credential ×
+request name. Neither implies the other. Manually added/catalog-listed request
 names record `unprobed` instead of fabricating a successful inference.
+
+Probe evidence is stored per `(column, wire id)` where the column is a
+position, so every snapshot also records `credential_ids` — the ordered
+credential identities the columns measured. On read, evidence is re-bound to
+the columns of the CURRENT document: a cell whose credential is gone is
+dropped and a reordered column keeps its own verdicts. Before that binding, a
+deleted key left its 401 verdicts on the same index and repainted whichever
+key inherited it, so an untouched, working credential could show a failing
+probe on every model. Legacy snapshots that predate `credential_ids` cannot be
+attributed and are discarded rather than guessed.
+
+**Problem:** positional probe keys survived credential edits, so evidence was
+misattributed after any key deletion or reorder. **Decision:** the snapshot
+carries its column identities and reads reconcile them. **Alternatives
+rejected:** clearing the whole cache on every credential edit throws away
+still-valid verdicts; renumbering by wire id alone cannot distinguish two keys
+probing the same supply.
 
 **Apply Recommendations** is symmetric: a `recommend_disable` verdict
 excludes that wire (the model grant drops only when every probed wire of
@@ -771,6 +838,18 @@ reachable pending wires. Ambiguous/version-suffixed names remain pending.
 This repair is idempotent and also covers installed providers; saved scoped
 selections retain reasoning controls after binding. Executable specifications:
 `tests/model_routing/test_world_catalog_sync.py`, `tests/model_routing/test_model_inheritance.py`.
+
+`display_name` is the MODEL's name. Recipes may author it, and the sync adopts
+it for a row whose stored name merely echoes its `model_id` (that value is
+what migration wrote when nothing was declared); any other stored name is an
+owner edit and wins. It is deliberately separate from
+`MODEL_PRICING[wire_id].name`: a pricing row is keyed on the ids routed on the
+wire and exists so cost and display fall back sensibly, while a registry row
+names one Model. The two V4 Flash generations are the worked example —
+`deepseek-v4-flash` (aa 34.3, 2026-05) and `deepseek-v4.1-flash`
+(aa 39.5, 2026-09-10) are different Models even while upstream routes the
+older ids to the newer one, so labelling both "V4.1 Flash" made the picker
+offer one product twice, once under a raw gateway id.
 
 The Codex OAuth catalogue request carries a `client_version` that upstream
 uses to gate newly released models. `lib/oauth/codex_version.py` resolves it

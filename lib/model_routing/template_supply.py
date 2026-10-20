@@ -23,13 +23,22 @@ Semantics:
   probed on the Anthropic face exactly like dispatch would. Ids the owner
   cleaned up because they probed dead never resurrect; transient probe
   failures simply retry on the next boot.
-* **Insert-only** — existing offerings, deployments, credentials and
-  owner edits are never modified or removed. New rows reuse the compiled
-  template bundle verbatim (identity, capabilities, context window) with
-  ids re-derived for the target access and deployments re-pointed at the
-  access's own connections. Confirmed model references are appended to
-  the access credentials' authorization so dispatch can actually route
-  them.
+* **Insert-only for supply** — existing offerings, credentials and owner
+  edits are never modified or removed; a recipe the access already serves
+  is never re-added. New rows reuse the compiled template bundle verbatim
+  (identity, capabilities, context window) with ids re-derived for the
+  target access and deployments re-pointed at the access's own
+  connections. Confirmed model references are appended to the access
+  credentials' authorization so dispatch can actually route them.
+* **Face-alias backfill** — the one exception: when a recipe later pins a
+  wire id to a serving-selector face (``request_faces``, e.g. aigc's
+  kunlun), a card installed before that pin lacks both the face
+  Connection and the alias Deployment. ``_backfill_request_faces`` adds
+  exactly those onto the existing Offering (creating the missing face
+  Connection deterministically) so dispatch reaches the selector wire.
+  Without it the new face URL also breaks the template fingerprint and
+  the whole sync would skip the access. Existing wires, connections and
+  credential exclusions stay untouched.
   Registry model rows converge upward (capabilities union, maximum
   context window) — the same convergence the domain alias merge applies
   to survivor rows — so a transplanted offering never out-claims the
@@ -166,7 +175,20 @@ def _find_template(document: dict, access: dict,
     known = _known_keys(document, access_id)
     for template in templates:
         template_urls = _template_urls(template)
-        if not template_urls or not template_urls <= access_urls:
+        if not template_urls:
+            continue
+        # A face reached ONLY through a recipe's ``request_faces`` selector
+        # (e.g. aigc's kunlun) may be absent from an older card: backfill is
+        # what creates it, so it must not disqualify the match. Require every
+        # other template URL (the default face and protocol faces) to be
+        # hosted — that is what keeps a foreign same-host access unflooded.
+        selector_urls = {
+            _norm_url((template.get('faces') or {}).get(face, {}).get('base_url'))
+            for recipe in template.get('offering_recipes') or []
+            for face in (recipe.get('request_faces') or {}).values()
+        } - {''}
+        required_urls = template_urls - selector_urls
+        if not required_urls or not required_urls <= access_urls:
             continue
         recipes = template.get('offering_recipes') or []
         if not recipes:
@@ -280,6 +302,217 @@ def _probe_plan(document: dict, access: dict,
         faces,
         headers,
     )
+
+
+def _supersede_renamed_supply(working: dict, access: dict, template: dict,
+                              stats: dict) -> bool:
+    """Retire offerings whose whole wire pool a renamed recipe now owns.
+
+    A logical id is renamed by authoring the SAME gateway spellings under the
+    new identity (yourprovider.json: `deepseek-v4-flash` → `deepseek-v4.1-flash`
+    with the v4-flash mirrors kept in its request_ids). Insert-only
+    convergence then leaves the previous offering alive forever, so the model
+    picker offers one gateway supply twice under two model identities, and
+    both stay dispatchable.
+
+    Evidence is the wire pool, not a name guess: an offering is superseded
+    only when every wire it deploys on the matched access is authored by a
+    DIFFERENT recipe of that same template. Partial overlap is left alone
+    because it may be genuine shared capacity; the superseded offering keeps
+    every field and is marked ``stale`` — the existing "no longer supplied"
+    state the picker hides and dispatch rejects — so nothing is destroyed.
+    """
+    from lib.model_catalog._creator_identity import merge_keys
+
+    access_id = access['provider_access_id']
+    authored: list[tuple[str, frozenset, set[str]]] = []
+    for recipe in template.get('offering_recipes') or []:
+        model_id = str(recipe.get('model_id') or '').strip()
+        wires = {
+            str(wire).strip()
+            for wire in (recipe.get('request_ids') or [model_id])
+            if str(wire).strip()
+        }
+        if model_id and wires:
+            authored.append((model_id, merge_keys(model_id), wires))
+    if not authored:
+        return False
+
+    connection_ids = {
+        row.get('connection_id')
+        for row in working.get('connections') or []
+        if isinstance(row, dict)
+        and row.get('provider_access_id') == access_id
+    }
+    wires_by_offering: dict[str, set[str]] = {}
+    for deployment in working.get('deployments') or []:
+        if not isinstance(deployment, dict):
+            continue
+        if deployment.get('connection_id') not in connection_ids:
+            continue
+        wire = str(deployment.get('wire_model_id') or '').strip()
+        if wire:
+            wires_by_offering.setdefault(
+                deployment['offering_id'], set()).add(wire)
+
+    changed = False
+    for offering in working.get('offerings') or []:
+        if not isinstance(offering, dict):
+            continue
+        if offering.get('provider_access_id') != access_id:
+            continue
+        if (offering.get('stale') is True or offering.get('enabled') is False
+                or offering.get('identity_state') != 'confirmed'):
+            continue
+        ref = offering.get('model') or {}
+        model_id = str(ref.get('model_id') or '').strip()
+        if not model_id:
+            continue
+        keys = merge_keys(model_id)
+        wires = wires_by_offering.get(offering['offering_id']) or set()
+        if not wires:
+            continue
+        if any(candidate[2] >= wires and keys & candidate[1]
+               for candidate in authored):
+            continue  # its own recipe still authors this supply
+        heir = next(
+            (candidate for candidate in authored
+             if candidate[2] >= wires and not (keys & candidate[1])),
+            None)
+        if heir is not None:
+            offering['stale'] = True
+            changed = True
+            entry = f"{access_id}:{model_id}->{heir[0]}"
+            if entry not in stats['superseded']:
+                stats['superseded'].append(entry)
+    return changed
+
+
+def _backfill_request_faces(working: dict, access: dict, template: dict,
+                            stats: dict) -> bool:
+    """Add a recipe's face-pinned wire ids an installed card never received.
+
+    Templates seed NEW installs only (insert-only), so a card built before a
+    recipe gained a ``request_faces`` alias keeps the logical model but never
+    grows the alias Deployment — worse, the new face's base URL enters the
+    template fingerprint, so an old card that lacks that face Connection stops
+    matching the template entirely and the whole supply sync skips it.
+
+    This converges the gap: for each confirmed Offering whose recipe declares
+    a face-pinned wire id the access does not yet deploy, ensure the face
+    Connection exists (create it deterministically when missing) and append
+    the alias Deployment onto the SAME Offering. Owner edits are never
+    touched: existing connections/deployments are matched by id/URL/wire and
+    left as-is, and a wire the owner excluded on every credential is left
+    unadded (the exclusion is the explicit owner decision).
+    """
+    from lib.model_routing.migration import _protocol, _stable_id
+
+    access_id = access['provider_access_id']
+    faces = template.get('faces') or {}
+    if not isinstance(faces, dict):
+        return False
+
+    connections = _access_connections(working, access_id)
+    by_url = {_norm_url(row.get('base_url')): row for row in connections}
+    connection_ids = {row.get('connection_id') for row in connections}
+    credentials = [row for row in working.get('credentials') or []
+                   if isinstance(row, dict)
+                   and row.get('provider_access_id') == access_id]
+
+    def _face_connection(face_name: str) -> tuple[str | None, dict | None]:
+        """(connection_id, new-connection-row-or-None) for a face."""
+        face = faces.get(face_name)
+        if not isinstance(face, dict):
+            return None, None
+        url = _norm_url(face.get('base_url'))
+        existing = by_url.get(url)
+        if existing is not None:
+            return existing['connection_id'], None
+        # Deterministic id matching migration._stable_id so a re-seeded fresh
+        # install and this backfill land on the same row (idempotent).
+        connection_id = _stable_id('conn', access_id, face_name, url)
+        if connection_id in connection_ids:
+            return connection_id, None
+        row = {
+            'connection_id': connection_id,
+            'provider_access_id': access_id,
+            'base_url': url,
+            'protocol': _protocol(face.get('protocol'), url),
+            'enabled': True,
+            'priority': 100,
+            'extra_headers': dict(face.get('extra_headers') or {}),
+            **({'responses_profile': face['responses_profile']}
+               if face.get('responses_profile') else {}),
+            **({'inference_profile': face['inference_profile']}
+               if face.get('inference_profile') else {}),
+            'gateway_namespace': face_name,
+        }
+        return connection_id, row
+
+    changed = False
+    for recipe in template.get('offering_recipes') or []:
+        request_faces = recipe.get('request_faces')
+        if not isinstance(request_faces, dict) or not request_faces:
+            continue
+        model_id = str(recipe.get('model_id') or '').strip()
+        if not model_id:
+            continue
+        offering = next(
+            (row for row in working.get('offerings') or []
+             if isinstance(row, dict)
+             and row.get('provider_access_id') == access_id
+             and row.get('identity_state') == 'confirmed'
+             and (row.get('model') or {}).get('model_id') == model_id),
+            None)
+        if offering is None:
+            continue  # not installed here; the insert-only path owns new adds
+        deployed = {
+            str(row.get('wire_model_id') or '').strip()
+            for row in working.get('deployments') or []
+            if isinstance(row, dict)
+            and row.get('offering_id') == offering['offering_id']
+        }
+        for wire, face_name in request_faces.items():
+            wire = str(wire or '').strip()
+            face_name = str(face_name or '').strip()
+            if not wire or not face_name or wire in deployed:
+                continue
+            connection_id, new_connection = _face_connection(face_name)
+            if connection_id is None:
+                continue  # undeclared face — leave for migration to flag
+            if new_connection is not None:
+                working['connections'].append(new_connection)
+                connection_ids.add(connection_id)
+                by_url[_norm_url(new_connection['base_url'])] = new_connection
+                # Grant every credential of this access the new Connection so
+                # dispatch can route through it (mirrors fresh-install shape).
+                for credential in credentials:
+                    ids = credential.setdefault('authorization', {}).setdefault(
+                        'connection_ids', [])
+                    if connection_id not in ids:
+                        ids.append(connection_id)
+                stats['added_connections'] += 1
+                changed = True
+            deployment_id = _stable_id('dep', access_id, connection_id, wire)
+            if any(row.get('deployment_id') == deployment_id
+                   for row in working.get('deployments') or []):
+                continue
+            working['deployments'].append({
+                'deployment_id': deployment_id,
+                'offering_id': offering['offering_id'],
+                'connection_id': connection_id,
+                'wire_model_id': wire,
+                'identity_confidence': 'high',
+                'probe_status': 'unprobed',
+                'priority': 110,
+            })
+            deployed.add(wire)
+            stats['added_deployments'] += 1
+            stats['accesses'].setdefault(access_id, []).append(
+                f'{model_id}+{wire}')
+            changed = True
+    return changed
 
 
 def _transplant(working: dict, access: dict, bundle: dict,
@@ -450,15 +683,20 @@ def sync_template_supply(*, boundary=None, repository=None,
     stats: dict[str, Any] = {
         'added_offerings': 0,
         'added_deployments': 0,
+        'added_connections': 0,
+        'superseded_offerings': 0,
+        'superseded': [],
         'accesses': {},
     }
     plans: list[tuple[dict, dict, dict]] = []
+    matched: list[tuple[dict, dict]] = []
     for access in document.get('provider_accesses') or []:
         if not isinstance(access, dict):
             continue
         template = _find_template(document, access, templates)
         if template is None:
             continue
+        matched.append((access, template))
         known = _known_keys(document, access['provider_access_id'])
         wires = _known_wires(document, access['provider_access_id'])
         missing = [
@@ -513,10 +751,27 @@ def sync_template_supply(*, boundary=None, repository=None,
         plans.append((access, bundle, verdicts))
 
     if not plans:
-        stats['revision'] = repository.get(boundary).revision
-        return stats
+        preview = copy.deepcopy(document)
+        probe_stats = {'superseded': [], 'added_connections': 0,
+                       'added_deployments': 0, 'accesses': {}}
+        changed = False
+        for access, template in matched:
+            changed = (_supersede_renamed_supply(preview, access, template,
+                                                 probe_stats) or changed)
+            changed = (_backfill_request_faces(preview, access, template,
+                                               probe_stats) or changed)
+        if not changed:
+            stats['revision'] = repository.get(boundary).revision
+            return stats
 
     def _mutate(working: dict):
+        retired = False
+        backfilled = False
+        for access, template in matched:
+            retired = (_supersede_renamed_supply(working, access, template,
+                                                 stats) or retired)
+            backfilled = (_backfill_request_faces(working, access, template,
+                                                  stats) or backfilled)
         appended = False
         for access, bundle, verdicts in plans:
             current = next(
@@ -530,9 +785,10 @@ def sync_template_supply(*, boundary=None, repository=None,
             appended = (
                 _transplant(working, current, bundle, verdicts, stats)
                 or appended)
-        return working if appended else None
+        return working if (appended or retired or backfilled) else None
 
     authority = repository.mutate(boundary, _mutate)
+    stats['superseded_offerings'] = len(stats['superseded'])
     stats['revision'] = authority.revision
     logger.info('template supply sync: %s', stats)
     audit_log('provider_template_supply_synced',
@@ -540,6 +796,8 @@ def sync_template_supply(*, boundary=None, repository=None,
                         for key, value in stats['accesses'].items()},
               added_offerings=stats['added_offerings'],
               added_deployments=stats['added_deployments'],
+              added_connections=stats['added_connections'],
+              superseded_offerings=stats['superseded_offerings'],
               owner_user_id=boundary.owner_user_id,
               model_routing_revision=authority.revision)
     try:

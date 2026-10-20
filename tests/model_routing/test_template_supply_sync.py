@@ -19,6 +19,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -56,6 +57,15 @@ def _boundary() -> OwnerBoundary:
 
 def _prober_ok(**kwargs):
     return {row['model_id']: 'ok' for row in kwargs['recipes']}
+
+
+def _template() -> dict:
+    with open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            'bundles', 'yourprovider', 'provider_templates', 'yourprovider.json'),
+            encoding='utf-8') as handle:
+        return json.load(handle)
 
 
 def _seed_mini_card(repository, boundary, selected=(_SEED_MODEL,)):
@@ -105,10 +115,14 @@ def test_missing_served_recipes_converge():
     assert 'gemini-3.8-flash' in ids
     assert 'glm-5.3-flash' in ids
     assert 'kimi-0902-preview' in ids
-    # 122 recipes − the seeded one − gpt-4o-2024-{08-06,11-20}: dated
-    # snapshots merge-key to the gpt-4o-2024-05-13 recipe already added
-    # this pass, and one identity may never grow a second offering.
-    assert stats['added_offerings'] == 119
+    # Every recipe lands exactly one offering, minus the seeded one, minus
+    # gpt-4o-2024-{08-06,11-20}: those dated snapshots merge-key to the
+    # gpt-4o-2024-05-13 recipe added in the same pass, and one identity may
+    # never grow a second offering. Derived from the template so a newly
+    # shipped recipe does not need this number edited.
+    recipes = [row for row in _template()['offering_recipes']
+               if row['model_id'] != _SEED_MODEL]
+    assert stats['added_offerings'] == len(recipes) - 2
     from lib.model_catalog._creator_identity import merge_keys
     gpt4o = merge_keys('gpt-4o')
     assert len([row for row in _offerings(document, access_id)
@@ -230,6 +244,192 @@ def test_second_run_is_a_no_op():
     assert stats['added_deployments'] == 0
 
 
+def test_face_pinned_alias_is_backfilled_onto_existing_offering():
+    """A recipe-declared alias that an installed card lacks must be added as
+    a Deployment on the correct face Connection — even when the Offering
+    itself already exists (insert-only never revisits it).
+
+    Mirrors 2026-10-20: a card seeded from the OLD template (no kunlun face)
+    already serves ``gpt-6.1-sol`` on the public wire. The new recipe adds
+    ``kunlunbedrock.gpt-6.1-sol-m17`` pinned to the kunlun face. Convergence
+    must backfill BOTH the missing kunlun Connection and the alias
+    Deployment, idempotently, without touching the existing public-wire
+    Deployment or the credential grant."""
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    # Seed from the CURRENT bundle (which already includes the alias), then
+    # strip everything kunlun to reproduce a pre-kunlun installed card.
+    bundle = _seed_mini_card(repository, boundary, selected=[_SEED_MODEL,
+                                                             'gpt-6.1-sol'])
+    access_id = bundle['provider_access']['provider_access_id']
+    document = repository.get(boundary).document
+    kunlun_conns = {row['connection_id'] for row in document['connections']
+                    if row.get('gateway_namespace') == 'kunlun'}
+    assert kunlun_conns, 'seed must start from a bundle that has the face'
+    document['connections'] = [row for row in document['connections']
+                               if row['connection_id'] not in kunlun_conns]
+    document['deployments'] = [row for row in document['deployments']
+                               if row['connection_id'] not in kunlun_conns]
+    for credential in document['credentials']:
+        credential['authorization']['connection_ids'] = [
+            row for row in credential['authorization']['connection_ids']
+            if row not in kunlun_conns]
+    repository.compare_and_swap(
+        boundary, document, expected_revision=repository.get(boundary).revision)
+
+    # Sanity: the installed card now serves only the public wire.
+    before = repository.get(boundary).document
+    assert {row['wire_model_id'] for row in before['deployments']
+            if (row.get('offering_id'))} >= {'gpt-6.1-sol'}
+    assert not any(row['wire_model_id'] == 'kunlunbedrock.gpt-6.1-sol-m17'
+                   for row in before['deployments'])
+
+    stats = sync_template_supply(
+        boundary=boundary, repository=repository, prober=_prober_ok)
+
+    document = repository.get(boundary).document
+    connections = {row['connection_id']: row for row in document['connections']}
+    sol_offering = next(row for row in _offerings(document, access_id)
+                        if (row.get('model') or {}).get('model_id')
+                        == 'gpt-6.1-sol')
+    deps = [row for row in document['deployments']
+            if row['offering_id'] == sol_offering['offering_id']]
+    wires = {row['wire_model_id'] for row in deps}
+    assert 'kunlunbedrock.gpt-6.1-sol-m17' in wires, wires
+    alias_dep = next(row for row in deps
+                     if row['wire_model_id'] == 'kunlunbedrock.gpt-6.1-sol-m17')
+    alias_conn = connections[alias_dep['connection_id']]
+    # The alias rides the kunlun face Connection, not the public default.
+    assert alias_conn.get('gateway_namespace') == 'kunlun', alias_conn
+    assert alias_conn.get('extra_headers') == {'x-context-provider': 'kunlun'}
+    assert alias_conn.get('protocol') == 'openai_responses'
+    # The existing public-wire deployment is untouched.
+    public_dep = next(row for row in deps
+                      if row['wire_model_id'] == 'gpt-6.1-sol')
+    assert connections[public_dep['connection_id']].get(
+        'gateway_namespace') in (None, 'default')
+    assert stats['added_deployments'] >= 1
+
+    # Idempotent: a second pass adds nothing and never duplicates the wire.
+    again = sync_template_supply(
+        boundary=boundary, repository=repository, prober=_prober_ok)
+    document = repository.get(boundary).document
+    deps = [row for row in document['deployments']
+            if row['offering_id'] == sol_offering['offering_id']]
+    assert [row['wire_model_id'] for row in deps].count(
+        'kunlunbedrock.gpt-6.1-sol-m17') == 1
+    assert again['added_deployments'] == 0
+
+
+def _install_deepseek_pair(repository, boundary):
+    """Scaffold plus the pre-rename DeepSeek supply: V4.1 live, V4 leftover.
+
+    Mirrors the aggregate a rename leaves behind — the template now authors
+    the gateway mirrors under ``deepseek-v4.1-flash`` while the earlier
+    ``deepseek-v4-flash`` offering still deploys them.
+    """
+    bundle = _seed_mini_card(repository, boundary)
+    access_id = bundle['provider_access']['provider_access_id']
+    connection_id = bundle['connections'][0]['connection_id']
+    document = repository.get(boundary).document
+    for model_id in ('deepseek-v4.1-flash', 'deepseek-v4-flash'):
+        document['models'].append({
+            'creator_id': 'deepseek',
+            'model_id': model_id,
+            'display_name': model_id,
+            'capabilities': ['text', 'vision', 'thinking'],
+            'context_window': 1000000,
+            'quality_rank': 1.0,
+        })
+    document['creators'].append({'creator_id': 'deepseek', 'name': 'DeepSeek'})
+    for index, (model_id, wires) in enumerate((
+            ('deepseek-v4.1-flash', ('deepseek-v4.1-flash',
+                                     'deepseek-v4.1-flash-huawei')),
+            ('deepseek-v4-flash', ('deepseek-v4-flash-huawei',
+                                   'deepseek-v4-flash-tencent')))):
+        offering_id = f'off_rename_{index}'
+        document['offerings'].append({
+            'offering_id': offering_id,
+            'provider_access_id': access_id,
+            'model': {'creator_id': 'deepseek', 'model_id': model_id},
+            'identity_state': 'confirmed',
+            'capabilities': ['text', 'vision', 'thinking'],
+            'context_window': 1000000,
+            'enabled': True,
+            'stale': False,
+        })
+        for wire in wires:
+            document['deployments'].append({
+                'deployment_id': f'dep_rename_{index}_{wire}',
+                'offering_id': offering_id,
+                'connection_id': connection_id,
+                'wire_model_id': wire,
+                'probe_status': 'passed',
+                'identity_confidence': 'high',
+            })
+    repository.compare_and_swap(
+        boundary, document, expected_revision=repository.get(boundary).revision)
+    return access_id
+
+
+def _offering(document, offering_id):
+    return next(row for row in document['offerings']
+                if row['offering_id'] == offering_id)
+
+
+def test_recipe_rename_supersedes_the_previous_offering_only():
+    """The same gateway wires re-authored under a new logical id must retire
+    the previous offering — otherwise one supply is offered (and dispatched)
+    twice under two Model identities."""
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    access_id = _install_deepseek_pair(repository, boundary)
+
+    stats = sync_template_supply(
+        boundary=boundary, repository=repository, prober=_prober_ok)
+
+    document = repository.get(boundary).document
+    assert _offering(document, 'off_rename_1')['stale'] is True
+    assert _offering(document, 'off_rename_0')['stale'] is False
+    assert stats['superseded_offerings'] == 1
+    # Superseding never deletes the retired row or its wire evidence.
+    assert [row for row in document['deployments']
+            if row['offering_id'] == 'off_rename_1']
+    # The Model itself stays in the world registry; only YourProvider's supply of
+    # it is retired.
+    assert any(row['model_id'] == 'deepseek-v4-flash'
+               for row in document['models'])
+    # Idempotent: a second pass retires nothing new.
+    again = sync_template_supply(
+        boundary=boundary, repository=repository, prober=_prober_ok)
+    assert again['superseded_offerings'] == 0
+    assert _offering(repository.get(boundary).document,
+                     'off_rename_1')['stale'] is True
+    assert _offering(repository.get(boundary).document,
+                     'off_rename_0')['stale'] is False
+
+
+def test_partial_wire_overlap_is_not_superseded():
+    """Only a FULL wire-pool takeover retires an offering; shared capacity
+    under two identities may be genuine and stays dispatchable."""
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    _install_deepseek_pair(repository, boundary)
+    document = repository.get(boundary).document
+    # Give the legacy offering one wire the renamed recipe does not author.
+    legacy = [row for row in document['deployments']
+              if row['offering_id'] == 'off_rename_1']
+    legacy[0]['wire_model_id'] = 'deepseek-v4-flash-legacy-only'
+    repository.compare_and_swap(
+        boundary, document, expected_revision=repository.get(boundary).revision)
+
+    sync_template_supply(
+        boundary=boundary, repository=repository, prober=_prober_ok)
+
+    assert _offering(repository.get(boundary).document,
+                     'off_rename_1')['stale'] is False
+
+
 def test_owner_disabled_offering_is_never_resurrected():
     repository = InMemoryModelRoutingRepository()
     boundary = _boundary()
@@ -349,7 +549,9 @@ def test_recipe_respelling_a_registered_model_converges():
     stats = sync_template_supply(
         boundary=boundary, repository=repository, prober=_prober_ok)
 
-    assert stats['added_offerings'] == 119
+    recipes = [row for row in _template()['offering_recipes']
+               if row['model_id'] != _SEED_MODEL]
+    assert stats['added_offerings'] == len(recipes) - 2
     document = repository.get(boundary).document
     o3 = [row for row in _offerings(document, access_id)
           if (row.get('model') or {}).get('creator_id') == 'openai'
