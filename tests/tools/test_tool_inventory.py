@@ -87,24 +87,27 @@ def test_full_provides_surface_listed_even_when_gated_off():
 
 @pytest.mark.parametrize('language', ['en', 'zh'])
 def test_builtin_inventory_rows_have_localized_descriptions(language):
-    """Dynamic inventory keys need a registry-to-locale parity guard."""
+    """Cover declared built-ins even before a data-backed family is active."""
+    from lib.tools.registry import all_specs
+
     locale_path = (Path(__file__).resolve().parents[2] / 'frontend' / 'src'
                    / 'i18n' / 'locales' / f'{language}.json')
     translations = json.loads(locale_path.read_text(encoding='utf-8'))
-    missing = []
+    required = set()
+    for spec in all_specs():
+        if spec.source == 'builtin':
+            required.add(f'toolsInv.family.{spec.key}')
+            required.update(f'toolsInv.tool.{name}' for name in spec.provides)
     for group in _inventory()['groups']:
         for family in group['families']:
             if family.get('source') != 'builtin':
                 continue
-            family_key = f'toolsInv.family.{family["key"]}'
-            if family_key not in translations:
-                missing.append(family_key)
-            for tool in family['tools']:
-                tool_key = f'toolsInv.tool.{tool["name"]}'
-                if tool_key not in translations:
-                    missing.append(tool_key)
+            required.add(f'toolsInv.family.{family["key"]}')
+            required.update(f'toolsInv.tool.{tool["name"]}'
+                            for tool in family['tools'])
+    missing = sorted(key for key in required if not translations.get(key, '').strip())
     assert not missing, (
-        f'{language} tool-inventory translations missing: {sorted(missing)}')
+        f'{language} tool-inventory translations missing: {missing}')
 
 
 # ── Two-phase evaluation semantics (the naive-evaluation regression) ────
