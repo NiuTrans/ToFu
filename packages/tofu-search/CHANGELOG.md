@@ -11,6 +11,10 @@
 
 ## Unreleased
 
+- Treat outstanding HTTP 202 responses, explicit Cloudflare challenge headers
+  and small DDG challenge forms as unavailable engine coverage, not empty search
+  success. Preserve bounded retries, configured alternate paths and real empty
+  results; blocked paths no longer reset failure learning.
 - Rank using query-focused evidence from the complete fetched body instead of
   an 8k prefix; sort small candidate pools and ignore query constraints and
   link inventories as positive evidence.

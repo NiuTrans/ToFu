@@ -43,6 +43,29 @@ sort every remaining candidate when none fits the remaining budget.
 
 ## Verification and measurement
 
+### Engine availability is separate from relevance
+
+**Problem:** successful HTTP status alone does not prove that an engine
+completed a search. A small challenge page can be shorter than a size heuristic,
+and repeated HTTP 202 responses can otherwise look like successful empty results.
+**Decision:** the shared HTTP envelope treats outstanding 202 responses, the
+documented Cloudflare challenge header, and DDG's challenge form as unavailable
+coverage. Existing bounded retries and already-configured alternate network
+paths still apply. Exhaustion remains an engine error; no new engine, browser
+authority or credential is selected. Real empty responses and search results
+discussing CAPTCHA remain valid.
+**Alternatives rejected:** relying on response size misses small interstitials;
+matching CAPTCHA-related prose rejects legitimate topics; accepting an empty
+challenge resets failure learning and prevents recovery.
+
+The structural indicators follow
+[Cloudflare's response contract](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/)
+and the [SearXNG DDG adapter](https://github.com/searxng/searxng/blob/master/searx/engines/duckduckgo.py).
+`tests/test_engine_block_pages.py` covers exhaustion, genuine recovery, ordinary
+no-match pages, topic false positives and configured path failover.
+
+### Offline measurements
+
 The package's offline specifications cover late answers, small candidate pools,
 constraints, link inventories, multilingual text, complementary facts, page
 identity, original-text fidelity and hard output budgets:
