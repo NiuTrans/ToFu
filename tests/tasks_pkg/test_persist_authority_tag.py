@@ -1,26 +1,9 @@
-"""The primary-source ``Authority:`` tag must survive the oversized-web_search
-disk offload.
+"""Source-hint uncertainty survives oversized web-search result persistence.
 
-Root cause (see JOURNAL 2026-07-07): ``format_search_for_tool_response`` (in
-tofu-search) emits a per-result ``Authority: …`` line so the model can tell a
-vendor's OWN page from an SEO aggregator. But when a batch ``web_search`` result
-exceeds budget, ``_persist_web_search_split`` rebuilds a COMPACT index (title /
-URL / Status / File) — and it originally parsed only ``URL:``, silently DROPPING
-the ``Authority:`` line. So on exactly the big multi-source searches where the
-signal matters most (e.g. the B2 CDN pricing item, 43 results / 480 KB), the
-model never saw which source was primary and synthesized wrong numbers from an
-aggregator.
-
-The fix parses ``Authority:`` like ``URL:`` and carries it into the index block.
-
-Test plan (project double-neuter convention):
-  1. Oversized web_search content whose result blocks carry ``Authority:`` →
-     the returned index PRESERVES the Authority line for each such result.
-  2. Content with NO Authority lines is unaffected (no spurious lines added).
-  3. NEUTER: strip the Authority-carry lines from the on-disk source → the index
-     LOSES the tag (proving it is load-bearing); restore byte-identical.
-
-Run:  pytest tests/tasks_pkg/test_persist_authority_tag.py -v
+The compact index retains each result's complete Authority field, including
+the qualifier that URL-derived hints are unverified. It neither invents tags
+for neutral results nor upgrades a spelling/host heuristic to verified source
+identity. An in-memory fault injection verifies the carry without source edits.
 """
 from __future__ import annotations
 
@@ -59,13 +42,18 @@ def _result_with_authority(n: int, title: str, url: str, authority: str,
 
 
 def _make_content(with_authority: bool) -> str:
+    from tofu_search.search.authority import authority_label
+
+    query = 'AWS CloudFront pricing'
     blocks = [
         _result_with_authority(
             1, 'AWS CloudFront Pricing', 'https://aws.amazon.com/cloudfront/pricing/',
-            'OFFICIAL SOURCE (vendor/authoritative domain named in query)' if with_authority else ''),
+            authority_label('https://aws.amazon.com/cloudfront/pricing/', query)
+            if with_authority else ''),
         _result_with_authority(
             2, 'CDN comparison', 'https://latencycost.com/cdn-comparison',
-            'third-party aggregator — verify against a primary source' if with_authority else ''),
+            authority_label('https://latencycost.com/cdn-comparison', query)
+            if with_authority else ''),
         _result_with_authority(
             3, 'Some blog', 'https://randomblog.example/cdn', ''),
     ]
@@ -90,16 +78,16 @@ class TestAuthorityTagSurvivesSplit:
         assert content.count(_SEP) >= 1
         index, files = _run_split(content)
         assert index is not None, 'should have split into per-result files'
-        # Both non-neutral tags survive into the LLM-facing index.
-        assert 'Authority: OFFICIAL SOURCE' in index
-        assert 'third-party aggregator' in index
-        # The official tag is attached to the AWS result, not the aggregator.
+        assert 'Authority: Unverified — query/host token match' in index
+        assert 'Unverified — aggregator-like domain name' in index
+        assert 'OFFICIAL SOURCE' not in index and 'PRIMARY SOURCE' not in index
+        # The query match is attached to the AWS result, not the aggregator hint.
         aws_line = next(ln for ln in index.splitlines()
                         if 'aws.amazon.com/cloudfront/pricing' in ln)
         # index blocks are multi-line; assert co-location by section slicing
         aws_idx = index.index('aws.amazon.com/cloudfront/pricing')
         agg_idx = index.index('latencycost.com')
-        assert 'OFFICIAL SOURCE' in index[aws_idx:agg_idx]
+        assert 'Unverified — query/host token match' in index[aws_idx:agg_idx]
         assert aws_line  # sanity
 
     def test_no_authority_lines_when_absent(self):

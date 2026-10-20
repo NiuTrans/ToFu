@@ -1,44 +1,21 @@
-"""tofu_search/search/authority.py — primary-source domain authority.
+"""URL-derived source hints shared by ranking and model-facing formatting.
 
-Motivation
-----------
-Reranking on BM25 relevance alone lets an SEO aggregator/blogspam page
-(e.g. ``latencycost.com`` reciting third-hand pricing) outrank the primary
-source (the vendor's own ``aws.amazon.com`` pricing page), so the model
-synthesizes wrong numbers from a weaker source. We add a light,
-domain-authority signal that PREFERS primary sources when relevance is
-otherwise comparable.
+Entry points: classify_authority, authority_label, and host_brand_labels.
+Only standard-library URL parsing is used; no network or ownership lookup.
 
-Design (deliberately general, NOT a per-eval allowlist)
--------------------------------------------------------
-Authority is derived from the URL host with three signals, in priority order:
+Query/host token matches, known reference hosts, documentation-shaped hosts,
+and aggregator-like domain names are heuristics. None establishes who owns a
+page, whether it is a primary source for this query, or whether its claims are
+true. Shared publishing hosts can carry arbitrary third-party material.
 
-  OFFICIAL (highest)  — the host's registrable brand token matches a
-      brand token IN THE QUERY. This is the key generalizable rule: a query
-      that names "aws", "cloudflare", "react", "postgresql", … lifts THAT
-      vendor's own domain (``aws.amazon.com``, ``cloudflare.com``,
-      ``react.dev``, ``postgresql.org``) above third parties writing about it.
-      No hardcoded vendor list — it keys off whatever the query mentions.
-
-  PRIMARY   — structurally primary/authoritative hosts independent of the
-      query: standards bodies & official docs/registries (``*.gov``,
-      ``*.edu``, docs/developer subdomains, ``python.org``, ``pypi.org``,
-      ``arxiv.org``, ``github.com``, ``nvd.nist.gov``, MDN, …). These are
-      trustworthy primary references regardless of topic.
-
-  AGGREGATOR (lowest) — hosts that look like SEO/price-aggregator/listicle
-      farms (``*cost*``, ``*compare*``, ``*deals*``, ``*pricing*`` in the
-      SLD, etc.). Demoted, never dropped — the model still sees them.
-
-  NEUTRAL   — everything else (score 0).
-
-The classifier returns a small additive BM25 boost so it only breaks ties /
-nudges ordering; it never overwhelms a strong lexical match.
+AUTHORITY_BOOST contains adjustment ceilings, not independent relevance
+evidence. The reranker bounds their contribution by actual lexical evidence.
 """
 
 from __future__ import annotations
 
 import re
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 __all__ = [
@@ -49,27 +26,27 @@ __all__ = [
     "host_brand_labels",
 ]
 
-# Additive BM25 boosts per tier. BM25 term scores on these docs are typically
-# ~1–8; these are intentionally modest so authority nudges ordering / breaks
-# near-ties rather than steamrolling a much more relevant page.
+# Preserve useful source preferences among comparable results. The reranker
+# caps positive contributions at the lexical score and negative contributions
+# at half of it: URL hints cannot create relevance or erase all its evidence.
 AUTHORITY_BOOST = {
-    "official": 2.5,
-    "primary": 1.2,
+    "query_match": 2.5,
+    "reference_host": 1.2,
     "neutral": 0.0,
-    "aggregator": -1.5,
+    "aggregator_hint": -1.5,
 }
 
-# Human-readable tag surfaced to the model in format.py.
+# Keep uncertainty in each label so it survives persisted/compacted results.
 _LABEL = {
-    "official": "OFFICIAL SOURCE (vendor/authoritative domain named in query)",
-    "primary": "PRIMARY SOURCE (official docs / standards / registry)",
+    "query_match": "Unverified — query/host token match",
+    "reference_host": "Unverified — reference/documentation host heuristic",
     "neutral": "",
-    "aggregator": "third-party aggregator — verify against a primary source",
+    "aggregator_hint": "Unverified — aggregator-like domain name",
 }
 
-# Structurally-primary hosts, independent of the query topic. Matched as
-# suffix (``endswith``) against the registrable host so subdomains count.
-_PRIMARY_HOST_SUFFIXES = (
+# Reference/publishing host hints, matched at DNS label boundaries. Inclusion
+# is not an endorsement of pages, packages, repositories, or authors they host.
+_REFERENCE_HOST_SUFFIXES = (
     ".gov", ".edu", ".mil", ".int",
     "python.org", "pypi.org", "readthedocs.io", "readthedocs.org",
     "arxiv.org", "github.com", "github.io", "gitlab.com",
@@ -80,8 +57,8 @@ _PRIMARY_HOST_SUFFIXES = (
     "kubernetes.io", "docker.com", "npmjs.com",
 )
 
-# Doc/developer subdomains are primary regardless of the parent brand.
-_PRIMARY_SUBDOMAIN_PREFIXES = ("docs.", "developer.", "dev.", "api.", "learn.")
+# Documentation-shaped subdomains are only a structural hint.
+_DOCUMENTATION_SUBDOMAIN_PREFIXES = ("docs.", "developer.", "dev.", "api.", "learn.")
 
 # SEO / price-aggregator / listicle tells in the second-level domain.
 _AGGREGATOR_SLD_RE = re.compile(
@@ -100,9 +77,24 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _host(url: str) -> str:
+    """Normalize an HTTP URL's DNS hostname; reject malformed and IP hosts."""
     try:
-        return (urlparse(url).netloc or "").lower().split("@")[-1].split(":")[0]
-    except Exception:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return ""
+        _ = parsed.port  # Validate a supplied port rather than ignoring malformed URLs.
+        host = (parsed.hostname or "").removesuffix(".").encode("idna").decode("ascii").lower()
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in host.split(".")
+        ):
+            return ""
+        try:
+            ip_address(host)
+        except ValueError:
+            return host
+        return ""
+    except (ValueError, UnicodeError):
         return ""
 
 
@@ -128,13 +120,11 @@ def brand_tokens(text: str) -> set[str]:
 
 
 def host_brand_labels(url: str) -> set[str]:
-    """Non-generic host labels usable as a brand identity for ``url``.
+    """Non-generic URL tokens for heuristic query matching and diversification.
 
-    ``aws.amazon.com`` → ``{amazon}`` (``aws``<3? no, len 3 → kept; ``com``
-    generic → dropped); ``www.cloudflare.com`` → ``{cloudflare}``. Registrar/
-    CDN/generic labels (``com``/``amazonaws``/``github``/…) are excluded so a
-    hosting domain is not mistaken for the entity it hosts. Shared by
-    ``classify_authority`` (OFFICIAL detection) and rerank entity attribution.
+    ``aws.amazon.com`` yields ``{aws, amazon}``; ``www.cloudflare.com`` yields
+    ``{cloudflare}``. These are spelling matches, not verified brand identities.
+    Subdomain names can be chosen by unrelated publishers or hosting tenants.
     """
     host = _host(url)
     if not host:
@@ -143,31 +133,28 @@ def host_brand_labels(url: str) -> set[str]:
 
 
 def classify_authority(url: str, query: str = "") -> str:
-    """Return one of 'official' | 'primary' | 'aggregator' | 'neutral'."""
+    """Classify a URL hint without certifying page authority or ownership."""
     host = _host(url)
     if not host:
         return "neutral"
 
     sld = _registrable_sld(host)
 
-    # OFFICIAL: a NON-GENERIC host label is named in the query. This lifts the
-    # vendor's OWN domain when the query mentions the vendor — e.g. query
-    # "…AWS CloudFront…" → host labels {cloudfront, amazonaws} or {aws, amazon}
-    # intersect query tokens. Generic labels (com/amazonaws/github/…) are
-    # excluded so a hosting/CDN/registrar domain isn't mistaken for the brand.
+    # Matching a query word in a hostname is useful but does not authenticate
+    # a vendor. Generic hosting labels remain excluded from this weak signal.
     q_tokens = brand_tokens(query)
     if host_brand_labels(url) & q_tokens:
-        return "official"
+        return "query_match"
 
-    # PRIMARY: structurally-authoritative host, query-independent.
-    if any(host == s.lstrip(".") or host.endswith(s) for s in _PRIMARY_HOST_SUFFIXES):
-        return "primary"
-    if any(host.startswith(p) for p in _PRIMARY_SUBDOMAIN_PREFIXES):
-        return "primary"
+    if any(host == s.lstrip(".") or host.endswith("." + s.lstrip("."))
+           for s in _REFERENCE_HOST_SUFFIXES):
+        return "reference_host"
+    if any(host.startswith(p) for p in _DOCUMENTATION_SUBDOMAIN_PREFIXES):
+        return "reference_host"
 
-    # AGGREGATOR: SEO/price-farm tells in the SLD.
+    # Domain wording alone cannot establish that a site is an aggregator.
     if _AGGREGATOR_SLD_RE.search(sld):
-        return "aggregator"
+        return "aggregator_hint"
 
     return "neutral"
 

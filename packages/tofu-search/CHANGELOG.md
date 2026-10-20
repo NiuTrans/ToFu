@@ -11,6 +11,9 @@
 
 ## Unreleased
 
+- Treat URL-derived source authority as explicitly unverified hints, match
+  reference hosts at DNS label boundaries, and require query evidence before
+  applying source/consensus/fetch bonuses or entity coverage.
 - Preserve request-bound configuration and provider context in concurrent
   proxy attempts using the existing context-copying submission owner.
 - Recover failed DDG HTML searches through its free Lite endpoint within the
