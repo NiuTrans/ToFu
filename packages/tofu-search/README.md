@@ -56,10 +56,13 @@ stays dependency-free when used standalone.
   text passes through unchanged.
 - **BM25 + authority/coverage reranking**: pure Python, no external API calls;
   includes search-engine consensus, primary-source preference, entity coverage,
-  and a two-result-per-domain diversity pass.
+  and a two-result-per-domain diversity pass. Query-focused body passages bring
+  late-document evidence into ranking; Unicode matching is shared with excerpts.
 - **Token-bounded MCP context**: full pages are used for ranking, while
   `web_search` returns query-focused excerpts under one shared 18k-character
-  budget by default.
+  budget by default. Complementary passages compete with repeated text while
+  preserving original wording and marking gaps. See
+  [quality contracts and reproducible measurements](docs/relevance-quality.md).
 - **SPA / bot-protection support**: optional Playwright fallback for
   JS-rendered and challenge pages.
 - **PDF extraction**: optional pymupdf / pymupdf4llm integration.

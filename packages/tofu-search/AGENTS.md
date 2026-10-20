@@ -23,6 +23,11 @@ the only host integration boundary.
 
 ## Verification
 
+`tofu_search/lexical.py` owns subject parsing/tokenization shared by fetch
+admission, ranking and excerpts; `passages.py` preserves original source spans.
+Quality contracts and the offline measurement command live in
+`docs/relevance-quality.md`; regression fixtures do not prove live superiority.
+
 Run `uv run --package tofu-search pytest packages/tofu-search/tests`, then the
 root search bridge/runtime and monorepo contract tests for integration changes.
 

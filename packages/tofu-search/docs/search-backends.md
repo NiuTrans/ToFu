@@ -37,3 +37,21 @@ Public SearXNG instances remain best-effort fallback only. Its official API
 documentation warns that many public instances disable JSON output; tofu-search
 therefore supports HTML fallback, but a self-host is the reproducible ChatUI
 configuration.
+
+## Agent search patterns reviewed on 2026-10-20
+
+These are capability comparisons from upstream documentation, not measured
+claims that one provider outperforms another.
+
+| Source | Useful capability | Current tofu-search boundary |
+|---|---|---|
+| [Exa Search](https://exa.ai/docs/reference/search) | Query-specific highlights alongside source identity | Deterministic source passages feed both ranking and model context; no Exa adapter is implied. |
+| [Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search) | Multiple relevant chunks per source and explicit search-depth choices | Complementary passages share the existing output budget; optional service/depth selection still needs its own provider contract. |
+| [Firecrawl Search](https://docs.firecrawl.dev/features/search) | Search with optional extraction of result pages | The existing overlapping search/fetch pipeline owns this lifecycle; importing a second crawler would duplicate ownership. |
+| [Crawl4AI Fit Markdown](https://docs.crawl4ai.com/core/fit-markdown/) | Query-aware content filtering separately from raw content | Source bodies remain intact while query-focused spans enter the ranker and tool preview. |
+| [WebCode](https://exa.ai/blog/webcode) and [ATLAS](https://exa.ai/blog/atlas-benchmark) | Evaluate coding search and search-intensive multi-hop/entity tasks beyond a single SERP | Relevant external benchmark candidates; tofu-search has not been evaluated on them here. Provider-authored results are not neutral proof of superiority. |
+
+The adopted local mechanisms and reproducible regression measurements are
+specified in [Search evidence quality](relevance-quality.md). A future live
+provider comparison must fix the agent/model, task set and budget, retain source
+provenance, and report failures and coverage gaps alongside successes.

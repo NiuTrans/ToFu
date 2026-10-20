@@ -1,78 +1,77 @@
-"""Cheap query-focused passage selection for LLM/tool context budgets.
+"""Source-preserving, query-focused passages for ranking and tool context.
 
-The search pipeline deliberately fetches more text than a chat model should be
-given: broad extraction improves ranking and recall, while copying six entire
-pages into an MCP result wastes context on navigation and unrelated sections.
-This module bridges those needs without an embedding or LLM call.
+Scan the complete extracted body; pack complementary lexical evidence into the
+requested output budget. No model calls, network, caches or host dependencies.
 """
 
 from __future__ import annotations
 
+import heapq
 import re
+from collections import Counter
+
+from tofu_search.lexical import query_subject, tokenize
 
 __all__ = ['select_relevant_passages']
 
-_CJK_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]')
-_LATIN_RE = re.compile(r'[a-z0-9]+')
 _LINKS_HEADER = '--- Page Links ---'
-_STOP_WORDS = frozenset({
-    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has',
-    'have', 'how', 'in', 'is', 'it', 'of', 'on', 'or', 'that', 'the', 'this',
-    'to', 'was', 'what', 'when', 'where', 'which', 'who', 'why', 'with', 'you',
-})
-
-
-def _tokens(text: str) -> list[str]:
-    """Small CJK-aware tokenizer kept independent of the search package."""
-    lowered = (text or '').lower()
-    out = [t for t in _LATIN_RE.findall(_CJK_RE.sub(' ', lowered))
-           if len(t) > 1 and t not in _STOP_WORDS]
-    cjk = ''.join(_CJK_RE.findall(lowered))
-    out.extend(cjk[i:i + 2] for i in range(max(0, len(cjk) - 1)))
-    if len(cjk) <= 2:
-        out.extend(cjk)
-    return out
+_GAP = '\n\n[... omitted ...]\n\n'
 
 
 def _without_link_inventory(text: str) -> str:
-    """Drop the extractor's navigation inventory from model-facing passages."""
-    idx = text.find(_LINKS_HEADER)
-    return text[:idx].rstrip() if idx >= 0 else text.strip()
+    return text.split(_LINKS_HEADER, 1)[0].strip()
 
 
-def _chunks(text: str, chunk_chars: int) -> list[str]:
-    """Split on paragraphs, then window unusually large paragraphs."""
-    paragraphs = [p.strip() for p in re.split(r'\n\s*\n+', text) if p.strip()]
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-
-    def flush() -> None:
-        nonlocal current, current_len
-        if current:
-            chunks.append('\n\n'.join(current))
-            current = []
-            current_len = 0
-
-    for para in paragraphs:
-        if len(para) > chunk_chars:
-            flush()
-            overlap = min(120, chunk_chars // 8)
-            step = max(1, chunk_chars - overlap)
-            for start in range(0, len(para), step):
-                piece = para[start:start + chunk_chars].strip()
-                if piece:
-                    chunks.append(piece)
-                if start + chunk_chars >= len(para):
-                    break
+def _chunk_spans(text: str, chunk_chars: int) -> list[tuple[int, int]]:
+    """Paragraph windows with overlap for long paragraphs; offsets stay exact."""
+    paragraphs = []
+    start = 0
+    for gap in re.finditer(r'\n\s*\n+', text):
+        paragraphs.append((start, gap.start()))
+        start = gap.end()
+    paragraphs.append((start, len(text)))
+    chunks: list[tuple[int, int]] = []
+    current = None
+    for start, end in paragraphs:
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start == end:
             continue
-        added = len(para) + (2 if current else 0)
-        if current and current_len + added > chunk_chars:
-            flush()
-        current.append(para)
-        current_len += added
-    flush()
+        if end - start > chunk_chars:
+            if current is not None:
+                chunks.append(current)
+                current = None
+            step = chunk_chars - min(120, chunk_chars // 8)
+            for offset in range(start, end, step):
+                chunks.append((offset, min(end, offset + chunk_chars)))
+                if offset + chunk_chars >= end:
+                    break
+        elif current is not None and end - current[0] <= chunk_chars:
+            current = (current[0], end)
+        else:
+            if current is not None:
+                chunks.append(current)
+            current = (start, end)
+    if current is not None:
+        chunks.append(current)
     return chunks
+
+
+def _merge_spans(spans: list[tuple[int, int]], text: str) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and (start <= merged[-1][1] or (
+                start - merged[-1][1] <= 4 and not text[merged[-1][1]:start].strip())):
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _render(spans: list[tuple[int, int]], text: str) -> str:
+    return _GAP.join(text[start:end] for start, end in _merge_spans(spans, text))
 
 
 def select_relevant_passages(
@@ -83,71 +82,97 @@ def select_relevant_passages(
     chunk_chars: int = 1_200,
     include_lead: bool = False,
 ) -> str:
-    """Return the most query-relevant excerpts within a hard character budget.
+    """Pack diverse query evidence into a hard character budget, in source order.
 
-    Selection is lexical and deterministic. The first chunk is retained for an
-    LLM relevance gate when ``include_lead`` is true, because it exposes 404 /
-    login / challenge-page identity. For model-facing search results it is false
-    so every character competes on relevance. If no chunk overlaps the query,
-    the function fails open to the document lead rather than returning nothing.
+    Chunks compete on coverage, density and phrase matches. Newly covered terms
+    win space over repeated aspects; exact duplicate chunks consume no extra
+    budget. Chosen spans retain original text and explicit gap markers.
+    ``include_lead`` reserves at most one third for page identity (login/error
+    detection), leaving room for relevant evidence. With no lexical evidence,
+    return the lead: a lexical miss is not proof of irrelevance.
     """
     if not text or max_chars <= 0:
         return ''
     body = _without_link_inventory(text)
     if len(body) <= max_chars:
         return body
-
-    # Keep scoring windows bounded even for a one-character budget; when no
-    # window fits, truncate the strongest window, not the document lead.
-    chunk_chars = max(80, min(chunk_chars, max_chars))
-    chunks = _chunks(body, chunk_chars)
-    if not chunks:
+    query_tokens = tokenize(query_subject(query))
+    query_terms = set(query_tokens)
+    if not query_terms:
         return body[:max_chars].rstrip()
 
-    query_tokens = _tokens(query)
-    query_terms = set(query_tokens)
-    normalized_query = ' '.join(query_tokens)
-    scored: list[tuple[float, int]] = []
-    for idx, chunk in enumerate(chunks):
-        toks = _tokens(chunk)
-        tok_set = set(toks)
-        hits = query_terms & tok_set
-        occurrences = sum(toks.count(term) for term in hits)
-        coverage = len(hits) / max(1, len(query_terms))
-        density = occurrences / max(1, len(toks))
-        phrase = 1.0 if normalized_query and normalized_query in ' '.join(toks) else 0.0
-        heading_hits = len(query_terms & set(_tokens(chunk.split('\n', 1)[0])))
-        score = coverage * 8.0 + density * 12.0 + phrase * 2.0 + heading_hits * 0.25
-        scored.append((score, idx))
-
-    chosen: set[int] = set()
-    if include_lead:
-        chosen.add(0)
-    positive = [(score, idx) for score, idx in scored if score > 0]
-    if not positive:
-        chosen.add(0)
-
-    used = sum(len(chunks[i]) for i in chosen)
-    for _score, idx in sorted(positive, key=lambda item: (-item[0], item[1])):
-        separator_cost = len('\n\n[... omitted ...]\n\n') if chosen else 0
-        if idx in chosen:
+    # Leave space for a second aspect even when the output budget is smaller
+    # than the normal scoring window.
+    chunk_chars = max(80, min(chunk_chars, max_chars // 2))
+    spans = _chunk_spans(body, chunk_chars)
+    phrase = ' '.join(query_tokens)
+    candidates = []
+    seen = set()
+    for idx, (start, end) in enumerate(spans):
+        chunk = body[start:end]
+        # Only exact text repeats are removed. Different numbers, qualifiers
+        # and conflicting observations must remain eligible.
+        identity = ' '.join(chunk.split())
+        if identity in seen:
             continue
-        if used + separator_cost + len(chunks[idx]) > max_chars:
+        seen.add(identity)
+        tokens = tokenize(chunk)
+        counts = Counter(tokens)
+        hits = query_terms & counts.keys()
+        if not hits:
             continue
-        chosen.add(idx)
-        used += separator_cost + len(chunks[idx])
+        coverage = len(hits) / len(query_terms)
+        density = sum(min(3, counts[term]) for term in hits) / max(1, len(tokens))
+        phrase_match = float(phrase in ' '.join(tokens))
+        heading_hits = len(query_terms & set(tokenize(chunk.split('\n', 1)[0])))
+        score = coverage * 8 + density * 12 + phrase_match * 2 + heading_hits * 0.25
+        candidates.append((score, idx, hits, set(counts)))
+    if not candidates:
+        return body[:max_chars].rstrip()
 
-    # A single chunk can be larger than a small remaining budget.
-    if not chosen:
-        best = max(scored, key=lambda item: (item[0], -item[1]))[1]
-        return chunks[best][:max_chars].rstrip()
+    chosen: list[tuple[int, int]] = []
+    covered: set[str] = set()
+    chosen_terms: list[set[str]] = []
+    if include_lead and max_chars >= 3:
+        lead_end = min(spans[0][1], max_chars // 3)
+        chosen.append((0, lead_end))
+        covered.update(query_terms & set(tokenize(body[:lead_end])))
 
-    ordered = sorted(chosen)
-    parts: list[str] = []
-    previous = None
-    for idx in ordered:
-        if previous is not None and idx != previous + 1:
-            parts.append('[... omitted ...]')
-        parts.append(chunks[idx])
-        previous = idx
-    return '\n\n'.join(parts)[:max_chars].rstrip()
+    def priority(score, hits, terms):
+        similarity = max((len(terms & previous) / max(1, len(terms | previous))
+                          for previous in chosen_terms), default=0.0)
+        return score * (1 - 0.65 * similarity) + 6 * len(hits - covered) / len(query_terms)
+
+    pending = [(-priority(score, hits, terms), idx, score, hits, terms)
+               for score, idx, hits, terms in candidates]
+    heapq.heapify(pending)
+    while pending:
+        _priority, idx, score, hits, terms = heapq.heappop(pending)
+        start, end = spans[idx]
+        trial = _render(chosen + [(start, end)], body)
+        accepted = False
+        if len(trial) <= max_chars:
+            chosen.append((start, end))
+            covered.update(hits)
+            chosen_terms.append(terms)
+            accepted = True
+        else:
+            # Give new evidence available space before a weaker shorter passage
+            # can take it. Contiguous slicing preserves source evidence.
+            remaining = max_chars - len(_render(chosen, body)) - (len(_GAP) if chosen else 0)
+            if remaining > 0 and (not covered or hits - covered):
+                end = min(end, start + remaining)
+                chosen.append((start, end))
+                selected_terms = set(tokenize(body[start:end]))
+                covered.update(query_terms & selected_terms)
+                chosen_terms.append(selected_terms)
+                accepted = True
+        if max_chars - len(_render(chosen, body)) <= len(_GAP):
+            break
+        if accepted:
+            # Recompute only when selected evidence changes. Popping unfit
+            # candidates remains O(log n), avoiding a quadratic full-page scan.
+            pending = [(-priority(s, h, t), i, s, h, t) for _, i, s, h, t in pending]
+            heapq.heapify(pending)
+
+    return _render(chosen, body)[:max_chars].rstrip()

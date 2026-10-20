@@ -29,44 +29,18 @@ Safety rails (so recall is not harmed):
     snippet-only result so rerank/format still see it. We only decline to pay
     for its page fetch.
 
-Reuses the BM25 tokenizer from ``rerank.py`` so the token model (CJK bigrams +
-Latin stop-word removal) is identical to what reranking uses — no second,
+Reuses ``lexical.py`` so the Unicode token model and subject parsing are
+identical to what ranking and passage selection use — no second,
 divergent notion of "query terms".
 """
 
-import re
-
+from tofu_search.lexical import query_subject
+from tofu_search.lexical import tokenize as _tokenize
 from tofu_search.log import get_logger
-from tofu_search.search.rerank import _tokenize
 
 logger = get_logger(__name__)
 
 __all__ = ['should_fetch_result', 'partition_fetchable']
-
-
-# Quoted literals are subjects even when they contain operator-like text.
-_QUERY_PART = re.compile(r'(?:[+-]?[A-Za-z]+:|[+-])?"[^"]*"|\S+')
-_STRUCTURED_OPERATOR = re.compile(
-    r'^[+-]?(?:site|filetype|ext|inurl|intitle|intext|allinurl|allintitle|'
-    r'allintext|before|after|daterange|related|cache|source|language|lang):', re.I)
-
-
-def query_subject(query: str) -> str:
-    """Remove constraints/Boolean syntax, not quoted subject literals.
-
-    Operator operands and negative terms constrain retrieval; they cannot prove
-    positive subject evidence. Unknown colon words remain ordinary subjects.
-    """
-    subjects = []
-    for match in _QUERY_PART.finditer(query or ''):
-        part = match.group()
-        if part.startswith('"'):
-            subjects.append(part[1:-1])
-        elif (part.strip('()') not in {'OR', 'AND', 'NOT'}
-              and not _STRUCTURED_OPERATOR.match(part.lstrip('('))
-              and not part.lstrip('(').startswith('-')):
-            subjects.append(part)
-    return ' '.join(subjects)
 
 
 def query_terms(query: str) -> set[str]:
