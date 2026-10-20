@@ -81,6 +81,10 @@ def test_build_keeps_external_inputs_inside_owned_target_tree(tmp_path, monkeypa
     existing.parent.mkdir()
     existing.write_text('existing crate input')
     monkeypatch.setattr(engines.shutil, 'which', lambda *args, **kwargs: '/toolchain/cargo')
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
+    monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda _: SimpleNamespace(
+        effective_cpu_count=2, effective_memory_available_mb=2048))
+    monkeypatch.setattr(engines.shutil, 'which', lambda *args, **kwargs: '/toolchain/cargo')
     monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda _: SimpleNamespace(
         effective_cpu_count=2, effective_memory_available_mb=2048))
     compiled = []
@@ -110,6 +114,9 @@ def test_build_refuses_redirected_snapshot_ancestors(tmp_path, monkeypatch, rela
     redirected = crate / 'target' / relative
     redirected.parent.mkdir(parents=True)
     redirected.symlink_to(foreign, target_is_directory=True)
+    monkeypatch.setattr(engines.shutil, 'which', lambda *args, **kwargs: '/toolchain/cargo')
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
+    monkeypatch.setattr(engines, '_run', lambda *args, **kwargs: pytest.fail('unsafe build started'))
     monkeypatch.setattr(engines.shutil, 'which', lambda *args, **kwargs: '/toolchain/cargo')
     monkeypatch.setattr(engines, '_run', lambda *args, **kwargs: pytest.fail('unsafe build started'))
 

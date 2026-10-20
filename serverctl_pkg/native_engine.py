@@ -83,8 +83,15 @@ for _, target in sorted(manifest.get("target", {}).items()):
         for key in ("dependencies", "build-dependencies", "dev-dependencies"):
             visit(target.get(key))
 package = manifest.get("package", {})
+cargo_env = {}
+for name, entry in (manifest.get("env") or {}).items():
+    if isinstance(entry, str):
+        cargo_env[name] = entry
+    elif isinstance(entry, dict) and isinstance(entry.get("value"), str):
+        cargo_env[name] = entry["value"]
 print(json.dumps({
     "package": package.get("name", ""),
+    "env": cargo_env,
     "has_workspace": "workspace" in manifest,
     "package_workspace": isinstance(package.get("workspace"), str),
     "package_publish": package.get("publish", True),
@@ -808,6 +815,67 @@ def _sync_build_snapshot(root: Path, crate: Path, snapshot: Path) -> None:
         stale_root.unlink()
 
 
+def _declared_cargo_compiler(crate: Path) -> str | None:
+    """The compiler this crate's own Cargo config pins, if any.
+
+    Cargo applies ``[env]`` only to variables absent from its environment, so a
+    synthesized ``CC`` silently outranks the package's declared pin. The build
+    snapshot mirrors this config, so the source crate is the same authority.
+    """
+    for name in ('config.toml', 'config'):
+        config = crate / '.cargo' / name
+        if config.is_file():
+            return _read_manifest(config).get('env', {}).get('CC') or None
+    return None
+
+
+# cc-rs passes -Wno-error=date-time for libmimalloc-sys, which gcc 4.8 cannot
+# parse. A compiler that only exists fails this deep inside the C build.
+_COMPILER_CAPABILITY_FLAG = '-Wdate-time'
+
+
+def _c_compiler_accepts_date_time(compiler: str) -> bool:
+    """Probe the flag libmimalloc-sys needs instead of trusting a path."""
+    with tempfile.TemporaryDirectory(prefix='tofu-cc-probe-') as temporary:
+        source = Path(temporary) / 'probe.c'
+        source.write_text('int main(void) { return 0; }\n')
+        try:
+            completed = subprocess.run(
+                [compiler, _COMPILER_CAPABILITY_FLAG, '-c', str(source),
+                 '-o', str(Path(temporary) / 'probe.o')],
+                capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return completed.returncode == 0
+
+
+def _resolve_c_compiler(search_path: str, declared: str | None) -> str:
+    """Choose the compiler cargo itself would use, then any that can compile.
+
+    The declared pin leads because it is the tree's own toolchain decision; the
+    capability probe keeps an older distribution compiler from shadowing it.
+    """
+    candidates = [declared] if declared else []
+    candidates.extend(found for found in (shutil.which(name, path=search_path)
+                                          for name in ('cc', 'gcc', 'clang')) if found)
+    unique = list(dict.fromkeys(candidates))
+    for compiler in unique:
+        if _c_compiler_accepts_date_time(compiler):
+            return compiler
+    if unique:
+        rejected = ', '.join(unique)
+        raise EnginePreparationError(
+            'Source storage build requires a C compiler that accepts '
+            f'{_COMPILER_CAPABILITY_FLAG} (cc-rs passes -Wno-error=date-time for '
+            f'libmimalloc-sys), but none of {rejected} does. Install gcc 4.9 or '
+            'newer, or provide a verified matching engine artifact. '
+            'The existing server remains running.')
+    raise EnginePreparationError(
+        'Source storage build requires a C compiler (cc, gcc or clang) '
+        'on the service PATH; no usable compiler was found. '
+        'Install a compiler or provide a verified matching engine artifact.')
+
+
 def _build(root: Path, staging: Path, environment: dict, *, build_root: Path | None = None) -> Path:
     # A GUI/service launch need not inherit an interactive shell's PATH.
     # Resolve only from this deployment environment, including custom rustup
@@ -840,15 +908,9 @@ def _build(root: Path, staging: Path, environment: dict, *, build_root: Path | N
             _report_progress(f'Ignoring unavailable compiler override {key}={value}')
             build_environment.pop(key, None)
     if sys.platform == 'linux' and not build_environment.get('CC'):
-        compiler = next((shutil.which(name, path=build_environment['PATH'])
-                         for name in ('cc', 'gcc', 'clang')
-                         if shutil.which(name, path=build_environment['PATH'])), None)
-        if compiler is None:
-            raise EnginePreparationError(
-                'Source storage build requires a C compiler (cc, gcc or clang) '
-                'on the service PATH; no usable compiler was found. '
-                'Install a compiler or provide a verified matching engine artifact.')
-        build_environment['CC'] = compiler
+        # A base image can ship gcc 4.8 beside the tree's declared newer pin.
+        build_environment['CC'] = _resolve_c_compiler(
+            build_environment['PATH'], _declared_cargo_compiler(root / 'packages/tofu-db'))
     crate = root / 'packages/tofu-db'
     # Mirror the repository layout entirely inside the owned build tree.
     # External root inputs resolve two levels above the crate; putting the

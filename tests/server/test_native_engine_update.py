@@ -252,6 +252,7 @@ def test_build_uses_owned_source_snapshot_and_launch_capacity(project, monkeypat
     from types import SimpleNamespace
     import runtime_guards
     monkeypatch.setattr(engines.shutil, 'which', lambda *_a, **_kw: '/toolchain/cargo')
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
     monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda _: SimpleNamespace(
         effective_cpu_count=12, effective_memory_available_mb=4096))
     stage = tmp_path / 'stage'; stage.mkdir()
@@ -354,6 +355,7 @@ def test_build_does_not_borrow_ambient_path(project, monkeypatch, tmp_path):
         return '/service/toolchain/cargo'
 
     monkeypatch.setattr(engines.shutil, 'which', lookup)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
     monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda _: SimpleNamespace(
         effective_cpu_count=1, effective_memory_available_mb=1024))
     children = []
@@ -547,11 +549,55 @@ def test_build_repairs_missing_compiler_only_in_child(project, tmp_path, monkeyp
     original = dict(environment)
     children = []
     monkeypatch.setattr(engines.shutil, 'which', lambda name, **kw: '/tools/' + name)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
     monkeypatch.setattr(engines, '_run', lambda *a, **kw: children.append(kw['environment']))
     engines._build(project, tmp_path, environment)
     assert environment == original
     assert children[0]['CC'] == '/tools/cc'
     assert 'CXX' not in children[0]
+
+
+def test_build_honors_the_crates_declared_compiler_pin(project, tmp_path, monkeypatch):
+    # Cargo applies [env] only where the variable is absent, so a synthesized
+    # CC would silently outrank the tree's own toolchain pin (an image can ship
+    # gcc 4.8 beside the pinned devtoolset).
+    pinned = '/opt/rh/devtoolset-9/root/usr/bin/gcc'
+    config = project / 'packages/tofu-db/.cargo/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[env]\nCC = "{pinned}"\nCXX = "/opt/rh/g++"\n')
+    children = []
+    monkeypatch.setattr(engines.shutil, 'which', lambda name, **kw: '/usr/bin/' + name)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
+    monkeypatch.setattr(engines, '_run', lambda *a, **kw: children.append(kw['environment']))
+    environment = {'PATH': os.defpath}
+    engines._build(project, tmp_path, environment)
+    assert children[0]['CC'] == pinned
+    assert 'CC' not in environment
+
+
+def test_declared_compiler_pin_is_skipped_when_it_cannot_compile(project, tmp_path, monkeypatch):
+    config = project / 'packages/tofu-db/.cargo/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text('[env]\nCC = "/opt/rh/devtoolset-9/root/usr/bin/gcc"\n')
+    children = []
+    monkeypatch.setattr(engines.shutil, 'which', lambda name, **kw: '/usr/bin/' + name)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time',
+                        lambda compiler: compiler == '/usr/bin/gcc')
+    monkeypatch.setattr(engines, '_run', lambda *a, **kw: children.append(kw['environment']))
+    engines._build(project, tmp_path, {'PATH': os.defpath})
+    assert children[0]['CC'] == '/usr/bin/gcc'
+
+
+def test_build_refuses_compilers_that_cannot_compile_libmimalloc(project, tmp_path, monkeypatch):
+    monkeypatch.setattr(engines.shutil, 'which', lambda name, **kw: '/usr/bin/' + name)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: False)
+    monkeypatch.setattr(engines, '_run', lambda *a, **kw: pytest.fail('must preflight the C compiler'))
+    with pytest.raises(engines.EnginePreparationError, match='-Wdate-time'):
+        engines._build(project, tmp_path, {'PATH': os.defpath})
+
+
+def test_compiler_capability_probe_reports_a_missing_binary(tmp_path):
+    assert engines._c_compiler_accepts_date_time(str(tmp_path / 'absent-cc')) is False
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux native allocator build')
@@ -571,6 +617,7 @@ def test_build_uses_remaining_outer_budget_and_refuses_exhausted_budget(project,
     import runtime_guards
 
     monkeypatch.setattr(engines.shutil, 'which', lambda *_a, **_kw: '/toolchain/cargo')
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
     monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda _: SimpleNamespace(
         effective_cpu_count=12, effective_memory_available_mb=4096))
     monkeypatch.setattr(engines.time, 'monotonic', lambda: elapsed)
@@ -609,6 +656,7 @@ def test_retry_reuses_host_cached_engine_before_network_or_compilation(project, 
 
 def test_build_preserves_explicit_profile_overrides(project, tmp_path, monkeypatch):
     monkeypatch.setattr(engines.shutil, 'which', lambda name, **kw: '/tools/' + name)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
     children = []
     monkeypatch.setattr(engines, '_run', lambda *a, **kw: children.append(kw['environment']))
     choices = {'CARGO_BUILD_JOBS': '2', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '8',
