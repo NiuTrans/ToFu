@@ -69,9 +69,9 @@ def _is_connection_failure(exc: Exception) -> bool:
 
 
 # Blocking HTTP statuses that justify retrying the other network path: a proxy
-# auth demand (407), an egress-IP block (403), rate-limit (429), or a 5xx that
-# is often an interstitial served by a blocking edge.
-_RETRYABLE_STATUSES = frozenset({403, 407, 429, 500, 502, 503, 504})
+# auth demand (407), an egress-IP block (403), an outstanding/challenged
+# response (202), rate-limit (429), or a blocking-edge 5xx.
+_RETRYABLE_STATUSES = frozenset({202, 403, 407, 429, 500, 502, 503, 504})
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -331,8 +331,8 @@ def http_search_get(
         Original user query — logged for diagnostics only.
     parser : callable
         ``parser(response) -> list[dict]``. Only invoked for a successful
-        (``resp.ok``) response. Parser owns all format-specific regex / HTML
-        handling.
+        response without an explicit challenge header or outstanding HTTP 202.
+        Parser owns result-specific regex / HTML handling.
     max_results : int
         Cap on number of results — enforced after parse, trimming overflow.
     timeout : int
@@ -346,9 +346,9 @@ def http_search_get(
     Returns
     -------
     list
-        Up to ``max_results`` parsed result dicts. Empty list ONLY for a
-        genuine no-match (a successful HTTP round-trip that parsed to zero
-        results) or a circuit-breaker skip.
+        Up to ``max_results`` parsed result dicts. An ordinary empty list means
+        a completed no-match search; circuit skips carry ``EngineUnavailable``
+        metadata rather than claiming an engine completed the request.
 
     Raises
     ------
@@ -403,10 +403,9 @@ def http_search_get(
         """One network-path attempt → a fine-grained outcome tuple.
 
         ('results', list) — HTTP ok, parser found results (genuine success)
-        ('empty',  None)  — HTTP ok, SMALL body, zero results (genuine no-match)
-        ('soft',   int)   — HTTP ok, BIG body, zero results (consent wall / bot
-                            interstitial served 200 — suspicious, worth another
-                            path when one remains)
+        ('empty',  None)  — HTTP ok, small unchallenged body, zero results
+        ('soft',   int)   — explicit challenge or large unparseable body;
+                            unavailable coverage, worth a configured alternate
         ('status', int)   — non-OK HTTP status
         ('conn',   exc)   — connect-level failure (proxy/DNS/refused): another
                             path may genuinely help
@@ -422,15 +421,29 @@ def http_search_get(
                 time.sleep(0.6)
                 resp = _get(proxies_kwarg)
 
-            if not resp.ok:
+            # HTTP 202 accepts a request but is not a completed search. DDG
+            # also uses it for its challenge flow. The one retry above may
+            # recover; another 202 must not teach proxy learning "success".
+            if resp.status_code == 202 or not resp.ok:
                 return ('status', resp.status_code)
+
+            response_headers = getattr(resp, 'headers', {}) or {}
+            # Cloudflare's documented challenge indicator is authoritative
+            # even if a parser mistakes an interstitial link for a result.
+            if str(response_headers.get('cf-mitigated', '')).lower() == 'challenge':
+                return ('soft', len(getattr(resp, 'text', '') or ''))
 
             parsed = parser(resp) or []
             if len(parsed) > max_results:
                 parsed = parsed[:max_results]
             if not parsed:
-                body_len = len(getattr(resp, 'text', '') or '')
-                if body_len > _SOFT_BLOCK_BODY_BYTES:
+                body = getattr(resp, 'text', '') or ''
+                body_len = len(body)
+                # SearXNG's DDG adapter recognizes this same structural marker.
+                # Do not keyword-match "captcha": legitimate searches discuss it.
+                if body_len > _SOFT_BLOCK_BODY_BYTES or (
+                        'challenge-form' in body and
+                        soup_of(body).select_one('form#challenge-form') is not None):
                     return ('soft', body_len)
                 return ('empty', None)
             return ('results', parsed)
@@ -496,7 +509,7 @@ def http_search_get(
         kind, payload = _attempt(mode, proxies_kwarg)
 
         if kind in ('results', 'empty'):
-            # Genuine success (a small-body 0-result page is a real no-match).
+            # Genuine success, including small unchallenged no-match pages.
             results = payload or []
             failed = False
             proxy_mode_manager.record_success(name, mode)
@@ -509,8 +522,8 @@ def http_search_get(
                 logger.info('%s connect failure via %s (%s) — trying alternate network path',
                             tag, mode, type(payload).__name__)
             elif kind == 'soft':
-                logger.info('%s 200 but parsed 0 results (%d bytes) via %s — '
-                            'likely soft block, trying alternate network path',
+                logger.info('%s challenged or unparseable response (%d bytes) via %s — '
+                            'trying configured alternate network path',
                             tag, payload, mode)
             else:
                 logger.info('%s HTTP %d via %s — trying alternate network path',
@@ -534,7 +547,8 @@ def http_search_get(
 
         if kind == 'soft':
             # An unparseable large response is unknown coverage, not no-match.
-            last_exc = requests.RequestException(f'{name} unparseable response (possible soft block)')
+            last_exc = requests.RequestException(
+                f'{name} challenged or unparseable response (possible soft block)')
             break
         if kind == 'status':
             logger.warning('%s returned HTTP %d via %s for query: %s',
