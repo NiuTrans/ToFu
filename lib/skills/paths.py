@@ -17,6 +17,35 @@ from lib.memory.storage import _dirs as memory_dirs
 
 OWNER_GLOBAL_SKILLS_SUBPATH = os.path.join('skills', 'users')
 
+#: Every place a skill package may live, in one table. This is the single
+#: source of truth for the skills-path design: ``skill_scan_dirs`` derives the
+#: scan order from it, and nothing else may hardcode a skills subdirectory.
+#:
+#: ``visibility`` records who the root belongs to, ``exported_in`` records which
+#: ``export.py --mode`` values carry it. Both are documentation consumed by
+#: ``tests/skills/test_skill_roots_contract.py``; runtime only reads ``subdir``.
+#:
+#: Order is precedence: an earlier project root wins when two roots define the
+#: same skill id (see ``docs/modules/skills.md``).
+PROJECT_SKILL_ROOTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    # Runtime project packages: what ``mtskills i`` and the Settings UI write.
+    # Gitignored; a per-machine install artifact, so it never exports.
+    (PROJECT_SKILLS_SUBDIR, 'project-runtime', ()),
+    # Repository development guides. Git-tracked and public-safe by
+    # construction, so they ship in every mode including opensource.
+    (os.path.join('.agents', 'skills'), 'project-public-dev',
+     ('personal', 'internal', 'opensource')),
+    # Codex CLI compatibility scan root: per-machine agent state, same class as
+    # ``.tofu``/``.chatui``. Excluded from internal and opensource exports; a
+    # personal backup keeps it because that export is for this machine's owner.
+    (os.path.join('.codex', 'skills'), 'project-codex-dev', ('personal',)),
+    # Internal-only platform guides (CodeLab, MLP, Hope). Git-tracked inside
+    # the ``bundles/`` tree, which opensource export excludes wholesale, so
+    # these reach internal sites without leaking to the public mirror.
+    (os.path.join('bundles', 'yourprovider', 'skills'), 'project-internal-dev',
+     ('personal', 'internal')),
+)
+
 
 def extra_skill_project_paths(project_paths: object, primary: str | None) -> list[str]:
     """Read attached workspace roots from current records or legacy strings.
@@ -91,7 +120,7 @@ def skill_scan_dirs(
             roots.append(path)
     out = []
     for root in roots:
-        for subdir in (PROJECT_SKILLS_SUBDIR, '.agents/skills', '.codex/skills'):
+        for subdir, _visibility, _exported in PROJECT_SKILL_ROOTS:
             directory = os.path.join(root, subdir)
             # A project grants access to its own packages, never a symlinked
             # host-home catalog belonging to an unrelated owner.
@@ -118,6 +147,7 @@ def legacy_global_skills_dir() -> str:
 
 __all__ = [
     'OWNER_GLOBAL_SKILLS_SUBPATH',
+    'PROJECT_SKILL_ROOTS',
     'extra_skill_project_paths',
     'legacy_global_skills_dir',
     'owner_global_skills_dir',
