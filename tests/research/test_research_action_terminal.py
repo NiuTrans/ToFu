@@ -212,14 +212,15 @@ def test_terminal_retains_loop_boundary_after_memory_loss(monkeypatch):
     task = create(runtime)
     meter = PaperAgentUsageMeter('research-action', token_budget=320000, dispatch_budget=10)
     for number in range(10):
-        meter.tools_for_round([], number)
+        meter.begin_dispatch()
     snapshot = meter.snapshot()
     task['_researchUsageSnapshot'] = deepcopy(snapshot)
     runtime.finish(task['id'], result={'summary':'bounded synthesis'})
     runtime.remove_owned(task['id'], user_id=1)
     terminal = load_action_terminal(task['id'], user_id=1)['terminal']
     assert terminal['usage_snapshot'] == snapshot
-    assert terminal['usage_snapshot']['forced_final_reason'] == 'dispatch_budget'
+    assert terminal['usage_snapshot']['agent_dispatches'] == 10
+    assert terminal['usage_snapshot']['forced_final_reason'] == ''
     assert terminal['replay_allowed'] is False
 
 

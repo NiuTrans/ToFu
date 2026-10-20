@@ -86,10 +86,6 @@ _SURVEY_MAX_PAPERS = PAPER_SURVEY_MAX_PAPERS
 _SURVEY_TEMPERATURE = 0.3      # below insight's 0.45 — survey is descriptive, not divergent
 _SURVEY_MAX_TOKENS = 8000
 _SURVEY_LANG_PREFIX = 'survey'
-# Agentic survey rounds repeatedly carry a large, already-distilled corpus.
-# This is a token envelope, not a round ceiling: after it is reached the next
-# dispatch gets no tools and must synthesize from evidence already collected.
-_SURVEY_AGENT_TOKEN_BUDGET = 1_000_000
 
 
 def survey_lang_key(lang: str) -> str:
@@ -896,20 +892,14 @@ def build_survey(direction: str, arxiv_ids, *, lang: str = 'en', user_id: int,
           'error': str,                     # set when ok is False
         }
     """
-    from lib.paper.agent_usage import resolve_paper_agent_budget
-    from lib.research.telemetry import ResearchUsageMeter, research_token_budget
+    from lib.research.telemetry import ResearchUsageMeter
 
     from lib.agent_core.execution_budget import ModelBudgetAdmissionDenied
     if model_budget_admit is not None and not callable(model_budget_admit):
         raise ValueError('model_budget_admit must be callable')
     user_id = require_user_id(user_id, context='paper survey')
     direction = (direction or '').strip()
-    usage_meter = ResearchUsageMeter(
-        'survey', fallback_model=model or '',
-        token_budget=research_token_budget(
-            'TOFU_RESEARCH_SURVEY_TOKEN_BUDGET', _SURVEY_AGENT_TOKEN_BUDGET),
-        dispatch_budget=resolve_paper_agent_budget(
-            'TOFU_RESEARCH_SURVEY_DISPATCH_BUDGET', 32, minimum=2, maximum=32), repeat_limit=0)
+    usage_meter = ResearchUsageMeter('survey', fallback_model=model or '')
     if not direction:
         return {'ok': False, 'error': 'empty direction', 'direction': '',
                 'lang': lang, 'survey_md': '', 'open_gaps': {}, 'citation_audit': None,

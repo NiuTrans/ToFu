@@ -1009,7 +1009,17 @@ class ExecutionBudget:
             task['_executionLimitReason'] = reason
             raise ModelBudgetExceeded(reason)
 
-    def settle_model(self, ordinal, usage=None, *, unsent=False):
+    def settle_model(self, ordinal, usage=None, *, unsent=False, refused=False):
+        """Close one attempt lease with its observed provider cost.
+
+        ``refused`` reports a waitable capacity rejection (429 rotation or a
+        gateway/vendor-transient outage) proven by a complete non-200 answer:
+        the status line precedes every body byte, so no prompt ran and nothing
+        is billable. It is accounted at zero — unlike a truncated or ambiguous
+        write, which stays unknown. Conflating the two fenced a finite task's
+        whole allowance on the first 429, killing work the dispatcher was still
+        retrying on other slots.
+        """
         with self._condition:
             row = self._model_leases.pop(ordinal, None)
             if row is None:
@@ -1019,6 +1029,8 @@ class ExecutionBudget:
             # A caller cannot void an attempt after physical dispatch began.
             if not unsent or row['dispatched']:
                 observed, complete = observed_usage_totals(usage)
+                if refused and usage is None:
+                    observed, complete = 0, True
                 if observed:
                     if task['id'] in self._active:
                         self._model_tokens[task['id']] += observed
@@ -1073,6 +1085,7 @@ class ModelBudgetLease:
         self.dispatched = False
         self.task = task
         self._input_confirmations = []
+        self._refused = False
 
     def prepare_input(self, wire_body):
         if self.task is not None:
@@ -1099,8 +1112,20 @@ class ModelBudgetLease:
             raise AbortedError(error.reason) from error
         self.dispatched = True
 
+    def note_provider_refusal(self):
+        """Witness that the provider answered this attempt without inferring.
+
+        Settlement ports share one ``settle`` signature because wallet and
+        receipt owners compose this lease. Refusal evidence therefore arrives
+        through its own optional hook, implemented only by the account owner
+        that distinguishes ``unknown`` from ``proven zero``.
+        """
+        self._refused = True
+
     def settle(self, usage=None, *, unsent=False):
-        self.budget.settle_model(self.ordinal, usage, unsent=unsent)
+        refused, self._refused = self._refused, False
+        self.budget.settle_model(self.ordinal, usage, unsent=unsent,
+                                refused=refused)
 
 
 def execution_usage_evidence(task: dict) -> dict:

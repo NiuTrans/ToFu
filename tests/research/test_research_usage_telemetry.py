@@ -38,35 +38,42 @@ def test_meter_accumulates_vendor_shapes_and_uses_dispatch_pricing(monkeypatch):
     assert got['cost_cny'] == 0.14
 
 
-def test_token_envelope_forces_next_dispatch_to_finalize(monkeypatch):
+def test_declared_envelope_refuses_the_next_dispatch_instead_of_degrading(monkeypatch):
     import lib.research.telemetry as tm
+    from lib.paper.agent_usage import PaperAgentBudgetExceeded
 
     monkeypatch.setattr(tm, 'compute_cost', lambda *a, **k: None)
     meter = tm.ResearchUsageMeter('ideate', token_budget=100)
-    tools = [{'type': 'function'}]
     message = {'tool_calls': [{'function': {'name': 'web_search',
                                              'arguments': '{"q":"x"}'}}]}
     meter.observe_agent_round({'prompt_tokens': 95, 'completion_tokens': 8}, message)
 
-    assert meter.allowed_tools(tools) is None
+    # A spent envelope is now an honest failure, not a silent tool-less round
+    # whose leaked markup could be mistaken for the finished answer.
+    with pytest.raises(PaperAgentBudgetExceeded) as raised:
+        meter.begin_dispatch()
+    assert raised.value.reason == 'token_budget'
     got = meter.snapshot()
-    assert got['forced_final'] is True
-    assert got['forced_final_reason'] == 'token_budget'
+    assert got['forced_final'] is False
+    assert got['forced_final_reason'] == ''
     assert got['agent_token_budget'] == 100
 
 
-def test_repeated_tool_calls_converge_without_a_global_round_ceiling(monkeypatch):
+def test_stage_without_a_declared_envelope_never_stops_spending(monkeypatch):
     import lib.research.telemetry as tm
 
     monkeypatch.setattr(tm, 'compute_cost', lambda *a, **k: None)
-    meter = tm.ResearchUsageMeter('survey', repeat_limit=1)
-    message = {'tool_calls': [{'function': {'name': 'fetch_url',
-                                             'arguments': '{"url":"u"}'}}]}
-    meter.observe_agent_round({'prompt_tokens': 1}, message)
-    assert meter.allowed_tools(['tool']) == ['tool']
-    meter.observe_agent_round({'prompt_tokens': 1}, message)
-    assert meter.allowed_tools(['tool']) is None
-    assert meter.snapshot()['forced_final_reason'] == 'repeated_tool_calls'
+    meter = tm.ResearchUsageMeter('survey')
+    for _ in range(50):
+        meter.begin_dispatch()
+        meter.observe_agent_round({'prompt_tokens': 100_000}, {})
+
+    got = meter.snapshot()
+    assert got['agent_dispatches'] == 50
+    assert got['agent_tokens'] == 5_000_000
+    assert got['agent_token_budget'] == 0
+    assert got['agent_dispatch_budget'] == 0
+    assert got['forced_final'] is False
 
 
 def test_stage_snapshots_fold_into_one_run_total():

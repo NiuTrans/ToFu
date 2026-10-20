@@ -147,15 +147,15 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
     'execution_token_usage_unknown': (
         '先前的模型用量尚未确认',
         'Previous model usage is unconfirmed',
-        '先前模型请求的实际 token 用量未确认，当前预算已阻止新的模型调用。'
-        '已有内容和已知用量仍然保留。\n'
-        '在对话中点击“检查并继续”，可检查是否能使用新预算继续。'
-        '检查本身不会调用模型或补全先前的未知用量，继续前仍需你确认。',
-        'Actual token usage from an earlier model request is unconfirmed, so the current '
-        'budget blocks another model call. Existing output and known usage are preserved.\n'
-        'Choose “Check and continue” in the conversation to check whether a new budget '
-        'can be used. The check does not call a model or recover earlier unknown usage; '
-        'continuing still requires your confirmation.'),
+        '先前模型请求的实际用量未能确认，因此暂停了新的模型调用。'
+        '已生成的内容都会保留。\n'
+        '点击“继续生成”即可在已保存的进度上接着生成；'
+        '新的额度上限由系统自动分配，你不需要填写任何参数。继续可能产生额外费用。',
+        'Actual usage from an earlier model request could not be confirmed, so the next '
+        'model call was paused. Everything generated so far is kept.\n'
+        'Choose “Continue generating” to carry on from the saved progress; the new, '
+        'limited budget is allocated automatically, so nothing has to be entered. '
+        'Continuing may incur additional charges.'),
     'quota':              ('⚠️ API Key 余额/配额已用尽',
                             'API key quota exhausted',
                             _SETTINGS_HINT_CN, _SETTINGS_HINT_EN),

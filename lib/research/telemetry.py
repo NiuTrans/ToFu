@@ -1,4 +1,4 @@
-"""Auto-research usage aggregation over the shared Paper paid-call policy.
+"""Auto-research usage aggregation over the shared Paper accounting.
 
 Research is a multi-call product: survey synthesis may take several tool
 rounds and ideation adds one rubric call for every structurally valid idea.
@@ -9,7 +9,9 @@ project's canonical usage/cost helpers and exposes one JSON-safe snapshot.
 The open-ended agent-loop accounting is owned once by
 ``lib.paper.agent_usage``. This module keeps the historical
 ``ResearchUsageMeter`` import and folds survey/ideate/evaluate snapshots into
-the durable auto-research aggregate.
+the durable auto-research aggregate. No research stage has a default spend or
+dispatch limit; a caller that declares one is refused honestly when it runs
+out (see :class:`~lib.paper.agent_usage.PaperAgentBudgetExceeded`).
 """
 
 from __future__ import annotations
@@ -17,25 +19,9 @@ from __future__ import annotations
 from typing import Optional
 
 from lib.cost import compute_cost
-from lib.paper.agent_usage import (
-    PaperAgentUsageMeter,
-    resolve_paper_agent_budget,
-)
+from lib.paper.agent_usage import PaperAgentUsageMeter
 
-__all__ = ['ResearchUsageMeter', 'research_token_budget', 'aggregate_research_usage']
-
-
-def research_token_budget(env_name: str, default: int) -> int:
-    """Resolve a finite legacy-named research token envelope."""
-    from lib.paper.agent_usage import (
-        PAPER_AGENT_TOKEN_BUDGET_HARD_MAX,
-        PAPER_AGENT_TOKEN_BUDGET_MIN,
-    )
-    return resolve_paper_agent_budget(
-        env_name, default,
-        minimum=PAPER_AGENT_TOKEN_BUDGET_MIN,
-        maximum=PAPER_AGENT_TOKEN_BUDGET_HARD_MAX,
-    )
+__all__ = ['ResearchUsageMeter', 'aggregate_research_usage']
 
 
 def aggregate_research_usage(survey_usage: dict, ideate_usage: dict,
@@ -76,15 +62,13 @@ def aggregate_research_usage(survey_usage: dict, ideate_usage: dict,
 
 
 class ResearchUsageMeter(PaperAgentUsageMeter):
-    """Compatibility owner for survey/ideate plus finite rubric calls."""
+    """Compatibility owner for survey/ideate plus their rubric calls."""
 
-    def __init__(self, stage: str, *, token_budget: int = 240_000,
-                 dispatch_budget: int = 10, repeat_limit: int = 2,
-                 fallback_model: str = ''):
+    def __init__(self, stage: str, *, token_budget: int = 0,
+                 dispatch_budget: int = 0, fallback_model: str = ''):
         super().__init__(
             stage, token_budget=token_budget,
-            dispatch_budget=dispatch_budget, repeat_limit=repeat_limit,
-            fallback_model=fallback_model)
+            dispatch_budget=dispatch_budget, fallback_model=fallback_model)
 
     def _compute_cost(self, usage, *, model_id: str, provider_id: str | None):
         # Keep tests and downstream callers that monkeypatch this module's

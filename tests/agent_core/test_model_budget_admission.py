@@ -391,8 +391,11 @@ def provider(monkeypatch):
     monkeypatch.setattr('lib.tasks_pkg.compaction._tokens.resolve_model_context_limit',
                         lambda *a, **k: 100000)
     bodies = []
-    options = {'usage': True, 'failure': False, 'hold': False,
+    options = {'usage': True, 'failure': False, 'hold': False, 'status': None,
                'release': threading.Event(), 'three_started': threading.Event()}
+    options = {'usage': True, 'failure': False, 'hold': False, 'status': None,
+               'status_once': None, 'release': threading.Event(),
+               'three_started': threading.Event()}
     lock = threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -409,6 +412,19 @@ def provider(monkeypatch):
                 self.send_response(200);self.send_header('Content-Length', '100')
                 self.end_headers();self.close_connection = True;return
             output = min(5, body.get('max_tokens', body.get('max_output_tokens', 5)))
+            if options['status_once'] is not None:
+                status, options['status_once'] = options['status_once'], None
+                payload = json.dumps({'error': {'message': 'rate limited'}}).encode()
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers();self.wfile.write(payload);return
+            if options['status'] is not None:
+                payload = json.dumps({'error': {'message': 'rate limited'}}).encode()
+                self.send_response(options['status'])
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers();self.wfile.write(payload);return
             final = {'choices': [{'delta': {}, 'finish_reason': 'stop'}]}
             if options['usage']: final['usage'] = {'prompt_tokens': 20, 'completion_tokens': output}
             payload = (b'data: {"choices":[{"delta":{"content":"observed"}}]}\n\n'
@@ -626,6 +642,121 @@ def test_real_transport_missing_usage_fences_subsequent_dispatch(provider, async
     with pytest.raises(AbortedError, match='execution_token_usage_unknown'):call()
     assert len(bodies) == 1 and owner['_executionActualsComplete'] is False
     assert derive_actuals(owner)['tokens'] == 0
+
+
+@pytest.mark.unit
+def test_only_waitable_capacity_rejections_prove_zero_cost():
+    """The refusal witness must never cover request-scoped rejections.
+
+    A 429 / gateway answer is retried on another slot, so its settlement is the
+    difference between rotating and killing the task. A bad payload or policy
+    block ends the attempt regardless, and claiming complete-at-zero there
+    would hide spend the provider may already have billed.
+    """
+    from lib.llm.llm_errors import (
+        BadRequestError, PromptTooLongError, RateLimitError, mark_provider_refusal,
+        provider_refused_request,
+    )
+    for waitable in (RateLimitError('rate limited', status_code=429),
+                     RateLimitError('gateway', status_code=503, is_gateway=True)):
+        assert provider_refused_request(mark_provider_refusal(waitable)) is True
+    for scoped in (BadRequestError('bad payload'),
+                   PromptTooLongError('prompt too long'),
+                   RuntimeError('unclassified')):
+        assert provider_refused_request(mark_provider_refusal(scoped)) is False
+
+
+@pytest.mark.unit
+def test_refusal_settlement_keeps_the_allowance_usable_without_hiding_cost():
+    from lib.agent_core.execution_budget import ExecutionBudget
+    refused_owner = task(50); refused_account = ExecutionBudget(refused_owner)
+    lease = reserve(refused_account, refused_owner)
+    lease.mark_dispatched()
+    lease.note_provider_refusal()
+    lease.settle(None)
+    assert refused_owner.get('_executionActualsComplete') is not False
+    assert refused_account.consumption_snapshot() == (0, 0, True)
+    # An ambiguous attempt still fences: the witness is the only difference.
+    unknown_owner = task(50); unknown_account = ExecutionBudget(unknown_owner)
+    other = reserve(unknown_account, unknown_owner)
+    other.mark_dispatched(); other.settle(None)
+    assert unknown_owner['_executionActualsComplete'] is False
+
+
+@pytest.mark.api
+def test_dispatch_survives_a_rate_limit_under_a_finite_budget(
+        provider, monkeypatch):
+    """Reproduce the Coordinator-worker failure end to end.
+
+    Production shape: the dispatcher meets a per-minute 429, rotates to another
+    key, and re-dispatches. With a finite execution budget the first attempt's
+    settlement used to fence the account, so the retry died with
+    ``execution_token_usage_unknown`` and the worker ended work it never ran.
+    """
+    from lib.agent_core.execution_budget import model_budget_admission
+    from lib.llm import stream as real_stream
+    from lib.llm_dispatch import _api_stream
+    url, bodies, options = provider
+    owner = task(200)
+    options['status_once'] = 429
+    slot = SimpleNamespace(
+        key_name='synthetic-key', model='glm-v4', api_key='unused',
+        base_url=url, extra_headers=None, oauth='', adapter=None,
+        protocol='openai', provider_id='synthetic', routing_provider_id='',
+        thinking_format='', capabilities={'text'}, stream_only=False,
+        consecutive_errors=0, cooldown_reason='', release=lambda: None,
+        record_error=lambda **kwargs: None,
+        record_success=lambda *args, **kwargs: None,
+        mark_route_missing=lambda *args, **kwargs: False)
+    dispatcher = SimpleNamespace(
+        pick_and_reserve=lambda **kwargs: slot,
+        has_capable_slots=lambda *args, **kwargs: True,
+        summarize_slots=lambda *args, **kwargs: 'synthetic',
+        note_shared_contention=lambda *args, **kwargs: None,
+        sticky_cooldown_remaining_s=lambda *args, **kwargs: None)
+    monkeypatch.setattr(_api_stream, 'get_dispatcher', lambda: dispatcher)
+    monkeypatch.setattr(
+        'lib.llm.stream_chat',
+        lambda body, **kwargs: real_stream.stream_chat(body, **kwargs))
+    result = _api_stream.dispatch_stream(
+        [{'role': 'user', 'content': 'synthetic'}],
+        prefer_model='glm-v4', strict_model=True, log_prefix='[t]',
+        max_retries=1, model_budget_admit=model_budget_admission(owner))
+    assert result.is_verified_complete
+    assert result.message['content'] == 'observed'
+    assert owner.get('_executionActualsComplete') is not False
+    assert len(bodies) == 2
+    assert derive_actuals(owner)['tokens'] == 25
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.api
+def test_provider_status_refusal_consumes_nothing_and_keeps_finite_work_alive(
+        provider, asynchronous):
+    """A complete non-200 answer is a refusal, not an unobserved generation.
+
+    A 429 rate limit arrives before inference, so the attempt consumed no
+    provider tokens. It must neither charge the account nor fence its
+    remaining allowance: dispatch treats 429 as a waitable capacity signal and
+    rotates slots, but an unknown-usage settlement killed the whole task on the
+    first rate limit instead.
+    """
+    from lib.llm import astream, stream
+    from lib.llm.llm_errors import RateLimitError
+    url, bodies, options = provider; owner = task(50)
+    options['status'] = 429
+    def call():
+        if asynchronous:
+            return asyncio.run(astream._async_stream_chat_once(
+                request(owner), base_url=url, owner_user_id=7))
+        return stream._stream_chat_once(request(owner), base_url=url, owner_user_id=7)
+    with pytest.raises(RateLimitError): call()
+    assert owner.get('_executionActualsComplete') is not False
+    assert not owner['_executionBudget']._model_leases
+    options['status'] = None
+    assert call().is_verified_complete
+    assert len(bodies) == 2
+    assert derive_actuals(owner)['tokens'] == 25
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])

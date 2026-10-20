@@ -24,9 +24,12 @@ def admit(repo, ordinal=1):
 
 
 def snapshot(ordinal=1):
-    meter = PaperAgentUsageMeter('research-action', token_budget=320000, dispatch_budget=10)
-    for index in range(ordinal):
-        meter.tools_for_round([], index)
+    # Synthetic accounting only: this helper fabricates an arbitrary ordinal, so
+    # it must not carry an envelope that would refuse the very dispatch it is
+    # describing.
+    meter = PaperAgentUsageMeter('research-action')
+    for _index in range(ordinal):
+        meter.begin_dispatch()
         meter.observe_agent_round(None, {})
     return meter.snapshot()
 
@@ -107,7 +110,7 @@ def test_live_dispatch_accounts_before_tools_and_durability_failure_blocks_progr
     monkeypatch.setattr(action, '_messages', lambda *args: [])
     monkeypatch.setattr(action, 'make_paper_exec_shim', lambda **kwargs: None)
     def loop(**kwargs):
-        meter = kwargs['usage_meter']; meter.tools_for_round([], 1)
+        meter = kwargs['usage_meter']; meter.begin_dispatch()
         kwargs['dispatch'](1, [])
         meter.observe_agent_round({'prompt_tokens': 100, 'completion_tokens': 5}, {})
         kwargs['on_round_result'](1, {'content': '{}'}, None,

@@ -322,14 +322,11 @@ def test_research_repeated_calls_leave_progress_decision_to_shared_loop(monkeypa
     def inspect_loop(*, usage_meter, **kwargs):
         call = {'tool_calls': [{'function': {'name': 'run_command',
                 'arguments': '{"command":"inspect experiment progress"}'}}]}
-        tools = [{'type': 'function'}]
-        for round_index in range(1, 5):
-            assert usage_meter.tools_for_round(tools, round_index) == tools
+        for round_index in range(1, 30):
+            usage_meter.begin_dispatch()
             usage_meter.observe_agent_round(None, call)
         assert usage_meter.force_final_reason == ''
-        for round_index in range(5, 30):
-            assert usage_meter.tools_for_round(tools, round_index) == tools
-        assert usage_meter.force_final_reason == ''
+        assert usage_meter.agent_dispatches == 29
         raise InspectedLoop
     monkeypatch.setattr(action, 'run_guarded_paper_agent_loop', inspect_loop)
     with pytest.raises(InspectedLoop):
@@ -504,7 +501,7 @@ def test_research_default_has_no_cumulative_cutoff_and_restores_frozen_policy(mo
             'task_id': 'capacity-policy', 'tool_rounds': [], 'action': 'experiment'}, {}, _epoch([]), [])
 
 
-def test_loop_failure_retains_forced_final_usage_for_terminal_persistence(monkeypatch):
+def test_loop_failure_retains_usage_for_terminal_persistence(monkeypatch):
     import threading
     from lib.research import action
     monkeypatch.setattr(action, '_messages', lambda *args: [])
@@ -513,15 +510,15 @@ def test_loop_failure_retains_forced_final_usage_for_terminal_persistence(monkey
             'task_id': 'terminal-loop-account', 'tool_rounds': [], 'action': 'experiment',
             'logical_budget': {'dispatch_budget': 10}}
     def stopped(*, usage_meter, **kwargs):
-        for number in range(10):
-            usage_meter.tools_for_round([], number)
+        for _number in range(10):
+            usage_meter.begin_dispatch()
         raise RuntimeError('controlled loop interruption')
     monkeypatch.setattr(action, 'run_guarded_paper_agent_loop', stopped)
     with pytest.raises(RuntimeError, match='loop interruption'):
         action._run_agent(task, {}, _epoch([]), [])
     snapshot = task['_researchUsageSnapshot']
     assert snapshot['agent_dispatches'] == 10
-    assert snapshot['forced_final_reason'] == 'dispatch_budget'
+    assert snapshot['forced_final_reason'] == ''
     assert snapshot['calls'] == 0
 
 

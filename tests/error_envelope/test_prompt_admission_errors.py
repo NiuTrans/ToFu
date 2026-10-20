@@ -23,8 +23,8 @@ def test_unknown_usage_keeps_its_identity_across_schema_and_persistence():
     assert envelope['titleKey'] == 'err.k.execution_token_usage_unknown.title'
     assert envelope['hintKey'] == 'err.k.execution_token_usage_unknown.hint'
 
-    assert '检查并继续' in envelope['hint']
-    assert 'Check and continue' in envelope['hint']
+    assert '继续生成' in envelope['hint']
+    assert 'Continue generating' in envelope['hint']
     assert not any(text in envelope['hint'] for text in (
         'maintainer', '维护者', '核对供应商', 'logs/', 'write code'))
     validate(envelope, typed_error_envelope_schema())

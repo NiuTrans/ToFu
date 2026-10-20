@@ -62,7 +62,7 @@ def setup(client, monkeypatch, *, unmetered=False, halted=False):
     request = defined_material(); digest = context.save_request(request)
     meter = PaperAgentUsageMeter('research-action', token_budget=320000, dispatch_budget=10)
     meter._compute_cost = lambda *args, **kwargs: {'costUsd': 0.01, 'costCny': 0.07}
-    meter.tools_for_round([], 0)
+    meter.begin_dispatch()
     intent = calls.admit_model_call(ordinal=1, round_index=0, requested_model='controlled',
         request_digest=digest, max_output=8000, usage_before=meter.snapshot(),
         request_snapshot_version=1, response_snapshot_version=1, loop_checkpoint_version=1)

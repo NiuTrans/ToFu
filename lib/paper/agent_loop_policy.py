@@ -1,9 +1,15 @@
 """Finite-progress policy for every agentic Paper workflow.
 
 Responsibility: compose the shared agent-loop chassis with Paper's common
-no-progress threshold and convert non-completion outcomes into honest control
-flow. Entry point: :func:`run_guarded_paper_agent_loop`. Dependencies are the
-generic agent loop, the shared Paper resource contract, and LLM abort errors.
+no-progress threshold, account each paid round, and convert non-completion
+outcomes into honest control flow. Entry point:
+:func:`run_guarded_paper_agent_loop`. Dependencies are the generic agent loop,
+the shared Paper resource contract, the usage meter, and LLM abort errors.
+
+A Paper loop is bounded by observable progress, the user's Stop, and — only
+when the caller declares one — its own envelope. The chassis never narrows its
+own authority to finish: a spent envelope raises
+:class:`~lib.paper.agent_usage.PaperAgentBudgetExceeded` before the paid request.
 """
 
 from __future__ import annotations
@@ -65,49 +71,26 @@ def run_guarded_paper_agent_loop(
         raise TypeError(
             'paper agent no-progress threshold is owned by agent_loop_policy')
 
-    # Compose billing/admission hooks here so a new Paper owner cannot remember
-    # the shared chassis but forget to account a round or remove tool authority
-    # at the budget boundary. Caller hooks remain additive and see the original
-    # response after the meter has durably accounted the upstream attempt.
+    # Compose accounting here so a new Paper owner cannot use the chassis but
+    # forget to price its rounds. The tools the loop admits are exactly the
+    # tools the caller requested; caller hooks remain additive and see the
+    # original response after the meter has accounted the upstream attempt.
     effective_loop_kwargs = dict(loop_kwargs)
     if usage_meter is not None:
         caller_dispatch = effective_loop_kwargs['dispatch']
         caller_on_round_result = effective_loop_kwargs.get('on_round_result')
-        caller_decide_round = effective_loop_kwargs.get('decide_round')
-        caller_retry_bonus = effective_loop_kwargs.get('retry_bonus')
 
-        def _budgeted_dispatch(round_index, requested_tools):
-            admitted_tools = usage_meter.tools_for_round(
-                requested_tools, round_index)
-            return caller_dispatch(round_index, admitted_tools)
+        def _accounted_dispatch(round_index, requested_tools):
+            usage_meter.begin_dispatch()
+            return caller_dispatch(round_index, requested_tools)
 
         def _account_round(round_index, message, finish, usage):
             usage_meter.observe_agent_round(usage, message)
             if caller_on_round_result is not None:
                 caller_on_round_result(round_index, message, finish, usage)
 
-        def _decide_budgeted_round(round_index, message, finish, usage):
-            budget_directive = usage_meter.decide_round(round_index, message)
-            if budget_directive is not None:
-                return budget_directive
-            if caller_decide_round is not None:
-                return caller_decide_round(round_index, message, finish, usage)
-            return None
-
-        effective_loop_kwargs['dispatch'] = _budgeted_dispatch
+        effective_loop_kwargs['dispatch'] = _accounted_dispatch
         effective_loop_kwargs['on_round_result'] = _account_round
-        effective_loop_kwargs['decide_round'] = _decide_budgeted_round
-
-        if caller_retry_bonus is not None:
-            def _bounded_retry_bonus(round_index, message, finish, usage):
-                # A tool-less synthesis attempt is the terminal budget slot.
-                # Do not let provider-close recovery silently spend beyond it.
-                if usage_meter.forced_round(round_index):
-                    return False
-                return caller_retry_bonus(
-                    round_index, message, finish, usage)
-
-            effective_loop_kwargs['retry_bonus'] = _bounded_retry_bonus
 
     outcome = run_agent_loop(
         max_consecutive_no_progress_rounds=(

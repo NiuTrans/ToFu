@@ -78,14 +78,7 @@ IDEATE_NOVELTY_RETRIEVAL_K = 5
 # Generation divergence — mirror insight's 0.45 (divergent but JSON-safe).
 _IDEATE_TEMPERATURE = 0.45
 _IDEATE_MAX_TOKENS = 8000
-# A forced, tool-less synthesis occasionally receives a provider-terminated
-# response with reasoning but no answer body.  Reissue that exact synthesis
-# once without replaying the completed tool history or the whole stage.
-_IDEATE_EMPTY_FINAL_RETRIES = 1
 # The open-ended generation/research loop gets a token envelope. Per-idea
-# rubric calls are finite and are accounted in the same usage snapshot, but do
-# not need a loop breaker.
-_IDEATE_AGENT_TOKEN_BUDGET = 160_000
 # Rubric judging is a judgement, not creative — deterministic.
 _RUBRIC_TEMPERATURE = 0.0
 _RUBRIC_MAX_TOKENS = 3000
@@ -893,48 +886,26 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
     _last = {'msg': None}
 
     def _dispatch(rnd, tools):
-        from lib.llm.stream_result import (
-            ProviderStreamState,
-            ensure_provider_stream_result,
-        )
+        from lib.llm.stream_result import ensure_provider_stream_result
 
-        def _attempt(admitted_tools):
-            _round['content'] = ''
+        _round['content'] = ''
 
-            def _on_content(t):
-                _round['content'] += t
+        def _on_content(t):
+            _round['content'] += t
 
-            effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
-                admitted_tools, owner_user_id=user_id)
-            return ensure_provider_stream_result(dispatch_stream(
-                messages, on_content=_on_content,
-                abort_check=abort_signal.is_set,
-                prefer_model=model or None, strict_model=bool(model),
-                capability='text', tools=effective_tools,
-                max_tokens=_IDEATE_MAX_TOKENS,
-                temperature=_IDEATE_TEMPERATURE,
-                thinking_enabled=False,
-                max_retries=PAPER_AGENT_ROUTE_MAX_RETRIES,
-                log_prefix='[Paper:Ideate]',
-                **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {})))
-
-        result = _attempt(tools)
-        for retry_index in range(_IDEATE_EMPTY_FINAL_RETRIES):
-            if (tools is not None
-                    or result.state is not ProviderStreamState.EMPTY_RESPONSE
-                    or abort_signal.is_set()):
-                break
-            # This is a second paid provider attempt in the same logical round.
-            # Account the empty attempt explicitly because the shared loop only
-            # observes the result ultimately returned by this callback.
-            usage_meter.observe_agent_round(result.usage, result.message)
-            usage_meter.tools_for_round(None, rnd)
-            logger.warning(
-                '[Paper:Ideate] empty tool-less synthesis; retrying current '
-                'round (%d/%d)', retry_index + 1,
-                _IDEATE_EMPTY_FINAL_RETRIES)
-            result = _attempt(None)
-        return result
+        effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
+            tools, owner_user_id=user_id)
+        return ensure_provider_stream_result(dispatch_stream(
+            messages, on_content=_on_content,
+            abort_check=abort_signal.is_set,
+            prefer_model=model or None, strict_model=bool(model),
+            capability='text', tools=effective_tools,
+            max_tokens=_IDEATE_MAX_TOKENS,
+            temperature=_IDEATE_TEMPERATURE,
+            thinking_enabled=False,
+            max_retries=PAPER_AGENT_ROUTE_MAX_RETRIES,
+            log_prefix='[Paper:Ideate]',
+            **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {})))
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -1183,18 +1154,13 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
     if model_budget_admit is not None and not callable(model_budget_admit):
         raise ValueError('model_budget_admit must be callable')
     from lib.research.contracts import normalize_research_idea_count
-    from lib.paper.agent_usage import paper_agent_dispatch_budget
-    from lib.research.telemetry import ResearchUsageMeter, research_token_budget
+    from lib.research.telemetry import ResearchUsageMeter
 
     direction = (direction or '').strip()
     n_ideas = normalize_research_idea_count(n_ideas)
     thr = IDEATE_GATE_THRESHOLD if threshold is None else float(threshold)
     valid_gaps = _valid_gap_ids(open_gaps)
-    usage_meter = ResearchUsageMeter(
-        'ideate', fallback_model=model or '',
-        token_budget=research_token_budget(
-            'TOFU_RESEARCH_IDEATE_TOKEN_BUDGET', _IDEATE_AGENT_TOKEN_BUDGET),
-        dispatch_budget=paper_agent_dispatch_budget('ideate'), repeat_limit=0)
+    usage_meter = ResearchUsageMeter('ideate', fallback_model=model or '')
     if not direction:
         return {'ok': False, 'error': 'empty direction', 'direction': '', 'lang': lang,
                 'accepted': [], 'rejected': [], 'threshold': thr,

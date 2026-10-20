@@ -11,12 +11,8 @@ from lib.paper.agent_loop_policy import (
     run_guarded_paper_agent_loop,
 )
 from lib.paper.agent_usage import (
-    PAPER_AGENT_BUDGET_SPECS,
-    PAPER_AGENT_DISPATCH_BUDGET_HARD_MAX,
-    PAPER_AGENT_TOKEN_BUDGET_HARD_MAX,
+    PaperAgentBudgetExceeded,
     PaperAgentUsageMeter,
-    paper_agent_dispatch_budget,
-    paper_agent_token_budget,
 )
 
 
@@ -107,16 +103,15 @@ def test_completion_and_explicit_partial_abort_modes_remain_distinct():
     assert outcome.completed is False
 
 
-def test_unique_tool_wandering_reserves_last_dispatch_for_final_answer():
+def test_unique_tool_wandering_keeps_every_tool_and_its_answer():
     calls = {'dispatch': 0, 'execute': 0}
     admitted_tools = []
-    meter = PaperAgentUsageMeter(
-        'test', token_budget=1_000_000, dispatch_budget=4, repeat_limit=0)
+    meter = PaperAgentUsageMeter('test', token_budget=1_000_000, dispatch_budget=4)
 
     def dispatch(round_index, tools):
         calls['dispatch'] += 1
         admitted_tools.append(tools)
-        if tools is None:
+        if round_index == 3:
             return ({'role': 'assistant', 'content': 'bounded answer'},
                     'stop', None)
         return ({
@@ -142,19 +137,17 @@ def test_unique_tool_wandering_reserves_last_dispatch_for_final_answer():
 
     assert outcome.completed is True
     assert calls == {'dispatch': 4, 'execute': 3}
-    assert admitted_tools[:3] == [[{'type': 'function'}]] * 3
-    assert admitted_tools[3] is None
+    # Tools are never withdrawn to make a loop finish.
+    assert admitted_tools == [[{'type': 'function'}]] * 4
     snapshot = meter.snapshot()
     assert snapshot['agent_dispatches'] == 4
-    assert snapshot['unmetered_calls'] == 4
-    assert snapshot['forced_final_reason'] == 'dispatch_budget'
+    assert snapshot['forced_final'] is False
 
 
-def test_token_envelope_forces_next_round_to_synthesize_without_tools():
+def test_spent_token_envelope_refuses_rather_than_stripping_tools():
     admitted_tools = []
     executed = []
-    meter = PaperAgentUsageMeter(
-        'test', token_budget=100, dispatch_budget=8, repeat_limit=0)
+    meter = PaperAgentUsageMeter('test', token_budget=100, dispatch_budget=8)
 
     def dispatch(round_index, tools):
         admitted_tools.append(tools)
@@ -169,34 +162,33 @@ def test_token_envelope_forces_next_round_to_synthesize_without_tools():
         return ({'role': 'assistant', 'content': 'answer'}, 'stop',
                 {'prompt_tokens': 20, 'completion_tokens': 5})
 
-    outcome = run_guarded_paper_agent_loop(
-        context='token-bounded Paper agent',
-        usage_meter=meter,
-        abort=AbortSignal.never(),
-        round_tools=['tool'],
-        dispatch=dispatch,
-        execute_tool=lambda _rnd, call: executed.append(call['id']),
-    )
+    with pytest.raises(PaperAgentBudgetExceeded) as raised:
+        run_guarded_paper_agent_loop(
+            context='token-bounded Paper agent',
+            usage_meter=meter,
+            abort=AbortSignal.never(),
+            round_tools=['tool'],
+            dispatch=dispatch,
+            execute_tool=lambda _rnd, call: executed.append(call['id']),
+        )
 
-    assert outcome.completed is True
-    assert admitted_tools == [['tool'], None]
+    assert raised.value.reason == 'token_budget'
+    # The first round ran with its tools; the refused round never dispatched.
+    assert admitted_tools == [['tool']]
     assert executed == ['first']
-    assert meter.snapshot()['forced_final_reason'] == 'token_budget'
+    assert meter.snapshot()['forced_final'] is False
 
 
-def test_provider_cannot_execute_tools_after_budget_authority_is_removed():
+def test_spent_dispatch_envelope_refuses_before_the_paid_request():
     calls = {'dispatch': 0, 'execute': 0}
-    admitted_tools = []
-    meter = PaperAgentUsageMeter(
-        'test', token_budget=1_000_000, dispatch_budget=2, repeat_limit=0)
+    meter = PaperAgentUsageMeter('test', token_budget=1_000_000, dispatch_budget=2)
 
-    def dispatch(round_index, tools):
+    def dispatch(round_index, _tools):
         calls['dispatch'] += 1
-        admitted_tools.append(tools)
         return ({
             'role': 'assistant', 'content': '',
             'tool_calls': [{
-                'id': f'ignored-{round_index}',
+                'id': f'call-{round_index}',
                 'function': {
                     'name': 'web_search',
                     'arguments': f'{{"query":"q-{round_index}"}}',
@@ -204,9 +196,9 @@ def test_provider_cannot_execute_tools_after_budget_authority_is_removed():
             }],
         }, 'tool_calls', None)
 
-    with pytest.raises(PaperAgentLoopHalted) as raised:
+    with pytest.raises(PaperAgentBudgetExceeded) as raised:
         run_guarded_paper_agent_loop(
-            context='authority-ignoring Paper agent',
+            context='dispatch-bounded Paper agent',
             usage_meter=meter,
             abort=AbortSignal.never(),
             round_tools=['tool'],
@@ -215,45 +207,19 @@ def test_provider_cannot_execute_tools_after_budget_authority_is_removed():
                 'execute', calls['execute'] + 1),
         )
 
-    assert admitted_tools == [['tool'], None]
-    assert calls == {'dispatch': 2, 'execute': 1}
-    assert raised.value.reason == 'agent_budget_ignored'
-    assert meter.snapshot()['budget_ignored'] is True
+    assert calls == {'dispatch': 2, 'execute': 2}
+    assert raised.value.reason == 'dispatch_budget'
+    assert meter.snapshot()['agent_dispatches'] == 3
 
 
-def test_budget_overrides_cannot_disable_or_escape_hard_envelopes():
-    assert paper_agent_token_budget(
-        'qa', {'TOFU_PAPER_QA_AGENT_TOKEN_BUDGET': '0'}) == 240_000
-    assert paper_agent_token_budget(
-        'qa', {'TOFU_PAPER_QA_AGENT_TOKEN_BUDGET': '999999999'}) \
-        == PAPER_AGENT_TOKEN_BUDGET_HARD_MAX
-    assert paper_agent_dispatch_budget(
-        'qa', {'TOFU_PAPER_QA_AGENT_DISPATCH_BUDGET': '0'}) == 8
-    assert paper_agent_dispatch_budget(
-        'qa', {'TOFU_PAPER_QA_AGENT_DISPATCH_BUDGET': '999999'}) \
-        == PAPER_AGENT_DISPATCH_BUDGET_HARD_MAX
-
-
-def test_all_seven_stage_defaults_are_finite_and_environment_names_are_unique():
-    expected = {
-        'report': (480_000, 10),
-        'qa': (240_000, 8),
-        'deepen': (320_000, 8),
-        'insight': (240_000, 8),
-        'recommend': (160_000, 8),
-        'survey': (240_000, 10),
-        'ideate': (160_000, 10),
-    }
-    assert {
-        stage: (spec.token_default, spec.dispatch_default)
-        for stage, spec in PAPER_AGENT_BUDGET_SPECS.items()
-    } == expected
-    env_names = [
-        name
-        for spec in PAPER_AGENT_BUDGET_SPECS.values()
-        for name in (spec.token_env, spec.dispatch_env)
-    ]
-    assert len(env_names) == len(set(env_names)) == 14
+def test_every_stage_defaults_to_no_declared_envelope():
+    for stage in ('report', 'qa', 'deepen', 'insight', 'recommend',
+                  'survey', 'ideate', 'research-action'):
+        snapshot = PaperAgentUsageMeter.for_stage(
+            stage, fallback_model='m').snapshot()
+        assert snapshot['agent_token_budget'] == 0, stage
+        assert snapshot['agent_dispatch_budget'] == 0, stage
+        assert snapshot['forced_final'] is False, stage
 
 
 def test_every_agentic_paper_owner_uses_the_guarded_chassis():
@@ -263,13 +229,7 @@ def test_every_agentic_paper_owner_uses_the_guarded_chassis():
         assert 'run_agent_loop(' not in source, relative_path
         assert 'usage_meter=' in source, relative_path
         assert '.allowed_tools(' not in source, relative_path
-        if relative_path == 'lib/paper/ideate.py':
-            # Documented exception: the dispatch callback retries an EMPTY
-            # tool-less synthesis with ONE extra paid provider attempt inside
-            # the same logical round; the chassis only observes the returned
-            # result, so that attempt is accounted explicitly at the retry
-            # site. Exactly one such call, next to its rationale comment.
-            assert source.count('.observe_agent_round(') == 1, relative_path
-            assert 'second paid provider attempt' in source, relative_path
-        else:
-            assert '.observe_agent_round(' not in source, relative_path
+        # Accounting happens once, in the chassis. A workflow that accounts its
+        # own extra paid attempt would be running a second provider dispatch
+        # outside the loop's authority, which no Paper stage does.
+        assert '.observe_agent_round(' not in source, relative_path

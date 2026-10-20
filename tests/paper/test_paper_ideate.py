@@ -666,45 +666,35 @@ def test_no_gaps_is_clean_failure():
     _ok('empty open_gaps → clean ok=False with a run-survey-first message')
 
 
-def test_empty_forced_synthesis_retries_only_current_dispatch():
-    """An empty provider-final answer must not replay the ideation stage."""
-    import json
-
+def test_empty_provider_answer_fails_instead_of_retrying_without_tools():
+    """An empty provider answer must not be papered over by a tool-less retry."""
     import lib.paper.ideate as it
     from lib.paper.agent_usage import PaperAgentUsageMeter
 
     calls = []
-    payload = json.dumps({'ideas': [{'title': 'Recovered idea'}]})
 
     def _fake_dispatch(_messages, *, on_content, tools, **_kwargs):
         calls.append(tools)
-        if len(calls) == 1:
-            return (
-                {'role': 'assistant', 'content': ''}, 'stop',
-                {'prompt_tokens': 10, 'completion_tokens': 2,
-                 '_empty_stop': True},
-            )
-        on_content(payload)
         return (
-            {'role': 'assistant', 'content': payload}, 'stop',
-            {'prompt_tokens': 10, 'completion_tokens': 8},
+            {'role': 'assistant', 'content': ''}, 'stop',
+            {'prompt_tokens': 10, 'completion_tokens': 2,
+             '_empty_stop': True},
         )
 
-    meter = PaperAgentUsageMeter(
-        'ideate', token_budget=1_000, dispatch_budget=1, repeat_limit=0)
+    meter = PaperAgentUsageMeter('ideate')
     restore = _patch({'dispatch_stream': _fake_dispatch})
     try:
-        ideas = it._generate_raw_ideas(
-            'direction', _OPEN_GAPS, '', 'en', usage_meter=meter)
+        with pytest.raises(Exception):
+            it._generate_raw_ideas(
+                'direction', _OPEN_GAPS, '', 'en', usage_meter=meter)
     finally:
         restore()
 
-    assert ideas == [{'title': 'Recovered idea'}]
-    assert len(calls) == 2 and all(not tools for tools in calls), \
-        'retry must remain tool-less'
-    assert meter.calls == 2, 'both paid attempts must be accounted'
-    assert meter.agent_dispatches == 2, 'retry must consume dispatch budget'
-    _ok('empty forced synthesis retries one dispatch without replaying tools')
+    # Exactly one paid attempt, still carrying its tools: an unverified stream
+    # is a typed failure, never a silent second call with reduced authority.
+    assert len(calls) == 1 and calls[0], 'no tool-less retry, no replay'
+    assert meter.calls == 1 and meter.agent_dispatches == 1
+    _ok('empty provider answer fails honestly instead of a tool-less retry')
 
 
 def main():
@@ -729,7 +719,7 @@ def main():
         test_partial_structural_rejection_is_not_degraded,
         test_zero_accepted_on_rubric_is_honest_not_degraded,
         test_no_gaps_is_clean_failure,
-        test_empty_forced_synthesis_retries_only_current_dispatch,
+        test_empty_provider_answer_fails_instead_of_retrying_without_tools,
     ]
     for fn in tests:
         try:

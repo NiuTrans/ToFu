@@ -99,8 +99,9 @@ class BoundedCalls:
             self._restored_records = len(records)
             self.meter.agent_dispatches = max(self.meter.agent_dispatches, dispatches)
         except (ValueError, TypeError, KeyError, OSError):
-            # A corrupt admission ledger must not reset paid-call authority.
-            self.reserved_tokens = self.meter.token_budget
+            # A corrupt cache ledger only loses reconstructible work; it grants
+            # no authority and must not change what the run may spend.
+            self.reserved_tokens = 0
 
     def _save_usage(self):
         if self.ledger:
@@ -141,12 +142,12 @@ class BoundedCalls:
                     return record['result']
             except (ValueError, KeyError, OSError):
                 pass
+        # Charge pessimistically when the provider omits token usage; the
+        # reservation is only an estimate for the ledger, never an admission
+        # gate. Survey cost is reported, not capped.
         estimate = len(body) + len(system) + 4000
-        if (self.meter.agent_dispatches >= self.meter.dispatch_budget or
-                max(self.reserved_tokens, self.meter.agent_tokens) + estimate > self.meter.token_budget):
-            raise RuntimeError('shared survey usage budget exhausted')
         self.reserved_tokens += estimate
-        self.meter.tools_for_round(None, self.meter.agent_dispatches)
+        self.meter.begin_dispatch()
         self._save_usage()
         chunks = []
         from lib.llm.stream_result import ensure_provider_stream_result

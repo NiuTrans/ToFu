@@ -985,7 +985,7 @@ def _run_agent(task: dict, workspace: Mapping[str, Any], epoch: PaperToolEpochV2
     budget = normalize_action_logical_budget(task.get('logical_budget'))
     meter = restored_meter if continuation is not None else PaperAgentUsageMeter(
         'research-action', token_budget=budget['token_budget'],
-        dispatch_budget=budget['dispatch_budget'], repeat_limit=0, fallback_model=model_name)
+        dispatch_budget=budget['dispatch_budget'], fallback_model=model_name)
     model_admissions = {}
     if continuation is not None:
         task['agentUsageV1'] = meter.snapshot()

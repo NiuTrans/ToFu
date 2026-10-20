@@ -245,8 +245,7 @@ def _discover_search_query(ctx: dict) -> tuple:
             direction, e)
         return '', {}
     from lib.research.telemetry import ResearchUsageMeter
-    meter = ResearchUsageMeter(
-        'harvest', token_budget=8_000, dispatch_budget=1, repeat_limit=0)
+    meter = ResearchUsageMeter('harvest')
     if raw_usage:
         meter.record(raw_usage)
     usage = meter.snapshot() if raw_usage else {}

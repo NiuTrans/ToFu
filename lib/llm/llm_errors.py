@@ -1072,6 +1072,42 @@ def _claims_credential_missing(error_text: str) -> bool:
 #  Central HTTP error classifier
 # ══════════════════════════════════════════════════════════
 
+_PROVIDER_REFUSAL_ATTR = 'provider_refused_request'
+
+
+def mark_provider_refusal(error):
+    """Witness that a waitable capacity rejection consumed no provider tokens.
+
+    ``RateLimitError`` is the whole waitable class: HTTP 429 slot rotation,
+    gateway 502/503/504, vendor-transient outages and saturation escalations.
+    Those failures are answered with a complete non-200 status line, which
+    precedes every body byte, so no prompt ran and nothing can be billed — and
+    the dispatcher responds by retrying on another slot rather than ending the
+    task. Budget settlement reads this witness so such an attempt is accounted
+    at zero instead of unconfirmed, which previously fenced the remaining
+    allowance of a finite task and killed it on the first 429.
+
+    Deliberately narrow: an SSE ``error`` frame after content already streamed
+    is never a refusal, and request-scoped rejections (bad payload, prompt too
+    long, policy block) keep their unconfirmed settlement because the attempt
+    is terminal either way and a false "complete" would hide real spend.
+    """
+    if not isinstance(error, RateLimitError):
+        return error
+    try:
+        setattr(error, _PROVIDER_REFUSAL_ATTR, True)
+    except Exception:
+        # Settlement evidence is diagnostic state, never a failure cause.
+        pass
+    return error
+
+
+def provider_refused_request(error) -> bool:
+    """True when ``error`` carries proof that no provider token was consumed."""
+    return bool(getattr(error, _PROVIDER_REFUSAL_ATTR, False))
+
+
+
 def _classify_http_error(status_code: int, err_msg: str, model: str,
                          log_prefix: str, *, max_tokens: int = 0,
                          credential_present: bool = False,

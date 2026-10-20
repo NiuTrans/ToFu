@@ -1,155 +1,74 @@
-"""Bounded paid-call accounting for every agentic Paper workflow.
+"""Paid-call accounting for every agentic Paper workflow — no implicit envelopes.
 
-Responsibility: define one stage budget contract, account each upstream model
-dispatch, and provide the policy hooks consumed by ``agent_loop_policy``.
-Prompt construction and task/event presentation remain with each workflow.
+Responsibility: account each upstream model dispatch, price it, and expose one
+JSON-safe snapshot. Entry point: :class:`PaperAgentUsageMeter`.
 
-The dispatch envelope is deliberately independent from the generic agent-loop
-repeat breaker.  Exact repeated calls are only one failure mode; a wandering
-model can change arguments forever while an unmetered provider reports no
-tokens.  Every Paper stage therefore gets both a token envelope and a finite
-dispatch envelope.  The last admitted dispatch is tool-less synthesis, so the
-budget includes the call needed to turn gathered evidence into a deliverable.
+A Paper stage has **no** spend or dispatch limit of its own. Every run is
+bounded by the shared chassis' no-progress breaker, the user's Stop, and — only
+when a caller explicitly declares one — its own envelope. There is deliberately
+no stage default: a fixed token/dispatch number cannot be derived from the
+paper, the model, or the machine, so imposing one silently truncates evidence.
+
+When a caller *does* declare an envelope (research actions freeze one in their
+task identity), exhausting it fails the dispatch with
+:class:`PaperAgentBudgetExceeded`. It never removes the model's tools: a
+tool-less round invites the model to print a tool call as prose, which then
+looks like a finished answer.
+
+The legacy snapshot keys (``agent_token_budget``, ``agent_dispatch_budget``,
+``forced_final``, ``forced_final_reason``, ``budget_ignored``) remain because
+that shape is the durable checkpoint and observation contract. A stage without
+a declared envelope reports zero, which the contract already defines as
+unbounded, and the terminal flags can no longer be set.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-import os
 import math
 import threading
-from typing import Any, Optional
+from typing import Any
 
-from lib.agent_loop.agent_loop import LoopDirective
 from lib.cost import compute_cost, normalize_usage, split_input_tokens
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
 PAPER_AGENT_USAGE_VERSION = 'paper-agent-usage/v1'
-PAPER_AGENT_TOKEN_BUDGET_HARD_MAX = 2_000_000
-PAPER_AGENT_DISPATCH_BUDGET_HARD_MAX = 32
-PAPER_AGENT_TOKEN_BUDGET_MIN = 16_000
-PAPER_AGENT_DISPATCH_BUDGET_MIN = 2
 
 
-@dataclass(frozen=True)
-class PaperAgentBudgetSpec:
-    """One task-local API-cost envelope; no user state is retained globally."""
+class PaperAgentBudgetExceeded(RuntimeError):
+    """A caller-declared envelope is spent; the task fails instead of degrading."""
 
-    stage: str
-    token_env: str
-    token_default: int
-    dispatch_env: str
-    dispatch_default: int
-
-
-PAPER_AGENT_BUDGET_SPECS = {
-    'report': PaperAgentBudgetSpec(
-        'report', 'TOFU_PAPER_REPORT_AGENT_TOKEN_BUDGET', 480_000,
-        'TOFU_PAPER_REPORT_AGENT_DISPATCH_BUDGET', 10),
-    'qa': PaperAgentBudgetSpec(
-        'qa', 'TOFU_PAPER_QA_AGENT_TOKEN_BUDGET', 240_000,
-        'TOFU_PAPER_QA_AGENT_DISPATCH_BUDGET', 8),
-    'deepen': PaperAgentBudgetSpec(
-        'deepen', 'TOFU_PAPER_DEEPEN_AGENT_TOKEN_BUDGET', 320_000,
-        'TOFU_PAPER_DEEPEN_AGENT_DISPATCH_BUDGET', 8),
-    'insight': PaperAgentBudgetSpec(
-        'insight', 'TOFU_PAPER_INSIGHT_AGENT_TOKEN_BUDGET', 240_000,
-        'TOFU_PAPER_INSIGHT_AGENT_DISPATCH_BUDGET', 8),
-    'recommend': PaperAgentBudgetSpec(
-        'recommend', 'TOFU_PAPER_RECOMMEND_AGENT_TOKEN_BUDGET', 160_000,
-        'TOFU_PAPER_RECOMMEND_AGENT_DISPATCH_BUDGET', 8),
-    # Preserve the established research token environment names. Dispatch
-    # limits are additive and use the same research-stage namespace.
-    'survey': PaperAgentBudgetSpec(
-        'survey', 'TOFU_RESEARCH_SURVEY_TOKEN_BUDGET', 240_000,
-        'TOFU_RESEARCH_SURVEY_DISPATCH_BUDGET', 10),
-    'ideate': PaperAgentBudgetSpec(
-        'ideate', 'TOFU_RESEARCH_IDEATE_TOKEN_BUDGET', 160_000,
-        'TOFU_RESEARCH_IDEATE_DISPATCH_BUDGET', 10),
-}
-
-
-def resolve_paper_agent_budget(
-    env_name: str,
-    default: int,
-    *,
-    minimum: int,
-    maximum: int,
-    environment: Mapping[str, str] | None = None,
-) -> int:
-    """Resolve one finite override; zero/malformed values fail back bounded."""
-    env = os.environ if environment is None else environment
-    bounded_default = max(minimum, min(maximum, int(default)))
-    raw = env.get(env_name)
-    if raw is None or not str(raw).strip():
-        return bounded_default
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError, OverflowError):
-        logger.warning('[Paper:Usage] invalid %s=%r; using %d',
-                       env_name, raw, bounded_default)
-        return bounded_default
-    if value < minimum:
-        logger.warning('[Paper:Usage] %s=%r is below finite minimum %d; using %d',
-                       env_name, raw, minimum, bounded_default)
-        return bounded_default
-    return min(maximum, value)
-
-
-def paper_agent_token_budget(
-    stage: str,
-    environment: Mapping[str, str] | None = None,
-) -> int:
-    """Return the finite logical-token envelope for one named Paper stage."""
-    try:
-        spec = PAPER_AGENT_BUDGET_SPECS[stage]
-    except KeyError as exc:
-        raise ValueError(f'unknown Paper agent stage: {stage!r}') from exc
-    return resolve_paper_agent_budget(
-        spec.token_env, spec.token_default,
-        minimum=PAPER_AGENT_TOKEN_BUDGET_MIN,
-        maximum=PAPER_AGENT_TOKEN_BUDGET_HARD_MAX,
-        environment=environment,
-    )
-
-
-def paper_agent_dispatch_budget(
-    stage: str,
-    environment: Mapping[str, str] | None = None,
-) -> int:
-    """Return dispatches including the reserved final synthesis attempt."""
-    try:
-        spec = PAPER_AGENT_BUDGET_SPECS[stage]
-    except KeyError as exc:
-        raise ValueError(f'unknown Paper agent stage: {stage!r}') from exc
-    return resolve_paper_agent_budget(
-        spec.dispatch_env, spec.dispatch_default,
-        minimum=PAPER_AGENT_DISPATCH_BUDGET_MIN,
-        maximum=PAPER_AGENT_DISPATCH_BUDGET_HARD_MAX,
-        environment=environment,
-    )
+    def __init__(self, stage: str, reason: str, *, token_budget: int = 0,
+                 dispatch_budget: int = 0, agent_tokens: int = 0,
+                 agent_dispatches: int = 0):
+        self.stage = stage
+        self.reason = reason
+        self.token_budget = token_budget
+        self.dispatch_budget = dispatch_budget
+        self.agent_tokens = agent_tokens
+        self.agent_dispatches = agent_dispatches
+        super().__init__(
+            f'Paper {stage} paid-call budget exhausted ({reason}): '
+            f'tokens {agent_tokens}/{token_budget or "unbounded"}, '
+            f'dispatches {agent_dispatches}/{dispatch_budget or "unbounded"}')
 
 
 class PaperAgentUsageMeter:
-    """Account model calls and force finite evidence-to-answer convergence.
+    """Account model calls and price them; impose no envelope by default.
 
-    ``token_budget`` watches only calls made through the open-ended agent loop.
-    Direct finite calls may use :meth:`record`; this lets auto-research keep
-    rubric calls in the same cost snapshot without letting them affect loop
-    admission. ``dispatch_budget`` counts actual agent dispatch attempts, including
-    unmetered responses and the final tool-less synthesis call.
+    ``token_budget`` / ``dispatch_budget`` are explicit caller declarations.
+    Zero (the default for every Paper stage) means unbounded. ``agent_tokens``
+    counts only open-ended agent-loop dispatches, matching the checkpoint
+    contract that a declared envelope was originally frozen against.
     """
 
-    def __init__(self, stage: str, *, token_budget: int,
-                 dispatch_budget: int, repeat_limit: int = 2,
-                 fallback_model: str = ''):
+    def __init__(self, stage: str, *, token_budget: int = 0,
+                 dispatch_budget: int = 0, fallback_model: str = ''):
         self.stage = str(stage or 'paper')
         self.token_budget = max(0, int(token_budget or 0))
         self.dispatch_budget = max(0, int(dispatch_budget or 0))
-        self.repeat_limit = max(0, int(repeat_limit or 0))
         self.fallback_model = fallback_model or ''
         self.calls = 0
         self.priced_calls = 0
@@ -166,44 +85,26 @@ class PaperAgentUsageMeter:
         self.cost_cny = 0.0
         self.cost_estimated = False
         self.models: set[str] = set()
+        # Terminal finalisation state is restore-only: nothing sets it any more,
+        # but a checkpoint written before this change must round-trip unchanged.
         self.force_final_reason = ''
         self.budget_ignored = False
-        self._forced_rounds: set[int] = set()
-        self._previous_fingerprint: Optional[str] = None
-        self._repeat_streak = 0
         self._lock = threading.RLock()
 
     @classmethod
-    def for_stage(
-        cls,
-        stage: str,
-        *,
-        fallback_model: str = '',
-        environment: Mapping[str, str] | None = None,
-    ) -> 'PaperAgentUsageMeter':
-        """Build the canonical finite meter for a named workflow."""
-        return cls(
-            stage,
-            token_budget=paper_agent_token_budget(stage, environment),
-            dispatch_budget=paper_agent_dispatch_budget(stage, environment),
-            # Exact call+world repetition is owned by the guarded chassis. The
-            # compatibility detector remains available to standalone meters,
-            # but production owners must preserve the canonical no_progress
-            # reason and threshold.
-            repeat_limit=0,
-            fallback_model=fallback_model,
-        )
+    def for_stage(cls, stage: str, *,
+                  fallback_model: str = '') -> 'PaperAgentUsageMeter':
+        """Build the meter for a named Paper workflow; no stage has a default cap."""
+        return cls(stage, fallback_model=fallback_model)
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, Any], *, fallback_model: str = '') -> 'PaperAgentUsageMeter':
         """Restore complete accounting; loop/tool replay authority is not restored.
 
-        Recovery uses the canonical chassis repetition detector (repeat_limit=0).
-        Its world-state history is a separate continuation requirement. Missing
-        counters are refused rather than synthesized from current defaults.
+        Missing counters are refused rather than synthesized from current
+        defaults.
         """
-        meter = cls('restoring', token_budget=0, dispatch_budget=0,
-                    repeat_limit=0, fallback_model=fallback_model)
+        meter = cls('restoring', fallback_model=fallback_model)
         template = meter.snapshot()
         if (not isinstance(snapshot, Mapping) or set(snapshot) != set(template)
                 or snapshot.get('version') != PAPER_AGENT_USAGE_VERSION):
@@ -227,12 +128,7 @@ class PaperAgentUsageMeter:
             raise ValueError('Paper usage checkpoint finalisation is inconsistent')
         if snapshot['agent_tokens'] > snapshot['total_tokens']:
             raise ValueError('Paper usage checkpoint agent tokens exceed total tokens')
-        if (not snapshot['forced_final'] and
-                ((snapshot['agent_token_budget'] and snapshot['agent_tokens'] >= snapshot['agent_token_budget'])
-                 or (snapshot['agent_dispatch_budget'] and snapshot['agent_dispatches'] >= snapshot['agent_dispatch_budget']))):
-            raise ValueError('Paper usage checkpoint omits exhausted-budget finalisation')
-        aliases = {'agent_token_budget': 'token_budget', 'agent_dispatch_budget': 'dispatch_budget',
-                   'forced_final_reason': 'force_final_reason'}
+        aliases = {'agent_token_budget': 'token_budget', 'agent_dispatch_budget': 'dispatch_budget'}
         for key in template:
             if key in ('version', 'forced_final', 'models'):
                 continue
@@ -285,76 +181,36 @@ class PaperAgentUsageMeter:
             self.unmetered_calls += 1
             logger.debug('[Paper:Usage] record failed (non-fatal): %s', exc)
 
-    def _force_final_unlocked(self, reason: str) -> None:
-        if self.force_final_reason:
-            return
-        self.force_final_reason = reason
-        logger.warning(
-            '[Paper:%s] %s reached; next/current dispatch synthesizes without tools',
-            self.stage, reason)
+    def begin_dispatch(self) -> None:
+        """Count one agent dispatch; refuse only a caller-declared exhausted envelope.
 
-    def tools_for_round(self, requested_tools: Any, round_index: int):
-        """Count one agent dispatch and reserve the last call for synthesis."""
+        Raises :class:`PaperAgentBudgetExceeded` *before* the paid request is
+        sent, so an over-budget run fails with a typed error instead of
+        continuing with degraded authority.
+        """
         with self._lock:
             self.agent_dispatches += 1
-            if (not self.force_final_reason and self.dispatch_budget
-                    and self.agent_dispatches >= self.dispatch_budget):
-                self._force_final_unlocked('dispatch_budget')
-            if self.force_final_reason:
-                self._forced_rounds.add(int(round_index))
-                return None
-            return requested_tools
+            if self.dispatch_budget and self.agent_dispatches > self.dispatch_budget:
+                raise PaperAgentBudgetExceeded(
+                    self.stage, 'dispatch_budget',
+                    token_budget=self.token_budget,
+                    dispatch_budget=self.dispatch_budget,
+                    agent_tokens=self.agent_tokens,
+                    agent_dispatches=self.agent_dispatches)
+            if self.token_budget and self.agent_tokens >= self.token_budget:
+                raise PaperAgentBudgetExceeded(
+                    self.stage, 'token_budget',
+                    token_budget=self.token_budget,
+                    dispatch_budget=self.dispatch_budget,
+                    agent_tokens=self.agent_tokens,
+                    agent_dispatches=self.agent_dispatches)
 
     def observe_agent_round(self, usage, message) -> None:
-        """Record a loop dispatch and update token/repetition finalisation."""
+        """Record one loop dispatch and add its tokens to the agent total."""
         with self._lock:
             before = self.total_tokens
             self._record_unlocked(usage)
             self.agent_tokens += max(0, self.total_tokens - before)
-            if (self.token_budget and self.agent_tokens >= self.token_budget
-                    and not self.force_final_reason):
-                self._force_final_unlocked('token_budget')
-
-            calls = message.get('tool_calls') if isinstance(message, dict) else None
-            if not calls or self.repeat_limit <= 0:
-                self._previous_fingerprint = None
-                self._repeat_streak = 0
-                return
-            fingerprint = repr([
-                (tc.get('function', {}).get('name', ''),
-                 tc.get('function', {}).get('arguments', ''))
-                for tc in calls if isinstance(tc, dict)
-            ])
-            if fingerprint == self._previous_fingerprint:
-                self._repeat_streak += 1
-                if self._repeat_streak >= self.repeat_limit:
-                    self._force_final_unlocked('repeated_tool_calls')
-            else:
-                self._repeat_streak = 0
-            self._previous_fingerprint = fingerprint
-
-    def allowed_tools(self, requested_tools):
-        """Compatibility reader; new loops use :meth:`tools_for_round`."""
-        with self._lock:
-            return None if self.force_final_reason else requested_tools
-
-    def forced_round(self, round_index: int) -> bool:
-        """Whether this exact upstream attempt was admitted without tools."""
-        with self._lock:
-            return int(round_index) in self._forced_rounds
-
-    def decide_round(self, round_index: int, message) -> LoopDirective | None:
-        """Reject provider tool calls emitted after tool authority was removed."""
-        with self._lock:
-            forced = int(round_index) in self._forced_rounds
-            calls = message.get('tool_calls') if isinstance(message, dict) else None
-            if forced and calls:
-                self.budget_ignored = True
-                logger.error(
-                    '[Paper:%s] provider emitted tool calls after tools were removed',
-                    self.stage)
-                return LoopDirective.halt('agent_budget_ignored')
-        return None
 
     def snapshot(self) -> dict:
         """Return the stable JSON-safe accounting and admission contract."""
@@ -375,6 +231,9 @@ class PaperAgentUsageMeter:
                 'agent_token_budget': self.token_budget,
                 'agent_dispatches': self.agent_dispatches,
                 'agent_dispatch_budget': self.dispatch_budget,
+                # Terminal flags retained for the durable contract; a Paper run
+                # no longer degrades its own authority, so new runs leave them
+                # unset and restored old checkpoints keep their original value.
                 'forced_final': bool(self.force_final_reason),
                 'forced_final_reason': self.force_final_reason,
                 'budget_ignored': self.budget_ignored,
@@ -386,13 +245,7 @@ class PaperAgentUsageMeter:
 
 
 __all__ = [
-    'PAPER_AGENT_BUDGET_SPECS',
-    'PAPER_AGENT_DISPATCH_BUDGET_HARD_MAX',
-    'PAPER_AGENT_TOKEN_BUDGET_HARD_MAX',
     'PAPER_AGENT_USAGE_VERSION',
-    'PaperAgentBudgetSpec',
+    'PaperAgentBudgetExceeded',
     'PaperAgentUsageMeter',
-    'paper_agent_dispatch_budget',
-    'paper_agent_token_budget',
-    'resolve_paper_agent_budget',
 ]

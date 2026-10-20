@@ -36,10 +36,17 @@ project write tools; nothing here calls a model directly.
   reuse requires matching count/width and successful extraction. Verify
   `tests/pdf_parser/test_pdf_classic_bounds.py`.
 
-`agent_usage.py` owns shared budget/accounting snapshots and strict meter
+`agent_usage.py` owns shared accounting snapshots and strict meter
 restoration; its restoration guards live in
 `tests/research/test_research_meter_recovery.py`. Workflow owners must separately
 restore loop progress and task ownership before executing a continuation.
+
+No Paper stage declares a default spend or dispatch envelope, and no stage may
+reintroduce one as a configuration knob. A loop ends on the shared no-progress
+breaker, cancellation, or a caller-frozen `logical_budget`; a spent caller
+envelope raises `PaperAgentBudgetExceeded` before the next paid dispatch and
+never removes the model's tools. The specification is
+`tests/paper/test_paper_agent_loop_policy.py`.
 
 ## Verification
 

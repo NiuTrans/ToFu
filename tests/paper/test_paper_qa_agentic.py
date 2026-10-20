@@ -248,7 +248,8 @@ def test_engine_answers_report_only_question_from_injected_report():
         usage = task['agentUsageV1']
         assert usage['stage'] == 'qa' and usage['agent_dispatches'] == 1
         done = [event for event in task['events'] if event.get('type') == 'done']
-        assert done[-1]['agentUsageV1']['agent_dispatch_budget'] == 8
+        assert done[-1]['agentUsageV1']['agent_dispatch_budget'] == 0
+        assert done[-1]['agentUsageV1']['forced_final_reason'] == ''
         # Prove the report actually reached the model.
         first_sys = cap['messages_seen'][0][0]['content']
         assert 'degrades on out-of-domain' in first_sys
