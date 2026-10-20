@@ -760,7 +760,7 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     step6_t0 = time.time()
     if not rerank:
         logger.debug('[Search] step6 skipped — caller passed rerank=False')
-    elif len(relevant) > max_results:
+    else:
         relevant = rerank_by_bm25(query, relevant, max_results)
     final_count = min(len(relevant), max_results)
     step_timings['step6_bm25_rerank'] = time.time() - step6_t0
