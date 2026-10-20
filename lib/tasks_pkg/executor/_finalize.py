@@ -12,6 +12,9 @@ from typing import Any
 from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.agent_core.events import EventType as EventType, build_event as build_event, now_ms as now_ms
 from lib.log import get_logger
+from lib.agent_core.publication import (
+    ChildPublicationRevoked, check_publication, publication_commit,
+)
 from lib.tool_results.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
@@ -72,6 +75,42 @@ _FINALIZE_VERDICTS = frozenset(
 
 
 def _finalize_tool_round(
+    task: dict,
+    rn: int,
+    round_entry: dict,
+    results: list,
+    *,
+    query_override: str = '',
+    extra_event_fields: dict[str, Any] | None = None,
+    status: str = 'done',
+) -> None:
+    """Publish handler presentation while this occurrence still owns it."""
+    check_publication()
+    if round_entry.get('_toolResultPublicationClosed'):
+        return
+    from lib.tasks_pkg.tool_runtime import active_context_for_call
+    context = active_context_for_call(
+        task, round_num=rn, tool_call_id=round_entry.get('toolCallId', ''),
+        round_entry=round_entry)
+
+    def publish(_event=None):
+        return _publish_tool_round(
+            task, rn, round_entry, results, query_override=query_override,
+            extra_event_fields=extra_event_fields, status=status)
+
+    if context is None:
+        return publish()
+    try:
+        return context.result_publication.deliver(publish, None)
+    except ChildPublicationRevoked:
+        # Our timeout may discard this display. An enclosing invocation's
+        # revocation must still propagate through its existing cancellation path.
+        check_publication()
+        if not context.result_publication.closed:
+            raise
+
+
+def _publish_tool_round(
     task: dict[str, Any],
     rn: int,
     round_entry: dict[str, Any],
@@ -118,76 +157,79 @@ def _finalize_tool_round(
     # Must run BEFORE results are frozen onto the round + copied into the SSE
     # event, so the live stream and any later replay/rehydration carry the
     # same descriptors (a post-hoc mutation would reach only one of them).
-    rejection = tool_rejection_descriptor(round_entry)
-    if rejection is not None and isinstance(results, list):
-        for result_meta in results:
-            if isinstance(result_meta, dict):
-                stamp_tool_rejection(
-                    result_meta, rejection, legacy_result_alias=True)
     if isinstance(results, list):
         _attach_terminal_qr(results)
-    round_entry['results'] = results
-    _status = status if status in _FINALIZE_VERDICTS else 'done'
-    _prior = round_entry.get('status')
-    if (_status == 'done' and isinstance(_prior, str)
-            and _prior in _FINALIZE_VERDICTS and _prior != 'done'):
-        # Verdict protection: a failure verdict already recorded (e.g. the
-        # pool-timeout lane stamped 'error') outranks a late success settle.
-        _status = _prior
-    round_entry['status'] = _status
-    # This is a handler presentation update. The handler may still raise, or
-    # its declared deadline may replace the return value. The common pipeline
-    # audits the final outcome after those execution decisions have settled.
+    with publication_commit():
+        if round_entry.get('_toolResultPublicationClosed'):
+            return
+        rejection = tool_rejection_descriptor(round_entry)
+        if rejection is not None and isinstance(results, list):
+            for result_meta in results:
+                if isinstance(result_meta, dict):
+                    stamp_tool_rejection(
+                        result_meta, rejection, legacy_result_alias=True)
+        round_entry['results'] = results
+        _status = status if status in _FINALIZE_VERDICTS else 'done'
+        _prior = round_entry.get('status')
+        if (_status == 'done' and isinstance(_prior, str)
+                and _prior in _FINALIZE_VERDICTS and _prior != 'done'):
+            # Verdict protection: a failure verdict already recorded (e.g. the
+            # pool-timeout lane stamped 'error') outranks a late success settle.
+            _status = _prior
+        round_entry['status'] = _status
+        # This is a handler presentation update. The handler may still raise, or
+        # its declared deadline may replace the return value. The common pipeline
+        # audits the final outcome after those execution decisions have settled.
 
-    # Timing contract (). `tEnd` is stamped HERE — the shared
-    #   finalize seam every one of the ~44 handler call sites already funnels
-    #   through — so per-tool duration is measured in ONE place instead of 44
-    #   that would drift. `tStart` is carried forward from the round so the
-    #   terminal frame is SELF-DESCRIBING: a client that reconnected mid-turn
-    #   (or replays from a cursor) never saw the tool_start, and would
-    #   otherwise render a blank duration on exactly the path a user takes when
-    #   investigating a slow turn.
-    #   `tStart` may be absent when a round dict was hand-built by a secondary
-    #   surface (paper / swarm / timer); we then fall back to `tEnd` rather than
-    #   inventing a start, so a duration is either honest or zero — never
-    #   fabricated.
-    _t_end = (round_entry or {}).get('tEnd') or task_execution_time_ms(task)
-    # A late finalize must not clobber the real completion time already
-    # stamped by ``_settle_tool_result`` (which preserves an existing tEnd).
-    round_entry['tEnd'] = _t_end
-    _t_start = round_entry.get('tStart')
-    if _t_start is None:
-        _t_start = _t_end
-        round_entry['tStart'] = _t_start
+        # Timing contract (). `tEnd` is stamped HERE — the shared
+        #   finalize seam every one of the ~44 handler call sites already funnels
+        #   through — so per-tool duration is measured in ONE place instead of 44
+        #   that would drift. `tStart` is carried forward from the round so the
+        #   terminal frame is SELF-DESCRIBING: a client that reconnected mid-turn
+        #   (or replays from a cursor) never saw the tool_start, and would
+        #   otherwise render a blank duration on exactly the path a user takes when
+        #   investigating a slow turn.
+        #   `tStart` may be absent when a round dict was hand-built by a secondary
+        #   surface (paper / swarm / timer); we then fall back to `tEnd` rather than
+        #   inventing a start, so a duration is either honest or zero — never
+        #   fabricated.
+        _t_end = (round_entry or {}).get('tEnd') or task_execution_time_ms(task)
+        # A late finalize must not clobber the real completion time already
+        # stamped by ``_settle_tool_result`` (which preserves an existing tEnd).
+        round_entry['tEnd'] = _t_end
+        _t_start = round_entry.get('tStart')
+        if _t_start is None:
+            _t_start = _t_end
+            round_entry['tStart'] = _t_start
 
-    _tool_name = round_entry.get('toolName')
-    if not _tool_name and isinstance(results, list) and results \
-            and isinstance(results[0], dict):
-        _tool_name = results[0].get('toolName')
-    event = build_event(
-        EventType.TOOL_RESULT,
-        roundNum=rn,
-        toolCallId=round_entry.get('toolCallId', ''),
-        toolName=_tool_name or '',
-        query=query_override or round_entry['query'],
-        results=results,
-        # Self-describing terminal frame: the verdict ALWAYS rides the event,
-        # so a client never settles a round by inference. The client treats
-        # this field as the ONLY truth for the success/failure badge.
-        status=_status,
-        tStart=_t_start,
-        tEnd=_t_end,
-    )
-    # Carry the harness self-repair descriptor onto the tool_result event.
-    #   For early-announced rounds the original tool_start went out with the
-    #   pre-repair (possibly garbled) display, so the frontend relies on this
-    #   to swap in the corrected line + "auto-fixed" badge.
-    if round_entry.get('_repaired'):
-        event['_repaired'] = round_entry['_repaired']
-    if rejection is not None:
-        stamp_tool_rejection(event, rejection)
-    if extra_event_fields:
-        event.update(extra_event_fields)
+        _tool_name = round_entry.get('toolName')
+        if not _tool_name and isinstance(results, list) and results \
+                and isinstance(results[0], dict):
+            _tool_name = results[0].get('toolName')
+        event = build_event(
+            EventType.TOOL_RESULT,
+            roundNum=rn,
+            toolCallId=round_entry.get('toolCallId', ''),
+            toolName=_tool_name or '',
+            query=query_override or round_entry['query'],
+            results=results,
+            # Self-describing terminal frame: the verdict ALWAYS rides the event,
+            # so a client never settles a round by inference. The client treats
+            # this field as the ONLY truth for the success/failure badge.
+            status=_status,
+            tStart=_t_start,
+            tEnd=_t_end,
+        )
+        # Carry the harness self-repair descriptor onto the tool_result event.
+        #   For early-announced rounds the original tool_start went out with the
+        #   pre-repair (possibly garbled) display, so the frontend relies on this
+        #   to swap in the corrected line + "auto-fixed" badge.
+        if round_entry.get('_repaired'):
+            event['_repaired'] = round_entry['_repaired']
+        if rejection is not None:
+            stamp_tool_rejection(event, rejection)
+        if extra_event_fields:
+            event.update(extra_event_fields)
     append_event(task, event)
 
 

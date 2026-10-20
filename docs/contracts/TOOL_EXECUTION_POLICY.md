@@ -102,6 +102,28 @@ Each subsequent call still passes normal authority and recovery admission.
 Verify `tests/tasks_pkg/test_tool_outcome_finality.py` for legacy/V2 delivery,
 late exceptions, unknown writes, timeout attribution and successful read retry.
 
+**Settled result publication.** Problem: a worker returning after the parallel
+deadline could overwrite result cards and emit new handler frames after the
+timeout already reached the model. Decision: common result settlement revokes
+that occurrence's handler presentation through its existing runtime context.
+The shared publication fence protects bounded result mutations and event
+admission; enclosing invocation fences remain in force. A worker entering
+after collection closed never enters its handler. Late success or failure
+cannot replace the frozen result, verdict, timing or outcome audit.
+Resource ownership remains registered until worker exit; closing presentation
+does not join an observer, prove that external effects stopped, or grant retry.
+Alternatives rejected: preserving only the status still permits contradictory
+body text; joining an uncooperative handler removes the finite pool deadline;
+discarding its runtime context loses cancellation and cleanup ownership.
+Verify handler-entry, display-preparation and late-return races in
+`tests/tasks_pkg/test_tool_outcome_finality.py`.
+The fence lives on the active tool context, with no new worker or global
+registry. The process-local closed marker is stripped by the common storage
+projection while effect evidence stays intact. A CPython 3.12.13 allocation
+sample of 2,000 active contexts measured about 171 bytes per fence; separate
+100/1,000/2,000-cycle create/close/unregister samples each retained 208 traced
+bytes and zero active contexts. The durable round projection added zero bytes.
+
 
 Root MCP authority refreshes before each request through ordinary owner/policy
 assembly on detached carriers. Only names in the root's initial MCP candidate

@@ -6,6 +6,7 @@ from lib.tasks_pkg.tool_runtime.context import (
 
     active_context_for_call,
     cancel_task_contexts,
+    close_tool_result_publication,
     context_for_task,
     unregister_context,
 )
@@ -22,6 +23,7 @@ from lib.tasks_pkg.tool_runtime.progress import (
 __all__ = [
     'ToolCancelled', 'ToolExecutionContext', 'active_context_for_call',
     'cancel_task_contexts',
+    'close_tool_result_publication',
     'context_for_task', 'unregister_context',
     'DEFAULT_COALESCE_BYTES', 'DEFAULT_COALESCE_MS',
     'TOOL_PROGRESS_CONTRACT_VERSION', 'TOOL_PROGRESS_VERSION',

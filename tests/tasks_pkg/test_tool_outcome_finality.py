@@ -17,6 +17,179 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize('mode', ['legacy', 'v2'])
+@pytest.mark.parametrize('late_result', ['success', 'error'])
+def test_late_worker_cannot_rewrite_a_published_timeout(
+        mode, late_result, observations, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    workers = []
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        entered.set()
+        assert release.wait(5), 'test did not release its owned worker'
+        if late_result == 'error':
+            raise RuntimeError('LATE-WORKER-FAILURE')
+        _finalize_tool_round(task, number, row, [{'content': 'LATE-WORKER-SUCCESS'}])
+        return call_id, 'LATE-WORKER-SUCCESS', False
+
+    def deadline_after_entry(futures, task, deadline):
+        workers.extend(futures)
+        assert entered.wait(5), 'worker did not enter before the injected deadline'
+        raise TimeoutError('injected pool deadline')
+
+    monkeypatch.setattr(
+        'lib.tasks_pkg.tool_dispatch._pipeline._completed_tools_until_cancel',
+        deadline_after_entry)
+    task = task_for(handler, mode)
+    try:
+        row, messages, settled = dispatch(task)
+        assert row['status'] == 'error'
+        assert 'timed out' in messages[0]['content']
+        assert settled[0].execution_status == 'error'
+        fields = ('results', 'status', 'toolContent', 'toolResultEvidence', 'tEnd')
+        published = deepcopy({field: row.get(field) for field in fields})
+        event_count = len(observations[0])
+    finally:
+        release.set()
+        for worker in workers:
+            worker.result(timeout=5)
+
+    assert {field: row.get(field) for field in fields} == published
+    assert row['_runtimeState'] == 'error'
+    assert len(observations[0]) == event_count
+    assert [event['outcome'] for event in observations[1]] == ['error']
+    assert not task.get('_activeToolContexts'), 'late worker retained its runtime context'
+
+
+@pytest.mark.parametrize('boundary', ['resolver', 'presentation'])
+def test_timeout_closes_racing_handler_entry_and_presentation(
+        boundary, observations, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    workers, handlers = [], []
+
+    def pause():
+        entered.set()
+        assert release.wait(5), 'test did not release its owned producer'
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        handlers.append(call_id)
+        _finalize_tool_round(task, number, row, [{'content': 'RACING-PRESENTATION'}])
+        return call_id, 'RACING-PRESENTATION', False
+
+    task = task_for(handler)
+    if boundary == 'resolver':
+        def resolve(_name):
+            pause()
+            return handler
+        task['_tool_env'] = SimpleNamespace(resolve=resolve)
+    else:
+        monkeypatch.setattr(
+            'lib.tasks_pkg.executor._finalize._attach_terminal_qr',
+            lambda _results: pause())
+
+    def expire(futures, *_args):
+        workers.extend(futures)
+        assert entered.wait(5)
+        raise TimeoutError('injected race deadline')
+
+    monkeypatch.setattr(
+        'lib.tasks_pkg.tool_dispatch._pipeline._completed_tools_until_cancel', expire)
+    try:
+        row, messages, settled = dispatch(task)
+        assert 'timed out' in messages[0]['content']
+        assert settled[0].execution_status == 'error'
+        frozen = deepcopy(row['results'])
+        event_count = len(observations[0])
+    finally:
+        release.set()
+        for worker in workers:
+            worker.result(timeout=5)
+    assert row['results'] == frozen
+    assert row['status'] == row['_runtimeState'] == 'error'
+    assert len(observations[0]) == event_count
+    assert not task.get('_activeToolContexts')
+    if boundary == 'resolver':
+        assert handlers == [] and 'executionEffect' not in row
+    else:
+        assert handlers == ['occurrence-1']
+
+
+@pytest.mark.parametrize('own_closed', [False, True])
+def test_suppressed_tool_display_still_obeys_parent_revocation(own_closed, observations):
+    from lib.agent_core.publication import ChildPublicationFence, ChildPublicationRevoked
+    from lib.tasks_pkg.tool_runtime import context_for_task, unregister_context
+    task = task_for(lambda *_args: None)
+    _, row, _ = _build_tool_round_entry('fetch_url', {}, 'owned', '{}', 1, False)
+    context = context_for_task(
+        task, round_num=1, tool_call_id='owned', tool_name='fetch_url', round_entry=row)
+    row['_toolResultPublicationClosed'] = own_closed
+    parent = ChildPublicationFence()
+
+    def publish(_event):
+        parent.close()
+        _finalize_tool_round(task, 1, row, [{'content': 'REVOKED-PARENT'}])
+
+    try:
+        with pytest.raises(ChildPublicationRevoked):
+            parent.deliver(publish, None)
+    finally:
+        unregister_context(context)
+    assert row['results'] is None
+    assert observations[0] == []
+
+
+def test_timeout_revokes_only_the_owning_gateway_child(observations, monkeypatch):
+    from lib.tasks_pkg.handlers.tool_gateway import _execute_call_batch
+    entered, release = threading.Event(), threading.Event()
+    workers = []
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        if call_id == 'slow':
+            entered.set()
+            assert release.wait(5)
+        _finalize_tool_round(task, number, row, [{'content': call_id}])
+        return call_id, call_id, False
+
+    def completed_then_deadline(futures, *_args):
+        workers.extend(futures)
+        assert entered.wait(5)
+        for worker, identity in futures.items():
+            if identity[0] == 'fast':
+                worker.result(timeout=5)
+                yield worker
+        raise TimeoutError('injected deadline after healthy sibling')
+
+    monkeypatch.setattr(
+        'lib.tasks_pkg.tool_dispatch._pipeline._completed_tools_until_cancel',
+        completed_then_deadline)
+    task = task_for(handler)
+    task['toolRounds'] = []
+    task['_executable_tool_catalog'] = [{
+        'type': 'function', 'function': {'name': 'fetch_url',
+        'parameters': {'type': 'object', 'properties': {}}}}]
+    calls = [{'id': call_id, 'type': 'function',
+              'function': {'name': 'fetch_url', 'arguments': '{}'}}
+             for call_id in ('slow', 'fast')]
+    try:
+        receipts = _execute_call_batch(
+            task, calls, cfg={'autoApply': True}, project_path=None,
+            project_enabled=False, model='test-model', llm_round=1)
+        assert [receipt['status'] for receipt in receipts] == ['error', 'done']
+        assert [receipt.canonical.execution_status for receipt in receipts] == ['error', 'ok']
+        assert receipts[1]['output'] == 'fast'
+        assert len(task['_activeToolContexts']) == 1
+        frozen = deepcopy([row['results'] for row in task['toolRounds']])
+        event_count = len(observations[0])
+    finally:
+        release.set()
+        for worker in workers:
+            worker.result(timeout=5)
+    assert [row['results'] for row in task['toolRounds']] == frozen
+    assert len(observations[0]) == event_count
+    assert sorted(event['outcome'] for event in observations[1]) == ['error', 'ok']
+    assert not task.get('_activeToolContexts')
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
 @pytest.mark.parametrize('name', ['fetch_url', 'write_file'])
 @pytest.mark.parametrize('fault', ['missing', 'short', 'foreign_id', 'search_flag'])
 def test_invalid_handler_receipt_fails_the_owned_occurrence(

@@ -1,8 +1,9 @@
 """Per-tool structured runtime context.
 
 One context belongs to one tool-call occurrence. It wraps the chat task's
-existing abort state and owns only resources scoped to that call; detached
-workers keep their independent lifecycle.
+existing abort state, scoped resources and revocable handler presentation.
+Result collection can close presentation before worker exit; resources stay
+registered until their owner exits. Detached workers retain their own lifecycle.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from lib.agent_core.publication import ChildPublicationFence
 
 CancelCallback = Callable[[], Any]
 
@@ -37,6 +40,8 @@ class ToolExecutionContext:
     _next_callback_id: int = field(default=1, repr=False)
     _terminal_state: str | None = field(default=None, repr=False)
     _progress_sink: Any = field(default=None, repr=False)
+    result_publication: ChildPublicationFence = field(
+        default_factory=ChildPublicationFence, repr=False)
 
     @property
     def task_id(self) -> str:
@@ -178,6 +183,8 @@ def context_for_task(task: dict[str, Any], *, round_num: int,
     )
     lock = task.setdefault('_toolRuntimeLock', threading.RLock())
     with lock:
+        if round_entry.get('_toolResultPublicationClosed'):
+            context.result_publication.close()
         active = task.setdefault('_activeToolContexts', {})
         # Call IDs are batch-local and providers may recycle them. The round
         # occurrence is part of the process-local key.
@@ -185,6 +192,23 @@ def context_for_task(task: dict[str, Any], *, round_num: int,
         context._task_registry_key = key  # local implementation detail
         active[key] = context
     return context
+
+
+def close_tool_result_publication(task, *, round_num, tool_call_id, round_entry,
+                                  terminal_status=None):
+    """Revoke handler presentation; resource ownership lasts until worker exit."""
+    if not isinstance(round_entry, dict):
+        return
+    lock = task.setdefault('_toolRuntimeLock', threading.RLock())
+    with lock:
+        round_entry['_toolResultPublicationClosed'] = True
+        if terminal_status:
+            round_entry['status'] = terminal_status
+        context = active_context_for_call(
+            task, round_num=round_num, tool_call_id=tool_call_id,
+            round_entry=round_entry)
+    if context is not None:
+        context.result_publication.close()
 
 
 def active_context_for_call(
@@ -236,5 +260,6 @@ def cancel_task_contexts(task: dict[str, Any]) -> tuple[int, tuple[Exception, ..
 
 __all__ = [
     'ToolCancelled', 'ToolExecutionContext', 'active_context_for_call',
-    'cancel_task_contexts', 'context_for_task', 'unregister_context',
+    'cancel_task_contexts', 'close_tool_result_publication',
+    'context_for_task', 'unregister_context',
 ]
