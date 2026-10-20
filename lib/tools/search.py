@@ -308,33 +308,29 @@ def build_update_search_settings_tool() -> dict:
         "function": {
             "name": "update_search_settings",
             "description": (
-                "Read or change SERVER-WIDE web search/fetch settings. No arguments is "
-                "a PURE READ: always inspect current effective values before proposing "
-                "a change. Writes persist across restarts, hot-reload immediately, and "
-                "affect every conversation; write only when the user asks or repeated "
+                "SERVER-WIDE search/fetch settings. No arguments: PURE READ; always inspect "
+                "effective values first. Writes persist across restarts, hot-reload "
+                "immediately, affect every conversation. Write only when the user asks or repeated "
                 "results prove current values harmful. Integers clamp to safe ranges.\n"
                 "Profiles: fast=3 pages/30k chars/no LLM filter; balanced=6/60k/filter; "
-                "deep=10/100k/filter+link deepening. overrides customizes a profile; "
-                "legacy concrete knobs remain accepted and are stored as overrides.\n"
-                "Trade-offs: fetch_top_n adds coverage, latency, and tokens; "
+                "deep=10/100k/filter+link deepening. overrides customize a profile; "
+                "legacy concrete knobs become overrides.\n"
+                "fetch_top_n trades coverage, latency, and tokens; "
                 "fetch_timeout is seconds; max_download_mb is MB, not bytes; "
                 "llm_content_filter=true uses a slower selective LLM gate, false uses "
                 "faster/cheaper lexical ranking. block_domain/unblock_domain edit the "
                 "normalized fetch blocklist.\n"
-                "The result reports applied and rejected values with reasons, env "
-                "overrides shadowing saved values, and the new effective state. Explain "
-                "the outcome to the user."
+                "Returns applied and rejected values with reasons, env overrides "
+                "shadowing saved values, and new effective state. Explain the outcome."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "profile": {
-                        "type": "string", "enum": ["fast", "balanced", "deep"],
-                        "description": "Depth preset."
+                        "type": "string", "enum": ["fast", "balanced", "deep"]
                     },
                     "overrides": {
                         "type": "object",
-                        "description": "Custom values layered on the preset.",
                         "properties": {
                             "fetch_top_n": {"type": "integer"},
                             "llm_content_filter": {"type": "boolean"},
@@ -343,27 +339,24 @@ def build_update_search_settings_tool() -> dict:
                     },
                     "fetch_top_n": {
                         "type": "integer",
-                        "description": "Pages fetched per search (1-20)."
+                        "description": "Pages/search: 1-20."
                     },
                     "fetch_timeout": {
                         "type": "integer",
-                        "description": "Per-page fetch timeout in seconds (5-120)."
+                        "description": "Seconds/page: 5-120."
                     },
                     "max_download_mb": {
                         "type": "integer",
-                        "description": "Download cap in MB (>0, max 500), not bytes."
+                        "description": "MB/download: >0, max 500."
                     },
                     "llm_content_filter": {
-                        "type": "boolean",
-                        "description": "true=LLM relevance gate; false=local lexical ranking."
+                        "type": "boolean"
                     },
                     "block_domain": {
-                        "type": "string",
-                        "description": "Block a normalized fetch domain."
+                        "type": "string"
                     },
                     "unblock_domain": {
-                        "type": "string",
-                        "description": "Remove a domain from the fetch blocklist."
+                        "type": "string"
                     }
                 }
             }

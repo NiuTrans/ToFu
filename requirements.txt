@@ -128,8 +128,9 @@ jsonschema>=4.18
 # HARD floor for the current browser integration: get_playwright_pool, submit_task
 # and joined async handler shutdown preserve request cancellation and cleanup.
 # Older workers cannot provide the application browser ownership contract.
-tofu-search>=0.12.0
-trafilatura>=1.6
+# 0.12.1 also excludes extraction dependencies that corrupt source evidence.
+tofu-search>=0.12.1
+trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches
 # Chromium before any research/LLM spend so an interpreter mismatch fails fast.
@@ -151,15 +152,9 @@ fontTools>=4.40
 # embedding.  Without an explicit declaration export fails only after all
 # research, authoring and rendering work has already completed.
 brotli>=1.1
-# lxml — floor aligned with bootstrap.py's _CONDA_PYTHON_DEPS so the pip path
-# and the conda-repair path build the SAME environment (they drifted: 4.9 here
-# vs >=5.3 there). >=5.3 is not a guess, it is the floor our own declared deps
-# already impose, measured from installed metadata:
-#     trafilatura 2.0.0   -> lxml>=5.3.0   (non-Darwin)
-#     justext     3.0.2   -> lxml[html_clean]>=4.4.2
-#     lxml_html_clean 0.4.5 -> lxml>=6.1.1
-# So a resolver could never actually hand us 4.9 while trafilatura is declared;
-# the old floor was dead text that only served to disagree with the other list.
+# lxml baseline matches bootstrap.py's _CONDA_PYTHON_DEPS repair list.
+# Search imposes the stronger lxml>=6.1.3 floor through trafilatura>=2.3.1;
+# normal pip resolution and the workspace lockfile include that constraint.
 #
 # NOTE the comment below is about PACKAGING, not about this floor: since lxml
 # 5.2 the `lxml.html.clean` module is a backward-compat shim that re-exports the

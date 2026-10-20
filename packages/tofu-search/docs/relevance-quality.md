@@ -1,5 +1,37 @@
 # Search evidence quality
 
+## HTML source fidelity
+
+**Problem:** the previously allowed Trafilatura 2.0 installation moved nested
+link/code labels after their surrounding words, removed code indentation and
+allowed one extraction's deduplication state to affect later calls. Version 2.2
+still corrupted bracketed code identifiers and lost some short code blocks.
+These are evidence defects even when retrieval succeeds.
+
+**Decision:** require Trafilatura 2.3.1 or newer. Use the community's
+[nested-element fixes](https://github.com/adbar/trafilatura/pull/872) and
+[subsequent extraction corrections](https://github.com/adbar/trafilatura/releases/tag/v2.3.1)
+through the existing serialized extractor. Network policies, source limits,
+link inventories and the BeautifulSoup fallback retain their current owners.
+`tests/test_html_fidelity.py` exercises the actual dependency, including repeated
+calls, rather than mocking its output. Published package metadata and the
+workspace lockfile must both exclude the affected versions.
+
+Article heuristics can still flatten list-nested or highlighted code and remove
+blank lines. The existing supplemental-structure pass therefore compares
+preformatted DOM text literally, preserves indentation and internal newlines,
+and emits a sufficiently long Markdown fence when the original block is absent.
+Repeated blocks are added once. Hidden and excluded elements remain outside
+that sanitized content boundary; source and presentation limits still apply.
+The supplement may be omitted by a small final prefix budget, so an uncapped
+read or query-focused excerpt can be needed for code late in a long page.
+
+**Alternatives rejected:** flattening all markup loses source structure;
+reconstructing sentences with an LLM invents evidence; copying upstream parser
+internals creates a second maintenance owner. Passing the new tests proves
+these extraction behaviors, not general retrieval superiority or that an agent
+will quote the evidence correctly.
+
 ## Ranking and excerpts
 
 **Problem:** a fixed document prefix can hide the answer even after a successful

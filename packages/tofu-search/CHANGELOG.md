@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.1
+
+- Require Trafilatura 2.3.1 or newer for source-faithful HTML extraction:
+  preserve nested inline text order, code indentation and bracketed identifiers,
+  and keep deduplication scoped to the document. Add real-dependency regression
+  tests so an allowed installation cannot silently retain the older behavior.
+- Recover original preformatted source when article extraction still changes
+  its whitespace. Retain indentation and blank lines, safely fence literal
+  backticks, and suppress repeated copies within the existing output budget.
+
 ## 0.12.0
 
 - Run built-in Playwright fetch, authenticated search and rendering as concurrent
