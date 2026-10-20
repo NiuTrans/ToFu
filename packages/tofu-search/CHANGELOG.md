@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.7
+
+- Fuse upstream and local lexical ranks for snippet-only candidates, preserving
+  lexical tie ordering and existing diversity. Count upstream consensus once
+  and require lexical evidence before rank votes can promote a result. Keep
+  fetched-body ranking and explicit `rerank=False` behavior. This also guides
+  prefetch selection within its existing budget; no paid service or model call
+  is introduced.
+
 ## 0.12.6
 
 - Mark query-only English collection descriptions as uncertain even when they
