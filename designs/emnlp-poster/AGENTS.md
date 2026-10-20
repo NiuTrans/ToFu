@@ -3,6 +3,11 @@
 - `layout.py` owns copy and physical composition. `build_poster.py` owns the
   millimetre-coordinate scene, PDF/SVG exporters and print preflight. Edit these
   sources, then regenerate; `output/` is disposable.
+- `poster-data.json` owns displayed measurements and their scope; check each
+  cell against the referenced contract. `community-references.md` records the
+  finished posters inspected for composition, without reusing their figures.
+- QR geometry and proof section boundaries live in `layout.py` and are shared
+  by export and verification.
 - `evidence.json` maps claims to inspected implementation and manuscript hashes.
   Keep the scientific scope and source evidence aligned when copy changes.
 - `assets/` contains the author's mascot, official institutional marks, licensed

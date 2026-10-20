@@ -139,7 +139,7 @@ class Scene:
                     self.rect(x+col*module, y+row*module, module, module, INK)
 
 
-from layout import make_scene
+from layout import QR, make_scene
 
 
 def rgb(value):
@@ -186,8 +186,9 @@ def draw_pdf(scene, destination):
                 p.lineTo(x*MM, (HEIGHT-y)*MM)
             p.close()
             c.drawPath(p, stroke=0, fill=1)
-    c.linkURL(URL, (32*MM, (HEIGHT-1178)*MM, 335*MM, (HEIGHT-1160)*MM), relative=0)
-    c.linkURL(URL, (745*MM, (HEIGHT-1179)*MM, 810*MM, (HEIGHT-1114)*MM), relative=0)
+    c.linkURL(URL, (32*MM, (HEIGHT-1184)*MM, 335*MM, (HEIGHT-1167)*MM), relative=0)
+    qx, qy, qs = QR
+    c.linkURL(URL, (qx*MM, (HEIGHT-qy-qs)*MM, (qx+qs)*MM, (HEIGHT-qy)*MM), relative=0)
     c.showPage()
     c.save()
     # Import the supplied mascot as vector PDF, never as a screenshot.
@@ -319,7 +320,7 @@ def inspect_pdf(scene, pdf_path, output):
                   minimum_main_body_pt=min(a["size"] for a in expected if a["tag"] == "body"),
                   text_overlaps=text_overlaps, failures=failures,
                   qr_target=URL, print_master=pdf_path.name,
-                  notes=["Vector text, diagrams, QR and mascot; official logos and a supplied product screenshot.",
+                  notes=["Vector text, diagrams, measured tables, QR and mascot; official institutional logos.",
                          "RGB PDF; no PDF/X, CMYK, or printer proof certification.",
                          "A screen preview and full-size PDF must be visually inspected."])
     (output/"preflight.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
