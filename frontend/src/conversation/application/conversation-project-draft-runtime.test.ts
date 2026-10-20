@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { captureConversationProject, createConversationProjectController, withProjectHydration } from './conversation-project';
 import { buildConversationSettingsSnapshot, createConversationSettingsResolution } from './conversation-settings-resolution';
+import { createProjectConversationNavigation } from '../../features/project-conversation-navigation';
 
 import { paintNewChatFolderBadges } from '../ui/new-chat-folder-badges';
 const { readFileSync } = await vi.importActual<{
@@ -58,6 +59,7 @@ function harness(input = 'work', folder: { name: string; color: unknown } | null
     folderDefaultWorkspace: vi.fn(() => folderDefaults),
     createComposerSubmissionGate: () => ({}),
     captureConversationProject, withProjectHydration, buildConversationSettingsSnapshot,
+    createProjectConversationNavigation,
 
     _getConvProjectPath: (conv: any) => conv.projectPath || '',
     sendFailureToastDetail: (error: Error) => error.message,
