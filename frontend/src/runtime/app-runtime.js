@@ -9037,14 +9037,14 @@ function _renderSegSystemNoteItemHTML(s) {
     ? _SEG_NOTE_ACTION_BADGE_KEY[action] : _SEG_NOTE_ACTION_BADGE_KEY.prompt;
   const text = (typeof s.text === 'string') ? s.text : '';
   const reasonChip = _segNoteReasonChipHtml(reason);
-  return `<div class="sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
+  return `<div class="sw-card sw-stall-card-item sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
     `<div class="sw-note-group-item-head">` +
     `<span class="ptool-icon">${presentation.icon}</span>` +
     `<span class="ptool-text">${escapeHtml(t(presentation.labelKey))}</span>` +
     reasonChip +
     `<span class="ptool-badge ptool-badge-info">${escapeHtml(t(badgeKey))}</span>` +
     `</div>` +
-    `<div class="sw-card sw-stall-card-item"><div class="sw-card-head"><span class="sw-card-role">${escapeHtml(t('systemNote.detailsLabel'))}</span></div><pre class="sw-card-raw-pre">${escapeHtml(text)}</pre></div>` +
+    `<pre class="sw-card-raw-pre">${escapeHtml(text)}</pre>` +
     `</div>`;
 }
 /* A maximal run of adjacent context-injection notes (the session-start
@@ -12753,7 +12753,34 @@ const _conversationProjectController = createConversationProjectController({
   apply: data => { projectState = data; _updateProjectUI(); },
 });
 function _restoreConvProject(conv, eligible) {
-  return _conversationProjectController.restore(conv, eligible);
+  const restored = _conversationProjectController.restore(conv, eligible);
+  _enrichConvProjectContext(conv, eligible);
+  return restored;
+}
+
+/* Conversations restored from SAVED settings carry no server-measured context:
+ * the scoped root registry is an ephemeral cache that stays cold until a turn
+ * registers roots. Everything the turn rail shows beyond the saved paths —
+ * the checked-out git branch above all — is measured from the root itself, so
+ * read it once per restore. This is ENRICHMENT ONLY: the result never selects
+ * or appends a root (`applyProjectGitState` writes branch fields and nothing
+ * else), and a response that lands after the user switched away is dropped. */
+function _enrichConvProjectContext(conv, eligible) {
+  const id = conv && conv.id;
+  if (!id || (eligible && !eligible())) return;
+  const stillCurrent = () => activeConvId === id
+    && conversations.some(x => x && x.id === id)
+    && (!eligible || eligible());
+  Promise.resolve(Api.project.status(id))
+    .then((data) => {
+      if (!data || !stillCurrent()) return;
+      if (typeof runtimeScope.applyProjectGitState === 'function'
+          && (Object.prototype.hasOwnProperty.call(data, 'gitBranch')
+              || Object.prototype.hasOwnProperty.call(data, 'gitBranches'))) {
+        runtimeScope.applyProjectGitState(data);
+      }
+    })
+    .catch(() => { /* branch context is optional enrichment */ });
 }
 
 
@@ -15683,6 +15710,22 @@ function _commandIsVisibleInAuthority(conv, commandId) {
       ?.hasAuthoritativeCommand?.(conv.id, commandId));
 }
 
+/**
+ * The durable input Turn a command committed, found through its attempt's
+ * `commandId`. Used when the ACK was lost but the commit is authoritative: the
+ * receipt must then describe what authority actually stored.
+ */
+function _committedInputTurn(conv, commandId) {
+  const state = runtimeScope.ConversationTurnRead?.state?.(conv);
+  if (!state || !commandId) return null;
+  for (const attempt of Object.values(state.attemptsById || {})) {
+    if (attempt?.commandId !== commandId) continue;
+    const turn = state.turnsById?.[attempt.turnId];
+    if (turn) return turn;
+  }
+  return null;
+}
+
 function _isLaneBusySendError(error) {
   const code = error?.body?.error?.code
     || error?.body?.code
@@ -16197,6 +16240,17 @@ async function _submitComposerDraft() {
       committed = _commandIsVisibleInAuthority(conv, draft.commandId);
       if (committed) {
         accepted = true;
+        /* Authority holds the commit, so the receipt must describe it. The
+         * `finally` block is only correct for a send that did NOT commit;
+         * leaving this to it rendered a successful queued send as
+         * "提交未完成". */
+        if (translationWait) {
+          const projection = _committedInputTurn(conv, draft.commandId)?.projection;
+          composerTranslationStatus.finish(translationWait,
+            projection?.translation?.sendFailure || projection?._translateFailed
+              ? 'failed' : 'completed',
+            projection?.translation?.model || projection?._translateModel);
+        }
         _consumeAcceptedComposerDraft(draft);
         _applyAcceptedConversationTitle(conv, draft);
         runtimeScope.ConversationSurfacePresentation?.followLatest?.();
@@ -16759,6 +16813,12 @@ function _reconcileConfigModelAvailability(chatModels) {
  * hidden-model policy applies before the routing catalog and effort ladder. */
 function _loadServerConfigAndPopulate() {
   return _modelPickerStartup.load();
+}
+/* Settings Save committed and applied the routing authority itself, so the
+ * post-save repaint only needs the miscellaneous config projection. Refetching
+ * the full aggregate here cost a ~550KB round trip and re-parse on every save. */
+function _refreshServerConfigAfterSave() {
+  return _modelPickerStartup.refreshConfig();
 }
 let _modelPickerLastRouting = null;
 const _modelPickerStartup = createModelPickerStartup({
@@ -21491,7 +21551,12 @@ let backgroundConversationActivity = new Map();
       tools = tools.filter((t) => !(t && t.tone === 'mode'));
     }
     const model = snap.model ? _modelLabel(snap.model) : '';
-    const git = (snap.git && typeof snap.git === 'object') ? snap.git : null;
+    /* A turn sent before the workspace's branch was known — an engine restart
+     * clears the ephemeral scoped root registry, so the send-time probe found
+     * nothing — froze a snapshot with NO `git`. Paint the branch the workspace
+     * is on now instead of leaving the rail silent; a snapshot that recorded a
+     * branch keeps its own (a mid-turn `git checkout` history stays accurate). */
+    const git = (snap.git && typeof snap.git === 'object') ? snap.git : _collectGit();
     const todos = Array.isArray(snap.todos) ? snap.todos : [];
     if (!model && !tools.length && !modes.length && !roots.length
         && !git && !todos.length) return '';
@@ -21528,8 +21593,8 @@ let backgroundConversationActivity = new Map();
           ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: rest.length})) + '</button>';
       }
       rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
-        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span>' + toggle + '</div>' +
-        '<div class="tctx-chips">' + shown + overflow + '</div></div>');
+        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span></div>' +
+        '<div class="tctx-chips">' + shown + overflow + toggle + '</div></div>');
     }
     if (roots.length) {
       // SHORT path (last two segments) with the full path on hover: a full
@@ -21549,8 +21614,8 @@ let backgroundConversationActivity = new Map();
           ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: restPaths.length})) + '</button>';
       }
       rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
-        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span>' + pathToggle + '</div>' +
-        '<div class="tctx-paths">' + shownPaths + pathOverflow + '</div></div>');
+        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span></div>' +
+        '<div class="tctx-paths">' + shownPaths + pathOverflow + pathToggle + '</div></div>');
     }
     /* ── Git branch + checklist rows ── LIVE rows (rebuilt in place by
      * _patchLiveCtxRails on a branch switch / todo_write). The snapshot
@@ -21598,10 +21663,10 @@ let backgroundConversationActivity = new Map();
     if (!rail) return;
     const btn = ev.target.closest('[data-tctx-more]');
     if (btn) {
-      /* The overflow sits next to the toggle inside whatever wrapper the row
-       * uses (.tctx-chips / .tctx-paths / .tctx-todos). Search the toggle's
-       * parent first, then the row, so a differently-shaped row (checklist)
-       * still resolves its own overflow. */
+      /* The toggle sits INLINE as the last item of the flow it gates (inside
+       * .tctx-chips / .tctx-paths), next to the hidden .tctx-overflow group.
+       * Search the toggle's parent first, then the row, so a differently-shaped
+       * row (checklist) still resolves its own overflow. */
       const scope = btn.parentNode;
       const row = btn.closest('.tctx-row');
       const hidden = (scope && scope.querySelector('.tctx-overflow'))
@@ -21921,7 +21986,10 @@ let backgroundConversationActivity = new Map();
     const changed = prevBranch !== nextBranch;
     const sameShape = JSON.stringify(_liveGit) === JSON.stringify(next);
     _liveGit = next;
-    if (!sameShape) _scheduleCtxPatch();
+    if (!sameShape) {
+      _scheduleCtxPatch();
+      _repaintRailsMissingBranch();
+    }
     if (changed && nextBranch) {
       /* A real switch mid-turn: the rail re-renders via the patch above;
        * this log line is the off-rail signal so the change isn't silent
@@ -21936,6 +22004,30 @@ let backgroundConversationActivity = new Map();
       }
     }
     return changed;
+  }
+
+  /* Turns sent BEFORE the workspace's branch was known froze a snapshot with
+   * no `git` — an engine restart clears the scoped root registry, so the branch
+   * only arrives with the enrichment fetch that follows the saved project
+   * path. Their rails were already painted from those snapshots, so ask the
+   * authoritative surface to repaint; the render path then falls back to the
+   * live branch (`renderTurnCtxNote`) without writing into the frozen record.
+   * Only a conversation that actually has a branch-less human turn triggers
+   * the repaint, so this cannot loop. */
+  function _repaintRailsMissingBranch() {
+    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+    if (!conv || !conv.id) return;
+    const read = runtimeScope.ConversationTurnRead;
+    if (!read || typeof read.ordered !== 'function') return;
+    const missing = (read.ordered(conv) || []).some((turn) => {
+      if (!turn || turn.actor !== 'human') return false;
+      const snap = _turnCtxSnapshot(turn);
+      return !!snap && !snap.git;
+    });
+    if (!missing) return;
+    if (typeof runtimeScope.requestAuthoritativeConversationRender === 'function') {
+      runtimeScope.requestAuthoritativeConversationRender(conv.id);
+    }
   }
 
   /* Ingest a checklist state — from a live todo_write round (results[0]
@@ -25305,6 +25397,7 @@ Object.assign(runtimeScope, {
   _getCurrentTheme,
   _findRenderedNativeTurnNode,
   _loadServerConfigAndPopulate,
+  _refreshServerConfigAfterSave,
   _modelBrand,
   _modelRoutingDropdownModels,
   _modelShortName,

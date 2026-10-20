@@ -877,15 +877,35 @@ function _renderV2KeysSection(provider, context) {
   return html + '</div>';
 }
 
+function _v2KeyCardPendingSecret(credentialId) {
+  if (typeof _stgPendingCredentialSecrets === 'undefined' ||
+      !_stgPendingCredentialSecrets || !credentialId) return '';
+  return String(_stgPendingCredentialSecrets[credentialId] || '');
+}
+
+/* Client mirror of the server hint contract (first4 + masks + last4), used
+ * only for staged values that the server has not hashed yet. */
+function _v2MaskedSecret(value) {
+  var normalized = String(value || '').trim();
+  if (!normalized) return '';
+  if (normalized.length <= 8) return '****';
+  var hidden = Math.min(normalized.length - 8, 40);
+  return normalized.slice(0, 4) + new Array(hidden + 1).join('*') +
+    normalized.slice(-4);
+}
+
 function _renderV2KeyCard(provider, item, order) {
   var row = item.row;
   var keyHint = String(row.key_hint || '').replace(/^…+/, '');
   var credentialId = String(row.credential_id || '');
   var isApiKey = row.kind === 'api_key';
-  var display = isApiKey
+  var storedDisplay = isApiKey
     ? (keyHint || '••••••••')
     : (row.kind === 'local_identity' ? '本地身份（无需密钥）' : '订阅授权（OAuth）');
+  var staged = isApiKey ? _v2KeyCardPendingSecret(credentialId) : '';
+  var display = staged ? _v2MaskedSecret(staged) : storedDisplay;
   return '<div class="stg-key-card ' + _v2KeyCardStateClass(provider.provider_id, item) +
+    (staged ? ' stg-key-card--staged' : '') +
     '" data-credential-index="' + item.index + '"' +
     ' data-provider-id="' + escapeHtml(provider.provider_id) + '"' +
     ' data-credential-id="' + escapeHtml(credentialId) + '">' +
@@ -894,6 +914,8 @@ function _renderV2KeyCard(provider, item, order) {
       '<input class="stg-keys-input" type="text" readonly spellcheck="false" autocomplete="off" ' +
         'value="' + escapeHtml(display) + '" placeholder="sk-…" ' +
         'data-masked="' + escapeHtml(display) + '" ' +
+        'data-stored="' + escapeHtml(storedDisplay) + '" ' +
+        (isApiKey ? 'data-tofu-action-input="_onV2KeySecretEdit(this)" ' : '') +
         'title="密文保存在服务端，默认只显示首尾识别位">' +
       (isApiKey && credentialId
         ? '<button type="button" class="stg-keys-btn stg-key-reveal" ' +
@@ -903,7 +925,7 @@ function _renderV2KeyCard(provider, item, order) {
         : '') +
       '<button type="button" class="stg-keys-btn danger" data-provider-id="' +
         escapeHtml(provider.provider_id) + '" data-credential-index="' + item.index + '" ' +
-        'data-tofu-action="_deleteV2Credential(this.dataset.providerId,Number(this.dataset.credentialIndex))" ' +
+        'data-tofu-action="_deleteV2Credential(this.dataset.providerId,this.dataset.credentialIndex)" ' +
         'title="删除该密钥">✕</button>' +
     '</div>' +
     '<div class="stg-key-card-stats">' + _renderV2KeyCardStats(provider.provider_id, item) + '</div>' +
@@ -924,6 +946,47 @@ function _v2KeyDisplaySecret(secret) {
   return secret;
 }
 
+function _markV2KeyCardStaged(card, staged) {
+  if (!card || !card.classList) return;
+  if (staged) card.classList.add('stg-key-card--staged');
+  else card.classList.remove('stg-key-card--staged');
+}
+
+function _showV2KeyPlaintext(button, card, input, plaintext) {
+  input.value = plaintext;
+  // A property, not a data attribute: an attribute would serialize the
+  // secret into every DOM snapshot/diagnostic dump.
+  input.__revealedSecret = plaintext;
+  input.readOnly = false;
+  input.title = '可直接编辑；保存后替换该密钥';
+  button.setAttribute('aria-pressed', 'true');
+  button.innerHTML = _V2_KEY_EYE_OFF;
+  input.focus();
+  if (typeof input.select === 'function') input.select();
+}
+
+function _onV2KeySecretEdit(input) {
+  if (!input || typeof input.closest !== 'function' || input.readOnly) return;
+  if (typeof _stgPendingCredentialSecrets === 'undefined' ||
+      !_stgPendingCredentialSecrets) return;
+  var card = input.closest('.stg-key-card');
+  if (!card) return;
+  var credentialId = card.getAttribute('data-credential-id') || '';
+  if (!credentialId) return;
+  var value = String(input.value || '');
+  var revealed = input.__revealedSecret || '';
+  var storedMask = input.getAttribute('data-stored') || '';
+  if (value.trim() && value !== revealed) {
+    _stgPendingCredentialSecrets[credentialId] = value;
+    input.setAttribute('data-masked', _v2MaskedSecret(value));
+    _markV2KeyCardStaged(card, true);
+  } else {
+    delete _stgPendingCredentialSecrets[credentialId];
+    input.setAttribute('data-masked', storedMask || '••••••••');
+    _markV2KeyCardStaged(card, false);
+  }
+}
+
 function _toggleV2KeyReveal(button) {
   if (!button || typeof button.closest !== 'function') return;
   var card = button.closest('.stg-key-card');
@@ -931,12 +994,22 @@ function _toggleV2KeyReveal(button) {
   if (!input) return;
   if (button.getAttribute('aria-pressed') === 'true') {
     input.value = input.getAttribute('data-masked') || '';
+    input.readOnly = true;
+    delete input.__revealedSecret;
+    input.title = '密文保存在服务端，默认只显示首尾识别位';
     button.setAttribute('aria-pressed', 'false');
     button.innerHTML = _V2_KEY_EYE_OPEN;
     return;
   }
   var credentialId = card.getAttribute('data-credential-id') || '';
-  if (!credentialId || typeof Api === 'undefined' || !Api.modelRouting ||
+  if (!credentialId) return;
+  // A staged replacement is already in memory; show it without a round trip.
+  var staged = _v2KeyCardPendingSecret(credentialId);
+  if (staged) {
+    _showV2KeyPlaintext(button, card, input, staged);
+    return;
+  }
+  if (typeof Api === 'undefined' || !Api.modelRouting ||
       !Api.modelRouting.revealCredentialSecret) return;
   button.disabled = true;
   Api.modelRouting.revealCredentialSecret(credentialId).then(function(data) {
@@ -945,10 +1018,9 @@ function _toggleV2KeyReveal(button) {
       showToast(t('settings.keyRevealFailed'));
       return;
     }
-    var display = _v2KeyDisplaySecret(data.secret);
-    input.value = display;
-    button.setAttribute('aria-pressed', 'true');
-    button.innerHTML = _V2_KEY_EYE_OFF;
+    // The user may have typed while the request was in flight; never clobber it.
+    if (input.readOnly === false && input.value.trim()) return;
+    _showV2KeyPlaintext(button, card, input, _v2KeyDisplaySecret(data.secret));
   });
 }
 
@@ -1242,7 +1314,8 @@ async function _commitNewV2ApiKey(providerId, card, input) {
 async function _deleteV2Credential(providerId, credentialIndex) {
   var context = _modelRoutingProviderContext(providerId);
   if (!context) return;
-  var row = (_stgModelRouting.credentials || [])[credentialIndex];
+  var index = Number(credentialIndex);
+  var row = Number.isInteger(index) ? (_stgModelRouting.credentials || [])[index] : null;
   if (!row || row.provider_access_id !== context.access.provider_access_id) return;
   var order = context.credentials.findIndex(function(item) {
     return item.row.credential_id === row.credential_id;
@@ -1258,6 +1331,9 @@ async function _deleteV2Credential(providerId, credentialIndex) {
     var saved = await Api.modelRouting.saveProvider(
       context.provider.provider_id, bundle, _stgModelRoutingRevision);
     if (!saved || !saved.provider) throw new Error('密钥未能删除');
+    if (typeof _stgPendingCredentialSecrets !== 'undefined' && _stgPendingCredentialSecrets) {
+      delete _stgPendingCredentialSecrets[row.credential_id];
+    }
     _stgModelRoutingRevision = Number(saved.revision || _stgModelRoutingRevision);
     await _loadModelRoutingAuthority();
     _renderProvidersTab();
@@ -2648,9 +2724,13 @@ function _toggleMatrixAccess(providerId, offeringIndex, credIdx, wireId) {
         String(grants[i].model_id || '') === modelId) { grant = grants[i]; break; }
   }
   if (!grant) {
-    // No grant at all → enabling. Mint a grant with no exclusions (the key
-    // stays absent — a grant without it reaches every wire of the model).
-    grants.push(JSON.parse(JSON.stringify(offering.model)));
+    // No grant at all → enabling THIS cell. A mint reaches every wire id of
+    // the model unless the siblings are withheld, so exclude them: clicking
+    // one request name must never enable its whole column of siblings.
+    var minted = JSON.parse(JSON.stringify(offering.model));
+    var withheld = pool.filter(function(id) { return id !== wire; });
+    if (withheld.length) minted.excluded_wire_model_ids = withheld;
+    grants.push(minted);
     credential.authorization.models = grants;
     _rerenderMatrix(providerId);
     return;
@@ -3028,7 +3108,12 @@ function _matrixApplyPlan(context, probe) {
     }
     if (!grant) {
       if (g.enables.length === 0) return;
-      plan.push({ group: g, kind: 'mint' });
+      // A mint reaches every wire id of the model. Withhold the siblings that
+      // no ok verdict covers, so an apply enables exactly the probed cells.
+      var withheld = pool.filter(function(id) {
+        return g.enables.indexOf(id) < 0;
+      });
+      plan.push({ group: g, kind: 'mint', excluded: withheld });
       return;
     }
     var excluded = (grant.excluded_wire_model_ids || []).slice();
@@ -3078,7 +3163,7 @@ function _applyMatrixRecommendations(providerId) {
     }
     if (action.kind === 'mint') {
       var fresh = { creator_id: g.creator, model_id: g.modelId };
-      if (g.disables.length) fresh.excluded_wire_model_ids = g.disables.slice();
+      if (action.excluded.length) fresh.excluded_wire_model_ids = action.excluded.slice();
       grants.push(fresh);
       applied++;
       return;
@@ -7087,6 +7172,7 @@ runtimeScope._oauthLogout = _oauthLogout;
 runtimeScope._oauthManualSubmit = _oauthManualSubmit;
 runtimeScope._onV2HeaderRowEdit = _onV2HeaderRowEdit;
 runtimeScope._onV2KeyClearOverride = _onV2KeyClearOverride;
+runtimeScope._onV2KeySecretEdit = _onV2KeySecretEdit;
 runtimeScope._onV2KeyToggle = _onV2KeyToggle;
 runtimeScope._openActiveCompaction = _openActiveCompaction;
 runtimeScope._openProviderModelPicker = _openProviderModelPicker;

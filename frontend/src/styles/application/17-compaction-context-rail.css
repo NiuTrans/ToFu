@@ -956,7 +956,9 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 
 .turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:var(--space-2); }
 .turn-ctx .tctx-row + .tctx-row{ padding-top:var(--space-3); border-top:var(--control-edge-inset) solid var(--border-light); }
-.turn-ctx .tctx-row-heading{ display:flex; align-items:center; justify-content:space-between; gap:var(--space-1); min-height:var(--control-h-sm); }
+/* The heading carries only the row label (+ count); the "+N" toggle moved
+ * inline into the chips/paths flow, so no space-between spread is needed. */
+.turn-ctx .tctx-row-heading{ display:flex; align-items:center; }
 .turn-ctx .tctx-row-count{ font-weight:var(--weight-regular); font-variant-numeric:tabular-nums; color:var(--text-secondary); }
 .turn-ctx .tctx-row-h{
   font-size:var(--font-size-xs);
@@ -983,22 +985,24 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 }
 /* "+N more" — a CLICK toggle, deliberately not hover. Expanding grows the
  * rail IN FLOW, which needs no containment escape (see the block comment).
- * It is the only pointer-reactive thing in the rail. */
+ * It is the only pointer-reactive thing in the rail. It renders INLINE with
+ * the chips it reveals (not parked right on the header line), styled to the
+ * rail's marginalia voice — quiet tertiary text, no button box — so the
+ * header keeps just its label + count. */
 .turn-ctx .tctx-more{
   pointer-events:auto;
   display:inline-flex;
   align-items:center;
-  justify-content:space-between;
-  gap:var(--space-2);
-  min-height:var(--control-h-sm);
+  gap:var(--space-1);
+  min-height:0;
   cursor:pointer;
-  font-size:var(--font-size-sm);
+  font-size:var(--font-size-xs);
   font-weight:var(--weight-medium);
-  padding:var(--space-1) var(--space-2);
-  border-radius:var(--radius-sm);
+  padding:1px var(--space-1);
+  border-radius:var(--radius-xs);
   background:transparent;
-  color:var(--text-secondary);
-  border:var(--control-edge-inset) solid transparent;
+  color:var(--text-tertiary);
+  border:none;
   flex:0 0 auto;
   font-family:var(--font-ui);
 }
@@ -1010,11 +1014,11 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   border-block-end:var(--control-edge-inset) solid currentColor;
   transform:rotate(-45deg);
 }
-.turn-ctx .tctx-more[aria-expanded="true"]{background:var(--accent-subtle);color:var(--text-primary)}
+.turn-ctx .tctx-more[aria-expanded="true"]{color:var(--accent)}
 .turn-ctx .tctx-more[aria-expanded="true"]::after{transform:rotate(45deg)}
-.turn-ctx .tctx-more:hover{color:var(--text-primary);background:var(--bg-hover)}
+.turn-ctx .tctx-more:hover{color:var(--text-primary)}
 .turn-ctx .tctx-more:focus-visible{outline:var(--control-edge-inset) solid var(--accent);outline-offset:var(--space-1)}
-@media(pointer:coarse){.turn-ctx .tctx-more{min-height:var(--control-h-lg)}}
+@media(pointer:coarse){.turn-ctx .tctx-more{min-height:var(--control-h-sm);padding:var(--space-1) var(--space-2)}}
 /* The overflow group must NOT be a flex item of its own: as a single item it
  * cannot wrap internally, so its nowrap chips run straight off the rail's
  * right edge (measured +110px past the pane at 1440). `display:contents`

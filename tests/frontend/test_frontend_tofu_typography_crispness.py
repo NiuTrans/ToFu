@@ -32,12 +32,12 @@ Symptoms this guards against (fixed 2026-07-08):
    INVARIANT: every numeric `font-weight` declared by a tofu-scoped rule falls
    inside the variable axis range the shipped Inter `@font-face` declares.
 
-3. INTER MUST BE REAL, NOT A PHANTOM STACK ENTRY. Inter is now the first Latin
-   body face in `--sans-body` and MUST be self-hosted (an `@font-face` block),
-   never left as a name with no matching file.
+3. SORA MUST BE REAL, NOT A PHANTOM STACK ENTRY. Sora is now the first Latin
+   body face in `--sans-body` (tofu theme) and MUST be self-hosted (an
+   `@font-face` block), never left as a name with no matching file.
 
-   INVARIANT: `--sans-body` lists 'Inter' before 'Plus Jakarta Sans' and ends in
-   `var(--cjk-fallback)`; the local font CSS defines an `@font-face` for Inter.
+   INVARIANT: `--sans-body` lists 'Sora' before 'Inter' and ends in
+   `var(--cjk-fallback)`; the local font CSS defines an `@font-face` for Sora.
 
 Env-independent: parses the CSS source directly. NEUTERs included.
 """
@@ -184,26 +184,26 @@ def test_tofu_body_weight_is_real_loaded_instance():
 
 # ── #3: Inter is first AND self-hosted, CJK tail intact ──
 
-def test_inter_is_first_body_face_with_cjk_tail():
+def test_sora_is_first_body_face_with_cjk_tail():
     css = _read(CSS)
     sb = _sans_body_value(css)
     assert sb, '--sans-body token not found'
-    assert sb.index("'Inter'") < sb.index("'Plus Jakarta Sans'"), (
-        "'Inter' must come before 'Plus Jakarta Sans' in --sans-body")
+    assert sb.index("'Sora'") < sb.index("'Inter'"), (
+        "'Sora' must come before 'Inter' in --sans-body")
     assert 'var(--cjk-fallback)' in sb, (
         '--sans-body must keep the shared --cjk-fallback tail (single-CJK rule)')
 
 
-def test_inter_is_self_hosted():
+def test_sora_is_self_hosted():
     font_css = _read(FONT_CSS)
     blocks = re.findall(r'@font-face\s*\{[^}]*\}', font_css)
-    inter = [b for b in blocks if "font-family: 'Inter'" in b or "font-family:'Inter'" in b]
-    assert inter, "Inter is not self-hosted — must have an @font-face block"
-    assert any('.woff2' in b for b in inter), (
-        'Inter @font-face does not reference a self-hosted woff2 file')
-    for name in ('Inter-latin.woff2',):
+    sora = [b for b in blocks if "font-family: 'Sora'" in b or "font-family:'Sora'" in b]
+    assert sora, "Sora is not self-hosted — must have an @font-face block"
+    assert any('.woff2' in b for b in sora), (
+        'Sora @font-face does not reference a self-hosted woff2 file')
+    for name in ('Sora-latin.woff2',):
         assert os.path.exists(os.path.join(ROOT, 'frontend', 'src', 'styles', 'fonts', name)), (
-            f'self-hosted Inter font file missing: {name}')
+            f'self-hosted Sora font file missing: {name}')
 
 
 # ── NEUTERs: prove each guard is load-bearing ──

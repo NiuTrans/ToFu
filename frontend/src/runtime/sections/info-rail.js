@@ -441,7 +441,12 @@
       tools = tools.filter((t) => !(t && t.tone === 'mode'));
     }
     const model = snap.model ? _modelLabel(snap.model) : '';
-    const git = (snap.git && typeof snap.git === 'object') ? snap.git : null;
+    /* A turn sent before the workspace's branch was known — an engine restart
+     * clears the ephemeral scoped root registry, so the send-time probe found
+     * nothing — froze a snapshot with NO `git`. Paint the branch the workspace
+     * is on now instead of leaving the rail silent; a snapshot that recorded a
+     * branch keeps its own (a mid-turn `git checkout` history stays accurate). */
+    const git = (snap.git && typeof snap.git === 'object') ? snap.git : _collectGit();
     const todos = Array.isArray(snap.todos) ? snap.todos : [];
     if (!model && !tools.length && !modes.length && !roots.length
         && !git && !todos.length) return '';
@@ -478,8 +483,8 @@
           ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: rest.length})) + '</button>';
       }
       rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
-        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span>' + toggle + '</div>' +
-        '<div class="tctx-chips">' + shown + overflow + '</div></div>');
+        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span></div>' +
+        '<div class="tctx-chips">' + shown + overflow + toggle + '</div></div>');
     }
     if (roots.length) {
       // SHORT path (last two segments) with the full path on hover: a full
@@ -499,8 +504,8 @@
           ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: restPaths.length})) + '</button>';
       }
       rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
-        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span>' + pathToggle + '</div>' +
-        '<div class="tctx-paths">' + shownPaths + pathOverflow + '</div></div>');
+        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span></div>' +
+        '<div class="tctx-paths">' + shownPaths + pathOverflow + pathToggle + '</div></div>');
     }
     /* ── Git branch + checklist rows ── LIVE rows (rebuilt in place by
      * _patchLiveCtxRails on a branch switch / todo_write). The snapshot
@@ -548,10 +553,10 @@
     if (!rail) return;
     const btn = ev.target.closest('[data-tctx-more]');
     if (btn) {
-      /* The overflow sits next to the toggle inside whatever wrapper the row
-       * uses (.tctx-chips / .tctx-paths / .tctx-todos). Search the toggle's
-       * parent first, then the row, so a differently-shaped row (checklist)
-       * still resolves its own overflow. */
+      /* The toggle sits INLINE as the last item of the flow it gates (inside
+       * .tctx-chips / .tctx-paths), next to the hidden .tctx-overflow group.
+       * Search the toggle's parent first, then the row, so a differently-shaped
+       * row (checklist) still resolves its own overflow. */
       const scope = btn.parentNode;
       const row = btn.closest('.tctx-row');
       const hidden = (scope && scope.querySelector('.tctx-overflow'))
@@ -871,7 +876,10 @@
     const changed = prevBranch !== nextBranch;
     const sameShape = JSON.stringify(_liveGit) === JSON.stringify(next);
     _liveGit = next;
-    if (!sameShape) _scheduleCtxPatch();
+    if (!sameShape) {
+      _scheduleCtxPatch();
+      _repaintRailsMissingBranch();
+    }
     if (changed && nextBranch) {
       /* A real switch mid-turn: the rail re-renders via the patch above;
        * this log line is the off-rail signal so the change isn't silent
@@ -886,6 +894,30 @@
       }
     }
     return changed;
+  }
+
+  /* Turns sent BEFORE the workspace's branch was known froze a snapshot with
+   * no `git` — an engine restart clears the scoped root registry, so the branch
+   * only arrives with the enrichment fetch that follows the saved project
+   * path. Their rails were already painted from those snapshots, so ask the
+   * authoritative surface to repaint; the render path then falls back to the
+   * live branch (`renderTurnCtxNote`) without writing into the frozen record.
+   * Only a conversation that actually has a branch-less human turn triggers
+   * the repaint, so this cannot loop. */
+  function _repaintRailsMissingBranch() {
+    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+    if (!conv || !conv.id) return;
+    const read = runtimeScope.ConversationTurnRead;
+    if (!read || typeof read.ordered !== 'function') return;
+    const missing = (read.ordered(conv) || []).some((turn) => {
+      if (!turn || turn.actor !== 'human') return false;
+      const snap = _turnCtxSnapshot(turn);
+      return !!snap && !snap.git;
+    });
+    if (!missing) return;
+    if (typeof runtimeScope.requestAuthoritativeConversationRender === 'function') {
+      runtimeScope.requestAuthoritativeConversationRender(conv.id);
+    }
   }
 
   /* Ingest a checklist state — from a live todo_write round (results[0]

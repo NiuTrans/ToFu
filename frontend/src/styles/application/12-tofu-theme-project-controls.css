@@ -1,7 +1,7 @@
 /* Project location and write mode are owned by 25-conversation-bar.css. */
 
 /* Project badge (topbar) — pixel tag */
-[data-theme="tofu"] .project-badge{background:rgba(196,149,106,0.14);color:#8A6240;border-color:rgba(196,149,106,0.25);border-radius:4px;box-shadow:none;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
+[data-theme="tofu"] .project-badge{background:rgba(143,81,38,0.09);color:#7A441F;border-color:rgba(143,81,38,0.20);border-radius:6px;box-shadow:none;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
 
 /* File changes bar — calm notification */
 [data-theme="tofu"] .file-changes-bar{
@@ -25,8 +25,8 @@
 [data-theme="tofu"] .fc-summary{color:#5E8A50;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
 [data-theme="tofu"] .fc-count{color:#5E8A50;font-weight:800}
 [data-theme="tofu"] .fc-undo-btn{
-  color:#A67B52;
-  border:2px solid #8A7A5A;
+  color:#7A441F;
+  border:2px solid #9A8F79;
   border-radius:10px;
   box-shadow:var(--clay-sm);
   font-family:var(--sans-body);
@@ -34,30 +34,198 @@
   transition:transform 0.12s cubic-bezier(0.34,1.56,0.64,1),box-shadow 0.12s
 }
 [data-theme="tofu"] .fc-undo-btn:hover{
-  background:rgba(196,149,106,0.08);
+  background:rgba(143,81,38,0.08);
   transform:translateY(-2px) scale(1.03);
   box-shadow:var(--clay-md)}
 
 /* ── Folder browser ── */
 [data-theme="tofu"] .folder-browser{border-radius:var(--radius-sm);border:1px solid rgba(184,176,160,0.4);box-shadow:0 2px 8px rgba(74,63,47,0.06);overflow:hidden}
-[data-theme="tofu"] .folder-browser-header{background:#E4E1D7;border-bottom:var(--stitch)}
-[data-theme="tofu"] .folder-browser-footer{background:#E4E1D7;border-top:var(--stitch)}
-[data-theme="tofu"] .folder-item.selected{background:rgba(196,149,106,0.08);border-left:3px solid #C4956A}
-[data-theme="tofu"] .folder-code-badge{background:rgba(196,149,106,0.1);color:#A67B52;border-radius:var(--radius-sm)}
-[data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#F5F3ED}
-[data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#1a1814;box-shadow:var(--clay-sm)}
-[data-theme="tofu"] .recent-hl{background:rgba(196,149,106,0.22);color:#A67B52}
-[data-theme="tofu"] .recent-path-item{border-radius:var(--radius-sm);border:1px solid #D6D1C3;box-shadow:var(--clay-sm)}
-[data-theme="tofu"] .recent-path-item:hover{background:rgba(196,149,106,0.06);box-shadow:none;color:#A67B52;transform:none}
-[data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
+[data-theme="tofu"] .folder-browser-header{background:#EFE6D2;border-bottom:var(--stitch)}
+[data-theme="tofu"] .folder-browser-footer{background:#EFE6D2;border-top:var(--stitch)}
+[data-theme="tofu"] .folder-item.selected{background:rgba(143,81,38,0.08);border-left:3px solid #8F5126}
+[data-theme="tofu"] .folder-code-badge{background:rgba(143,81,38,0.1);color:#7A441F;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #3B2E1E;border-radius:var(--radius-sm);background:#FBF6E9}
+[data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#3B2E1E;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-hl{background:rgba(143,81,38,0.22);color:#7A441F}
+[data-theme="tofu"] .recent-path-item{border-radius:var(--radius-sm);border:1px solid #DED3BC;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-path-item:hover{background:rgba(143,81,38,0.06);box-shadow:none;color:#7A441F;transform:none}
+[data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#7A441F}
+
+/* ══════════════════════════════════════════════════════════════════════
+   MENUS — one floating paper sheet
+   Triggers and popovers share ONE geometry: 32px chips at 10px radius,
+   panels at 14px radius with a single hairline border and a layered warm
+   shadow. The retired 2px bevel (white top-left / tan bottom-right) made a
+   popover look like an embossed plastic key, which is exactly why it read as
+   a foreign object inside an otherwise editorial UI. Depth now comes from
+   the drop shadow only; the inset white line is letterpress, not a bevel.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Submenu triggers — quiet chips, identical to every other toolbar chip ── */
+[data-theme="tofu"] .submenu-trigger{
+  border-radius:var(--radius-sm);
+  border-color:transparent;
+  color:var(--text-secondary);
+  font-family:var(--sans-body);
+  font-weight:600;
+  transition:background-color .15s ease,color .15s ease,border-color .15s ease,box-shadow .15s ease
+}
+[data-theme="tofu"] .submenu-trigger:hover{
+  background:rgba(143,81,38,0.07);
+  border-color:#E7DAC2;
+  color:var(--text-primary)
+}
+[data-theme="tofu"] .submenu-trigger.open,
+[data-theme="tofu"] .submenu-trigger[aria-expanded="true"]{
+  background:#FBF2E2;
+  border-color:#E3CFAD;
+  color:var(--chat-primary-ink);
+  box-shadow:inset 0 1px 2px rgba(143,81,38,0.06)
+}
+[data-theme="tofu"] .submenu-trigger.has-active{
+  background:rgba(143,81,38,0.10);
+  border-color:rgba(143,81,38,0.26);
+  color:var(--accent)
+}
+[data-theme="tofu"] .submenu-trigger:active{
+  transform:none;
+  box-shadow:none
+}
+[data-theme="tofu"] .submenu-trigger:disabled,[data-theme="tofu"] .submenu-trigger:disabled:hover{
+  opacity:.45;
+  cursor:not-allowed;
+  transform:none;
+  background:transparent;
+  color:var(--text-tertiary);
+  border-color:transparent;
+  box-shadow:none
+}
+[data-theme="tofu"] .submenu-arrow{opacity:.4;color:#9A8F79}
+[data-theme="tofu"] .submenu-count{
+  background:rgba(143,81,38,0.14);
+  color:#7E4A1E;
+  border-radius:999px;
+  box-shadow:inset 0 0 0 1px rgba(143,81,38,0.18);
+  font-family:var(--sans-body);
+  font-size:9px;
+  font-weight:700;
+  padding:0 5px;
+  min-width:15px;
+  height:15px;
+  line-height:1
+}
+
+/* ── Panel ── */
+[data-theme="tofu"] .submenu-dropdown,
+[data-theme="tofu"] .flow-menu{
+  border-radius:var(--radius);
+  border:1px solid #E2D5BB;
+  background:#FFFEFA;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 18px 42px -18px rgba(74,52,26,0.32),
+    0 3px 10px rgba(74,52,26,0.07);
+  padding:6px;
+  overflow:visible;
+  z-index:9999;
+  max-height:none;
+  clip-path:none
+}
+[data-theme="tofu"] #agentModeMenu{overflow-y:auto}
+[data-theme="tofu"] .submenu-dropdown::after,
+[data-theme="tofu"] .flow-menu::after{
+  background:#FFFEFA;
+  border-right:1px solid #E2D5BB;
+  border-bottom:1px solid #E2D5BB;
+  border-bottom-right-radius:2px;
+  bottom:-6px;
+  width:11px;
+  height:11px
+}
+
+/* ── Rows ── */
+[data-theme="tofu"] .submenu-item,
+[data-theme="tofu"] .flow-menu-item{
+  border-radius:10px;
+  padding:8px 9px 8px 8px;
+  font-family:var(--sans-body);
+  font-weight:600;
+  transition:background-color .13s ease
+}
+[data-theme="tofu"] .submenu-item:hover,
+[data-theme="tofu"] .flow-menu-item:hover{background:#F7EEDD}
+/* Active row: a warm wash plus a 2px caramel spine — the same "selected"
+   grammar as the sidebar's conversation rows, so the two read as one system. */
+[data-theme="tofu"] .submenu-item.active,
+[data-theme="tofu"] .flow-menu-item.selected{
+  background:linear-gradient(90deg,rgba(143,81,38,0.13),rgba(143,81,38,0.045));
+  border-radius:10px;
+  box-shadow:inset 2px 0 0 var(--accent)
+}
+[data-theme="tofu"] .submenu-item-icon,
+[data-theme="tofu"] .flow-menu-icon{
+  width:28px;
+  height:28px;
+  border-radius:8px;
+  background:#F4ECDB;
+  color:#8A7358;
+  transition:background-color .13s ease,color .13s ease
+}
+[data-theme="tofu"] .submenu-item.active .submenu-item-icon,
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{
+  background:#F0DFC4;
+  color:var(--accent)
+}
+[data-theme="tofu"] .submenu-item-name,
+[data-theme="tofu"] .flow-menu-name{
+  color:var(--text-primary);
+  font-family:var(--sans-body);
+  font-size:13px;
+  font-weight:650;
+  line-height:1.3;
+  letter-spacing:0;
+  -webkit-font-smoothing:antialiased
+}
+[data-theme="tofu"] .submenu-item.active .submenu-item-name,
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name{color:var(--chat-primary-ink)}
+[data-theme="tofu"] .submenu-item-desc,
+[data-theme="tofu"] .flow-menu-desc{
+  color:var(--text-tertiary);
+  font-size:10.5px;
+  font-weight:450;
+  line-height:1.35;
+  margin-top:1px
+}
+/* Selected check — a pressed hanko seal, not a bare glyph. */
+[data-theme="tofu"] .submenu-item-check,
+[data-theme="tofu"] .flow-menu-check{color:var(--accent)}
+[data-theme="tofu"] .submenu-item.active .submenu-item-check,
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{
+  color:#FFF8EC;
+  background:var(--accent);
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  box-shadow:0 1px 2px rgba(120,70,30,0.28)
+}
+[data-theme="tofu"] .submenu-divider{background:#EDE3CF;height:1px;margin:6px 8px}
+[data-theme="tofu"] .submenu-section-label{
+  color:#A98F6C;
+  font-family:var(--sans-body);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:0.08em;
+  text-transform:uppercase
+}
 
 /* ── Capability mode picker — tofu (clay) theme ──
- * The trigger inherits the shared composer .submenu-trigger
- * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
- * active-Studio accent is bespoke here. */
-[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
-[data-theme="tofu"] .submenu-section-label{color:#8A7A56;font-family:var(--sans-body)}
-/* ── Light theme ── */
+   The trigger inherits the shared composer chip; only the active-Studio
+   accent is bespoke here. */
+[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{
+  color:var(--accent);
+  background:rgba(143,81,38,0.10);
+  border-color:rgba(143,81,38,0.26)
+}
 [data-theme="light"] .chat-mode-trigger[data-mode="studio"]{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
 [data-theme="light"] .submenu-section-label{color:var(--text-tertiary)}
 /* Mobile capability-mode rows read as a radio group — active row painted
@@ -66,74 +234,6 @@
 .mobile-mode-item .mobile-sheet-item-check{opacity:0}
 .mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
 
-/* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
-[data-theme="tofu"] .submenu-trigger:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3)
-}
-[data-theme="tofu"] .submenu-trigger:disabled,[data-theme="tofu"] .submenu-trigger:disabled:hover{
-  opacity:.5;
-  cursor:not-allowed;
-  transform:none;
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3)
-}
-[data-theme="tofu"] .submenu-trigger.open{
-  background:rgba(196,149,106,0.12);
-  color:#3D3022;
-  border-color:rgba(196,149,106,0.35);
-  font-weight:700
-}
-[data-theme="tofu"] .submenu-item.active .submenu-item-name,[data-theme="tofu"] .submenu-item.active .submenu-item-icon,[data-theme="tofu"] .submenu-item.active .submenu-item-check{color:#A67B52}
-[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:rgba(196,149,106,0.1)}
-[data-theme="tofu"] .submenu-item{border-radius:3px;padding:var(--space-2) 10px;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
-[data-theme="tofu"] .submenu-item:hover{background:rgba(196,149,106,0.08)}
-[data-theme="tofu"] .submenu-item.active{background:rgba(196,149,106,0.07);border-radius:3px}
-[data-theme="tofu"] .submenu-item-icon{border-radius:3px;background:transparent;color:#8A7A5A}
-[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:#E8E5DC}
-[data-theme="tofu"] .submenu-item-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
-[data-theme="tofu"] .submenu-item-desc{font-size:10px;color:#6A5A3A;font-weight:500}
-[data-theme="tofu"] .submenu-count{background:rgba(196,149,106,0.18);color:#8E6B48;border-radius:8px;box-shadow:none;font-family:var(--sans-body);font-size:9px;font-weight:700;padding:0 5px;min-width:14px;height:14px;line-height:1}
-[data-theme="tofu"] .submenu-dropdown{
-  border-radius:4px;
-  border:2px solid #C2BCA4;
-  border-top-color:#FFFCF6;
-  border-left-color:#FFFCF6;
-  border-right-color:#A89878;
-  border-bottom-color:#A89878;
-  box-shadow:var(--clay-sm);
-  background:#F4F2EB;
-  padding:var(--space-1);
-  overflow:visible;
-  z-index:9999;
-  max-height:none;
-  clip-path:none
-}
-[data-theme="tofu"] .submenu-dropdown::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
-
-/* ── Flow menu: same clay treatment as the Mode/Enhance/Tools sub-menus ── */
-[data-theme="tofu"] .flow-menu{
-  border-radius:4px;
-  border:2px solid #C2BCA4;
-  border-top-color:#FFFCF6;
-  border-left-color:#FFFCF6;
-  border-right-color:#A89878;
-  border-bottom-color:#A89878;
-  box-shadow:var(--clay-sm);
-  background:#F4F2EB;
-  padding:var(--space-1);
-  z-index:9999
-}
-[data-theme="tofu"] .flow-menu::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
-[data-theme="tofu"] .flow-menu-item{border-radius:3px;padding:var(--space-2) 10px;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
-[data-theme="tofu"] .flow-menu-item:hover{background:rgba(196,149,106,0.08)}
-[data-theme="tofu"] .flow-menu-item.selected{background:rgba(196,149,106,0.07);border-radius:3px}
-[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{color:#A67B52}
-[data-theme="tofu"] .flow-menu-icon{border-radius:3px;background:transparent;color:#8A7A5A}
-[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{background:#E8E5DC}
-[data-theme="tofu"] .flow-menu-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
-[data-theme="tofu"] .flow-menu-desc{font-size:10px;color:#6A5A3A;font-weight:500}
 
 /* ── Scrollbar — thin pixel track ── */
 [data-theme="tofu"] ::-webkit-scrollbar{width:5px}
@@ -141,13 +241,13 @@
 [data-theme="tofu"] .conversations-list:hover::-webkit-scrollbar-thumb,
 [data-theme="tofu"] .chat-container:hover::-webkit-scrollbar-thumb,
 [data-theme="tofu"] .modal:hover::-webkit-scrollbar-thumb{
-  background:rgba(196,149,106,0.35);
+  background:rgba(143,81,38,0.35);
   border-radius:2px;
   border:1px solid rgba(255,252,246,0.3)
 }
 [data-theme="tofu"] .conversations-list:hover,
 [data-theme="tofu"] .chat-container:hover,
-[data-theme="tofu"] .modal:hover{scrollbar-color:rgba(196,149,106,0.3) transparent}
+[data-theme="tofu"] .modal:hover{scrollbar-color:rgba(143,81,38,0.3) transparent}
 
 /* ── Debug panel — pixel window ── */
 [data-theme="tofu"] .debug-panel{
@@ -189,7 +289,7 @@
    memory-modal. */
 [data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel){
   background:#faf8f3;
-  border:3px solid #1a1814;
+  border:3px solid #3B2E1E;
   border-radius:var(--radius);
   box-shadow:var(--clay-sm);
   animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both
@@ -201,9 +301,9 @@
   font-weight:900;
   text-transform:uppercase;
   letter-spacing:-0.01em;
-  color:#1a1814;
+  color:#3B2E1E;
   padding-bottom:var(--space-3);
-  border-bottom:2px solid #1a1814
+  border-bottom:2px solid #3B2E1E
 }
 [data-theme="tofu"] .modal > h3::after{
   content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;
@@ -235,7 +335,7 @@
 [data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input){
   border-radius:var(--radius);
   border:1px solid rgba(184,176,160,0.4);
-  background:#F5F3ED;
+  background:#FBF6E9;
   box-shadow:none
 }
 [data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):focus{border-color:#BB9572;box-shadow:none}
@@ -244,7 +344,7 @@
       .pm-header, so the generic > h3 rule doesn't reach it). ── */
 [data-theme="tofu"] .pm-header{
   background:#f2ecda;
-  border-bottom:3px solid #1a1814;
+  border-bottom:3px solid #3B2E1E;
   position:relative
 }
 [data-theme="tofu"] .pm-header::after{
@@ -252,24 +352,24 @@
   background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
   opacity:.55
 }
-[data-theme="tofu"] .pm-workbench h3{font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814}
+[data-theme="tofu"] .pm-workbench h3{font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#3B2E1E}
 [data-theme="tofu"] .pm-header-icon{color:#a87d2e}
-[data-theme="tofu"] .pm-subtitle{color:#3d362c}
+[data-theme="tofu"] .pm-subtitle{color:#5A4B36}
 /* Blocky close button shared by plain modals (browser/apply) + project. */
 [data-theme="tofu"] .modal-close-btn,
 [data-theme="tofu"] .pm-close{
-  border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  border:2px solid #3B2E1E;border-radius:var(--radius);background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);
   transition:transform .1s,box-shadow .1s,background .1s,color .1s
 }
 [data-theme="tofu"] .modal-close-btn:hover,
 [data-theme="tofu"] .pm-close:hover{
-  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#FFFDF8
 }
 [data-theme="tofu"] .modal-close-btn:active,
-[data-theme="tofu"] .pm-close:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .pm-close:active{transform:translate(2px,2px);box-shadow:0 0 0 #3B2E1E}
 /* pm rail/cards: square + ink on the cream shell */
-[data-theme="tofu"] .pm-rail-card{border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);background:#fff}
+[data-theme="tofu"] .pm-rail-card{border:2px solid #3B2E1E;border-radius:var(--radius);box-shadow:var(--clay-sm);background:#FFFEFA}
 
 /* ═══════════════════════════════════════════
    Update modal — neo-brutalist tofu treatment
@@ -278,14 +378,14 @@
    ═══════════════════════════════════════════ */
 [data-theme="tofu"] .update-modal{
   background:#faf8f3;
-  border:3px solid #1a1814;
+  border:3px solid #3B2E1E;
   border-radius:var(--radius);
   box-shadow:var(--clay-sm);
   animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both;
 }
 [data-theme="tofu"] .update-modal-header{
   background:#f2ecda;
-  border-bottom:3px solid #1a1814;
+  border-bottom:3px solid #3B2E1E;
   padding:var(--space-4) var(--space-5);
   position:relative;
 }
@@ -296,75 +396,75 @@
   opacity:.55;
 }
 [data-theme="tofu"] .upd-head-icon{
-  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);
 }
 [data-theme="tofu"] .update-modal-header h3{
-  font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814;
+  font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#3B2E1E;
 }
-[data-theme="tofu"] .upd-head-sub{color:#3d362c}
+[data-theme="tofu"] .upd-head-sub{color:#5A4B36}
 [data-theme="tofu"] .modal-close-btn{
-  width:34px;height:34px;border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  width:34px;height:34px;border:2px solid #3B2E1E;border-radius:var(--radius);background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);font-size:var(--font-size-2xl);
   transition:transform .1s,box-shadow .1s,background .1s,color .1s;
 }
 [data-theme="tofu"] .modal-close-btn:hover{
-  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff;
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#FFFDF8;
 }
-[data-theme="tofu"] .modal-close-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .modal-close-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #3B2E1E}
 [data-theme="tofu"] .update-modal-body{padding:var(--space-5);min-height:140px}
 /* Checking + retry */
 [data-theme="tofu"] .upd-checking-wrap .upd-big-spin{border-color:rgba(26,24,20,.18);border-top-color:#c9993f}
-[data-theme="tofu"] .upd-checking-wrap span{color:#3d362c}
+[data-theme="tofu"] .upd-checking-wrap span{color:#5A4B36}
 [data-theme="tofu"] .upd-retry-btn{
-  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);font-weight:700;transition:transform .1s,box-shadow .1s,background .1s;
 }
 [data-theme="tofu"] .upd-retry-btn:hover{transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f2ecda}
 /* Version hero — current → latest */
 [data-theme="tofu"] .upd-hero{
   background:linear-gradient(135deg,#f2ecda,#f5eedd);
-  border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);
+  border:2px solid #3B2E1E;border-radius:var(--radius);box-shadow:var(--clay-sm);
 }
-[data-theme="tofu"] .upd-ver-label{color:#3d362c}
-[data-theme="tofu"] .upd-ver-num{color:#1a1814}
+[data-theme="tofu"] .upd-ver-label{color:#5A4B36}
+[data-theme="tofu"] .upd-ver-num{color:#3B2E1E}
 [data-theme="tofu"] .upd-ver.latest .upd-ver-num{color:#a87d2e}
-[data-theme="tofu"] .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:#1a1814}
-[data-theme="tofu"] .upd-arrow{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814}
-[data-theme="tofu"] .upd-hero:not(.up-to-date) .upd-arrow{background:#c9993f;color:#fff;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:#3B2E1E}
+[data-theme="tofu"] .upd-arrow{border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#FFFEFA;color:#3B2E1E}
+[data-theme="tofu"] .upd-hero:not(.up-to-date) .upd-arrow{background:#c9993f;color:#FFFDF8;box-shadow:var(--clay-sm)}
 /* Apply / restart action button — tofu block */
 [data-theme="tofu"] .upd-apply-btn{
-  background:#c9993f;color:#1a1814;border:2px solid #1a1814;border-radius:var(--radius-sm);
+  background:#c9993f;color:#3B2E1E;border:2px solid #3B2E1E;border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm);font-weight:800;text-transform:uppercase;letter-spacing:.01em;
   transition:transform .1s,box-shadow .1s,background .1s;
 }
 [data-theme="tofu"] .upd-apply-btn:hover{background:#d4a44a;transform:translate(1px,1px);box-shadow:var(--clay-md)}
-[data-theme="tofu"] .upd-apply-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .upd-apply-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #3B2E1E}
 [data-theme="tofu"] .upd-apply-btn:disabled{transform:none;box-shadow:var(--clay-sm)}
 /* Live stepper — square dots, ink rails */
-[data-theme="tofu"] .upd-step-dot{border-radius:var(--radius-sm);border:2px solid #1a1814;color:#1a1814}
+[data-theme="tofu"] .upd-step-dot{border-radius:var(--radius-sm);border:2px solid #3B2E1E;color:#3B2E1E}
 [data-theme="tofu"] .upd-step:not(:last-child)::before{background:rgba(26,24,20,.25)}
-[data-theme="tofu"] .upd-step.is-done:not(:last-child)::before{background:#1a1814}
-[data-theme="tofu"] .upd-step.is-done .upd-step-dot{background:#4ade80;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-done:not(:last-child)::before{background:#3B2E1E}
+[data-theme="tofu"] .upd-step.is-done .upd-step-dot{background:#4ade80;border-color:#3B2E1E}
 [data-theme="tofu"] .upd-step.is-active .upd-step-dot{border-color:#c9993f;border-top-color:transparent}
-[data-theme="tofu"] .upd-step.is-error .upd-step-dot{background:#f87171;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-error .upd-step-dot{background:#f87171;border-color:#3B2E1E}
 [data-theme="tofu"] .upd-step.is-active .upd-step-label,
-[data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#1a1814}
+[data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#3B2E1E}
 /* Badges, file lists, hints */
-[data-theme="tofu"] .upd-badge{border-radius:var(--radius-sm);border-width:2px;border-color:#1a1814;box-shadow:var(--clay-sm);font-weight:800}
+[data-theme="tofu"] .upd-badge{border-radius:var(--radius-sm);border-width:2px;border-color:#3B2E1E;box-shadow:var(--clay-sm);font-weight:800}
 [data-theme="tofu"] .upd-badge.ok{background:#dff5e3;color:#2f7d4f}
-[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#1a1814;border-radius:var(--radius-sm)}
-[data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#3d362c}
-[data-theme="tofu"] .upd-files{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#f5eedd;color:#3d362c}
-[data-theme="tofu"] .upd-log-label{color:#1a1814}
-[data-theme="tofu"] .upd-log-copy{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#f5eedd;color:#1a1814;font-weight:700}
+[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#3B2E1E;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#5A4B36}
+[data-theme="tofu"] .upd-files{border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#f5eedd;color:#5A4B36}
+[data-theme="tofu"] .upd-log-label{color:#3B2E1E}
+[data-theme="tofu"] .upd-log-copy{border:2px solid #3B2E1E;border-radius:var(--radius-sm);background:#f5eedd;color:#3B2E1E;font-weight:700}
 [data-theme="tofu"] .upd-log-copy.copied{color:#2f7d4f}
-[data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#1a1814}
-[data-theme="tofu"] .upd-hint{color:#3d362c}
+[data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#3B2E1E}
+[data-theme="tofu"] .upd-hint{color:#5A4B36}
 /* Check-failure card — ink heading, muted reason */
 [data-theme="tofu"] .upd-err-icon{color:#c0392b}
-[data-theme="tofu"] .upd-err-title{color:#1a1814;font-weight:900}
-[data-theme="tofu"] .upd-err-reason{color:#3d362c}
+[data-theme="tofu"] .upd-err-title{color:#3B2E1E;font-weight:900}
+[data-theme="tofu"] .upd-err-reason{color:#5A4B36}
 /* ── Settings-panel pixel inputs RETIRED (2026-09-04 owner direction: no
    brutalist ink boxes in Settings, any theme). They were already dead — the
    generic `.modal input` bleed above out-specified them — and the unified
@@ -382,8 +482,8 @@
 }
 /* 🧱 btn-primary — neo-brutalist gold block (matches the modal's ink border + hard shadow) */
 [data-theme="tofu"] .btn-primary{
-  background:#C9993F;color:#1a1814;
-  border:2px solid #1a1814;
+  background:#C9993F;color:#3B2E1E;
+  border:2px solid #3B2E1E;
   border-radius:var(--radius-sm);
   position:relative;overflow:visible;
   box-shadow:var(--clay-sm);
@@ -400,13 +500,13 @@
   box-shadow:var(--clay-md)}
 [data-theme="tofu"] .btn-primary:active{
   transform:translate(3px,3px);
-  box-shadow:0 0 0 #1a1814;
+  box-shadow:0 0 0 #3B2E1E;
   background:#BC8A35
 }
 /* 🧱 btn-secondary — neo-brutalist cream block (matches btn-primary geometry exactly) */
 [data-theme="tofu"] .btn-secondary{
-  background:#faf8f3;color:#1a1814;
-  border:2px solid #1a1814;
+  background:#faf8f3;color:#3B2E1E;
+  border:2px solid #3B2E1E;
   border-radius:var(--radius-sm);
   position:relative;overflow:visible;
   box-shadow:var(--clay-sm);
@@ -418,12 +518,12 @@
   transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s,color 0.1s
 }
 [data-theme="tofu"] .btn-secondary:hover{
-  background:#ECE7DD;color:#1a1814;
+  background:#ECE7DD;color:#3B2E1E;
   transform:translate(-1px,-1px);
   box-shadow:var(--clay-md)}
 [data-theme="tofu"] .btn-secondary:active{
   transform:translate(3px,3px);
-  box-shadow:0 0 0 #1a1814;
+  box-shadow:0 0 0 #3B2E1E;
   background:#E2DCCF
 }
 /* ── Settings buttons — standard theme button language (owner direction
@@ -441,8 +541,8 @@
    gradient breads). 0-3/0-4 specificity to outrank the settings sheet and the
    comfort flattening, which load after this file. ── */
 [data-theme="tofu"] .settings-panel .stg-btn-balance{
-  background:#C9993F;color:#1a1814;
-  border:2px solid #1a1814;
+  background:#C9993F;color:#3B2E1E;
+  border:2px solid #3B2E1E;
   border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm);
   text-shadow:none;
@@ -456,7 +556,7 @@
 }
 [data-theme="tofu"] .settings-panel .stg-btn-balance:active{
   transform:translate(3px,3px);
-  box-shadow:0 0 0 #1a1814;
+  box-shadow:0 0 0 #3B2E1E;
   background:#BC8A35;
 }
 /* The tofu-theme oauth button overrides moved to
@@ -481,7 +581,7 @@
 /* ── Modal shell — game cartridge card ── */
 [data-theme="tofu"] .stg-modal {
   background: #FAF8F2;
-  border: 3px solid #8A7A5A;
+  border: 3px solid #9A8F79;
   border-top-color: #C4B89E;
   border-left-color: #C4B89E;
   border-right-color: #6B5A3A;
@@ -519,7 +619,7 @@
   bottom: -2px;
   left: var(--space-3); right: var(--space-3);
   height: 1.5px;
-  background: linear-gradient(90deg, transparent, #C4956A 20%, #C4956A 80%, transparent);
+  background: linear-gradient(90deg, transparent, #8F5126 20%, #8F5126 80%, transparent);
   opacity: 0.4;
 }
 [data-theme="tofu"] .stg-modal-title {
@@ -543,7 +643,7 @@
   border-bottom-color: rgba(168, 152, 120, 0.4);
   border-radius: 6px;
   background: linear-gradient(180deg, #F6F4EE, #EBE8DF);
-  color: #8A7A5A;
+  color: #9A8F79;
   font-size: var(--font-size-lg);
   font-weight: 700;
   padding: 0;
@@ -552,7 +652,7 @@
 }
 [data-theme="tofu"] .stg-modal-close:hover {
   background: #E85050;
-  color: #fff;
+  color: #FFFDF8;
   border-color: #C04040;
   box-shadow: 0 1px 0 #903030;
 }
@@ -567,7 +667,7 @@
 /* ── Description — warm muted text ── */
 [data-theme="tofu"] .stg-modal-desc {
   font-size: var(--font-size-xs);
-  color: #8A7A5A;
+  color: #9A8F79;
   line-height: 1.7;
   margin-bottom: 18px;
   padding: 10px var(--space-3);
@@ -590,7 +690,7 @@
 
 /* ── Inputs — SNES recessed screen ── */
 [data-theme="tofu"] .stg-modal .stg-field input {
-  background: #F5F3ED;
+  background: #FBF6E9;
   border: 2.5px solid #B8AD94;
   border-top-color: #9A9070;
   border-left-color: #9A9070;
@@ -608,7 +708,7 @@
 [data-theme="tofu"] .stg-modal .stg-field input:focus {
   transform: none;
   background: #FFFEF8;
-  border-color: #C4956A;
+  border-color: #8F5126;
   border-top-color: #A07850;
   border-left-color: #A07850;
   border-right-color: #DEB890;
@@ -630,7 +730,7 @@
  * rounded beige input. Give the EDITOR the recessed chrome and strip the
  * inner input's own. */
 [data-theme="tofu"] .stg-modal .stg-tag-editor {
-  background: #F5F3ED;
+  background: #FBF6E9;
   border: 2.5px solid #B8AD94;
   border-top-color: #9A9070;
   border-left-color: #9A9070;
@@ -643,7 +743,7 @@
 [data-theme="tofu"] .stg-modal .stg-tag-editor:focus-within {
   transform: none;
   background: #FFFEF8;
-  border-color: #C4956A;
+  border-color: #8F5126;
   border-top-color: #A07850;
   border-left-color: #A07850;
   border-right-color: #DEB890;
@@ -671,14 +771,14 @@
 /* ── Hint text ── */
 [data-theme="tofu"] .stg-modal .stg-hint {
   font-size: 10px;
-  color: #A89878;
+  color: #C2B496;
 }
 
 /* ── Footer — action bar ── */
 [data-theme="tofu"] .stg-modal-footer {
   padding: 14px 18px var(--space-4);
   border-top: 2px solid rgba(168, 152, 120, 0.25);
-  background: linear-gradient(180deg, #F5F3ED, #F0EDE4);
+  background: linear-gradient(180deg, #FBF6E9, #F0EDE4);
   position: relative;
   z-index: 1;
 }
@@ -703,7 +803,7 @@
 [data-theme="tofu"] .stg-modal .stg-btn-secondary:hover {
   transform: translateY(-1px);
   box-shadow: 0 3px 0 #8A8060, 0 4px 8px rgba(74, 63, 47, 0.1);
-  background: linear-gradient(180deg, #F5F3ED, #EBE8DF);
+  background: linear-gradient(180deg, #FBF6E9, #EBE8DF);
 }
 [data-theme="tofu"] .stg-modal .stg-btn-secondary:active {
   transform: translateY(2px);
@@ -719,8 +819,8 @@
   font-size: var(--font-size-sm);
   font-weight: 700;
   padding: var(--space-2) var(--space-5);
-  background: linear-gradient(180deg, #D4AA80, #C4956A);
-  border: 2.5px solid #C4956A;
+  background: linear-gradient(180deg, #D4AA80, #8F5126);
+  border: 2.5px solid #8F5126;
   border-top-color: #E8CCA8;
   border-left-color: #E8CCA8;
   border-right-color: #A07850;
@@ -744,7 +844,7 @@
   border-left-color: #A07850;
   border-right-color: #E8CCA8;
   border-bottom-color: #E8CCA8;
-  background: linear-gradient(180deg, #C4956A, #B88A5E);
+  background: linear-gradient(180deg, #8F5126, #B88A5E);
 }
 [data-theme="tofu"] .stg-modal .stg-btn-primary:disabled {
   background: #D8D2C4;
@@ -801,9 +901,9 @@
 [data-theme="tofu"] .ig-generate-btn{
   background:#BB9572;color:#FFFCF6;
   border-radius:var(--radius-sm);
-  border:2px solid #C4956A;
+  border:2px solid #8F5126;
   border-top-color:#D4BC9E;border-left-color:#D4BC9E;
-  border-right-color:#8E6B48;border-bottom-color:#8E6B48;
+  border-right-color:#7A441F;border-bottom-color:#7A441F;
   box-shadow:0 2px 0 #6B4F32;
   clip-path:none;
   image-rendering:auto;
@@ -816,7 +916,7 @@
 [data-theme="tofu"] .ig-generate-btn:active{
   transform:translateY(2px);
   box-shadow:none;
-  border-top-color:#8E6B48;border-left-color:#8E6B48;
+  border-top-color:#7A441F;border-left-color:#7A441F;
   border-right-color:#D4BC9E;border-bottom-color:#D4BC9E;
   background:#9A7A58
 }
@@ -901,11 +1001,11 @@
 }
 /* ── Cost tag — warm accent text ── */
 [data-theme="tofu"] .cost-tag{
-  color:#A67B52 !important;
+  color:#7A441F !important;
   font-weight:700 !important
 }
 [data-theme="tofu"] .cost-tag .cost-breakdown{color:#B8A080}
-[data-theme="tofu"] #browserToggle.active{background:rgba(196,149,106,0.08);color:#A67B52;border-bottom-color:rgba(196,149,106,0.5)}
+[data-theme="tofu"] #browserToggle.active{background:rgba(143,81,38,0.08);color:#7A441F;border-bottom-color:rgba(143,81,38,0.5)}
 [data-theme="tofu"] #desktopToggle.active{background:rgba(138,120,176,0.08);color:#8A78B0;border-bottom-color:rgba(138,120,176,0.5)}
 
 /* ── Conv action buttons — pixel overlay ── */
@@ -925,9 +1025,9 @@
   transition:all 0.08s ease
 }
 [data-theme="tofu"] .conv-action-btn:hover{
-  background:rgba(196,149,106,0.12);
-  border-color:rgba(196,149,106,0.2);
-  color:#8E6B48
+  background:rgba(143,81,38,0.12);
+  border-color:rgba(143,81,38,0.2);
+  color:#7A441F
 }
 [data-theme="tofu"] .conv-action-btn.conv-delete:hover{
   background:rgba(207,56,56,0.08);

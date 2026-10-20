@@ -1124,14 +1124,14 @@ function _renderSegSystemNoteItemHTML(s) {
     ? _SEG_NOTE_ACTION_BADGE_KEY[action] : _SEG_NOTE_ACTION_BADGE_KEY.prompt;
   const text = (typeof s.text === 'string') ? s.text : '';
   const reasonChip = _segNoteReasonChipHtml(reason);
-  return `<div class="sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
+  return `<div class="sw-card sw-stall-card-item sw-note-group-item" data-note-kind="${escapeHtml(noteKind)}"${reason ? ` data-reason="${escapeHtml(reason)}"` : ''}>` +
     `<div class="sw-note-group-item-head">` +
     `<span class="ptool-icon">${presentation.icon}</span>` +
     `<span class="ptool-text">${escapeHtml(t(presentation.labelKey))}</span>` +
     reasonChip +
     `<span class="ptool-badge ptool-badge-info">${escapeHtml(t(badgeKey))}</span>` +
     `</div>` +
-    `<div class="sw-card sw-stall-card-item"><div class="sw-card-head"><span class="sw-card-role">${escapeHtml(t('systemNote.detailsLabel'))}</span></div><pre class="sw-card-raw-pre">${escapeHtml(text)}</pre></div>` +
+    `<pre class="sw-card-raw-pre">${escapeHtml(text)}</pre>` +
     `</div>`;
 }
 /* A maximal run of adjacent context-injection notes (the session-start

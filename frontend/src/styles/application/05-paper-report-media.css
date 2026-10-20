@@ -324,7 +324,15 @@
 
 /* Closed details must hide the flex list as well as each item's text. */
 .sw-note-group:not([open])>.sw-note-group-body{display:none}
-.sw-note-group-item{display:flex;flex-direction:column;gap:var(--space-1)}
+/* Each member is ONE card (header + provenance meta + verbatim text) so an
+   expanded group reads as a stack of uniform boxes instead of two mismatched
+   sub-boxes. The .sw-card base supplies the border/background; gap here keeps
+   the header, provenance and verbatim body breathing apart. */
+.sw-note-group-item{display:flex;flex-direction:column;gap:var(--space-2);min-width:0;overflow-wrap:anywhere}
+/* Provenance folded INSIDE the member card must not look like a competing
+   box — strip its own border/background so it reads as in-card meta. */
+.sw-note-group-item .sw-note-provenance-item{border:none;background:transparent;padding:0;margin:0}
+.sw-note-group-item .sw-note-provenance{margin:0}
 .sw-note-group-item-head{display:flex;align-items:center;gap:var(--space-2);color:var(--text-secondary)}
 .sw-note-group-item-head .ptool-text{font-size:var(--font-size-sm);font-weight:600}
 .sw-note-group-item-head .ptool-icon{display:flex;align-items:center;opacity:0.8}

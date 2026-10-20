@@ -72,6 +72,9 @@
   --conversation-process-row-height:var(--control-h-md);
   --conversation-process-inset:var(--space-1);
   --conversation-process-marker:var(--space-4);
+  /* One line box for a whole activity row: the leading glyph is centered
+     against this height, so it can never drift off its own label. */
+  --conversation-activity-line-height:calc(var(--conversation-font-size-meta) * 1.45);
   --conversation-process-gap:var(--space-2);
   --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
   --conversation-flow-gap:var(--space-1);

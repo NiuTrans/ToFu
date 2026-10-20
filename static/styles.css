@@ -491,6 +491,9 @@
   --conversation-process-row-height:var(--control-h-md);
   --conversation-process-inset:var(--space-1);
   --conversation-process-marker:var(--space-4);
+  /* One line box for a whole activity row: the leading glyph is centered
+     against this height, so it can never drift off its own label. */
+  --conversation-activity-line-height:calc(var(--conversation-font-size-meta) * 1.45);
   --conversation-process-gap:var(--space-2);
   --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
   --conversation-flow-gap:var(--space-1);
@@ -4395,7 +4398,15 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 
 /* Closed details must hide the flex list as well as each item's text. */
 .sw-note-group:not([open])>.sw-note-group-body{display:none}
-.sw-note-group-item{display:flex;flex-direction:column;gap:var(--space-1)}
+/* Each member is ONE card (header + provenance meta + verbatim text) so an
+   expanded group reads as a stack of uniform boxes instead of two mismatched
+   sub-boxes. The .sw-card base supplies the border/background; gap here keeps
+   the header, provenance and verbatim body breathing apart. */
+.sw-note-group-item{display:flex;flex-direction:column;gap:var(--space-2);min-width:0;overflow-wrap:anywhere}
+/* Provenance folded INSIDE the member card must not look like a competing
+   box — strip its own border/background so it reads as in-card meta. */
+.sw-note-group-item .sw-note-provenance-item{border:none;background:transparent;padding:0;margin:0}
+.sw-note-group-item .sw-note-provenance{margin:0}
 .sw-note-group-item-head{display:flex;align-items:center;gap:var(--space-2);color:var(--text-secondary)}
 .sw-note-group-item-head .ptool-text{font-size:var(--font-size-sm);font-weight:600}
 .sw-note-group-item-head .ptool-icon{display:flex;align-items:center;opacity:0.8}
@@ -6748,6 +6759,13 @@ input.settings-mono {
   background: #fff;
   border-color: var(--s-gold);
   box-shadow: 0 0 0 3px var(--s-gold-glow);
+}
+/* A replacement secret lives only in memory until 保存 commits it; the row
+   must read as edited, not saved, or the user assumes the key already changed. */
+.stg-key-card--staged > .stg-key-card-edit > input.stg-keys-input {
+  border-color: var(--s-gold);
+  background: #fffdf5;
+  box-shadow: inset 3px 0 0 var(--s-gold);
 }
 .stg-key-card--new .stg-key-card-edit { width: 100%; }
 .stg-key-card--new .stg-key-card-edit > input.stg-keys-input {
@@ -9987,12 +10005,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptool-batch-done-block > summary { list-style: none; cursor: pointer; }
 .ptool-batch-done-block > summary::-webkit-details-marker { display: none; }
 .ptool-batch-done-block > summary::marker { display: none; content: ""; }
-.ptool-batch-done-block > summary .ptool-text::after {
-  content: " ▸";
-  font-size: var(--font-size-xs);
-  opacity: 0.5;
-}
-.ptool-batch-done-block[open] > summary .ptool-text::after { content: " ▾"; }
+/* The disclosure caret belongs to the summary row (an atomic flex item), not
+ * to the wrapping label — inline label text produced an extra line holding
+ * only the caret. Owner: 23-reading-process.css shared disclosure grammar. */
 .ptool-batch-done-block > .ptool-result-body {
   margin: 0;
   padding: 0;
@@ -13159,34 +13174,54 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 
 /* ══════════════════════════════════════════════════════════
-   TOFU — pale gray-white surfaces, soft corners and restrained amber accents.
+   TOFU — washi paper, kinako borders and roasted-tea caramel ink.
    Variable NAMES are a stable contract consumed app-wide — retune
    VALUES only; do not rename or remove.
+
+   Identity guard (owner decision 2026-10-20): the theme must NOT drift into
+   the light theme's cool grey-beige + indigo room. Tofu is a *paper* room:
+   warm ivory ground, slightly deeper washi panels, caramel (roasted tea) as
+   the single accent. Warmth lives in every surface, never in a yellow CTA.
    ══════════════════════════════════════════════════════════ */
 [data-theme="tofu"]{
-  /* A quiet navigation action: warmth is a local tint, not a yellow canvas. */
-  --chat-primary-background:color-mix(in srgb,var(--accent) 6%,var(--bg-primary));
-  --chat-primary-hover:color-mix(in srgb,var(--accent) 10%,var(--bg-primary));
-  --chat-primary-border:color-mix(in srgb,var(--accent) 18%,var(--border));
-  --bg-primary:#F8FAFC;
-  --bg-secondary:#F7F8FA;
-  --bg-tertiary:#EEF1F4;
-  --bg-hover:#E8ECF0;
-  --bg-active:#DDE2E7;
-  /* Borders — soft, low-contrast (restraint over ruled lines) */
-  --border:#D9DEE4;
-  --border-light:#E9EDF1;
-  --text-primary:#202327;
-  --text-secondary:#626971;
-  --text-tertiary:#949CA5;
-  --accent:#C97A1D;
-  --accent-hover:#A85E0B;
-  --accent-subtle:rgba(201,122,29,0.10);
-  /* 品牌字身专用墨色 — 当前与 --accent-hover 同值,但刻意独立:品牌色不随交互态色阶演进 */
-  --brand-ink:#A85E0B;
-  --thinking-bg:rgba(201,122,29,0.05);
-  --thinking-border:rgba(201,122,29,0.22);
-  --thinking-text:#8B560F;
+  /* A quiet navigation action: paper fill, caramel edge, warm ink. */
+  --chat-primary-background:#FFFEFA;
+  --chat-primary-hover:#FBF1E0;
+  --chat-primary-ink:#5E4426;
+  --chat-primary-border:#E2CDAB;
+  --chat-primary-shadow:inset 0 1px 0 #FFFFFF,0 1px 2px rgba(94,68,38,0.06);
+  /* The ground is DEEPER than the light theme's #f4f2ed and warm in HUE, but it
+     must not also be high in CHROMA: the first palette ran every surface at
+     OKLCH C 0.024-0.043 (hue pinned at 85-88deg), so the entire viewport was one
+     cream field with no neutral to rest on and the screen read as stained. The
+     ground now sits at C 0.016, panels stay near C 0.020, and cards/composer
+     step UP to a near-neutral warm white (#FFFEFA, C 0.005) so the hierarchy is
+     paper-on-desk: one clean sheet, warm chrome, no wash-on-wash. */
+  --bg-primary:#F7F1E6;
+  --bg-secondary:#F1EADC;
+  --bg-tertiary:#EAE1CE;
+  --bg-hover:#E5DAC4;
+  --bg-active:#D9CDB4;
+  /* Borders — warm hairlines, never grey */
+  --border:#DED2B9;
+  --border-light:#ECE3D0;
+  --text-primary:#2C261D;
+  --text-secondary:#6A5F4C;
+  /* 4.1:1 on --bg-primary / 3.9:1 on --bg-secondary. The previous #9A8F79 was
+     2.78:1 — timestamps, counts and meta labels dissolved into the cream and
+     forced the eye to work. Do not lighten this back toward the ground. */
+  --text-tertiary:#7F7360;
+  /* Accent reads as ink on paper at 5.5:1 and carries white labels at 6.2:1.
+     The previous #A0602F measured 4.35:1 as text — under AA — despite the
+     "4.6:1" it was documented as. Roasted tea, one step darker. */
+  --accent:#8F5126;
+  --accent-hover:#7A441F;
+  --accent-subtle:rgba(143,81,38,0.10);
+  /* 品牌字身专用墨色 — 刻意独立于 --accent-hover:品牌色不随交互态色阶演进 */
+  --brand-ink:#85502A;
+  --thinking-bg:rgba(143,81,38,0.05);
+  --thinking-border:rgba(143,81,38,0.22);
+  --thinking-text:#7E4A1E;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
   --error-text:#B05B48;
@@ -13195,20 +13230,20 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   --chip-ok-color:#5E8A50;
   --chip-ok-bg:rgba(106,138,94,0.1);
   --chip-ok-border:rgba(106,138,94,0.25);
-  --chip-warn-color:#A67B52;
-  --chip-warn-bg:rgba(196,149,106,0.1);
-  --chip-warn-border:rgba(196,149,106,0.25);
+  --chip-warn-color:#7A441F;
+  --chip-warn-bg:rgba(143,81,38,0.10);
+  --chip-warn-border:rgba(143,81,38,0.24);
   --chip-err-color:var(--error-text);
   --chip-err-bg:var(--error-bg);
   --chip-err-border:var(--error-border);
-  --chip-info-color:#A67B52;
-  --chip-info-bg:rgba(196,149,106,0.1);
-  --chip-info-border:rgba(196,149,106,0.2);
+  --chip-info-color:#7A441F;
+  --chip-info-bg:rgba(143,81,38,0.10);
+  --chip-info-border:rgba(143,81,38,0.20);
   --chip-neutral-color:var(--text-tertiary);
   --chip-neutral-bg:var(--bg-tertiary);
   --chip-neutral-border:var(--border);
-  --user-bubble:#F2F4F6;
-  --shadow:0 1px 2px rgba(19,25,31,0.04),0 3px 14px rgba(19,25,31,0.06);
+  --user-bubble:#F3E7D0;
+  --shadow:0 1px 2px rgba(92,72,44,0.05),0 3px 14px rgba(92,72,44,0.07);
   /* Soft-organic corners (editorial 8–16px) */
   --radius:14px;
   --radius-sm:10px;
@@ -13222,21 +13257,41 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
      BEFORE the CJK fallback only for Latin glyphs; they carry no usable
      Han glyphs, so the shared tail wins for Chinese either way. */
   --cjk-fallback:'PingFang SC','Microsoft YaHei','Hiragino Sans GB','Noto Sans SC','Noto Sans CJK SC';
-  --serif-display:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
-  --sans-body:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
+  /* Sora: geometric, light, design-forward Latin face — used for both display
+     and body in the tofu theme. Its open forms and light weights read cleaner
+     and more contemporary than the previous Inter-only stack.
+     Newsreader: editorial serif reserved for large italic accents.
+     Inter/Plus Jakarta Sans: kept as fallback in the stack. CJK tail unchanged. */
+  --serif-display:'Newsreader',var(--cjk-fallback),system-ui,serif;
+  --sans-display:'Sora',var(--cjk-fallback),system-ui,sans-serif;
+  --sans-body:'Sora','Inter',var(--cjk-fallback),system-ui,sans-serif;
   --search-blue:#5E90AE;
   --search-cyan:#4FA3AC;
   --search-purple:#8C7FB0;
   --fetch-green:#C1794B;
   --fetch-teal:#5E9E8C;
-  /* Shadow tokens — soft, neutral, diffuse (no hard pixel offset) */
-  --clay-sm:0 1px 2px rgba(19,25,31,0.05);
-  --clay-md:0 2px 10px rgba(19,25,31,0.07);
-  --clay-lg:0 10px 30px rgba(19,25,31,0.10);
-  --clay-pressed:inset 0 1px 3px rgba(19,25,31,0.10);
-  --stitch:1px solid #D9DEE4
+  /* Shadow tokens — soft, warm-tinted, diffuse (no hard pixel offset) */
+  --clay-sm:0 1px 2px rgba(92,72,44,0.06);
+  --clay-md:0 2px 10px rgba(92,72,44,0.08);
+  --clay-lg:0 12px 30px rgba(92,72,44,0.12);
+  --clay-pressed:inset 0 1px 3px rgba(92,72,44,0.12);
+  --stitch:1px solid #DED3BC
 }
 
+/* ── Paper ground ────────────────────────────────────────────────────────
+   FLAT by owner decision (2026-10-20): the previous full-viewport gradient
+   (1240x640 highlight top-left into a caramel falloff bottom-right) put a slow
+   luminance ramp under every pixel. Low-frequency gradients leave no flat field
+   to focus on, which reads as "unevenly lit" and was reported as uncomfortable
+   rather than warm. Warmth now lives in the ink, borders and accent; the ground
+   itself is one even sheet. Do not reintroduce an ambient full-screen ramp. */
+[data-theme="tofu"] body{
+  background:var(--bg-primary)
+}
+[data-theme="tofu"] ::selection{
+  background:rgba(143,81,38,0.18);
+  color:var(--text-primary)
+}
 /* ── Typography: reading-optimized with CJK care ── */
 [data-theme="tofu"]{
   -webkit-font-smoothing:antialiased;
@@ -13259,13 +13314,13 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .md-content strong{font-weight:660}
 [data-theme="tofu"] .md-content em{color:var(--text-secondary);font-style:italic}
 [data-theme="tofu"] .md-content h1{
-  font-family:var(--serif-display);
-  font-size:var(--font-size-3xl);margin:26px 0 10px;font-weight:600;letter-spacing:-0.01em;
-  line-height:1.3;color:var(--text-primary);
+  font-family:var(--sans-display);
+  font-size:var(--font-size-3xl);margin:26px 0 10px;font-weight:700;letter-spacing:-0.02em;
+  line-height:1.25;color:var(--text-primary);
   border-bottom:none;padding-bottom:0;padding-left:0;display:block
 }
-[data-theme="tofu"] .md-content h2{font-family:var(--serif-display);font-size:18.5px;margin:22px 0 9px;font-weight:600;letter-spacing:-0.005em;line-height:1.35}
-[data-theme="tofu"] .md-content h3{font-family:var(--serif-display);font-size:var(--font-size-xl);font-weight:600;letter-spacing:0;line-height:1.4}
+[data-theme="tofu"] .md-content h2{font-family:var(--sans-display);font-size:18.5px;margin:22px 0 9px;font-weight:650;letter-spacing:-0.01em;line-height:1.3}
+[data-theme="tofu"] .md-content h3{font-family:var(--sans-display);font-size:var(--font-size-xl);font-weight:650;letter-spacing:-0.005em;line-height:1.35}
 /* ══════════════════════════════════════════════════════════
    MESSAGES — Warm Reading Room
    Assistant = a quiet page on soft paper (no frame theatrics)
@@ -13358,7 +13413,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   border-color:rgba(212,83,59,0.3)
 }
 [data-theme="tofu"] .delete-turn-popup{
-  background:#FFFDF9;
+  background:#FFFEFA;
   border:1px solid var(--border);
   box-shadow:var(--clay-lg)
 }
@@ -13368,7 +13423,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   font-size:var(--font-size-xs)
 }
 [data-theme="tofu"] .delete-popup-turn:hover{color:#D4533B;background:rgba(212,83,59,0.08)}
-[data-theme="tofu"] .delete-popup-single:hover{color:#C4956A;background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .delete-popup-single:hover{color:#8F5126;background:rgba(143,81,38,0.1)}
 
 /* ── Stream elapsed timer — quiet chip ── */
 [data-theme="tofu"] .stream-elapsed-timer{
@@ -13405,9 +13460,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    A quiet paper rail: soft ground, hairline divider, no CRT/pixel chrome.
    ══════════════════════════════════════════════════════ */
 [data-theme="tofu"] .sidebar{
-  background:var(--bg-secondary);
+  background:#F2EADB;
   border-right:1px solid var(--border);
-  box-shadow:none;
+  box-shadow:inset -1px 0 0 rgba(255,255,255,0.55);
   position:relative;
   overflow:visible
 }
@@ -13418,9 +13473,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 
 [data-theme="tofu"] .topbar{
-  background:var(--bg-secondary);
+  background:#F2EADB;
   border-bottom:1px solid var(--border);
-  box-shadow:none;
+  box-shadow:0 1px 0 rgba(255,255,255,0.6) inset
 }
 [data-theme="tofu"] .topbar-title{
   font-family:var(--sans-body);
@@ -13467,8 +13522,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   display:none
 }
 [data-theme="tofu"] .sidebar-header h1{
-  font-family:var(--serif-display);
-  font-size:20px;font-weight:600;letter-spacing:0;text-transform:none
+  font-family:var(--sans-display);
+  font-size:20px;font-weight:700;letter-spacing:-0.02em;text-transform:none
 }
 /* Header action buttons — quiet ghost icons */
 [data-theme="tofu"] .sidebar-header .action-btn{
@@ -13515,9 +13570,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    不用主题 accent #C1794B(会与链接/按钮撞色,显不出品牌)。 */
 [data-theme="tofu"] .sidebar-header h1 .sidebar-brand,
 [data-theme="tofu"] .welcome h2.tofu-brand{
-  font-family:var(--sans-body);
-  font-weight:800;
-  letter-spacing:-0.03em;
+  font-family:var(--sans-display);
+  font-weight:700;
+  letter-spacing:-0.02em;
   text-transform:none
 }
 [data-theme="tofu"] .sidebar-header h1 .sidebar-brand>span,
@@ -13643,40 +13698,75 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* Pinned zone removed — replaced by folders */
 
-/* New Chat uses the shared flat primary action in shell navigation. */
+/* ── New Chat — the one place the sidebar raises its voice ──────────────
+   A paper slip with a single filled caramel plus. Everything around it is a
+   quiet row, so the CTA takes its emphasis from ONE solid mark rather than a
+   bevel + gradient + shadow stack; the previous version read as an empty
+   text input sitting above the conversation list. */
+[data-theme="tofu"] .new-chat-btn{
+  background:linear-gradient(180deg,#FFFEFA 0%,#FCF4E4 100%);
+  border:1px solid var(--chat-primary-border);
+  border-radius:var(--radius-sm);
+  box-shadow:0 1px 0 #FFFFFF inset,0 1px 2px rgba(92,72,44,0.07);
+  color:var(--chat-primary-ink);
+  font-family:var(--sans-body);
+  font-size:13.5px;
+  font-weight:650;
+  letter-spacing:0.01em;
+  padding:var(--space-2) 10px;
+  gap:9px;
+  transition:background .18s ease,border-color .18s ease,box-shadow .18s ease
+}
+[data-theme="tofu"] .new-chat-btn>svg{
+  width:22px;height:22px;padding:3px;box-sizing:border-box;
+  border-radius:7px;
+  background:linear-gradient(180deg,#B06A33,#8E5222);
+  color:#FFF8EC;
+  box-shadow:0 1px 1px rgba(70,44,18,0.22)
+}
+[data-theme="tofu"] .new-chat-btn:hover{
+  background:linear-gradient(180deg,#FFFEFA 0%,#F8EDD8 100%);
+  border-color:#D9BE92;
+  box-shadow:0 1px 0 #FFFFFF inset,0 2px 6px rgba(92,72,44,0.10)
+}
+[data-theme="tofu"] .new-chat-btn:active{
+  background:#F6ECD9;
+  box-shadow:inset 0 1px 2px rgba(92,72,44,0.12)
+}
+
 /* ── Tofu theme: sidebar action row ── */
 [data-theme="tofu"] .sidebar-action-row{padding:10px 10px 6px}
-[data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E8D5C0}
-[data-theme="tofu"] .folder-dialog-input{background:#FFF9F4;border-color:#D4B896;color:#5C4A38}
-[data-theme="tofu"] .folder-dialog-input:focus{border-color:#C4956A}
-[data-theme="tofu"] .folder-dialog-cancel{background:#F0E3D5;border-color:#D4B896;color:#8A7458}
-[data-theme="tofu"] .folder-dialog-ok{background:linear-gradient(180deg,#C4956A 0%,#A67B55 100%)}
-[data-theme="tofu"] .conv-rename-card{background:#FDF8F3;border-color:#E8D5C0}
-[data-theme="tofu"] .conv-rename-input{background:#FFF9F4;border-color:#D4B896;color:#5C4A38}
-[data-theme="tofu"] .conv-rename-input:focus{border-color:#C4956A}
-[data-theme="tofu"] .conv-rename-btn.cancel{background:#F0E3D5;border-color:#D4B896;color:#8A7458}
-[data-theme="tofu"] .conv-rename-btn.ok{background:linear-gradient(180deg,#C4956A 0%,#A67B55 100%)}
+[data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E3CFAD}
+[data-theme="tofu"] .folder-dialog-input{background:#FFF9F4;border-color:#D8B98A;color:#5C4A38}
+[data-theme="tofu"] .folder-dialog-input:focus{border-color:#8F5126}
+[data-theme="tofu"] .folder-dialog-cancel{background:#F0E3D5;border-color:#D8B98A;color:#8A7458}
+[data-theme="tofu"] .folder-dialog-ok{background:linear-gradient(180deg,#8F5126 0%,#7A441F 100%)}
+[data-theme="tofu"] .conv-rename-card{background:#FDF8F3;border-color:#E3CFAD}
+[data-theme="tofu"] .conv-rename-input{background:#FFF9F4;border-color:#D8B98A;color:#5C4A38}
+[data-theme="tofu"] .conv-rename-input:focus{border-color:#8F5126}
+[data-theme="tofu"] .conv-rename-btn.cancel{background:#F0E3D5;border-color:#D8B98A;color:#8A7458}
+[data-theme="tofu"] .conv-rename-btn.ok{background:linear-gradient(180deg,#8F5126 0%,#7A441F 100%)}
 
 /* ── Tofu theme: project rail ── */
-[data-theme="tofu"] .project-rail{background:linear-gradient(180deg,#EAE6DC 0%,#E4E0D5 100%);border-right:2px solid #C2BCA4}
-[data-theme="tofu"] .project-rail-title{color:#A89878}
+[data-theme="tofu"] .project-rail{background:linear-gradient(180deg,#F5F0E1 0%,#F0EADA 100%);border-right:1px solid var(--border)}
+[data-theme="tofu"] .project-rail-title{color:#C2B496}
 [data-theme="tofu"] .project-rail-collapse{color:#B8A090}
-[data-theme="tofu"] .project-rail-collapse:hover{color:#A67B55;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .project-rail-collapse:hover{color:#7A441F;background:rgba(143,81,38,0.12)}
 [data-theme="tofu"] .folder-tab{color:#8A7458;font-size:var(--font-size-sm)}
-[data-theme="tofu"] .folder-tab:hover{background:rgba(196,149,106,0.12);color:#5C4A38}
-[data-theme="tofu"] .folder-tab.active{background:rgba(196,149,106,0.18);color:#A67B55}
-[data-theme="tofu"] .folder-tab.active::before{background:#C4956A}
-[data-theme="tofu"] .folder-tab-count{background:rgba(196,149,106,0.18);color:#8A7458}
-[data-theme="tofu"] .folder-tab.active .folder-tab-count{background:#C4956A;color:#FFF9F4}
+[data-theme="tofu"] .folder-tab:hover{background:rgba(143,81,38,0.12);color:#5C4A38}
+[data-theme="tofu"] .folder-tab.active{background:rgba(143,81,38,0.18);color:#7A441F}
+[data-theme="tofu"] .folder-tab.active::before{background:#8F5126}
+[data-theme="tofu"] .folder-tab-count{background:rgba(143,81,38,0.18);color:#8A7458}
+[data-theme="tofu"] .folder-tab.active .folder-tab-count{background:#8F5126;color:#FFF9F4}
 [data-theme="tofu"] .folder-tab-inbox-dot,[data-theme="tofu"] .folder-tab-add-dot{color:#B8A090}
-[data-theme="tofu"] .folder-tab.active .folder-tab-inbox-dot{color:#A67B55}
+[data-theme="tofu"] .folder-tab.active .folder-tab-inbox-dot{color:#7A441F}
 [data-theme="tofu"] .folder-tab-add{color:#B8A090}
-[data-theme="tofu"] .folder-tab-add:hover{color:#A67B55;background:rgba(196,149,106,0.12)}
-[data-theme="tofu"] .folder-quickadd{color:#B8A090;border-color:#E8D5C0}
-[data-theme="tofu"] .folder-quickadd:hover{color:#A67B55;border-color:#C4956A;background:rgba(196,149,106,0.1)}
-[data-theme="tofu"] .folder-tab-menu{background:#FDF8F3;border-color:#E8D5C0}
+[data-theme="tofu"] .folder-tab-add:hover{color:#7A441F;background:rgba(143,81,38,0.12)}
+[data-theme="tofu"] .folder-quickadd{color:#B8A090;border-color:#E3CFAD}
+[data-theme="tofu"] .folder-quickadd:hover{color:#7A441F;border-color:#8F5126;background:rgba(143,81,38,0.1)}
+[data-theme="tofu"] .folder-tab-menu{background:#FDF8F3;border-color:#E3CFAD}
 [data-theme="tofu"] .folder-tab-menu-item{color:#5C4A38}
-[data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(143,81,38,0.1)}
 [data-theme="tofu"] .folder-tab-menu-delete:hover{color:#D4544A;background:rgba(212,84,74,0.08)}
 
 [data-theme="tofu"] .folder-tab-dot.streaming{animation:folderDotPulse 2.2s ease-in-out infinite}
@@ -13702,23 +13792,20 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 [data-theme="tofu"] .avatar.assistant{
   background:transparent;
-  color:#A67B52;
+  color:#7A441F;
   border-radius:var(--radius-sm)}
+/* Model tag — a flat label, not a second 3D key beside the composer. */
 [data-theme="tofu"] .model-badge{
-  background:linear-gradient(180deg, #F8F6F0 0%, #F1EEE6 100%);
-  color:#6B5A40;
-  border-radius:4px;
+  background:#F6EEDC;
+  color:#7E5A34;
+  border:1px solid #E3D2B2;
+  border-radius:6px;
   font-family:var(--sans-body);
-  border:1.5px solid rgba(168,152,120,0.4);
-  border-top-color:rgba(255,252,246,0.7);
-  border-left-color:rgba(255,252,246,0.7);
-  border-right-color:rgba(168,152,120,0.45);
-  border-bottom-color:rgba(168,152,120,0.45);
-  box-shadow:0 1px 0 rgba(154,144,122,0.2);
+  box-shadow:none;
   font-size:10px;
-  font-weight:700;
-  padding:3px var(--space-2);
-  letter-spacing:0.02em
+  font-weight:650;
+  padding:2px 7px;
+  letter-spacing:0.01em
 }
 
 /* Topbar and latency controls inherit shared shell geometry and colors. */
@@ -13819,19 +13906,19 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
      此处只留 tofu 的颜色与字身口音。 */
   color:var(--text-primary);background:none;
   -webkit-text-fill-color:var(--text-primary);
-  font-family:var(--sans-body);
-  font-weight:800;letter-spacing:-0.03em;text-transform:none
+  font-family:var(--sans-display);
+  font-weight:700;letter-spacing:-0.02em;text-transform:none
 }
 /* 非品牌的说明小字。必须排除 .tofu-brand —— 它与基础层的印章规则同为 (0,2,2)
    且位置在后,不排除就会把印面字拉回 Jakarta 500/13px(实测如此)。 */
 [data-theme="tofu"] .welcome h2:not(.tofu-brand) small{
   -webkit-text-fill-color:#9C9178;
-  font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;
+  font-family:var(--sans-display);
   letter-spacing:.12em;font-weight:500;font-size:var(--font-size-md)
 }
 [data-theme="tofu"] .welcome p{
   color:#736750;
-  font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;
+  font-family:var(--sans-body);
   font-size:15px;line-height:1.65
 }
 
@@ -13967,19 +14054,19 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 [data-theme="tofu"] .sidebar-search-box{
   border-radius:3px;
-  border:2px solid #C4956A;
-  border-top-color:#A89878;
-  border-left-color:#A89878;
+  border:2px solid #8F5126;
+  border-top-color:#C2B496;
+  border-left-color:#C2B496;
   border-right-color:#E8D5B8;
   border-bottom-color:#E8D5B8;
   background:#EBE8DE;
   box-shadow:
-    inset 0 1px 4px rgba(196,149,106,0.12),
-    0 0 0 2px rgba(196,149,106,0.08);
+    inset 0 1px 4px rgba(143,81,38,0.12),
+    0 0 0 2px rgba(143,81,38,0.08);
   padding:0 var(--space-2);
   transition:border-color 0.15s,box-shadow 0.15s,background 0.15s
 }
-[data-theme="tofu"] #sidebarSearchToggle.active{color:#A67B55;background:rgba(196,149,106,0.15)}
+[data-theme="tofu"] #sidebarSearchToggle.active{color:#7A441F;background:rgba(143,81,38,0.15)}
 [data-theme="tofu"] .sidebar-search-box .sidebar-search-input{
   font-family:var(--sans-body);
   font-size:11.5px;
@@ -13996,7 +14083,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* Search icon — pixel magnifier */
 [data-theme="tofu"] .sidebar-search-icon{
-  color:#A67B52;
+  color:#7A441F;
   opacity:0.8
 }
 [data-theme="tofu"] .sidebar-search-icon svg{
@@ -14009,20 +14096,20 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   transition:all 0.08s ease
 }
 [data-theme="tofu"] .sidebar-search-clear:hover{
-  background:rgba(196,149,106,0.15);
-  color:#8E6B48
+  background:rgba(143,81,38,0.15);
+  color:#7A441F
 }
 [data-theme="tofu"] .sidebar-search-highlight{
-  background:rgba(196,149,106,0.35);
+  background:rgba(143,81,38,0.35);
   border-radius:1px;
   padding:0 2px;
-  box-shadow:0 0 0 1px rgba(196,149,106,0.15)
+  box-shadow:0 0 0 1px rgba(143,81,38,0.15)
 }
 /* Search stats — pixel counter */
 [data-theme="tofu"] .sidebar-search-stats{
   font-family:var(--sans-body);
   font-size:9px;
-  color:#A89878;
+  color:#C2B496;
   letter-spacing:0.04em;
   padding:3px var(--space-1) 0
 }
@@ -14030,81 +14117,25 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .sidebar-search-empty{
   font-family:var(--sans-body);
   font-size:var(--font-size-xs);
-  color:#A89878
+  color:#C2B496
 }
 [data-theme="tofu"] .sidebar-search-empty-icon{
   font-size:24px;
   opacity:0.4
 }
 
-/* ── Search toggle — pixel pill, consistent with toolbar items ── */
-[data-theme="tofu"] .search-mode-toggle{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  /* Item 2 — true frosted glass matching the project bar's pills */
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  padding:var(--space-1) 10px;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:700;
-  letter-spacing:0.02em;
-  -webkit-font-smoothing:antialiased;
-  -moz-osx-font-smoothing:grayscale;
-  transition:color 0.15s,background 0.15s,border-color 0.2s,transform 0.08s ease,box-shadow 0.08s ease;
-  animation:none !important
-}
-[data-theme="tofu"] .search-mode-toggle::before{display:none !important}
-[data-theme="tofu"] .search-mode-toggle:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
-  color:#2A2018;
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06)
-}
-[data-theme="tofu"] .search-mode-toggle:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3)
-}
-/* Single search — subtle blue accent */
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"]{
-  color:#4A7898;
-  background:rgba(90,138,168,0.06);
-  border-color:rgba(90,138,168,0.3);
-  animation:none !important
-}
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"]:hover{background:rgba(90,138,168,0.12)}
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"] .sm-icon{color:#4A7898;animation:none}
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"] .sm-mode-pill{background:rgba(90,138,168,0.18);color:#2A5A72;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
-/* Multi search — subtle purple accent */
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]{
-  color:#6A5898;
-  background:rgba(138,120,176,0.06);
-  border-color:rgba(138,120,176,0.3);
-  animation:none !important
-}
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]:hover{background:rgba(138,120,176,0.12)}
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-icon{color:#6A5898;animation:none}
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-mode-pill{background:rgba(138,120,176,0.18);color:#4A3870;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
-/* Off state pill */
-[data-theme="tofu"] .search-mode-toggle[data-mode="off"] .sm-mode-pill{background:rgba(184,176,160,0.18);color:#5C5240;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
+/* The search toggle is a member of the composer chip family; its skin lives
+   with the other toolbar chips in 13-tofu-theme-composer-tools.css. */
 
 /* ── Badges — pixel chips ── */
-[data-theme="tofu"] .timer-trigger .tm-dot{background:#C4956A}
+[data-theme="tofu"] .timer-trigger .tm-dot{background:#8F5126}
 [data-theme="tofu"] .timer-trigger .timer-count{background:#B8895E}
 [data-theme="tofu"] .search-orbit-center{background:#6A9EC0}
 
 /* ── Stream phase indicator — warm kinako capsule ── */
 [data-theme="tofu"] .stream-phase{
-  background:rgba(196,149,106,0.1);
-  border:1px solid rgba(196,149,106,0.22);
+  background:rgba(143,81,38,0.1);
+  border:1px solid rgba(143,81,38,0.22);
   border-radius:4px;
   color:#8A6240;
   font-family:var(--sans-body);
@@ -14235,7 +14266,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 [data-theme="tofu"] .log-clean-btn.dismiss:hover{
   color:#5A4A38;
-  background:rgba(196,149,106,0.12)
+  background:rgba(143,81,38,0.12)
 }
 
 /* ── Search/fetch result blocks — card style ── */
@@ -14259,7 +14290,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* Project location and write mode are owned by 25-conversation-bar.css. */
 
 /* Project badge (topbar) — pixel tag */
-[data-theme="tofu"] .project-badge{background:rgba(196,149,106,0.14);color:#8A6240;border-color:rgba(196,149,106,0.25);border-radius:4px;box-shadow:none;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
+[data-theme="tofu"] .project-badge{background:rgba(143,81,38,0.09);color:#7A441F;border-color:rgba(143,81,38,0.20);border-radius:6px;box-shadow:none;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
 
 /* File changes bar — calm notification */
 [data-theme="tofu"] .file-changes-bar{
@@ -14283,8 +14314,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .fc-summary{color:#5E8A50;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
 [data-theme="tofu"] .fc-count{color:#5E8A50;font-weight:800}
 [data-theme="tofu"] .fc-undo-btn{
-  color:#A67B52;
-  border:2px solid #8A7A5A;
+  color:#7A441F;
+  border:2px solid #9A8F79;
   border-radius:10px;
   box-shadow:var(--clay-sm);
   font-family:var(--sans-body);
@@ -14292,30 +14323,198 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   transition:transform 0.12s cubic-bezier(0.34,1.56,0.64,1),box-shadow 0.12s
 }
 [data-theme="tofu"] .fc-undo-btn:hover{
-  background:rgba(196,149,106,0.08);
+  background:rgba(143,81,38,0.08);
   transform:translateY(-2px) scale(1.03);
   box-shadow:var(--clay-md)}
 
 /* ── Folder browser ── */
 [data-theme="tofu"] .folder-browser{border-radius:var(--radius-sm);border:1px solid rgba(184,176,160,0.4);box-shadow:0 2px 8px rgba(74,63,47,0.06);overflow:hidden}
-[data-theme="tofu"] .folder-browser-header{background:#E4E1D7;border-bottom:var(--stitch)}
-[data-theme="tofu"] .folder-browser-footer{background:#E4E1D7;border-top:var(--stitch)}
-[data-theme="tofu"] .folder-item.selected{background:rgba(196,149,106,0.08);border-left:3px solid #C4956A}
-[data-theme="tofu"] .folder-code-badge{background:rgba(196,149,106,0.1);color:#A67B52;border-radius:var(--radius-sm)}
-[data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#F5F3ED}
-[data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#1a1814;box-shadow:var(--clay-sm)}
-[data-theme="tofu"] .recent-hl{background:rgba(196,149,106,0.22);color:#A67B52}
-[data-theme="tofu"] .recent-path-item{border-radius:var(--radius-sm);border:1px solid #D6D1C3;box-shadow:var(--clay-sm)}
-[data-theme="tofu"] .recent-path-item:hover{background:rgba(196,149,106,0.06);box-shadow:none;color:#A67B52;transform:none}
-[data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
+[data-theme="tofu"] .folder-browser-header{background:#EFE6D2;border-bottom:var(--stitch)}
+[data-theme="tofu"] .folder-browser-footer{background:#EFE6D2;border-top:var(--stitch)}
+[data-theme="tofu"] .folder-item.selected{background:rgba(143,81,38,0.08);border-left:3px solid #8F5126}
+[data-theme="tofu"] .folder-code-badge{background:rgba(143,81,38,0.1);color:#7A441F;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #3B2E1E;border-radius:var(--radius-sm);background:#FBF6E9}
+[data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#3B2E1E;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-hl{background:rgba(143,81,38,0.22);color:#7A441F}
+[data-theme="tofu"] .recent-path-item{border-radius:var(--radius-sm);border:1px solid #DED3BC;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-path-item:hover{background:rgba(143,81,38,0.06);box-shadow:none;color:#7A441F;transform:none}
+[data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#7A441F}
+
+/* ══════════════════════════════════════════════════════════════════════
+   MENUS — one floating paper sheet
+   Triggers and popovers share ONE geometry: 32px chips at 10px radius,
+   panels at 14px radius with a single hairline border and a layered warm
+   shadow. The retired 2px bevel (white top-left / tan bottom-right) made a
+   popover look like an embossed plastic key, which is exactly why it read as
+   a foreign object inside an otherwise editorial UI. Depth now comes from
+   the drop shadow only; the inset white line is letterpress, not a bevel.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Submenu triggers — quiet chips, identical to every other toolbar chip ── */
+[data-theme="tofu"] .submenu-trigger{
+  border-radius:var(--radius-sm);
+  border-color:transparent;
+  color:var(--text-secondary);
+  font-family:var(--sans-body);
+  font-weight:600;
+  transition:background-color .15s ease,color .15s ease,border-color .15s ease,box-shadow .15s ease
+}
+[data-theme="tofu"] .submenu-trigger:hover{
+  background:rgba(143,81,38,0.07);
+  border-color:#E7DAC2;
+  color:var(--text-primary)
+}
+[data-theme="tofu"] .submenu-trigger.open,
+[data-theme="tofu"] .submenu-trigger[aria-expanded="true"]{
+  background:#FBF2E2;
+  border-color:#E3CFAD;
+  color:var(--chat-primary-ink);
+  box-shadow:inset 0 1px 2px rgba(143,81,38,0.06)
+}
+[data-theme="tofu"] .submenu-trigger.has-active{
+  background:rgba(143,81,38,0.10);
+  border-color:rgba(143,81,38,0.26);
+  color:var(--accent)
+}
+[data-theme="tofu"] .submenu-trigger:active{
+  transform:none;
+  box-shadow:none
+}
+[data-theme="tofu"] .submenu-trigger:disabled,[data-theme="tofu"] .submenu-trigger:disabled:hover{
+  opacity:.45;
+  cursor:not-allowed;
+  transform:none;
+  background:transparent;
+  color:var(--text-tertiary);
+  border-color:transparent;
+  box-shadow:none
+}
+[data-theme="tofu"] .submenu-arrow{opacity:.4;color:#9A8F79}
+[data-theme="tofu"] .submenu-count{
+  background:rgba(143,81,38,0.14);
+  color:#7E4A1E;
+  border-radius:999px;
+  box-shadow:inset 0 0 0 1px rgba(143,81,38,0.18);
+  font-family:var(--sans-body);
+  font-size:9px;
+  font-weight:700;
+  padding:0 5px;
+  min-width:15px;
+  height:15px;
+  line-height:1
+}
+
+/* ── Panel ── */
+[data-theme="tofu"] .submenu-dropdown,
+[data-theme="tofu"] .flow-menu{
+  border-radius:var(--radius);
+  border:1px solid #E2D5BB;
+  background:#FFFEFA;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 18px 42px -18px rgba(74,52,26,0.32),
+    0 3px 10px rgba(74,52,26,0.07);
+  padding:6px;
+  overflow:visible;
+  z-index:9999;
+  max-height:none;
+  clip-path:none
+}
+[data-theme="tofu"] #agentModeMenu{overflow-y:auto}
+[data-theme="tofu"] .submenu-dropdown::after,
+[data-theme="tofu"] .flow-menu::after{
+  background:#FFFEFA;
+  border-right:1px solid #E2D5BB;
+  border-bottom:1px solid #E2D5BB;
+  border-bottom-right-radius:2px;
+  bottom:-6px;
+  width:11px;
+  height:11px
+}
+
+/* ── Rows ── */
+[data-theme="tofu"] .submenu-item,
+[data-theme="tofu"] .flow-menu-item{
+  border-radius:10px;
+  padding:8px 9px 8px 8px;
+  font-family:var(--sans-body);
+  font-weight:600;
+  transition:background-color .13s ease
+}
+[data-theme="tofu"] .submenu-item:hover,
+[data-theme="tofu"] .flow-menu-item:hover{background:#F7EEDD}
+/* Active row: a warm wash plus a 2px caramel spine — the same "selected"
+   grammar as the sidebar's conversation rows, so the two read as one system. */
+[data-theme="tofu"] .submenu-item.active,
+[data-theme="tofu"] .flow-menu-item.selected{
+  background:linear-gradient(90deg,rgba(143,81,38,0.13),rgba(143,81,38,0.045));
+  border-radius:10px;
+  box-shadow:inset 2px 0 0 var(--accent)
+}
+[data-theme="tofu"] .submenu-item-icon,
+[data-theme="tofu"] .flow-menu-icon{
+  width:28px;
+  height:28px;
+  border-radius:8px;
+  background:#F4ECDB;
+  color:#8A7358;
+  transition:background-color .13s ease,color .13s ease
+}
+[data-theme="tofu"] .submenu-item.active .submenu-item-icon,
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{
+  background:#F0DFC4;
+  color:var(--accent)
+}
+[data-theme="tofu"] .submenu-item-name,
+[data-theme="tofu"] .flow-menu-name{
+  color:var(--text-primary);
+  font-family:var(--sans-body);
+  font-size:13px;
+  font-weight:650;
+  line-height:1.3;
+  letter-spacing:0;
+  -webkit-font-smoothing:antialiased
+}
+[data-theme="tofu"] .submenu-item.active .submenu-item-name,
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name{color:var(--chat-primary-ink)}
+[data-theme="tofu"] .submenu-item-desc,
+[data-theme="tofu"] .flow-menu-desc{
+  color:var(--text-tertiary);
+  font-size:10.5px;
+  font-weight:450;
+  line-height:1.35;
+  margin-top:1px
+}
+/* Selected check — a pressed hanko seal, not a bare glyph. */
+[data-theme="tofu"] .submenu-item-check,
+[data-theme="tofu"] .flow-menu-check{color:var(--accent)}
+[data-theme="tofu"] .submenu-item.active .submenu-item-check,
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{
+  color:#FFF8EC;
+  background:var(--accent);
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  box-shadow:0 1px 2px rgba(120,70,30,0.28)
+}
+[data-theme="tofu"] .submenu-divider{background:#EDE3CF;height:1px;margin:6px 8px}
+[data-theme="tofu"] .submenu-section-label{
+  color:#A98F6C;
+  font-family:var(--sans-body);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:0.08em;
+  text-transform:uppercase
+}
 
 /* ── Capability mode picker — tofu (clay) theme ──
- * The trigger inherits the shared composer .submenu-trigger
- * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
- * active-Studio accent is bespoke here. */
-[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
-[data-theme="tofu"] .submenu-section-label{color:#8A7A56;font-family:var(--sans-body)}
-/* ── Light theme ── */
+   The trigger inherits the shared composer chip; only the active-Studio
+   accent is bespoke here. */
+[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{
+  color:var(--accent);
+  background:rgba(143,81,38,0.10);
+  border-color:rgba(143,81,38,0.26)
+}
 [data-theme="light"] .chat-mode-trigger[data-mode="studio"]{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
 [data-theme="light"] .submenu-section-label{color:var(--text-tertiary)}
 /* Mobile capability-mode rows read as a radio group — active row painted
@@ -14324,74 +14523,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .mobile-mode-item .mobile-sheet-item-check{opacity:0}
 .mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
 
-/* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
-[data-theme="tofu"] .submenu-trigger:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3)
-}
-[data-theme="tofu"] .submenu-trigger:disabled,[data-theme="tofu"] .submenu-trigger:disabled:hover{
-  opacity:.5;
-  cursor:not-allowed;
-  transform:none;
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3)
-}
-[data-theme="tofu"] .submenu-trigger.open{
-  background:rgba(196,149,106,0.12);
-  color:#3D3022;
-  border-color:rgba(196,149,106,0.35);
-  font-weight:700
-}
-[data-theme="tofu"] .submenu-item.active .submenu-item-name,[data-theme="tofu"] .submenu-item.active .submenu-item-icon,[data-theme="tofu"] .submenu-item.active .submenu-item-check{color:#A67B52}
-[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:rgba(196,149,106,0.1)}
-[data-theme="tofu"] .submenu-item{border-radius:3px;padding:var(--space-2) 10px;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
-[data-theme="tofu"] .submenu-item:hover{background:rgba(196,149,106,0.08)}
-[data-theme="tofu"] .submenu-item.active{background:rgba(196,149,106,0.07);border-radius:3px}
-[data-theme="tofu"] .submenu-item-icon{border-radius:3px;background:transparent;color:#8A7A5A}
-[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:#E8E5DC}
-[data-theme="tofu"] .submenu-item-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
-[data-theme="tofu"] .submenu-item-desc{font-size:10px;color:#6A5A3A;font-weight:500}
-[data-theme="tofu"] .submenu-count{background:rgba(196,149,106,0.18);color:#8E6B48;border-radius:8px;box-shadow:none;font-family:var(--sans-body);font-size:9px;font-weight:700;padding:0 5px;min-width:14px;height:14px;line-height:1}
-[data-theme="tofu"] .submenu-dropdown{
-  border-radius:4px;
-  border:2px solid #C2BCA4;
-  border-top-color:#FFFCF6;
-  border-left-color:#FFFCF6;
-  border-right-color:#A89878;
-  border-bottom-color:#A89878;
-  box-shadow:var(--clay-sm);
-  background:#F4F2EB;
-  padding:var(--space-1);
-  overflow:visible;
-  z-index:9999;
-  max-height:none;
-  clip-path:none
-}
-[data-theme="tofu"] .submenu-dropdown::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
-
-/* ── Flow menu: same clay treatment as the Mode/Enhance/Tools sub-menus ── */
-[data-theme="tofu"] .flow-menu{
-  border-radius:4px;
-  border:2px solid #C2BCA4;
-  border-top-color:#FFFCF6;
-  border-left-color:#FFFCF6;
-  border-right-color:#A89878;
-  border-bottom-color:#A89878;
-  box-shadow:var(--clay-sm);
-  background:#F4F2EB;
-  padding:var(--space-1);
-  z-index:9999
-}
-[data-theme="tofu"] .flow-menu::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
-[data-theme="tofu"] .flow-menu-item{border-radius:3px;padding:var(--space-2) 10px;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
-[data-theme="tofu"] .flow-menu-item:hover{background:rgba(196,149,106,0.08)}
-[data-theme="tofu"] .flow-menu-item.selected{background:rgba(196,149,106,0.07);border-radius:3px}
-[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{color:#A67B52}
-[data-theme="tofu"] .flow-menu-icon{border-radius:3px;background:transparent;color:#8A7A5A}
-[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{background:#E8E5DC}
-[data-theme="tofu"] .flow-menu-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
-[data-theme="tofu"] .flow-menu-desc{font-size:10px;color:#6A5A3A;font-weight:500}
 
 /* ── Scrollbar — thin pixel track ── */
 [data-theme="tofu"] ::-webkit-scrollbar{width:5px}
@@ -14399,13 +14530,13 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .conversations-list:hover::-webkit-scrollbar-thumb,
 [data-theme="tofu"] .chat-container:hover::-webkit-scrollbar-thumb,
 [data-theme="tofu"] .modal:hover::-webkit-scrollbar-thumb{
-  background:rgba(196,149,106,0.35);
+  background:rgba(143,81,38,0.35);
   border-radius:2px;
   border:1px solid rgba(255,252,246,0.3)
 }
 [data-theme="tofu"] .conversations-list:hover,
 [data-theme="tofu"] .chat-container:hover,
-[data-theme="tofu"] .modal:hover{scrollbar-color:rgba(196,149,106,0.3) transparent}
+[data-theme="tofu"] .modal:hover{scrollbar-color:rgba(143,81,38,0.3) transparent}
 
 /* ── Debug panel — pixel window ── */
 [data-theme="tofu"] .debug-panel{
@@ -14447,7 +14578,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    memory-modal. */
 [data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel){
   background:#faf8f3;
-  border:3px solid #1a1814;
+  border:3px solid #3B2E1E;
   border-radius:var(--radius);
   box-shadow:var(--clay-sm);
   animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both
@@ -14459,9 +14590,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   font-weight:900;
   text-transform:uppercase;
   letter-spacing:-0.01em;
-  color:#1a1814;
+  color:#3B2E1E;
   padding-bottom:var(--space-3);
-  border-bottom:2px solid #1a1814
+  border-bottom:2px solid #3B2E1E
 }
 [data-theme="tofu"] .modal > h3::after{
   content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;
@@ -14493,7 +14624,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input){
   border-radius:var(--radius);
   border:1px solid rgba(184,176,160,0.4);
-  background:#F5F3ED;
+  background:#FBF6E9;
   box-shadow:none
 }
 [data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):focus{border-color:#BB9572;box-shadow:none}
@@ -14502,7 +14633,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
       .pm-header, so the generic > h3 rule doesn't reach it). ── */
 [data-theme="tofu"] .pm-header{
   background:#f2ecda;
-  border-bottom:3px solid #1a1814;
+  border-bottom:3px solid #3B2E1E;
   position:relative
 }
 [data-theme="tofu"] .pm-header::after{
@@ -14510,24 +14641,24 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
   opacity:.55
 }
-[data-theme="tofu"] .pm-workbench h3{font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814}
+[data-theme="tofu"] .pm-workbench h3{font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#3B2E1E}
 [data-theme="tofu"] .pm-header-icon{color:#a87d2e}
-[data-theme="tofu"] .pm-subtitle{color:#3d362c}
+[data-theme="tofu"] .pm-subtitle{color:#5A4B36}
 /* Blocky close button shared by plain modals (browser/apply) + project. */
 [data-theme="tofu"] .modal-close-btn,
 [data-theme="tofu"] .pm-close{
-  border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  border:2px solid #3B2E1E;border-radius:var(--radius);background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);
   transition:transform .1s,box-shadow .1s,background .1s,color .1s
 }
 [data-theme="tofu"] .modal-close-btn:hover,
 [data-theme="tofu"] .pm-close:hover{
-  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#FFFDF8
 }
 [data-theme="tofu"] .modal-close-btn:active,
-[data-theme="tofu"] .pm-close:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .pm-close:active{transform:translate(2px,2px);box-shadow:0 0 0 #3B2E1E}
 /* pm rail/cards: square + ink on the cream shell */
-[data-theme="tofu"] .pm-rail-card{border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);background:#fff}
+[data-theme="tofu"] .pm-rail-card{border:2px solid #3B2E1E;border-radius:var(--radius);box-shadow:var(--clay-sm);background:#FFFEFA}
 
 /* ═══════════════════════════════════════════
    Update modal — neo-brutalist tofu treatment
@@ -14536,14 +14667,14 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    ═══════════════════════════════════════════ */
 [data-theme="tofu"] .update-modal{
   background:#faf8f3;
-  border:3px solid #1a1814;
+  border:3px solid #3B2E1E;
   border-radius:var(--radius);
   box-shadow:var(--clay-sm);
   animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both;
 }
 [data-theme="tofu"] .update-modal-header{
   background:#f2ecda;
-  border-bottom:3px solid #1a1814;
+  border-bottom:3px solid #3B2E1E;
   padding:var(--space-4) var(--space-5);
   position:relative;
 }
@@ -14554,75 +14685,75 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   opacity:.55;
 }
 [data-theme="tofu"] .upd-head-icon{
-  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);
 }
 [data-theme="tofu"] .update-modal-header h3{
-  font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814;
+  font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#3B2E1E;
 }
-[data-theme="tofu"] .upd-head-sub{color:#3d362c}
+[data-theme="tofu"] .upd-head-sub{color:#5A4B36}
 [data-theme="tofu"] .modal-close-btn{
-  width:34px;height:34px;border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  width:34px;height:34px;border:2px solid #3B2E1E;border-radius:var(--radius);background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);font-size:var(--font-size-2xl);
   transition:transform .1s,box-shadow .1s,background .1s,color .1s;
 }
 [data-theme="tofu"] .modal-close-btn:hover{
-  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff;
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#FFFDF8;
 }
-[data-theme="tofu"] .modal-close-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .modal-close-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #3B2E1E}
 [data-theme="tofu"] .update-modal-body{padding:var(--space-5);min-height:140px}
 /* Checking + retry */
 [data-theme="tofu"] .upd-checking-wrap .upd-big-spin{border-color:rgba(26,24,20,.18);border-top-color:#c9993f}
-[data-theme="tofu"] .upd-checking-wrap span{color:#3d362c}
+[data-theme="tofu"] .upd-checking-wrap span{color:#5A4B36}
 [data-theme="tofu"] .upd-retry-btn{
-  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#FFFEFA;color:#3B2E1E;
   box-shadow:var(--clay-sm);font-weight:700;transition:transform .1s,box-shadow .1s,background .1s;
 }
 [data-theme="tofu"] .upd-retry-btn:hover{transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f2ecda}
 /* Version hero — current → latest */
 [data-theme="tofu"] .upd-hero{
   background:linear-gradient(135deg,#f2ecda,#f5eedd);
-  border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);
+  border:2px solid #3B2E1E;border-radius:var(--radius);box-shadow:var(--clay-sm);
 }
-[data-theme="tofu"] .upd-ver-label{color:#3d362c}
-[data-theme="tofu"] .upd-ver-num{color:#1a1814}
+[data-theme="tofu"] .upd-ver-label{color:#5A4B36}
+[data-theme="tofu"] .upd-ver-num{color:#3B2E1E}
 [data-theme="tofu"] .upd-ver.latest .upd-ver-num{color:#a87d2e}
-[data-theme="tofu"] .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:#1a1814}
-[data-theme="tofu"] .upd-arrow{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814}
-[data-theme="tofu"] .upd-hero:not(.up-to-date) .upd-arrow{background:#c9993f;color:#fff;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:#3B2E1E}
+[data-theme="tofu"] .upd-arrow{border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#FFFEFA;color:#3B2E1E}
+[data-theme="tofu"] .upd-hero:not(.up-to-date) .upd-arrow{background:#c9993f;color:#FFFDF8;box-shadow:var(--clay-sm)}
 /* Apply / restart action button — tofu block */
 [data-theme="tofu"] .upd-apply-btn{
-  background:#c9993f;color:#1a1814;border:2px solid #1a1814;border-radius:var(--radius-sm);
+  background:#c9993f;color:#3B2E1E;border:2px solid #3B2E1E;border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm);font-weight:800;text-transform:uppercase;letter-spacing:.01em;
   transition:transform .1s,box-shadow .1s,background .1s;
 }
 [data-theme="tofu"] .upd-apply-btn:hover{background:#d4a44a;transform:translate(1px,1px);box-shadow:var(--clay-md)}
-[data-theme="tofu"] .upd-apply-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .upd-apply-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #3B2E1E}
 [data-theme="tofu"] .upd-apply-btn:disabled{transform:none;box-shadow:var(--clay-sm)}
 /* Live stepper — square dots, ink rails */
-[data-theme="tofu"] .upd-step-dot{border-radius:var(--radius-sm);border:2px solid #1a1814;color:#1a1814}
+[data-theme="tofu"] .upd-step-dot{border-radius:var(--radius-sm);border:2px solid #3B2E1E;color:#3B2E1E}
 [data-theme="tofu"] .upd-step:not(:last-child)::before{background:rgba(26,24,20,.25)}
-[data-theme="tofu"] .upd-step.is-done:not(:last-child)::before{background:#1a1814}
-[data-theme="tofu"] .upd-step.is-done .upd-step-dot{background:#4ade80;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-done:not(:last-child)::before{background:#3B2E1E}
+[data-theme="tofu"] .upd-step.is-done .upd-step-dot{background:#4ade80;border-color:#3B2E1E}
 [data-theme="tofu"] .upd-step.is-active .upd-step-dot{border-color:#c9993f;border-top-color:transparent}
-[data-theme="tofu"] .upd-step.is-error .upd-step-dot{background:#f87171;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-error .upd-step-dot{background:#f87171;border-color:#3B2E1E}
 [data-theme="tofu"] .upd-step.is-active .upd-step-label,
-[data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#1a1814}
+[data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#3B2E1E}
 /* Badges, file lists, hints */
-[data-theme="tofu"] .upd-badge{border-radius:var(--radius-sm);border-width:2px;border-color:#1a1814;box-shadow:var(--clay-sm);font-weight:800}
+[data-theme="tofu"] .upd-badge{border-radius:var(--radius-sm);border-width:2px;border-color:#3B2E1E;box-shadow:var(--clay-sm);font-weight:800}
 [data-theme="tofu"] .upd-badge.ok{background:#dff5e3;color:#2f7d4f}
-[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#1a1814;border-radius:var(--radius-sm)}
-[data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#3d362c}
-[data-theme="tofu"] .upd-files{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#f5eedd;color:#3d362c}
-[data-theme="tofu"] .upd-log-label{color:#1a1814}
-[data-theme="tofu"] .upd-log-copy{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#f5eedd;color:#1a1814;font-weight:700}
+[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#3B2E1E;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#5A4B36}
+[data-theme="tofu"] .upd-files{border-radius:var(--radius-sm);border:2px solid #3B2E1E;background:#f5eedd;color:#5A4B36}
+[data-theme="tofu"] .upd-log-label{color:#3B2E1E}
+[data-theme="tofu"] .upd-log-copy{border:2px solid #3B2E1E;border-radius:var(--radius-sm);background:#f5eedd;color:#3B2E1E;font-weight:700}
 [data-theme="tofu"] .upd-log-copy.copied{color:#2f7d4f}
-[data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#1a1814}
-[data-theme="tofu"] .upd-hint{color:#3d362c}
+[data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#3B2E1E}
+[data-theme="tofu"] .upd-hint{color:#5A4B36}
 /* Check-failure card — ink heading, muted reason */
 [data-theme="tofu"] .upd-err-icon{color:#c0392b}
-[data-theme="tofu"] .upd-err-title{color:#1a1814;font-weight:900}
-[data-theme="tofu"] .upd-err-reason{color:#3d362c}
+[data-theme="tofu"] .upd-err-title{color:#3B2E1E;font-weight:900}
+[data-theme="tofu"] .upd-err-reason{color:#5A4B36}
 /* ── Settings-panel pixel inputs RETIRED (2026-09-04 owner direction: no
    brutalist ink boxes in Settings, any theme). They were already dead — the
    generic `.modal input` bleed above out-specified them — and the unified
@@ -14640,8 +14771,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* 🧱 btn-primary — neo-brutalist gold block (matches the modal's ink border + hard shadow) */
 [data-theme="tofu"] .btn-primary{
-  background:#C9993F;color:#1a1814;
-  border:2px solid #1a1814;
+  background:#C9993F;color:#3B2E1E;
+  border:2px solid #3B2E1E;
   border-radius:var(--radius-sm);
   position:relative;overflow:visible;
   box-shadow:var(--clay-sm);
@@ -14658,13 +14789,13 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   box-shadow:var(--clay-md)}
 [data-theme="tofu"] .btn-primary:active{
   transform:translate(3px,3px);
-  box-shadow:0 0 0 #1a1814;
+  box-shadow:0 0 0 #3B2E1E;
   background:#BC8A35
 }
 /* 🧱 btn-secondary — neo-brutalist cream block (matches btn-primary geometry exactly) */
 [data-theme="tofu"] .btn-secondary{
-  background:#faf8f3;color:#1a1814;
-  border:2px solid #1a1814;
+  background:#faf8f3;color:#3B2E1E;
+  border:2px solid #3B2E1E;
   border-radius:var(--radius-sm);
   position:relative;overflow:visible;
   box-shadow:var(--clay-sm);
@@ -14676,12 +14807,12 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s,color 0.1s
 }
 [data-theme="tofu"] .btn-secondary:hover{
-  background:#ECE7DD;color:#1a1814;
+  background:#ECE7DD;color:#3B2E1E;
   transform:translate(-1px,-1px);
   box-shadow:var(--clay-md)}
 [data-theme="tofu"] .btn-secondary:active{
   transform:translate(3px,3px);
-  box-shadow:0 0 0 #1a1814;
+  box-shadow:0 0 0 #3B2E1E;
   background:#E2DCCF
 }
 /* ── Settings buttons — standard theme button language (owner direction
@@ -14699,8 +14830,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    gradient breads). 0-3/0-4 specificity to outrank the settings sheet and the
    comfort flattening, which load after this file. ── */
 [data-theme="tofu"] .settings-panel .stg-btn-balance{
-  background:#C9993F;color:#1a1814;
-  border:2px solid #1a1814;
+  background:#C9993F;color:#3B2E1E;
+  border:2px solid #3B2E1E;
   border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm);
   text-shadow:none;
@@ -14714,7 +14845,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 [data-theme="tofu"] .settings-panel .stg-btn-balance:active{
   transform:translate(3px,3px);
-  box-shadow:0 0 0 #1a1814;
+  box-shadow:0 0 0 #3B2E1E;
   background:#BC8A35;
 }
 /* The tofu-theme oauth button overrides moved to
@@ -14739,7 +14870,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Modal shell — game cartridge card ── */
 [data-theme="tofu"] .stg-modal {
   background: #FAF8F2;
-  border: 3px solid #8A7A5A;
+  border: 3px solid #9A8F79;
   border-top-color: #C4B89E;
   border-left-color: #C4B89E;
   border-right-color: #6B5A3A;
@@ -14777,7 +14908,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   bottom: -2px;
   left: var(--space-3); right: var(--space-3);
   height: 1.5px;
-  background: linear-gradient(90deg, transparent, #C4956A 20%, #C4956A 80%, transparent);
+  background: linear-gradient(90deg, transparent, #8F5126 20%, #8F5126 80%, transparent);
   opacity: 0.4;
 }
 [data-theme="tofu"] .stg-modal-title {
@@ -14801,7 +14932,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   border-bottom-color: rgba(168, 152, 120, 0.4);
   border-radius: 6px;
   background: linear-gradient(180deg, #F6F4EE, #EBE8DF);
-  color: #8A7A5A;
+  color: #9A8F79;
   font-size: var(--font-size-lg);
   font-weight: 700;
   padding: 0;
@@ -14810,7 +14941,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 [data-theme="tofu"] .stg-modal-close:hover {
   background: #E85050;
-  color: #fff;
+  color: #FFFDF8;
   border-color: #C04040;
   box-shadow: 0 1px 0 #903030;
 }
@@ -14825,7 +14956,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Description — warm muted text ── */
 [data-theme="tofu"] .stg-modal-desc {
   font-size: var(--font-size-xs);
-  color: #8A7A5A;
+  color: #9A8F79;
   line-height: 1.7;
   margin-bottom: 18px;
   padding: 10px var(--space-3);
@@ -14848,7 +14979,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 
 /* ── Inputs — SNES recessed screen ── */
 [data-theme="tofu"] .stg-modal .stg-field input {
-  background: #F5F3ED;
+  background: #FBF6E9;
   border: 2.5px solid #B8AD94;
   border-top-color: #9A9070;
   border-left-color: #9A9070;
@@ -14866,7 +14997,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .stg-modal .stg-field input:focus {
   transform: none;
   background: #FFFEF8;
-  border-color: #C4956A;
+  border-color: #8F5126;
   border-top-color: #A07850;
   border-left-color: #A07850;
   border-right-color: #DEB890;
@@ -14888,7 +15019,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
  * rounded beige input. Give the EDITOR the recessed chrome and strip the
  * inner input's own. */
 [data-theme="tofu"] .stg-modal .stg-tag-editor {
-  background: #F5F3ED;
+  background: #FBF6E9;
   border: 2.5px solid #B8AD94;
   border-top-color: #9A9070;
   border-left-color: #9A9070;
@@ -14901,7 +15032,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .stg-modal .stg-tag-editor:focus-within {
   transform: none;
   background: #FFFEF8;
-  border-color: #C4956A;
+  border-color: #8F5126;
   border-top-color: #A07850;
   border-left-color: #A07850;
   border-right-color: #DEB890;
@@ -14929,14 +15060,14 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Hint text ── */
 [data-theme="tofu"] .stg-modal .stg-hint {
   font-size: 10px;
-  color: #A89878;
+  color: #C2B496;
 }
 
 /* ── Footer — action bar ── */
 [data-theme="tofu"] .stg-modal-footer {
   padding: 14px 18px var(--space-4);
   border-top: 2px solid rgba(168, 152, 120, 0.25);
-  background: linear-gradient(180deg, #F5F3ED, #F0EDE4);
+  background: linear-gradient(180deg, #FBF6E9, #F0EDE4);
   position: relative;
   z-index: 1;
 }
@@ -14961,7 +15092,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .stg-modal .stg-btn-secondary:hover {
   transform: translateY(-1px);
   box-shadow: 0 3px 0 #8A8060, 0 4px 8px rgba(74, 63, 47, 0.1);
-  background: linear-gradient(180deg, #F5F3ED, #EBE8DF);
+  background: linear-gradient(180deg, #FBF6E9, #EBE8DF);
 }
 [data-theme="tofu"] .stg-modal .stg-btn-secondary:active {
   transform: translateY(2px);
@@ -14977,8 +15108,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   font-size: var(--font-size-sm);
   font-weight: 700;
   padding: var(--space-2) var(--space-5);
-  background: linear-gradient(180deg, #D4AA80, #C4956A);
-  border: 2.5px solid #C4956A;
+  background: linear-gradient(180deg, #D4AA80, #8F5126);
+  border: 2.5px solid #8F5126;
   border-top-color: #E8CCA8;
   border-left-color: #E8CCA8;
   border-right-color: #A07850;
@@ -15002,7 +15133,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   border-left-color: #A07850;
   border-right-color: #E8CCA8;
   border-bottom-color: #E8CCA8;
-  background: linear-gradient(180deg, #C4956A, #B88A5E);
+  background: linear-gradient(180deg, #8F5126, #B88A5E);
 }
 [data-theme="tofu"] .stg-modal .stg-btn-primary:disabled {
   background: #D8D2C4;
@@ -15059,9 +15190,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .ig-generate-btn{
   background:#BB9572;color:#FFFCF6;
   border-radius:var(--radius-sm);
-  border:2px solid #C4956A;
+  border:2px solid #8F5126;
   border-top-color:#D4BC9E;border-left-color:#D4BC9E;
-  border-right-color:#8E6B48;border-bottom-color:#8E6B48;
+  border-right-color:#7A441F;border-bottom-color:#7A441F;
   box-shadow:0 2px 0 #6B4F32;
   clip-path:none;
   image-rendering:auto;
@@ -15074,7 +15205,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .ig-generate-btn:active{
   transform:translateY(2px);
   box-shadow:none;
-  border-top-color:#8E6B48;border-left-color:#8E6B48;
+  border-top-color:#7A441F;border-left-color:#7A441F;
   border-right-color:#D4BC9E;border-bottom-color:#D4BC9E;
   background:#9A7A58
 }
@@ -15159,11 +15290,11 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* ── Cost tag — warm accent text ── */
 [data-theme="tofu"] .cost-tag{
-  color:#A67B52 !important;
+  color:#7A441F !important;
   font-weight:700 !important
 }
 [data-theme="tofu"] .cost-tag .cost-breakdown{color:#B8A080}
-[data-theme="tofu"] #browserToggle.active{background:rgba(196,149,106,0.08);color:#A67B52;border-bottom-color:rgba(196,149,106,0.5)}
+[data-theme="tofu"] #browserToggle.active{background:rgba(143,81,38,0.08);color:#7A441F;border-bottom-color:rgba(143,81,38,0.5)}
 [data-theme="tofu"] #desktopToggle.active{background:rgba(138,120,176,0.08);color:#8A78B0;border-bottom-color:rgba(138,120,176,0.5)}
 
 /* ── Conv action buttons — pixel overlay ── */
@@ -15183,9 +15314,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   transition:all 0.08s ease
 }
 [data-theme="tofu"] .conv-action-btn:hover{
-  background:rgba(196,149,106,0.12);
-  border-color:rgba(196,149,106,0.2);
-  color:#8E6B48
+  background:rgba(143,81,38,0.12);
+  border-color:rgba(143,81,38,0.2);
+  color:#7A441F
 }
 [data-theme="tofu"] .conv-action-btn.conv-delete:hover{
   background:rgba(207,56,56,0.08);
@@ -15232,12 +15363,68 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* Conversation strip uses the composer card's single hairline. */
 [data-theme="tofu"] .conv-status-strip{box-shadow:inset 0 -1px 0 var(--border-light)}
-/* Quiet, static scene echo in the toolbar tray, never behind typing. */
+/* ── The composer card: a sheet of paper laid on the desk ──
+   A warm white face, one hairline, a letterpress highlight along the top edge
+   and a single soft drop shadow. Focus deepens the edge and adds a caramel
+   halo — never a coloured slab behind the textarea. */
+[data-theme="tofu"] .input-area .input-box{
+  /* Near-neutral paper: the sheet must be the one CLEAN surface in the room,
+     or the warm ground and a warm card read as two washes on top of each other. */
+  background:linear-gradient(180deg,#FFFEFA 0%,#FDFAF3 100%);
+  border:1px solid #E2D3B6;
+  border-radius:16px;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 14px 30px -22px rgba(80,58,32,0.55),
+    0 2px 6px rgba(80,58,32,0.05);
+  transition:border-color .2s ease,box-shadow .2s ease
+}
+[data-theme="tofu"] .input-area .input-box:focus-within{
+  border-color:#D6B486;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 0 0 3px rgba(143,81,38,0.12),
+    0 14px 30px -22px rgba(80,58,32,0.55)
+}
+/* The typing surface: warm ink on bare paper. No blur, no gradient, no
+   animation — nothing may move behind live text. */
+[data-theme="tofu"] .input-box textarea{
+  color:var(--text-primary);
+  caret-color:var(--accent);
+  font-family:var(--sans-body);
+  font-size:15.5px;
+  line-height:1.6
+}
+[data-theme="tofu"] .input-box textarea::placeholder{color:#A2947C}
+/* Quiet, static scene echo in the toolbar tray, never behind typing.
+   The scene colour pools LOW as a soft watercolour bloom and the top band stays
+   pale, so chip labels and the send button keep contrast. Colours are pulled
+   into the paper family (sage / eucalyptus / dusk-rose rather than the base
+   build's saturated green, teal and peach) — a candy tray under a warm card was
+   the loudest remaining seam in the composer. */
 @media(min-width:801px){
-  [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 12.5px 12.5px}
-  [data-theme="tofu"] .project-bar[data-decor="meadow"]:not([style*="none"]) ~ .input-box .input-actions{background:#f0f2e9}
-  [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{background:#edf1ef}
-  [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{background:#f5ede8}
+  [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 15px 15px}
+  [data-theme="tofu"] .project-bar[data-decor="meadow"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(120% 150% at 16% 158%, rgba(138,158,110,0.22) 0%, rgba(138,158,110,0) 62%),
+      radial-gradient(110% 130% at 88% 136%, rgba(143,81,38,0.10) 0%, rgba(143,81,38,0) 60%),
+      linear-gradient(180deg, rgba(255,253,248,0) 0%, rgba(255,253,248,0.62) 100%),
+      #F7F3E2
+  }
+  [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(120% 150% at 20% 156%, rgba(120,152,140,0.20) 0%, rgba(120,152,140,0) 62%),
+      radial-gradient(110% 130% at 86% 138%, rgba(143,81,38,0.09) 0%, rgba(143,81,38,0) 60%),
+      linear-gradient(180deg, rgba(255,253,248,0) 0%, rgba(255,253,248,0.62) 100%),
+      #F4F2E3
+  }
+  [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(120% 150% at 18% 156%, rgba(178,140,132,0.18) 0%, rgba(178,140,132,0) 62%),
+      radial-gradient(110% 130% at 88% 140%, rgba(143,81,38,0.10) 0%, rgba(143,81,38,0) 60%),
+      linear-gradient(180deg, rgba(255,253,248,0) 0%, rgba(255,253,248,0.62) 100%),
+      #F9F0E2
+  }
 }
 /* ══════════════════════════════════════════════════════════════
    Tofu Code Block — clean editorial code surface
@@ -15342,7 +15529,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .md-table-wrapper{border-radius:0;border:1px solid #D8D1C0}
 [data-theme="tofu"] .table-header{background:#E6E1D4;border-bottom:1px solid #D8D1C0;border-radius:0;color:#8A7458}
 [data-theme="tofu"] .table-header .copy-btn{color:#8A7458}
-[data-theme="tofu"] .table-header .copy-btn:hover{color:#4A4233;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .table-header .copy-btn:hover{color:#4A4233;background:rgba(143,81,38,0.12)}
 [data-theme="tofu"] .md-content table{
   border-radius:0;overflow:hidden;
   border:none;
@@ -15351,15 +15538,15 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 [data-theme="tofu"] .md-content th{background:#E6E1D4}
 [data-theme="tofu"] .md-content td,[data-theme="tofu"] .md-content th{border-color:#D8D1C0}
-[data-theme="tofu"] .md-content tr:nth-child(even) td{background:rgba(196,149,106,0.03)}
+[data-theme="tofu"] .md-content tr:nth-child(even) td{background:rgba(143,81,38,0.03)}
 
 /* ── Text selection — warm amber highlight ── */
 [data-theme="tofu"] ::selection{
-  background:rgba(196,149,106,0.25);
+  background:rgba(143,81,38,0.25);
   color:#3A3428
 }
 [data-theme="tofu"] ::-moz-selection{
-  background:rgba(196,149,106,0.25);
+  background:rgba(143,81,38,0.25);
   color:#3A3428
 }
 
@@ -15454,14 +15641,16 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .preset-toggle-wrapper{overflow:visible}
 
 /* ══════════════════════════════════════════════════════
-   🕹️ TOOLBAR v5 — Pixel Console Buttons
-   Design principles:
-   1. SNES-style 3D borders (light top-left, dark bottom-right)
-   2. JetBrains Mono for crisp, cute monospace text
-   3. Clear dark text (#5C4A33) — no grayish/blurry fonts
-   4. Pixel press-down on :active (translateY + shadow collapse)
-   5. Unified warm ivory gradient backgrounds
-   6. 4px border-radius for retro pixel-friendly corners
+   🎛️ TOOLBAR — one chip family
+   Every toolbar control (model, capability, agent mode, extras, search)
+   shares ONE geometry and ONE set of states:
+     rest  · transparent, hairline transparent
+     hover · caramel wash, hairline #E7DAC2
+     open  · paper fill, hairline #E3CFAD, 1px press
+   Identity comes from the leading glyph (brand mark / lever / dots), never
+   from a per-control bevel. The previous build gave the model pill a 3D key
+   edge while its neighbours were flat, so the row read as two different
+   toolkits pasted together.
    ══════════════════════════════════════════════════════ */
 
 /* ── Toolbar tray ── */
@@ -15469,7 +15658,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   gap:6px;
   padding:6px 10px 7px var(--space-3);
   position:relative;
-  z-index:2
+  z-index:2;
+  box-shadow:inset 0 1px 0 rgba(143,81,38,0.05)
 }
 [data-theme="tofu"] .input-actions::before{
   background:none;
@@ -15477,135 +15667,220 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   height:0;
   left:var(--space-3);right:var(--space-3)
 }
-[data-theme="tofu"] .input-group{gap:5px}
-[data-theme="tofu"] #modelGroup{gap:6px}
-/* Dot separator between groups — small & centered */
+[data-theme="tofu"] .input-group{gap:2px}
+[data-theme="tofu"] #modelGroup{gap:2px}
+/* Hairline separator between groups — a rule, not a floating dot. */
 [data-theme="tofu"] .input-actions-scroll .input-group:not(:last-child)::after{
   content:'';
   display:block;
-  width:3px;height:3px;
-  background:rgba(196,149,106,0.28);
-  border-radius:50%;
-  margin:0 5px;
+  width:1px;height:18px;
+  background:#E7DAC2;
+  margin:0 4px;
   flex-shrink:0
 }
 
-/* Warm cream depth card, shared by the model footer and mobile sheet. */
+/* Warm cream depth card, shared by the model footer and mobile sheet.
+   A light caramel fill on a pale washi track: a 24px-tall bar in the accent's
+   darkest ink read as a black slab across the bottom of the panel. */
 [data-theme="tofu"] .depth-slider{
-  --depth-track:#E5DFD2;--depth-fill:#A78360;color:#594A36;
+  --depth-track:#F2E9D7;
+  --depth-fill:#C08A5C;
+  --depth-dot:rgba(120,96,64,0.45);
+  color:var(--text-secondary)
+}
+[data-theme="tofu"] .depth-slider .depth-slider-value{color:#7A441F}
+[data-theme="tofu"] .depth-slider input::-webkit-slider-thumb{
+  background:#FFFEFA;
+  box-shadow:0 1px 3px rgba(92,72,44,0.28),0 0 0 1px rgba(143,81,38,0.22)
+}
+[data-theme="tofu"] .depth-slider input::-moz-range-thumb{
+  background:#FFFEFA;
+  box-shadow:0 1px 3px rgba(92,72,44,0.28),0 0 0 1px rgba(143,81,38,0.22)
 }
 
-/* ── Model selector — quiet token pill ── */
+/* ── Model selector — a quiet field, not a 3D key ──
+   Same 32px/10px chip geometry as every neighbour; the only difference is a
+   paper fill and a hairline, because this one is a *field* (it displays state)
+   while the others are *actions*. The brand hue moves into the leading glyph;
+   the label is ink like every other label in the row. */
 [data-theme="tofu"] .preset-toggle{
-  border-radius:var(--radius-xs);
-  /* Item 2 — frosted-glass kinship with the project bar's pills: translucent
-     tofu-cream fill + backdrop blur so the toolbar reads as the SAME surface as
-     the bar (the scene wash shows through between pills). */
-  background:linear-gradient(180deg, rgba(250,248,242,0.62) 0%, rgba(240,237,228,0.5) 100%);
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  background:rgba(255,253,248,0.72);
+  border:1px solid #E7DAC2;
   color:var(--text-secondary);
   box-shadow:none;
   clip-path:none;
   image-rendering:auto;
-  transition:background 0.18s ease,color 0.18s ease,border-color 0.18s ease
+  transition:background-color .18s ease,color .18s ease,border-color .18s ease
 }
 [data-theme="tofu"] .preset-toggle:hover{
-  background:var(--bg-hover);
+  background:#FFFEFA;
+  border-color:#DCC9A6;
   color:var(--text-primary);
   box-shadow:none;
   transform:none
 }
 [data-theme="tofu"] .preset-toggle:active{
   transform:none;
-  box-shadow:var(--clay-pressed)
+  background:#FBF3E4;
+  box-shadow:inset 0 1px 2px rgba(143,81,38,0.08)
 }
-/* Brand color overrides — slim colored bottom accent */
-[data-theme="tofu"] .preset-toggle[data-brand="claude"]{color:#9A6520;box-shadow:inset 0 -2px 0 rgba(217,119,6,0.35)}
-[data-theme="tofu"] .preset-toggle[data-brand="openai"]{color:#2D7A4A;box-shadow:inset 0 -2px 0 rgba(16,163,127,0.3)}
-[data-theme="tofu"] .preset-toggle[data-brand="gemini"]{color:#3A6898;box-shadow:inset 0 -2px 0 rgba(66,133,244,0.3)}
-[data-theme="tofu"] .preset-toggle[data-brand="deepseek"]{color:#4A5A92;box-shadow:0 2px 0 rgba(154,144,122,0.4), inset 0 -2px 0 rgba(77,107,254,0.3)}
+[data-theme="tofu"] .preset-toggle-wrapper.open .preset-toggle{
+  background:#FBF2E2;
+  border-color:#E3CFAD;
+  color:var(--chat-primary-ink);
+  box-shadow:inset 0 1px 2px rgba(143,81,38,0.06)
+}
+/* Brand identity lives in the glyph only (12px mark), never in the text or a
+   coloured edge — a brand-tinted label was the loudest colour in the composer. */
+[data-theme="tofu"] .preset-toggle[data-brand="claude"]{color:#8A5A12;background:rgba(255,253,248,0.72);box-shadow:none}
+[data-theme="tofu"] .preset-toggle[data-brand="openai"]{color:#2D6A46;background:rgba(255,253,248,0.72);box-shadow:none}
+[data-theme="tofu"] .preset-toggle[data-brand="gemini"]{color:#3A6898;background:rgba(255,253,248,0.72);box-shadow:none}
+[data-theme="tofu"] .preset-toggle[data-brand="deepseek"]{color:#4D5FA0;background:rgba(255,253,248,0.72);box-shadow:none}
 [data-theme="tofu"] .preset-toggle .ps-label{
   font-family:var(--sans-body);
-  font-weight:700;
+  font-weight:650;
   font-size:var(--font-size-xs);
-  letter-spacing:0.02em;
-  color:inherit;
+  letter-spacing:0.01em;
+  color:var(--text-primary);
   -webkit-font-smoothing:antialiased
 }
-[data-theme="tofu"] .preset-toggle .ps-arrow{opacity:0.5;color:#8A7A5A}
+[data-theme="tofu"] .preset-toggle .ps-arrow{opacity:0.4;color:#9A8F79}
 
+/* ── Model picker panel — the same paper sheet as every other menu ──
+   Solid warm white (the old #F4F2EB panel read as grey next to the new ivory
+   ground), one hairline, layered shadow, 14px radius. */
 [data-theme="tofu"] .preset-dropdown{
-  border-radius:12px;
-  border:1px solid #C2BCA4;
-  box-shadow:0 12px 32px rgba(90,74,52,0.18), 0 2px 6px rgba(90,74,52,0.10);
-  background:#F4F2EB;
+  border-radius:var(--radius);
+  border:1px solid #E2D5BB;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 18px 42px -18px rgba(74,52,26,0.32),
+    0 3px 10px rgba(74,52,26,0.07);
+  background:#FFFEFA;
   padding:6px;
   overflow-y:auto;
   z-index:9999
 }
-[data-theme="tofu"] .ps-dd-depth-wrap{background:#F4F2EB;border-top-color:#C2BCA4;bottom:-6px;margin-bottom:-6px}
-[data-theme="tofu"] .ps-dd-hint{border-top-color:#C2BCA4;color:#8A7A5A}
-[data-theme="tofu"] .ps-dd-hint:hover{color:#5C4A33}
+[data-theme="tofu"] .ps-dd-depth-wrap{background:#FFFEFA;border-top-color:#EDE3CF;bottom:-6px;margin-bottom:-6px}
+[data-theme="tofu"] .ps-dd-hint{border-top-color:#EDE3CF;color:var(--text-tertiary);font-size:10.5px}
+[data-theme="tofu"] .ps-dd-hint:hover{color:var(--text-secondary);background:#F7EEDD}
 [data-theme="tofu"] .preset-dropdown-item{
-  border-radius:8px;
+  border-radius:10px;
+  padding:7px 9px;
   font-family:var(--sans-body);
   font-size:var(--font-size-xs);
-  font-weight:500;
-  letter-spacing:0.02em;
-  color:#5C4A33;
+  font-weight:600;
+  letter-spacing:0.01em;
+  color:var(--text-primary);
   outline:none
 }
-[data-theme="tofu"] .preset-dropdown-item:hover{background:rgba(196,149,106,0.10)}
-[data-theme="tofu"] .preset-dropdown-item.selected{background:rgba(196,149,106,0.16);color:#4A3820}
-/* Base marks the active model with a faint full-row outline (Linear-style
- * selected band reads as a grey slab against the beige panel). Replace it
- * with a warm tint + hairline inset accent — the clay theme's active card. */
+[data-theme="tofu"] .preset-dropdown-item:hover{background:#F7EEDD}
+[data-theme="tofu"] .preset-dropdown-item.selected{background:rgba(143,81,38,0.10)}
+/* Active model: warm wash + a 2px caramel spine, matching the selected row in
+   every other menu (the faint outline read as a misaligned grey rectangle). */
 [data-theme="tofu"] .preset-dropdown-item.active{
-  background:rgba(196,149,106,0.22);
+  background:linear-gradient(90deg,rgba(143,81,38,0.13),rgba(143,81,38,0.045));
   outline:none;
-  box-shadow:inset 0 0 0 1px rgba(138,116,80,0.28)
+  box-shadow:inset 2px 0 0 var(--accent)
 }
-[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-label{color:#3E2E18;font-weight:700}
-[data-theme="tofu"] .preset-dropdown-item .ps-dd-icon{color:#8A7A5A}
-[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-icon{color:#9A6520}
-/* Per-row provider preference — a quiet cream chip whose popover mirrors
- * the panel itself: warm tint + hairline inset ring on the active option. */
+[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-label{color:var(--chat-primary-ink);font-weight:700}
+[data-theme="tofu"] .preset-dropdown-item .ps-dd-icon{color:#A08A6A}
+[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-icon{color:var(--accent)}
+/* Per-row provider preference — a quiet chip whose popover mirrors the panel. */
 [data-theme="tofu"] .ps-dd-provider-chip{
-  background:#FBF9F3;
-  border:1px solid #D6CFB8;
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
   border-radius:8px;
-  color:#6E5E48;
+  color:var(--text-secondary);
   padding:5px 9px;
   transition:background .15s,border-color .15s
 }
 [data-theme="tofu"] .ps-dd-provider-chip:hover,
-[data-theme="tofu"] .ps-dd-provider-chip[aria-expanded="true"]{background:#FFFEFA;border-color:#B8AE90}
+[data-theme="tofu"] .ps-dd-provider-chip[aria-expanded="true"]{background:#FBF3E4;border-color:#DCC9A6;color:var(--text-primary)}
 [data-theme="tofu"] .ps-dd-provider-menu{
-  background:#F4F2EB;
-  border:1px solid #C2BCA4;
-  box-shadow:0 12px 32px rgba(90,74,52,0.18), 0 2px 6px rgba(90,74,52,0.10)
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
+  border-radius:11px;
+  box-shadow:0 18px 40px -18px rgba(74,52,26,0.30),0 3px 10px rgba(74,52,26,0.07)
 }
-[data-theme="tofu"] .ps-dd-provider-menu-item{color:#5C4A33;font-weight:500;letter-spacing:0.02em}
-[data-theme="tofu"] .ps-dd-provider-menu-item:hover{background:rgba(196,149,106,0.10)}
+[data-theme="tofu"] .ps-dd-provider-menu-item{color:var(--text-secondary);font-weight:600;letter-spacing:0.01em}
+[data-theme="tofu"] .ps-dd-provider-menu-item:hover{background:#F7EEDD;color:var(--text-primary)}
 [data-theme="tofu"] .ps-dd-provider-menu-item.active{
-  background:rgba(196,149,106,0.22);
-  box-shadow:inset 0 0 0 1px rgba(138,116,80,0.28);
-  color:#3E2E18
+  background:rgba(143,81,38,0.10);
+  box-shadow:inset 2px 0 0 var(--accent);
+  color:var(--chat-primary-ink)
 }
-[data-theme="tofu"] .ps-dd-provider-check{color:#9A6520}
-[data-theme="tofu"] .ps-dd-provider-tag{border-color:#D6CFB8;color:#A89B7B}
-[data-theme="tofu"] .ps-dd-search{background:#F4F2EB;border-bottom-color:#C2BCA4;color:#A89B7B;margin:-6px -6px 6px;top:-6px}
-[data-theme="tofu"] .ps-dd-section-label{color:#A89B7B;opacity:1;padding:7px var(--space-3) 3px}
+[data-theme="tofu"] .ps-dd-provider-check{color:var(--accent)}
+[data-theme="tofu"] .ps-dd-provider-tag{border-color:#E7DAC2;color:var(--text-tertiary)}
+[data-theme="tofu"] .ps-dd-search{background:#FFFEFA;border-bottom-color:#EDE3CF;color:var(--text-tertiary);margin:-6px -6px 6px;top:-6px}
+[data-theme="tofu"] .ps-dd-section-label{color:#A98F6C;opacity:1;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:8px var(--space-3) 3px}
 [data-theme="tofu"] .img-preview{border-radius:8px;border:1px solid rgba(90,78,64,0.3);box-shadow:0 2px 8px rgba(0,0,0,0.1)}
 
+/* ── Search toggle — same chip family; "on" is caramel, not a neon halo ──
+   The base build spins a conic blue/purple ring around this control. In a
+   paper room that halo is the only neon object on the desk, so the on-state
+   becomes a plain caramel chip with a filled ∞ seal. */
+[data-theme="tofu"] .search-mode-toggle{
+  border-radius:var(--radius-sm);
+  background:transparent;
+  border-width:1px;
+  border-color:transparent;
+  color:var(--text-secondary);
+  font-family:var(--sans-body);
+  font-weight:600;
+  animation:none;
+  transition:background-color .15s ease,color .15s ease,border-color .15s ease
+}
+[data-theme="tofu"] .search-mode-toggle::before{display:none}
+[data-theme="tofu"] .search-mode-toggle:hover{
+  background:rgba(143,81,38,0.07);
+  border-color:#E7DAC2;
+  color:var(--text-primary)
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]{
+  color:var(--accent);
+  background:rgba(143,81,38,0.10);
+  border-color:rgba(143,81,38,0.26);
+  animation:none;
+  box-shadow:none
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]:hover{background:rgba(143,81,38,0.15)}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-icon{color:var(--accent);animation:none}
+[data-theme="tofu"] .search-mode-toggle[data-mode="off"] .sm-mode-pill{
+  background:#F1E9D8;
+  color:var(--text-tertiary);
+  box-shadow:inset 0 0 0 1px #E7DAC2
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-mode-pill{
+  background:var(--accent);
+  color:#FFF8EC
+}
+
+/* ── Send — the one solid object in the row ── */
+[data-theme="tofu"] .send-btn{
+  background:linear-gradient(180deg,#B06A33,#8E5222);
+  border-radius:10px;
+  box-shadow:0 1px 0 rgba(255,255,255,0.18) inset,0 2px 6px rgba(120,70,30,0.26);
+  transition:background .15s ease,box-shadow .15s ease,opacity .15s ease
+}
+[data-theme="tofu"] .send-btn:hover:not(:disabled){
+  background:linear-gradient(180deg,#A9612C,#7E481D);
+  box-shadow:0 1px 0 rgba(255,255,255,0.16) inset,0 3px 9px rgba(120,70,30,0.30)
+}
+[data-theme="tofu"] .send-btn:disabled{
+  background:#E6DCC6;
+  color:#A99B80;
+  box-shadow:none
+}
 /* ── User bubble: a gently tinted note — hairline, one soft shadow ── */
 [data-theme="tofu"] .message.user-msg .message-content{
-  background:#F5F3ED;
+  background:var(--user-bubble);
   border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:10px var(--space-4);
+  /* Match the base chat-bubble geometry (23-reading-responsive.css): flattened
+     top-right sender corner, narrower padding so a one-liner is a tight note. */
+  border-radius:var(--radius) var(--radius) var(--radius-xs) var(--radius);
+  padding:var(--space-3) var(--space-4);
   box-shadow:var(--clay-sm);
   position:relative
 }
@@ -15677,9 +15952,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 
 /* ── Tool badge — rounded chip ── */
 [data-theme="tofu"] .tool-badge{
-  background: rgba(196,149,106,0.1);
-  color: #A67B52;
-  border: 1px solid rgba(196,149,106,0.25);
+  background: rgba(143,81,38,0.1);
+  color: #7A441F;
+  border: 1px solid rgba(143,81,38,0.25);
   border-radius: 10px;
   box-shadow: none;
   font-weight: 600;
@@ -15705,12 +15980,12 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .ptool-turn{
   border: 1px solid #D6CCB8;
   border-radius:var(--radius-sm);
-  background: #FFFDF9;
+  background: #FFFEFA;
   /* Enclosing depth, not a right/bottom bevel: an even 1px ring wraps all
      four sides equally (the "fully wrapped" feel), then two soft warm drops
      ground the card and deepen the separation so a long panel reads calmly. */
   box-shadow:
-    0 0 0 1px rgba(196,149,106,0.05),
+    0 0 0 1px rgba(143,81,38,0.05),
     0 2px 6px rgba(92,72,44,0.09),
     0 5px 16px rgba(92,72,44,0.06);
 }
@@ -15718,7 +15993,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Tool lines (individual tool call rows) ── */
 [data-theme="tofu"] .ptool-line{
   color: #5C5040;
-  border-bottom: 1px solid rgba(196,149,106,0.06);
+  border-bottom: 1px solid rgba(143,81,38,0.06);
 }
 /* Card-model seam fix (2026-07-08): each .ptool-turn is now a bordered card,
    so the LAST row's own bottom hairline would double against the card's
@@ -15732,7 +16007,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 
 [data-theme="tofu"] .ptool-line:hover{
-  background: rgba(196,149,106,0.05);
+  background: rgba(143,81,38,0.05);
 }
 [data-theme="tofu"] .ptool-line.ptool-active{
   color: #4A3F2F;
@@ -15740,10 +16015,10 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 
 /* Icons — warm kinako instead of neon amber */
 [data-theme="tofu"] .ptool-icon{
-  color: #C4956A;
+  color: #8F5126;
 }
 [data-theme="tofu"] .ptool-line.ptool-active .ptool-icon{
-  color: #A67B52;
+  color: #7A441F;
 }
 
 /* ── Status badges — the heart of the redesign ── */
@@ -15762,7 +16037,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* Success/OK: pixel matcha stamp */
 [data-theme="tofu"] .ptool-batch-done-edit.ptool-batch-ok .ptool-batch-status{ color: #5E8A50; }
 /* Operation pills: kinako for rewrite, matcha for pure insertion */
-[data-theme="tofu"] .ptool-op--replace{color:#A67B52;background:rgba(196,149,106,0.1);border-color:rgba(196,149,106,0.25)}
+[data-theme="tofu"] .ptool-op--replace{color:#7A441F;background:rgba(143,81,38,0.1);border-color:rgba(143,81,38,0.25)}
 [data-theme="tofu"] .ptool-op--insert{color:#5E8A50;background:rgba(106,138,94,0.1);border-color:rgba(106,138,94,0.25)}
 [data-theme="tofu"] .ptool-badge-ok{
   border: 1px solid var(--chip-ok-border);
@@ -15786,40 +16061,40 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   animation: none;
 }
 
-[data-theme="tofu"] .ptool-gate-note{border-color:rgba(196,149,106,0.3);background:rgba(196,149,106,0.07)}
-[data-theme="tofu"] .ptool-gate-note-icon,[data-theme="tofu"] .ptool-gate-note-title{color:#A67B52}
-[data-theme="tofu"] .ptool-gate-note-path{background:rgba(196,149,106,0.14)}
+[data-theme="tofu"] .ptool-gate-note{border-color:rgba(143,81,38,0.3);background:rgba(143,81,38,0.07)}
+[data-theme="tofu"] .ptool-gate-note-icon,[data-theme="tofu"] .ptool-gate-note-title{color:#7A441F}
+[data-theme="tofu"] .ptool-gate-note-path{background:rgba(143,81,38,0.14)}
 
 /* Skip: pixel muted */
 [data-theme="tofu"] .ptool-badge-skip{
   color: #9C9178;
-  background: rgba(196,149,106,0.05);
-  border: 1px solid rgba(196,149,106,0.12);
+  background: rgba(143,81,38,0.05);
+  border: 1px solid rgba(143,81,38,0.12);
   border-radius:var(--radius-sm);
 }
 
 /* ── Spinner — warm kinako ── */
 [data-theme="tofu"] .ptool-spinner{
-  border-color: rgba(196,149,106,0.2);
-  border-top-color: #C4956A;
+  border-color: rgba(143,81,38,0.2);
+  border-top-color: #8F5126;
 }
 
 /* ── Search orbit dots — warm palette ── */
-[data-theme="tofu"] .ptool-panel .search-orbit-center{ background: #C4956A; }
+[data-theme="tofu"] .ptool-panel .search-orbit-center{ background: #8F5126; }
 [data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(2){ background: #D4A878; }
-[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(3){ background: #C4956A; }
-[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(4){ background: #A67B52; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(3){ background: #8F5126; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(4){ background: #7A441F; }
 
 /* ── Truncated results — warm ── */
 [data-theme="tofu"] .ptool-truncated{
   color: rgba(166,123,82,0.65);
-  background: rgba(196,149,106,0.04);
-  border-color: rgba(196,149,106,0.15);
+  background: rgba(143,81,38,0.04);
+  border-color: rgba(143,81,38,0.15);
 }
 [data-theme="tofu"] .ptool-truncated:hover{
-  color: #A67B52;
-  background: rgba(196,149,106,0.08);
-  border-color: rgba(196,149,106,0.3);
+  color: #7A441F;
+  background: rgba(143,81,38,0.08);
+  border-color: rgba(143,81,38,0.3);
 }
 
 /* ── Expandable results blocks — pixel ── */
@@ -15829,20 +16104,20 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   border-radius:var(--radius-sm);
 }
 [data-theme="tofu"] .ptool-results-block.expanded{
-  border-color: rgba(196,149,106,0.16);
-  background: rgba(196,149,106,0.03);
+  border-color: rgba(143,81,38,0.16);
+  background: rgba(143,81,38,0.03);
 }
 [data-theme="tofu"] .ptool-results-block.expanded .ptool-results-content{
-  border-top-color: rgba(196,149,106,0.12);
+  border-top-color: rgba(143,81,38,0.12);
 }
 [data-theme="tofu"] .ptool-results-header:hover{
-  background: rgba(196,149,106,0.04);
+  background: rgba(143,81,38,0.04);
 }
 [data-theme="tofu"] .ptool-results-content .search-result-item{
-  border-top-color: rgba(196,149,106,0.06);
+  border-top-color: rgba(143,81,38,0.06);
 }
 [data-theme="tofu"] .ptool-results-content .search-result-item:hover{
-  background: rgba(196,149,106,0.03);
+  background: rgba(143,81,38,0.03);
 }
 
 /* ── Search diagnostics ── */
@@ -15866,14 +16141,14 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   border-radius: var(--radius-sm);
 }
 [data-theme="tofu"] .ptool-tool-search-card{
-  border-color: rgba(196,149,106,0.16);
-  background: #FFFDF9;
+  border-color: rgba(143,81,38,0.16);
+  background: #FFFEFA;
   box-shadow: var(--clay-sm);
 }
 [data-theme="tofu"] .ptool-tool-search-namespace,
 [data-theme="tofu"] .ptool-tool-arg{
-  background: rgba(196,149,106,0.07);
-  border-color: rgba(196,149,106,0.13);
+  background: rgba(143,81,38,0.07);
+  border-color: rgba(143,81,38,0.13);
 }
 
 /* ── Batch done rows — readable desc + path on cream bg ── */
@@ -15888,15 +16163,15 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Pending approval — pixel breathing border ── */
 [data-theme="tofu"] .ptool-pending-wrap{
   border: 2px solid rgba(184,136,74,0.3);
-  background: rgba(196,149,106,0.03);
+  background: rgba(143,81,38,0.03);
   border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm);
   animation: tofuPendingBreath 2.5s ease-in-out infinite;
 }
 [data-theme="tofu"] .ptool-pending-wrap .ptool-line.ptool-pending{
-  color: #A67B52;
-  background: rgba(196,149,106,0.06);
-  border-bottom-color: rgba(196,149,106,0.1);
+  color: #7A441F;
+  background: rgba(143,81,38,0.06);
+  border-bottom-color: rgba(143,81,38,0.1);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -16393,16 +16668,16 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .sw-panel{background:transparent;border:none;box-shadow:none}
 [data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:2px 0}
 [data-theme="tofu"] .sw-panel.sw-active{border:none;box-shadow:none;animation:none}
-[data-theme="tofu"] .sw-header:hover{background:rgba(196,149,106,0.07)}
+[data-theme="tofu"] .sw-header:hover{background:rgba(143,81,38,0.07)}
 [data-theme="tofu"] .sw-header-icon{color:#B8884A}
 [data-theme="tofu"] .sw-complete .sw-header-icon{color:#5E8A50}
-[data-theme="tofu"] .sw-header-title{color:#A67B52}
+[data-theme="tofu"] .sw-header-title{color:#7A441F}
 [data-theme="tofu"] .sw-complete .sw-header-title{color:#5E8A50}
 [data-theme="tofu"] .sw-progress-track{background:rgba(92,72,44,0.10)}
-[data-theme="tofu"] .sw-progress-fill{background:linear-gradient(90deg,#C4956A,#A67B52)}
+[data-theme="tofu"] .sw-progress-fill{background:linear-gradient(90deg,#8F5126,#7A441F)}
 [data-theme="tofu"] .sw-complete .sw-progress-fill{background:linear-gradient(90deg,#7A9E6A,#5E8A50)}
 [data-theme="tofu"] .sw-progress-fill.has-errors{background:linear-gradient(90deg,#7A9E6A 0%,#7A9E6A var(--ok-pct),var(--error-text) var(--ok-pct),var(--error-text) 100%)}
-[data-theme="tofu"] .sw-agent{background:transparent;border-color:rgba(196,149,106,0.30)}
+[data-theme="tofu"] .sw-agent{background:transparent;border-color:rgba(143,81,38,0.30)}
 [data-theme="tofu"] .sw-agent.sw-a-running{border-color:rgba(43,108,176,0.32);background:rgba(43,108,176,0.04)}
 [data-theme="tofu"] .sw-agent.sw-a-failed,
 [data-theme="tofu"] .sw-agent.sw-a-error{border-color:rgba(192,57,43,0.32);background:rgba(192,57,43,0.04)}
@@ -16431,7 +16706,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .sw-a-err{color:#b23b2e;background:rgba(192,57,43,0.06)}
 [data-theme="tofu"] .sw-typing-cursor{color:#B8884A}
 [data-theme="tofu"] .sw-dep-tag{background:rgba(184,136,74,0.08);border-color:rgba(184,136,74,0.20);color:#8a6d1f}
-[data-theme="tofu"] .sw-footer{border-top-color:rgba(196,149,106,0.22)}
+[data-theme="tofu"] .sw-footer{border-top-color:rgba(143,81,38,0.22)}
 [data-theme="tofu"] .sw-complete .sw-footer{border-top-color:rgba(106,138,94,0.22)}
 [data-theme="tofu"] .sw-spinner{border-color:rgba(184,136,74,0.25);border-top-color:#B8884A}
 [data-theme="tofu"] .sw-status-pill.sw-pill-async{color:#8a6d1f;background:rgba(184,136,74,0.10);border-color:rgba(184,136,74,0.28)}
@@ -16511,7 +16786,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   color: #716A55;
 }
 [data-theme="tofu"] .hg-textarea {
-  background: #F5F3ED;
+  background: #FBF6E9;
   color: #4A4233;
   border-color: rgba(187, 149, 114, 0.30);
 }
@@ -21784,7 +22059,9 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 
 .turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:var(--space-2); }
 .turn-ctx .tctx-row + .tctx-row{ padding-top:var(--space-3); border-top:var(--control-edge-inset) solid var(--border-light); }
-.turn-ctx .tctx-row-heading{ display:flex; align-items:center; justify-content:space-between; gap:var(--space-1); min-height:var(--control-h-sm); }
+/* The heading carries only the row label (+ count); the "+N" toggle moved
+ * inline into the chips/paths flow, so no space-between spread is needed. */
+.turn-ctx .tctx-row-heading{ display:flex; align-items:center; }
 .turn-ctx .tctx-row-count{ font-weight:var(--weight-regular); font-variant-numeric:tabular-nums; color:var(--text-secondary); }
 .turn-ctx .tctx-row-h{
   font-size:var(--font-size-xs);
@@ -21811,22 +22088,24 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 }
 /* "+N more" — a CLICK toggle, deliberately not hover. Expanding grows the
  * rail IN FLOW, which needs no containment escape (see the block comment).
- * It is the only pointer-reactive thing in the rail. */
+ * It is the only pointer-reactive thing in the rail. It renders INLINE with
+ * the chips it reveals (not parked right on the header line), styled to the
+ * rail's marginalia voice — quiet tertiary text, no button box — so the
+ * header keeps just its label + count. */
 .turn-ctx .tctx-more{
   pointer-events:auto;
   display:inline-flex;
   align-items:center;
-  justify-content:space-between;
-  gap:var(--space-2);
-  min-height:var(--control-h-sm);
+  gap:var(--space-1);
+  min-height:0;
   cursor:pointer;
-  font-size:var(--font-size-sm);
+  font-size:var(--font-size-xs);
   font-weight:var(--weight-medium);
-  padding:var(--space-1) var(--space-2);
-  border-radius:var(--radius-sm);
+  padding:1px var(--space-1);
+  border-radius:var(--radius-xs);
   background:transparent;
-  color:var(--text-secondary);
-  border:var(--control-edge-inset) solid transparent;
+  color:var(--text-tertiary);
+  border:none;
   flex:0 0 auto;
   font-family:var(--font-ui);
 }
@@ -21838,11 +22117,11 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   border-block-end:var(--control-edge-inset) solid currentColor;
   transform:rotate(-45deg);
 }
-.turn-ctx .tctx-more[aria-expanded="true"]{background:var(--accent-subtle);color:var(--text-primary)}
+.turn-ctx .tctx-more[aria-expanded="true"]{color:var(--accent)}
 .turn-ctx .tctx-more[aria-expanded="true"]::after{transform:rotate(45deg)}
-.turn-ctx .tctx-more:hover{color:var(--text-primary);background:var(--bg-hover)}
+.turn-ctx .tctx-more:hover{color:var(--text-primary)}
 .turn-ctx .tctx-more:focus-visible{outline:var(--control-edge-inset) solid var(--accent);outline-offset:var(--space-1)}
-@media(pointer:coarse){.turn-ctx .tctx-more{min-height:var(--control-h-lg)}}
+@media(pointer:coarse){.turn-ctx .tctx-more{min-height:var(--control-h-sm);padding:var(--space-1) var(--space-2)}}
 /* The overflow group must NOT be a flex item of its own: as a single item it
  * cannot wrap internally, so its nowrap chips run straight off the rail's
  * right edge (measured +110px past the pane at 1440). `display:contents`
@@ -24059,23 +24338,12 @@ body.kb-open { overflow: hidden; }
   overflow: visible;
 }
 
+/* Turn avatars removed (2026-10-19): the role icon box read as clutter and forced
+ * a hanging indent on every agent line. The role label in the header carries the
+ * identity; the gutter is now flush-left. The node stays in the DOM (keyed slot)
+ * but is never shown. */
 .conversation-surface .conversation-turn.message > .conversation-turn-avatar.message-avatar {
-  position: absolute;
-  inset-block-start: var(--space-2);
-  inset-inline-start: var(--space-2);
-  width: var(--space-5);
-  height: var(--space-5);
-  margin-top: 0;
-  opacity: 1;
-  color: var(--accent);
-  border: var(--control-edge-inset) solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
-  border-radius: var(--conversation-process-radius);
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg-primary));
-}
-
-.conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
-  max-width: var(--space-5);
-  max-height: var(--space-5);
+  display: none;
 }
 
 .conversation-surface .conversation-turn-content.message-content {
@@ -24091,7 +24359,6 @@ body.kb-open { overflow: hidden; }
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
   min-height: var(--control-h-md);
-  padding-inline-start: var(--conversation-reading-inset);
   margin: 0 0 var(--space-3);
   gap: var(--space-2);
   line-height: 1.25;
@@ -24134,16 +24401,8 @@ body.kb-open { overflow: hidden; }
   margin: 0;
 }
 
-/* One hanging icon gutter: role, narration, answer rubric, headings and
- * process labels all share a single reading baseline. */
-.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text {
-  box-sizing: border-box;
-  padding-inline-start: var(--conversation-reading-inset);
-}
-
-.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-actions, .conversation-turn-footer, .conversation-block--live-status) {
-  padding-inline-start: var(--conversation-reading-inset);
-}
+/* Flush-left reading: with the avatar gutter removed, role text, actions and
+ * footer all start at the page margin. */
 
 /* One spacing owner, including the demand-mounted historical process body.
  * Adjacent process rows form a compact run. Prose gets a paragraph's breath
@@ -24161,56 +24420,52 @@ body.kb-open { overflow: hidden; }
   margin-bottom: 0;
 }
 
-/* Adjacent process leaves make one continuous work surface. The derived edges
- * describe the mounted order only: narration, deliverables and page boundaries
- * break the surface. No extra wrapper, duplicate content or disclosure state. */
+/* Adjacent process leaves form one quiet run. The derived edges describe the
+ * mounted order only: narration, deliverables and page boundaries break the
+ * run. No extra wrapper, duplicate content or disclosure state.
+ *
+ * 2026-10-19 declutter: the process column no longer hangs in a separate
+ * narrow gutter. Process rows now start at the same reading baseline as the
+ * narration and answer text (`--conversation-process-indent`), so the whole
+ * turn reads as ONE calm left edge instead of a wire holding a stray column
+ * of icons out to the left. The old `data-process-edge` vertical spine and
+ * its boxed side borders are gone — grouping is carried by shared alignment
+ * and rhythm, not a rail. */
 .conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge] {
   position: relative;
-  isolation: isolate;
   margin-block-start: 0;
-  padding-inline: var(--conversation-process-shell-inset);
-  border-inline: var(--control-edge-inset) solid var(--turn-process-line);
-  background: var(--turn-process-panel);
+  /* Align the row's icon to the shared reading baseline. The row pads in by
+   * the full reading inset (the same edge the role label, narration and answer
+   * text use), so the leading icon lands on that one vertical line and the
+   * whole turn reads as a single calm left edge — no stray icon gutter. */
+  padding-inline-start: var(--conversation-reading-inset);
 }
 
 .conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
   margin-block-start: var(--space-4);
-  padding-block-start: var(--space-2);
-  border-block-start: var(--control-edge-inset) solid var(--turn-process-line);
-  border-start-start-radius: var(--conversation-process-radius);
-  border-start-end-radius: var(--conversation-process-radius);
 }
 
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="end"], [data-process-edge="single"]) {
-  padding-block-end: var(--space-2);
-  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
-  border-end-start-radius: var(--conversation-process-radius);
-  border-end-end-radius: var(--conversation-process-radius);
-}
-
-.conversation-surface .conversation-block[data-process-edge]::before {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  inset-block: 0;
-  inset-inline-start: calc(var(--conversation-process-shell-inset) + var(--conversation-process-inset) + var(--conversation-process-marker) / 2);
-  width: var(--control-edge-inset);
-  background: var(--turn-spine);
-  pointer-events: none;
-}
-.conversation-surface .conversation-block[data-process-edge="start"]::before {
-  inset-block-start: calc(var(--conversation-process-row-height) / 2 + var(--space-2));
-}
-.conversation-surface .conversation-block[data-process-edge="end"]::before {
-  height: calc(var(--conversation-process-row-height) / 2);
-  inset-block-end: auto;
-}
-.conversation-surface .conversation-block[data-process-edge="single"]::before { display: none; }
+/* No vertical spine. The 2026-07-08 chrome-less card model removed the rail
+ * that welded rounds into one column; the recent `data-process-edge` rail
+ * re-introduced it as a faint wire. Both the owner report and the card-model
+ * invariant (tests/frontend/test_frontend_segment_timeline.py) agree: the
+ * process run groups by shared alignment and spacing, not by a line.
+ *
+ * ONLY the active (still running) step keeps a whisper of tint. A settled
+ * failure gets no wash at all: it previously used the same background as the
+ * running state, so the block read as a stuck running indicator long after
+ * the round had failed (owner report 2026-10-20). The failure verdict pill
+ * and the `conversation-action-state` chip already state the outcome; a
+ * persistent full-row tint is redundant emphasis.
+ *
+ * The tint is clipped to the content box: these rows pad in by the reading
+ * inset, so a padding-box background painted a band 33px wider than the row's
+ * own content — the running command looked like it had flooded the whole
+ * horizontal lane instead of lighting up its own box. */
 .conversation-surface .conversation-block[data-process-edge][data-action-state="active"] {
-  background: color-mix(in srgb, var(--accent) 5%, var(--turn-process-panel));
-}
-.conversation-surface .conversation-block[data-process-edge][data-action-state="attention"] {
-  border-inline-start-color: var(--error-text);
+  background-color: color-mix(in srgb, var(--accent) 5%, transparent);
+  background-clip: content-box;
+  border-radius: var(--radius-sm);
 }
 
 /* Leaves remain direct keyed children so streaming never reparents live cards. */
@@ -24664,8 +24919,11 @@ body.kb-open { overflow: hidden; }
 }
 
 /* Tool identity stays in the leading slot; a single trailing caret is the
- * consistent disclosure affordance. Native summaries still own interaction. */
-.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after {
+ * consistent disclosure affordance. Native summaries still own interaction.
+ * The caret is a pseudo-element of the FLEX ROW, so it is an atomic flex item
+ * that can never wrap onto a line of its own — the failure the edit card had
+ * while its caret was inline text inside the wrapping label. */
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after {
   content: '';
   box-sizing: border-box;
   flex: 0 0 var(--space-2);
@@ -24677,7 +24935,7 @@ body.kb-open { overflow: hidden; }
   transform: rotate(-45deg);
   color: var(--text-secondary);
 }
-.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after,
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after,
 .conversation-surface .ptool-results-header[aria-expanded="true"]::after {
   transform: rotate(45deg);
 }
@@ -24691,7 +24949,7 @@ body.kb-open { overflow: hidden; }
   color: var(--text-secondary);
 }
 .conversation-surface .ptool-results-header > .ptool-results-toggle,
-.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header) .ptool-text::after {
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header) .ptool-text::after {
   display: none;
 }
 .conversation-surface .ptc-head::before,
@@ -25251,13 +25509,15 @@ body.kb-open { overflow: hidden; }
   background: transparent;
 }
 
+/* The leading glyph is centered inside the row's line box: a fixed offset
+ * drifts off the words as soon as the meta type or line height changes. */
 .conversation-surface .activity-event__marker {
   position: static;
   display: inline-flex;
   flex-shrink: 0;
   width: var(--space-4);
   height: var(--space-4);
-  margin-block-start: var(--space-1);
+  margin-block-start: calc((var(--conversation-activity-line-height) - var(--space-4)) / 2);
   align-items: center;
   justify-content: center;
   border-radius: 50%;
@@ -25288,6 +25548,90 @@ body.kb-open { overflow: hidden; }
 }
 
 /* Diagnostic icons carry meaning inline; there is no out-of-flow gutter. */
+/* A provider retry storm is one fact, not N banners: the run of failed /
+ * retried requests collapses into a single closed disclosure that keeps the
+ * same log-line geometry as an activity row. Members stay inside unchanged. */
+
+.conversation-surface .conversation-block--activity-event-group {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.conversation-surface .activity-event-group {
+  display: block;
+  min-width: 0;
+}
+
+.conversation-surface .activity-event-group__summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  box-sizing: border-box;
+  cursor: pointer;
+  list-style: none;
+}
+
+.conversation-surface .activity-event-group__summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-surface .activity-event-group__summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: calc(var(--space-1) * -1);
+}
+
+.conversation-surface .activity-event-group__marker {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-block-start: calc((var(--conversation-activity-line-height) - var(--space-4)) / 2);
+  align-items: center;
+  justify-content: center;
+  color: var(--warning-text);
+}
+
+.conversation-surface .activity-event-group__marker svg {
+  width: 12px;
+  height: 12px;
+}
+
+.conversation-surface .activity-event-group__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--conversation-activity-line-height);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .activity-event-group__models {
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-surface .activity-event-group__chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  transition: transform var(--motion-fast) ease;
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .activity-event-group[open] .activity-event-group__chevron {
+  transform: rotate(0);
+}
+
+.conversation-surface .activity-event-group__body {
+  min-width: 0;
+  margin-inline-start: var(--space-4);
+  padding-inline-start: var(--space-2);
+  border-inline-start: 1px solid var(--turn-rule);
+}
+
 
 .conversation-surface details.activity-event {
   display: block;
@@ -25300,7 +25644,7 @@ body.kb-open { overflow: hidden; }
 
 .conversation-surface .activity-event__summary {
   font-size: var(--conversation-font-size-meta);
-  line-height: 1.45;
+  line-height: var(--conversation-activity-line-height);
 }
 
 .conversation-surface .activity-event__chips {
@@ -25569,6 +25913,20 @@ body.kb-open { overflow: hidden; }
   gap: var(--conversation-process-gap);
   border-radius: var(--radius-sm);
   font-size: var(--conversation-process-font-size);
+}
+
+/* The summary is a process row, so it reserves the same leading marker column
+ * its siblings do. Without a glyph in that column the label itself fell into
+ * the icon slot and the row read as an unexplained indent against the tool
+ * rows above it. */
+.conversation-surface .conversation-file-changes .fc-summary > .fc-summary-icon {
+  display: inline-flex;
+  flex: 0 0 var(--conversation-process-marker);
+  align-items: center;
+  justify-content: center;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
 }
 
 .conversation-surface .conversation-file-changes .fc-summary:hover {
@@ -26117,10 +26475,14 @@ body.kb-open { overflow: hidden; }
   justify-self: end;
   box-sizing: border-box;
   width: fit-content;
-  max-width: 90%;
-  padding: var(--space-4) var(--space-5);
+  /* Cap to a chat-bubble measure, not the assistant reading column: a one-liner
+     must read as a tight note, not a slab that nearly spans the transcript. */
+  max-width: min(72%, 46rem);
+  padding: var(--space-3) var(--space-4);
   border: var(--control-edge-inset) solid var(--turn-rule);
-  border-radius: var(--conversation-process-radius);
+  /* Chat geometry: a slightly flattened top-right corner signals the sender's
+     side; the rest stay rounded so it reads as one calm bubble, not a card. */
+  border-radius: var(--radius) var(--radius) var(--radius-xs) var(--radius);
   background: color-mix(in srgb, var(--user-bubble) 70%, var(--bg-primary));
   box-shadow: none;
 }
@@ -26141,6 +26503,15 @@ body.kb-open { overflow: hidden; }
 .conversation-surface .message.user-msg .conversation-block--text > .md-content {
   font-size: var(--conversation-font-size-body);
   line-height: var(--leading-body);
+}
+
+/* When the bubble carries attachments, the fixed-size media tiles (80px thumbs,
+   300px video cards) are far narrower than a full-length text line. fit-content
+   then sizes the bubble to the TEXT, leaving dead space beside the thumbnails.
+   Cap the text to a comfortable reading measure so the bubble hugs its real
+   content and the attachment row and text row stay visually balanced. */
+.conversation-surface .message.user-msg .conversation-turn-blocks:has(.conversation-block--attachments) .conversation-block--text > .md-content {
+  max-width: 34rem;
 }
 
 .conversation-surface .message.user-msg .conversation-turn-actions {
@@ -26236,9 +26607,9 @@ body.kb-open { overflow: hidden; }
   }
 
   .conversation-surface .message.user-msg .message-content {
-    max-width: 100%;
+    max-width: 88%;
     padding: var(--space-3) var(--space-4);
-    border-radius: var(--conversation-process-radius);
+    border-radius: var(--radius) var(--radius) var(--radius-xs) var(--radius);
   }
 }
 

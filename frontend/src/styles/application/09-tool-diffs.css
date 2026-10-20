@@ -99,12 +99,9 @@
 .ptool-batch-done-block > summary { list-style: none; cursor: pointer; }
 .ptool-batch-done-block > summary::-webkit-details-marker { display: none; }
 .ptool-batch-done-block > summary::marker { display: none; content: ""; }
-.ptool-batch-done-block > summary .ptool-text::after {
-  content: " ▸";
-  font-size: var(--font-size-xs);
-  opacity: 0.5;
-}
-.ptool-batch-done-block[open] > summary .ptool-text::after { content: " ▾"; }
+/* The disclosure caret belongs to the summary row (an atomic flex item), not
+ * to the wrapping label — inline label text produced an extra line holding
+ * only the caret. Owner: 23-reading-process.css shared disclosure grammar. */
 .ptool-batch-done-block > .ptool-result-body {
   margin: 0;
   padding: 0;

@@ -88,11 +88,12 @@ a blanket font reduction loses the distinction between answers and process.
   `.branch-reject-btn`'s `--error-border` usage. This is the single
   deliberate legacy-visual change of the spike.
 - `--text-on-accent`: centralized as `#fff` (identical to every existing
-  ghost fallback → zero visual change). Known legacy debt: white on the
-  light/tofu accents measures 4.47:1 / 3.34:1 (pre-existing primary-button
-  paint, reported as WARN by `capture.py`; phase-4 decision — deepening
-  the accent hues or darkening labels changes shipped product surfaces and
-  needs a product call, not a spike call).
+  ghost fallback → zero visual change). Remaining legacy debt is the LIGHT
+  accent (pre-existing primary-button paint, reported as WARN by
+  `capture.py`); deepening it changes shipped product surfaces and needs a
+  product call, not a spike call. Tofu no longer owes this: its accent was
+  deepened to `#8F5126` on 2026-10-20, which also fixed accent-as-text
+  (4.35:1 → 5.5:1 on the ground) and puts white labels at 6.2:1.
 
 ## Component catalog
 
@@ -258,6 +259,10 @@ own delivery surface, as do artifacts and other durable content.
 `23-turn-reading-system.css` owns these boundaries. The shared process slot,
 label column, type scale and evidence inset live in `23-reading-process.css`
 and `23-reading-execution.css`. Tool identity is leading; disclosure is trailing.
+That trailing caret is a pseudo-element of the disclosure ROW, never inline text
+inside the wrapping label: a label-suffix caret is ordinary inline content, so a
+full last line pushes it alone onto the next line. As a row-level flex item it is
+atomic — it cannot wrap, and multi-line labels keep one caret at the row's end.
 Reasoning, search/read results, context, checklists, programs and fallback tools
 use the same row rhythm. Code/output controls remain independent, with selectable
 intent. The program summary keeps recorded activity, counts and semantic receipts;
@@ -265,15 +270,43 @@ arbitrary return-value previews live in expanded evidence. Failure/attention
 receipts remain visible. Routine success is quiet; pending actions retain their
 own controls and status.
 
-Tofu uses the established pale gray-white canvas and restrained amber accents;
-large surfaces must not acquire a yellow cast. **Problem:** a beige canvas plus a
-yellow gradient primary button overwhelmed the brand's small warm details.
-**Decision:** recover the pre-redesign theme tokens and use a flat, lightly tinted
-New Chat navigation row with a leading plus, left-aligned label, soft border and
-visible keyboard focus. **Rejected:** both a glossy gold fill and a solid black
-CTA compete with the conversation. Message actions retain their icon shelf,
-localized accessible names and native tooltips; Review keeps its visible label.
-Shared controls remain keyboard and touch accessible.
+Tofu is a **paper room**: a warm washi ground (`--bg-primary #F7F1E6`,
+`--bg-secondary #F1EADC`) with near-neutral paper sheets (`#FFFEFA`) stepped up
+on top, warm ink, and one roasted-caramel accent (`--accent #8F5126`). Warmth
+lives in hue, not in chroma; saturation is reserved for the two filled marks
+(New Chat's plus, the Send button). **Problem:** the palette had drifted to a
+cool grey-white canvas statistically indistinguishable from the light theme
+(#F8FAFC vs #f4f2ed), so Tofu read as "light with an orange accent"; an earlier
+iteration had over-corrected into a beige canvas plus a yellow gradient CTA. The
+first warm pass then over-corrected a second time: every surface sat at OKLCH
+C 0.024–0.043 with the hue pinned at 85–88°, so the whole viewport was one cream
+field with no neutral anywhere — reported as "too warm and uncomfortable", which
+is the eye finding no resting point rather than a hue complaint. It also put a
+full-viewport gradient (top-left highlight → caramel falloff) under every pixel,
+and left `--text-tertiary #9A8F79` at 2.78:1 on the ground. **Decision:** warm
+in HUE at low chroma — ground C 0.016, panels ≤0.020, sheets near-neutral (C
+0.005) so exactly one surface is clean; the ground is FLAT (no ambient ramp);
+sheets step up in L by ~0.04 over the ground; and every ink role clears AA
+(`--text-tertiary #7F7360` 4.1:1, `--accent #8F5126` 5.5:1 text / 6.2:1 with a
+white label). Depth is ONE hairline plus a soft warm shadow — never per-side
+bevels. **Rejected:** a saturated yellow CTA (competes with the conversation), a
+uniform ivory wash (no hierarchy), an ambient full-screen gradient (low-frequency
+luminance ramp reads as unevenly lit and leaves no flat field), a cream-on-cream
+ramp at high chroma (the stained-screen effect above), and embossed 2px bevels on
+popovers (read as a foreign plastic object inside an editorial UI).
+
+One chip family owns every composer control (`.preset-toggle`,
+`.submenu-trigger`, `.search-mode-toggle`): 32px tall, 10px radius, transparent
+at rest, caramel wash on hover, paper fill when open, no offset shadow. The
+model selector is a *field* (paper fill + hairline, brand hue confined to its
+12px glyph); the rest are *actions*. Menus and the model picker share one
+floating sheet: 14px radius, one hairline, layered warm shadow, 10px rows, and
+a selected state of caramel wash plus a 2px left spine — the same grammar as a
+selected conversation row. New Chat is a paper slip with a leading filled
+caramel plus; the label stays left-aligned and keyboard focus stays visible.
+Message actions retain their icon shelf, localized accessible names and native
+tooltips; Review keeps its visible label. Shared controls remain keyboard and
+touch accessible.
 
 The assistant byline, narration, process labels, localized **Answer** title and
 answer text share `--conversation-reading-inset`; the avatar occupies the gutter

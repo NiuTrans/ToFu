@@ -36,12 +36,68 @@
 }
 /* Conversation strip uses the composer card's single hairline. */
 [data-theme="tofu"] .conv-status-strip{box-shadow:inset 0 -1px 0 var(--border-light)}
-/* Quiet, static scene echo in the toolbar tray, never behind typing. */
+/* ── The composer card: a sheet of paper laid on the desk ──
+   A warm white face, one hairline, a letterpress highlight along the top edge
+   and a single soft drop shadow. Focus deepens the edge and adds a caramel
+   halo — never a coloured slab behind the textarea. */
+[data-theme="tofu"] .input-area .input-box{
+  /* Near-neutral paper: the sheet must be the one CLEAN surface in the room,
+     or the warm ground and a warm card read as two washes on top of each other. */
+  background:linear-gradient(180deg,#FFFEFA 0%,#FDFAF3 100%);
+  border:1px solid #E2D3B6;
+  border-radius:16px;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 14px 30px -22px rgba(80,58,32,0.55),
+    0 2px 6px rgba(80,58,32,0.05);
+  transition:border-color .2s ease,box-shadow .2s ease
+}
+[data-theme="tofu"] .input-area .input-box:focus-within{
+  border-color:#D6B486;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 0 0 3px rgba(143,81,38,0.12),
+    0 14px 30px -22px rgba(80,58,32,0.55)
+}
+/* The typing surface: warm ink on bare paper. No blur, no gradient, no
+   animation — nothing may move behind live text. */
+[data-theme="tofu"] .input-box textarea{
+  color:var(--text-primary);
+  caret-color:var(--accent);
+  font-family:var(--sans-body);
+  font-size:15.5px;
+  line-height:1.6
+}
+[data-theme="tofu"] .input-box textarea::placeholder{color:#A2947C}
+/* Quiet, static scene echo in the toolbar tray, never behind typing.
+   The scene colour pools LOW as a soft watercolour bloom and the top band stays
+   pale, so chip labels and the send button keep contrast. Colours are pulled
+   into the paper family (sage / eucalyptus / dusk-rose rather than the base
+   build's saturated green, teal and peach) — a candy tray under a warm card was
+   the loudest remaining seam in the composer. */
 @media(min-width:801px){
-  [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 12.5px 12.5px}
-  [data-theme="tofu"] .project-bar[data-decor="meadow"]:not([style*="none"]) ~ .input-box .input-actions{background:#f0f2e9}
-  [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{background:#edf1ef}
-  [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{background:#f5ede8}
+  [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 15px 15px}
+  [data-theme="tofu"] .project-bar[data-decor="meadow"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(120% 150% at 16% 158%, rgba(138,158,110,0.22) 0%, rgba(138,158,110,0) 62%),
+      radial-gradient(110% 130% at 88% 136%, rgba(143,81,38,0.10) 0%, rgba(143,81,38,0) 60%),
+      linear-gradient(180deg, rgba(255,253,248,0) 0%, rgba(255,253,248,0.62) 100%),
+      #F7F3E2
+  }
+  [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(120% 150% at 20% 156%, rgba(120,152,140,0.20) 0%, rgba(120,152,140,0) 62%),
+      radial-gradient(110% 130% at 86% 138%, rgba(143,81,38,0.09) 0%, rgba(143,81,38,0) 60%),
+      linear-gradient(180deg, rgba(255,253,248,0) 0%, rgba(255,253,248,0.62) 100%),
+      #F4F2E3
+  }
+  [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(120% 150% at 18% 156%, rgba(178,140,132,0.18) 0%, rgba(178,140,132,0) 62%),
+      radial-gradient(110% 130% at 88% 140%, rgba(143,81,38,0.10) 0%, rgba(143,81,38,0) 60%),
+      linear-gradient(180deg, rgba(255,253,248,0) 0%, rgba(255,253,248,0.62) 100%),
+      #F9F0E2
+  }
 }
 /* ══════════════════════════════════════════════════════════════
    Tofu Code Block — clean editorial code surface
@@ -146,7 +202,7 @@
 [data-theme="tofu"] .md-table-wrapper{border-radius:0;border:1px solid #D8D1C0}
 [data-theme="tofu"] .table-header{background:#E6E1D4;border-bottom:1px solid #D8D1C0;border-radius:0;color:#8A7458}
 [data-theme="tofu"] .table-header .copy-btn{color:#8A7458}
-[data-theme="tofu"] .table-header .copy-btn:hover{color:#4A4233;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .table-header .copy-btn:hover{color:#4A4233;background:rgba(143,81,38,0.12)}
 [data-theme="tofu"] .md-content table{
   border-radius:0;overflow:hidden;
   border:none;
@@ -155,15 +211,15 @@
 }
 [data-theme="tofu"] .md-content th{background:#E6E1D4}
 [data-theme="tofu"] .md-content td,[data-theme="tofu"] .md-content th{border-color:#D8D1C0}
-[data-theme="tofu"] .md-content tr:nth-child(even) td{background:rgba(196,149,106,0.03)}
+[data-theme="tofu"] .md-content tr:nth-child(even) td{background:rgba(143,81,38,0.03)}
 
 /* ── Text selection — warm amber highlight ── */
 [data-theme="tofu"] ::selection{
-  background:rgba(196,149,106,0.25);
+  background:rgba(143,81,38,0.25);
   color:#3A3428
 }
 [data-theme="tofu"] ::-moz-selection{
-  background:rgba(196,149,106,0.25);
+  background:rgba(143,81,38,0.25);
   color:#3A3428
 }
 
@@ -258,14 +314,16 @@
 [data-theme="tofu"] .preset-toggle-wrapper{overflow:visible}
 
 /* ══════════════════════════════════════════════════════
-   🕹️ TOOLBAR v5 — Pixel Console Buttons
-   Design principles:
-   1. SNES-style 3D borders (light top-left, dark bottom-right)
-   2. JetBrains Mono for crisp, cute monospace text
-   3. Clear dark text (#5C4A33) — no grayish/blurry fonts
-   4. Pixel press-down on :active (translateY + shadow collapse)
-   5. Unified warm ivory gradient backgrounds
-   6. 4px border-radius for retro pixel-friendly corners
+   🎛️ TOOLBAR — one chip family
+   Every toolbar control (model, capability, agent mode, extras, search)
+   shares ONE geometry and ONE set of states:
+     rest  · transparent, hairline transparent
+     hover · caramel wash, hairline #E7DAC2
+     open  · paper fill, hairline #E3CFAD, 1px press
+   Identity comes from the leading glyph (brand mark / lever / dots), never
+   from a per-control bevel. The previous build gave the model pill a 3D key
+   edge while its neighbours were flat, so the row read as two different
+   toolkits pasted together.
    ══════════════════════════════════════════════════════ */
 
 /* ── Toolbar tray ── */
@@ -273,7 +331,8 @@
   gap:6px;
   padding:6px 10px 7px var(--space-3);
   position:relative;
-  z-index:2
+  z-index:2;
+  box-shadow:inset 0 1px 0 rgba(143,81,38,0.05)
 }
 [data-theme="tofu"] .input-actions::before{
   background:none;
@@ -281,135 +340,220 @@
   height:0;
   left:var(--space-3);right:var(--space-3)
 }
-[data-theme="tofu"] .input-group{gap:5px}
-[data-theme="tofu"] #modelGroup{gap:6px}
-/* Dot separator between groups — small & centered */
+[data-theme="tofu"] .input-group{gap:2px}
+[data-theme="tofu"] #modelGroup{gap:2px}
+/* Hairline separator between groups — a rule, not a floating dot. */
 [data-theme="tofu"] .input-actions-scroll .input-group:not(:last-child)::after{
   content:'';
   display:block;
-  width:3px;height:3px;
-  background:rgba(196,149,106,0.28);
-  border-radius:50%;
-  margin:0 5px;
+  width:1px;height:18px;
+  background:#E7DAC2;
+  margin:0 4px;
   flex-shrink:0
 }
 
-/* Warm cream depth card, shared by the model footer and mobile sheet. */
+/* Warm cream depth card, shared by the model footer and mobile sheet.
+   A light caramel fill on a pale washi track: a 24px-tall bar in the accent's
+   darkest ink read as a black slab across the bottom of the panel. */
 [data-theme="tofu"] .depth-slider{
-  --depth-track:#E5DFD2;--depth-fill:#A78360;color:#594A36;
+  --depth-track:#F2E9D7;
+  --depth-fill:#C08A5C;
+  --depth-dot:rgba(120,96,64,0.45);
+  color:var(--text-secondary)
+}
+[data-theme="tofu"] .depth-slider .depth-slider-value{color:#7A441F}
+[data-theme="tofu"] .depth-slider input::-webkit-slider-thumb{
+  background:#FFFEFA;
+  box-shadow:0 1px 3px rgba(92,72,44,0.28),0 0 0 1px rgba(143,81,38,0.22)
+}
+[data-theme="tofu"] .depth-slider input::-moz-range-thumb{
+  background:#FFFEFA;
+  box-shadow:0 1px 3px rgba(92,72,44,0.28),0 0 0 1px rgba(143,81,38,0.22)
 }
 
-/* ── Model selector — quiet token pill ── */
+/* ── Model selector — a quiet field, not a 3D key ──
+   Same 32px/10px chip geometry as every neighbour; the only difference is a
+   paper fill and a hairline, because this one is a *field* (it displays state)
+   while the others are *actions*. The brand hue moves into the leading glyph;
+   the label is ink like every other label in the row. */
 [data-theme="tofu"] .preset-toggle{
-  border-radius:var(--radius-xs);
-  /* Item 2 — frosted-glass kinship with the project bar's pills: translucent
-     tofu-cream fill + backdrop blur so the toolbar reads as the SAME surface as
-     the bar (the scene wash shows through between pills). */
-  background:linear-gradient(180deg, rgba(250,248,242,0.62) 0%, rgba(240,237,228,0.5) 100%);
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  background:rgba(255,253,248,0.72);
+  border:1px solid #E7DAC2;
   color:var(--text-secondary);
   box-shadow:none;
   clip-path:none;
   image-rendering:auto;
-  transition:background 0.18s ease,color 0.18s ease,border-color 0.18s ease
+  transition:background-color .18s ease,color .18s ease,border-color .18s ease
 }
 [data-theme="tofu"] .preset-toggle:hover{
-  background:var(--bg-hover);
+  background:#FFFEFA;
+  border-color:#DCC9A6;
   color:var(--text-primary);
   box-shadow:none;
   transform:none
 }
 [data-theme="tofu"] .preset-toggle:active{
   transform:none;
-  box-shadow:var(--clay-pressed)
+  background:#FBF3E4;
+  box-shadow:inset 0 1px 2px rgba(143,81,38,0.08)
 }
-/* Brand color overrides — slim colored bottom accent */
-[data-theme="tofu"] .preset-toggle[data-brand="claude"]{color:#9A6520;box-shadow:inset 0 -2px 0 rgba(217,119,6,0.35)}
-[data-theme="tofu"] .preset-toggle[data-brand="openai"]{color:#2D7A4A;box-shadow:inset 0 -2px 0 rgba(16,163,127,0.3)}
-[data-theme="tofu"] .preset-toggle[data-brand="gemini"]{color:#3A6898;box-shadow:inset 0 -2px 0 rgba(66,133,244,0.3)}
-[data-theme="tofu"] .preset-toggle[data-brand="deepseek"]{color:#4A5A92;box-shadow:0 2px 0 rgba(154,144,122,0.4), inset 0 -2px 0 rgba(77,107,254,0.3)}
+[data-theme="tofu"] .preset-toggle-wrapper.open .preset-toggle{
+  background:#FBF2E2;
+  border-color:#E3CFAD;
+  color:var(--chat-primary-ink);
+  box-shadow:inset 0 1px 2px rgba(143,81,38,0.06)
+}
+/* Brand identity lives in the glyph only (12px mark), never in the text or a
+   coloured edge — a brand-tinted label was the loudest colour in the composer. */
+[data-theme="tofu"] .preset-toggle[data-brand="claude"]{color:#8A5A12;background:rgba(255,253,248,0.72);box-shadow:none}
+[data-theme="tofu"] .preset-toggle[data-brand="openai"]{color:#2D6A46;background:rgba(255,253,248,0.72);box-shadow:none}
+[data-theme="tofu"] .preset-toggle[data-brand="gemini"]{color:#3A6898;background:rgba(255,253,248,0.72);box-shadow:none}
+[data-theme="tofu"] .preset-toggle[data-brand="deepseek"]{color:#4D5FA0;background:rgba(255,253,248,0.72);box-shadow:none}
 [data-theme="tofu"] .preset-toggle .ps-label{
   font-family:var(--sans-body);
-  font-weight:700;
+  font-weight:650;
   font-size:var(--font-size-xs);
-  letter-spacing:0.02em;
-  color:inherit;
+  letter-spacing:0.01em;
+  color:var(--text-primary);
   -webkit-font-smoothing:antialiased
 }
-[data-theme="tofu"] .preset-toggle .ps-arrow{opacity:0.5;color:#8A7A5A}
+[data-theme="tofu"] .preset-toggle .ps-arrow{opacity:0.4;color:#9A8F79}
 
+/* ── Model picker panel — the same paper sheet as every other menu ──
+   Solid warm white (the old #F4F2EB panel read as grey next to the new ivory
+   ground), one hairline, layered shadow, 14px radius. */
 [data-theme="tofu"] .preset-dropdown{
-  border-radius:12px;
-  border:1px solid #C2BCA4;
-  box-shadow:0 12px 32px rgba(90,74,52,0.18), 0 2px 6px rgba(90,74,52,0.10);
-  background:#F4F2EB;
+  border-radius:var(--radius);
+  border:1px solid #E2D5BB;
+  box-shadow:
+    inset 0 1px 0 #FFFFFF,
+    0 18px 42px -18px rgba(74,52,26,0.32),
+    0 3px 10px rgba(74,52,26,0.07);
+  background:#FFFEFA;
   padding:6px;
   overflow-y:auto;
   z-index:9999
 }
-[data-theme="tofu"] .ps-dd-depth-wrap{background:#F4F2EB;border-top-color:#C2BCA4;bottom:-6px;margin-bottom:-6px}
-[data-theme="tofu"] .ps-dd-hint{border-top-color:#C2BCA4;color:#8A7A5A}
-[data-theme="tofu"] .ps-dd-hint:hover{color:#5C4A33}
+[data-theme="tofu"] .ps-dd-depth-wrap{background:#FFFEFA;border-top-color:#EDE3CF;bottom:-6px;margin-bottom:-6px}
+[data-theme="tofu"] .ps-dd-hint{border-top-color:#EDE3CF;color:var(--text-tertiary);font-size:10.5px}
+[data-theme="tofu"] .ps-dd-hint:hover{color:var(--text-secondary);background:#F7EEDD}
 [data-theme="tofu"] .preset-dropdown-item{
-  border-radius:8px;
+  border-radius:10px;
+  padding:7px 9px;
   font-family:var(--sans-body);
   font-size:var(--font-size-xs);
-  font-weight:500;
-  letter-spacing:0.02em;
-  color:#5C4A33;
+  font-weight:600;
+  letter-spacing:0.01em;
+  color:var(--text-primary);
   outline:none
 }
-[data-theme="tofu"] .preset-dropdown-item:hover{background:rgba(196,149,106,0.10)}
-[data-theme="tofu"] .preset-dropdown-item.selected{background:rgba(196,149,106,0.16);color:#4A3820}
-/* Base marks the active model with a faint full-row outline (Linear-style
- * selected band reads as a grey slab against the beige panel). Replace it
- * with a warm tint + hairline inset accent — the clay theme's active card. */
+[data-theme="tofu"] .preset-dropdown-item:hover{background:#F7EEDD}
+[data-theme="tofu"] .preset-dropdown-item.selected{background:rgba(143,81,38,0.10)}
+/* Active model: warm wash + a 2px caramel spine, matching the selected row in
+   every other menu (the faint outline read as a misaligned grey rectangle). */
 [data-theme="tofu"] .preset-dropdown-item.active{
-  background:rgba(196,149,106,0.22);
+  background:linear-gradient(90deg,rgba(143,81,38,0.13),rgba(143,81,38,0.045));
   outline:none;
-  box-shadow:inset 0 0 0 1px rgba(138,116,80,0.28)
+  box-shadow:inset 2px 0 0 var(--accent)
 }
-[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-label{color:#3E2E18;font-weight:700}
-[data-theme="tofu"] .preset-dropdown-item .ps-dd-icon{color:#8A7A5A}
-[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-icon{color:#9A6520}
-/* Per-row provider preference — a quiet cream chip whose popover mirrors
- * the panel itself: warm tint + hairline inset ring on the active option. */
+[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-label{color:var(--chat-primary-ink);font-weight:700}
+[data-theme="tofu"] .preset-dropdown-item .ps-dd-icon{color:#A08A6A}
+[data-theme="tofu"] .preset-dropdown-item.active .ps-dd-icon{color:var(--accent)}
+/* Per-row provider preference — a quiet chip whose popover mirrors the panel. */
 [data-theme="tofu"] .ps-dd-provider-chip{
-  background:#FBF9F3;
-  border:1px solid #D6CFB8;
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
   border-radius:8px;
-  color:#6E5E48;
+  color:var(--text-secondary);
   padding:5px 9px;
   transition:background .15s,border-color .15s
 }
 [data-theme="tofu"] .ps-dd-provider-chip:hover,
-[data-theme="tofu"] .ps-dd-provider-chip[aria-expanded="true"]{background:#FFFEFA;border-color:#B8AE90}
+[data-theme="tofu"] .ps-dd-provider-chip[aria-expanded="true"]{background:#FBF3E4;border-color:#DCC9A6;color:var(--text-primary)}
 [data-theme="tofu"] .ps-dd-provider-menu{
-  background:#F4F2EB;
-  border:1px solid #C2BCA4;
-  box-shadow:0 12px 32px rgba(90,74,52,0.18), 0 2px 6px rgba(90,74,52,0.10)
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
+  border-radius:11px;
+  box-shadow:0 18px 40px -18px rgba(74,52,26,0.30),0 3px 10px rgba(74,52,26,0.07)
 }
-[data-theme="tofu"] .ps-dd-provider-menu-item{color:#5C4A33;font-weight:500;letter-spacing:0.02em}
-[data-theme="tofu"] .ps-dd-provider-menu-item:hover{background:rgba(196,149,106,0.10)}
+[data-theme="tofu"] .ps-dd-provider-menu-item{color:var(--text-secondary);font-weight:600;letter-spacing:0.01em}
+[data-theme="tofu"] .ps-dd-provider-menu-item:hover{background:#F7EEDD;color:var(--text-primary)}
 [data-theme="tofu"] .ps-dd-provider-menu-item.active{
-  background:rgba(196,149,106,0.22);
-  box-shadow:inset 0 0 0 1px rgba(138,116,80,0.28);
-  color:#3E2E18
+  background:rgba(143,81,38,0.10);
+  box-shadow:inset 2px 0 0 var(--accent);
+  color:var(--chat-primary-ink)
 }
-[data-theme="tofu"] .ps-dd-provider-check{color:#9A6520}
-[data-theme="tofu"] .ps-dd-provider-tag{border-color:#D6CFB8;color:#A89B7B}
-[data-theme="tofu"] .ps-dd-search{background:#F4F2EB;border-bottom-color:#C2BCA4;color:#A89B7B;margin:-6px -6px 6px;top:-6px}
-[data-theme="tofu"] .ps-dd-section-label{color:#A89B7B;opacity:1;padding:7px var(--space-3) 3px}
+[data-theme="tofu"] .ps-dd-provider-check{color:var(--accent)}
+[data-theme="tofu"] .ps-dd-provider-tag{border-color:#E7DAC2;color:var(--text-tertiary)}
+[data-theme="tofu"] .ps-dd-search{background:#FFFEFA;border-bottom-color:#EDE3CF;color:var(--text-tertiary);margin:-6px -6px 6px;top:-6px}
+[data-theme="tofu"] .ps-dd-section-label{color:#A98F6C;opacity:1;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:8px var(--space-3) 3px}
 [data-theme="tofu"] .img-preview{border-radius:8px;border:1px solid rgba(90,78,64,0.3);box-shadow:0 2px 8px rgba(0,0,0,0.1)}
 
+/* ── Search toggle — same chip family; "on" is caramel, not a neon halo ──
+   The base build spins a conic blue/purple ring around this control. In a
+   paper room that halo is the only neon object on the desk, so the on-state
+   becomes a plain caramel chip with a filled ∞ seal. */
+[data-theme="tofu"] .search-mode-toggle{
+  border-radius:var(--radius-sm);
+  background:transparent;
+  border-width:1px;
+  border-color:transparent;
+  color:var(--text-secondary);
+  font-family:var(--sans-body);
+  font-weight:600;
+  animation:none;
+  transition:background-color .15s ease,color .15s ease,border-color .15s ease
+}
+[data-theme="tofu"] .search-mode-toggle::before{display:none}
+[data-theme="tofu"] .search-mode-toggle:hover{
+  background:rgba(143,81,38,0.07);
+  border-color:#E7DAC2;
+  color:var(--text-primary)
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]{
+  color:var(--accent);
+  background:rgba(143,81,38,0.10);
+  border-color:rgba(143,81,38,0.26);
+  animation:none;
+  box-shadow:none
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]:hover{background:rgba(143,81,38,0.15)}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-icon{color:var(--accent);animation:none}
+[data-theme="tofu"] .search-mode-toggle[data-mode="off"] .sm-mode-pill{
+  background:#F1E9D8;
+  color:var(--text-tertiary);
+  box-shadow:inset 0 0 0 1px #E7DAC2
+}
+[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-mode-pill{
+  background:var(--accent);
+  color:#FFF8EC
+}
+
+/* ── Send — the one solid object in the row ── */
+[data-theme="tofu"] .send-btn{
+  background:linear-gradient(180deg,#B06A33,#8E5222);
+  border-radius:10px;
+  box-shadow:0 1px 0 rgba(255,255,255,0.18) inset,0 2px 6px rgba(120,70,30,0.26);
+  transition:background .15s ease,box-shadow .15s ease,opacity .15s ease
+}
+[data-theme="tofu"] .send-btn:hover:not(:disabled){
+  background:linear-gradient(180deg,#A9612C,#7E481D);
+  box-shadow:0 1px 0 rgba(255,255,255,0.16) inset,0 3px 9px rgba(120,70,30,0.30)
+}
+[data-theme="tofu"] .send-btn:disabled{
+  background:#E6DCC6;
+  color:#A99B80;
+  box-shadow:none
+}
 /* ── User bubble: a gently tinted note — hairline, one soft shadow ── */
 [data-theme="tofu"] .message.user-msg .message-content{
-  background:#F5F3ED;
+  background:var(--user-bubble);
   border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:10px var(--space-4);
+  /* Match the base chat-bubble geometry (23-reading-responsive.css): flattened
+     top-right sender corner, narrower padding so a one-liner is a tight note. */
+  border-radius:var(--radius) var(--radius) var(--radius-xs) var(--radius);
+  padding:var(--space-3) var(--space-4);
   box-shadow:var(--clay-sm);
   position:relative
 }
@@ -481,9 +625,9 @@
 
 /* ── Tool badge — rounded chip ── */
 [data-theme="tofu"] .tool-badge{
-  background: rgba(196,149,106,0.1);
-  color: #A67B52;
-  border: 1px solid rgba(196,149,106,0.25);
+  background: rgba(143,81,38,0.1);
+  color: #7A441F;
+  border: 1px solid rgba(143,81,38,0.25);
   border-radius: 10px;
   box-shadow: none;
   font-weight: 600;
@@ -509,12 +653,12 @@
 [data-theme="tofu"] .ptool-turn{
   border: 1px solid #D6CCB8;
   border-radius:var(--radius-sm);
-  background: #FFFDF9;
+  background: #FFFEFA;
   /* Enclosing depth, not a right/bottom bevel: an even 1px ring wraps all
      four sides equally (the "fully wrapped" feel), then two soft warm drops
      ground the card and deepen the separation so a long panel reads calmly. */
   box-shadow:
-    0 0 0 1px rgba(196,149,106,0.05),
+    0 0 0 1px rgba(143,81,38,0.05),
     0 2px 6px rgba(92,72,44,0.09),
     0 5px 16px rgba(92,72,44,0.06);
 }
@@ -522,7 +666,7 @@
 /* ── Tool lines (individual tool call rows) ── */
 [data-theme="tofu"] .ptool-line{
   color: #5C5040;
-  border-bottom: 1px solid rgba(196,149,106,0.06);
+  border-bottom: 1px solid rgba(143,81,38,0.06);
 }
 /* Card-model seam fix (2026-07-08): each .ptool-turn is now a bordered card,
    so the LAST row's own bottom hairline would double against the card's
@@ -536,7 +680,7 @@
 }
 
 [data-theme="tofu"] .ptool-line:hover{
-  background: rgba(196,149,106,0.05);
+  background: rgba(143,81,38,0.05);
 }
 [data-theme="tofu"] .ptool-line.ptool-active{
   color: #4A3F2F;
@@ -544,10 +688,10 @@
 
 /* Icons — warm kinako instead of neon amber */
 [data-theme="tofu"] .ptool-icon{
-  color: #C4956A;
+  color: #8F5126;
 }
 [data-theme="tofu"] .ptool-line.ptool-active .ptool-icon{
-  color: #A67B52;
+  color: #7A441F;
 }
 
 /* ── Status badges — the heart of the redesign ── */
@@ -566,7 +710,7 @@
 /* Success/OK: pixel matcha stamp */
 [data-theme="tofu"] .ptool-batch-done-edit.ptool-batch-ok .ptool-batch-status{ color: #5E8A50; }
 /* Operation pills: kinako for rewrite, matcha for pure insertion */
-[data-theme="tofu"] .ptool-op--replace{color:#A67B52;background:rgba(196,149,106,0.1);border-color:rgba(196,149,106,0.25)}
+[data-theme="tofu"] .ptool-op--replace{color:#7A441F;background:rgba(143,81,38,0.1);border-color:rgba(143,81,38,0.25)}
 [data-theme="tofu"] .ptool-op--insert{color:#5E8A50;background:rgba(106,138,94,0.1);border-color:rgba(106,138,94,0.25)}
 [data-theme="tofu"] .ptool-badge-ok{
   border: 1px solid var(--chip-ok-border);
@@ -590,40 +734,40 @@
   animation: none;
 }
 
-[data-theme="tofu"] .ptool-gate-note{border-color:rgba(196,149,106,0.3);background:rgba(196,149,106,0.07)}
-[data-theme="tofu"] .ptool-gate-note-icon,[data-theme="tofu"] .ptool-gate-note-title{color:#A67B52}
-[data-theme="tofu"] .ptool-gate-note-path{background:rgba(196,149,106,0.14)}
+[data-theme="tofu"] .ptool-gate-note{border-color:rgba(143,81,38,0.3);background:rgba(143,81,38,0.07)}
+[data-theme="tofu"] .ptool-gate-note-icon,[data-theme="tofu"] .ptool-gate-note-title{color:#7A441F}
+[data-theme="tofu"] .ptool-gate-note-path{background:rgba(143,81,38,0.14)}
 
 /* Skip: pixel muted */
 [data-theme="tofu"] .ptool-badge-skip{
   color: #9C9178;
-  background: rgba(196,149,106,0.05);
-  border: 1px solid rgba(196,149,106,0.12);
+  background: rgba(143,81,38,0.05);
+  border: 1px solid rgba(143,81,38,0.12);
   border-radius:var(--radius-sm);
 }
 
 /* ── Spinner — warm kinako ── */
 [data-theme="tofu"] .ptool-spinner{
-  border-color: rgba(196,149,106,0.2);
-  border-top-color: #C4956A;
+  border-color: rgba(143,81,38,0.2);
+  border-top-color: #8F5126;
 }
 
 /* ── Search orbit dots — warm palette ── */
-[data-theme="tofu"] .ptool-panel .search-orbit-center{ background: #C4956A; }
+[data-theme="tofu"] .ptool-panel .search-orbit-center{ background: #8F5126; }
 [data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(2){ background: #D4A878; }
-[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(3){ background: #C4956A; }
-[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(4){ background: #A67B52; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(3){ background: #8F5126; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(4){ background: #7A441F; }
 
 /* ── Truncated results — warm ── */
 [data-theme="tofu"] .ptool-truncated{
   color: rgba(166,123,82,0.65);
-  background: rgba(196,149,106,0.04);
-  border-color: rgba(196,149,106,0.15);
+  background: rgba(143,81,38,0.04);
+  border-color: rgba(143,81,38,0.15);
 }
 [data-theme="tofu"] .ptool-truncated:hover{
-  color: #A67B52;
-  background: rgba(196,149,106,0.08);
-  border-color: rgba(196,149,106,0.3);
+  color: #7A441F;
+  background: rgba(143,81,38,0.08);
+  border-color: rgba(143,81,38,0.3);
 }
 
 /* ── Expandable results blocks — pixel ── */
@@ -633,20 +777,20 @@
   border-radius:var(--radius-sm);
 }
 [data-theme="tofu"] .ptool-results-block.expanded{
-  border-color: rgba(196,149,106,0.16);
-  background: rgba(196,149,106,0.03);
+  border-color: rgba(143,81,38,0.16);
+  background: rgba(143,81,38,0.03);
 }
 [data-theme="tofu"] .ptool-results-block.expanded .ptool-results-content{
-  border-top-color: rgba(196,149,106,0.12);
+  border-top-color: rgba(143,81,38,0.12);
 }
 [data-theme="tofu"] .ptool-results-header:hover{
-  background: rgba(196,149,106,0.04);
+  background: rgba(143,81,38,0.04);
 }
 [data-theme="tofu"] .ptool-results-content .search-result-item{
-  border-top-color: rgba(196,149,106,0.06);
+  border-top-color: rgba(143,81,38,0.06);
 }
 [data-theme="tofu"] .ptool-results-content .search-result-item:hover{
-  background: rgba(196,149,106,0.03);
+  background: rgba(143,81,38,0.03);
 }
 
 /* ── Search diagnostics ── */
@@ -670,14 +814,14 @@
   border-radius: var(--radius-sm);
 }
 [data-theme="tofu"] .ptool-tool-search-card{
-  border-color: rgba(196,149,106,0.16);
-  background: #FFFDF9;
+  border-color: rgba(143,81,38,0.16);
+  background: #FFFEFA;
   box-shadow: var(--clay-sm);
 }
 [data-theme="tofu"] .ptool-tool-search-namespace,
 [data-theme="tofu"] .ptool-tool-arg{
-  background: rgba(196,149,106,0.07);
-  border-color: rgba(196,149,106,0.13);
+  background: rgba(143,81,38,0.07);
+  border-color: rgba(143,81,38,0.13);
 }
 
 /* ── Batch done rows — readable desc + path on cream bg ── */
@@ -692,15 +836,15 @@
 /* ── Pending approval — pixel breathing border ── */
 [data-theme="tofu"] .ptool-pending-wrap{
   border: 2px solid rgba(184,136,74,0.3);
-  background: rgba(196,149,106,0.03);
+  background: rgba(143,81,38,0.03);
   border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm);
   animation: tofuPendingBreath 2.5s ease-in-out infinite;
 }
 [data-theme="tofu"] .ptool-pending-wrap .ptool-line.ptool-pending{
-  color: #A67B52;
-  background: rgba(196,149,106,0.06);
-  border-bottom-color: rgba(196,149,106,0.1);
+  color: #7A441F;
+  background: rgba(143,81,38,0.06);
+  border-bottom-color: rgba(143,81,38,0.1);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1197,16 +1341,16 @@
 [data-theme="tofu"] .sw-panel{background:transparent;border:none;box-shadow:none}
 [data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:2px 0}
 [data-theme="tofu"] .sw-panel.sw-active{border:none;box-shadow:none;animation:none}
-[data-theme="tofu"] .sw-header:hover{background:rgba(196,149,106,0.07)}
+[data-theme="tofu"] .sw-header:hover{background:rgba(143,81,38,0.07)}
 [data-theme="tofu"] .sw-header-icon{color:#B8884A}
 [data-theme="tofu"] .sw-complete .sw-header-icon{color:#5E8A50}
-[data-theme="tofu"] .sw-header-title{color:#A67B52}
+[data-theme="tofu"] .sw-header-title{color:#7A441F}
 [data-theme="tofu"] .sw-complete .sw-header-title{color:#5E8A50}
 [data-theme="tofu"] .sw-progress-track{background:rgba(92,72,44,0.10)}
-[data-theme="tofu"] .sw-progress-fill{background:linear-gradient(90deg,#C4956A,#A67B52)}
+[data-theme="tofu"] .sw-progress-fill{background:linear-gradient(90deg,#8F5126,#7A441F)}
 [data-theme="tofu"] .sw-complete .sw-progress-fill{background:linear-gradient(90deg,#7A9E6A,#5E8A50)}
 [data-theme="tofu"] .sw-progress-fill.has-errors{background:linear-gradient(90deg,#7A9E6A 0%,#7A9E6A var(--ok-pct),var(--error-text) var(--ok-pct),var(--error-text) 100%)}
-[data-theme="tofu"] .sw-agent{background:transparent;border-color:rgba(196,149,106,0.30)}
+[data-theme="tofu"] .sw-agent{background:transparent;border-color:rgba(143,81,38,0.30)}
 [data-theme="tofu"] .sw-agent.sw-a-running{border-color:rgba(43,108,176,0.32);background:rgba(43,108,176,0.04)}
 [data-theme="tofu"] .sw-agent.sw-a-failed,
 [data-theme="tofu"] .sw-agent.sw-a-error{border-color:rgba(192,57,43,0.32);background:rgba(192,57,43,0.04)}
@@ -1235,7 +1379,7 @@
 [data-theme="tofu"] .sw-a-err{color:#b23b2e;background:rgba(192,57,43,0.06)}
 [data-theme="tofu"] .sw-typing-cursor{color:#B8884A}
 [data-theme="tofu"] .sw-dep-tag{background:rgba(184,136,74,0.08);border-color:rgba(184,136,74,0.20);color:#8a6d1f}
-[data-theme="tofu"] .sw-footer{border-top-color:rgba(196,149,106,0.22)}
+[data-theme="tofu"] .sw-footer{border-top-color:rgba(143,81,38,0.22)}
 [data-theme="tofu"] .sw-complete .sw-footer{border-top-color:rgba(106,138,94,0.22)}
 [data-theme="tofu"] .sw-spinner{border-color:rgba(184,136,74,0.25);border-top-color:#B8884A}
 [data-theme="tofu"] .sw-status-pill.sw-pill-async{color:#8a6d1f;background:rgba(184,136,74,0.10);border-color:rgba(184,136,74,0.28)}
@@ -1315,7 +1459,7 @@
   color: #716A55;
 }
 [data-theme="tofu"] .hg-textarea {
-  background: #F5F3ED;
+  background: #FBF6E9;
   color: #4A4233;
   border-color: rgba(187, 149, 114, 0.30);
 }

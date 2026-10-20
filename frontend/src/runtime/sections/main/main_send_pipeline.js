@@ -208,6 +208,22 @@ function _commandIsVisibleInAuthority(conv, commandId) {
       ?.hasAuthoritativeCommand?.(conv.id, commandId));
 }
 
+/**
+ * The durable input Turn a command committed, found through its attempt's
+ * `commandId`. Used when the ACK was lost but the commit is authoritative: the
+ * receipt must then describe what authority actually stored.
+ */
+function _committedInputTurn(conv, commandId) {
+  const state = runtimeScope.ConversationTurnRead?.state?.(conv);
+  if (!state || !commandId) return null;
+  for (const attempt of Object.values(state.attemptsById || {})) {
+    if (attempt?.commandId !== commandId) continue;
+    const turn = state.turnsById?.[attempt.turnId];
+    if (turn) return turn;
+  }
+  return null;
+}
+
 function _isLaneBusySendError(error) {
   const code = error?.body?.error?.code
     || error?.body?.code
@@ -722,6 +738,17 @@ async function _submitComposerDraft() {
       committed = _commandIsVisibleInAuthority(conv, draft.commandId);
       if (committed) {
         accepted = true;
+        /* Authority holds the commit, so the receipt must describe it. The
+         * `finally` block is only correct for a send that did NOT commit;
+         * leaving this to it rendered a successful queued send as
+         * "提交未完成". */
+        if (translationWait) {
+          const projection = _committedInputTurn(conv, draft.commandId)?.projection;
+          composerTranslationStatus.finish(translationWait,
+            projection?.translation?.sendFailure || projection?._translateFailed
+              ? 'failed' : 'completed',
+            projection?.translation?.model || projection?._translateModel);
+        }
         _consumeAcceptedComposerDraft(draft);
         _applyAcceptedConversationTitle(conv, draft);
         runtimeScope.ConversationSurfacePresentation?.followLatest?.();

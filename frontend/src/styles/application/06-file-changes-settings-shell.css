@@ -1841,6 +1841,13 @@ input.settings-mono {
   border-color: var(--s-gold);
   box-shadow: 0 0 0 3px var(--s-gold-glow);
 }
+/* A replacement secret lives only in memory until 保存 commits it; the row
+   must read as edited, not saved, or the user assumes the key already changed. */
+.stg-key-card--staged > .stg-key-card-edit > input.stg-keys-input {
+  border-color: var(--s-gold);
+  background: #fffdf5;
+  box-shadow: inset 3px 0 0 var(--s-gold);
+}
 .stg-key-card--new .stg-key-card-edit { width: 100%; }
 .stg-key-card--new .stg-key-card-edit > input.stg-keys-input {
   flex: 1 1 auto;

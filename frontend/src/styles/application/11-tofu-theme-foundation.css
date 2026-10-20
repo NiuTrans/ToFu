@@ -1,32 +1,52 @@
 /* ══════════════════════════════════════════════════════════
-   TOFU — pale gray-white surfaces, soft corners and restrained amber accents.
+   TOFU — washi paper, kinako borders and roasted-tea caramel ink.
    Variable NAMES are a stable contract consumed app-wide — retune
    VALUES only; do not rename or remove.
+
+   Identity guard (owner decision 2026-10-20): the theme must NOT drift into
+   the light theme's cool grey-beige + indigo room. Tofu is a *paper* room:
+   warm ivory ground, slightly deeper washi panels, caramel (roasted tea) as
+   the single accent. Warmth lives in every surface, never in a yellow CTA.
    ══════════════════════════════════════════════════════════ */
 [data-theme="tofu"]{
-  /* A quiet navigation action: warmth is a local tint, not a yellow canvas. */
-  --chat-primary-background:color-mix(in srgb,var(--accent) 6%,var(--bg-primary));
-  --chat-primary-hover:color-mix(in srgb,var(--accent) 10%,var(--bg-primary));
-  --chat-primary-border:color-mix(in srgb,var(--accent) 18%,var(--border));
-  --bg-primary:#F8FAFC;
-  --bg-secondary:#F7F8FA;
-  --bg-tertiary:#EEF1F4;
-  --bg-hover:#E8ECF0;
-  --bg-active:#DDE2E7;
-  /* Borders — soft, low-contrast (restraint over ruled lines) */
-  --border:#D9DEE4;
-  --border-light:#E9EDF1;
-  --text-primary:#202327;
-  --text-secondary:#626971;
-  --text-tertiary:#949CA5;
-  --accent:#C97A1D;
-  --accent-hover:#A85E0B;
-  --accent-subtle:rgba(201,122,29,0.10);
-  /* 品牌字身专用墨色 — 当前与 --accent-hover 同值,但刻意独立:品牌色不随交互态色阶演进 */
-  --brand-ink:#A85E0B;
-  --thinking-bg:rgba(201,122,29,0.05);
-  --thinking-border:rgba(201,122,29,0.22);
-  --thinking-text:#8B560F;
+  /* A quiet navigation action: paper fill, caramel edge, warm ink. */
+  --chat-primary-background:#FFFEFA;
+  --chat-primary-hover:#FBF1E0;
+  --chat-primary-ink:#5E4426;
+  --chat-primary-border:#E2CDAB;
+  --chat-primary-shadow:inset 0 1px 0 #FFFFFF,0 1px 2px rgba(94,68,38,0.06);
+  /* The ground is DEEPER than the light theme's #f4f2ed and warm in HUE, but it
+     must not also be high in CHROMA: the first palette ran every surface at
+     OKLCH C 0.024-0.043 (hue pinned at 85-88deg), so the entire viewport was one
+     cream field with no neutral to rest on and the screen read as stained. The
+     ground now sits at C 0.016, panels stay near C 0.020, and cards/composer
+     step UP to a near-neutral warm white (#FFFEFA, C 0.005) so the hierarchy is
+     paper-on-desk: one clean sheet, warm chrome, no wash-on-wash. */
+  --bg-primary:#F7F1E6;
+  --bg-secondary:#F1EADC;
+  --bg-tertiary:#EAE1CE;
+  --bg-hover:#E5DAC4;
+  --bg-active:#D9CDB4;
+  /* Borders — warm hairlines, never grey */
+  --border:#DED2B9;
+  --border-light:#ECE3D0;
+  --text-primary:#2C261D;
+  --text-secondary:#6A5F4C;
+  /* 4.1:1 on --bg-primary / 3.9:1 on --bg-secondary. The previous #9A8F79 was
+     2.78:1 — timestamps, counts and meta labels dissolved into the cream and
+     forced the eye to work. Do not lighten this back toward the ground. */
+  --text-tertiary:#7F7360;
+  /* Accent reads as ink on paper at 5.5:1 and carries white labels at 6.2:1.
+     The previous #A0602F measured 4.35:1 as text — under AA — despite the
+     "4.6:1" it was documented as. Roasted tea, one step darker. */
+  --accent:#8F5126;
+  --accent-hover:#7A441F;
+  --accent-subtle:rgba(143,81,38,0.10);
+  /* 品牌字身专用墨色 — 刻意独立于 --accent-hover:品牌色不随交互态色阶演进 */
+  --brand-ink:#85502A;
+  --thinking-bg:rgba(143,81,38,0.05);
+  --thinking-border:rgba(143,81,38,0.22);
+  --thinking-text:#7E4A1E;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
   --error-text:#B05B48;
@@ -35,20 +55,20 @@
   --chip-ok-color:#5E8A50;
   --chip-ok-bg:rgba(106,138,94,0.1);
   --chip-ok-border:rgba(106,138,94,0.25);
-  --chip-warn-color:#A67B52;
-  --chip-warn-bg:rgba(196,149,106,0.1);
-  --chip-warn-border:rgba(196,149,106,0.25);
+  --chip-warn-color:#7A441F;
+  --chip-warn-bg:rgba(143,81,38,0.10);
+  --chip-warn-border:rgba(143,81,38,0.24);
   --chip-err-color:var(--error-text);
   --chip-err-bg:var(--error-bg);
   --chip-err-border:var(--error-border);
-  --chip-info-color:#A67B52;
-  --chip-info-bg:rgba(196,149,106,0.1);
-  --chip-info-border:rgba(196,149,106,0.2);
+  --chip-info-color:#7A441F;
+  --chip-info-bg:rgba(143,81,38,0.10);
+  --chip-info-border:rgba(143,81,38,0.20);
   --chip-neutral-color:var(--text-tertiary);
   --chip-neutral-bg:var(--bg-tertiary);
   --chip-neutral-border:var(--border);
-  --user-bubble:#F2F4F6;
-  --shadow:0 1px 2px rgba(19,25,31,0.04),0 3px 14px rgba(19,25,31,0.06);
+  --user-bubble:#F3E7D0;
+  --shadow:0 1px 2px rgba(92,72,44,0.05),0 3px 14px rgba(92,72,44,0.07);
   /* Soft-organic corners (editorial 8–16px) */
   --radius:14px;
   --radius-sm:10px;
@@ -62,21 +82,41 @@
      BEFORE the CJK fallback only for Latin glyphs; they carry no usable
      Han glyphs, so the shared tail wins for Chinese either way. */
   --cjk-fallback:'PingFang SC','Microsoft YaHei','Hiragino Sans GB','Noto Sans SC','Noto Sans CJK SC';
-  --serif-display:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
-  --sans-body:'Inter','Plus Jakarta Sans',var(--cjk-fallback),system-ui,sans-serif;
+  /* Sora: geometric, light, design-forward Latin face — used for both display
+     and body in the tofu theme. Its open forms and light weights read cleaner
+     and more contemporary than the previous Inter-only stack.
+     Newsreader: editorial serif reserved for large italic accents.
+     Inter/Plus Jakarta Sans: kept as fallback in the stack. CJK tail unchanged. */
+  --serif-display:'Newsreader',var(--cjk-fallback),system-ui,serif;
+  --sans-display:'Sora',var(--cjk-fallback),system-ui,sans-serif;
+  --sans-body:'Sora','Inter',var(--cjk-fallback),system-ui,sans-serif;
   --search-blue:#5E90AE;
   --search-cyan:#4FA3AC;
   --search-purple:#8C7FB0;
   --fetch-green:#C1794B;
   --fetch-teal:#5E9E8C;
-  /* Shadow tokens — soft, neutral, diffuse (no hard pixel offset) */
-  --clay-sm:0 1px 2px rgba(19,25,31,0.05);
-  --clay-md:0 2px 10px rgba(19,25,31,0.07);
-  --clay-lg:0 10px 30px rgba(19,25,31,0.10);
-  --clay-pressed:inset 0 1px 3px rgba(19,25,31,0.10);
-  --stitch:1px solid #D9DEE4
+  /* Shadow tokens — soft, warm-tinted, diffuse (no hard pixel offset) */
+  --clay-sm:0 1px 2px rgba(92,72,44,0.06);
+  --clay-md:0 2px 10px rgba(92,72,44,0.08);
+  --clay-lg:0 12px 30px rgba(92,72,44,0.12);
+  --clay-pressed:inset 0 1px 3px rgba(92,72,44,0.12);
+  --stitch:1px solid #DED3BC
 }
 
+/* ── Paper ground ────────────────────────────────────────────────────────
+   FLAT by owner decision (2026-10-20): the previous full-viewport gradient
+   (1240x640 highlight top-left into a caramel falloff bottom-right) put a slow
+   luminance ramp under every pixel. Low-frequency gradients leave no flat field
+   to focus on, which reads as "unevenly lit" and was reported as uncomfortable
+   rather than warm. Warmth now lives in the ink, borders and accent; the ground
+   itself is one even sheet. Do not reintroduce an ambient full-screen ramp. */
+[data-theme="tofu"] body{
+  background:var(--bg-primary)
+}
+[data-theme="tofu"] ::selection{
+  background:rgba(143,81,38,0.18);
+  color:var(--text-primary)
+}
 /* ── Typography: reading-optimized with CJK care ── */
 [data-theme="tofu"]{
   -webkit-font-smoothing:antialiased;
@@ -99,13 +139,13 @@
 [data-theme="tofu"] .md-content strong{font-weight:660}
 [data-theme="tofu"] .md-content em{color:var(--text-secondary);font-style:italic}
 [data-theme="tofu"] .md-content h1{
-  font-family:var(--serif-display);
-  font-size:var(--font-size-3xl);margin:26px 0 10px;font-weight:600;letter-spacing:-0.01em;
-  line-height:1.3;color:var(--text-primary);
+  font-family:var(--sans-display);
+  font-size:var(--font-size-3xl);margin:26px 0 10px;font-weight:700;letter-spacing:-0.02em;
+  line-height:1.25;color:var(--text-primary);
   border-bottom:none;padding-bottom:0;padding-left:0;display:block
 }
-[data-theme="tofu"] .md-content h2{font-family:var(--serif-display);font-size:18.5px;margin:22px 0 9px;font-weight:600;letter-spacing:-0.005em;line-height:1.35}
-[data-theme="tofu"] .md-content h3{font-family:var(--serif-display);font-size:var(--font-size-xl);font-weight:600;letter-spacing:0;line-height:1.4}
+[data-theme="tofu"] .md-content h2{font-family:var(--sans-display);font-size:18.5px;margin:22px 0 9px;font-weight:650;letter-spacing:-0.01em;line-height:1.3}
+[data-theme="tofu"] .md-content h3{font-family:var(--sans-display);font-size:var(--font-size-xl);font-weight:650;letter-spacing:-0.005em;line-height:1.35}
 /* ══════════════════════════════════════════════════════════
    MESSAGES — Warm Reading Room
    Assistant = a quiet page on soft paper (no frame theatrics)
@@ -198,7 +238,7 @@
   border-color:rgba(212,83,59,0.3)
 }
 [data-theme="tofu"] .delete-turn-popup{
-  background:#FFFDF9;
+  background:#FFFEFA;
   border:1px solid var(--border);
   box-shadow:var(--clay-lg)
 }
@@ -208,7 +248,7 @@
   font-size:var(--font-size-xs)
 }
 [data-theme="tofu"] .delete-popup-turn:hover{color:#D4533B;background:rgba(212,83,59,0.08)}
-[data-theme="tofu"] .delete-popup-single:hover{color:#C4956A;background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .delete-popup-single:hover{color:#8F5126;background:rgba(143,81,38,0.1)}
 
 /* ── Stream elapsed timer — quiet chip ── */
 [data-theme="tofu"] .stream-elapsed-timer{
@@ -245,9 +285,9 @@
    A quiet paper rail: soft ground, hairline divider, no CRT/pixel chrome.
    ══════════════════════════════════════════════════════ */
 [data-theme="tofu"] .sidebar{
-  background:var(--bg-secondary);
+  background:#F2EADB;
   border-right:1px solid var(--border);
-  box-shadow:none;
+  box-shadow:inset -1px 0 0 rgba(255,255,255,0.55);
   position:relative;
   overflow:visible
 }
@@ -258,9 +298,9 @@
 }
 
 [data-theme="tofu"] .topbar{
-  background:var(--bg-secondary);
+  background:#F2EADB;
   border-bottom:1px solid var(--border);
-  box-shadow:none;
+  box-shadow:0 1px 0 rgba(255,255,255,0.6) inset
 }
 [data-theme="tofu"] .topbar-title{
   font-family:var(--sans-body);
@@ -307,8 +347,8 @@
   display:none
 }
 [data-theme="tofu"] .sidebar-header h1{
-  font-family:var(--serif-display);
-  font-size:20px;font-weight:600;letter-spacing:0;text-transform:none
+  font-family:var(--sans-display);
+  font-size:20px;font-weight:700;letter-spacing:-0.02em;text-transform:none
 }
 /* Header action buttons — quiet ghost icons */
 [data-theme="tofu"] .sidebar-header .action-btn{
@@ -355,9 +395,9 @@
    不用主题 accent #C1794B(会与链接/按钮撞色,显不出品牌)。 */
 [data-theme="tofu"] .sidebar-header h1 .sidebar-brand,
 [data-theme="tofu"] .welcome h2.tofu-brand{
-  font-family:var(--sans-body);
-  font-weight:800;
-  letter-spacing:-0.03em;
+  font-family:var(--sans-display);
+  font-weight:700;
+  letter-spacing:-0.02em;
   text-transform:none
 }
 [data-theme="tofu"] .sidebar-header h1 .sidebar-brand>span,
@@ -483,40 +523,75 @@
 }
 /* Pinned zone removed — replaced by folders */
 
-/* New Chat uses the shared flat primary action in shell navigation. */
+/* ── New Chat — the one place the sidebar raises its voice ──────────────
+   A paper slip with a single filled caramel plus. Everything around it is a
+   quiet row, so the CTA takes its emphasis from ONE solid mark rather than a
+   bevel + gradient + shadow stack; the previous version read as an empty
+   text input sitting above the conversation list. */
+[data-theme="tofu"] .new-chat-btn{
+  background:linear-gradient(180deg,#FFFEFA 0%,#FCF4E4 100%);
+  border:1px solid var(--chat-primary-border);
+  border-radius:var(--radius-sm);
+  box-shadow:0 1px 0 #FFFFFF inset,0 1px 2px rgba(92,72,44,0.07);
+  color:var(--chat-primary-ink);
+  font-family:var(--sans-body);
+  font-size:13.5px;
+  font-weight:650;
+  letter-spacing:0.01em;
+  padding:var(--space-2) 10px;
+  gap:9px;
+  transition:background .18s ease,border-color .18s ease,box-shadow .18s ease
+}
+[data-theme="tofu"] .new-chat-btn>svg{
+  width:22px;height:22px;padding:3px;box-sizing:border-box;
+  border-radius:7px;
+  background:linear-gradient(180deg,#B06A33,#8E5222);
+  color:#FFF8EC;
+  box-shadow:0 1px 1px rgba(70,44,18,0.22)
+}
+[data-theme="tofu"] .new-chat-btn:hover{
+  background:linear-gradient(180deg,#FFFEFA 0%,#F8EDD8 100%);
+  border-color:#D9BE92;
+  box-shadow:0 1px 0 #FFFFFF inset,0 2px 6px rgba(92,72,44,0.10)
+}
+[data-theme="tofu"] .new-chat-btn:active{
+  background:#F6ECD9;
+  box-shadow:inset 0 1px 2px rgba(92,72,44,0.12)
+}
+
 /* ── Tofu theme: sidebar action row ── */
 [data-theme="tofu"] .sidebar-action-row{padding:10px 10px 6px}
-[data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E8D5C0}
-[data-theme="tofu"] .folder-dialog-input{background:#FFF9F4;border-color:#D4B896;color:#5C4A38}
-[data-theme="tofu"] .folder-dialog-input:focus{border-color:#C4956A}
-[data-theme="tofu"] .folder-dialog-cancel{background:#F0E3D5;border-color:#D4B896;color:#8A7458}
-[data-theme="tofu"] .folder-dialog-ok{background:linear-gradient(180deg,#C4956A 0%,#A67B55 100%)}
-[data-theme="tofu"] .conv-rename-card{background:#FDF8F3;border-color:#E8D5C0}
-[data-theme="tofu"] .conv-rename-input{background:#FFF9F4;border-color:#D4B896;color:#5C4A38}
-[data-theme="tofu"] .conv-rename-input:focus{border-color:#C4956A}
-[data-theme="tofu"] .conv-rename-btn.cancel{background:#F0E3D5;border-color:#D4B896;color:#8A7458}
-[data-theme="tofu"] .conv-rename-btn.ok{background:linear-gradient(180deg,#C4956A 0%,#A67B55 100%)}
+[data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E3CFAD}
+[data-theme="tofu"] .folder-dialog-input{background:#FFF9F4;border-color:#D8B98A;color:#5C4A38}
+[data-theme="tofu"] .folder-dialog-input:focus{border-color:#8F5126}
+[data-theme="tofu"] .folder-dialog-cancel{background:#F0E3D5;border-color:#D8B98A;color:#8A7458}
+[data-theme="tofu"] .folder-dialog-ok{background:linear-gradient(180deg,#8F5126 0%,#7A441F 100%)}
+[data-theme="tofu"] .conv-rename-card{background:#FDF8F3;border-color:#E3CFAD}
+[data-theme="tofu"] .conv-rename-input{background:#FFF9F4;border-color:#D8B98A;color:#5C4A38}
+[data-theme="tofu"] .conv-rename-input:focus{border-color:#8F5126}
+[data-theme="tofu"] .conv-rename-btn.cancel{background:#F0E3D5;border-color:#D8B98A;color:#8A7458}
+[data-theme="tofu"] .conv-rename-btn.ok{background:linear-gradient(180deg,#8F5126 0%,#7A441F 100%)}
 
 /* ── Tofu theme: project rail ── */
-[data-theme="tofu"] .project-rail{background:linear-gradient(180deg,#EAE6DC 0%,#E4E0D5 100%);border-right:2px solid #C2BCA4}
-[data-theme="tofu"] .project-rail-title{color:#A89878}
+[data-theme="tofu"] .project-rail{background:linear-gradient(180deg,#F5F0E1 0%,#F0EADA 100%);border-right:1px solid var(--border)}
+[data-theme="tofu"] .project-rail-title{color:#C2B496}
 [data-theme="tofu"] .project-rail-collapse{color:#B8A090}
-[data-theme="tofu"] .project-rail-collapse:hover{color:#A67B55;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .project-rail-collapse:hover{color:#7A441F;background:rgba(143,81,38,0.12)}
 [data-theme="tofu"] .folder-tab{color:#8A7458;font-size:var(--font-size-sm)}
-[data-theme="tofu"] .folder-tab:hover{background:rgba(196,149,106,0.12);color:#5C4A38}
-[data-theme="tofu"] .folder-tab.active{background:rgba(196,149,106,0.18);color:#A67B55}
-[data-theme="tofu"] .folder-tab.active::before{background:#C4956A}
-[data-theme="tofu"] .folder-tab-count{background:rgba(196,149,106,0.18);color:#8A7458}
-[data-theme="tofu"] .folder-tab.active .folder-tab-count{background:#C4956A;color:#FFF9F4}
+[data-theme="tofu"] .folder-tab:hover{background:rgba(143,81,38,0.12);color:#5C4A38}
+[data-theme="tofu"] .folder-tab.active{background:rgba(143,81,38,0.18);color:#7A441F}
+[data-theme="tofu"] .folder-tab.active::before{background:#8F5126}
+[data-theme="tofu"] .folder-tab-count{background:rgba(143,81,38,0.18);color:#8A7458}
+[data-theme="tofu"] .folder-tab.active .folder-tab-count{background:#8F5126;color:#FFF9F4}
 [data-theme="tofu"] .folder-tab-inbox-dot,[data-theme="tofu"] .folder-tab-add-dot{color:#B8A090}
-[data-theme="tofu"] .folder-tab.active .folder-tab-inbox-dot{color:#A67B55}
+[data-theme="tofu"] .folder-tab.active .folder-tab-inbox-dot{color:#7A441F}
 [data-theme="tofu"] .folder-tab-add{color:#B8A090}
-[data-theme="tofu"] .folder-tab-add:hover{color:#A67B55;background:rgba(196,149,106,0.12)}
-[data-theme="tofu"] .folder-quickadd{color:#B8A090;border-color:#E8D5C0}
-[data-theme="tofu"] .folder-quickadd:hover{color:#A67B55;border-color:#C4956A;background:rgba(196,149,106,0.1)}
-[data-theme="tofu"] .folder-tab-menu{background:#FDF8F3;border-color:#E8D5C0}
+[data-theme="tofu"] .folder-tab-add:hover{color:#7A441F;background:rgba(143,81,38,0.12)}
+[data-theme="tofu"] .folder-quickadd{color:#B8A090;border-color:#E3CFAD}
+[data-theme="tofu"] .folder-quickadd:hover{color:#7A441F;border-color:#8F5126;background:rgba(143,81,38,0.1)}
+[data-theme="tofu"] .folder-tab-menu{background:#FDF8F3;border-color:#E3CFAD}
 [data-theme="tofu"] .folder-tab-menu-item{color:#5C4A38}
-[data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(143,81,38,0.1)}
 [data-theme="tofu"] .folder-tab-menu-delete:hover{color:#D4544A;background:rgba(212,84,74,0.08)}
 
 [data-theme="tofu"] .folder-tab-dot.streaming{animation:folderDotPulse 2.2s ease-in-out infinite}
@@ -542,23 +617,20 @@
 }
 [data-theme="tofu"] .avatar.assistant{
   background:transparent;
-  color:#A67B52;
+  color:#7A441F;
   border-radius:var(--radius-sm)}
+/* Model tag — a flat label, not a second 3D key beside the composer. */
 [data-theme="tofu"] .model-badge{
-  background:linear-gradient(180deg, #F8F6F0 0%, #F1EEE6 100%);
-  color:#6B5A40;
-  border-radius:4px;
+  background:#F6EEDC;
+  color:#7E5A34;
+  border:1px solid #E3D2B2;
+  border-radius:6px;
   font-family:var(--sans-body);
-  border:1.5px solid rgba(168,152,120,0.4);
-  border-top-color:rgba(255,252,246,0.7);
-  border-left-color:rgba(255,252,246,0.7);
-  border-right-color:rgba(168,152,120,0.45);
-  border-bottom-color:rgba(168,152,120,0.45);
-  box-shadow:0 1px 0 rgba(154,144,122,0.2);
+  box-shadow:none;
   font-size:10px;
-  font-weight:700;
-  padding:3px var(--space-2);
-  letter-spacing:0.02em
+  font-weight:650;
+  padding:2px 7px;
+  letter-spacing:0.01em
 }
 
 /* Topbar and latency controls inherit shared shell geometry and colors. */
@@ -659,19 +731,19 @@
      此处只留 tofu 的颜色与字身口音。 */
   color:var(--text-primary);background:none;
   -webkit-text-fill-color:var(--text-primary);
-  font-family:var(--sans-body);
-  font-weight:800;letter-spacing:-0.03em;text-transform:none
+  font-family:var(--sans-display);
+  font-weight:700;letter-spacing:-0.02em;text-transform:none
 }
 /* 非品牌的说明小字。必须排除 .tofu-brand —— 它与基础层的印章规则同为 (0,2,2)
    且位置在后,不排除就会把印面字拉回 Jakarta 500/13px(实测如此)。 */
 [data-theme="tofu"] .welcome h2:not(.tofu-brand) small{
   -webkit-text-fill-color:#9C9178;
-  font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;
+  font-family:var(--sans-display);
   letter-spacing:.12em;font-weight:500;font-size:var(--font-size-md)
 }
 [data-theme="tofu"] .welcome p{
   color:#736750;
-  font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;
+  font-family:var(--sans-body);
   font-size:15px;line-height:1.65
 }
 
@@ -807,19 +879,19 @@
 }
 [data-theme="tofu"] .sidebar-search-box{
   border-radius:3px;
-  border:2px solid #C4956A;
-  border-top-color:#A89878;
-  border-left-color:#A89878;
+  border:2px solid #8F5126;
+  border-top-color:#C2B496;
+  border-left-color:#C2B496;
   border-right-color:#E8D5B8;
   border-bottom-color:#E8D5B8;
   background:#EBE8DE;
   box-shadow:
-    inset 0 1px 4px rgba(196,149,106,0.12),
-    0 0 0 2px rgba(196,149,106,0.08);
+    inset 0 1px 4px rgba(143,81,38,0.12),
+    0 0 0 2px rgba(143,81,38,0.08);
   padding:0 var(--space-2);
   transition:border-color 0.15s,box-shadow 0.15s,background 0.15s
 }
-[data-theme="tofu"] #sidebarSearchToggle.active{color:#A67B55;background:rgba(196,149,106,0.15)}
+[data-theme="tofu"] #sidebarSearchToggle.active{color:#7A441F;background:rgba(143,81,38,0.15)}
 [data-theme="tofu"] .sidebar-search-box .sidebar-search-input{
   font-family:var(--sans-body);
   font-size:11.5px;
@@ -836,7 +908,7 @@
 }
 /* Search icon — pixel magnifier */
 [data-theme="tofu"] .sidebar-search-icon{
-  color:#A67B52;
+  color:#7A441F;
   opacity:0.8
 }
 [data-theme="tofu"] .sidebar-search-icon svg{
@@ -849,20 +921,20 @@
   transition:all 0.08s ease
 }
 [data-theme="tofu"] .sidebar-search-clear:hover{
-  background:rgba(196,149,106,0.15);
-  color:#8E6B48
+  background:rgba(143,81,38,0.15);
+  color:#7A441F
 }
 [data-theme="tofu"] .sidebar-search-highlight{
-  background:rgba(196,149,106,0.35);
+  background:rgba(143,81,38,0.35);
   border-radius:1px;
   padding:0 2px;
-  box-shadow:0 0 0 1px rgba(196,149,106,0.15)
+  box-shadow:0 0 0 1px rgba(143,81,38,0.15)
 }
 /* Search stats — pixel counter */
 [data-theme="tofu"] .sidebar-search-stats{
   font-family:var(--sans-body);
   font-size:9px;
-  color:#A89878;
+  color:#C2B496;
   letter-spacing:0.04em;
   padding:3px var(--space-1) 0
 }
@@ -870,81 +942,25 @@
 [data-theme="tofu"] .sidebar-search-empty{
   font-family:var(--sans-body);
   font-size:var(--font-size-xs);
-  color:#A89878
+  color:#C2B496
 }
 [data-theme="tofu"] .sidebar-search-empty-icon{
   font-size:24px;
   opacity:0.4
 }
 
-/* ── Search toggle — pixel pill, consistent with toolbar items ── */
-[data-theme="tofu"] .search-mode-toggle{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  /* Item 2 — true frosted glass matching the project bar's pills */
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  padding:var(--space-1) 10px;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:700;
-  letter-spacing:0.02em;
-  -webkit-font-smoothing:antialiased;
-  -moz-osx-font-smoothing:grayscale;
-  transition:color 0.15s,background 0.15s,border-color 0.2s,transform 0.08s ease,box-shadow 0.08s ease;
-  animation:none !important
-}
-[data-theme="tofu"] .search-mode-toggle::before{display:none !important}
-[data-theme="tofu"] .search-mode-toggle:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
-  color:#2A2018;
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06)
-}
-[data-theme="tofu"] .search-mode-toggle:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3)
-}
-/* Single search — subtle blue accent */
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"]{
-  color:#4A7898;
-  background:rgba(90,138,168,0.06);
-  border-color:rgba(90,138,168,0.3);
-  animation:none !important
-}
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"]:hover{background:rgba(90,138,168,0.12)}
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"] .sm-icon{color:#4A7898;animation:none}
-[data-theme="tofu"] .search-mode-toggle[data-mode="single"] .sm-mode-pill{background:rgba(90,138,168,0.18);color:#2A5A72;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
-/* Multi search — subtle purple accent */
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]{
-  color:#6A5898;
-  background:rgba(138,120,176,0.06);
-  border-color:rgba(138,120,176,0.3);
-  animation:none !important
-}
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"]:hover{background:rgba(138,120,176,0.12)}
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-icon{color:#6A5898;animation:none}
-[data-theme="tofu"] .search-mode-toggle[data-mode="multi"] .sm-mode-pill{background:rgba(138,120,176,0.18);color:#4A3870;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
-/* Off state pill */
-[data-theme="tofu"] .search-mode-toggle[data-mode="off"] .sm-mode-pill{background:rgba(184,176,160,0.18);color:#5C5240;border-radius:999px;font-family:var(--sans-body);font-size:10px;font-weight:600}
+/* The search toggle is a member of the composer chip family; its skin lives
+   with the other toolbar chips in 13-tofu-theme-composer-tools.css. */
 
 /* ── Badges — pixel chips ── */
-[data-theme="tofu"] .timer-trigger .tm-dot{background:#C4956A}
+[data-theme="tofu"] .timer-trigger .tm-dot{background:#8F5126}
 [data-theme="tofu"] .timer-trigger .timer-count{background:#B8895E}
 [data-theme="tofu"] .search-orbit-center{background:#6A9EC0}
 
 /* ── Stream phase indicator — warm kinako capsule ── */
 [data-theme="tofu"] .stream-phase{
-  background:rgba(196,149,106,0.1);
-  border:1px solid rgba(196,149,106,0.22);
+  background:rgba(143,81,38,0.1);
+  border:1px solid rgba(143,81,38,0.22);
   border-radius:4px;
   color:#8A6240;
   font-family:var(--sans-body);
@@ -1075,7 +1091,7 @@
 }
 [data-theme="tofu"] .log-clean-btn.dismiss:hover{
   color:#5A4A38;
-  background:rgba(196,149,106,0.12)
+  background:rgba(143,81,38,0.12)
 }
 
 /* ── Search/fetch result blocks — card style ── */

@@ -100,11 +100,23 @@ def _rule_body(css: str, selector: str) -> str | None:
     return None
 
 
+def _accent_rgb(css: str) -> str:
+    """The tofu --accent as 'r,g,b'. The focus halo is the accent at low alpha,
+    so its channels must FOLLOW the token: pinning a literal here is how the
+    halo silently stops matching the accent after a palette retune."""
+    for sel, body in _rules(css):
+        if sel != '[data-theme="tofu"]' or '--accent:' not in body:
+            continue
+        hex6 = re.search(r'--accent:\s*#([0-9A-Fa-f]{6})', body).group(1)
+        return ','.join(str(int(hex6[i:i + 2], 16)) for i in (0, 2, 4))
+    raise AssertionError('tofu --accent not found')
+
+
 # ── Selectors under test ──────────────────────────────────────────────────
-BOX = '[data-theme="tofu"] .input-box'
-FOCUS = '[data-theme="tofu"] .input-box:focus-within'
-TEXTAREA = '[data-theme="tofu"] textarea'
-FROSTED_PILLS = (
+BOX = '[data-theme="tofu"] .input-area .input-box'
+FOCUS = '[data-theme="tofu"] .input-area .input-box:focus-within'
+TEXTAREA = '[data-theme="tofu"] .input-box textarea'
+CHIP_FAMILY = (
     '[data-theme="tofu"] .preset-toggle',
     '[data-theme="tofu"] .submenu-trigger',
     '[data-theme="tofu"] .search-mode-toggle',
@@ -158,13 +170,14 @@ def test_retired_decorative_pseudo_elements_stay_retired():
 #  (b) warm focus-within rule exists (warm frame + amber ring, no lift)
 # ═══════════════════════════════════════════════════════════════════════════
 def test_focus_within_is_warm_and_static():
-    """:focus-within warms the frame + adds a static amber ring; no lift."""
+    """:focus-within deepens the frame + adds a static caramel halo; no lift."""
     body = _rule_body(_read(CSS), FOCUS)
     assert body is not None, f'{FOCUS} rule not found (structure changed?)'
     flat = body.replace(' ', '')
-    # warm amber ring from the bar's #C4956A family (rgb 196,149,106)
-    assert '196,149,106' in flat, (
-        f'{FOCUS} lost the warm-amber focus ring (rgba(196,149,106,…)).\n'
+    # warm caramel halo — the theme's --accent at low alpha
+    accent = _accent_rgb(_read(CSS))
+    assert f'rgba({accent},' in flat, (
+        f'{FOCUS} lost the warm-caramel focus halo (rgba({accent},…)).\n'
         'body=' + body)
     # NO lift — the box must not translate on focus
     m = re.search(r'transform\s*:\s*([^;]+)', body)
@@ -178,30 +191,42 @@ def test_focus_within_is_warm_and_static():
 #  (c) frame kinship + frosted-pill kinship both exist
 # ═══════════════════════════════════════════════════════════════════════════
 def test_input_box_shares_gallery_frame():
-    """.input-box adopts the bar's frame vocabulary: 14px radius + a two-layer
-    (comma-separated) soft shadow."""
+    """.input-box is a paper sheet: 16px radius + a multi-layer (comma-separated)
+    soft shadow whose first layer is the letterpress top highlight."""
     body = _rule_body(_read(CSS), BOX)
     assert body is not None, f'{BOX} rule not found'
     m = re.search(r'border-radius\s*:\s*([^;]+)', body)
-    assert m is not None and '14px' in m.group(1), (
-        f'{BOX} lost the 14px gallery-frame radius.\nbody=' + body)
+    assert m is not None and '16px' in m.group(1), (
+        f'{BOX} lost the 16px paper-sheet radius.\nbody=' + body)
     shadow = re.search(r'box-shadow\s*:\s*([^;]+)', body)
-    assert shadow is not None and ',' in shadow.group(1), (
-        f'{BOX} lost the soft two-layer (comma-separated) elevation.\n'
+    assert shadow is not None and shadow.group(1).count(',') >= 2, (
+        f'{BOX} lost the layered paper elevation (>=3 shadow layers).\n'
         'box-shadow=' + (shadow.group(1) if shadow else '<none>'))
 
 
-def test_toolbar_pills_are_frosted_glass():
-    """The tofu toolbar pills gain backdrop-filter:blur — the project bar's
-    frosted-glass pill idiom, so the two bars read as one surface."""
+def test_toolbar_controls_are_one_chip_family():
+    """Model selector, submenu triggers and the search toggle must share ONE
+    chip geometry — the model pill's 3D key edge versus flat neighbours was the
+    inconsistency this replaced. Blur behind the pills is retired with it."""
     css = _read(CSS)
-    for sel in FROSTED_PILLS:
+    radii = set()
+    for sel in CHIP_FAMILY:
         body = _rule_body(css, sel)
         assert body is not None, f'{sel} rule not found'
         flat = body.replace(' ', '')
-        assert 'backdrop-filter:blur' in flat, (
-            f'{sel} did not gain backdrop-filter:blur — the frosted-glass '
-            'kinship with the project bar pills is missing.\nbody=' + body)
+        assert 'backdrop-filter' not in flat, (
+            f'{sel} regained a backdrop-filter — the chips are flat paper '
+            'now; blur behind them belongs to the retired frosted idiom.\n'
+            'body=' + body)
+        assert 'transform' not in flat.replace('transform:none', ''), (
+            f'{sel} carries a transform — the chip family must stay flat at '
+            'rest (no per-chip 3D lift).\nbody=' + body)
+        m = re.search(r'border-radius\s*:\s*([^;]+)', body)
+        assert m is not None, f'{sel} declares no border-radius.\nbody=' + body
+        radii.add(re.sub(r'\s+', '', m.group(1)))
+    assert len(radii) == 1, (
+        'chip family radii diverged (' + ', '.join(sorted(radii)) + ') — every '
+        'toolbar control must share one corner radius.')
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -260,48 +285,53 @@ def _assert_neuter(sel: str, poison_body, check):
 def test_NC_textarea_blur_is_flagged():
     """If the textarea gained a backdrop-filter, guard (a) must fire."""
     def check(css):
-        for sel, body in _rules(css):
-            if sel != re.sub(r'\s+', ' ', TEXTAREA).strip():
-                continue
-            assert 'backdrop-filter' not in body, 'flagged'
+        body = _rule_body(css, TEXTAREA)
+        assert body is not None, 'flagged: typing surface rule vanished'
+        assert 'backdrop-filter' not in body, 'flagged'
     _assert_neuter(TEXTAREA,
                    lambda b: b.rstrip().rstrip('}') + ';backdrop-filter:blur(6px)',
                    check)
 
 
 def test_NC_focus_ring_removal_is_flagged():
-    """If the warm amber ring were reverted, guard (b) must fire."""
+    """If the warm caramel halo were reverted, guard (b) must fire."""
+    accent = _accent_rgb(_read(CSS))
+
     def check(css):
         body = _rule_body(css, FOCUS)
         assert body is not None
-        assert '196,149,106' in body.replace(' ', ''), 'flagged'
+        assert f'rgba({accent},' in body.replace(' ', ''), 'flagged'
     _assert_neuter(FOCUS,
-                   lambda b: b.replace('196,149,106', '110,86,207'),  # back to plain accent
+                   lambda b: b.replace(f'rgba({accent},', 'rgba(110,86,207,'),  # plain indigo
                    check)
 
 
 def test_NC_frame_radius_revert_is_flagged():
-    """If the 14px gallery radius were reverted, guard (c) must fire."""
+    """If the 16px paper-sheet radius were reverted, guard (c) must fire."""
     def check(css):
         body = _rule_body(css, BOX)
         assert body is not None
         m = re.search(r'border-radius\s*:\s*([^;]+)', body)
-        assert m is not None and '14px' in m.group(1), 'flagged'
+        assert m is not None and '16px' in m.group(1), 'flagged'
     _assert_neuter(BOX,
-                   lambda b: b.replace('border-radius:14px', 'border-radius:var(--radius)'),
+                   lambda b: b.replace('border-radius:16px', 'border-radius:var(--radius)'),
                    check)
 
 
-def test_NC_pill_frost_removal_is_flagged():
-    """If a toolbar pill lost its backdrop-filter, guard (c-pills) must fire."""
+def test_NC_chip_divergence_is_flagged():
+    """If one chip diverged from the family radius, guard (c-chips) must fire."""
     def check(css):
-        body = _rule_body(css, '[data-theme="tofu"] .preset-toggle')
-        assert body is not None
-        assert 'backdrop-filter:blur' in body.replace(' ', ''), 'flagged'
+        radii = set()
+        for sel in CHIP_FAMILY:
+            body = _rule_body(css, sel)
+            assert body is not None
+            m = re.search(r'border-radius\s*:\s*([^;]+)', body)
+            assert m is not None, 'flagged'
+            radii.add(re.sub(r'\s+', '', m.group(1)))
+        assert len(radii) == 1, 'flagged'
     _assert_neuter('[data-theme="tofu"] .preset-toggle',
-                   lambda b: re.sub(r'-?webkit-?backdrop-filter\s*:[^;]+;?', '',
-                                    b.replace('backdrop-filter:blur(6px) saturate(1.05)', ''))
-                   if 'backdrop-filter' in b else b,
+                   lambda b: b.replace('border-radius:var(--radius-sm)',
+                                       'border-radius:6px'),
                    check)
 
 
