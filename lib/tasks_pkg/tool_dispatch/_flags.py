@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from typing import Any
 
 from lib.log import get_logger
@@ -25,6 +26,15 @@ logger = get_logger(__name__)
 
 
 _TOOL_RESULT_CACHE_MIN_CAPACITY = 16
+_UNCONDITIONAL_CACHE_STORE = object()
+
+
+def _tool_receipt_lock(task):
+    """Task-local publication lock; never held across tool execution or I/O."""
+    lock = task.get('_toolResultReceiptLock')
+    if lock is None:
+        lock = task.setdefault('_toolResultReceiptLock', threading.RLock())
+    return lock
 
 
 def _call_id_signature(fn_name: str, fn_args: Any) -> str:
@@ -112,6 +122,9 @@ _CACHEABLE_TOOLS_BASE = frozenset({
     'read_files', 'list_dir', 'grep_search', 'find_files',
 })
 
+# Read-like protocol actions can still require provider occurrence order.
+ORDERED_STATE_TOOLS = frozenset({'todo_write'})
+
 
 def _resolve_tool_result_cache_capacity(
     environment: dict[str, str] | None = None,
@@ -162,36 +175,37 @@ def _trim_tool_result_cache(
 
 def _ensure_tool_result_cache(task: dict[str, Any]) -> dict:
     """Return the task cache, repairing legacy shape and enforcing its cap."""
-    cache = task.get('_tool_result_cache')
-    if not isinstance(cache, dict):
-        if cache is not None:
-            logger.warning(
-                '[DedupCache] task=%s replaced invalid cache type=%s',
-                str(task.get('id') or '')[:12] or '?',
-                type(cache).__name__)
-        cache = {}
-        task['_tool_result_cache'] = cache
+    with _tool_receipt_lock(task):
+        cache = task.get('_tool_result_cache')
+        if not isinstance(cache, dict):
+            if cache is not None:
+                logger.warning(
+                    '[DedupCache] task=%s replaced invalid cache type=%s',
+                    str(task.get('id') or '')[:12] or '?',
+                    type(cache).__name__)
+            cache = {}
+            task['_tool_result_cache'] = cache
 
-    capacity = task.get('_tool_result_cache_capacity')
-    try:
-        capacity = int(capacity)
-    except (TypeError, ValueError, OverflowError):
-        capacity = 0
-    if not (_TOOL_RESULT_CACHE_MIN_CAPACITY
-            <= capacity <= TOOL_RESULT_CACHE_HARD_CAPACITY):
-        capacity = _resolve_tool_result_cache_capacity()
-        task['_tool_result_cache_capacity'] = capacity
-    _trim_tool_result_cache(task, cache, capacity)
-    # Adopt legacy/manual tuples once at the common cache-owner seam. Actual
-    # producers already carry their start fence, so are never rebound here.
-    from lib.write_freshness import project_read_cache_generation
-    for key, entry in list(cache.items()):
-        if (key.split('::', 1)[0] in _PROJECT_CACHEABLE_TOOLS
-                and isinstance(entry, (tuple, list))
-                and not isinstance(entry, _ToolResultCacheReceipt)):
-            cache[key] = _ToolResultCacheReceipt(
-                entry, project_read_cache_generation())
-    return cache
+        capacity = task.get('_tool_result_cache_capacity')
+        try:
+            capacity = int(capacity)
+        except (TypeError, ValueError, OverflowError):
+            capacity = 0
+        if not (_TOOL_RESULT_CACHE_MIN_CAPACITY
+                <= capacity <= TOOL_RESULT_CACHE_HARD_CAPACITY):
+            capacity = _resolve_tool_result_cache_capacity()
+            task['_tool_result_cache_capacity'] = capacity
+        _trim_tool_result_cache(task, cache, capacity)
+        # Adopt legacy/manual tuples once at the common cache-owner seam. Actual
+        # producers already carry their start fence, so are never rebound here.
+        from lib.write_freshness import project_read_cache_generation
+        for key, entry in list(cache.items()):
+            if (key.split('::', 1)[0] in _PROJECT_CACHEABLE_TOOLS
+                    and isinstance(entry, (tuple, list))
+                    and not isinstance(entry, _ToolResultCacheReceipt)):
+                cache[key] = _ToolResultCacheReceipt(
+                    entry, project_read_cache_generation())
+        return cache
 
 
 class _ToolResultCacheReceipt(tuple):
@@ -213,33 +227,44 @@ def _project_cache_entry_is_current(tool_name: str, entry: Any) -> bool:
 
 def _store_tool_result_cache_entry(
     task: dict[str, Any], cache_key: str, cache_entry: Any,
-    *, generation: object | None = None,
+    *, generation: object | None = None, expected_entry: Any = _UNCONDITIONAL_CACHE_STORE,
 ) -> dict:
     """Insert a bounded receipt; production reads supply their START fence.
 
     Legacy synchronous/manual entries bind here. Rewrites must carry the old
     receipt's generation, never bless old in-flight bytes at insertion time.
     """
-    cache = _ensure_tool_result_cache(task)
-    tool_name = cache_key.split('::', 1)[0]
-    if tool_name in _PROJECT_CACHEABLE_TOOLS:
-        from lib.write_freshness import project_read_cache_generation
-        if generation is None:
-            generation = getattr(cache_entry, 'generation', None)
-        if generation is None:
-            generation = project_read_cache_generation()
-        cache_entry = _ToolResultCacheReceipt(cache_entry, generation)
-        if not _project_cache_entry_is_current(tool_name, cache_entry):
+    with _tool_receipt_lock(task):
+        cache = _ensure_tool_result_cache(task)
+        if expected_entry is not _UNCONDITIONAL_CACHE_STORE and cache.get(cache_key) is not expected_entry:
             return cache
-    # Replacing an existing receipt refreshes its FIFO age.  This matters for
-    # the prefetch-to-budgeted rewrite: the final compact form is the live
-    # receipt, not an old entry that should be first under pressure.
-    if cache_key in cache:
-        cache.pop(cache_key, None)
-    cache[cache_key] = cache_entry
-    capacity = int(task['_tool_result_cache_capacity'])
-    _trim_tool_result_cache(task, cache, capacity)
-    return cache
+        tool_name = cache_key.split('::', 1)[0]
+        if tool_name in _PROJECT_CACHEABLE_TOOLS:
+            from lib.write_freshness import project_read_cache_generation
+            if generation is None:
+                generation = getattr(cache_entry, 'generation', None)
+            if generation is None:
+                generation = project_read_cache_generation()
+            cache_entry = _ToolResultCacheReceipt(cache_entry, generation)
+            if not _project_cache_entry_is_current(tool_name, cache_entry):
+                return cache
+        # Replacing an existing receipt refreshes its FIFO age.  This matters for
+        # the prefetch-to-budgeted rewrite: the final compact form is the live
+        # receipt, not an old entry that should be first under pressure.
+        if cache_key in cache:
+            cache.pop(cache_key, None)
+        cache[cache_key] = cache_entry
+        capacity = int(task['_tool_result_cache_capacity'])
+        _trim_tool_result_cache(task, cache, capacity)
+        return cache
+
+
+def _discard_tool_result_cache_entry(task, key, expected):
+    """Discard only the stale receipt observed before a concurrent publish."""
+    with _tool_receipt_lock(task):
+        cache = task.get('_tool_result_cache')
+        if isinstance(cache, dict) and cache.get(key) is expected:
+            cache.pop(key, None)
 
 
 def _record_tool_call_id_receipt_evictions(
@@ -269,62 +294,64 @@ def _ensure_tool_call_id_receipts(task: dict[str, Any]) -> dict[str, dict]:
     collision correctness comes from the active history index in the pipeline,
     so pressure may safely discard the oldest signature receipt.
     """
-    receipts = task.get('_tool_call_id_receipts')
-    if not isinstance(receipts, dict):
-        if receipts is not None:
-            logger.warning(
-                '[CallIdReceipts] task=%s replaced invalid ledger type=%s',
-                str(task.get('id') or '')[:12] or '?',
-                type(receipts).__name__)
-        receipts = {}
-        task['_tool_call_id_receipts'] = receipts
+    with _tool_receipt_lock(task):
+        receipts = task.get('_tool_call_id_receipts')
+        if not isinstance(receipts, dict):
+            if receipts is not None:
+                logger.warning(
+                    '[CallIdReceipts] task=%s replaced invalid ledger type=%s',
+                    str(task.get('id') or '')[:12] or '?',
+                    type(receipts).__name__)
+            receipts = {}
+            task['_tool_call_id_receipts'] = receipts
 
-    # Repair live/rehydrated legacy rows that pinned a complete tool body.
-    invalid_keys = []
-    for call_id, receipt in receipts.items():
-        if not isinstance(receipt, dict):
-            invalid_keys.append(call_id)
-            continue
-        receipts[call_id] = {
-            'signature': str(receipt.get('signature') or ''),
-            'name': str(receipt.get('name') or ''),
-            'status': str(receipt.get('status') or 'done'),
-        }
-    for call_id in invalid_keys:
-        receipts.pop(call_id, None)
+        # Repair live/rehydrated legacy rows that pinned a complete tool body.
+        invalid_keys = []
+        for call_id, receipt in receipts.items():
+            if not isinstance(receipt, dict):
+                invalid_keys.append(call_id)
+                continue
+            receipts[call_id] = {
+                'signature': str(receipt.get('signature') or ''),
+                'name': str(receipt.get('name') or ''),
+                'status': str(receipt.get('status') or 'done'),
+            }
+        for call_id in invalid_keys:
+            receipts.pop(call_id, None)
 
-    _ensure_tool_result_cache(task)
-    capacity = int(task['_tool_result_cache_capacity'])
-    evicted = len(invalid_keys)
-    while len(receipts) > capacity:
-        receipts.pop(next(iter(receipts)), None)
-        evicted += 1
-    _record_tool_call_id_receipt_evictions(task, evicted, capacity)
-    return receipts
+        _ensure_tool_result_cache(task)
+        capacity = int(task['_tool_result_cache_capacity'])
+        evicted = len(invalid_keys)
+        while len(receipts) > capacity:
+            receipts.pop(next(iter(receipts)), None)
+            evicted += 1
+        _record_tool_call_id_receipt_evictions(task, evicted, capacity)
+        return receipts
 
 
 def _store_tool_call_id_receipt(
     task: dict[str, Any], call_id: str, receipt: dict[str, Any],
 ) -> dict[str, dict]:
     """Store one newest call identity without retaining model/tool content."""
-    receipts = _ensure_tool_call_id_receipts(task)
-    normalized = {
-        'signature': str(receipt.get('signature') or ''),
-        'name': str(receipt.get('name') or ''),
-        'status': str(receipt.get('status') or 'done'),
-    }
-    call_id = str(call_id or '')
-    if not call_id:
+    with _tool_receipt_lock(task):
+        receipts = _ensure_tool_call_id_receipts(task)
+        normalized = {
+            'signature': str(receipt.get('signature') or ''),
+            'name': str(receipt.get('name') or ''),
+            'status': str(receipt.get('status') or 'done'),
+        }
+        call_id = str(call_id or '')
+        if not call_id:
+            return receipts
+        receipts.pop(call_id, None)
+        receipts[call_id] = normalized
+        capacity = int(task['_tool_result_cache_capacity'])
+        evicted = 0
+        while len(receipts) > capacity:
+            receipts.pop(next(iter(receipts)), None)
+            evicted += 1
+        _record_tool_call_id_receipt_evictions(task, evicted, capacity)
         return receipts
-    receipts.pop(call_id, None)
-    receipts[call_id] = normalized
-    capacity = int(task['_tool_result_cache_capacity'])
-    evicted = 0
-    while len(receipts) > capacity:
-        receipts.pop(next(iter(receipts)), None)
-        evicted += 1
-    _record_tool_call_id_receipt_evictions(task, evicted, capacity)
-    return receipts
 
 # ── Concurrency safety partitioning ──
 # Per-tool concurrency-safety flags.
@@ -493,29 +520,31 @@ _PROJECT_CACHEABLE_TOOLS = frozenset({
 })
 
 
-def _invalidate_project_cache(cache: dict, trigger: str = 'write_op') -> None:
+def _invalidate_project_cache(task: dict, trigger: str = 'write_op') -> None:
     """Remove all project-tool cache entries after a write operation.
 
     Called after write_file / apply_diff / code_exec so that subsequent
     read_files / grep_search calls re-read the (now-modified) filesystem.
 
     Args:
-        cache: The per-task dedup cache dict.
+        task: Owner of the per-task dedup cache and publication lock.
         trigger: Name of the operation that triggered invalidation
                  (for logging).
     """
-    stale_keys = [k for k in cache if k.split('::', 1)[0] in _PROJECT_CACHEABLE_TOOLS]
-    for k in stale_keys:
-        del cache[k]
-    if stale_keys:
-        # Group by tool name for readable logging
-        tool_counts: dict[str, int] = {}
+    with _tool_receipt_lock(task):
+        cache = _ensure_tool_result_cache(task)
+        stale_keys = [k for k in cache if k.split('::', 1)[0] in _PROJECT_CACHEABLE_TOOLS]
         for k in stale_keys:
-            tool_name = k.split('::', 1)[0]
-            tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
-        breakdown = ', '.join(f'{n}={c}' for n, c in sorted(tool_counts.items()))
-        logger.info('[DedupInvalidate] %d entries invalidated by %s: %s',
-                    len(stale_keys), trigger, breakdown)
+            del cache[k]
+        if stale_keys:
+            # Group by tool name for readable logging
+            tool_counts: dict[str, int] = {}
+            for k in stale_keys:
+                tool_name = k.split('::', 1)[0]
+                tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+            breakdown = ', '.join(f'{n}={c}' for n, c in sorted(tool_counts.items()))
+            logger.info('[DedupInvalidate] %d entries invalidated by %s: %s',
+                        len(stale_keys), trigger, breakdown)
 
 
 def _unpack_cache_entry(cached) -> tuple:

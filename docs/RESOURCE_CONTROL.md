@@ -108,6 +108,39 @@ The optional NativeGateway borrows the application's declared executor and owns 
 
 Measurement: the focused pending-policy test admits one outstanding decision with a declared one-call/4096-byte budget, rejects the second while policy is blocked, then closes with zero retained proofs/bytes and rejects the late grant. The real native/application test performs one registered file write, one settled tool round and two model requests through the existing event and terminal owners. These are ownership/count measurements, not RSS or end-to-end speed comparisons.
 
+Problem: the native CLI and host serialized qualified independent tools despite
+available capacity. Decision: borrow the existing native Scheduler and Python
+demand executor, qualifying reads through the common dispatch policy. Runtime
+worker count supplies the scheduler's compatibility hint; it is not an admission
+cap. Writes and ordered state tools remain in their ordered lane. One reader
+owns active request waiters, and one publication lock protects complete stdout
+frames/descriptor flags; neither is held across host execution. At most one
+callback task, handler task and Stop signal are retained per active invocation;
+the original response/tool/frame bounds apply. Results, control waiters and
+workers join before terminal acknowledgement/reuse. Completed callback entries
+are removed immediately, with no lifetime request-ID history.
+
+Invocation-local V2 envelope maps cannot consume a sibling pipeline's evidence.
+Task-local receipt locks protect bounded cache and metadata publication, while
+progress result hashing stays outside its short merge lock. Exact receipt
+comparison prevents compaction/discard from overwriting a newer observation.
+Program input count/byte bounds and image fallback byte bounds remain unchanged;
+their updates now serialize. No new persistent data or executor is introduced.
+
+Controlled end-to-end measurement (2026-10-21, five repetitions, verified sealed
+native executable and canonical `fetch_url`, 40 ms wait per uncached occurrence,
+borrowed executor idle hint 1): median tool-work span fell from 83.34 to 40.75 ms
+for two reads (2.05×), and 339.08 to 47.82 ms for eight (7.09×). Peak active tools
+were respectively 1→2 and 1→8; active callbacks/workers returned to zero after
+joined close, and only MainThread remained after the measurement process's
+20 runs. Same arguments and original call IDs were checked through next-provider
+replay; cache reuse was explicitly disabled to compare equal work. This measures
+controlled I/O overlap, not real network/model latency or production throughput.
+The measurement scenarios are retained in `test_native_tools_parallel_installed`.
+Alternatives: a larger fixed worker quota still serializes the protocol; a new
+pool duplicates capacity and teardown ownership; retaining completed waiter maps
+would grow with long-running tasks.
+
 ## Native host approval resources
 
 Optional approval control borrows the existing native reader/control slot and application callback executor; no pool, process or resident polling loop is added. The existing native approval Store retains only its configured receipt count and identity byte quota, TTL and weak parent binding. Host proofs retain detached canonical name/argument/caller bytes under explicit payload and receipt-count bounds until exact consumption or invocation disposal; Python container overhead is additional bounded per-entry work, not charged as allocator/RSS evidence. Each request carries the native remaining deadline rounded upward to milliseconds. One scoped host timeout signals the request stop event and joins its callback; late decisions become denial. Repeated explicit cancellation writes Stop before joining callback/result delivery. Published write calls wait for result/EOF; client admission remains charged until host work and native close both quiesce. The real archive/TCP probe observes one write callback/scratch mutation after one approval, zero mutations after denial/policy failure/approval Stop, and no second model request after required policy/tool failure or Stop. A cancelled already started write may have committed: its one observed effect remains evidence, not rolled back or silently replayed. All cases observe zero active native runs after joined return. These are lifecycle/effect counts, not application CPU/RSS or throughput admission. Old standalone read-only stdio callers retain their declared cancel/deadline semantics; matching native host clients opt into result joining.

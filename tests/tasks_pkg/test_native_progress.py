@@ -112,3 +112,33 @@ def test_failure_signature_normalizes_arguments_and_ignores_response_ids():
     assert nonretryable_failure_signature(a,result)==nonretryable_failure_signature(b,result)
     assert nonretryable_failure_signature(call(2),result)!=nonretryable_failure_signature(a,result)
     assert nonretryable_failure_signature(a,'tool failed') is None
+
+
+@pytest.mark.parametrize('close_during_hash', [False, True])
+def test_parallel_hashing_preserves_all_occurrences_and_cannot_revive_closed_carrier(monkeypatch, close_during_hash):
+    from concurrent.futures import ThreadPoolExecutor
+    p = policy()
+    entered = threading.Barrier(9)
+    release = threading.Event()
+    def digest(c, r):
+        entered.wait(5)
+        assert release.wait(5)
+        return tool_result_evidence(c, r)
+    monkeypatch.setattr('lib.tasks_pkg.native_progress.tool_result_evidence', digest)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        work = [pool.submit(p.record, 0, call(i), str(i)) for i in range(8)]
+        try:
+            entered.wait(5)
+            if close_during_hash:
+                p.close()
+        finally:
+            release.set()
+        for future in work:
+            future.result()
+    if close_during_hash:
+        assert p.batch is None and p.gateway is None
+    else:
+        observation = asyncio.run(p.observe(request(calls=8)))
+        assert observation['resultEvidenceComplete']
+        assert set(observation['evidenceIds']) == set(counted_result_evidence({
+            tool_result_evidence(call(i), str(i)): 1 for i in range(8)}))

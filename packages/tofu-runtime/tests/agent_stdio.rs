@@ -209,6 +209,25 @@ fn write_catalog_refuses_before_any_network_or_tool_effect() {
 }
 
 #[test]
+fn invalid_parallel_qualification_refuses_before_any_network_or_tool_effect() {
+    for names in [json!(["foreign"]), json!(["lookup", "lookup"]), json!([false]), json!("lookup")] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut c = config(format!("http://{}/chat", listener.local_addr().unwrap()));
+        c["parallel_tool_names"] = names;
+        let mut process = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+            .args(["run-http-agent", "65536"]).stdin(Stdio::piped())
+            .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+        writeln!(process.0.stdin.as_mut().unwrap(), "{c}").unwrap();
+        let mut text = String::new();
+        BufReader::new(process.0.stdout.take().unwrap()).read_to_string(&mut text).unwrap();
+        assert!(!process.0.wait().unwrap().success());
+        assert!(text.is_empty());
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    }
+}
+
+#[test]
 fn protocol_schemas_enforce_version_fields_and_allow_empty_text() {
     use tofu_runtime::tool_contract::Catalog;
     let contract: Value = serde_json::from_str(include_str!(

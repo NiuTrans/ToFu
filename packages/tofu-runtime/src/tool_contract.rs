@@ -78,8 +78,13 @@ pub struct AdmittedCall {
     epoch: String,
     permission: Permission,
     approval: Option<(String, crate::approval::Ticket)>,
+    model_call_id: Option<String>,
 }
 impl AdmittedCall {
+    pub(crate) fn with_model_call_id(mut self, id: &str) -> Self {
+        self.model_call_id = Some(id.into());
+        self
+    }
     pub fn with_approval(
         mut self,
         call_id: &str,
@@ -591,6 +596,7 @@ impl Catalog {
             epoch: self.epoch.clone(),
             permission,
             approval: None,
+            model_call_id: None,
         })
     }
 }
@@ -603,6 +609,8 @@ pub struct InvocationContext<'a> {
     pub caller: Option<&'a Value>,
     /// Zero-based native model round; absent outside an agent batch.
     pub model_round: Option<usize>,
+    /// Original agent occurrence identity; grants no execution authority.
+    pub model_call_id: Option<&'a str>,
     /// Present only after the exact single-use native receipt was consumed.
     pub approved_call_id: Option<&'a str>,
     pub runtime: crate::tool_execution::Context<'a>,
@@ -772,6 +780,7 @@ impl Registry {
                     epoch: &call.epoch,
                     caller: call.caller.as_ref(),
                     model_round,
+                    model_call_id: call.model_call_id.as_deref(),
                     approved_call_id: approved_call_id.as_deref(),
                     runtime,
                 },

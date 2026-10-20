@@ -18,6 +18,7 @@ from lib.log import get_logger
 from lib.tasks_pkg.tool_dispatch._flags import (
     _ensure_tool_result_cache,
     _make_cache_key,
+    _tool_receipt_lock,
 )
 
 logger = get_logger(__name__)
@@ -62,31 +63,32 @@ def _state_key(tool_name: str, arguments: dict[str, Any]) -> str:
 
 def _bounded_state(task: dict[str, Any], *, create: bool) -> dict[str, Any]:
     """Return the content-free state map under the shared receipt budget."""
-    state = task.get(_STATE_TASK_FIELD)
-    if not isinstance(state, dict):
-        if not create:
-            return {}
-        state = {}
-        task[_STATE_TASK_FIELD] = state
+    with _tool_receipt_lock(task):
+        state = task.get(_STATE_TASK_FIELD)
+        if not isinstance(state, dict):
+            if not create:
+                return {}
+            state = {}
+            task[_STATE_TASK_FIELD] = state
 
-    # Reuse the launch-probed receipt capacity, but not its FIFO slots: cheap
-    # control-plane digests must never evict an expensive web/fetch body.
-    _ensure_tool_result_cache(task)
-    capacity = int(task['_tool_result_cache_capacity'])
-    evicted = 0
-    while len(state) > capacity:
-        state.pop(next(iter(state)), None)
-        evicted += 1
-    if evicted:
-        try:
-            previous = max(
-                0, int(task.get(
-                    '_unchanged_tool_result_receipt_evictions') or 0))
-        except (TypeError, ValueError, OverflowError):
-            previous = 0
-        task['_unchanged_tool_result_receipt_evictions'] = min(
-            1_000_000_000, previous + evicted)
-    return state
+        # Reuse the launch-probed receipt capacity, but not its FIFO slots: cheap
+        # control-plane digests must never evict an expensive web/fetch body.
+        _ensure_tool_result_cache(task)
+        capacity = int(task['_tool_result_cache_capacity'])
+        evicted = 0
+        while len(state) > capacity:
+            state.pop(next(iter(state)), None)
+            evicted += 1
+        if evicted:
+            try:
+                previous = max(
+                    0, int(task.get(
+                        '_unchanged_tool_result_receipt_evictions') or 0))
+            except (TypeError, ValueError, OverflowError):
+                previous = 0
+            task['_unchanged_tool_result_receipt_evictions'] = min(
+                1_000_000_000, previous + evicted)
+        return state
 
 
 def _visible_content(
@@ -185,9 +187,10 @@ def remember_full_result(
         'toolCallId': str(tool_call_id or ''),
         'evidenceId': str(evidence.get('evidenceId') or ''),
     }
-    state = _bounded_state(task, create=True)
-    key = _state_key(tool_name, arguments)
-    if key in state:
-        state.pop(key, None)
-    state[key] = entry
-    _bounded_state(task, create=True)
+    with _tool_receipt_lock(task):
+        state = _bounded_state(task, create=True)
+        key = _state_key(tool_name, arguments)
+        if key in state:
+            state.pop(key, None)
+        state[key] = entry
+        _bounded_state(task, create=True)

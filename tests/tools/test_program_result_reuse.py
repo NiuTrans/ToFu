@@ -13,6 +13,29 @@ from lib.tools.result_value import capture_result
 pytestmark = pytest.mark.unit
 
 
+def test_parallel_retention_stays_bounded_and_terminal_cannot_reopen_it(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from lib.tools import program_results
+    task = {'id': 'parallel-retention', 'status': 'running', '_ptc_local': {'tier': 'program'}}
+    cleanups = []
+    monkeypatch.setattr(program_results, 'tool_result_cache_capacity', lambda: 16)
+    monkeypatch.setattr('lib.agent_core.admission.on_terminal', lambda identity, callback: cleanups.append(callback))
+    barrier = threading.Barrier(8)
+    def retain(worker):
+        barrier.wait(5)
+        for i in range(64):
+            program_results._admit(task, f'{worker}:{i}', {'retainedBytes': 64000})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(retain, range(8)))
+    assert len(task['_programResultRefs']) == 16
+    assert len(cleanups) == 1
+    task['status'] = 'done'
+    cleanups[0](task['id'])
+    assert not program_results._admit(task, 'late', {'retainedBytes': 1})
+    assert '_programResultRefs' not in task
+
+
 @pytest.fixture
 def world(monkeypatch):
     reads, writes = [], []

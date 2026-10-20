@@ -402,6 +402,12 @@ async def run_native_task(
             raise ValueError('native application gateway composition differs')
         if callbacks or approval_policy is not None or progress_policy is not None:
             raise ValueError('native application gateway has one callback/policy owner')
+        parallel_names = configuration.get('parallel_tool_names', sorted(gateway.parallel_names))
+        if (not isinstance(parallel_names, list) or any(not isinstance(name, str) for name in parallel_names)
+                or not set(parallel_names).issubset(gateway.parallel_names)
+                or len(parallel_names) != len(set(parallel_names))):
+            raise ValueError('native application parallel tools differ from canonical scheduling policy')
+        configuration = dict(configuration, parallel_tool_names=parallel_names)
         no_progress = configuration.get('no_progress_rounds', 0)
         terminal_failures = configuration.get('nonretryable_failure_rounds', 0)
         if configuration.get('progress_control') is True or no_progress != 0 or terminal_failures != 0:
@@ -411,7 +417,7 @@ async def run_native_task(
         callbacks = gateway.callbacks()
         if file_recovery is not None:
             file_recovery.bind_gateway(gateway)
-        if prepare_wire_tools is not None or file_recovery is not None:
+        if prepare_wire_tools is not None or file_recovery is not None or parallel_names:
             configuration=dict(configuration,tool_sibling_control=True)
             rounds.response_policy=gateway.prepare_response
         approval_policy = gateway if ('approval_control' in configuration

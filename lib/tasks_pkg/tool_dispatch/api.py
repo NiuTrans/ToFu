@@ -4,6 +4,12 @@ This module is the only cross-domain entry point for parsing model tool calls
 and executing them through approval, scheduling, receipt, and result handling.
 """
 
+def parallel_tool_names(task, names):
+    """Use the ordinary pipeline's live write/ordered-state classification."""
+    from lib.tasks_pkg.tool_dispatch._flags import _task_partitions, ORDERED_STATE_TOOLS
+    writes, _ = _task_partitions(task)
+    return frozenset(names) - writes - ORDERED_STATE_TOOLS
+
 def publish_prepared_response_siblings(task, parsed_calls, round_num):
     """Publish one response's direct occurrences for qualified gateway reuse."""
     from lib.tools.gateway import EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME, SEARCH_TOOLS_NAME
@@ -77,4 +83,4 @@ def withdraw_prepared_tool_call(task, parsed_call, *, status='aborted'):
     _finalize_tool_round(task, number, row, [meta], status=status)
 
 
-__all__ = ['execute_tool_pipeline', 'parse_tool_calls', 'authorize_prepared_tool_call', 'withdraw_prepared_tool_call', 'publish_prepared_response_siblings', 'publish_tool_call_entry']
+__all__ = ['execute_tool_pipeline', 'parse_tool_calls', 'authorize_prepared_tool_call', 'withdraw_prepared_tool_call', 'publish_prepared_response_siblings', 'publish_tool_call_entry', 'parallel_tool_names']

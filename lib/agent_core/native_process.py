@@ -109,6 +109,7 @@ class ToolRequest:
     caller: Any = None
     cancelled: asyncio.Event | None = None
     model_round: int | None = None
+    model_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1226,6 +1227,7 @@ class NativeProcessClient:
         self.protocol_version = protocol_version
         self._loop = None
         self._runs: dict[asyncio.Task, asyncio.Future] = {}
+        self._tool_callbacks: set[asyncio.Task] = set()
         self._image: asyncio.Task | None = None
         self._closing: asyncio.Task | None = None
         self._closed = False
@@ -1474,6 +1476,12 @@ class NativeProcessClient:
             or any(not callable(handler) for handler in handlers.values())
         ):
             raise NativeConfigurationError("native read-tool catalog/callbacks differ")
+        parallel_names = config.get('parallel_tool_names', [])
+        if (not isinstance(parallel_names, list)
+                or any(not isinstance(name, str) or not name or name not in tools
+                       or tools[name]['permission'] != 'read' for name in parallel_names)
+                or len(parallel_names) != len(set(parallel_names))):
+            raise NativeConfigurationError('parallel tools must belong to the admitted read catalog')
         task_id = config.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             raise NativeConfigurationError("native task identity is required")
@@ -1659,6 +1667,7 @@ class NativeProcessClient:
         spawn = None
         stop_subscription = stop_signal.subscribe_async() if stop_signal is not None else None
         stop_watcher = None
+        tool_callbacks = None
         try:
             if self._image is None:
 
@@ -1706,9 +1715,11 @@ class NativeProcessClient:
                     await stop_subscription.future
                     owner_task.cancel()
                 stop_watcher=asyncio.create_task(observe_stop())
+            from lib.agent_core.native_tool_control import NativeToolControl
+            tool_callbacks = NativeToolControl(self, process, config, handlers, approvals)
             while True:
                 try:
-                    line = await process.stdout.readline()
+                    line = await tool_callbacks.readline()
                     if (
                         not line
                         or not line.endswith(b"\n")
@@ -1722,6 +1733,8 @@ class NativeProcessClient:
                     raise NativeProcessError("native output protocol failed") from error
                 if not isinstance(value, dict):
                     raise NativeProcessError("native output must be an object")
+                if value.get('type') != 'tool_request':
+                    await tool_callbacks.settle()
                 if value.get('type') == 'model_request':
                     if model is None:
                         raise NativeProcessError('native model policy was not supplied')
@@ -1798,6 +1811,8 @@ class NativeProcessClient:
                         raise NativeRoundError('native progress observation callback failed') from rounds.progress.failure
                     if rounds is not None and rounds.preparation_failure is not None:
                         raise NativeRoundError('native round preparation callback failed') from rounds.preparation_failure
+                    if tool_callbacks.failure is not None:
+                        raise NativeToolError('native host tool callback failed') from tool_callbacks.failure
                     return value
                 if (
                     value.get("version") != self.protocol_version
@@ -1808,86 +1823,24 @@ class NativeProcessClient:
                     or not isinstance(value.get("arguments"), dict)
                     or not isinstance(value.get("name"), str)
                     or value.get("name") not in handlers
+                    or ("model_call_id" in value and (not isinstance(value["model_call_id"], str)
+                        or not value["model_call_id"]))
+                    or (value.get("name") in parallel_names and not value.get("model_call_id"))
                     or ("model_round" in value and (type(value["model_round"]) is not int
                         or value["model_round"] < 0))
                 ):
                     raise NativeProcessError("native tool request authority differs")
-                callback = None
-                stopped = asyncio.Event()
-                callback_cancelled = False
-                tool_error = None
-                try:
-                    if approvals is not None:
-                        approvals.consume(value)
-                    callback = asyncio.create_task(handlers[value["name"]](
-                        ToolRequest(
-                            self.principal,
-                            task_id,
-                            value["request_id"],
-                            value["name"],
-                            value["arguments"],
-                            value.get('call_id'), value.get('caller'),
-                            stopped, value.get("model_round"),
-                        )
-                    ))
-                    callback_cancelled = False
-                    try:
-                        content = await asyncio.shield(callback)
-                    except asyncio.CancelledError:
-                        callback_cancelled = True
-                        stopped.set()
-                        async def stop_tool():
-                            process.stdin.write(self._encode({'version':self.protocol_version,
-                                'type':'cancel'},self.budget.frame_bytes))
-                            await process.stdin.drain()
-                        await _joined(asyncio.create_task(stop_tool()))
-                        content = await _joined(callback)
-                except Exception as error:
-                    logger.debug('run failure handled: %s', type(error).__name__)
-                    tool_error, tool_failed, content = error, True, ''
-                finally:
-                    if callback is not None and not callback.done():
-                        stopped.set()
-                        try:
-                            await _joined(callback)
-                        except Exception as diagnostic_error:
-                            logger.debug('run failure handled: %s', type(diagnostic_error).__name__)
-                            pass
-                if not isinstance(content, str):
-                    try:
-                        if config.get('tool_feedback','text')!='multimodal':
-                            raise TypeError('native tool callback must return text')
-                        validate_model_content(content)
-                    except (TypeError,ValueError) as error:
-                        tool_error,tool_failed,content=error,True,''
-                reply = self._encode(
-                    {
-                        "version": self.protocol_version,
-                        "type": "tool_result",
-                        "request_id": value["request_id"],
-                        "content": content,
-                        **({'failed':True} if tool_error is not None else {}),
-                    },
-                    min(self.budget.frame_bytes, config["tool_frame_bytes"]),
-                )
-                async def send_result():
-                    async with asyncio.timeout(self.budget.shutdown_seconds):
-                        process.stdin.write(reply)
-                        await process.stdin.drain()
-                reply_task = asyncio.create_task(send_result())
-                try:
-                    await asyncio.shield(reply_task)
-                except asyncio.CancelledError:
-                    callback_cancelled = True
-                    stopped.set()
-                    await _joined(reply_task)
-                if callback_cancelled:
-                    raise asyncio.CancelledError
-                if tool_error is not None:
-                    raise NativeToolError('native host tool callback failed') from tool_error
+                tool_callbacks.submit(value)
         except OSError as error:
             raise NativeProcessError("native process transport failed") from error
         finally:
+            callback_cleanup_error = None
+            if tool_callbacks is not None:
+                try:
+                    await _joined(asyncio.create_task(tool_callbacks.close()))
+                except BaseException as error:
+                    callback_cleanup_error = error
+                tool_failed = tool_callbacks.failure is not None
             if stop_watcher is not None:
                 stop_watcher.cancel()
                 try:await _joined(stop_watcher)
@@ -1919,10 +1872,15 @@ class NativeProcessClient:
             finally:
                 try:
                     if self._worker_pool is not None and process is not None:
-                        await _joined(asyncio.create_task(self._worker_pool.release(process,healthy=sys.exception() is None)))
+                        await _joined(asyncio.create_task(self._worker_pool.release(process,healthy=sys.exception() is None and callback_cleanup_error is None)))
                 finally:
                     done = self._runs.pop(task)
                     done.set_result(None)
+            if callback_cleanup_error is not None:
+                primary = sys.exception()
+                if primary is None:
+                    raise callback_cleanup_error
+                primary.add_note('native tool cleanup failed: ' + type(callback_cleanup_error).__name__)
 
     async def _close_owned(self) -> None:
         runs = list(self._runs.items())
@@ -1943,7 +1901,7 @@ class NativeProcessClient:
 
     async def close(self) -> None:
         self._bind_loop()
-        if asyncio.current_task() in self._runs:
+        if asyncio.current_task() in self._runs or asyncio.current_task() in self._tool_callbacks:
             raise NativeProcessError("native host callback cannot close its own client")
         self._closed = True
         if self._closing is None:

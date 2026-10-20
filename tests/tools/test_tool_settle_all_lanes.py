@@ -118,6 +118,26 @@ def _mk_tc(tc_id: str, fn_name: str, seq: int, *, parse_err=None, args=None):
             round_entry, parse_err)
 
 
+def test_compacting_one_result_cannot_overwrite_a_later_identical_query(rec, monkeypatch):
+    from lib.tasks_pkg.tool_dispatch import _pipeline as pipeline
+    from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key, _store_tool_result_cache_entry
+    task = _mk_task()
+    task['config'] = {'tools': {'resultEnvelope': 'legacy'}}
+    parsed = _mk_tc('first', 'fetch_url', 1)
+    key = _make_cache_key('fetch_url', {})
+    _store_tool_result_cache_entry(task, key, ('first response body', False))
+    newer = ('new response body from another occurrence', False)
+    def compact(*args, **kwargs):
+        _store_tool_result_cache_entry(task, key, newer)
+        return 'first compact'
+    monkeypatch.setattr(pipeline, 'budget_tool_result', compact)
+    content = pipeline._settle_tool_result(task, 'fetch_url', 'first', {}, parsed[4], parsed[5],
+        'first response body', idempotent_tools={'fetch_url'}, cache=task['_tool_result_cache'],
+        tid=task['id'], round_num=0, settled_results={})
+    assert content == 'first compact'
+    assert task['_tool_result_cache'][key] is newer
+
+
 class _Recorder:
     def __init__(self):
         self.events: list[dict] = []

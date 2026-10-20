@@ -185,6 +185,36 @@ with `tests/tasks_pkg/test_native_gateway.py` and the `gateway_write` case in
 `tests/storage/test_native_task_terminal.py` using a verified native archive and
 disposable authority. Exact ROOT wire comparison still gates default selection.
 
+## Qualified native tool parallelism
+
+Native application composition derives `parallel_tool_names` from the common
+tool-dispatch write/ordered-state policy, intersected with its admitted read
+catalog. An explicit subset can narrow it; `[]` selects ordered dispatch.
+Standalone stdio/SDK omission retains ordered dispatch. Older artifacts reject
+the new configuration before provider/tool effects and require a matching build.
+
+Problem: the CLI, stdio callback reader and application gateway each serialized
+independent reads even when the shared executor could overlap them. Decision:
+bind the existing Rust Scheduler, multiplex only active tool replies on the one
+control reader, and dispatch qualified callbacks through the existing canonical
+pipeline/executor. Control/model/approval exchanges retain their exclusive slot;
+writes and ordered state actions such as `todo_write` retain provider order.
+The original `model_call_id` correlates identical calls independently of response
+arrival; it grants no approval and does not replace the single-use `call_id`
+approval receipt. The application binds model declarations before callbacks.
+Changed read/write classification refuses before the affected callback executes.
+
+Every accepted callback joins before terminal persistence or worker reuse.
+Business callback failure retains successful siblings and raises after terminal
+delivery; malformed/duplicate transport replies fail the invocation. Input EOF
+wakes outstanding waiters, preserves replies already delivered, and prevents new
+exchanges. Alternatives: removing only the gateway lock leaves two serial stages;
+matching by argument/arrival order mixes identical occurrences; a second reader
+or detached callback group loses Stop and terminal ownership. Verify
+`test_native_tool_control.py`, `test_native_gateway_parallel.py`,
+`test_native_tools_parallel_installed.py`, Rust `agent_stdio` and the ordinary
+application/approval/terminal suites against the matching built archive.
+
 ## Native non-read host tools
 
 `NativeProcessClient.run(..., approval_policy=...)` requires explicit `approval_control` receipt/payload bounds for non-read tools. The async `ApprovalPolicy.decide(ApprovalRequest)` returns a canonical receipt authority or `denied`; it consumes the existing human/auto/delegated policy, never guesses from a tool name. Detached argument/caller accessors cannot rewrite the proof. The request stop event and remaining deadline govern owned waiters; all work must quiesce before the returned future finishes. ToolRequest exposes a consumed `call_id`, caller and stop event. The admitted callback must enter the existing tool gateway and preserve its permission, ownership, hooks and result policies. `run_native_route` and `run_native_task` forward this policy explicitly. A failed host tool sends `tool_result.failed=true` rather than stranding its native waiter; the host preserves the original error and drains native failure before releasing admission. The host opts into `tool_result_join`; use a newly built matching archive. Source-only approval tests and `tests/support/native_approval_probe.py` verify exact consumption and real scratch-only effects. Process loss still needs application effect reconciliation; approval does not authorize a replay.
