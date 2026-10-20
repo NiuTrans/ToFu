@@ -25,7 +25,8 @@ from pathlib import Path
 import pytest
 
 from lib.identity import PrincipalContext
-from lib.storage import StorageSupervisor
+from lib.storage import StorageRuntime, StorageSupervisor
+from lib.storage.service import install_runtime_for_test
 from lib.storage.errors import StorageError
 from tests.support.envelope import v1_get_json
 
@@ -37,18 +38,18 @@ def storage(tmp_path: Path, monkeypatch):
     monkeypatch.setenv('TOFU_STORAGE_SQLITE_READ_POOL', '2')
     supervisor = StorageSupervisor(
         project_root=tmp_path, backend='sqlite', startup_timeout=60)
-    supervisor.start()
+    runtime = StorageRuntime(supervisor, auto_restart=False)
+    install_runtime_for_test(runtime)
     try:
+        runtime.start()
         yield supervisor
     finally:
-        supervisor.stop()
+        install_runtime_for_test(None)
 
 
 @pytest.fixture
 def turn_service(storage, monkeypatch):
     monkeypatch.setenv('TOFU_TURN_DELTA_RECORD_MS', '0')
-    monkeypatch.setattr('lib.storage.get_storage_client',
-                        lambda write=False: storage.client)
     from lib import turn_lifecycle
     return turn_lifecycle
 

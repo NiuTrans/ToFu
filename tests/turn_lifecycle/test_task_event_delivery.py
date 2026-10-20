@@ -18,32 +18,36 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(params=['sqlite', 'tofudb'])
 def storage(tmp_path, monkeypatch, request):
-    from lib.storage import StorageSupervisor
+    from lib.storage import StorageRuntime, StorageSupervisor
+    from lib.storage.service import install_runtime_for_test
     if request.param == 'tofudb':
         from scripts.check_tofudb_engine_drift import resolve_deployment_binary
         monkeypatch.setenv('TOFUDB_BIN', resolve_deployment_binary(Path(__file__).resolve().parents[2]))
         monkeypatch.setenv('TOFUDB_TRANSPORT', 'daemon')
     supervisor = StorageSupervisor(project_root=tmp_path, backend=request.param, startup_timeout=60)
-    supervisor.start()
-    # Preserve exact receipt payloads across incidental cold-start pressure;
-    # the injected executor/ACK failures remain outside this fixture seam.
-    from lib.storage.retry import call_with_transient_retry
-    original_command = supervisor.client.command
-    def command(*args, **kwargs):
-        return call_with_transient_retry(lambda: original_command(*args, **kwargs),
-            label='isolated event delivery fixture', delays=(.05, .1, .2))
-    monkeypatch.setattr(supervisor.client, 'command', command)
+    # Keep imported getter references stable across fixture teardown. Only the
+    # installed runtime changes, so lazy consumers follow the next authority.
+    runtime = StorageRuntime(supervisor, auto_restart=False)
+    install_runtime_for_test(runtime)
     try:
+        runtime.start()
+        # Preserve exact receipt payloads across incidental cold-start pressure;
+        # the injected executor/ACK failures remain outside this fixture seam.
+        from lib.storage.retry import call_with_transient_retry
+        original_command = supervisor.client.command
+        def command(*args, **kwargs):
+            return call_with_transient_retry(lambda: original_command(*args, **kwargs),
+                label='isolated event delivery fixture', delays=(.05, .1, .2))
+        monkeypatch.setattr(supervisor.client, 'command', command)
         yield supervisor
     finally:
-        supervisor.stop()
+        install_runtime_for_test(None)
 
 
 @pytest.fixture
 def turn_service(storage, monkeypatch):
     from lib import turn_lifecycle
     monkeypatch.setenv('TOFU_TURN_DELTA_RECORD_MS', '0')
-    monkeypatch.setattr('lib.storage.get_storage_client', lambda write=False: storage.client)
     return turn_lifecycle
 
 
@@ -69,6 +73,24 @@ def _discard(task):
     from lib.agent_core.execution_session import ExecutionPhase
     task['_executionSession'].settle(ExecutionPhase.CANCELLED)
     chat_task_runtime.discard(task['id'])
+
+
+def test_retained_storage_reader_follows_replacement_authority(
+        turn_service, storage, tmp_path):
+    """A late import must not retain the fixture's stopped supervisor."""
+    from lib.storage import StorageRuntime, StorageSupervisor, get_storage_client
+    from lib.storage.service import install_runtime_for_test
+
+    replacement = StorageRuntime(StorageSupervisor(
+        project_root=tmp_path / 'replacement-authority', backend='sqlite',
+        startup_timeout=60), auto_restart=False)
+    install_runtime_for_test(replacement)
+    try:
+        replacement.start()
+        storage.stop()
+        assert get_storage_client().health()['ready'] is True
+    finally:
+        install_runtime_for_test(None)
 
 
 def test_root_events_cross_provider_boundary_without_waiting_and_freeze_projection(
