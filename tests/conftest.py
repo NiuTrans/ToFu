@@ -678,8 +678,10 @@ def warn_on_nc_source_poison_at_session_start() -> list:
                'leftover neuter from a HARD-CRASHED prior run (SIGKILL/OOM skips '
                'the restore finally). The belt will snapshot the CURRENT '
                '(possibly poisoned) bytes as its baseline, so verify these are '
-               'intended before trusting this run. To clear a suspected poison: '
-               'git checkout HEAD -- <file>.' % (len(drifted), ', '.join(drifted)))
+               'intended before trusting this run. Inspect with '
+               'git diff HEAD -- <file> and reproduce in an isolated worktree; '
+               'preserve concurrent edits before repairing confirmed NC poison.'
+               % (len(drifted), ', '.join(drifted)))
         _conftest_logger.warning(msg)
     return drifted
 

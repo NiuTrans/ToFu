@@ -355,7 +355,7 @@ def test_scanner_ignores_tmp_path_and_copy_writers(tmp_path):
 # tests pin that it (a) detects a guarded file drifted from HEAD, and (b) stays
 # quiet when every guarded file is clean.
 
-def test_session_start_poison_detector_flags_drift_from_head(tmp_path, monkeypatch):
+def test_session_start_poison_detector_flags_drift_from_head(tmp_path, monkeypatch, caplog):
     """Detect a simulated leftover neuter in an isolated Git repository.
 
     This used to poison a real guarded source in the shared working tree.  In
@@ -387,12 +387,18 @@ def test_session_start_poison_detector_flags_drift_from_head(tmp_path, monkeypat
     )
     monkeypatch.setattr(conftest, '_ROOT_DIR', str(repo))
     monkeypatch.setattr(conftest, '_NC_GUARDED_SOURCES', (victim,))
+    pending_bytes = guarded.read_bytes()
 
     drifted = conftest.warn_on_nc_source_poison_at_session_start()
 
     assert drifted == [victim], (
         f'session-start detector failed to flag the isolated poisoned source: '
         f'{victim} not in {drifted}')
+    assert guarded.read_bytes() == pending_bytes
+    assert 'git diff HEAD -- <file>' in caplog.text
+    assert 'isolated worktree' in caplog.text
+    assert not any(command in caplog.text for command in (
+        'git checkout', 'git restore', 'git reset', 'git clean'))
 
 
 def test_session_start_detector_is_quiet_when_clean(monkeypatch):
