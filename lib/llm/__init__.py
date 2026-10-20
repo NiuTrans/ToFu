@@ -15,6 +15,11 @@ All public symbols are re-exported here for convenience::
 
 from importlib import import_module
 
+# Import the lightweight definition explicitly: a lazy same-name child import
+# would overwrite this callable with the ``lib.llm.chat`` module. The function
+# loads its provider and HTTP dependencies only when invoked.
+from lib.llm.chat import chat as chat
+
 __all__ = [
     # body
     'build_body',
@@ -84,8 +89,8 @@ __all__ = [
 
 # A focused child import such as ``lib.llm.stream_result`` is used by verdict
 # and wire-contract code that must not initialize HTTP transports. Preserve the
-# historical package facade while resolving each symbol from its owner only on
-# first access.
+# historical package facade while resolving the remaining exports from their
+# owners only on first access.
 _EXPORT_MODULES = {
     # Body/cache and request entry points.
     'build_body': 'lib.llm.body',
@@ -94,7 +99,6 @@ _EXPORT_MODULES = {
     '_strip_trailing_assistant_for_claude': 'lib.llm.body',
     'add_cache_breakpoints': 'lib.llm.cache',
     '_gateway_honors_cache_markers': 'lib.llm.cache',
-    'chat': 'lib.llm.chat',
     'stream_chat': 'lib.llm.stream',
     'async_stream_chat': 'lib.llm.astream',
     'RawSSEDumper': 'lib.llm.diagnostics',
