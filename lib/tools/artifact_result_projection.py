@@ -1,9 +1,9 @@
-"""Model-only native artifact pages: declared defaults, never domain filtering.
+"""Model-only native artifact pages: declared omission, never domain filtering.
 
 Canonical/decoded results remain exact. Unknown fields, all source references,
-coverage/scope, error boundaries, media descriptors and signed cursors survive.
-Only known complete-view defaults can be omitted. Partial pages keep even the
-zero resume point so clipping never strands historical evidence.
+coverage/scope, error boundaries, media descriptors and next-page cursors survive.
+The signed replay cursor stays in canonical evidence; clipped or unknown model
+views retain it inline. Page pagination is independent of model-view clipping.
 """
 from __future__ import annotations
 from lib.tools.result_projection_json import (
@@ -45,9 +45,18 @@ def _page(name, value):
 
 def _compact_page(value):
     defaults = CONTRACT['artifactProjectionDefaults']
+    replay = CONTRACT['artifactProjectionReplayCursor']
+    clipped = value.get(replay['viewTruncatedField'], False)
+    complete_view = type(clipped) is bool and not clipped
     partial = value.get('truncated') is True or value.get('outputTruncated') is True
     result = {}
     for key, item in value.items():
+        if (key == replay['field'] and complete_view and type(item) is str
+                and item.startswith(replay['formatPrefix'])):
+            # This cursor replays an already-delivered page; nextCursor alone
+            # advances pagination. Retention captures the full source before
+            # projection, including this cursor for later compaction recovery.
+            continue
         if key in defaults and type(item) is type(defaults[key]) and item == defaults[key]:
             # Complete-view omission never conflates source coverage with page
             # truncation. Preserve all explicit gaps/continuations on partials.
