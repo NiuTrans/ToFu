@@ -90,6 +90,41 @@ TofuDB it auto-discovers the running application's loopback API (configured
 target a different application. Backend selection and diagnostic limits live
 in `docs/STORAGE.md`.
 
+# Tool and harness quality
+
+The harness — model-facing tools, the scripts under `debug/` and `scripts/`, MCP
+servers, tool schemas and descriptions, and this guidance — is part of the
+product, not a fixed backdrop. A defect you hit while doing a task is evidence
+about that harness, and fixing it is part of the job. Same principle as
+`docs/AGENT_CAPABILITY_GUIDE.md`: fix the chassis, not the caller.
+
+- Track incidental findings while you work: tool, exact invocation, expected vs
+  observed, and whether the task result was affected. Never silently route
+  around a defect — name the workaround and its residual risk in the final
+  answer.
+- Reproduce it without the task's context before blaming the tool. Misuse, a
+  stale assumption, or a documented limitation is not a defect; say which it
+  was and continue.
+- Fix it before finishing the task when the defect can corrupt a task result,
+  or when the fix is local, testable in the existing ladder, and changes no
+  public contract or schema. Add the failing specification first, keep the
+  harness fix as its own commit, and state the fix plus its verification in the
+  final answer.
+- Fix the mechanism, not only the instance: the missing validation, vague
+  error, misleading tool description, or absent guardrail that allowed the
+  defect to happen.
+- Never encode a workaround as the contract: no caller-side fallback for a tool
+  that should be fixed, no test asserting the buggy behavior, no document
+  sentence that makes the defect the intended API.
+- Report instead of fixing when the change crosses an authority or contract,
+  spans owners, or would displace the user's task. Give the finding, the
+  smallest proposed fix, and what you did not verify.
+- The task stays primary. Do not turn a delivery into a harness project, do not
+  "optimize" tools you merely found inelegant, and stop when a fix outgrows the
+  small-local rule above. A defect reported once and hit again is no longer
+  report-only: record it as a project memory and fix it or escalate with a
+  concrete proposal.
+
 # Design principles (standing constraints)
 
 Four long-term product constraints govern every change in this repo.

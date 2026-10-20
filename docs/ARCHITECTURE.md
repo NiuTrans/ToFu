@@ -1017,7 +1017,7 @@ adapters remain pending; the trusted mint API is not an approval decision engine
 | Access boundary | auth/request middleware, `routes/common.py` | identity and policy services |
 | Application | domain packages under `lib/` | repository protocols, execution ports |
 | Execution | `lib/tasks_pkg/`, `lib/agent_core/`, `tofu_agent/runtime.py`, tools, LLM dispatch | application contracts; semantic storage only for durable composition |
-| Persistence | `lib/storage/`, `lib/storage_sidecar/`, `packages/tofu-db/` | schema and backend adapters only |
+| Persistence | `lib/storage/`, `lib/storage_authority_sql/`, `packages/tofu-db/` | schema and backend adapters only |
 | Operations | `serverctl.py`, lifecycle modules, health and maintenance | public service/storage ports |
 
 Dependencies point down this table. A lower layer never imports a route or

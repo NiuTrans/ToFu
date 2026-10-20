@@ -43,6 +43,12 @@ def test_guidance_recognizes_the_actual_or_admitted_action(source):
         assert operation in interface
     assert 'programInput.read' in interface and 'jsonType' in interface
 
+    assert 'Prefer direct tools for single actions' in text
+    assert 'execute_tools for known independent batches' in text
+    assert 'statements ending in return' in text
+    assert 'Return routine results' in text
+    assert 'tools.observe ends the script only for unresolved judgment' in text
+    assert 'Never replay completed actions' in text
 
 
 @pytest.mark.parametrize('defect', ['configuration_only', 'names_only', 'document_only',

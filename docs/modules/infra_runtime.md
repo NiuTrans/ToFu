@@ -116,6 +116,20 @@ ceiling, healthy traffic postpones synthetic requests, a host idle 24h is not
 rearmed); the tracked-host ceiling is 64 and persisted timestamps are clamped
 before they can schedule work.
 
+Learned routing state is only invalidated by a real topology change.
+`set_proxy_pool` and `set_bypass_domains` compare the applied value first and
+return without clearing health/choice caches, bumping the topology epoch, or
+resetting egress/netpath measurements when it is unchanged. Problem: Settings
+Save re-POSTs the complete pool and bypass editor state on every save, so an
+unchanged save used to invalidate every learned verdict and clear each host's
+chosen path — hosts fell back to unmeasured routing, the prober re-probed them
+through ~1s proxy round-trips, and user requests took the slow evaluation path
+right after a save. Decision: idempotency at the runtime applier, not at the
+route, because pool/bypass are also applied at startup and from adapters.
+Alternatives rejected: comparing in the HTTP route would leave every other
+caller pair invalidating; keeping a "was this a no-change save" flag at the
+route cannot survive the concurrent-writer read-modify-write.
+
 The public orchestrator probes are `/health/live`, `/health/ready`, and `/health/startup`. Liveness performs no dependency I/O; readiness/startup project only lifecycle state, process role, and a storage-ready boolean (diagnostics stay authenticated). `/api/health` is the identity/liveness projection, `/api/ready` the dependency-readiness projection used by the personal UI. Readiness carries the serving PID so the manager proves locked-worker identity and dependency readiness in one request; older-generation workers fall back to `/api/health`. A live-but-unready worker is degraded. Probe failure and stale heartbeats preserve the live owner for in-place recovery; see [the reliability contract](../runbooks/RELIABILITY_RUNBOOK.md).
 
 `/api/health` additionally carries `bootProfile`: the previous boot's measured per-phase startup timings (`{phases: [{key,label,index,duration_s}], ...}`), persisted by `lib/boot_profile.py` at readiness and keyed by the same 9-phase ordinal/key catalog as `lib/startup_phases.py`. The in-app restart progress bar (`frontend/src/runtime/sections/update.js`) budgets progress from this host's own observed boot shape; the field is absent on a first-ever boot, where the client falls back to its built-in weight estimate. A boot never fails over this telemetry: persist/load are best-effort and schema-gated. The bar reports three truthful stages: request preparation, a bounded drain band labelled shutdown that eases while the old process still answers, then the measured boot timeline anchored at the first failed health probe (old process gone); the changed-bootId check makes early answers from the old process harmless.

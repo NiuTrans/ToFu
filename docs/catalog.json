@@ -303,7 +303,7 @@
     },
     {
       "path": "contracts/storage_harness_certification_v1.json",
-      "guard": "tests/storage_sidecar/test_storage_certification_gate.py"
+      "guard": "tests/storage_authority_sql/test_storage_certification_gate.py"
     },
     {
       "path": "contracts/api_endpoint_index_v1.json",
@@ -465,12 +465,12 @@
     {
       "path": "contracts/native_checkpoint_storage_abi_v1.json",
       "generator": "scripts/gen_native_checkpoint_storage_abi.py",
-      "guard": "tests/storage_sidecar/test_native_checkpoint_storage.py"
+      "guard": "tests/storage_authority_sql/test_native_checkpoint_storage.py"
     },
     {
       "path": "contracts/native_checkpoint_storage_abi_v1.h",
       "generator": "scripts/gen_native_checkpoint_storage_abi.py",
-      "guard": "tests/storage_sidecar/test_native_checkpoint_storage.py"
+      "guard": "tests/storage_authority_sql/test_native_checkpoint_storage.py"
     }
   ],
   "authority": [

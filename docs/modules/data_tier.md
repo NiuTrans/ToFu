@@ -9,29 +9,29 @@ code ownership only and must not redefine backend authority.
 | Package | Runs in | Responsibility |
 |---|---|---|
 | `lib/storage/` | Web, worker, task, plugin parent | Selected `storage.v1` / native `storage.v2` transport, process-wide response-frame admission, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
-| `lib/storage_sidecar/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
-| `lib/storage_sidecar/native_checkpoint_{config,service}.py`, `lib/storage/checkpoint_control.py` | Selected SQL Sidecar / application client | Explicit pinned scope, lazy joined code lifetime and one-attempt instance-bound RPC; no backend switching or generic receipts |
-| `lib/storage_sidecar/native_checkpoint_outbox.py` | Selected SQL Sidecar | Shared Rust checkpoint transaction capture, ordered SQL prefix verification and passive replay; existing outbox owns encryption/publication |
-| `lib/storage_sidecar/adapters/sqlite.py` | Sidecar only | One ordered writer without job-count admission, fair priority lanes, demand-created query-only connections with idle reuse, WAL/full-sync, progress watchdog, result-code retry classification |
-| `lib/storage_sidecar/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 demand-created connections, isolated read/write lease owners, idle reuse and SQLSTATE retry classification |
+| `lib/storage_authority_sql/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
+| `lib/storage_authority_sql/native_checkpoint_{config,service}.py`, `lib/storage/checkpoint_control.py` | Selected SQL Sidecar / application client | Explicit pinned scope, lazy joined code lifetime and one-attempt instance-bound RPC; no backend switching or generic receipts |
+| `lib/storage_authority_sql/native_checkpoint_outbox.py` | Selected SQL Sidecar | Shared Rust checkpoint transaction capture, ordered SQL prefix verification and passive replay; existing outbox owns encryption/publication |
+| `lib/storage_authority_sql/adapters/sqlite.py` | Sidecar only | One ordered writer without job-count admission, fair priority lanes, demand-created query-only connections with idle reuse, WAL/full-sync, progress watchdog, result-code retry classification |
+| `lib/storage_authority_sql/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 demand-created connections, isolated read/write lease owners, idle reuse and SQLSTATE retry classification |
 | `packages/tofu-db/` | Supervised Rust authority | CONTROL/WAL engine, owner-scoped semantic operations and resource-budgeted `storage.v2` serving; selection and certification are separate ([native contract](../STORAGE_TOFUDB.md)) |
 | `lib/storage/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
 | `lib/storage/storage_event_policy.py` | Application process | Launch-derived event residency hints and independent Sidecar frame bounds; batcher uses RAM/file overflow, while task delivery owns its separate scheduling policy |
 | `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting; validated interval-count projection |
 
 | `lib/conversations/diagnostic.py` | Application process | Strict owner/revision/rank/byte-cursor validation for bounded diagnostic reads; no projection hydration or physical storage knowledge |
-| `lib/storage_sidecar/operations_pkg/_conversation_diagnostic.py`, `packages/tofu-db/src/conversation_diagnostic.rs` | Selected SQL / native authority | Read-only header/turn/chunk queries, byte slicing and integrity fences; behavioral contract in [diagnostic contract](../contracts/CONVERSATION_DIAGNOSTICS.md) |
-| `lib/storage_sidecar/fastpath.py`, `shipper.py` | Sidecar only | Opt-in measured-local SQLite write front, deployment lineage, capacity preflight, bounded-RPO durable shadow shipping and recovery |
-| `lib/storage_sidecar/storage_capabilities.py` | Sidecar/control plane | Bounded filesystem capability report and pure, conservative adaptive backend/front policy; never moves authority bytes |
-| `lib/storage_sidecar/turn_search_projection.py` | Sidecar only | Transactional dirty-set consumer; local SQLite demand readers share the connection owner with the authority; independent PostgreSQL projection transactions, corruption recovery, generation fencing and paged backfill |
-| `lib/storage_sidecar/operations_pkg/_conversations.py` | Sidecar only | Owner-scoped metadata/full/window/activity projections; SQL paging/scalar timestamps for active Turns; bounded compatibility decoding for frozen archives |
-| `lib/storage_sidecar/archived_message_codec.py`, `offline_compaction_archive_maintenance.py` | Sidecar archive boundary / stopped-server window | Backend-neutral lossless per-message storage codec; bounded owner-resolved consolidation of retired compaction snapshots |
-| `lib/storage_sidecar/task_result_field_codec.py`, `operations_pkg/_records.py`, `offline_task_result_maintenance.py` | Sidecar task-result boundary / stopped-server window | Selective backend-neutral field codec; public hydration, compact projections, and bounded version-neutral historical backfill |
-| `lib/storage_sidecar/logical_outbox.py`, `logical_shadow.py` | Sidecar only, explicit opt-in | Same-transaction durable logical outbox; asynchronous backend-neutral publisher; private checksummed filesystem sink; publisher health and backpressure |
-| `lib/storage_sidecar/logical_replay.py` | Offline verifier / future projection worker | Authenticated bounded mutation replay to SQLite/PostgreSQL with an atomic durable checkpoint, ordered projection digests, deterministic canary sampling, explicit fail-closed cutover/rollback evidence |
+| `lib/storage_authority_sql/operations_pkg/_conversation_diagnostic.py`, `packages/tofu-db/src/conversation_diagnostic.rs` | Selected SQL / native authority | Read-only header/turn/chunk queries, byte slicing and integrity fences; behavioral contract in [diagnostic contract](../contracts/CONVERSATION_DIAGNOSTICS.md) |
+| `lib/storage_authority_sql/fastpath.py`, `shipper.py` | Sidecar only | Opt-in measured-local SQLite write front, deployment lineage, capacity preflight, bounded-RPO durable shadow shipping and recovery |
+| `lib/storage_authority_sql/storage_capabilities.py` | Sidecar/control plane | Bounded filesystem capability report and pure, conservative adaptive backend/front policy; never moves authority bytes |
+| `lib/storage_authority_sql/turn_search_projection.py` | Sidecar only | Transactional dirty-set consumer; local SQLite demand readers share the connection owner with the authority; independent PostgreSQL projection transactions, corruption recovery, generation fencing and paged backfill |
+| `lib/storage_authority_sql/operations_pkg/_conversations.py` | Sidecar only | Owner-scoped metadata/full/window/activity projections; SQL paging/scalar timestamps for active Turns; bounded compatibility decoding for frozen archives |
+| `lib/storage_authority_sql/archived_message_codec.py`, `offline_compaction_archive_maintenance.py` | Sidecar archive boundary / stopped-server window | Backend-neutral lossless per-message storage codec; bounded owner-resolved consolidation of retired compaction snapshots |
+| `lib/storage_authority_sql/task_result_field_codec.py`, `operations_pkg/_records.py`, `offline_task_result_maintenance.py` | Sidecar task-result boundary / stopped-server window | Selective backend-neutral field codec; public hydration, compact projections, and bounded version-neutral historical backfill |
+| `lib/storage_authority_sql/logical_outbox.py`, `logical_shadow.py` | Sidecar only, explicit opt-in | Same-transaction durable logical outbox; asynchronous backend-neutral publisher; private checksummed filesystem sink; publisher health and backpressure |
+| `lib/storage_authority_sql/logical_replay.py` | Offline verifier / future projection worker | Authenticated bounded mutation replay to SQLite/PostgreSQL with an atomic durable checkpoint, ordered projection digests, deterministic canary sampling, explicit fail-closed cutover/rollback evidence |
 | `scripts/storage_deep_clean.py` | Explicit stopped-server window | Lease-owned retention, verified compaction, deferred performance-index installation, integrity/parity gates, atomic publication and rollback retention |
-| `lib/storage_sidecar/migration/tofudb_migration_{source,checkpoint,target,import}.py` | Explicit offline migration owner | Bounded pinned SQLite reads, verified identity-bound resume publication, and operator domain import; limits generated from `contracts/tofudb_ir_v1.json`; rollback, remaining domains, and cutover stay separate |
-| `lib/storage_sidecar/migrate.py` | One-shot distributed migration Job | Advisory-lock serialization and forward-only PostgreSQL schema migration; never imported as application startup authority |
+| `lib/storage_authority_sql/migration/tofudb_migration_{source,checkpoint,target,import}.py` | Explicit offline migration owner | Bounded pinned SQLite reads, verified identity-bound resume publication, and operator domain import; limits generated from `contracts/tofudb_ir_v1.json`; rollback, remaining domains, and cutover stay separate |
+| `lib/storage_authority_sql/migrate.py` | One-shot distributed migration Job | Advisory-lock serialization and forward-only PostgreSQL schema migration; never imported as application startup authority |
 | `lib/database_panel/` | Application process | Settings → 数据库 panel: engine status/switch (`.env` + restart), optional native/SQLite Fast Path configuration and actual activation, independent native search-index placement, path discovery, dual-path backup mirror; contract in [STORAGE.md](../STORAGE.md#settings-database-panel) |
 
 ## Dependency direction
@@ -42,7 +42,7 @@ Repository / Service / Plugin
           v
 lib.storage.StorageClient
     |-- selected native v2 --> packages/tofu-db semantic executor
-    `-- selected SQL v1 ----> lib.storage_sidecar.operations
+    `-- selected SQL v1 ----> lib.storage_authority_sql.operations
                                |-- SQLite adapter
                                `-- PostgreSQL adapter
 ```
@@ -94,11 +94,11 @@ skipped assignments and canonical stored bytes.
 
 ## Schema evolution boundary
 
-`lib/storage_sidecar/schema.py` is the single schema definition and upgrade
+`lib/storage_authority_sql/schema.py` is the single schema definition and upgrade
 sequence for both adapters. Application modules never import cursors, driver
 errors, SQL translation, transaction helpers, or migration internals. Offline
 transfer and maintenance commands may open a driver only from their explicit
-CLI boundary; `tests/storage_sidecar/test_storage_process_boundary.py` keeps that exception
+CLI boundary; `tests/storage_authority_sql/test_storage_process_boundary.py` keeps that exception
 small and prevents it from becoming a runtime access path.
 
 Problem: without ripgrep, indexed startup scans included offline scripts and refused a valid Web process. Decision: Git, lexical and filesystem scans use the same runtime roots; the separate strict inventory still audits offline tools. Alternative: requiring ripgrep hides the scope defect and makes storage startup depend on an optional accelerator. Verify all Git/ripgrep availability combinations and real production restart.
@@ -120,9 +120,9 @@ each engine retains its own runtime/client without replacing the global runtime.
 `tests/tofudb/test_tofudb_perf_compare.py` covers both engine orders, inherited settings,
 and failure cleanup offline; PostgreSQL measurements require an explicitly
 provisioned disposable database, never a production authority.
-- `tests/storage_sidecar/test_storage_process_boundary.py` checks the client/route driver and
+- `tests/storage_authority_sql/test_storage_process_boundary.py` checks the client/route driver and
   path boundary.
-- `tests/storage/test_storage_sidecar_contract.py` launches the real SQLite sidecar and
+- `tests/storage/test_storage_authority_sql_contract.py` launches the real SQLite sidecar and
   covers authentication, preflight, receipts, conflicts, natural idempotency,
   plugin manifests, backup, integrity, and crash fencing.
 
