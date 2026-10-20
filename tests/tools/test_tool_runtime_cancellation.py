@@ -29,6 +29,57 @@ from lib.tasks_pkg.tool_runtime import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize('closed_owner', ['parent', 'child'])
+@pytest.mark.parametrize('entrypoint', ['deliver', 'commit'])
+def test_nested_publication_preserves_each_owning_fence(closed_owner, entrypoint):
+    from lib.agent_core.publication import (
+        ChildPublicationFence, ChildPublicationRevoked, commit_child_publication)
+    parent, child = ChildPublicationFence(), ChildPublicationFence()
+    mutations = []
+
+    def nested(_event):
+        (parent if closed_owner == 'parent' else child).close()
+        if entrypoint == 'commit':
+            return child.commit(lambda: mutations.append('late'))
+        return child.deliver(
+            lambda _inner: commit_child_publication(lambda: mutations.append('late')),
+            None)
+
+    with pytest.raises(ChildPublicationRevoked):
+        parent.deliver(nested, None)
+    assert mutations == []
+
+
+def test_nested_publication_close_does_not_wait_for_observer_io():
+    from lib.agent_core.publication import ChildPublicationFence, check_publication
+    parent, child = ChildPublicationFence(), ChildPublicationFence()
+    entered, release = threading.Event(), threading.Event()
+    failures = []
+
+    def observe(_event):
+        entered.set()
+        assert release.wait(5)
+
+    def publish():
+        try:
+            parent.deliver(lambda _event: child.deliver(observe, None), None)
+        except BaseException as error:
+            failures.append(error)
+
+    worker = threading.Thread(target=publish)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        child.close()
+        parent.close()
+        assert worker.is_alive(), 'close must not join an observer callback'
+        check_publication()  # The producer's scope never leaked to this thread.
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive() and not failures
+
+
 def _make_context(task=None, **overrides) -> ToolExecutionContext:
     values = {
         'task': task or {'id': 'ctx-task', 'aborted': False},

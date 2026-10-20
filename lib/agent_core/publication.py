@@ -5,11 +5,11 @@ Captured child-owned contexts preserve originating authority across deferral.
 Root FIFO acceptance may explicitly transfer it with accepted_publication_context.
 Storage transactions still require their own attempt/CAS fence.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar, copy_context
 import threading
 
-_publication_scope = ContextVar('child_publication_scope', default=None)
+_publication_scope = ContextVar('child_publication_scope', default=())
 
 
 class ChildPublicationRevoked(RuntimeError):
@@ -25,20 +25,28 @@ class ChildPublicationFence:
         with self._lock:
             self._closed = True
 
+    @property
+    def closed(self):
+        with self._lock:
+            return self._closed
+
     def check(self):
         with self._lock:
             if self._closed:
                 raise ChildPublicationRevoked('Child invocation publication revoked')
 
     def commit(self, mutation):
-        with self._lock:
-            self.check()
-            return mutation()
+        return self.deliver(
+            lambda _event: commit_child_publication(mutation), None)
 
     def deliver(self, sink, event):
-        self.check()
-        token = _publication_scope.set(self)
+        # A nested producer cannot replace its originating authority. Acquire
+        # commit locks in stable parent-to-child order; observer I/O stays out.
+        parents = _publication_scope.get()
+        fences = parents if self in parents else (*parents, self)
+        token = _publication_scope.set(fences)
         try:
+            check_publication()
             return sink(event)
         finally:
             _publication_scope.reset(token)
@@ -47,13 +55,15 @@ class ChildPublicationFence:
 @contextmanager
 def publication_commit():
     """Only bounded local mutations belong here, after owner-lock acquisition."""
-    fence = _publication_scope.get()
-    if fence is None:
+    fences = _publication_scope.get()
+    if not fences:
         yield
-    else:
-        with fence._lock:
+        return
+    with ExitStack() as locks:
+        for fence in fences:
+            locks.enter_context(fence._lock)
             fence.check()
-            yield
+        yield
 
 
 @contextmanager
@@ -67,13 +77,12 @@ def accepted_publication_context():
     """
     with publication_commit():
         context = copy_context()
-        context.run(_publication_scope.set, None)
+        context.run(_publication_scope.set, ())
         yield context
 
 
 def check_publication():
-    fence = _publication_scope.get()
-    if fence is not None:
+    for fence in _publication_scope.get():
         fence.check()
 
 
