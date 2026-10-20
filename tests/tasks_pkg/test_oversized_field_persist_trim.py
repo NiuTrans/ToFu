@@ -49,6 +49,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 
 
+@pytest.mark.parametrize('status', ['running', 'done', 'error', 'aborted', 'rejected'])
+def test_result_publication_fence_is_transient_but_effect_evidence_is_durable(status):
+    from lib.storage.storage_projection import trim_tool_round_for_persist
+    round_item = {
+        'status': status, 'toolContent': 'authoritative result',
+        'executionEffect': {'state': 'unknown', 'operationId': 'owned-operation'},
+        '_toolResultPublicationClosed': True,
+    }
+    projected = trim_tool_round_for_persist(round_item)
+    assert projected == {key: value for key, value in round_item.items()
+                         if key != '_toolResultPublicationClosed'}
+    assert round_item['_toolResultPublicationClosed'] is True
+    assert trim_tool_round_for_persist(projected) is projected
+
+
 def _big_wire_fp():
     # Mimic the ~226 KB canonical-message list _wire_fp carries per round.
     return [f'msg{i}:field:hashvalue{i:08d}' for i in range(4000)]

@@ -98,14 +98,18 @@ def project_task_result_metadata_for_storage(metadata):
 
 
 def trim_tool_round_for_persist(round_item):
-    """Drop a completed command round's redundant live output buffer.
+    """Drop process-local publication state and redundant completed output.
 
     The completed output remains authoritative in ``results[0].output`` or
     ``toolContent``. A running round keeps ``_partialOutput`` so reconnect can
-    still replay live progress. The input is never mutated.
+    still replay live progress. Publication fences belong only to the current
+    process; effect evidence remains durable. The input is never mutated.
     """
     if not isinstance(round_item, dict):
         return round_item
+    if '_toolResultPublicationClosed' in round_item:
+        round_item = dict(round_item)
+        round_item.pop('_toolResultPublicationClosed')
     transient_output_fields = (
         '_partialOutput',
         '_partialOutputTotalChars',

@@ -593,6 +593,13 @@ def _settle_tool_result(
     if tc_id in _settled:
         return _settled[tc_id]
 
+    # The result owner now controls presentation. A timed-out worker can still
+    # own resources, but cannot replace this occurrence's published evidence.
+    from lib.tasks_pkg.tool_runtime import close_tool_result_publication
+    close_tool_result_publication(
+        task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry,
+        terminal_status=terminal_status)
+
     projection_items = (
         round_entry.pop(TOOL_RESULT_PROJECTION_ITEMS_KEY, None)
         if isinstance(round_entry, dict) else None)

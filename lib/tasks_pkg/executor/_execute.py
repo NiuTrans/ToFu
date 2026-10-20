@@ -220,6 +220,8 @@ def _dispatch_admitted_tool_one(
             from lib.project_dispatch.scope import tool_scope
             with tool_admission_scope(task, context, tool_name=fn_name) if dispatch_file else nullcontext():
                 with tool_scope(task, fn_name, fn_args, project_path) if dispatch_file else nullcontext():
+                    if round_entry.get('_toolResultPublicationClosed'):
+                        raise TimeoutError('Tool result collection ended before handler entry')
                     begin_tool_effect(task, fn_name, tc_id, rn, round_entry)
                     if task.get('aborted') or context.cancellation_requested:
                         from lib.llm.llm_errors import AbortedError
@@ -261,10 +263,14 @@ def _dispatch_admitted_tool_one(
             except Exception as exc:
                 logger.debug('[Executor] Returned failure presentation failed '
                              'for %s: %s', fn_name, exc)
+        closed_status = (round_entry.get('status')
+                         if round_entry.get('_toolResultPublicationClosed') else None)
         state = ('cancelled' if context.cancellation_requested or verdict == 'aborted'
-                 else 'error' if verdict else 'done')
+                 or closed_status == 'aborted'
+                 else 'error' if verdict or closed_status in {
+                     'error', 'rejected', 'unanswerable'} else 'done')
         context.settle_once(state)
-        round_entry['_runtimeState'] = state
+        round_entry['_runtimeState'] = context.terminal_state
         return result
     finally:
         unregister_context(context)
