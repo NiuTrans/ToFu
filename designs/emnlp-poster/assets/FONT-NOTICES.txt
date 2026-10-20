@@ -5,3 +5,8 @@ Inter: https://openfontlicense.org
 Newsreader: Copyright 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader)
 
 Newsreader: http://scripts.sil.org/OFL
+JetBrains Mono Regular
+Copyright 2020 The JetBrains Mono Project Authors
+https://github.com/JetBrains/JetBrainsMono
+Source: existing frontend font asset; unchanged static face.
+License: SIL Open Font License 1.1; see JetBrainsMono-OFL.txt.

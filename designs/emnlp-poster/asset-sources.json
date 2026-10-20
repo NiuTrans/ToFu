@@ -1,0 +1,41 @@
+{
+  "retrieved": "2026-10-20",
+  "assets": [
+    {
+      "file": "neu-faculty-logo.png",
+      "organization": "Northeastern University, China",
+      "source": "http://faculty.neu.edu.cn/_resource/fileshow/BZbaQvIzYr2u",
+      "source_page": "https://faculty.neu.edu.cn/songjie/",
+      "use": "Unmodified institutional affiliation mark",
+      "sha256": "fccc01c310183673a7293b46d103ef8736f679a8fcbc41831940913f789ee07b"
+    },
+    {
+      "file": "niutrans-avatar.png",
+      "organization": "NiuTrans Research",
+      "source": "https://github.com/NiuTrans.png?size=1000",
+      "source_page": "https://github.com/NiuTrans",
+      "use": "Unmodified official organization avatar; accompanying name is editable text",
+      "sha256": "d05404041c3911d9c1ccaae0ec82c39fa66c903ff8ca39085b861cd664ea23a3"
+    },
+    {
+      "file": "longcat.svg",
+      "organization": "YourProvider LongCat",
+      "source": "https://s3.yourprovider.net/static-prod01/com.example-corp.friday.longcat.next2/assets/longcat_logo-X5K_hpNA.svg",
+      "source_page": "https://longcat.ai/",
+      "use": "Unmodified official vector logo",
+      "sha256": "b4a23318b68108dc953eb3ed87d52b2a987b73abd3ab6708d5e088ab9146af6b"
+    },
+    {
+      "file": "paper.png",
+      "source": ".tmp/tofu-paper/_EMNLP_Demo__ToFu.zip :: figs/paper.png",
+      "use": "Unmodified screenshot supplied by the author; manuscript-era interface, explicitly captioned",
+      "sha256": "f321ab3efb4870224dde02efa148772936e612d1fdfdde571a6c15074c2257bd"
+    },
+    {
+      "file": "inspector-context.png",
+      "source": "capture_inspector.py and inspector-context.provenance.json",
+      "use": "Production CONTEXT renderer with synthetic values; not a measured run",
+      "sha256": "bce44525fc8166ac2b48aa5fb77765f49c3c48321754021f5dbfc25e32eb2961"
+    }
+  ]
+}
