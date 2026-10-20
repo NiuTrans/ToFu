@@ -52,7 +52,7 @@ def _compact_page(value):
     result = {}
     for key, item in value.items():
         if (key == replay['field'] and complete_view and type(item) is str
-                and item.startswith(replay['formatPrefix'])):
+                and item.startswith(tuple(replay['formatPrefixes']))):
             # This cursor replays an already-delivered page; nextCursor alone
             # advances pagination. Retention captures the full source before
             # projection, including this cursor for later compaction recovery.

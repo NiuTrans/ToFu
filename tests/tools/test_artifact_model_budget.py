@@ -116,3 +116,20 @@ def test_required_or_unrecognized_metadata_still_consumes_budget(operation, chan
     assert result['error']['code'] == 'response_metadata_too_large'
     assert result['artifactRef'] == REFERENCE
     assert 'nextCursor' not in result
+
+
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+def test_opaque_next_cursor_never_survives_local_body_clipping(prefix):
+    source = {'status': 'ok', **page(
+        'read_tool_artifact', nextCursor=prefix + 'next-page', content='evidence ' * 500)}
+    # A decoded/programmatic page may omit the optional replay cursor. Its next
+    # cursor still authenticates the whole source page, including any unseen tail.
+    source.pop('resumeCursor')
+    before = handler._serialize(source)
+
+    result = handler._fit_read_result(source, '', 700)
+
+    assert result['error']['code'] == 'response_metadata_too_large'
+    assert result['artifactRef'] == REFERENCE
+    assert 'nextCursor' not in result
+    assert handler._serialize(source) == before

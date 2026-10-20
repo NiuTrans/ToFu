@@ -1,0 +1,76 @@
+{
+  "description": "Synthetic protocol vectors; key is test-only, never a runtime credential.",
+  "keyBytes": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  "binding": [
+    7,
+    "tool-result:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "search",
+    "Straße 中🙂\n",
+    "/name中🙂\n\"\\\u0000/~0~1"
+  ],
+  "nowMs": 1700000000000,
+  "sql": {
+    "position": {
+      "r": [
+        1,
+        2
+      ],
+      "p": 3,
+      "o": 11,
+      "skip": 0,
+      "expiry": 1700000123456,
+      "partial": false
+    },
+    "legacyCursor": "trq1.W1s3LCJ0b29sLXJlc3VsdDphYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwic2VhcmNoIiwiU3RyYVx1MDBkZmUgXHU0ZTJkXHVkODNkXHVkZTQyXG4iLCIvbmFtZVx1NGUyZFx1ZDgzZFx1ZGU0MlxuXCJcXFx1MDAwMC9-MH4xIl0seyJyIjpbMSwyXSwicCI6MywibyI6MTEsInNraXAiOjAsImV4cGlyeSI6MTcwMDAwMDEyMzQ1NiwicGFydGlhbCI6ZmFsc2V9XQ.14209c4e08fdb526972032f84b205191af3b5512311f0b60915a45c961d4e855",
+    "currentCursor": "trq2.eyJyIjpbMSwyXSwicCI6MywibyI6MTEsInNraXAiOjAsImV4cGlyeSI6MTcwMDAwMDEyMzQ1NiwicGFydGlhbCI6ZmFsc2V9.F9aEMYdSH8-dDGWJsL5WrTILnSngFDJcKeA0oo4W87s"
+  },
+  "native": {
+    "position": {
+      "r": [
+        1,
+        2
+      ],
+      "p": 3,
+      "b": 7,
+      "o": 11,
+      "skip": 0,
+      "expiry": 1700000123456,
+      "partial": false
+    },
+    "legacyCursor": "trq1.W1s3LCJ0b29sLXJlc3VsdDphYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwic2VhcmNoIiwiU3RyYcOfZSDkuK3wn5mCXG4iLCIvbmFtZeS4rfCfmYJcblwiXFxcdTAwMDAvfjB-MSJdLHsiciI6WzEsMl0sInAiOjMsImIiOjcsIm8iOjExLCJza2lwIjowLCJleHBpcnkiOjE3MDAwMDAxMjM0NTYsInBhcnRpYWwiOmZhbHNlfV0.7c098102ba84f329a92f8d65721e8ac3612b7feefa6ce7c6baad670d54fc8c82",
+    "currentCursor": "trq2.eyJyIjpbMSwyXSwicCI6MywiYiI6NywibyI6MTEsInNraXAiOjAsImV4cGlyeSI6MTcwMDAwMDEyMzQ1NiwicGFydGlhbCI6ZmFsc2V9.HI8DJSqRkcKQoS_TKUk-_FaXKNeWxyqToWAkfJL4I5g"
+  }
+}

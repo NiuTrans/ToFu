@@ -65,7 +65,7 @@ def _mime_ext(mime):
 
 #: Stay inside ``budget_tool_result_v2``'s pass-through band. Otherwise a
 #: continuation response can itself spill into another artifact pointer.
-from lib.tool_results.tool_result_query_contract import CONTRACT
+from lib.tool_results.tool_result_query_contract import CONTRACT, SIGNED_CURSOR_PREFIXES
 _RESPONSE_TOKEN_BUDGET = CONTRACT['response']['tokens']
 _MAX_BATCH_WORKERS = 4
 _BATCH_KEYS = {
@@ -105,7 +105,7 @@ def _fit_read_result(result, model, token_budget):
     # Opaque cursors cannot be reconstructed after trimming text locally.
     if _model_tokens('read_tool_artifact', _serialize(result), model) <= token_budget:
         return result
-    if result.get('resumeCursor') or str(result.get('nextCursor', '')).startswith('trq1.'):
+    if result.get('resumeCursor') or str(result.get('nextCursor', '')).startswith(SIGNED_CURSOR_PREFIXES):
         return _metadata_refusal(result)
     visible = result.get('content') or ''
     low, high, best = 1, len(visible), None
@@ -147,16 +147,16 @@ def _fit_batch_to_budget(fn_name, results, model):
     return text
 
 
-def _parse_cursor(arguments: dict) -> int:
+def _parse_cursor(arguments: dict) -> int | str:
 
     raw = arguments.get('cursor') or '0'
-    if isinstance(raw, str) and raw.startswith('trq1.'):
+    if isinstance(raw, str) and raw.startswith(SIGNED_CURSOR_PREFIXES):
         return raw
     try:
         cursor = int(arguments.get('cursor') or 0)
     except (TypeError, ValueError) as exc:
         raise ToolContractError(
-            'invalid_cursor', 'cursor must be a non-negative integer',
+            'invalid_cursor', 'cursor must be a non-negative integer or a returned continuation cursor',
             path='$.cursor') from exc
     if cursor < 0:
         raise ToolContractError(

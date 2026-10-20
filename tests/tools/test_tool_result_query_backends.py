@@ -47,6 +47,40 @@ def pages(repo, reference, **kw):
     pytest.fail('read cursor never terminates')
 
 
+def test_large_valid_selector_can_continue_and_replay(repo):
+    # The pointer fits the declared 1024-character source-query bound. Its
+    # repeated encoding must not make an otherwise valid read unpageable.
+    key = '段' * 700
+    content = 'selected 中🙂\n' * 5
+    root = manifest(repo, [{'kind': 'json', 'text': json.dumps(
+        {key: content}, ensure_ascii=False)}])
+    arguments = dict(user_id=1, artifact_ref=root,
+                     selector='/' + key, limit=32,
+                     now_ms=repo.query_test_now_ms + 1)
+    first = repo.read_range(**arguments)
+    assert first['nextCursor']
+    read = list(pages(repo, root, selector='/' + key, limit=32))
+    assert ''.join(page['content'] for page in read) == json.dumps(
+        content, ensure_ascii=False, separators=(',', ':'))
+    assert repo.read_range(**arguments, offset=first['resumeCursor']) == first
+
+
+def test_maximum_unicode_search_query_can_continue_and_replay(repo):
+    query = '🙂' * 200
+    root = put(repo, query + ' gap ' + query)
+    arguments = dict(user_id=1, artifact_ref=root, query=query, limit=1,
+                     now_ms=repo.query_test_now_ms + 1)
+    first = repo.search(**arguments)
+    assert len(first['items']) == 1
+    assert query in first['items'][0]['text']
+    assert first['nextCursor']
+    second = repo.search(**arguments, cursor=first['nextCursor'])
+    assert len(second['items']) == 1
+    assert query in second['items'][0]['text']
+    assert [first['items'][0]['offset'], second['items'][0]['offset']] == [0, 205]
+    assert repo.search(**arguments, cursor=first['resumeCursor']) == first
+
+
 def test_nested_unicode_and_repeated_call_ids_keep_exact_segment_identity(repo):
     text = 'ß中🙂é\n' * 100
     leaf = put(repo, text)
@@ -69,7 +103,7 @@ def test_signed_route_cursor_survives_restart_and_rejects_changed_bindings(repo,
     root = manifest(repo, children=[{'name': 'tool', 'callId': 'child', 'artifactRef': child}])
     first = repo.read_range(user_id=1, artifact_ref=root, now_ms=repo.query_test_now_ms + 1, limit=5)
     cursor = first['nextCursor']
-    assert cursor.startswith('trq1.')
+    assert cursor.startswith('trq2.')
     storage.stop(); storage.start()
     rest = repo.read_range(user_id=1, artifact_ref=root, now_ms=repo.query_test_now_ms + 2, offset=cursor)
     assert first['content'] + rest['content'] == '中abcdefß' * 20

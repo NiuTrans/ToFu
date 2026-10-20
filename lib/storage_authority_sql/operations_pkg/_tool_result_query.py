@@ -33,9 +33,34 @@ def binding(payload, operation):
             str(payload.get('selector', ''))]
 
 
+def _scoped_mac(key, payload, operation, data):
+    """Bind the complete query without repeating its text inside the cursor."""
+    mac = hmac.new(key, digestmod=hashlib.sha256)
+    mac.update(CONTRACT['cursor']['authentication']['domain'].encode('utf-8'))
+    mac.update(b'\0')
+    mac.update(json.dumps(binding(payload, operation), ensure_ascii=False,
+                          separators=(',', ':')).encode('utf-8'))
+    mac.update(b'\0')
+    mac.update(data)
+    return mac.digest()
+
+
+def _base64url(data):
+    return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
+
+
+def _decode_base64url(text):
+    data = base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+    if _base64url(data) != text:
+        invalid()
+    return data
+
+
 def encode_cursor(session, payload, operation, state):
-    data = json.dumps([binding(payload, operation), state], separators=(',', ':')).encode()
-    token = 'trq1.' + base64.urlsafe_b64encode(data).decode().rstrip('=') + '.' + hmac.new(cursor_key(session), data, hashlib.sha256).hexdigest()
+    data = json.dumps(state, separators=(',', ':')).encode('utf-8')
+    signature = _scoped_mac(cursor_key(session), payload, operation, data)
+    token = '.'.join((CONTRACT['cursor']['currentPrefix'], _base64url(data),
+                      _base64url(signature)))
     if len(token) > CONTRACT_CURSOR_MAX:
         invalid('Continuation metadata too large')
     return token
@@ -58,12 +83,22 @@ def decode_cursor(session, payload, operation):
         return {'r': [], 'p': 0, 'o': 0, 'skip': int(raw), 'expiry': 0, 'partial': False}
     try:
         prefix, token, signature = raw.split('.')
-        if prefix != 'trq1' or len(raw) > CONTRACT_CURSOR_MAX:
-            invalid()
-        data = base64.urlsafe_b64decode(token + '=' * (-len(token) % 4))
-        scope, state = json.loads(data)
-        expected = hmac.new(cursor_key(session), data, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected) or scope != binding(payload, operation):
+        if prefix == CONTRACT['cursor']['currentPrefix']:
+            data = _decode_base64url(token)
+            supplied = _decode_base64url(signature)
+            expected = _scoped_mac(cursor_key(session), payload, operation, data)
+            if not hmac.compare_digest(supplied, expected):
+                invalid()
+            state = json.loads(data)
+        elif prefix == CONTRACT['cursor']['legacyPrefix']:
+            data = base64.urlsafe_b64decode(token + '=' * (-len(token) % 4))
+            expected = hmac.new(cursor_key(session), data, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(signature, expected):
+                invalid()
+            scope, state = json.loads(data)
+            if scope != binding(payload, operation):
+                invalid()
+        else:
             invalid()
         if type(state) is not dict or set(state) != {'r', 'p', 'o', 'skip', 'expiry', 'partial'}:
             invalid()
