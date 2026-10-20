@@ -98,11 +98,17 @@ def test_small_challenge_reaches_an_already_configured_alternate(monkeypatch):
 
 def test_orchestrator_reports_challenge_as_failed_coverage(monkeypatch):
     from tofu_search import perform_web_search
+    from tofu_search.search.engines import ddg
 
-    monkeypatch.setattr(common.search_session, "get", lambda *a, **kw: response(CHALLENGE))
+    calls = []
+    def challenged(*args, **kwargs):
+        calls.append(1)
+        return response(CHALLENGE)
+    monkeypatch.setattr(ddg, "_search_http2_get", challenged)
     results = perform_web_search(
         "Python", engines=["DDG-HTML"], fetch_pages=False, filter_pages=False,
         config=get_config().copy(search_deadline_secs=1))
+    assert calls
     assert not results
     assert "DDG-HTML" in results._search_diag["engine_errors"]
     assert "DDG-HTML" not in results._search_diag["engine_empty"]
