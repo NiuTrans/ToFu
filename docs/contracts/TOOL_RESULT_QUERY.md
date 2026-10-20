@@ -75,6 +75,18 @@ new observation and may duplicate effects. Verify `test_artifact_query_recovery`
 on both authorities, shared storage-error wire tests and native semantic error
 classification, alongside cursor, budget and batch contracts.
 
+Artifact settlement: **Problem:** failed queries emitted a failure badge but
+settled the occurrence as successful, and one failed batch item suppressed media
+from successful siblings. **Decision:** the handler publishes the final owned
+result's verdict through common settlement and carries media only from successful
+items in the fitted result. Partial failure keeps its successful evidence while
+remaining an error outcome for the occurrence, event and audit. Successful source
+text containing error-shaped JSON remains ordinary data. **Alternatives rejected:**
+inferring verdicts from badges or application text splits settlement authority;
+dropping every image on partial failure discards completed work. Verify actual
+legacy/V2 pipeline delivery, captured parts, events, audits and worker cleanup in
+`test_artifact_query_settlement`, alongside decoded media and batch budgets.
+
 Problem: clipping search quotations to fit the response budget could remove the
 matched term while retaining a cursor that had already consumed those hits.
 Decision: the handler retries the same immutable query/cursor with a smaller

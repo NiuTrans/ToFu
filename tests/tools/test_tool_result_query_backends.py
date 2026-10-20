@@ -224,7 +224,7 @@ def test_default_sixteen_read_batch_returns_each_requested_source_page(
     monkeypatch.setattr(handler, 'ToolResultArtifactRepository',
                         lambda: SimpleNamespace(read_range=query))
     monkeypatch.setattr(handler, 'task_user_id', lambda task: 1)
-    monkeypatch.setattr(handler, '_finalize_tool_round', lambda *args: None)
+    monkeypatch.setattr(handler, '_finalize_tool_round', lambda *args, **kwargs: None)
     _, content, _ = handler._handle_tool_result_artifact(
         {'model': 'gpt-4o'}, {}, 'read_tool_artifact', 'small-page-batch',
         {'reads': [{'artifact_ref': ref, 'limit': 8} for _ in range(16)]},

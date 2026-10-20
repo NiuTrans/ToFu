@@ -17,7 +17,7 @@ def _invoke(monkeypatch, fn_name, arguments, repository):
     monkeypatch.setattr(
         handler, 'ToolResultArtifactRepository', lambda: repository)
     monkeypatch.setattr(handler, 'task_user_id', lambda _task: 17)
-    monkeypatch.setattr(handler, '_finalize_tool_round', lambda *_args: None)
+    monkeypatch.setattr(handler, '_finalize_tool_round', lambda *_args, **_kwargs: None)
     _tc_id, content, is_search = handler._handle_tool_result_artifact(
         {'model': ''}, {}, fn_name, 'tc-batch', arguments, 1, {}, {}, '', False)
     assert is_search is False

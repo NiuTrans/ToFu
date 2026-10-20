@@ -315,7 +315,8 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
                           "retryable": True},
             })} for index, result in enumerate(results)]
             content = _fit_batch_to_budget(fn_name, indexed, model)
-            succeeded = all(item.get('status') == 'ok' for item in indexed)
+            batch_result = json.loads(content)
+            succeeded = batch_result['status'] == 'ok'
         else:
             result = _execute_one(
                 fn_name, calls[0], user_id=owner, repository=repository,
@@ -337,12 +338,12 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
     # blind) and ``imageDataUris`` on the row meta (the frontend renders the
     # same images as tiles). Search results are text-only by contract scope.
     media_refs = []
-    if fn_name == 'read_tool_artifact' and succeeded:
+    if fn_name == 'read_tool_artifact':
         if is_batch:
-            for item in indexed:
+            for item in batch_result['items']:
                 if item.get('status') == 'ok':
                     media_refs.extend(_media_descriptors_of(item))
-        else:
+        elif succeeded:
             media_refs = _media_descriptors_of(result)
     media_capped = len(media_refs) > _MAX_MEDIA_REPLAY
     media_refs = media_refs[:_MAX_MEDIA_REPLAY]
@@ -377,5 +378,6 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
              'format': _mime_ext(mime),
              'filename': f'artifact-media-{index + 1}.{_mime_ext(mime)}'}
             for index, (ref, mime) in enumerate(media_refs)]
-    _finalize_tool_round(task, rn, round_entry, [meta])
+    _finalize_tool_round(task, rn, round_entry, [meta],
+                         status='done' if succeeded else 'error')
     return tc_id, content, False
