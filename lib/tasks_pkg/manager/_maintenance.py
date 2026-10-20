@@ -17,6 +17,7 @@ from lib.tasks_pkg.manager.runtime import (
     _conv_latest_task,
     _conv_latest_task_lock,
 )
+from lib.tasks_pkg.explained_wait import explained_wait
 from lib.tasks_pkg.manager._events import append_event
 from lib.tasks_pkg.manager._persist import (
     _upsert_task_row,
@@ -367,6 +368,18 @@ def reap_stuck_running_tasks() -> int:
     :func:`_cmd_interrupt_grace_secs` — i.e. the read loop itself, not merely
     the subprocess, is wedged — does the full task reap below fire.
 
+    Silence may also be OWNED by an external waiter, and then it is progress
+    this reaper cannot see from a clock: storage ACK backpressure and command
+    writer admission both publish a marker for the duration of the wait
+    (:mod:`lib.tasks_pkg.explained_wait`; the lease wait owner publishes it, so
+    every acquisition path is covered), and a task holding one is skipped.
+    Writer admission is the case that produced a false reap (2026-10-20): a
+    turn queued behind another task's 31-minute command has no process and no
+    output BY DESIGN, so both clocks are stale from the first second while the
+    wait is completely healthy. Explicit Stop, an execution deadline and the
+    operator bound ``TOFU_WORKSPACE_TOOL_WAIT_SECONDS`` still end such a wait;
+    this reaper does not.
+
     Requiring BOTH stale is exactly the signal a client-side poll CANNOT recover
     (poll only sees ``status='running'``, indistinguishable from a slow turn),
     so the reap MUST be server-side. Both clocks fall back to ``created_at`` so
@@ -386,9 +399,11 @@ def reap_stuck_running_tasks() -> int:
 
     def _inspect_and_reap(task):
 
-        # Required storage backpressure is explained waiting, not silence.
-        # Explicit Stop/deadline remain controlled by the invocation owner.
-        if task.get('_storageWaits'):
+        # Silence owned by an external waiter (storage ACK, command writer
+        # admission) is waiting, not a wedge: no output can arrive until that
+        # owner answers. Explicit Stop/deadline remain controlled by the
+        # invocation owner.
+        if explained_wait(task):
             return
         created = task.get('created_at', now)
         # Both clocks fall back to created_at so a task that never emitted

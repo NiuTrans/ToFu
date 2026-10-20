@@ -589,7 +589,8 @@ observed median **0.017 ms**, maximum **0.027 ms**; not a network-volume guarant
   This trusted runtime-only API grants no arbitrary directory-write authority.
 - **Proven Git inspection** runs lease-free per segment, including in mixed
   query/runtime/file-write chains. The maintained local-read catalog covers
-  status/log/diff/show, file/tree/ref/index/config queries, and worktree listing.
+  status/log/diff/show, file/tree/ref/index/config queries, worktree listing and
+  `grep` (with its bundled short flags and attached values).
   Each admitted query disables optional index refresh, pager/fsmonitor,
   external diff/textconv and signature verification. Configuration getters do
   not receive overrides that would change the value being queried. Unknown
@@ -643,6 +644,35 @@ unknown ownership; a lock-file inode is not holder evidence.
   again before admitting the body. Contended waits probe at most every 50 ms;
   uncontended paths do not sleep. Commands distinguish `workspace-busy` from
   `workspace-lease-cancelled` and state that the command was not started.
+  `workspace-lease-cancelled` is owner cancellation, not contention: it is
+  reported in the ordinary aborted-command shape, so a stopped turn never
+  advertises a lock conflict the model could retry around.
+- **A wait is observable.** A pre-spawn wait has no process, no output and no
+  other log line, so it once looked identical to a running command for 21
+  minutes. After two seconds of waiting, and then at most once per minute, the
+  lease owner logs `[WorkspaceLease] wait …` with the waiter's bounded
+  pid/thread/tool/task/conversation and the actual local holder (pid, thread,
+  held seconds, tool/task/conversation). Cross-process flocks report the holder
+  type as unknown instead of inventing one. No worker, timer or retained state
+  is added: the notice is emitted from the existing 50 ms probe loop.
+- **The wait itself is handoff-able.** `run_with_steer_handoff` marks the
+  pre-spawn admission phase on the detachable task, so the ordinary 60-second
+  background rule and the operator's move-to-background action both apply while
+  the command is still waiting. With no process the round otherwise cannot
+  settle and the model cannot proceed, even though nothing is executing.
+- **The wait is not a wedge.** A wait produces no process and no output BY
+  DESIGN, so both task-liveness clocks are stale from its first second. The
+  wait owner (`workspace_lease._publish_admission_wait`, for every acquisition,
+  keyed by `tool_admission.WORKSPACE_ADMISSION_KEY`) publishes that state for
+  exactly the acquisition span and drops it before the body. The stuck-task
+  reaper and the invocation stall guard read one class owner
+  (`lib.tasks_pkg.explained_wait`) instead of testing markers individually;
+  otherwise a healthy queue behind another writer was force-failed at the
+  30-minute silence threshold with no answer produced (2026-10-20). This grants
+  no cancellation immunity: exit is explicit Stop, an execution deadline, or
+  the operator bound above. A holder is not covered by this exemption, so its
+  own dual-clock reaping still applies — and a command holder gets the
+  per-command interrupt, which returns partial output and releases the lease.
 - A write scope covering internal neutral lease storage raises
   `WorkspaceLeaseNamespaceError`; command entry points report
   `workspace-protected-namespace` before snapshots or execution. This is a

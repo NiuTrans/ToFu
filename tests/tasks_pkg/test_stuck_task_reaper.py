@@ -215,6 +215,44 @@ def test_human_waiting_task_not_reaped(reaper_env, put_task):
 # ─────────────────────────────────────────────────────────────────────────
 # Guards: not-yet-stale, already-terminal, already-aborted, disabled.
 # ─────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# (v) EXPLAINED WAIT — the 2026-10-20 incident. A writer-admission wait has no
+#     process and no output by design, so BOTH clocks are stale from the start.
+#     Waiting is progress owned by another writer, never a wedge.
+# ─────────────────────────────────────────────────────────────────────────
+def test_task_waiting_for_writer_admission_not_reaped(reaper_env, put_task):
+    now = time.time()
+    stale = now - 400
+    put_task(_mk_task(
+        'admission-wait-1',
+        content='', thinking='', events=[],
+        _t_last_event=stale,
+        _dispatch_heartbeat=stale,
+        created_at=stale,
+        _workspaceAdmission={'since': stale, 'depth': 1, 'claimCount': 1},
+    ))
+
+    assert _reap() == 0, 'a queued writer is waiting, not wedged'
+    t = _get('admission-wait-1')
+    assert t['status'] == 'running'
+    assert t['aborted'] is False
+
+
+def test_task_waiting_for_storage_ack_not_reaped(reaper_env, put_task):
+    """Parity: the pre-existing storage wait keeps the same exemption."""
+    now = time.time()
+    stale = now - 400
+    put_task(_mk_task(
+        'storage-wait-1',
+        _t_last_event=stale,
+        _dispatch_heartbeat=stale,
+        created_at=stale,
+        _storageWaits={'append': 1},
+    ))
+
+    assert _reap() == 0
+    assert _get('storage-wait-1')['status'] == 'running'
+
 def test_young_task_not_reaped(reaper_env, put_task):
     now = time.time()
     put_task(_mk_task(

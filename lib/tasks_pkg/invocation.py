@@ -12,6 +12,7 @@ from typing import Any
 import math
 import time
 from lib.log import clear_log_context, get_logger, set_req_id
+from lib.tasks_pkg.explained_wait import explained_wait
 
 logger = get_logger(__name__)
 
@@ -105,7 +106,7 @@ def invocation_abort_requested(task: dict) -> bool:
         task['_executionLimitReason'] = 'execution_deadline_exceeded'
         return _stop_internal_invocation(task, 'deadline')
     beacon = task.get('_invocationProgressBeacon')
-    if (beacon is not None and not task.get('_storageWaits')
+    if (beacon is not None and not explained_wait(task)
             and not beacon.is_making_progress(task.get('_invocationProgressKey') or task['id'])):
         return _stop_internal_invocation(task, 'stalled', beacon=beacon)
     deadline = task.get('_invocationDeadline')

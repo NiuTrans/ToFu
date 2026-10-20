@@ -328,6 +328,52 @@ def _holder_identity(cancel_event):
             'since': time.monotonic()}
 
 
+# A wait longer than this is invisible to every other subsystem: no process
+# exists, no output arrives, and the round still looks alive. Log it once, then
+# at a bounded interval so rotation cannot swallow a genuine 20-minute stall.
+_ADMISSION_NOTICE_SECONDS = 2.0
+_ADMISSION_NOTICE_INTERVAL_SECONDS = 60.0
+
+
+def _log_admission_wait(root, mode, active, entry, waited_s, waiter):
+    """Bounded diagnostic; never raises into admission or retains command text."""
+    try:
+        from lib.log import get_logger
+        get_logger(__name__).warning(
+            '[WorkspaceLease] wait %.0fs mode=%s root=%s waiter(pid=%s thread=%s '
+            'tool=%s task=%s conv=%s)%s',
+            waited_s, mode, root,
+            waiter.get('pid'), waiter.get('thread'), waiter.get('tool') or '-',
+            waiter.get('task') or '-', waiter.get('conversation') or '-',
+            _holder_summary(entry, active))
+    except Exception:
+        pass  # Diagnostics never decide admission.
+
+
+def _holder_summary(entry, active):
+    """Render the ACTUAL blockers under the caller's condition; '' if unknown."""
+    if entry is None:
+        return ''
+    if entry['writer_thread'] is not None:
+        owners = [(_WRITE, entry['writer_thread'])]
+    elif active == _READ:
+        owners = [(_READ, thread) for thread in entry['readers']]
+    elif entry['file_writers']:
+        owners = [(_FILE_BARRIER, thread) for thread in entry['file_writers']]
+    else:
+        owners = []
+    details = []
+    for key in owners[:3]:
+        holder = entry['holders'].get(key)
+        if holder is None:
+            continue
+        fields = [f'pid={holder["pid"]}', f'thread={holder["thread"]}',
+                  f'held_seconds={max(0.0, time.monotonic() - holder["since"]):.1f}']
+        fields.extend(f'{name}={holder[name]}' for name in ('tool', 'task', 'conversation')
+                      if holder[name])
+        details.append(', '.join(fields))
+    return (' [holder: ' + '; '.join(details) + ']') if details else ''
+
 def _busy(root, active, entry=None):
 
     domain = 'Workspace'
@@ -339,27 +385,9 @@ def _busy(root, active, entry=None):
         return WorkspaceBusyError(
             f'{domain} lease contention is active (holder type unknown): {root}')
     message = f'{domain} {active} is active: {root}'
-    if entry is not None:
-        # Called under the same condition as admission/release. Report actual
-        # blockers, not the waiting caller or an invented cross-process owner.
-        if entry['writer_thread'] is not None:
-            owners = [(_WRITE, entry['writer_thread'])]
-        elif active == _READ:
-            owners = [(_READ, thread) for thread in entry['readers']]
-        else:
-            owners = [(_FILE_BARRIER, thread) for thread in entry['file_writers']]
-        details = []
-        for key in owners[:3]:
-            holder = entry['holders'].get(key)
-            if holder is None:
-                continue
-            fields = [f'pid={holder["pid"]}', f'thread={holder["thread"]}',
-                      f'held_seconds={max(0.0, time.monotonic() - holder["since"]):.3f}']
-            fields.extend(f'{name}={holder[name]}' for name in ('tool', 'task', 'conversation')
-                          if holder[name])
-            details.append(', '.join(fields))
-        if details:
-            message += ' [holder: ' + '; '.join(details) + ']'
+    # Called under the same condition as admission/release. Report actual
+    # blockers, not the waiting caller or an invented cross-process owner.
+    message += _holder_summary(entry, active)
     return WorkspaceBusyError(message)
 
 
@@ -428,6 +456,10 @@ def _acquire_process_lock(common, root, deadline, cancel_event, mode):
         with _registry_lock:
             fd, fcntl = _open_lock(common, root)
             _active_descriptors.add(fd)
+        # Cross-process waits have no local holder entry: state that honestly
+        # rather than reporting a fabricated blocker.
+        waiter = _holder_identity(cancel_event)
+        waited_since = next_notice = None
         while True:
             _check_cancelled(root, cancel_event)
             try:
@@ -439,6 +471,14 @@ def _acquire_process_lock(common, root, deadline, cancel_event, mode):
                 remaining = _wait_remaining(deadline)
                 if remaining is not None and remaining <= 0:
                     raise _busy(root, _UNKNOWN)
+                now = time.monotonic()
+                if waited_since is None:
+                    waited_since = next_notice = now + _ADMISSION_NOTICE_SECONDS
+                elif now >= next_notice:
+                    next_notice = now + _ADMISSION_NOTICE_INTERVAL_SECONDS
+                    _log_admission_wait(root, mode, _UNKNOWN, None,
+                                        now - (waited_since - _ADMISSION_NOTICE_SECONDS),
+                                        waiter)
                 time.sleep(0.05 if remaining is None else min(0.05, remaining))
     except BaseException as error:
         if fd is not None:
@@ -484,6 +524,7 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
     waited_locally = False
     try:
         with entry['cond']:
+            waited_since = next_notice = None
             while True:
                 _check_cancelled(root, cancel_event)
                 # Even reentry mutates depths. Every logical admission is a
@@ -500,6 +541,14 @@ def _enter(path, mode, timeout, cancel_event, _identity=None, _binding=None,
                 if remaining is not None and remaining <= 0:
                     raise _busy(root, outcome, entry)
                 waited_locally = True
+                now = time.monotonic()
+                if waited_since is None:
+                    waited_since = next_notice = now + _ADMISSION_NOTICE_SECONDS
+                elif now >= next_notice:
+                    next_notice = now + _ADMISSION_NOTICE_INTERVAL_SECONDS
+                    _log_admission_wait(root, mode, outcome, entry,
+                                        now - (waited_since - _ADMISSION_NOTICE_SECONDS),
+                                        holder)
                 entry['cond'].wait(timeout=0.05 if remaining is None else min(0.05, remaining))
             # Fresh reservations are always validated after physical admission,
             # before publication/body. Existing-FD/reentry and local-wait paths
@@ -583,13 +632,58 @@ def _wait_remaining(deadline):
     return None if deadline is None else max(0.0, deadline - time.monotonic())
 
 
+def _waiting_task(cancel_event):
+    """The live task dict that owns this wait, or None for task-less callers."""
+    from .tool_admission import cancellation
+    for control in (cancel_event, cancellation()):
+        task = getattr(control, 'task', None)
+        if isinstance(task, dict):
+            return task
+    return None
+
+
+@contextlib.contextmanager
+def _publish_admission_wait(cancel_event):
+    """Mark a task as WAITING for admission for exactly the acquisition span.
+
+    The wait produces no process and no output, so every silence-based liveness
+    decision would otherwise read it as a wedge
+    (``lib.tasks_pkg.explained_wait`` owns that classification). Publishing it
+    here — the wait owner — covers every caller: commands, scoped file writes
+    and MCP preparation alike. A caller-side copy would only cover its own path.
+    """
+    from .tool_admission import WORKSPACE_ADMISSION_KEY
+    task = _waiting_task(cancel_event)
+    if task is None:
+        yield
+        return
+    previous = task.get(WORKSPACE_ADMISSION_KEY)
+    depth = 1
+    since = time.monotonic()
+    if isinstance(previous, dict) and previous.get('depth'):
+        depth = int(previous['depth']) + 1
+        since = previous.get('since', since)
+    # A pre-existing marker is not guaranteed to be a mapping; only presence
+    # matters, so an unreadable value must not fail admission itself.
+    base = previous if isinstance(previous, dict) else {}
+    task[WORKSPACE_ADMISSION_KEY] = {**base, 'since': since, 'depth': depth}
+    try:
+        yield
+    finally:
+        if previous is None:
+            task.pop(WORKSPACE_ADMISSION_KEY, None)
+        else:
+            task[WORKSPACE_ADMISSION_KEY] = previous
+
+
 @contextlib.contextmanager
 def _lease(path, mode, timeout, cancel_event, _identity=None, _binding=None,
            _validation_path=None):
     timeout = _validated_timeout(timeout)
     owner_pid = os.getpid()
-    entry, root, key, action = _enter(path, mode, timeout, cancel_event, _identity,
-                                     _binding, _validation_path)
+    with _publish_admission_wait(cancel_event):
+        entry, root, key, action = _enter(path, mode, timeout, cancel_event, _identity,
+                                         _binding, _validation_path)
     if entry is None:  # non-Git path: no-op
         yield
         return

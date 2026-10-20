@@ -735,8 +735,11 @@ def test_writer_wait_acquires_or_cancels_before_snapshot_and_spawn(
     assert not errors
     assert len(outcomes) == 1
     if cancel_source:
-        assert '[workspace-lease-cancelled]' in outcomes[0]
-        assert 'Command was not started' in outcomes[0]
+        # Owner cancellation is reported as an aborted command, exactly like
+        # the pre-start guard — never as a lease conflict the model could retry.
+        assert '[Command aborted by user]' in outcomes[0]
+        assert 'workspace-lease-cancelled' not in outcomes[0]
+        assert 'Command was not started' not in outcomes[0]
         assert phases == []
     else:
         assert '[exit code: 0]' in outcomes[0]

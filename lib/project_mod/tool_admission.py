@@ -11,6 +11,13 @@ import os
 
 _control = ContextVar('project_tool_admission', default=None)
 
+# Task marker published for the DURATION of a wait for workspace admission, by
+# the wait owner (``workspace_lease._publish_admission_wait``). A wait has no
+# process and no output, so silence-based liveness decisions must read it
+# instead of concluding the task is wedged; ``lib.tasks_pkg.explained_wait``
+# owns that classification and imports this constant, never the reverse.
+WORKSPACE_ADMISSION_KEY = '_workspaceAdmission'
+
 
 @dataclass(frozen=True)
 class RecordedCommandSource:

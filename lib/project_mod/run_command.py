@@ -1173,6 +1173,18 @@ def command_background_refusal(command):
     return None
 
 
+def _redirect_only_reader(segment, cwd):
+    """Prove a writer signal came only from a discarded output redirect.
+
+    Named output files are never exempt: they are real writes and keep their
+    existing FILE/TREE claim. The split helper is the shared owner, so a
+    heredoc header, ``>&2`` dup or ``2>/dev/null`` cannot fake the exemption.
+    """
+    from .command_analysis import command_segment_discardable_redirect_split
+    split = command_segment_discardable_redirect_split(segment)
+    return split is not None and not _segment_needs_command_writer(split[0], cwd)
+
+
 def _segment_needs_command_writer(segment, cwd):
     """Separate literal opaque executables from unsafe shell/utility shapes."""
 
@@ -1189,9 +1201,14 @@ def _segment_needs_command_writer(segment, cwd):
     if (os.name == 'posix' and not SHELL_PREFIX
             and _lease_free_git_segment(segment) == segment):
         return False
-    if (_command_checkout_mutation(_mask_quoted_literals(shell_source), cwd)
-            or _has_dynamic_shell_syntax(shell_source)):
+    if _command_checkout_mutation(_mask_quoted_literals(shell_source), cwd):
         return True
+    if _has_dynamic_shell_syntax(shell_source):
+        # ``2>/dev/null`` (or a descriptor dup) opens no file. It must not be
+        # the sole reason a proven reader escalates to a whole-checkout writer:
+        # measured 2026-10-20, ``ls -d x 2>/dev/null`` claimed the entire
+        # repository exclusively and waited 21 minutes behind another writer.
+        return not _redirect_only_reader(segment, cwd)
     try:
         words = list(command_segment_words(segment))
     except ValueError:
@@ -1509,6 +1526,7 @@ def command_write_lease_claims(base, command, *, _owned_formatter_paths=None,
     """
     from .command_analysis import (
         _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts, command_segment_words,
+        command_segment_discardable_redirect_split,
         command_segment_literal_targets, command_segment_write_scope_refusal,
     )
     from .git_command_scope import git_command_scopes
@@ -1603,6 +1621,12 @@ def command_write_lease_claims(base, command, *, _owned_formatter_paths=None,
             if (is_git and original is None and not SHELL_PREFIX and os.name == 'posix'
                     and _lease_free_git_segment(segment) == segment):
                 continue
+            if is_git and original is None and not SHELL_PREFIX and os.name == 'posix':
+                # ``git grep -n x 2>/dev/null``: the only unproven token is the
+                # discarded redirect, so the inspection keeps its exemption.
+                split = command_segment_discardable_redirect_split(segment)
+                if split is not None and _lease_free_git_segment(split[0]) == split[0]:
+                    continue
             if not is_git and not _segment_needs_command_writer(segment, cwd):
                 continue
             formatter = command_segment_formatter_writes(segment)
@@ -1714,6 +1738,10 @@ def _with_command_writer(function):
                               bound.get('runtime_context', control.get('runtime_context')))
         wait_timeout = admission_timeout()
         with ExitStack() as stack:
+            # The lease owner publishes the wait marker (it covers every
+            # acquisition path) and drops it before the command body: once
+            # admitted, the command owns a real process clock and ordinary
+            # handoff rules apply again.
             try:
                 stack.enter_context(workspace_claims_lease(claims,
                     timeout=wait_timeout, cancel_event=cancel,
@@ -1723,8 +1751,13 @@ def _with_command_writer(function):
                 if command_write_lease_claims(base, command) != claims:
                     return ('Error [workspace-target-changed]: Command targets changed during writer admission. '
                             'Re-read the workspace and reconcile; command was not started.')
-            except WorkspaceLeaseCancelled as error:
-                return f'Error [workspace-lease-cancelled]: {error}. Command was not started.'
+            except WorkspaceLeaseCancelled:
+                # This type means the OWNER cancelled admission; it is never
+                # lease contention. Report the same shape as the pre-start
+                # guard above, so a stopped turn does not advertise a lock
+                # conflict the model could try to work around.
+                return _format_run_output(command, '', '', -1,
+                                          timed_out=False, aborted=True)
             except WorkspaceLeaseNamespaceError as error:
                 return (f'Error [workspace-protected-namespace]: {error}. Command was not started. '
                         'The write scope overlaps internal lease storage; waiting will not resolve it. '
