@@ -165,6 +165,17 @@ Swarm unattended continuation uses durable `parent_cfg._swarmContinuationSource`
 
 ## Failure rules
 
+**Unavailable handler verdict.** Problem: the resolver's missing-handler branch
+returned error prose while ordinary settlement promoted the round to success.
+Decision: that branch emits the existing typed `tool_unavailable` category,
+stamps an error before presentation, and releases its runtime context even when
+an observer fails. No effect intent or handler execution is created. Direct
+executor and pipeline consumers retain one failed audit; recovery directs the
+model to the current available catalog and allows independent work. Alternatives
+rejected: inferring failure from arbitrary prose can misclassify tool data;
+leaving only a runtime-state flag lets canonical capture and model feedback
+disagree. Verify `tests/tasks_pkg/test_handler_runtime_failure.py`.
+
 
 Internal event-delivery failures are typed local failures, not provider failures. Primary, reactive, configured-fallback and pool-rescue calls propagate them without another model/key attempt; the fatal handler bypasses turn auto-retry. The error envelope classifies `EventDeliveryError` as `server_busy` (revocation or owner cancellation as `aborted`), reports `task-event-delivery` as its source, and retains the explicit first cause in technical detail without classifying provider-looking words in that cause. A later terminal publication or result persistence failure is logged but cannot replace the original fatal envelope. **Decision:** retain the original cause and use the existing settlement/recovery owner. **Alternative rejected:** retrying a provider or masking the first failure with a terminal-lane error cannot repair local durability. `status: rejected` means the tool did not execute; the public `rejection` descriptor carries its stable kind, tool, reason, and known retryability. `_rejected` and result-level `rejected` are compatibility aliases. The descriptor survives the round, tool events, cold Turn projection, and activity timeline. If it is the last terminal tool act, finalization emits a typed task error: `hallucinated` maps to `tool_not_available`; all other refusal kinds map to `tool_call_rejected` with original detail. Abort/interruption wins. Activity keeps status `skipped`, summary `blocked`/`unavailable`, and kind as `reasonCode`. In the transcript the tool row owns the rejection inline (badge + the full, unclipped reason, kind code appended when absent), so the conversation view model drops the timeline's `blocked`/`unavailable` row whenever the matching round carries the descriptor; a trimmed or absent round keeps the timeline row as the last visible record. Genuine failures follow the same rule: an error round owns its full tool content inline (no first-line/300-character clipping, line breaks rendered, no line clamp), so the view model drops the timeline's `failed` row — a log-policy-bounded excerpt — whenever the matching round renders the error lane; `execute_tools` gateway rows are exempt because they replay as child-validation rows, and a trimmed or absent round keeps the timeline row as the last visible record.
 
