@@ -465,13 +465,24 @@ def extract_html_text(html, max_chars, url=''):
             rendered = '\n'.join(rows)
             if rendered and re.sub(r'\s+', ' ', rendered) not in known:
                 supplemental.append(rendered)
+        # Article heuristics can flatten highlighted/list-nested code or remove
+        # blank lines. Whitespace is source evidence here, not dedup noise.
+        # Recover original DOM text using the same sanitized content boundary.
+        preserved_code = set()
+        for element in content_el.find_all('pre'):
+            value = element.get_text().replace('\r\n', '\n').replace('\r', '\n').strip('\n')
+            if value.strip() and value not in main_text and value not in preserved_code:
+                fence = '`' * max(3, max((len(run) + 1 for run in re.findall(r'`+', value)),
+                                        default=0))
+                supplemental.append(f'{fence}\n{value}\n{fence}')
+                preserved_code.add(value)
         # Documentation UIs often put exact identifiers inside copy buttons.
-        for element in content_el.select('pre, button'):
+        for element in content_el.find_all('button'):
             value = element.get_text(' ', strip=True)
             if value and re.sub(r'\s+', ' ', value) not in known:
                 supplemental.append(value)
         if supplemental:
-            main_text += '\n\n--- Additional source structures ---\n' + '\n'.join(supplemental)
+            main_text += '\n\n--- Additional source structures ---\n' + '\n\n'.join(supplemental)
 
     # ── Phase 3: Append link section (if we have links and main text) ──
     if links and main_text:
