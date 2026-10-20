@@ -12,11 +12,11 @@ import re
 from .command_analysis import (
     _ENV_ASSIGNMENT_GUARD_RE, _GIT_GUARD_GLOBAL_BARE_FLAGS,
     _GIT_GUARD_GLOBAL_VALUE_OPTS, _classify_git_invocation,
-    _git_worktree_add_destination, _mask_quoted_literals,
+    _git_worktree_add_destination, _mask_quoted_literals, git_worktree_lifecycle,
     _split_pipeline_spans, _unwrap_command_parts,
     command_segment_words, shell_source_has_expansion,
 )
-from .workspace_lease import _checkout_identity
+from .workspace_lease import _checkout_binding, _checkout_identity
 
 
 @dataclass(frozen=True)
@@ -31,12 +31,17 @@ class GitCommandScope:
     subcommand: str = ""
 
     lease_scopes: tuple[tuple[str, str], ...] = ()
+    # Lifecycle commands share metadata with the invoker but destroy only
+    # their tree operands, unless executable helpers/redirects widen effects.
+    presence_paths: tuple[str, ...] | None = None
 
     def writer_claims(self):
         return tuple(claim for claim in self.lease_scopes
                      if claim[1] not in self.future_paths)
 
     def presence_roots(self):
+        if self.presence_paths is not None:
+            return self.presence_paths
         roots = set()
         for path in self.paths:
             identity = None if path in self.future_paths else _checkout_identity(path)
@@ -206,18 +211,26 @@ def _git_executable_helpers(paths, configs, environment, subcommand):
     if home:
         configuration.update({os.path.join(home, '.gitconfig'), os.path.join(
             environment.get('XDG_CONFIG_HOME') or os.path.join(home, '.config'), 'git', 'config')})
+    worktree_configuration = set()
     for path in paths:
-        identity = _checkout_identity(path)
-        if identity:
-            common = os.fspath(identity[1])
+        binding = _checkout_binding(path)
+        if binding:
+            common = os.fspath(binding[1])
             configuration.add(os.path.join(common, 'config'))
+            # extensions.worktreeConfig is a configuration source, not a
+            # callback. Inspect that source, including the linked gitdir.
+            # Reading it even when disabled is conservative and avoids a
+            # second parser for Git boolean precedence.
+            worktree_configuration.add(os.path.join(binding[2], 'config.worktree'))
             if not hooks_disabled and any(os.access(os.path.join(common, 'hooks', hook), os.X_OK)
                                           for hook in hook_names):
                 return True
-    helper_keys = 'hookspath|fsmonitor|gpgsign|program|command|clean|smudge|process|path|worktreeconfig'
+    helper_keys = 'hookspath|fsmonitor|gpgsign|program|command|clean|smudge|process|path'
     if subcommand == 'pull':
         helper_keys += '|helper'  # Credential callbacks are not invoked by local commit/reset.
-    return any(_git_config_has_helpers(filename, helper_keys) for filename in configuration)
+    return (any(_git_config_has_helpers(filename, helper_keys) for filename in configuration)
+            or any(_git_config_has_helpers(filename, helper_keys + '|worktree|bare')
+                   for filename in worktree_configuration))
 
 
 def _git_tree_claims(paths):
@@ -275,6 +288,17 @@ def git_metadata_mutation_mode(subcommand, args):
     return None
 
 
+def _worktree_lifecycle_paths(lifecycle, cwd):
+    """Physical operands, including Git's move-into-existing-directory rule."""
+    source = _literal_path(cwd, lifecycle.paths[0])
+    if lifecycle.operation == 'remove':
+        return (source,)
+    destination = _literal_path(cwd, lifecycle.paths[1])
+    if os.path.isdir(destination):
+        destination = _literal_path(destination, os.path.basename(source))
+    return source, destination
+
+
 def _git_lease_effects(words, cwd, subcommand, position, paths, ambiguous, environment):
     """Lease effects are separate from destructive-operation approval risk."""
     args = words[position + 1:]
@@ -282,30 +306,25 @@ def _git_lease_effects(words, cwd, subcommand, position, paths, ambiguous, envir
     configs = _git_configs(words, position)
     unresolved_include = _git_inline_include(configs)
     if subcommand == 'worktree' and args[:1] in (['remove'], ['move']):
-        operands = []
-        options_done = False
-        for value in args[1:]:
-            if value == '--' and not options_done:
-                options_done = True
-            elif not options_done and value.startswith('-'):
-                if value not in {'-f', '--force'}:
-                    raise ValueError('Unresolved Git worktree lifecycle option')
-            else:
-                operands.append(value)
-        required = 1 if args[0] == 'remove' else 2
-        if len(operands) != required or any(value.startswith('~') for value in operands):
+        lifecycle = git_worktree_lifecycle(args)
+        if lifecycle is None:
             raise ValueError('Unresolved Git worktree lifecycle operands')
-        source = _literal_path(cwd, operands[0])
+        operands = lifecycle.paths
+        targets = _worktree_lifecycle_paths(lifecycle, cwd)
+        source = targets[0]
         if not os.path.isabs(operands[0]):
             owner = _checkout_identity(source)
             invocation = _checkout_identity(cwd)
             if (ambiguous or not owner or owner[0] != source or not invocation
                     or owner[1] != invocation[1]):
                 raise ValueError('Unresolved Git worktree lifecycle source; use an explicit absolute path')
-        helper_effect = ambiguous or _git_executable_helpers(paths, configs, environment, subcommand)
+        # Removal can inspect the target's status/configuration. Its own
+        # worktree config must not hide a callback from the invoking checkout.
+        helper_effect = ambiguous or _git_executable_helpers(
+            paths | {source}, configs, environment, subcommand)
         return ((_git_tree_claims(paths) if helper_effect else
                  {('metadata', path) for path in paths})
-                | {('tree', _literal_path(cwd, value)) for value in operands})
+                | {('tree', target) for target in targets})
     if ambiguous or unresolved_include:
         return _git_tree_claims(paths)
 
@@ -478,6 +497,8 @@ def git_command_scopes(command, base, *, environment, strict=True):
             creates_checkout = False
             execution_cwds = set()
             lease_scopes = set()
+            presence_paths = set()
+            lifecycle_presence = False
             for cwd in cwds:
                 try:
                     resolved, destination, ambiguous, execution_cwd, subcommand, subcommand_index = _git_targets(words, cwd, segment_environment)
@@ -515,10 +536,26 @@ def git_command_scopes(command, base, *, environment, strict=True):
                     words, execution_cwd, subcommand, subcommand_index, resolved, ambiguous, segment_environment)
                 lease_scopes.update(effects)
                 paths.update(path for kind, path in effects if kind == 'tree')
+                lifecycle = (git_worktree_lifecycle(words[subcommand_index + 1:])
+                             if subcommand == 'worktree' else None)
+                # Keep metadata exclusion without treating activity at its
+                # owner as evidence that the retired tree is in use. Other
+                # verbs (e.g. reset --soft) still protect ref/index consumers.
+                if lifecycle is not None:
+                    lifecycle_presence = True
+                    targets = _worktree_lifecycle_paths(lifecycle, execution_cwd)
+                    for kind, path in effects:
+                        if kind != 'tree':
+                            continue
+                        # A missing lifecycle target is that exact tree, not
+                        # the containing checkout discovered by walking up.
+                        identity = None if path in targets else _checkout_identity(path)
+                        presence_paths.add(identity[0] if identity else path)
             scopes.append(GitCommandScope(
                 start, end, _classify_git_invocation(words[1:]),
                 tuple(sorted(paths)), tuple(sorted(future_paths)), creates_checkout,
-                tuple(sorted(execution_cwds)), subcommand, tuple(sorted(lease_scopes))))
+                tuple(sorted(execution_cwds)), subcommand, tuple(sorted(lease_scopes)),
+                tuple(sorted(presence_paths)) if lifecycle_presence else None))
         elif words:
             # Opaque code cannot attest that a future .git identity survived.
             future_checkouts.clear()

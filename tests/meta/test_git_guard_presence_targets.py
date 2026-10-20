@@ -147,6 +147,65 @@ def test_other_checkout_peer_does_not_block_actual_solo_target(checkouts, harnes
     assert harness['receipts'] == ['agent_git_guard_solo']
 
 
+def test_worktree_removal_checks_target_instead_of_invoking_project(checkouts, harness):
+    dispatch, target = checkouts
+    harness['peers_at'].add(str(dispatch))
+    stopped, _, _ = _invoke(dispatch, 'git worktree remove ' + shlex.quote(str(target)))
+    assert stopped is False
+    assert harness['roots'] == [str(target)]
+    assert harness['receipts'] == ['agent_git_guard_solo']
+
+
+@pytest.mark.parametrize('force', ['', '--force '])
+def test_worktree_removal_still_refuses_active_target(checkouts, harness, force):
+    dispatch, target = checkouts
+    harness['peers_at'].add(str(target))
+    stopped, results, _ = _invoke(
+        dispatch, 'git worktree remove ' + force + shlex.quote(str(target)))
+    assert stopped is True
+    assert harness['roots'] == [str(target)]
+    assert f'Checkout root: {target}' in results['call'][0]
+    assert f'Checkout root: {dispatch}' not in results['call'][0]
+    assert 'worktree_retirement' in results['call'][0]
+    assert not harness['receipts']
+
+
+def test_force_cleanup_retains_review_without_parent_presence_refusal(
+        checkouts, harness, monkeypatch):
+    dispatch, target = checkouts
+    harness['peers_at'].add(str(dispatch))
+    reviews = []
+    monkeypatch.setattr(pipeline, '_handle_approval', lambda *args, **kwargs:
+                        reviews.append(kwargs) or (True, ''))
+    stopped, _, _ = _invoke(
+        dispatch, 'git worktree remove --force ' + shlex.quote(str(target)))
+    assert stopped is False
+    assert harness['roots'] == [str(target)]
+    assert reviews
+    assert not harness['receipts']
+    assert not harness['settles']  # No fabricated active-project conflict.
+
+
+def test_cleanup_chain_keeps_other_destructive_checkout_checks(checkouts, harness):
+    dispatch, target = checkouts
+    harness['peers_at'].add(str(dispatch))
+    stopped, results, _ = _invoke(dispatch,
+        'git worktree remove ' + shlex.quote(str(target)) + ' && git reset --hard')
+    assert stopped is True
+    assert set(harness['roots']) == {str(dispatch), str(target)}
+    assert f'checkout root: {dispatch}' in results['call'][0]
+
+
+def test_worktree_move_checks_both_operands(checkouts, harness, tmp_path):
+    dispatch, target = checkouts
+    destination = tmp_path / 'destination'
+    harness['peers_at'].update({str(dispatch), str(destination)})
+    stopped, _, _ = _invoke(dispatch,
+        'git worktree move ' + shlex.quote(str(target)) + ' ' + shlex.quote(str(destination)))
+    assert stopped is True
+    assert set(harness['roots']) == {str(target), str(destination)}
+
+
 def test_each_destructive_git_target_is_checked(checkouts, harness):
     dispatch, target = checkouts
     harness['peers_at'].add(str(target))

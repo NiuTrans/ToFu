@@ -2556,6 +2556,46 @@ def _git_worktree_add_destination(args):
     return rest[0]
 
 
+GitWorktreeLifecycle = namedtuple('GitWorktreeLifecycle', 'operation paths forced')
+
+
+def git_worktree_lifecycle(args):
+    """Parse native remove/move once for classification, targets and review.
+
+    This is syntax evidence only. The target resolver validates relative
+    operands against the invoking checkout; force never proves ownership or
+    that discarded files, commits and worktree locks are expendable.
+    """
+    if not args or args[0] not in ('remove', 'move'):
+        return None
+    operands = []
+    options_done = False
+    forced = False
+    for value in args[1:]:
+        if value == '--' and not options_done:
+            options_done = True
+        elif not options_done and value.startswith('-'):
+            if value not in ('-f', '--force'):
+                return None
+            forced = True
+        else:
+            operands.append(value)
+    required = 1 if args[0] == 'remove' else 2
+    if len(operands) != required:
+        return None
+    if any(not value or value.startswith('~') for value in operands):
+        return None
+    return GitWorktreeLifecycle(args[0], tuple(operands), forced)
+
+
+def _git_worktree_lifecycle_targets(args):
+    """Classify only literal absolute targets; relative paths need cwd evidence."""
+    lifecycle = git_worktree_lifecycle(args)
+    if lifecycle and all(os.path.isabs(path) for path in lifecycle.paths):
+        return lifecycle.paths
+    return None
+
+
 GitIntegrationEvidence = namedtuple(
     'GitIntegrationEvidence', 'risky_options unknown_options external_options')
 
@@ -2726,6 +2766,8 @@ def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
             return 'readonly'
         if _git_worktree_add_destination(rest) is not None:
             return 'safe_write'
+        if _git_worktree_lifecycle_targets(rest) is not None:
+            return 'tree_destroying'
         return None
     if sub in {'merge', 'cherry-pick', 'revert'}:
         return _classify_git_integration(

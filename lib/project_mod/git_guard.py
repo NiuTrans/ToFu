@@ -6,10 +6,12 @@ In a shared canonical checkout, one conversation's tree-destroying Git command
 (``checkout``, ``reset --hard``, ``stash``, …) rewrites the working tree under
 every OTHER active conversation — the bytes may be recoverable, the victims'
 in-context assumptions are not. The guard moves the decision from an
-uninformed human approval to the executing agent: with no active peer the
-command runs with an automatic receipt; with active peers it is refused with
+uninformed human approval to the executing agent: eligible commands with no
+active peer run with an automatic receipt; with active peers they are refused with
 a tool-result message that names the peers and asks the executor to wait or
 use a separately authorized isolated checkout. A nonce never overrides peers.
+Forced worktree cleanup retains explicit review: absent presence establishes
+neither task ownership nor permission to discard dirty files or worktree locks.
 
 This module owns ONLY:
   * the guard enable switch and the classification re-export (pure logic
@@ -49,6 +51,7 @@ from lib.project_mod.command_analysis import (
 
     git_command_words,
     git_integration_option_evidence,
+    git_worktree_lifecycle,
     _shell_words,
     _split_pipeline,
     _unwrap_command_parts,
@@ -87,11 +90,29 @@ def classify(command: str) -> str | None:
 
 
 def automatic_receipt_eligible(command: str) -> bool:
-    """Risk presence checks do not authorize unknown or opaque shell code."""
+    """Presence absence proves neither opaque code nor forced cleanup safe."""
     if not _ENABLED:
         return False
     try:
-        return _git_guard_classify(command, require_known_segments=True) is not None
+        if _git_guard_classify(command, require_known_segments=True) is None:
+            return False
+        for segment in _split_pipeline(command):
+            words = [word.text for word in _shell_words(segment)]
+            while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+                words.pop(0)
+            words = git_command_words(words)
+            if not words or os.path.basename(words[0]) != 'git':
+                continue
+            parsed = git_invocation_parts(words[1:])
+            if parsed and parsed[0] == 'worktree':
+                lifecycle = git_worktree_lifecycle(parsed[1])
+                if lifecycle is not None and lifecycle.forced:
+                    # A force flag bypasses native dirty/locked-tree checks.
+                    # No-presence is not task ownership or content review.
+                    # Retain the existing explicit approval authority; do not
+                    # add a path whitelist or a racy pre-approval status probe.
+                    return False
+        return True
     except Exception as exc:
         logger.debug('[GitGuard] receipt parse failed, falling back to gate: %s', exc)
         return False
@@ -337,6 +358,13 @@ def _operation_diagnostic(verb: str, args: list[str]) -> tuple[str, list[str], s
     """Annotation of a classified mutation, never execution authority."""
     from lib.project_mod.git_command_scope import git_metadata_mutation_mode
     metadata_mode = git_metadata_mutation_mode(verb, args)
+    if verb == 'worktree':
+        lifecycle = git_worktree_lifecycle(args)
+        if lifecycle is not None:
+            return ('forced_worktree_retirement' if lifecycle.forced else 'worktree_retirement',
+                    ['target_worktree', 'worktree_metadata'],
+                    'verify_target_ownership_and_discarded_content' if lifecycle.forced
+                    else 'inspect_target_activity')
     if verb == 'reset':
         if metadata_mode == 'soft_reset':
             return 'head_rewrite', ['refs', 'operation_state'], 'inspect_head_and_task_ownership'

@@ -404,11 +404,57 @@ def test_unknown_apply_options_keep_risk_without_granting_receipt(command):
     ('add -B existing .worktrees/new HEAD', None),
     ('add --force -b new .worktrees/new HEAD', None),
     ('add -b new .worktrees/new HEAD --force', None),
-    ('remove --force .worktrees/new', None),
+    # remove/move on a literal absolute path: Git itself refuses the main
+    # worktree and a dirty/locked target, so this is tree_destroying (solo
+    # admissible) rather than unknown. Relative/~ operands stay unknown — the
+    # classifier cannot see the invoking checkout to resolve them, and the
+    # lease layer enforces the same absolute-path requirement.
+    ('remove /tmp/wt-a', 'tree_destroying'),
+    ('remove --force /tmp/wt-a', 'tree_destroying'),
+    ('remove /tmp/wt-a --force', 'tree_destroying'),
+    ('remove -f /tmp/wt-a', 'tree_destroying'),
+    ('move /tmp/wt-a /tmp/wt-b', 'tree_destroying'),
+    ('move --force /tmp/wt-a /tmp/wt-b', 'tree_destroying'),
+    ('remove --force .worktrees/new', None),   # relative source: unresolved root
+    ('remove ../wt-rel', None),                 # relative source
+    ('remove ~/wt', None),                      # tilde operand
+    ('remove --orphan /tmp/wt-a', None),        # unknown option
+    ('remove --reason x /tmp/wt-a', None),      # unknown option
+    ('remove /tmp/wt-a /tmp/wt-b', None),       # remove takes one operand
+    ('move /tmp/wt-a', None),                   # move takes two operands
     ('prune', None),
 ])
 def test_worktree_parameter_sensitive_classification(args, expected):
     assert _git_guard_classify('/usr/bin/git worktree ' + args) == expected
+
+
+def test_worktree_remove_chain_no_longer_unknown():
+    # The repo's mandated isolated-worktree cleanup shape: remove the temp
+    # worktree, force-delete its branch, list survivors. Previously
+    # ``worktree remove`` was unclassified (None -> unknown), which forced the
+    # whole chain to the human approval gate even though every other segment
+    # is known. Now every git segment is classified, so the chain is a clean
+    # tree_destroying verdict: solo-admissible, and eligible for the
+    # merged-branch downgrade in git_guard.force_delete_targets_merged.
+    command = ('cd /repo && git worktree remove --force /tmp/wt-x'
+               ' && git branch -D fix/x && git worktree list | grep wt'
+               ' || echo GONE')
+    assert _git_guard_classify(command) == 'tree_destroying'
+    # The compound with shell cd is not auto-receipt-eligible (cd is not a
+    # provably read-only utility), but that is a receipt concern, not the
+    # unknown-segment refusal that previously blocked it.
+    assert _git_guard_classify(command, require_known_segments=True) is None
+
+
+def test_worktree_remove_force_has_known_risk_but_still_requires_review():
+    # Syntax classification does not grant forced cleanup authority. The
+    # guard must retain review even when the entire chain is understood.
+    command = ('git worktree remove --force /tmp/wt-x'
+               ' && git branch -D fix/x && git worktree list | grep wt'
+               ' || echo GONE')
+    assert _git_guard_classify(command, require_known_segments=True) == 'tree_destroying'
+    from lib.project_mod.git_guard import automatic_receipt_eligible
+    assert automatic_receipt_eligible(command) is False
 
 
 def test_worktree_add_and_cherry_pick_uses_ordinary_write_policy():

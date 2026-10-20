@@ -102,6 +102,52 @@ shared parent. Existing destinations resolve normally; subsequent destructive
 operations on the parent still check parent presence. Git's own destination/ref
 checks and cooperative writer admission remain in force.
 
+Problem: isolated-worktree cleanup was first unclassified, then inherited
+presence from the invoking checkout merely because it shares Git metadata.
+An unrelated conversation generating in the main checkout could veto removal
+of an idle verification tree. Decision: literal absolute-path `worktree
+remove|move` remains `tree_destroying`, with presence derived from its actual
+tree effects. Removal checks the target; movement checks the source and actual
+destination, including Git's basename append when moving into an existing
+directory. Missing destinations retain their own identity instead of inheriting
+presence from a containing checkout.
+Shared Git metadata still takes its existing exclusive lease. Main-checkout
+source edits can proceed while an unrelated tree is retired; target-file
+writers and shared Git metadata mutations still exclude cleanup. Configured
+helpers or unresolved redirects retain conservative source-tree admission
+and presence. Each other destructive segment retains its own presence roots.
+
+The shared `command_analysis.git_worktree_lifecycle` parser owns syntax for
+classification, effects and diagnostics. Relative operands retain the existing
+approval gate; execution resolves them only with proven same-repository source
+identity. `~`, unknown options and missing/extra operands remain unresolved.
+Diagnostics identify worktree retirement and target/administrative effects,
+rather than suggesting the invoking checkout's files/index will be reset.
+
+`--force`/`-f` bypasses Git's dirty/locked-target protection, so solo presence
+never mints an automatic cleanup receipt. Force keeps the existing explicit
+approval review for target ownership, active users/commands, retained commits
+and discarded tracked/untracked/ignored content. This applies even to `/tmp`,
+known virtualenv links, repeated force flags and otherwise ordinary chains.
+Native Git refuses dirty/locked/main-tree removal without force. Neither a
+clean status nor absent presence proves task ownership or external-process
+quiescence. Existing execution/task ownership and cooperative writer leases
+remain independent; opaque tests/builds still provide no stable-read promise.
+No cleanup nonce, persisted ownership registry or pre-approval status snapshot
+is introduced. Alternatives rejected: allowing every force cleanup, a `/tmp`
+whitelist, or treating project-wide presence as a writer lock.
+Specifications: `test_worktree_cleanup_admission.py`,
+`test_git_guard_presence_targets.py`, `test_command_analysis_git_guard.py`.
+
+Concurrency evidence: private real-Git tests complete removal/movement while
+another thread holds a main-source file lease, refuse under a target-file or
+common-metadata lease, and fence a target-status callback writing main-source
+bytes. A 100-call local FUSE scope-resolution sample measured median 7.6 ms
+before / 11.4 ms with target configuration inspection (p95 21.8 / 30.6 ms).
+Resolution starts no subprocess and retains no cache, worker or registry;
+the extra metadata reads preserve callback evidence while removing unrelated
+source-tree exclusion. These host-dependent timings are not latency limits.
+
 `branch -d`/`--delete` is `safe_write` because Git itself refuses the delete
 when the branch is unmerged (against HEAD or its upstream) or checked out in
 any worktree — a successful plain delete can neither orphan commits nor break
@@ -224,7 +270,11 @@ Decision: additive `worktree add -b` or `--detach` takes source Git metadata
 admission plus the actual destination tree, not source checkout ownership.
 The destination remains fenced throughout success-dependent follow-up commands:
 Git's own ref lockfiles do not exclude raw file edits after creation. Configured
-helpers add conservative source-tree admission. A nonexistent destination is
+helpers add conservative source-tree admission. `extensions.worktreeConfig`
+alone is not helper evidence: admission also inspects `config.worktree` in
+each relevant Git directory (including linked targets). Includes, executable
+settings, redirects and unreadable/unsupported configuration stay conservative.
+A nonexistent destination is
 recognized as a future checkout only across success-dependent `&&` segments.
 Existing destinations and `;`, `||` or pipeline control resolve normally.
 Git writer admission follows only global `-C` hops before the subcommand and
