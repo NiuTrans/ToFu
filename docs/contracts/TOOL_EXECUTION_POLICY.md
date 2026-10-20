@@ -185,6 +185,29 @@ redispatch of the same gateway occurrence may reuse its receipt; changed calls
 execute, and a cached failure retains its failure verdict. The task-local table
 evicts oldest entries beyond 256.
 
+**Nonretryable batch failures.** Problem: a generic `partial_failure` wrapper
+hid explicit child error classifications from the shared failure breaker.
+Decision: a nonempty batch whose children all settled as error/rejected with
+typed `retryable: false` errors publishes `tool_batch_failed` through the
+existing error envelope. The normal compact receipt view preserves each
+child's code and recovery advice; original canonical children remain available.
+The unchanged operation participates in the existing bounded failure streak,
+while corrected arguments or independent work remain possible. Success,
+retryable, untyped, delegated and aborted children prevent this aggregation.
+Alternatives rejected: treating any failed child as a terminal batch would
+stop useful mixed work; recursively interpreting arbitrary JSON would turn
+source documents into execution policy. No child is re-executed to classify
+its result. For this typed batch failure, shared operation fingerprints omit
+only `calls[].call_id`, the gateway's correlation field; child order and
+business arguments (including an argument named `call_id`) remain significant.
+Otherwise a new response ID would disguise an unchanged failed operation.
+Ordered child codes live in `items[0].failureCodes` and participate in that
+fingerprint, so a newly observed failure cause starts a new recovery attempt.
+Missing, malformed or incomplete cause identity fails open instead of proving
+an unchanged failure; the outer error and child recovery advice still apply.
+Verify `test_gateway_failure_recovery.py` with root/native progress,
+delivery-budget and mixed-result neighbors.
+
 Call IDs are correlation tokens, never conversation- or process-global
 execution identities. Fresh assistant batches repair blank or recycled IDs
 before history is committed. Each dispatch indexes earlier/enclosing IDs once,

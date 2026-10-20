@@ -1131,6 +1131,30 @@ def _execute_program(
         project_program_run(task, run, llm_round=llm_round, terminal=True)
 
 
+def _nonretryable_batch_error(results):
+    """Classify only a nonempty batch of explicit settled terminal failures."""
+    from dataclasses import replace
+    from lib.tools.result_envelope import tool_result_error, typed_tool_error
+
+    if not results:
+        return None
+    codes = []
+    for result in results:
+        if result.get('status') not in ('error', 'rejected'):
+            return None
+        error = tool_result_error(result.get('error'))
+        if error is None or error.retryable:
+            return None
+        codes.append(error.code)
+    failure = typed_tool_error(
+        'tool_batch_failed', retryable=False,
+        message='Every child in this batch failed and cannot be retried unchanged.',
+        next_action=(
+            'Inspect each child error and use corrected arguments or another authorized tool. '
+            'Do not replay the unchanged batch or uncertain effects; independent work may continue.'))
+    return replace(failure, items=({'failureCodes': codes},))
+
+
 @tool_registry.handler(EXECUTE_PROGRAM_NAME, category='tools',
                        description='Execute JavaScript over task tool data')
 def handle_execute_program(
@@ -1282,6 +1306,20 @@ def handle_execute_tools(
             failure = replace(failure, items=(diagnostics,)).with_visible_bytes()
             content = TrustedResultText(failure.to_envelope_text(),
                                         canonical=content.canonical, envelope=True)
+        elif program is None and payload['status'] == 'partial_failure':
+            failure = _nonretryable_batch_error(payload['results'])
+            if failure is not None:
+                # Keep exact child evidence behind the same canonical result.
+                # Reuse the ordinary model view instead of echoing receipt
+                # transport controls inside this typed recovery envelope.
+                from dataclasses import replace
+                from lib.tools.result_surfaces import project_model_source
+                from lib.tools.result_value import TrustedResultText
+                failure = replace(failure, summary=project_model_source(
+                    EXECUTE_TOOLS_NAME, content)).with_visible_bytes()
+                content = TrustedResultText(
+                    failure.to_envelope_text(), canonical=content.canonical,
+                    envelope=True)
         # A mixed batch still exposes each successful child in the payload, but
         # its outer settlement is a failure verdict. Never paint a failed child
         # batch as a green/done gateway round merely because some work landed.
