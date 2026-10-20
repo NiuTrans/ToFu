@@ -359,7 +359,7 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
                           artifact_ref: str, truncated: bool, raw_bytes: int,
                           observed_at_ms: int, world_version: str,
                           evidence_id: str, model: str,
-                          recovery=None, error=None,
+                          recovery=None, error=None, failed_execution=False,
                           artifact_content: str = "",
                           token_budget: int = TOOL_RESULT_V2_MAX_TOKENS) -> str:
     from lib.tools.result_envelope import ToolResultEnvelopeV2
@@ -373,7 +373,8 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
     recovery_marker = (
         (_ARTIFACT_RESUME_MARKER if prefix_resumable
          else _ARTIFACT_CONTINUATION_MARKER) if artifact_ref
-        else _NARROWER_QUERY_MARKER if recovery is not None
+        else _NARROWER_QUERY_MARKER
+        if recovery is not None and error is None and not failed_execution
         else _UNAVAILABLE_RESULT_MARKER)
 
     def _resume_cursor(candidate_summary: str) -> str:
@@ -425,7 +426,8 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
     truncated = truncated or fitted_summary != summary
     for item in items:
         candidate = _render(
-            fitted_summary, [*accepted, item], truncated)
+            "" if error is not None else fitted_summary,
+            [*accepted, item], truncated)
         if _model_result_tokens(candidate, model) > token_budget:
             truncated = True
             break
@@ -442,7 +444,14 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
     remaining_items = list(accepted)
     while True:
         low, high = 0, len(summary)
+        # Typed metadata and compact error items describe the failed operation.
+        # Prefer them to optional diagnostic prose, including a repeated marker
+        # when the explicit truncated flag already reports the clipped view.
         best_visible = ""
+        if error is not None:
+            metadata_only = _render("", remaining_items, True)
+            if _model_result_tokens(metadata_only, model) <= token_budget:
+                best_visible = metadata_only
         while low <= high:
             middle = (low + high) // 2
             candidate_summary = (
@@ -478,6 +487,8 @@ def _materialize_file_read_envelope(
     model: str,
     max_preview_chars: int | None = None,
     recovery=None,
+    error=None,
+    failed_execution=False,
     token_budget: int = TOOL_RESULT_V2_MAX_TOKENS,
 ) -> str:
     """Fit the file preview window, then share preview space max-min fairly.
@@ -543,6 +554,7 @@ def _materialize_file_read_envelope(
             world_version=world_version,
             evidence_id=evidence_id,
             recovery=recovery,
+            error=error,
         ).with_visible_bytes()
 
     # Identity/status is non-negotiable. Progressive fallbacks only remove
@@ -557,7 +569,10 @@ def _materialize_file_read_envelope(
     if _result_tokens(minimal.to_model_text(), model) > token_budget:
         # Defensive last form for malformed non-schema callers. It still keeps
         # one identity/status row per preview item instead of first-file bias.
-        fitted_summary = "Batch read result; re-read named files as needed."
+        fitted_summary = (
+            "File diagnostics reduced; follow the original error's recovery advice."
+            if error is not None or failed_execution else
+            "Batch read result; re-read named files as needed.")
         minimal = _render(0, path_limit=24, include_details=False)
 
     maximum_source_preview = max(
@@ -992,7 +1007,12 @@ def enforce_round_aggregate_budget_v2(
     token_budget: int | None = None,
     require_retention: bool = False,
 ) -> dict[str, tuple[str, str, str]]:
-    """Bound a batch; mandatory admission may require lossless retention first."""
+    """Reduce a batch without growing facts or changing execution outcomes.
+
+    Mandatory admission may require lossless retention first. Irreducible facts
+    remain for the caller's complete-prompt admission rather than being inflated
+    with recovery hints or falsely reported as fitting.
+    """
     limit = (ROUND_TOOL_RESULT_V2_MAX_TOKENS if token_budget is None
              else max(1, int(token_budget)))
     total = sum(_model_result_tokens(content, model)
@@ -1016,11 +1036,24 @@ def enforce_round_aggregate_budget_v2(
             value = {}
         if not (isinstance(content, TrustedResultText) and content.envelope):
             value = {}  # Application JSON has no recovery/identity authority.
+        from lib.tools.result_envelope import tool_result_error
+        retained_error = tool_result_error(value)
+        failed_execution = isinstance(value, dict) and (
+            value.get("status") == "error"
+            or value.get("executionStatus") not in (None, "ok", "success"))
         declared = ((recovery_by_call_id or {}).get(tc_id) or {})
         existing_recovery = (value.get("recovery")
                              if isinstance(value, dict) else None)
         if not isinstance(existing_recovery, Mapping):
             existing_recovery = {}
+        supplied_error_recovery = None
+        if failed_execution and existing_recovery:
+            from lib.tools.result_envelope import ToolResultRecoveryV2
+            try:
+                supplied_error_recovery = ToolResultRecoveryV2(**existing_recovery)
+            except (TypeError, ValueError):
+                # An unknown producer recovery record cannot be reinterpreted.
+                continue
         recovery_policy = _normalized_recovery_policy(
             declared.get("policy") or (
                 "source" if existing_recovery.get("kind") == "source"
@@ -1040,8 +1073,11 @@ def enforce_round_aggregate_budget_v2(
         if require_retention and not artifact_ref:
             # Unconsumed evidence cannot be replaced by an unavailable preview.
             continue
-        recovery = (_source_recovery(tool_name, source_arguments)
-                    if recovery_policy == "source" else None)
+        # A declared source policy is not a new retry decision for a failed
+        # execution. Keep producer advice; absent classification proves no retry.
+        recovery = supplied_error_recovery
+        if recovery_policy == "source" and not failed_execution:
+            recovery = _source_recovery(tool_name, source_arguments)
         evidence_id = (str(value.get("evidenceId") or "")
                        if isinstance(value, dict) else "")
         if not evidence_id:
@@ -1057,7 +1093,7 @@ def enforce_round_aggregate_budget_v2(
             source_freshness.get("observedAtMs") or 0)
         source_world_version = str(
             source_freshness.get("worldVersion") or "")
-        if recovery is not None:
+        if recovery is not None and not failed_execution:
             reduced_summary = (
                 f"{tool_name} result exceeded the shared round budget; "
                 f"rerun {tool_name} with a narrower query or range for "
@@ -1074,15 +1110,20 @@ def enforce_round_aggregate_budget_v2(
                               if isinstance(value, dict) else "")
             preview = _fit_summary(
                 source_summary or content, token_budget=512, model=model,
-                marker=_NARROWER_QUERY_MARKER)
+                marker=_UNAVAILABLE_RESULT_MARKER)
             if recovery_policy == "none":
                 reduced_summary = (
                     "Result reduced by the shared round budget; this tool "
                     "declares no overflow recovery.\n" + preview)
+            elif recovery_policy == "source":
+                reduced_summary = (
+                    "Diagnostic reduced by the shared round budget; "
+                    "follow the original error's recovery advice.\n" + preview)
             else:
                 reduced_summary = (
                     "Full aggregate result unavailable because artifact "
-                    "persistence failed; rerun with a narrower query.\n"
+                    "persistence failed; inspect the prior outcome before "
+                    "deciding whether to repeat the operation.\n"
                     + preview
                 )
         source_items = (value.get("items")
@@ -1091,13 +1132,20 @@ def enforce_round_aggregate_budget_v2(
             is_file_read_projection,
             normalize_file_read_projection_items,
         )
-        if (recovery_policy == "source" and tool_name == "read_files"
+        if (not failed_execution and recovery_policy == "source"
+                and tool_name == "read_files"
                 and not is_file_read_projection(source_items)):
             source_items = normalize_file_read_projection_items(
                 None, source_arguments)
+        # Count the final typed failure/items inside the same remaining budget.
+        # Required metadata may be irreducible; adoption below uses its actual
+        # model projection rather than claiming an unattainable reduction.
+        result_budget = min(
+            TOOL_RESULT_V2_MAX_TOKENS, max(1, limit - (total - before)))
+        reduced_status = "error" if retained_error is not None else "partial"
         if is_file_read_projection(source_items):
             reduced = _materialize_file_read_envelope(
-                status="partial",
+                status=reduced_status,
                 summary=reduced_summary,
                 items=list(source_items),
                 artifact_ref=artifact_ref,
@@ -1110,18 +1158,22 @@ def enforce_round_aggregate_budget_v2(
                 # Aggregate pressure may remove previews, never identities.
                 max_preview_chars=0,
                 recovery=recovery,
+                error=retained_error, failed_execution=failed_execution,
+                token_budget=result_budget,
             )
         else:
             reduced = _materialize_envelope(
-                status="partial",
+                status=reduced_status,
                 summary=reduced_summary,
-                items=[], artifact_ref=artifact_ref, truncated=True,
+                items=(source_items or []) if retained_error is not None else [],
+                artifact_ref=artifact_ref, truncated=True,
                 raw_bytes=raw_bytes or len(content.encode("utf-8")),
                 observed_at_ms=max(
                     0, source_observed_at_ms or int(observed_at_ms or 0)),
                 world_version=source_world_version,
                 evidence_id=evidence_id, model=model,
-                recovery=recovery,
+                recovery=recovery, error=retained_error,
+                failed_execution=failed_execution, token_budget=result_budget,
             )
         from lib.tools.result_value import TrustedResultText
         if isinstance(content, TrustedResultText):
@@ -1136,13 +1188,15 @@ def enforce_round_aggregate_budget_v2(
             reduced_value['viewCoverage'] = 'partial'
             if not artifact_ref:
                 reduced_value['retentionCoverage'] = 'unavailable'
-            if reduced_value.get('executionStatus') not in (None, 'ok', 'success'):
+            if failed_execution:
                 reduced_value['status'] = 'error'
             reduced = TrustedResultText(json.dumps(reduced_value, ensure_ascii=False),
                                         canonical=content.canonical, envelope=True)
             reduced = with_program_input(reduced, program_input)
-        tool_results[tc_id] = (reduced, tool_name, tool_use_id)
-        total -= max(0, before - _model_result_tokens(reduced, model))
+        after = _model_result_tokens(reduced, model)
+        if after < before:
+            tool_results[tc_id] = (reduced, tool_name, tool_use_id)
+            total -= before - after
     return tool_results
 
 
