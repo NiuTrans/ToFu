@@ -132,7 +132,10 @@ jsonschema>=4.18
 # >=0.12.2: bounded anonymous fetch retries and transient pre-body recovery.
 # SOFT floor for startup; ensures retries and Retry-After waits consume the
 # caller's remaining budget while preserving HTTP failure status and cleanup.
-tofu-search>=0.12.2
+# >=0.12.3: preserve inline HTML value groups and isolate extraction dedup state.
+# SOFT floor for startup; repeated reads retain the same evidence, hidden text
+# stays excluded, and short structured facts survive surrounding article prose.
+tofu-search>=0.12.3
 trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches

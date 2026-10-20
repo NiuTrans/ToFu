@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-search"
-version = "0.12.2"
+version = "0.12.3"
 description = "Multi-engine web search, vertical lookups, and content fetching with optional LLM filtering — standalone library from the Tofu AI assistant"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -24,8 +24,8 @@ classifiers = [
 dependencies = [
     "requests>=2.32.4",
     "httpx[http2,socks]>=0.28,<1",
-    # Older releases reorder nested inline evidence, lose code indentation,
-    # escape linked identifiers and share deduplication state across calls.
+    # Fix nested inline evidence, code indentation and linked identifiers;
+    # accept a call-local dedup cache instead of the boolean global-cache mode.
     "trafilatura>=2.3.1",
     "beautifulsoup4>=4.13.4",
     "python-dateutil>=2.8",
