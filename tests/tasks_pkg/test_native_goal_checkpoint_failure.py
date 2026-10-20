@@ -14,7 +14,7 @@ from tests.tasks_pkg.test_native_sql_production_recovery import sql_application
 pytestmark = [pytest.mark.api, pytest.mark.slow]
 
 
-def test_goal_checkpoint_refusal_is_failed_before_provider_dispatch(tmp_path, sql_application):
+def test_goal_checkpoint_refusal_is_failed_before_provider_dispatch(tmp_path, sql_application):  # noqa: F811 -- imported fixture
     archive = os.environ.get('TOFU_NATIVE_TERMINAL_TEST_ARCHIVE')
     if not archive:
         pytest.skip('explicit verified native archive required')
