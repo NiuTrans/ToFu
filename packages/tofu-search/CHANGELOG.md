@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.5
+
+- Apply the existing relevance ranking at the public search boundary even when
+  the candidate count fits within the requested result limit. Cover snippets,
+  fetched bodies and explicit `rerank=False` through the public entry point.
+  No additional network, model or service calls are required.
+
 ## 0.12.4
 
 - Preserve technical lexical evidence such as `C++`, `C#`, `O(N)` and

@@ -103,8 +103,12 @@ identity and relevant body evidence can both reach a relevance filter.
 
 `search/rerank.py` builds its bounded BM25 representation from those passages
 and SERP metadata. The representation limit is not a source-prefix limit.
-Ranking also applies when the candidate pool is smaller than the requested
-count. URL source hints, engine-agreement and diversity signals remain.
+The public search entry point ranks candidates even when the pool fits within
+the requested count; only explicit `rerank=False` disables this step. Skipping
+ranking when no truncation is needed leaves the earliest engine result first,
+even when a later result covers more of the query. Public-entry regression tests
+exercise both snippets and fetched bodies, alongside the ranking helper tests.
+URL source hints, engine-agreement and diversity signals remain.
 Original result dictionaries and bodies are preserved for fetch follow-up.
 
 **Alternatives considered:** increasing the prefix limit moves the same failure

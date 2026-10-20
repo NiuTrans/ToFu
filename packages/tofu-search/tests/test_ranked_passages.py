@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from tofu_search.passages import select_relevant_passages
+from tofu_search.search import orchestrator
 from tofu_search.search.rerank import rerank_by_bm25
 
 pytestmark = pytest.mark.unit
@@ -30,6 +31,36 @@ def test_rank_small_candidate_sets_too():
     candidates = [row("noise", "Gardening and cooking."),
                   row("answer", "Quasar latency is 17 milliseconds.")]
     assert rerank_by_bm25("quasar latency", candidates, top_k=5)[0] is candidates[1]
+
+
+@pytest.mark.parametrize("max_results", [1, 2, 5])
+@pytest.mark.parametrize("fetch_pages", [False, True])
+@pytest.mark.parametrize("rerank", [False, True])
+def test_public_search_ranks_relevant_candidates_independent_of_pool_size(
+    monkeypatch, max_results, fetch_pages, rerank,
+):
+    candidates = [
+        {"url": "https://sampling.example/article", "title": "Lunar isotope sampling notes",
+         "snippet": "Material measurements and calibration methods for lunar isotope samples."},
+        {"url": "https://atlas.example/reference", "title": "Lunar isotope atlas reference",
+         "snippet": "The atlas maps lunar isotope abundance across mapped regions."},
+    ]
+    original = deepcopy(candidates)
+    monkeypatch.setattr(orchestrator, "search_bing", lambda *args, **kwargs: candidates)
+    bodies = {candidate["url"]: candidate["snippet"] for candidate in candidates}
+    monkeypatch.setattr(orchestrator, "fetch_page_content", lambda url, **kwargs: bodies[url])
+
+    results = orchestrator.perform_web_search(
+        "lunar isotope atlas", max_results=max_results, engines=["Bing"],
+        fetch_pages=fetch_pages, filter_pages=False, rerank=rerank, deepen=False,
+    )
+
+    expected = list(reversed(candidates)) if rerank else candidates
+    assert [result["url"] for result in results] == [
+        candidate["url"] for candidate in expected[:max_results]
+    ]
+    assert all(result["relevance"] == "lexical_match" for result in results)
+    assert candidates == original
 
 
 @pytest.mark.parametrize("top_k", [0, -1])
