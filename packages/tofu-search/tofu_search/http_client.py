@@ -41,6 +41,10 @@ def _search_http2_get(url, *, params, headers, timeout, proxies=None, deadline):
     ca_file = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('CURL_CA_BUNDLE')
     try:
         verify = ssl.create_default_context(cafile=ca_file) if ca_file else True
+        if ca_file and proxy and proxy.lower().startswith('https://'):
+            # HTTPX configures the proxy's outer TLS separately from the
+            # destination TLS; both must retain the caller's trust roots.
+            proxy = httpx.Proxy(proxy, ssl_context=verify)
         # Each call already has an admitted engine worker. No persistent pool,
         # background worker or cross-query cookie jar is introduced here.
         with httpx.Client(http2=True, proxy=proxy, trust_env=False, verify=verify,
