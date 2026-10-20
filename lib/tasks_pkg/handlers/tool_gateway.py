@@ -626,7 +626,7 @@ def _execute_call_batch(
         started = {id(call): time.monotonic() for call in fresh}
         parsed, _ = parse_tool_calls(
             assistant, task, llm_round, base, project_enabled,
-            early_announced=None)
+            early_announced=None, collapse_provider_repetitions=False)
         row_by_call_object = {
             id(parsed_call): parsed_row
             for parsed_call, _name, _call_id, _args, _round_num, parsed_row,

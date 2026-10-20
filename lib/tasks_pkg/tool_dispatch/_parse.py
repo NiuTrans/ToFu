@@ -143,7 +143,7 @@ def parse_tool_calls(
     tool_round_num: int,
     project_enabled: bool,
     early_announced: dict[str, tuple] | None = None,
-    *, tool_entry_publisher=None,
+    *, tool_entry_publisher=None, collapse_provider_repetitions: bool = True,
 ) -> tuple[list[tuple], int]:
     """Parse raw tool_calls from the assistant message into structured tuples.
 
@@ -172,6 +172,10 @@ def parse_tool_calls(
         Map of ``tc_id → (roundNum, round_entry)`` for tools already announced
         via ``StreamingToolAccumulator.on_tool_call_ready``.  These will reuse
         the existing round entry and skip SSE emission.
+    collapse_provider_repetitions : bool
+        Apply the physical provider-response repetition guard. Host-constructed
+        gateway batches pass False: each child is an explicit occurrence and
+        still goes through ordinary contract, authority and execution admission.
 
     Returns
     -------
@@ -197,10 +201,11 @@ def parse_tool_calls(
     # Callback-free resends and non-streaming adapters share stream admission.
     # A repeated identical occurrence is collapsed, not rejected: keep the
     # first of each exact signature, stamp the bounded evidence, and proceed.
-    tool_calls, _flood_evidence = dedupe_tool_call_response(tool_calls)
-    if _flood_evidence is not None:
-        assistant_msg['tool_calls'] = tool_calls
-        assistant_msg['_flood_collapsed'] = _flood_evidence
+    if collapse_provider_repetitions:
+        tool_calls, _flood_evidence = dedupe_tool_call_response(tool_calls)
+        if _flood_evidence is not None:
+            assistant_msg['tool_calls'] = tool_calls
+            assistant_msg['_flood_collapsed'] = _flood_evidence
     parsed_tcs = []
     _early = early_announced or {}
     _early_claimed: set[str] = set()
