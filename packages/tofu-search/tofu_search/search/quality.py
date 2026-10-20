@@ -7,6 +7,7 @@ miss is uncertainty, never a semantic rejection or proof of nonexistence.
 import re
 from urllib.parse import urlsplit
 
+from tofu_search.lexical import matching_text
 from tofu_search.search.prefetch_gate import query_subject, query_terms
 from tofu_search.search.prefetch_gate import result_terms as result_terms
 from tofu_search.search.rerank import _tokenize
@@ -74,7 +75,7 @@ def fetched_body(result):
 
 
 def _normalized(text):
-    return ' '.join(re.findall(r'\w+', (text or '').casefold()))
+    return matching_text(text)
 
 
 def _contains_subject(subject, text):

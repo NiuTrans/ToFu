@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.4
+
+- Preserve technical lexical evidence such as `C++`, `C#`, `O(N)` and
+  `O(n log n)` across ranking, quoted-subject checks and passage selection.
+  Retain ordinary identifier/version features and original source text, with
+  bounded notation recognition and no additional service or dependency.
+
 ## 0.12.3
 
 - Preserve adjacent inline-only HTML value cells in their source position,

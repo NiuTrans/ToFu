@@ -75,6 +75,23 @@ literals remain subjects. CJK bigrams come from contiguous runs; non-Latin
 words, accents and numeric versions remain matchable. This is lexical matching,
 not semantic equivalence or factual verification.
 
+Technical symbols are lexical evidence: `C++` and `C#` remain distinct,
+and balanced `O(...)`, `Ω(...)` and `Θ(...)` notation retains a bounded atomic
+feature. Spaces around operators normalize only for matching; spaces between
+names remain significant (`n log n` differs from `nlogn`). Ordinary words and
+numeric versions remain available alongside the added features. Quoted-subject
+checks use the same boundaries, including stop words and negations. Source
+excerpts and outbound queries are unchanged. Recognition examines at most 128
+characters from each opening parenthesis; malformed or longer notation keeps
+ordinary word tokens. This is not a programming-language or math parser.
+
+**Problem:** stripping punctuation made some technical queries empty or tied
+different languages/complexities, hiding late evidence. **Alternatives rejected:**
+rewriting search queries changes provider semantics; interpreting formulas or
+using a model adds an independent matching authority. Shared deterministic
+features fix ranking, admission and excerpt selection together. Text without
+candidate symbol syntax uses the ordinary word scan directly.
+
 `passages.py` scans the complete supplied body, excluding the extractor's
 explicit link inventory. It selects source spans using lexical coverage,
 phrase matches, bounded term density and complementary query terms. Repeated
@@ -184,9 +201,10 @@ python benchmarks/search_relevance.py \
   --repeats 9 --output /tmp/search-candidate.json
 ```
 
-The benchmark contains 19 adversarial cases: body position, four languages,
+The benchmark contains 25 adversarial cases: body position, four languages,
 constraint/navigation bait, small pools, complementary facts at three context
-budgets, quoted literals and version identifiers. These are regression probes,
+budgets, quoted literals, version identifiers and technical-symbol distinctions.
+These are regression probes,
 not an estimate of real-world search quality. Literal recall cannot grade
 paraphrases or establish that a source is true. A live comparison must measure
 retrieval coverage, stale/blocked sources, source correctness, latency and

@@ -99,6 +99,21 @@ def cases():
         _row("other", "Product catalog"),
     ], {"https://answer.example/article": 3, "https://old.example/article": 1},
         ["Nova v3 cache has a new protocol."], top_k=1)
+    # Symbol-bearing subjects must survive the shared matching representation.
+    # Labels describe these synthetic documents, independently of tokenizer code.
+    for name, query, fact, decoy in (
+        ('cpp', 'C++ memory model', 'C++ memory model reference.', 'C# memory model reference.'),
+        ('csharp', 'C# memory model', 'C# memory model reference.', 'C++ memory model reference.'),
+        ('linear', 'O(N)', 'Atlas lookup takes O (N) time.', 'Atlas lookup takes O(1) time.'),
+        ('constant', 'O(1)', 'Atlas lookup takes O(1) time.', 'Atlas version 1 reference.'),
+        ('nlogn', 'O(n log n)', 'Atlas sort takes O(n log n) time.', 'Atlas log n reference.'),
+        ('cpp-version', 'C++20', 'The C++20 revision includes this example.',
+         'The C++17 revision includes this example.'),
+    ):
+        add('technical-' + name, query, [
+            _row('decoy', decoy),
+            _row('answer', noise * 400 + fact + '\n\n' + noise * 30),
+        ], {'https://answer.example/article': 3}, [fact], top_k=1, budget=240)
     return result
 
 
