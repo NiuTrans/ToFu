@@ -1,0 +1,212 @@
+{
+  "snapshot_date": "2026-10-20",
+  "repository_head_at_capture": "dc7e8edaf323fe4318db495cb4a722fea7ff56fa",
+  "authority_note": "Current shared working files, including concurrent uncommitted changes, are the technical reference. Hashes identify exact inspected bytes; HEAD alone is not a complete source snapshot. No runtime implementation was modified or benchmark rerun for this poster.",
+  "user_scope": "The manuscript is background only; show the latest Tofu technology and reasons for researchers to try it. Include TofuDB; avoid a benchmark-centered story.",
+  "claims": [
+    {
+      "id": "context_layers",
+      "claim": "Three layers reduce working context while preserving recoverable evidence.",
+      "source_files": [
+        {
+          "path": "docs/CONTEXT_COMPACTION.md",
+          "sha256": "37fccd5e5ac8cc7af0cc22ff27318cdbfa6bc491ded67201efcc726942e4954b"
+        },
+        {
+          "path": "docs/LLM_COST_OPTIMIZATION.md",
+          "sha256": "a9480d6e9a37ea47e1d9ceefb63710761ebf05ed9abd353e324ccae2d90e827f"
+        }
+      ]
+    },
+    {
+      "id": "compaction_economics",
+      "claim": "Compaction compares expected future savings with summary and warm-prefix disruption costs.",
+      "source_files": [
+        {
+          "path": "docs/LLM_COST_OPTIMIZATION.md",
+          "sha256": "a9480d6e9a37ea47e1d9ceefb63710761ebf05ed9abd353e324ccae2d90e827f"
+        },
+        {
+          "path": "docs/CONTEXT_BUDGET_POLICY.md",
+          "sha256": "7a4f9f430752ff35a550e91abc98e4c60abc5b313b65ff57d84a7f425f6a932d"
+        }
+      ]
+    },
+    {
+      "id": "request_inspection",
+      "claim": "Captured requests and context decision receipts can be inspected; receipts are not proof of model consumption.",
+      "source_files": [
+        {
+          "path": "docs/CONTEXT_INJECTIONS.md",
+          "sha256": "2da86e7d963d8c8d055486bbab81092bb11826d4ea3822aeaf578b0a48394434"
+        },
+        {
+          "path": "docs/CONTEXT_COMPACTION.md",
+          "sha256": "37fccd5e5ac8cc7af0cc22ff27318cdbfa6bc491ded67201efcc726942e4954b"
+        }
+      ]
+    },
+    {
+      "id": "programmatic_tools",
+      "claim": "An isolated WASM JavaScript program can call task-admitted tools and process results. Each call retains authority checks. Incomplete results hand back to the model.",
+      "source_files": [
+        {
+          "path": "docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md",
+          "sha256": "9e50dafeb39e8f88d9a309af3665ad837857c22066726b51fe79ed6ec7b7c1f1"
+        },
+        {
+          "path": "lib/tools/javascript/bootstrap.js",
+          "sha256": "ad719ecd668a399fe8456aa1042701ee74c0d07211acde271e69a3bd2f0fa973"
+        }
+      ]
+    },
+    {
+      "id": "native_continuation",
+      "claim": "A storage-minted certificate reuses a verified prefix within an authority-open epoch. Earlier semantic mutations invalidate it; reopen reauthenticates.",
+      "source_files": [
+        {
+          "path": "docs/TOFUDB_CONTEXT_READ.md",
+          "sha256": "1e315a76b18fa398d37078423234de8198a251fd134a37f10abe45ecc8821a1f"
+        },
+        {
+          "path": "packages/tofu-db/src/turn/model_context.rs",
+          "sha256": "31436861906b26a81b03b4cb1ca6e6e1d355e2f2953b768a387985032de4bc2e"
+        }
+      ]
+    },
+    {
+      "id": "logical_work_example",
+      "claim": "After certification, adding two Turns visits three headers in the focused 8/128/2048 retained-Turn fixtures. This is logical verification work, not a latency ratio.",
+      "source_files": [
+        {
+          "path": "docs/TOFUDB_CONTEXT_READ.md",
+          "sha256": "1e315a76b18fa398d37078423234de8198a251fd134a37f10abe45ecc8821a1f"
+        }
+      ]
+    },
+    {
+      "id": "native_materialization",
+      "claim": "The native context reader removes private parse/serialize/copy cycles while preserving exact selected evidence and byte bounds.",
+      "source_files": [
+        {
+          "path": "docs/TOFUDB_CONTEXT_READ.md",
+          "sha256": "1e315a76b18fa398d37078423234de8198a251fd134a37f10abe45ecc8821a1f"
+        }
+      ]
+    },
+    {
+      "id": "sql_alternative",
+      "claim": "Native, SQLite and PostgreSQL share semantic operations. SQLite already offers transactions and recovery; native engine superiority is not established by the poster.",
+      "source_files": [
+        {
+          "path": "docs/modules/data_tier.md",
+          "sha256": "d5becc8e087498b379625b388cdb2746713951d6186bad5c66f6803a381f3501"
+        },
+        {
+          "path": "docs/TOFUDB_SQLITE_CONTROLS.md",
+          "sha256": "e56d062e592bd669a7ec143af813f892a341d962b36c5cb447a344049f288c32"
+        },
+        {
+          "path": "docs/STORAGE_TOFUDB.md",
+          "sha256": "bc74810f73bd8eda2c91aad384f84f58a8bb830b334a9d226bf2d3ab107f10f3"
+        }
+      ]
+    },
+    {
+      "id": "research_workbench",
+      "claim": "Paper reader, harness inspection and editable orchestration are offered as an example research workflow, not a measured end-to-end experiment.",
+      "source_files": [
+        {
+          "path": "docs/modules/ingest_media.md",
+          "sha256": "0a89c37128dea92fd46a9fb544228ff390d75d9ae229da35eaabc0ef732ea2d4"
+        },
+        {
+          "path": "docs/modules/context_engineering.md",
+          "sha256": "6f557435c918055760c870eb4246bcfc172dbffb883b2bdf7c03c2b2aadafad6"
+        },
+        {
+          "path": "README.md",
+          "sha256": "929d32e04a6933f41e2d98cddea763eb38387330841b7b1bd2ab21dce911b490"
+        }
+      ]
+    }
+  ],
+  "manuscript": {
+    "path": ".tmp/tofu-paper/_EMNLP_Demo__ToFu.zip",
+    "sha256": "80b2d152ef457b28ddcbf2cbb0d9052e578e92a3e66e73db5c1731a2d10e652b",
+    "used_for": [
+      "title",
+      "author roster",
+      "affiliations",
+      "mascot",
+      "historical framing"
+    ],
+    "historical_scores_displayed": false
+  },
+  "external_references": [
+    {
+      "url": "https://2026.emnlp.org/poster-printing/",
+      "purpose": "A0 portrait PDF, 841 x 1189 mm"
+    },
+    {
+      "url": "https://github.com/K-Dense-AI/scientific-agent-skills/blob/main/skills/latex-posters/SKILL.md",
+      "purpose": "Reviewed poster workflow: physical typography, vector figures, artifact inspection; no LaTeX template or external generator was used."
+    },
+    {
+      "url": "https://github.com/ZLHe0/Skill-ML-Conference-Poster-Creation/blob/main/SKILL.md",
+      "purpose": "Reviewed editable poster production and layout review; no template or wrapper code copied."
+    },
+    {
+      "url": "https://developers.openai.com/blog/codex-as-a-platform",
+      "purpose": "Avoid false claims that Codex is a closed harness or lacks extensibility."
+    },
+    {
+      "url": "https://opencode.ai/docs/",
+      "purpose": "Avoid unsupported feature-exclusivity claims about OpenCode."
+    },
+    {
+      "url": "https://github.com/NiuTrans/ToFu",
+      "purpose": "Verified destination for the QR code and project link."
+    }
+  ],
+  "deliberately_excluded": [
+    "Historical SWE-bench performance numbers as a causal explanation",
+    "Universal TofuDB speedup versus SQLite",
+    "Whole-agent latency or success improvements inferred from storage microbenchmarks",
+    "Exactly-once arbitrary external effects",
+    "Native runtime ports presented as universally enabled production defaults"
+  ],
+  "font_assets": [
+    {
+      "file": "assets/Inter-400.ttf",
+      "sha256": "8fe523f52564985a24663269785ea95c62b4d7f5cdcdb24be897d9fafd4715de"
+    },
+    {
+      "file": "assets/Inter-600.ttf",
+      "sha256": "d71afa489ba84bf36426317dc1e9b1b0c637ef4fd8bd19af56100d8acd41842c"
+    },
+    {
+      "file": "assets/Inter-700.ttf",
+      "sha256": "98795d77c8988e10b624370a455c323f8b9c980ebe738f6a26aef22276411b49"
+    },
+    {
+      "file": "assets/Newsreader-400.ttf",
+      "sha256": "30f84a761d412603192e5cfcefe043bd67c1a503226f1e1d68003487e488ccdf"
+    },
+    {
+      "file": "assets/Newsreader-500.ttf",
+      "sha256": "8ab4e2f1bbf983f46eb5f356235d0bd76c1c1579d7d2ca21f38bcc464d7980dd"
+    }
+  ],
+  "verification": {
+    "pdf": "A0 portrait, one page, four used font faces embedded, zero raster images, no missing glyphs or text overlaps.",
+    "svg": "Independently rendered in Chromium; embedded fonts loaded, no text outside page.",
+    "qr": "Decoded from a 300-dpi crop of the final PDF; exact target matched.",
+    "visual": "Final PDF and SVG inspected side by side; headline, mechanisms, TofuDB panel and footer checked.",
+    "limitations": [
+      "No physical print proof",
+      "RGB PDF, not certified PDF/X or CMYK",
+      "No runtime or benchmark acceptance is implied"
+    ]
+  }
+}
