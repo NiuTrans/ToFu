@@ -29,7 +29,7 @@ export function projectModelPickerCatalog(value: ModelRoutingDocument | null | u
     let entry = automatic.get(key);
     if (!entry) {
       const creator = creators.get(model.creator_id);
-      entry = { capabilities: new Set(), row: { model_id: model.model_id, creator_id: model.creator_id,
+      entry = { capabilities: new Set(), row: { model_id: model.model_id, display_name: model.display_name || '', creator_id: model.creator_id,
         creator_name: creator?.name || model.creator_id, offering_id: '', provider_id: '', provider_name: '自动服务商',
         provider_options: [], brand: model.creator_id || '', routing_v2: true, pending_identity: false } };
       automatic.set(key, entry);

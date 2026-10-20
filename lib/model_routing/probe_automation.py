@@ -160,7 +160,10 @@ def run_daily_probe(*, principal, max_runtime=DAILY_PROBE_MAX_RUNTIME,
         if not work:
             continue
         key = f"u{boundary.owner_user_id}_{provider['provider_id']}"
-        task = dict(provider_id=key, status='running', started_at=time.time(),
+        task = dict(provider_id=key,
+                    credential_ids=[str(row['credential_id'])
+                                    for row in bundle['credentials']],
+                    status='running', started_at=time.time(),
                     finished_at=None, total=len(work), done_count=0, cells={},
                     summary={'ok': 0, 'disable': 0}, error=None, attempts=3,
                     _abort=False, _base_url=plan['provider']['base_url'],

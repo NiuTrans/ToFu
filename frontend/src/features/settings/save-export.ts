@@ -73,6 +73,7 @@ type SaveExportGlobals = Window & {
   _applyTradingVisibility?: () => void;
   _applyDebugModeVisibility?: () => void;
   _loadServerConfigAndPopulate?: () => void;
+  _refreshServerConfigAfterSave?: () => Promise<void>;
   _persistSttProvider?: () => Promise<void>;
   _destroySkills?: () => void;
   _destroyPreferences?: () => void;
@@ -460,10 +461,13 @@ async function saveServerConfig(): Promise<boolean> {
         const lateHint = document.getElementById('settingsStatusHint');
         if (lateHint && lateHint.textContent === t('settings.saved')) lateHint.textContent = '';
       }, 3000);
-      // Re-fetch server config to refresh model dropdown with any new/changed models.
-      // Without this, _registeredModels stays stale and newly added providers' models
-      // don't appear in the preset toggle until a page refresh.
-      if (typeof bridge._loadServerConfigAndPopulate === 'function') {
+      // Refresh the miscellaneous config projection so the model dropdown sees
+      // hidden-model / default-model policy from this save. The routing
+      // authority was committed by the PUT above, so a full startup pass here
+      // would only re-download and re-parse the aggregate we already hold.
+      if (typeof bridge._refreshServerConfigAfterSave === 'function') {
+        void bridge._refreshServerConfigAfterSave().catch(() => { /* startup recovery owns retries */ });
+      } else if (typeof bridge._loadServerConfigAndPopulate === 'function') {
         bridge._loadServerConfigAndPopulate();
       }
       return true;

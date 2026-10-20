@@ -61,7 +61,7 @@ and refusing it would outlaw working configurations.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from lib.log import get_logger
@@ -105,6 +105,9 @@ class FaceResolution:
         responses_profile: ``compatible`` / ``openai`` / ``codex`` for a
             Responses face, otherwise empty. This is a feature boundary, not
             a second routing decision.
+        extra_headers: routing selectors this face requires (for example a
+            gateway header that picks a serving provider). Only the chosen
+            face's selectors are sent — they are per-route, not per-account.
     """
     ok: bool
     base_url: str = ''
@@ -113,6 +116,7 @@ class FaceResolution:
     forced: bool = False
     error: str = ''
     responses_profile: str = ''
+    extra_headers: dict = field(default_factory=dict)
 
 
 def _host(url: str) -> str:
@@ -130,6 +134,7 @@ def provider_faces(provider: dict) -> dict:
             'base_url': provider.get('base_url') or '',
             'protocol': provider.get('protocol') or '',
             'responses_profile': provider.get('responses_profile') or '',
+            'extra_headers': dict(provider.get('extra_headers') or {}),
         },
     }
     declared = provider.get('faces')
@@ -146,6 +151,11 @@ def provider_faces(provider: dict) -> dict:
                 'responses_profile': (
                     spec.get('responses_profile')
                     or provider.get('responses_profile') or ''),
+                # A face may select its serving provider with a header. It
+                # does NOT inherit the default face's selectors: sending one
+                # face's selector on another face is actively rejected
+                # upstream (aigc: 400 "该模型在 provider 下无可用账号").
+                'extra_headers': dict(spec.get('extra_headers') or {}),
             }
     return faces
 
@@ -203,7 +213,8 @@ def dual_face_hosts(refresh: bool = False) -> set:
 
 
 def resolve_face(provider: dict, model_entry: dict,
-                 dual_face_hosts: set | None = None) -> FaceResolution:
+                 dual_face_hosts: set | None = None,
+                 wire_id: str = '') -> FaceResolution:
     """Resolve which wire face *model_entry* dispatches over.
 
     Args:
@@ -211,6 +222,10 @@ def resolve_face(provider: dict, model_entry: dict,
         model_entry: one of its ``models`` entries.
         dual_face_hosts: override the derived host set (tests / callers that
             already computed it). ``None`` = derive from shipped templates.
+        wire_id: the concrete id about to be sent. When the entry declares
+            ``request_faces`` this picks the face for THAT wire id — one
+            logical model may span faces when a gateway only serves one of
+            its spellings through a specific provider selector.
 
     Returns:
         A :class:`FaceResolution`. When ``ok`` is False the caller MUST NOT
@@ -234,20 +249,26 @@ def resolve_face(provider: dict, model_entry: dict,
         return FaceResolution(
             ok=True, base_url=spec['base_url'], protocol=spec['protocol'],
             face_name=face_name, forced=forced,
+            extra_headers=dict(spec.get('extra_headers') or {}),
             responses_profile=normalize_responses_feature_profile(
                 raw_profile, protocol=spec['protocol'],
                 base_url=spec['base_url'], oauth=provider.get('oauth') or ''))
 
-    # ── 1. Explicit pin ──
+    # ── 1. Explicit pin (whole entry, or one wire id) ──
     pinned = (model_entry.get('face') or '').strip()
+    request_faces = model_entry.get('request_faces')
+    if not pinned and wire_id and isinstance(request_faces, dict):
+        pinned = str(request_faces.get(wire_id) or '').strip()
     if pinned:
         spec = faces.get(pinned)
         if spec is None:
             return FaceResolution(
                 ok=False,
-                error=('model %r pins face %r, which provider %r does not '
+                error=('model %r%s pins face %r, which provider %r does not '
                        'declare (known: %s)'
-                       % (model_id, pinned, provider.get('id', '?'),
+                       % (model_id,
+                          (' (wire id %r)' % wire_id) if wire_id else '',
+                          pinned, provider.get('id', '?'),
                           ', '.join(sorted(faces)))))
         return _resolved(spec, face_name=pinned, forced=True)
 

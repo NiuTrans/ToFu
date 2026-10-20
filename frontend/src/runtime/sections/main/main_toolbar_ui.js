@@ -277,6 +277,12 @@ function _reconcileConfigModelAvailability(chatModels) {
 function _loadServerConfigAndPopulate() {
   return _modelPickerStartup.load();
 }
+/* Settings Save committed and applied the routing authority itself, so the
+ * post-save repaint only needs the miscellaneous config projection. Refetching
+ * the full aggregate here cost a ~550KB round trip and re-parse on every save. */
+function _refreshServerConfigAfterSave() {
+  return _modelPickerStartup.refreshConfig();
+}
 let _modelPickerLastRouting = null;
 const _modelPickerStartup = createModelPickerStartup({
   loadConfig: signal => Api.serverConfig.get({ signal, timeout: 15000 }),

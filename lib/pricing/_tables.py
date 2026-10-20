@@ -152,7 +152,8 @@ MODEL_PRICING = {
     # the BASE model; 1M ctx / 384K max output. The legacy ids
     # 'deepseek-v4-flash' / 'deepseek-v4-flash-vision-exp' are temporarily
     # routed to V4.1 Flash and billed at Flash rates, so their rows carry the
-    # new prices. 'deepseek-v4-pro' is scheduled to route to V4.1 Flash from
+    # new prices — but a row's `name` stays the MODEL's name, not the route's.
+    # 'deepseek-v4-pro' is scheduled to route to V4.1 Flash from
     # 2026-09-14 12:00 Beijing time (until a V4.1 Pro release) — its row keeps
     # the V4 Pro price card until that routing lands, and the dated pin
     # deepseek-v4-pro-0813 folds onto it (lib/pricing.pricing_for_model).
@@ -166,18 +167,37 @@ MODEL_PRICING = {
     'deepseek-flash':            {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash',
                                   'peak': {'mul': 2.0, 'windows': [(1, 4), (6, 10)], 'tz_offset': 0, 'weekdays': [0, 1, 2, 3, 4], 'effective_from': 1786900800}},
     'deepseek-v4-pro':           {'input': 0.66,  'output': 1.98,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0333, 'name': 'DeepSeek V4 Pro'},
-    'deepseek-v4-flash':         {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash',
+    'deepseek-v4-flash':         {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash',
                                   'peak': {'mul': 2.0, 'windows': [(1, 4), (6, 10)], 'tz_offset': 0, 'weekdays': [0, 1, 2, 3, 4], 'effective_from': 1786900800}},
     # YourProvider gateway Huawei-cloud mirror for DeepSeek V4 Flash — same pricing.
-    'deepseek-v4-flash-huawei':  {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash (Huawei)'},
+    'deepseek-v4-flash-huawei':  {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (Huawei)'},
     # YourProvider gateway Tencent/YourProvider-cloud mirrors for DeepSeek V4 — same pricing.
-    'deepseek-v4-flash-tencent': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash (Tencent)'},
-    'deepseek-v4-flash-yourprovider': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash (YourProvider)'},
+    'deepseek-v4-flash-tencent': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (Tencent)'},
+    'deepseek-v4-flash-yourprovider': {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4 Flash (YourProvider)'},
     'deepseek-v4-pro-tencent':   {'input': 0.66,  'output': 1.98,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0333, 'name': 'DeepSeek V4 Pro (Tencent)'},
+
+    # YourProvider gateway spelling of the same V4.1 product as 'deepseek-flash'
+    # (aa 39.5, 2026-09-10). It is a LOGICAL id in yourprovider.json whose wire pool
+    # is the repointed legacy family above, so it needs its own row: lookup on
+    # the logical id is what the picker prints, and a miss there is what showed
+    # a raw gateway string. No 'peak' — that schedule is the official API's
+    # billing, while this id is billed on the gateway's flat price card.
+    #
+    # Still its OWN Model, not a rename of 'deepseek-v4-flash' (aa 34.3,
+    # 2026-05): the registry holds both, so `name` must keep them apart —
+    # labelling the V4 row 'V4.1 Flash' made the picker show one product twice.
+    # A row's `name` is the MODEL's name, not its upstream route's.
+    'deepseek-v4.1-flash':       {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash'},
+    'deepseek-v4-1-flash':       {'input': 0.15,  'output': 0.60,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.02,   'name': 'DeepSeek V4.1 Flash'},
+    # Gateway region/mirror spellings of the same product. Cost keys on the
+    # WIRE id, so each needs a row or the route books at $0.
+    'deepseek-v4.1-flash-baidu':  {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.02, 'name': 'DeepSeek V4.1 Flash (Baidu)'},
+    'deepseek-v4.1-flash-huawei': {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.02, 'name': 'DeepSeek V4.1 Flash (Huawei)'},
+    'deepseek-v4.1-flash-m17':    {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.02, 'name': 'DeepSeek V4.1 Flash (M17)'},
     # Vision experimental variant of V4 Flash — superseded 2026-09-10: vision
     # moved into the base V4.1 Flash model; DeepSeek temporarily routes the
     # exp id to it at Flash rates.
-    'deepseek-v4-flash-vision-exp': {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.02, 'name': 'DeepSeek V4.1 Flash'},
+    'deepseek-v4-flash-vision-exp': {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.02, 'name': 'DeepSeek V4 Flash Vision Exp'},
     'deepseek-v3.2':             {'input': 0.28,  'output': 0.41,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2'},  # ¥2/¥3 per 1M
     'LongCat-Flash-Thinking-2601': {'input': 0.0, 'output': 0.0,  'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash'},
     'LongCat-Flash-Chat-2603':      {'input': 0.28,'output': 1.10, 'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash Chat'},  # ¥2/¥8 per 1M
@@ -348,6 +368,10 @@ MODEL_PRICING = {
     # xAI charges $4/$1/$12 above 200K prompt tokens; this flat table
     # records only the base tier, not an enforceable high-context price cap.
     'grok-4.7':                  {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Grok 4.7'},
+    # aws.grok-4.7: YourProvider AIGC gateway deployment spelling of the same xAI card
+    # (live probe 2026-10-20: 429 per-model RPM, while bare grok-4.7 400s
+    # 不支持的模型类型). Cost keys on the WIRE id, so the mirror needs its own row.
+    'aws.grok-4.7':              {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Grok 4.7'},
     # grok-4.6 (2026-08): $2/$6 per 1M, cached input $0.50 → cacheReadMul 0.25.
     'grok-4.6':                  {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Grok 4.6'},
     'grok-4.20':                 {'input': 1.25, 'output': 2.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 4.20'},
@@ -394,8 +418,8 @@ def pricing_for_model(model_id):
     Exact id first; on a miss, one dated-checkpoint suffix is folded so a
     pinned snapshot inherits the rolling alias's row.
     """
-    if model_id in {"deepseek-v4.1-flash", "deepseek-v4-1-flash"}:
-        model_id = "deepseek-flash"
+    if model_id == "deepseek-v4-1-flash":
+        model_id = "deepseek-v4.1-flash"
     row = MODEL_PRICING.get(model_id)
     if row is None and isinstance(model_id, str):
         row = MODEL_PRICING.get(_DATED_SUFFIX_RE.sub('', model_id))

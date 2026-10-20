@@ -801,9 +801,13 @@ function _toggleMatrixAccess(providerId, offeringIndex, credIdx, wireId) {
         String(grants[i].model_id || '') === modelId) { grant = grants[i]; break; }
   }
   if (!grant) {
-    // No grant at all → enabling. Mint a grant with no exclusions (the key
-    // stays absent — a grant without it reaches every wire of the model).
-    grants.push(JSON.parse(JSON.stringify(offering.model)));
+    // No grant at all → enabling THIS cell. A mint reaches every wire id of
+    // the model unless the siblings are withheld, so exclude them: clicking
+    // one request name must never enable its whole column of siblings.
+    var minted = JSON.parse(JSON.stringify(offering.model));
+    var withheld = pool.filter(function(id) { return id !== wire; });
+    if (withheld.length) minted.excluded_wire_model_ids = withheld;
+    grants.push(minted);
     credential.authorization.models = grants;
     _rerenderMatrix(providerId);
     return;
@@ -1181,7 +1185,12 @@ function _matrixApplyPlan(context, probe) {
     }
     if (!grant) {
       if (g.enables.length === 0) return;
-      plan.push({ group: g, kind: 'mint' });
+      // A mint reaches every wire id of the model. Withhold the siblings that
+      // no ok verdict covers, so an apply enables exactly the probed cells.
+      var withheld = pool.filter(function(id) {
+        return g.enables.indexOf(id) < 0;
+      });
+      plan.push({ group: g, kind: 'mint', excluded: withheld });
       return;
     }
     var excluded = (grant.excluded_wire_model_ids || []).slice();
@@ -1231,7 +1240,7 @@ function _applyMatrixRecommendations(providerId) {
     }
     if (action.kind === 'mint') {
       var fresh = { creator_id: g.creator, model_id: g.modelId };
-      if (g.disables.length) fresh.excluded_wire_model_ids = g.disables.slice();
+      if (action.excluded.length) fresh.excluded_wire_model_ids = action.excluded.slice();
       grants.push(fresh);
       applied++;
       return;

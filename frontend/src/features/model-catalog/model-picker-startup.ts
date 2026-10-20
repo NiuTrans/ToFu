@@ -36,7 +36,12 @@ function isTransient(error: unknown): boolean {
 
 export function createModelPickerStartup<Config, Routing>(
   ports: ModelPickerStartupPorts<Config, Routing>,
-): { load(): Promise<void>; recover(): void; destroy(): void } {
+): {
+  load(): Promise<void>;
+  refreshConfig(): Promise<void>;
+  recover(): void;
+  destroy(): void;
+} {
   let disposed = false;
   let inFlight: Promise<void> | null = null;
   let controller: AbortController | null = null;
@@ -48,6 +53,7 @@ export function createModelPickerStartup<Config, Routing>(
   let retryAttempt = 0;
   let retryTimer: unknown = null;
   let bootProbeUsed = false;
+  let refreshController: AbortController | null = null;
   const isActive = () => ports.isActive?.() !== false;
   const schedule = ports.scheduleRetry ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancel = ports.cancelRetry ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -153,12 +159,39 @@ export function createModelPickerStartup<Config, Routing>(
     return inFlight;
   }
 
+  /* Settings Save already committed the routing authority, so only the misc
+   * config projection can have changed. Going through load() would refetch the
+   * whole ~550KB aggregate and re-apply an authority the caller holds, adding
+   * a round trip plus main-thread parse cost to the save the user is watching.
+   * A failed refresh falls back to the full startup pass so the established
+   * retry/readiness ladder keeps owning recovery. */
+  function refreshConfig(): Promise<void> {
+    if (disposed) return Promise.resolve();
+    refreshController?.abort();
+    refreshController = new AbortController();
+    const current = refreshController;
+    return Promise.resolve()
+      .then(() => ports.loadConfig(current.signal))
+      .then(config => {
+        if (!disposed && refreshController === current) ports.applyConfig(config);
+      })
+      .catch(error => {
+        if (!disposed) void load();
+        throw error;
+      })
+      .finally(() => {
+        if (refreshController === current) refreshController = null;
+      });
+  }
+
   return {
     load,
+    refreshConfig,
     recover,
     destroy() {
       disposed = true;
       controller?.abort();
+      refreshController?.abort();
       cancelScheduledRetry();
       offBootReady();
       offActivity?.();

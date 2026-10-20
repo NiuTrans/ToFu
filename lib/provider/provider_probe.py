@@ -1075,6 +1075,55 @@ def normalize_probe_snapshot(snapshot: dict) -> dict:
     return out
 
 
+def align_probe_snapshot(snapshot: dict, credential_ids) -> dict:
+    """Re-key persisted probe evidence to the CURRENT credential columns.
+
+    Cell keys are positional (``key_idx::wire``), so a credential that was
+    added, removed or reordered after the snapshot was written shifts every
+    later column onto a different key's evidence — a deleted key's 401
+    verdicts would then paint a healthy column as unauthorized. Cells record
+    the credential they were measured on; evidence whose credential no longer
+    exists is dropped instead of being re-attributed, and a snapshot too old
+    to name its columns cannot be attributed at all.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    current = [str(value) for value in (credential_ids or ())]
+    recorded = [str(value) for value in (snapshot.get('credential_ids') or ())]
+    out = dict(snapshot)
+    out['credential_ids'] = current
+    if not recorded:
+        # Legacy snapshot: column indices cannot be resolved to identities.
+        # Drop the evidence rather than paint it onto the wrong keys; the
+        # status stays as recorded so a running task keeps being polled.
+        out['cells'] = {}
+        return normalize_probe_snapshot(out)
+    index_by_id = {cid: idx for idx, cid in enumerate(current)}
+    cells = {}
+    for key, cell in (snapshot.get('cells') or {}).items():
+        if not isinstance(cell, dict):
+            continue
+        credential_id = str(cell.get('credential_id') or '')
+        if not credential_id:
+            try:
+                position = int(str(key).split('::', 1)[0])
+            except ValueError:
+                continue
+            if not 0 <= position < len(recorded):
+                continue
+            credential_id = recorded[position]
+        column = index_by_id.get(credential_id)
+        if column is None:
+            continue
+        wire = str(cell.get('model_id') or str(key).split('::', 1)[-1])
+        moved = dict(cell)
+        moved['key_idx'] = column
+        moved['credential_id'] = credential_id
+        cells[probe_cell_key(column, wire)] = moved
+    out['cells'] = cells
+    return normalize_probe_snapshot(out)
+
+
 def build_probe_work(
     provider: dict,
     models: list,
@@ -1143,17 +1192,33 @@ def build_probe_work(
             if not root:
                 continue
             caps = m.get('capabilities') or []
-            face = resolve_face(provider, m)
-            cell_url = face.base_url if (face.ok and face.base_url) else base_url
-            cell_proto = (face.protocol if face.ok else protocol) or 'openai'
+            provider_headers = dict(provider.get('extra_headers') or {})
             cell = (m.get('key_access') or {}).get(str(key_idx))
             probe_cell = dict(cell) if isinstance(cell, dict) else None
             if probe_cell:
                 probe_cell.pop('disabled_ids', None)
             for mid in resolve_request_ids(m, probe_cell):
+                # Per-WIRE face: one logical model may need a different face
+                # per spelling (a gateway can expose a deployment only
+                # through a specific provider selector).
+                face = resolve_face(provider, m, wire_id=mid)
+                cell_url = (face.base_url if (face.ok and face.base_url)
+                            else base_url)
+                cell_proto = ((face.protocol if face.ok else protocol)
+                              or 'openai')
+                face_headers = dict(face.extra_headers or {}) if face.ok else {}
                 if request_contexts is None:
-                    work.append((key_idx, api_key, root, mid, caps,
-                                 cell_url, cell_proto))
+                    if face_headers:
+                        # Only a face that actually requires a selector
+                        # carries one — sending it on another face is
+                        # rejected upstream.
+                        work.append((key_idx, api_key, root, mid, caps,
+                                     cell_url, cell_proto,
+                                     {'extra_headers': {**provider_headers,
+                                                        **face_headers}}))
+                    else:
+                        work.append((key_idx, api_key, root, mid, caps,
+                                     cell_url, cell_proto))
                 else:
                     connection = request_contexts.get(mid)
                     if connection is None:
@@ -1270,11 +1335,24 @@ def _recount_summary(task: dict):
     }
 
 
+def _credential_id_at(task: dict, key_idx: int) -> str:
+    """The credential measured in one column, or '' when unknown."""
+    credential_ids = task.get('credential_ids') or ()
+    return (str(credential_ids[key_idx])
+            if isinstance(key_idx, int) and 0 <= key_idx < len(credential_ids)
+            else '')
+
+
 def public_probe_snapshot(task: dict) -> dict:
     """The serialisable, secret-free view of a probe task (for poll + disk)."""
     return normalize_probe_snapshot({
         'probe_schema_version': PROBE_SCHEMA_VERSION,
         'provider_id': task['provider_id'],
+        # Ordered credential column identities. Cell keys use positional
+        # indices for compactness, so the snapshot must carry the identity of
+        # each column: a deleted/reordered credential otherwise shifts every
+        # later index onto a different key and misattributes its evidence.
+        'credential_ids': [str(value) for value in (task.get('credential_ids') or ())],
         'status': task['status'],
         'started_at': task['started_at'],
         'finished_at': task['finished_at'],
@@ -1329,6 +1407,7 @@ def run_cell_probe_task(task: dict, work: list, timeout: int, *, on_complete=Non
             if probe_fn is None:
                 return {
                     'key_idx': key_idx,
+                    'credential_id': _credential_id_at(task, key_idx),
                     'model_id': mid,
                     'root_model_id': root,
                     'status': SKIPPED,
@@ -1359,6 +1438,7 @@ def run_cell_probe_task(task: dict, work: list, timeout: int, *, on_complete=Non
         http_status = _http_status_from_detail(detail)
         return {
             'key_idx': key_idx,
+            'credential_id': _credential_id_at(task, key_idx),
             'model_id': mid,
             'root_model_id': root,
             'status': status,
@@ -1437,6 +1517,7 @@ __all__ = [
     'provider_probe_runtime_snapshot',
     'build_probe_work',
     'public_probe_snapshot', 'normalize_probe_snapshot',
+    'align_probe_snapshot',
     'CELL_PROBE_TASKS', 'CELL_PROBE_LOCK', 'SKIPPED',
     'PROBE_SCHEMA_VERSION',
 ]

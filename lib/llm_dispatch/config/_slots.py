@@ -136,6 +136,7 @@ DEFAULT_SLOT_CONFIGS = {
     'gemini-2.5-flash-lite':         {'caps': {'text', 'vision', 'cheap'},         'rpm': 200, 'latency': 1000, 'cost': 0.001},
     'doubao-seed-1-6-vision-250815': {'caps': {'text', 'vision', 'cheap'},         'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'grok-4.6':                      {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 3000, 'cost': 0.010},
+    'aws.grok-4.7':                  {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 3000, 'cost': 0.010},
     'kimi-k2.7-code':                {'caps': {'text', 'thinking', 'cheap'},       'rpm': 30,  'latency': 3000, 'cost': 0.003},
     'kimi-k2.7-code-highspeed':      {'caps': {'text', 'thinking', 'cheap'},       'rpm': 30,  'latency': 1500, 'cost': 0.005},
     'o3-pro':                        {'caps': {'text', 'thinking'},                'rpm': 10,  'latency': 8000, 'cost': 0.060},

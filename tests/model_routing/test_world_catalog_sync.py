@@ -148,6 +148,50 @@ def test_world_catalog_never_reinserts_an_incomplete_owner_draft():
     assert repository.get(boundary).revision == draft.revision
 
 
+def test_id_echo_display_name_adopts_the_authored_template_name():
+    """A row whose display_name merely repeats its model_id carries no naming
+    decision — migration wrote that when the template declared none. The
+    authored name is adopted so a gateway spelling stops surfacing as a raw
+    id; any real owner name still wins."""
+    from lib.model_routing.world_catalog import _adopt_declared_name
+
+    echo = {'model_id': 'deepseek-v4.1-flash',
+            'display_name': 'deepseek-v4.1-flash'}
+    assert _adopt_declared_name(
+        echo, {'display_name': 'DeepSeek V4.1 Flash'}) is True
+    assert echo['display_name'] == 'DeepSeek V4.1 Flash'
+
+    edited = {'model_id': 'deepseek-v4.1-flash', 'display_name': 'My DS'}
+    assert _adopt_declared_name(
+        edited, {'display_name': 'DeepSeek V4.1 Flash'}) is False
+    assert edited['display_name'] == 'My DS'
+
+    # No authored name, or a name that is just the id again, changes nothing.
+    untouched = {'model_id': 'x', 'display_name': 'x'}
+    assert _adopt_declared_name(untouched, {}) is False
+    assert _adopt_declared_name(
+        untouched, {'display_name': 'x'}) is False
+    assert untouched['display_name'] == 'x'
+
+    # The template name survives an end-to-end sync rather than being
+    # overwritten by the registry row it was copied from.
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    document = empty_document(revision=0)
+    document['creators'].append({'creator_id': 'deepseek', 'name': 'DeepSeek'})
+    document['models'].append({
+        'creator_id': 'deepseek', 'model_id': 'deepseek-v4-pro',
+        'display_name': 'deepseek-v4-pro', 'capabilities': ['text'],
+        'context_window': 1000000, 'quality_rank': 1,
+    })
+    repository.compare_and_swap(boundary, document, expected_revision=0)
+    summary = sync_world_model_catalog(boundary=boundary, repository=repository)
+    row = next(model for model in repository.get(boundary).document['models']
+               if model['model_id'] == 'deepseek-v4-pro')
+    assert row['display_name'] == 'DeepSeek V4 Pro'
+    assert summary['display_names_filled'] >= 1
+
+
 def test_sync_is_insert_only_and_preserves_owner_edits():
     repository = InMemoryModelRoutingRepository()
     boundary = _boundary()

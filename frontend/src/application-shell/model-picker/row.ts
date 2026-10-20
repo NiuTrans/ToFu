@@ -11,7 +11,15 @@ export function renderModelRow(model: PickerModel, section: string, options: { s
   row.className = 'preset-dropdown-item' + (options.sub ? ' ps-dd-sub-item' : '');
   row.dataset.value = model.model_id; row.dataset.section = section;
   row.dataset.routeKey = [model.provider_id || 'auto', model.creator_id || '', model.offering_id || '', model.model_id].join('::');
-  const label = options.rawId ? model.model_id : ports.shortName(model.model_id);
+  /* The Model's registered name beats the pricing-era label: two Models can
+   * share one pricing name (DeepSeek V4 Flash vs V4.1), and the pricing table
+   * is keyed on ids the model registry may spell differently. A registry row
+   * that merely echoes its own id declares no name and keeps the fallback. */
+  const declared = model.display_name && model.display_name !== model.model_id
+    ? model.display_name : '';
+  const label = options.rawId
+    ? model.model_id
+    : (declared || ports.shortName(model.model_id));
   const choose = createButton({ label: '', variant: 'ghost', size: 'sm' }, document);
   choose.classList.add('ps-dd-model-choice'); choose.removeAttribute('role'); choose.tabIndex = 0;
   const icon = document.createElement('span'); icon.className = 'ps-dd-icon'; icon.innerHTML = ports.icon(ports.brand(model), 14) || '✦';

@@ -123,7 +123,13 @@ class ModelRequestBudgetScope:
             self._closed = True
             leases = tuple(self.leases)
         usage = self.usage if error is None else getattr(error, 'usage', None)
+        from lib.llm.llm_errors import provider_refused_request
+        refused = usage is None and provider_refused_request(error)
         for lease in leases:
+            if refused:
+                note = getattr(lease, 'note_provider_refusal', None)
+                if callable(note):
+                    note()
             lease.settle(usage, unsent=not lease.dispatched and usage is None)
             confirm = getattr(lease, 'confirm_input', None)
             if confirm is not None:

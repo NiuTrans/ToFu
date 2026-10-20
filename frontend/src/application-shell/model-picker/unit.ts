@@ -7,7 +7,8 @@ import type { ModelPickerFilter, SearchRow } from './filter';
 export function renderModelUnit(unit: ModelDisplayUnit<PickerModel>, section: string, root: HTMLElement, ports: ModelPickerPorts,
   filter: ModelPickerFilter, row: (model: PickerModel, section: string, options?: { sub?: boolean; rawId?: boolean; extraSearch?: string }) => SearchRow): void {
   const face = unit.face, document = ports.document;
-  const extraSearch = unit.members.map(model => model.model_id + ' ' + ports.shortName(model.model_id)).join(' ');
+  const extraSearch = unit.members.map(model => [model.model_id, model.display_name || '', ports.shortName(model.model_id)]
+    .filter(Boolean).join(' ')).join(' ');
   const faceRow = row(face, section, { extraSearch });
   if (unit.kind === 'single' || unit.members.length < 2) { root.append(faceRow.element); return; }
   const sub = document.createElement('div'); sub.className = 'ps-dd-sub'; sub.dataset.section = section;

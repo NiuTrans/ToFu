@@ -285,7 +285,15 @@ repository boundary; it is never included in the public template or bundle.
    ids never resurrect. New rows reuse
    the compiled bundle verbatim with ids re-derived for the target access
    and credential authorization extended to the new confirmed models.
-   Strictly insert-only; a converged access makes later passes no-ops.
+   Insert-only for ADDITIONS; a converged access makes later passes
+   no-ops. One authored exception: when a recipe renames a logical id by
+   taking over the SAME wires (`deepseek-v4-flash` → `deepseek-v4.1-flash`
+   in `yourprovider.json`, whose `request_ids` still list the v4-flash mirrors),
+   the earlier offering's whole wire pool is authored by a different recipe
+   of that template, so it is marked `stale` — the existing not-supplied
+   state the picker hides and dispatch rejects. Nothing is deleted and the
+   Model row stays in the world registry; partial wire overlap is left
+   alone because it may be genuine shared capacity.
    It rides the same shared monitor; `TOFU_TEMPLATE_SUPPLY_SYNC=0` opts
    out.
 

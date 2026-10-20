@@ -351,16 +351,22 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             'new_limit': _detected_limit,
                         }
                         return content_r, usage_r
-                _classify_http_error(resp.status_code, err_msg, model,
-                                     log_prefix, max_tokens=max_tokens,
-                                     credential_present=(
-                                         _has_outbound_credential(hdrs)))
+                try:
+                    _classify_http_error(resp.status_code, err_msg, model,
+                                         log_prefix, max_tokens=max_tokens,
+                                         credential_present=(
+                                             _has_outbound_credential(hdrs)))
+                except BaseException as error:
+                    from lib.llm.llm_errors import mark_provider_refusal
+                    raise mark_provider_refusal(error)
             break
         except (RateLimitError, PermissionError_, ContentFilterError, PromptTooLongError, StreamOnlyError, InvalidImageError, EndpointUnreachableError):
             raise
         except _RETRYABLE as e:
             if _budget_scope is not None:
-                _budget_scope.settle(getattr(e, 'usage', None))
+                from lib.llm.llm_errors import provider_refused_request
+                _budget_scope.settle(getattr(e, 'usage', None),
+                                     refused=provider_refused_request(e))
             if attempt < retries:
                 wait = (0.0 if isinstance(e, SubscriptionConnectionError)
                         else retry_wait(attempt))

@@ -2,7 +2,7 @@
 import type { FoldableModelEntry, ModelDisplayUnit } from '../../core/model-display-fold';
 export interface ProviderOption { provider_id: string; provider_name: string; offering_id?: string; brand?: string }
 export interface PickerModel extends FoldableModelEntry {
-  model_id: string; creator_id?: string; creator_name?: string; provider_id?: string; provider_name?: string;
+  model_id: string; display_name?: string; creator_id?: string; creator_name?: string; provider_id?: string; provider_name?: string;
   offering_id?: string; brand?: string; routing_v2?: boolean; pending_identity?: boolean;
   capabilities?: readonly string[]; thinking_default?: boolean; provider_options?: ProviderOption[];
 }

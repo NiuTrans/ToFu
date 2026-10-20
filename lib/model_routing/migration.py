@@ -540,6 +540,21 @@ def plan_legacy_migration(
             if face_name in connection_by_face:
                 face_name = f"{face_name}_{connection_index}"
             connection_by_face[face_name] = connection_id
+            # A face may select its route with a header (aigc's
+            # ``x-context-provider`` picks a serving provider per wire).
+            # Plain routing headers belong to THIS Connection; the provider
+            # level bucket below stays the shared default for every face.
+            face_spec = spec.get("extra_headers")
+            face_envelope, face_connection = split_header_secrecy(
+                face_spec if isinstance(face_spec, Mapping) else {})
+            if face_envelope:
+                issues.append(MigrationIssue(
+                    "warning", "face_secret_headers_ignored",
+                    f"face {face_name!r} declares credential-named headers "
+                    f"{sorted(face_envelope)}; those belong on the encrypted "
+                    "Credential and were not applied to this Connection",
+                    f"providers[{provider_index}].faces.{face_name}",
+                ))
             connection_profile = resolve_inference_profile(
                 offering={"inference_profile": provider_profile},
                 connection={"inference_profile": profile_from_metadata(spec)},
@@ -551,7 +566,7 @@ def plan_legacy_migration(
                 "protocol": _protocol(spec.get("protocol") or legacy.get("protocol"), endpoint_url),
                 "enabled": not bool(spec.get("disabled")) and bool(spec.get("enabled", True)),
                 "priority": int(spec.get("priority") or connection_index * 10 + 100),
-                "extra_headers": dict(connection_headers),
+                "extra_headers": {**connection_headers, **face_connection},
                 **({"inference_profile": connection_profile} if connection_profile else {}),
                 **{key: spec.get(key, legacy.get(key)) for key in ("thinking_format", "responses_profile") if spec.get(key, legacy.get(key))},
                 **({"adapter": copy.deepcopy(
@@ -746,9 +761,28 @@ def plan_legacy_migration(
             connection_id = connection_by_face.get(face_name) or connection_by_face.get("default")
             if connection_id is None:
                 connection_id = next(iter(connection_by_face.values()))
+            # One logical model may span faces when the gateway serves only
+            # SOME of its spellings through a specific provider selector.
+            # Undeclared names are errors, not a silent default: a fallback
+            # would send that wire id to the wrong face and fail upstream.
+            request_faces = seed.get("request_faces")
+            request_faces = request_faces if isinstance(request_faces, Mapping) else {}
             for wire_index, wire_model_id in enumerate(request_ids):
+                wire_face_name = str(request_faces.get(wire_model_id) or "")
+                wire_connection_id = connection_id
+                if wire_face_name:
+                    wire_connection_id = connection_by_face.get(wire_face_name)
+                    if wire_connection_id is None:
+                        issues.append(MigrationIssue(
+                            "error", "unknown_request_face",
+                            f"wire ID {wire_model_id!r} selects undeclared face "
+                            f"{wire_face_name!r} (known: "
+                            f"{', '.join(sorted(connection_by_face))})",
+                            f"providers[{provider_index}].models[{model_index}].request_faces",
+                        ))
+                        continue
                 wire_key = (access_id, wire_model_id)
-                deployment_id = _stable_id("dep", access_id, connection_id, wire_model_id)
+                deployment_id = _stable_id("dep", access_id, wire_connection_id, wire_model_id)
                 if wire_key in wire_ids:
                     issues.append(MigrationIssue(
                         "error", "ambiguous_wire_model_id",
@@ -760,7 +794,7 @@ def plan_legacy_migration(
                 document["deployments"].append({
                     "deployment_id": deployment_id,
                     "offering_id": offering_id,
-                    "connection_id": connection_id,
+                    "connection_id": wire_connection_id,
                     "wire_model_id": wire_model_id,
 
                     **({"max_output_tokens": seed["max_output_tokens"]} if seed.get("max_output_tokens") is not None else {}),

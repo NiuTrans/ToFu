@@ -84,7 +84,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(routes, 'CELL_PROBE_TASKS', tasks)
     monkeypatch.setattr(provider_probe, 'CELL_PROBE_TASKS', tasks)
     monkeypatch.setattr(routes, '_read_persisted_probe_snapshot',
-                        lambda key: deepcopy(state.cached))
+                        lambda key, credential_ids=None: deepcopy(state.cached))
 
     def submit(task, work, timeout, *, runner):
         state.queued.append((task, work, timeout, runner))
@@ -171,6 +171,9 @@ def test_disabled_selected_cell_uses_saved_transport_and_success_is_read_only(
     assert work[0][1] == repository.secrets['secret-a-second']
     assert work[0][7]['extra_headers'] == {'X-Transport': 'disabled'}
     assert task['_owner_user_id'] == BOUNDARY.owner_user_id
+    # Cell keys are positional, so the snapshot must say which credential each
+    # column measured — otherwise a later key deletion re-labels the evidence.
+    assert started['credential_ids'] == CREDENTIAL_IDS
     assert harness.network == []
     assert_unmodified(harness, before)
     assert_secret_free(harness, started)
@@ -182,6 +185,7 @@ def test_disabled_selected_cell_uses_saved_transport_and_success_is_read_only(
     assert completed['done_count'] == completed['total'] == 1
     assert set(completed['cells']) == {f'1::{wire}'}
     assert completed['cells'][f'1::{wire}']['status'] == 'ok'
+    assert completed['credential_ids'] == CREDENTIAL_IDS
     assert len(harness.network) == 1
     assert harness.persisted
     assert_unmodified(harness, before)

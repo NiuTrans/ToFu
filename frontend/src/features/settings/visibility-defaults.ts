@@ -75,6 +75,17 @@ function modelShortName(modelId: string): string {
   return typeof bridge._modelShortName === 'function' ? bridge._modelShortName(modelId) : modelId;
 }
 
+/* The routing registry's own name for the Model wins; the pricing table's name
+ * is only a display convention for ids the registry does not carry. Two Models
+ * can otherwise read as one (DeepSeek V4 Flash vs V4.1 Flash), and a bare id
+ * is the last resort. */
+function modelEntryLabel(model: VisibilityModel): string {
+  const declared = (model.display_name || '').trim();
+  // An id-echo declares no name; keep the pricing label instead of the id.
+  if (!declared || declared === model.model_id) return modelShortName(model.model_id);
+  return declared;
+}
+
 function setSelectOptions(
   select: HTMLElement,
   emptyLabel: string,
@@ -88,7 +99,7 @@ function setSelectOptions(
     const modelId = entry.model.model_id;
     const opt = document.createElement('option');
     opt.value = modelId;
-    opt.textContent = modelShortName(modelId);
+    opt.textContent = modelEntryLabel(entry.model);
     if (modelId === savedVal) opt.selected = true;
     sel.appendChild(opt);
   }
@@ -278,7 +289,7 @@ function renderDropdownVisibility(): void {
 
   renderVisibilityGroups(container, allModels, hidden, (m, isVisible) => {
     const mid = m.model_id;
-    const shortName = modelShortName(mid);
+    const shortName = modelEntryLabel(m);
     let h = '<div class="stg-dv-item">';
     h += '  <span class="stg-dv-name" title="' + escapeHtml(mid) + '">' + escapeHtml(shortName) + '</span>';
     h += '  <label class="stg-toggle stg-dv-toggle">';

@@ -1027,10 +1027,17 @@ def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper
     err_msg = f'API HTTP {status_code}: {err_text[:_ERR_BODY_LIMIT]}'
     if raw_dumper.enabled:
         raw_dumper.line(f'[HTTP-{status_code}] {err_text[:_ERR_BODY_LIMIT]}')
-    _classify_http_error(status_code, err_msg, body.get('model', ''),
-                         log_prefix, max_tokens=body.get('max_tokens', 0),
-                         credential_present=credential_present,
-                         route_limit_key=str(route_limit_key or ''))
+    try:
+        _classify_http_error(status_code, err_msg, body.get('model', ''),
+                             log_prefix, max_tokens=body.get('max_tokens', 0),
+                             credential_present=credential_present,
+                             route_limit_key=str(route_limit_key or ''))
+    except BaseException as error:
+        # The status line precedes every body byte, so a non-200 answer proves
+        # the provider never ran this prompt. Budget settlement needs that
+        # proof to account the attempt at zero instead of leaving it unknown.
+        from lib.llm.llm_errors import mark_provider_refusal
+        raise mark_provider_refusal(error)
 
 
 def _wire_tool_names(tools) -> set[str]:

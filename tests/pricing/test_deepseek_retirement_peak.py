@@ -121,6 +121,25 @@ def test_v41_flash_slot_is_canonical_and_multimodal():
     # stay, but the id is no longer needed for the vision lane.
 
 
+def test_v4_and_v41_keep_distinct_display_names():
+    """The registry holds V4 Flash (aa 34.3, 2026-05) and V4.1 Flash
+    (aa 39.5, 2026-09-10) as two Models. A pricing row's `name` is the
+    MODEL's name, not its upstream route's: relabelling the V4 row 'V4.1
+    Flash' made the model picker offer one product twice, once under a raw
+    gateway id."""
+    from lib.pricing import MODEL_PRICING, pricing_for_model
+    assert MODEL_PRICING['deepseek-v4-flash']['name'] == 'DeepSeek V4 Flash'
+    assert MODEL_PRICING['deepseek-flash']['name'] == 'DeepSeek V4.1 Flash'
+    # The YourProvider gateway's logical V4.1 id must resolve too: that lookup is
+    # what the picker prints for the model, so a miss shows the raw id.
+    for mid in ('deepseek-v4.1-flash', 'deepseek-v4-1-flash'):
+        assert pricing_for_model(mid)['name'] == 'DeepSeek V4.1 Flash'
+    # Cost keys on the wire id, so every gateway mirror needs its own row.
+    for mid in ('deepseek-v4.1-flash-baidu', 'deepseek-v4.1-flash-huawei',
+                'deepseek-v4.1-flash-m17'):
+        assert pricing_for_model(mid)['name'].startswith('DeepSeek V4.1 Flash')
+
+
 def test_v41_flash_thinking_hint():
     """The canonical 'deepseek-flash' id must match the thinking_type hint
     (the V4-era pattern only covered 'deepseek-v4*')."""

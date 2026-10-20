@@ -699,10 +699,13 @@ def test_apply_mixed_recommendations_preserves_scope_and_grant_policy(tmp_path):
     #   per-wire exclusion; `esm-fail` carries the legacy marker so its disable
     #   is NOT applied (stays reachable). cred-b: fresh ok on `esm-pass` mints
     #   the grant. cred-other (different provider) is untouched.
+    # A mint reaches every request name of the model unless the siblings are
+    # withheld, so the new grant enables ONLY the proven `esm-pass` cell.
     assert out["grants"] == [
         [{"creator_id": "meta", "model_id": "esm",
           "excluded_wire_model_ids": ["esm"]}],
-        [{"creator_id": "meta", "model_id": "esm"}],
+        [{"creator_id": "meta", "model_id": "esm",
+          "excluded_wire_model_ids": ["esm", "esm-fail", "esm-unknown"]}],
         [{"creator_id": "meta", "model_id": "esm"}],
     ]
     assert out["toasts"] == ["已应用：移除 2 项模型授权 — 保存后生效。"]
@@ -809,16 +812,17 @@ def test_all_wire_pool_logical_head_and_shared_grants(tmp_path):
 """)
     assert out['pool'] == ['esm-east', 'esm-west']
     assert out['logical'] and out['search'] and out['deploymentsUnchanged']
-    # Per-wire toggle: enabling mints one shared grant reaching both wires.
-    assert out['grantsAfterOn'] == [{'creator_id': 'meta', 'model_id': 'esm'}]
-    assert out['onHtml'].count('stg-mx-cell on') == 2
-    assert 'stg-mx-cell off' not in out['onHtml']
-    # Toggling the primary wire off excludes ONLY that wire; the sibling wire
-    # stays on (a bare toggle resolves to the row's primary wire `esm-east`).
-    assert out['grantsAfterOff'] == [{'creator_id': 'meta', 'model_id': 'esm',
-                                      'excluded_wire_model_ids': ['esm-east']}]
-    assert out['offHtml'].count('stg-mx-cell on') == 1
-    assert out['offHtml'].count('stg-mx-cell off') == 1
+    # Per-wire toggle mints the shared grant but enables ONLY the clicked
+    # request name: the sibling wire must stay off.
+    assert out['grantsAfterOn'] == [{'creator_id': 'meta', 'model_id': 'esm',
+                                     'excluded_wire_model_ids': ['esm-west']}]
+    assert out['onHtml'].count('stg-mx-cell on') == 1
+    assert out['onHtml'].count('stg-mx-cell off') == 1
+    # Toggling the primary wire again clears its exclusion and removes the
+    # grant entirely (no other wire is excluded), i.e. both go off.
+    assert out['grantsAfterOff'] == []
+    assert out['offHtml'].count('stg-mx-cell on') == 0
+    assert out['offHtml'].count('stg-mx-cell off') == 2
     assert out['onHtml'].count('stg-mx-cell logical') == 1
     assert '未启用' not in out['onHtml'] and 'wire-off' not in out['onHtml']
     assert 'data-id="esm"' in out['onHtml']

@@ -63,6 +63,7 @@ from lib.json_store import read_json, write_json_atomic
 from lib.provider.provider_probe import (
     CELL_PROBE_LOCK,
     CELL_PROBE_TASKS,
+    align_probe_snapshot,
     build_probe_work,
     normalize_probe_snapshot,
     probe_cache_path,
@@ -493,13 +494,36 @@ def _probe_cell_cache_key(boundary: OwnerBoundary, provider_id: str) -> str:
     return f"u{boundary.owner_user_id}_{provider_id}"
 
 
-def _read_persisted_probe_snapshot(cache_key: str) -> dict[str, Any] | None:
-    """Read a public snapshot and terminalise impossible post-restart work."""
+def _probe_credential_ids(repository, boundary, provider_id: str) -> list[str] | None:
+    """Ordered credential column identities of the provider's current grid."""
+    try:
+        bundle = _provider_bundle(repository.get(boundary).public_document(), provider_id)
+    except Exception as error:
+        logger.warning("[CellProbe] cannot resolve credential columns for %s: %s",
+                       provider_id, error)
+        return None
+    if not bundle:
+        return None
+    return [str(row["credential_id"]) for row in bundle["credentials"]]
+
+
+def _read_persisted_probe_snapshot(
+    cache_key: str,
+    credential_ids: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Read a public snapshot and terminalise impossible post-restart work.
+
+    ``credential_ids`` re-binds positional column evidence to the CURRENT
+    credential identities. Without it a key deleted after the probe leaves its
+    verdicts sitting on whichever key inherited the same column index.
+    """
     cache_path = probe_cache_path(cache_key)
     cached = read_json(cache_path, default=None)
     if not isinstance(cached, dict):
         return None
     cached = normalize_probe_snapshot(cached)
+    if credential_ids is not None:
+        cached = align_probe_snapshot(cached, credential_ids)
     # A live generation is always present in CELL_PROBE_TASKS. A disk-only
     # ``running`` row therefore belongs to a dead process; returning it would
     # make Settings poll forever for work that cannot resume.
@@ -592,6 +616,7 @@ def probe_provider_cells_start(provider_id: str):
                 kind="provider_probe_stale_selection", field="credential_ids")
         if explicit_targets:
             bundle = manual_probe_bundle(bundle, body["targets"])
+        credential_ids = [str(row["credential_id"]) for row in bundle["credentials"]]
         with CELL_PROBE_LOCK:
             existing = CELL_PROBE_TASKS.get(cache_key)
             if existing and existing["status"] == "running":
@@ -604,7 +629,7 @@ def probe_provider_cells_start(provider_id: str):
                 return api_ok(public_probe_snapshot(existing))
 
         if not force and not scoped and not explicit_targets:
-            cached = _read_persisted_probe_snapshot(cache_key)
+            cached = _read_persisted_probe_snapshot(cache_key, credential_ids)
             if isinstance(cached, dict) and cached.get("cells"):
                 logger.info(
                     "[CellProbe] %s resumed from disk (%d cells, status=%s)",
@@ -640,7 +665,7 @@ def probe_provider_cells_start(provider_id: str):
                     kind="provider_probe_empty_scope", field="only")
             probed_keys = {probe_cell_key(w[0], w[3]) for w in work}
             valid_keys = {probe_cell_key(w[0], w[3]) for w in full_work}
-            cached = _read_persisted_probe_snapshot(cache_key)
+            cached = _read_persisted_probe_snapshot(cache_key, credential_ids)
             if isinstance(cached, dict) and isinstance(cached.get("cells"), dict):
                 for key, value in cached["cells"].items():
                     if key in valid_keys and key not in probed_keys \
@@ -649,6 +674,7 @@ def probe_provider_cells_start(provider_id: str):
 
         task = {
             "provider_id": cache_key,
+            "credential_ids": credential_ids,
             "status": "running",
             "started_at": _time.time(),
             "finished_at": None,
@@ -708,8 +734,11 @@ def probe_provider_cells_status(provider_id: str):
     with CELL_PROBE_LOCK:
         task = CELL_PROBE_TASKS.get(cache_key)
         if task:
+            # A live task carries the columns it actually measured, so it needs
+            # no authority read on every poll.
             return api_ok(public_probe_snapshot(task))
-    cached = _read_persisted_probe_snapshot(cache_key)
+    credential_ids = _probe_credential_ids(_repository(), boundary, provider_id)
+    cached = _read_persisted_probe_snapshot(cache_key, credential_ids)
     if isinstance(cached, dict) and cached.get("cells") is not None:
         return api_ok(cached)
     return api_ok({"status": "none"})

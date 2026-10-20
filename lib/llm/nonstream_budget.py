@@ -35,9 +35,13 @@ class NonStreamBudgetScope:
         self.lease.mark_dispatched()
         return send(*args,**kwargs)
 
-    def settle(self, usage=None, *, successful=False):
+    def settle(self, usage=None, *, successful=False, refused=False):
         lease,self.lease=self.lease,None
         if lease is not None:
+            if refused and usage is None:
+                note = getattr(lease, 'note_provider_refusal', None)
+                if callable(note):
+                    note()
             lease.settle(usage,unsent=not lease.dispatched and usage is None)
             confirm = getattr(lease, 'confirm_input', None)
             if confirm is not None:
@@ -57,6 +61,8 @@ def budgeted_nonstream_chat(function):
             scope.settle(result[1], successful=True)
             return result
         except BaseException as error:
-            scope.settle(getattr(error,'usage',None))
+            from lib.llm.llm_errors import provider_refused_request
+            scope.settle(getattr(error,'usage',None),
+                         refused=provider_refused_request(error))
             raise
     return wrapped

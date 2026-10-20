@@ -59,6 +59,27 @@ def _world_catalog_rows() -> tuple[list[dict], list[dict]]:
     return list(creators.values()), list(models.values())
 
 
+def _adopt_declared_name(model: dict, template_row: dict | None) -> bool:
+    """Give an id-echoing registry row the Model's authored display name.
+
+    A row whose ``display_name`` merely repeats its ``model_id`` carries no
+    naming decision — it is what migration wrote when the template declared
+    none. Adopting the template's name is therefore not an overwrite of an
+    owner edit (unlike ``apply_model_defaults``, any other value wins), and it
+    is what lets a gateway spelling such as ``deepseek-v4.1-flash`` stop
+    surfacing as a raw id.
+    """
+    declared = (template_row or {}).get('display_name')
+    if not isinstance(declared, str) or not declared.strip():
+        return False
+    if declared == model.get('model_id'):
+        return False
+    if model.get('display_name') not in (None, '', model.get('model_id')):
+        return False
+    model['display_name'] = declared
+    return True
+
+
 def _retired_model_keys() -> set:
     """Canonical keys of every template-authored ``retired_model_ids`` row."""
     from lib.model_catalog._creator_identity import canonical_key
@@ -126,10 +147,12 @@ def sync_world_model_catalog(*, boundary=None, repository=None) -> dict:
     def repair_metadata(document):
         filled = sum(apply_model_defaults(row, baseline=baseline.get(
             (row['creator_id'], row['model_id']))) for row in document['models'])
+        named = sum(_adopt_declared_name(row, baseline.get(
+            (row['creator_id'], row['model_id']))) for row in document['models'])
         bound = reconcile_catalog_identities(document)
         migrated = len(reconcile_offering_metadata(document,
             provider_templates=metadata_templates, legacy_receipt=legacy_receipt))
-        return filled, bound, migrated
+        return filled, named, bound, migrated
 
     repairs = repair_metadata(deepcopy(current.document))
     known_creators = {row['creator_id'] for row in current.document['creators']}
@@ -148,7 +171,7 @@ def sync_world_model_catalog(*, boundary=None, repository=None) -> dict:
                 'revision': current.revision}
 
     pruned_count = 0
-    repaired_counts = (0, 0, 0)
+    repaired_counts = (0, 0, 0, 0)
 
     def _mutate(working: dict):
         nonlocal pruned_count, repaired_counts
@@ -192,8 +215,9 @@ def sync_world_model_catalog(*, boundary=None, repository=None) -> dict:
         'creators_added': len(new_creators),
         'pruned': pruned_count,
         'profiles_filled': repaired_counts[0],
-        'identities_bound': repaired_counts[1],
-        'metadata_migrated': repaired_counts[2],
+        'display_names_filled': repaired_counts[1],
+        'identities_bound': repaired_counts[2],
+        'metadata_migrated': repaired_counts[3],
         'revision': authority.revision,
     }
     logger.info('world catalogue sync: %s', summary)

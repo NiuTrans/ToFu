@@ -231,6 +231,14 @@ model card must not be copied onto that alias without an official mapping.
 This variant is not auto-registered, and an existing owner draft remains
 non-callable until independently evidenced.
 
+The YourProvider AIGC gateway serves Grok 4.7 only under its `aws.` deployment
+spelling: live probe 2026-10-20 returned HTTP 429 with a per-model RPM message
+for `aws.grok-4.7`, while the bare `grok-4.7` returned 400
+`不支持的模型类型` (no such deployment). The recipe therefore keeps
+`model_id: grok-4.7` and puts `aws.grok-4.7` in `request_ids`, and the mirror
+carries its own `MODEL_PRICING` / `DEFAULT_SLOT_CONFIGS` rows because cost and
+slot seeding key on the wire id.
+
 The Models settings projection shows `ready` rows and legacy unmarked rows
 awaiting migration, not persisted `pending_*` or `disabled` drafts. Drafts
 remain in authority for research/admission and provider diagnostics; hiding
