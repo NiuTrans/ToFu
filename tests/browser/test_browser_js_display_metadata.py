@@ -248,14 +248,15 @@ def test_tab_resolution_list_is_reused_without_another_display_request():
     def send(command, params, **authority):
         calls.append(command)
         if command == 'list_tabs':
-            return [{'id': 73, 'title': 'Resolved active page', 'active': True, 'isClient': False}], None
+            return [{'id': 73, 'title': 'Resolved automation page', 'active': True,
+                     'automation': True, 'isClient': False}], None
         return 2, None
 
     runtime = BrowserToolRuntime('42', 'chosen', sender=send, work_key='unique-active-test',
                                  display_metadata=metadata)
     try:
         assert _handle_execute_js({'code': '1+1'}, runtime) == '2'
-        assert metadata == {'tabTitle': 'Resolved active page'}
+        assert metadata == {'tabTitle': 'Resolved automation page'}
         assert calls == ['list_tabs', 'execute_js']
     finally:
         forget_work_tab(runtime.route_key, 73)

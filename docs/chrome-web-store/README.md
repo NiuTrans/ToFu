@@ -28,11 +28,11 @@
 >
 > **Kit readiness, checked 2026-10-09** — so a future submitter starts from
 > facts rather than re-deriving them:
-> - `manifest.store.json` = 12 permissions, version 5.7.1, matching the
+> - `manifest.store.json` = 12 permissions, version 5.8.0, matching the
 >   shipped manifest; `downloads`, `webRequest`, and `webNavigation` present,
 >   `activeTab` absent.
 > - `bash scripts/package_extension.sh --store` produces a valid
->   `tofu-browser-bridge-5.7.1-store.zip` (8 files, `<all_urls>`).
+>   `tofu-browser-bridge-5.8.0-store.zip` (8 files, `<all_urls>`).
 > - `tests/release/test_chrome_store_manifest_parity.py` — 25/25, and it DERIVES the
 >   required permissions from the extension's real `chrome.*` calls, so it
 >   keeps this kit honest while it sits idle.
@@ -113,7 +113,7 @@ It exists because the store manifest once omitted `downloads` while
 `background.js` really called `chrome.downloads.download` — the `download`
 command would have thrown for every store-installed user.
 
-Extension 5.7.1 starts owned transient resources on demand and retains exact
+Extension 5.8.0 starts owned transient resources on demand and retains exact
 cleanup/restart records. Per-capture content bounds, redaction, scope checks and
 permissions are unchanged. Both local archives were rebuilt and inspected with
 eight files; packaging uses Python's standard ZIP writer and atomic publication

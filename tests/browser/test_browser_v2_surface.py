@@ -260,21 +260,33 @@ def test_work_tab_explicit_wins_and_remembers():
     assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 42
 
 
-def test_work_tab_seeds_from_active_tab():
+def test_work_tab_never_seeds_a_tab_the_user_is_using():
+    """Ownership, not activity, picks the implicit target. The owner's active
+    tab is where they are working, so it must never be adopted implicitly —
+    even when it is the only tab open."""
     from lib.browser._resolve import resolve_work_tab
     send = _fake_send({'list_tabs': (
         [{'id': 7, 'active': False}, {'id': 9, 'active': True}], None)})
-    assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 9
+    assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) is None
+
+
+def test_work_tab_seeds_from_an_automation_tab():
+    from lib.browser._resolve import resolve_work_tab
+    send = _fake_send({'list_tabs': (
+        [{'id': 7, 'active': True},
+         {'id': 11, 'active': False, 'automation': True},
+         {'id': 9, 'active': False, 'automation': True}], None)})
+    # Highest id ≈ the most recently opened automation tab.
+    assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 11
 
 
 def test_work_tab_seed_skips_client_tab():
     """The Tofu client tab (flagged isClient by the extension) is never an
-    implicit action target — seeding falls through to the next tab even
-    when the client tab is the active one."""
+    implicit action target, even if the extension ever mislabels it."""
     from lib.browser._resolve import resolve_work_tab
     send = _fake_send({'list_tabs': (
-        [{'id': 7, 'active': True, 'isClient': True},
-         {'id': 9, 'active': False}], None)})
+        [{'id': 7, 'active': True, 'isClient': True, 'automation': True},
+         {'id': 9, 'active': False, 'automation': True}], None)})
     assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 9
 
 
@@ -287,11 +299,12 @@ def test_work_tab_seed_returns_none_when_only_client_tabs():
 
 def test_close_tab_forgets_work_tab():
     from lib.browser._resolve import forget_work_tab, resolve_work_tab
-    send = _fake_send({'list_tabs': ([{'id': 5, 'active': True}], None)})
+    send = _fake_send({'list_tabs': (
+        [{'id': 5, 'active': True, 'automation': True}], None)})
     assert resolve_work_tab(
         {'tabId': 5}, route_key=_ROUTE_KEY, send=send) == 5
     forget_work_tab(_ROUTE_KEY, 5)
-    # Falls back to seeding again (active tab 5 from the fake).
+    # Falls back to seeding the automation tab from the fake.
     assert resolve_work_tab({}, route_key=_ROUTE_KEY, send=send) == 5
 
 
@@ -341,7 +354,7 @@ def test_work_tab_memory_expires_and_reseeds(monkeypatch):
 
     def send(command, **_kwargs):
         calls.append(command)
-        return [{'id': 9, 'active': True}], None
+        return [{'id': 9, 'active': True, 'automation': True}], None
 
     assert _resolve.resolve_work_tab(
         {}, route_key=_ROUTE_KEY, send=send) == 9
@@ -397,9 +410,9 @@ def test_list_tabs_seeds_work_tab_only_from_owner_allowed_rows(monkeypatch):
     runtime = _handler_runtime({
         'list_tabs': ([
             {'id': 8, 'url': 'https://denied.example/', 'title': 'Secret',
-             'active': True},
+             'active': True, 'automation': True},
             {'id': 9, 'url': 'https://allowed.example/', 'title': 'Allowed',
-             'active': False},
+             'active': False, 'automation': True},
         ], None),
     }, calls)
 
@@ -428,7 +441,28 @@ def test_list_tabs_marks_client_tab_and_never_seeds_it():
     rendered = _handle_list_tabs({}, runtime)
 
     assert 'never navigated' in rendered
-    assert current_work_tab(_ROUTE_KEY) == 9
+    # A user tab is listed and addressable, never adopted as the implicit target.
+    assert current_work_tab(_ROUTE_KEY) is None
+
+
+def test_list_tabs_marks_and_seeds_automation_tabs():
+    from lib.browser._resolve import current_work_tab
+    from lib.browser.handlers import _handle_list_tabs
+
+    calls = []
+    runtime = _handler_runtime({
+        'list_tabs': ([
+            {'id': 3, 'url': 'http://127.0.0.1:8080/', 'title': 'Tofu',
+             'active': True, 'isClient': True},
+            {'id': 11, 'url': 'https://allowed.example/', 'title': 'Allowed',
+             'active': False, 'automation': True},
+        ], None),
+    }, calls)
+
+    rendered = _handle_list_tabs({}, runtime)
+
+    assert '[automation tab' in rendered
+    assert current_work_tab(_ROUTE_KEY) == 11
 
 
 # ── 4. Action receipt ─────────────────────────────────────────────────
@@ -456,6 +490,72 @@ def test_receipt_never_raises_on_bridge_failure():
     send = _fake_send({'list_tabs': (None, 'bridge down')})
     assert action_receipt(
         1, (None, None, None), route_key=_ROUTE_KEY, send=send) == ''
+
+
+def test_navigate_opens_a_background_tab_instead_of_using_the_users_tab():
+    """No automation tab to continue in: navigation opens its own tab.
+
+    The user has a tab open and is looking at it. The previous policy adopted
+    it and navigated it away; the fix keeps it intact and opens a background
+    tab that never takes focus.
+    """
+    from lib.browser._resolve import current_work_tab
+    from lib.browser.handlers import _handle_navigate
+
+    calls = []
+    runtime = _handler_runtime({
+        'list_tabs': ([
+            {'id': 4, 'url': 'http://127.0.0.1:15000/', 'title': 'Tofu',
+             'active': True, 'isClient': True},
+            {'id': 9, 'url': 'https://user.example/', 'title': 'Reading',
+             'active': False},
+        ], None),
+        'create_tab': ({'id': 12, 'url': 'https://example.test/'}, None),
+        'navigate': ({'id': 9, 'url': 'https://example.test/'}, None),
+    }, calls)
+
+    out = _handle_navigate({'url': 'https://example.test/'}, runtime)
+
+    cmds = [c for c, _p in calls]
+    assert 'navigate' not in cmds, 'a user tab must never be navigated implicitly'
+    create_params = next(p for c, p in calls if c == 'create_tab')
+    assert create_params['active'] is False
+    assert 'Opened new tab #12' in out
+    assert current_work_tab(_ROUTE_KEY) == 12
+
+
+def test_navigate_continues_in_the_automation_tab():
+    from lib.browser.handlers import _handle_navigate
+
+    calls = []
+    runtime = _handler_runtime({
+        'list_tabs': ([
+            {'id': 12, 'url': 'https://example.test/', 'title': 'Agent',
+             'active': False, 'automation': True},
+        ], None),
+        'navigate': ({'id': 12, 'url': 'https://example.test/next'}, None),
+    }, calls)
+
+    out = _handle_navigate({'url': 'https://example.test/next'}, runtime)
+
+    assert [c for c, _p in calls] == ['list_tabs', 'navigate']
+    assert 'Navigated tab #12' in out
+
+
+def test_explicit_tab_id_still_targets_a_user_tab():
+    """Explicit targeting is the deliberate path to the user's own page."""
+    from lib.browser.handlers import _handle_navigate
+
+    calls = []
+    runtime = _handler_runtime({
+        'list_tabs': ([], None),
+        'navigate': ({'id': 9, 'url': 'https://example.test/'}, None),
+    }, calls)
+
+    out = _handle_navigate({'url': 'https://example.test/', 'tabId': 9}, runtime)
+
+    assert [c for c, _p in calls] == ['navigate']
+    assert 'Navigated tab #9' in out
 
 
 # ── 5. Handlers end-to-end (fake bridge) ──────────────────────────────

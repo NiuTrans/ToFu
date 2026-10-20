@@ -199,8 +199,8 @@ def test_click_retargets_when_remembered_tab_died():
             ({'elements': _ELEMENTS}, None),
         ],
         'list_tabs': [
-            ([{'id': 1, 'url': 'http://a', 'title': 'A', 'active': True}],
-             None),
+            ([{'id': 1, 'url': 'http://a', 'title': 'A', 'active': False,
+               'automation': True}], None),
         ],
         'click_element': (
             {'clicked': True, 'tag': 'button', 'text': 'Save'}, None),
@@ -247,6 +247,34 @@ def test_click_non_tab_gone_note_does_not_retarget():
         'an honest empty enumeration must not be mistaken for a dead tab')
 
 
+def test_dead_automation_tab_is_not_retargeted_onto_a_user_tab():
+    """Losing the automation tab must not promote the user's tab.
+
+    Re-seeding is the recovery path for a dead remembered tab; when the only
+    remaining tab is one the owner is using, retargeting would click or type
+    inside their page. The call fails with the original diagnosis instead.
+    """
+    calls = []
+    runtime = _runtime(_fake_send({
+        'get_interactive_elements': (None, _TAB_GONE),
+        'list_tabs': [
+            ([{'id': 1, 'url': 'https://user.example/', 'title': 'Reading',
+               'active': True}], None),
+        ],
+        'click_element': (
+            {'clicked': True, 'tag': 'button', 'text': 'Save'}, None),
+    }, calls))
+    _seed_dead_work_tab()
+
+    from lib.browser.handlers import _handle_click
+    out = _handle_click({'text': 'save'}, runtime)
+
+    assert 'No clear match' in out
+    assert 'click_element' not in [c for c, _p in calls]
+    # The note names the real recovery action instead of inviting a retry on
+    # a tab that no longer exists.
+    assert 'browser_navigate' in out
+
 def test_type_retargets_when_remembered_tab_died():
     calls = []
     runtime = _runtime(_fake_send({
@@ -255,8 +283,8 @@ def test_type_retargets_when_remembered_tab_died():
             ({'elements': _ELEMENTS}, None),
         ],
         'list_tabs': [
-            ([{'id': 1, 'url': 'http://a', 'title': 'A', 'active': True}],
-             None),
+            ([{'id': 1, 'url': 'http://a', 'title': 'A', 'active': False,
+               'automation': True}], None),
         ],
         'type_text': ({'typed': True}, None),
     }, calls))

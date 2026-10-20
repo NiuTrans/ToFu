@@ -6,11 +6,15 @@ half of the v2 surface):
 
 1. **Working-tab memory** — the last tab a tool acted on is remembered, so
    ``tab_id`` is optional everywhere: omit it and the action lands on the
-   tab you were already working with (seeded from the browser's active tab
-   on first use; tabs the extension flags ``isClient`` — the Tofu app
-   itself — are never seeded, so a tool call cannot replace the chat the
-   user is working in). This kills the list_tabs-first ceremony for
-   single-tab flows and the per-call id plumbing.
+   tab you were already working with. The seed set is only the tabs the
+   extension opened for automation (flagged ``automation``); a tab the owner
+   is using — the Tofu client tab, the page they are reading, a form they
+   half-filled — is never seeded implicitly, so an unattended call cannot
+   replace or click through what the human has in front of them. Reaching a
+   user tab takes an explicit ``tab_id``; once the caller has named it,
+   continuation on it is intended. This kills the list_tabs-first ceremony
+   for single-tab flows and the per-call id plumbing without taking the
+   browser away from its user.
 2. **Intent-based element resolution** — ``text=`` params are resolved
    server-side: enumerate interactive elements once, fuzzy-rank them
    (exact > prefix > substring; role/tag-aware boost), act on the winner.
@@ -184,10 +188,16 @@ def resolve_work_tab(fn_args, *, route_key, send):
     """Resolve which tab this call should act on. Returns int tab id or None.
 
     Priority: explicit ``tabId`` arg (which also becomes the new working
-    tab) → remembered working tab → the browser's currently active tab
-    (seeded via one list_tabs call, skipping ``isClient`` rows — the Tofu
-    client tab is never an implicit action target) → None (caller renders
-    the error).
+    tab) → remembered working tab → an automation tab the extension opened
+    for this owner/device (seeded via one list_tabs call) → None (the caller
+    renders the error, or opens a tab of its own).
+
+    Seeding never adopts a user tab. The owner's active tab is where they
+    are working: the Tofu chat, a page they are reading, a half-filled form.
+    Adopting it navigates or clicks inside the page the human is using, which
+    is the browser-control defect this policy closes. Only an explicit
+    ``tabId`` names one — and that naming is the deliberate act that makes it
+    the working tab for the calls that follow.
     """
     explicit = fn_args.get('tabId')
     if explicit is not None:
@@ -215,15 +225,16 @@ def resolve_work_tab(fn_args, *, route_key, send):
         return None
     if error or not isinstance(result, list) or not result:
         return None
-    eligible = [t for t in result if not t.get('isClient')]
-    for t in eligible:
-        if t.get('active') and t.get('id') is not None:
-            remember_work_tab(route_key, t['id'])
-            return int(t['id'])
-    if eligible and eligible[0].get('id') is not None:
-        remember_work_tab(route_key, eligible[0]['id'])
-        return int(eligible[0]['id'])
-    return None
+    automation = [t for t in result
+                  if t.get('automation') and not t.get('isClient')
+                  and t.get('id') is not None]
+    if not automation:
+        return None
+    # Highest id ≈ most recently opened automation tab: the one the last
+    # session was working in before this server lost its LRU entry.
+    chosen = max(automation, key=lambda t: int(t['id']))
+    remember_work_tab(route_key, chosen['id'])
+    return int(chosen['id'])
 
 
 # ══════════════════════════════════════════════════════════

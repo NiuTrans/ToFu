@@ -143,7 +143,8 @@ def _handle_advanced_tool(fn_name, fn_args, runtime):
             fn_args, route_key=runtime.route_key, send=runtime.send)
         if tab_id is None:
             return ('Error: no tab to act on. Pass tab_id, or call '
-                    'browser_list_tabs / browser_navigate first.')
+                    'browser_navigate first (it opens an automation tab), or '
+                    'pass the id of a tab the user already has open.')
         before = tab_snapshot(tab_id, send=runtime.send)
         if fn_name == 'browser_menu_click':
             result = menu_click(

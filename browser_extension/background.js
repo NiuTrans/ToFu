@@ -66,6 +66,16 @@ const TEMPORARY_TAB_CLEANUP_TIMEOUT_MS = 5000;
 const _temporaryTabIds = new Set();
 let _temporaryTabLedgerTail = Promise.resolve();
 let _temporaryTabRecovery = null;
+// Tabs THIS extension opened for automation, as opposed to tabs the owner
+// opened. The server targets only these for tab_id-less actions, so an
+// implicit read/click/navigation can never take over the page the human is
+// working in (the Tofu chat included). Session storage, not memory: an MV3
+// worker restart must not turn the agent's own tab into a "user tab".
+const AUTOMATION_TAB_SESSION_KEY = 'automationTabIds';
+const AUTOMATION_TAB_LEDGER_MAX = 32;
+const _automationTabIds = new Set();
+let _automationTabLedgerTail = Promise.resolve();
+let _automationTabRestore = null;
 
 // ══════════════════════════════════════════
 //  State
@@ -295,6 +305,7 @@ chrome.webNavigation.onReferenceFragmentUpdated.addListener(
 chrome.tabs.onRemoved.addListener((tabId) => {
   _recentNetworkByTab.delete(Number(tabId));
   _recentDevtoolsByTab.delete(Number(tabId));
+  _forgetAutomationTab(tabId);
   _stopDebugSession(Number(tabId), 'tab-closed').catch(() => {});
   for (const capture of Array.from(_networkCaptures.values())) {
     if (capture.tabId === Number(tabId)) {
@@ -395,6 +406,7 @@ function init() {
   _recoverTemporaryTabs().catch((error) => {
     console.warn('[TemporaryTabs] recovery failed:', _textForDiagnostic(error));
   });
+  _restoreAutomationTabs();
   // Generate or restore a stable client ID for per-device command routing.
   // Then adopt the download-time preseed (if any) BEFORE server detection,
   // so a freshly-installed package pairs with zero user input.
@@ -1010,6 +1022,7 @@ async function executeCommand(type, params, temporaryTabs) {
 // ══════════════════════════════════════════
 
 async function cmdListTabs(params) {
+  await _restoreAutomationTabs();
   const queryOpts = {};
   if (params.active !== undefined) queryOpts.active = params.active;
   if (params.currentWindow !== undefined) queryOpts.currentWindow = params.currentWindow;
@@ -1026,6 +1039,7 @@ async function cmdListTabs(params) {
     status: t.status,
     pinned: t.pinned,
     isClient: _isOwnServerTab(t),
+    automation: _automationTabIds.has(Number(t.id)),
   }));
 }
 
@@ -3432,6 +3446,7 @@ async function cmdCreateTab(params) {
   if (params.windowId) opts.windowId = params.windowId;
 
   const tab = await chrome.tabs.create(opts);
+  _rememberAutomationTab(tab.id);
   let captureId = null;
   if (captureNavigation) {
     const timeoutMs = Math.max(1000, Math.min(30000, Number(params.timeoutMs) || 15000));
@@ -3531,6 +3546,47 @@ function _recoverTemporaryTabs() {
     })();
   }
   return _temporaryTabRecovery;
+}
+
+/* Automation-tab ownership. Chrome cannot tell "a tab the agent opened" from
+ * "a tab the human opened"; the extension records that fact at the only
+ * moment it is known (the create) and replays it to the server in list_tabs.
+ * The ledger is advisory for targeting, never an authority: losing it costs
+ * one extra background tab, it never grants access to a user tab. */
+function _persistAutomationTabs() {
+  const ids = [..._automationTabIds].slice(-AUTOMATION_TAB_LEDGER_MAX);
+  const write = _automationTabLedgerTail.catch(() => false).then(() =>
+    chrome.storage.session.set({[AUTOMATION_TAB_SESSION_KEY]: ids}));
+  _automationTabLedgerTail = write.catch(() => {});
+  return _automationTabLedgerTail;
+}
+
+function _rememberAutomationTab(tabId) {
+  const id = Number(tabId);
+  if (!Number.isInteger(id) || id <= 0) return;
+  _automationTabIds.add(id);
+  _persistAutomationTabs();
+}
+
+function _forgetAutomationTab(tabId) {
+  if (_automationTabIds.delete(Number(tabId))) _persistAutomationTabs();
+}
+
+function _restoreAutomationTabs() {
+  if (!_automationTabRestore) {
+    _automationTabRestore = (async () => {
+      try {
+        const data = await chrome.storage.session.get(AUTOMATION_TAB_SESSION_KEY);
+        const ids = data && data[AUTOMATION_TAB_SESSION_KEY];
+        for (const id of (Array.isArray(ids) ? ids : [])) {
+          if (Number.isInteger(id) && id > 0) _automationTabIds.add(id);
+        }
+      } catch (_) {
+        // A missing ledger only means the server opens its own tab again.
+      }
+    })();
+  }
+  return _automationTabRestore;
 }
 
 function _createTemporaryTabScope() {
@@ -4500,11 +4556,13 @@ async function cmdNavigate(params) {
 
   const target = await chrome.tabs.get(tabId);
   if (_isOwnServerTab(target)) {
-    // The Tofu client tab is never navigated — open the destination in a
-    // new foreground tab (same capture-before-navigation flow) and tell the
-    // server, which re-binds the working tab to the new id.
+    // The Tofu client tab is never navigated — open the destination in a new
+    // tab (same capture-before-navigation flow) and tell the server, which
+    // re-binds the working tab to the new id. The new tab stays in the
+    // background unless the caller asked for focus: replacing the chat is
+    // bad, yanking the window away from the chat is worse.
     const created = await cmdCreateTab({
-      url, active: true,
+      url, active: params.active === true,
       waitForLoad: params.waitForLoad,
       timeoutMs: params.timeoutMs,
     });

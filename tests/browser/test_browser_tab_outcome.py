@@ -468,6 +468,10 @@ def test_extension_navigate_guard_protects_the_client_tab():
     assert probe['clientResult']['protectedTabId'] == 7
     assert probe['clientResult']['url'] == 'https://dev.example.test/'
     assert probe['clientOps'] == ['tabs.create:https://dev.example.test/']
+    # ...and it stays in the background: opening a destination must not pull
+    # the window away from the chat the user is typing in.
+    assert probe['clientCreateOptions'] == [
+        {'url': 'https://dev.example.test/', 'active': False}]
 
     # A normal tab still navigates in place, with no redirect marker.
     assert probe['normalOps'] == ['tabs.update:https://dev.example.test/']
@@ -477,6 +481,28 @@ def test_extension_navigate_guard_protects_the_client_tab():
     assert probe['unpairedOps'] == ['tabs.update:https://dev.example.test/']
     assert 'redirectedToNewTab' not in probe['unpairedResult']
 
+
+def test_extension_owns_the_tabs_it_opens_and_nothing_else():
+    """Tab ownership is recorded where it is known: the create.
+
+    The server targets only these tabs for tab_id-less actions, so a tab the
+    user opened (the Tofu chat included) can never be navigated or clicked
+    implicitly. The ledger is session-scoped so an MV3 worker restart does not
+    turn the agent's own tab into a user tab, and closing the tab retires the
+    id so a recycled one is never adopted."""
+    from tests._browser_extension_probe import run_extension_probe
+    probe = run_extension_probe('automationOwnership')
+
+    assert probe['listed'] == [
+        {'id': 7, 'automation': True},
+        {'id': 8, 'automation': False},
+    ]
+    # Worker restart: memory cleared, session ledger restores ownership.
+    assert probe['restored'] == [True, False]
+    # Closed tab: ownership retired.
+    assert probe['afterClose'] == [False, False]
+    # The user closing the tab goes through the same retirement.
+    assert probe['afterRemovalEvent'] is False
 
 def test_extension_create_tab_never_strands_blank_tabs():
     """Incident 2026-09-04: wedged network captures filled

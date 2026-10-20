@@ -28,7 +28,9 @@ function listeners() {
 }
 
 const debuggerEvents = listeners();
+const tabRemovedEvents = listeners();
 const operations = [];
+const createdTabOptions = [];
 const runtimeCalls = {reload: 0};
 const debuggerCommands = [];
 const sessionData = mode === 'temporaryTabRecovery'
@@ -59,10 +61,11 @@ const chrome = {
     onReferenceFragmentUpdated: listeners(),
   },
   tabs: {
-    onRemoved: listeners(),
+    onRemoved: tabRemovedEvents,
     onUpdated: listeners(),
     create: async (options) => {
       operations.push(`tabs.create:${options.url}`);
+      createdTabOptions.push({url: options.url, active: options.active});
       currentUrl = options.url;
       return {id: nextTabId, url: currentUrl, title: 'Probe', status: 'complete'};
     },
@@ -940,9 +943,10 @@ async function navigateGuardProbe() {
   const listTabs = await vm.runInContext('cmdListTabs({})', context);
 
   // Case 1: the target tab IS the Tofu client — must open a new tab, never
-  // tabs.update the client tab.
+  // tabs.update the client tab — and that tab stays in the background.
   currentUrl = 'https://tofu.test/app';
   operations.length = 0;
+  createdTabOptions.length = 0;
   const clientResult = await vm.runInContext(
     "cmdNavigate({tabId: 7, url: 'https://dev.example.test/', waitForLoad: false})",
     context);
@@ -967,7 +971,54 @@ async function navigateGuardProbe() {
   const unpairedOps = operations.slice();
 
   return {listTabs, clientResult, clientOps, normalResult, normalOps,
-          unpairedResult, unpairedOps};
+          unpairedResult, unpairedOps,
+          clientCreateOptions: createdTabOptions.slice()};
+}
+
+async function automationOwnershipProbe() {
+  vm.runInContext(`
+    SERVER_URL = 'https://tofu.test';
+    CLIENT_ID = 'probe-client';
+  `, context);
+
+  // A tab the extension opens for automation is recorded as owned.
+  await vm.runInContext(
+    "cmdCreateTab({url: 'https://example.test/a', active: false, waitForLoad: false})",
+    context);
+  createdTabOptions.length = 0;
+
+  chrome.tabs.query = async () => ([
+    {id: 7, url: 'https://example.test/a', title: 'Agent', active: false,
+     windowId: 1, index: 1, status: 'complete', pinned: false},
+    {id: 8, url: 'https://user.example/', title: 'User', active: true,
+     windowId: 1, index: 2, status: 'complete', pinned: false},
+  ]);
+  const listed = await vm.runInContext('cmdListTabs({})', context);
+
+  // An MV3 worker restart wipes memory; the session ledger must restore it.
+  const restored = await vm.runInContext(`
+    _automationTabIds.clear();
+    _automationTabRestore = null;
+    cmdListTabs({}).then((rows) => rows.map((t) => t.automation));
+  `, context);
+
+  // Closing the tab retires ownership so a recycled id is never adopted.
+  const afterClose = await vm.runInContext(`
+    _forgetAutomationTab(7);
+    cmdListTabs({}).then((rows) => rows.map((t) => t.automation));
+  `, context);
+
+  // The same path Chrome itself uses when the user closes the tab.
+  await vm.runInContext('_rememberAutomationTab(7)', context);
+  tabRemovedEvents.emit(7);
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterRemovalEvent = await vm.runInContext(
+    '_automationTabIds.has(7)', context);
+
+  return {
+    listed: listed.map((t) => ({id: t.id, automation: t.automation})),
+    restored, afterClose, afterRemovalEvent,
+  };
 }
 
 async function temporaryTabTimeoutProbe() {
@@ -1233,6 +1284,7 @@ const probes = {
   diagnosticUrl: diagnosticUrlProbe,
   createTabDegraded: createTabDegradedProbe,
   navigateGuard: navigateGuardProbe,
+  automationOwnership: automationOwnershipProbe,
   fetch: fetchProbe,
   fileTransferCleanup: fileTransferCleanupProbe,
   fileTransferDeadline: fileTransferDeadlineProbe,

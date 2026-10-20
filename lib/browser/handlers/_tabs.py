@@ -50,23 +50,27 @@ def _handle_list_tabs(fn_args, runtime):
         lines = [f'Open tabs ({len(result)} total):\n']
         for t in result:
             active_mark = ' * (active)' if t.get('active') else ''
+            automation_mark = (' [automation tab — implicit actions land here]'
+                               if t.get('automation') else '')
             client_mark = (' [Tofu client — never navigated]'
                            if t.get('isClient') else '')
             url = t.get('url', '')
             title = t.get('title', '(no title)')
-            lines.append(f'  Tab {t["id"]}: {title}{active_mark}{client_mark}')
+            lines.append(
+                f'  Tab {t["id"]}: {title}{active_mark}{automation_mark}{client_mark}')
             lines.append(f'    URL: {url}')
         # Seed only from the already-filtered result. Re-querying through the
         # resolver would both waste a bridge round and could remember a tab
         # whose domain was removed by the owner-scoped read policy above.
-        # isClient rows (the Tofu app itself) are never seeded — navigating
-        # or clicking the chat out from under the user is never the intent.
+        # Only automation tabs are eligible: the tab the owner is looking at
+        # (the Tofu chat, their reading, their form) must never become the
+        # implicit action target of a later tab_id-less call. Those tabs stay
+        # addressable by passing their id explicitly.
         from lib.browser._resolve import remember_work_tab
         selected = next((t for t in result
-                         if t.get('active') and not t.get('isClient')), None)
-        if selected is None:
-            selected = next((t for t in result if not t.get('isClient')), None)
-        if selected is not None and selected.get('id') is not None:
+                         if t.get('automation') and not t.get('isClient')
+                         and t.get('id') is not None), None)
+        if selected is not None:
             remember_work_tab(runtime.route_key, selected['id'])
         return '\n'.join(lines)
     return json.dumps(result, ensure_ascii=False, indent=2)
@@ -135,7 +139,16 @@ def _handle_navigate(fn_args, runtime):
     url = fn_args.get('url')
     if not url:
         return 'Error: url is required.'
-    if fn_args.get('newTab'):
+    tab_id = None
+    if not fn_args.get('newTab'):
+        tab_id = resolve_work_tab(
+            fn_args, route_key=runtime.route_key, send=runtime.send)
+    # No automation tab to continue in (first use, expired memory, or the
+    # last one was closed): open one in the BACKGROUND. Repurposing a tab the
+    # owner is using — and stealing their focus — is never the answer, so
+    # same-tab navigation degrades to a fresh hidden tab instead of seeding a
+    # user tab.
+    if fn_args.get('newTab') or tab_id is None:
         params = {
             'url': url,
             'active': fn_args.get('active', False),
@@ -151,11 +164,6 @@ def _handle_navigate(fn_args, runtime):
             return (f'Opened new tab #{new_id} -> {url} '
                     f'(now the working tab)')
         return json.dumps(result, ensure_ascii=False, indent=2)
-    tab_id = resolve_work_tab(
-        fn_args, route_key=runtime.route_key, send=runtime.send)
-    if tab_id is None:
-        return ('Error: no tab to navigate. Pass tab_id, use new_tab=true, '
-                'or call browser_list_tabs first.')
     params = {
         'tabId': int(tab_id),
         'url': url,

@@ -51,7 +51,10 @@ BROWSER_TOOL_LIST_TABS = {
         "name": "browser_list_tabs",
         "description": (
             "List open browser tabs with titles, URLs and IDs. Use this only "
-            "to choose a different tab; other tools use the working tab."
+            "to choose a different tab; other tools use the working tab. Tabs "
+            "marked [automation tab] are the ones tab_id-less calls act on; a "
+            "tab the user opened (the Tofu chat, their reading, their form) "
+            "is reached only by passing its id explicitly."
         ),
         "parameters": {
             "type": "object",
@@ -345,10 +348,12 @@ BROWSER_TOOL_NAVIGATE = {
     "function": {
         "name": "browser_navigate",
         "description": (
-            "Navigate the working tab, or open a background tab with new_tab=true. "
-            "Waits for load and reports final URL/title. The Tofu client tab is "
-            "never navigated; targeting it opens a new tab instead. If unsure, "
-            "use web_search; never guess a URL from memory."
+            "Navigate the working tab, or a new one. Without an automation tab "
+            "to continue in, this opens a BACKGROUND tab — it never repurposes "
+            "or focuses the tab the user is using. Waits for load and reports "
+            "final URL/title. The Tofu client tab is never navigated; targeting "
+            "it opens a new tab instead. If unsure, use web_search; never guess "
+            "a URL from memory."
         ),
         "parameters": {
             "type": "object",
@@ -360,11 +365,18 @@ BROWSER_TOOL_NAVIGATE = {
                 },
                 "new_tab": {
                     "type": "boolean",
-                    "description": "Open a new working tab (default false)."
+                    "description": (
+                        "Force a new working tab instead of continuing in the "
+                        "current automation tab (default false)."
+                    )
                 },
                 "active": {
                     "type": "boolean",
-                    "description": "Only with new_tab=true: whether the new tab steals focus (default: false)"
+                    "description": (
+                        "Whether the tab this call opens may take focus from "
+                        "the user (default: false). Only ever opens a tab, so "
+                        "it never brings an existing user tab forward."
+                    )
                 },
                 "wait_for_load": {
                     "type": "boolean",

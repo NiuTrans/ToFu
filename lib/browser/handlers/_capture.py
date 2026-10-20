@@ -29,7 +29,8 @@ def _handle_execute_js(fn_args, runtime):
         fn_args, route_key=runtime.route_key, send=resolution_send)
     if tab_id is None:
         return ('Error: no tab to run JS in. Pass tab_id, or call '
-                'browser_list_tabs / browser_navigate first.')
+                'browser_navigate first (it opens an automation tab), or pass '
+                'the id of a tab the user already has open.')
     # A cached title can predate navigation or an external title change. Refresh
     # before JS, reusing the resolver's list when present; never rerun JS to
     # obtain display data. Lookup failure is advisory and leaves cached evidence.

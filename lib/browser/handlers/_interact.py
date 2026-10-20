@@ -15,23 +15,32 @@ logger = get_logger(__name__)
 _TAB_GONE_RE = re.compile(r'element discovery failed: Tab \d+ not found')
 
 
+_NO_AUTOMATION_TAB_NOTE = (
+    ' There is no automation tab to continue in either; call '
+    'browser_navigate (it opens a background tab) or pass the id of a tab '
+    'the user has open.')
+
+
 def _retarget_if_tab_gone(note, tab_id, fn_args, runtime):
     """Re-seed the working tab when the remembered one died between calls.
 
-    Returns the replacement tab id, or None to keep the original error path.
-    An explicit tabId arg is a deliberate target — never silently reroute it.
+    Returns ``(replacement_tab_id, note)``. When nothing is left to retarget
+    onto — the normal outcome now, because a user tab is never adopted — the
+    note gains the recovery action, so the caller is not sent looking for a
+    better ``text=`` on a tab that no longer exists. An explicit tabId arg is
+    a deliberate target and is never silently rerouted.
     """
     if fn_args.get('tabId') is not None:
-        return None
+        return None, note
     if not note or not _TAB_GONE_RE.search(note):
-        return None
+        return None, note
     from lib.browser._resolve import forget_work_tab, resolve_work_tab
     forget_work_tab(runtime.route_key, tab_id)
     retry_tab = resolve_work_tab(
         {}, route_key=runtime.route_key, send=runtime.send)
     if retry_tab is None or retry_tab == tab_id:
-        return None
-    return retry_tab
+        return None, note + _NO_AUTOMATION_TAB_NOTE
+    return retry_tab, note
 
 
 def _trusted_suffix(result):
@@ -104,7 +113,8 @@ def _handle_click(fn_args, runtime):
         fn_args, route_key=runtime.route_key, send=runtime.send)
     if tab_id is None:
         return ('Error: no tab to act on. Pass tab_id, or call '
-                'browser_list_tabs / browser_navigate first.')
+                'browser_navigate first (it opens an automation tab), or pass '
+                'the id of a tab the user already has open.')
     selector = fn_args.get('selector', '')
     text_query = fn_args.get('text', '')
     if not selector and not text_query:
@@ -117,7 +127,8 @@ def _handle_click(fn_args, runtime):
             tab_id, text_query, 'clickable', send=runtime.send)
 
         if el is None:
-            retry_tab = _retarget_if_tab_gone(note, tab_id, fn_args, runtime)
+            retry_tab, note = _retarget_if_tab_gone(
+                note, tab_id, fn_args, runtime)
             if retry_tab is not None:
                 tab_id = retry_tab
                 el, note, candidates = resolve_element(
@@ -186,7 +197,8 @@ def _handle_type(fn_args, runtime):
         fn_args, route_key=runtime.route_key, send=runtime.send)
     if tab_id is None:
         return ('Error: no tab to act on. Pass tab_id, or call '
-                'browser_list_tabs / browser_navigate first.')
+                'browser_navigate first (it opens an automation tab), or pass '
+                'the id of a tab the user already has open.')
     value = fn_args.get('value')
     if value is None:
         return 'Error: value is required (the text to type into the field).'
@@ -201,7 +213,8 @@ def _handle_type(fn_args, runtime):
             tab_id, text_query, 'input', send=runtime.send)
 
         if el is None:
-            retry_tab = _retarget_if_tab_gone(note, tab_id, fn_args, runtime)
+            retry_tab, note = _retarget_if_tab_gone(
+                note, tab_id, fn_args, runtime)
             if retry_tab is not None:
                 tab_id = retry_tab
                 el, note, candidates = resolve_element(
@@ -242,7 +255,8 @@ def _handle_press_key(fn_args, runtime):
         fn_args, route_key=runtime.route_key, send=runtime.send)
     if tab_id is None:
         return ('Error: no tab to act on. Pass tab_id, or call '
-                'browser_list_tabs / browser_navigate first.')
+                'browser_navigate first (it opens an automation tab), or pass '
+                'the id of a tab the user already has open.')
     keys = fn_args.get('keys', '')
     if not keys:
         return 'Error: keys is required.'
@@ -279,7 +293,8 @@ def _resolve_target_with_forward(fn_args, runtime, kinds):
         fn_args, route_key=runtime.route_key, send=runtime.send)
     if tab_id is None:
         return None, '', '', ('Error: no tab to act on. Pass tab_id, or call '
-                              'browser_list_tabs / browser_navigate first.')
+                              'browser_navigate first (it opens an automation '
+                              'tab), or pass the id of a tab the user has open.')
     selector = fn_args.get('selector', '')
     text_query = fn_args.get('text', '')
     if not selector and not text_query:
@@ -290,7 +305,8 @@ def _resolve_target_with_forward(fn_args, runtime, kinds):
         el, note, candidates = resolve_element(
             tab_id, text_query, kinds, send=runtime.send)
         if el is None:
-            retry_tab = _retarget_if_tab_gone(note, tab_id, fn_args, runtime)
+            retry_tab, note = _retarget_if_tab_gone(
+                note, tab_id, fn_args, runtime)
             if retry_tab is not None:
                 tab_id = retry_tab
                 el, note, candidates = resolve_element(
@@ -398,7 +414,8 @@ def _handle_scroll(fn_args, runtime):
         fn_args, route_key=runtime.route_key, send=runtime.send)
     if tab_id is None:
         return ('Error: no tab to act on. Pass tab_id, or call '
-                'browser_list_tabs / browser_navigate first.')
+                'browser_navigate first (it opens an automation tab), or pass '
+                'the id of a tab the user already has open.')
     params = {'tabId': int(tab_id)}
     selector = fn_args.get('selector')
     if selector:

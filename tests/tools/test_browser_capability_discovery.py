@@ -8,6 +8,7 @@ import pytest
 from lib.browser import queue
 from lib.browser.availability import browser_extension_availability
 from lib.tasks_pkg.handlers import tool_gateway
+from lib.tasks_pkg.tool_search_projection import tool_search_display_results
 from lib.tools.browser import BROWSER_TOOL_LIST_TABS, BROWSER_TOOL_PREVIEW_PAGE
 from lib.tools.gateway import search_executable_catalog
 
@@ -41,7 +42,7 @@ def test_disconnected_browser_returns_known_unavailable_and_safe_ui(monkeypatch)
     assert 'cannot read' in evidence['recovery_hint']
     assert result['items'] == [] and result['total'] == 0
     assert 'missing_name' not in result
-    ui = tool_gateway._search_display_results(result)
+    ui = tool_search_display_results(result)
     assert ui[0]['type'] == 'tool_catalog_availability'
     assert ui[0]['reasonCode'] == evidence['reason_code']
     assert 'arguments' not in ui[0] and 'toolName' not in ui[0]
