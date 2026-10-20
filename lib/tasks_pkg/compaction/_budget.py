@@ -54,6 +54,10 @@ _ARTIFACT_RESUME_MARKER = (
 _NARROWER_QUERY_MARKER = (
     "\n… [truncated; rerun the source tool with a narrower query or range]"
 )
+_UNAVAILABLE_RESULT_MARKER = (
+    "\n… [truncated; full result unavailable. Inspect the prior outcome "
+    "before repeating this operation.]"
+)
 
 
 #: Longest run of uninterrupted non-whitespace that still looks like prose or
@@ -355,7 +359,7 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
                           artifact_ref: str, truncated: bool, raw_bytes: int,
                           observed_at_ms: int, world_version: str,
                           evidence_id: str, model: str,
-                          recovery=None,
+                          recovery=None, error=None,
                           artifact_content: str = "",
                           token_budget: int = TOOL_RESULT_V2_MAX_TOKENS) -> str:
     from lib.tools.result_envelope import ToolResultEnvelopeV2
@@ -369,7 +373,8 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
     recovery_marker = (
         (_ARTIFACT_RESUME_MARKER if prefix_resumable
          else _ARTIFACT_CONTINUATION_MARKER) if artifact_ref
-        else _NARROWER_QUERY_MARKER)
+        else _NARROWER_QUERY_MARKER if recovery is not None
+        else _UNAVAILABLE_RESULT_MARKER)
 
     def _resume_cursor(candidate_summary: str) -> str:
         """Byte offset where the visible summary ends inside the artifact.
@@ -401,7 +406,7 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
             truncated=candidate_truncated,
             raw_bytes=raw_bytes, visible_bytes=0,
             observed_at_ms=observed_at_ms, world_version=world_version,
-            evidence_id=evidence_id, recovery=recovery,
+            evidence_id=evidence_id, recovery=recovery, error=error,
         ).with_visible_bytes().to_envelope_text()
 
     # Preserve a complete result whenever its final model projection fits.
@@ -633,11 +638,15 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
             if not artifact_ref:
                 retention = 'unavailable'
                 summary = '[Canonical retention unavailable.]\n' + summary
-        view = _materialize_envelope(status='partial' if old.get('status') == 'error' else old.get('status','partial'), summary=summary,
+        from lib.tools.result_envelope import tool_result_error
+        retained_error = tool_result_error(content)
+        view = _materialize_envelope(
+            status=('partial' if old.get('status') == 'error' and retained_error is None
+                    else old.get('status', 'partial')), summary=summary,
             items=old.get('items',[]), artifact_ref=artifact_ref, truncated=True,
             raw_bytes=old.get('rawBytes',0), observed_at_ms=old.get('observedAtMs',0),
             world_version=old.get('worldVersion',''), evidence_id=old.get('evidenceId',''),
-            model=kwargs.get('model',''), token_budget=limit)
+            model=kwargs.get('model',''), token_budget=limit, error=retained_error)
         reduced = json.loads(view)
         if old.get('status') == 'error':
             reduced['status'] = 'error'
@@ -862,9 +871,10 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
             summary = (
                 _fit_summary(
                     summary, token_budget=5_000, model=model,
-                    marker=_NARROWER_QUERY_MARKER)
-                + "\n[Full result unavailable; rerun with a narrower query.]"
+                    marker=_UNAVAILABLE_RESULT_MARKER)
             )
+            if not summary.endswith(_UNAVAILABLE_RESULT_MARKER):
+                summary += _UNAVAILABLE_RESULT_MARKER
     if preserve_file_identities:
         return _materialize_file_read_envelope(
             status="partial",

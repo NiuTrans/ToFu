@@ -228,4 +228,15 @@ Problem: a sealed scanner could still load replaced external grammar code. Decis
 
 Problem: transient installed SDK rounds imported an intentionally excluded storage package to validate even an empty MCP wire. Decision: share the same bounded, detached wire validator in `lib/mcp/declarations.py`; the durable conversation repository keeps identity, settings CAS and persistence. Alternatives rejected: shipping application storage in the standalone SDK would widen its boundary; skipping empty-wire validation would leave nonempty calls broken. Installed model/tool smoke and declaration lifecycle tests verify both paths.
 
+Problem: result truncation with unavailable storage suggested repeating any
+tool, and typed-error metadata was restored only after fitting the visible
+budget. Decision: V2 fitting asks for prior-outcome inspection when recovery is
+unknown; only a
+declared source recovery or file-read policy suggests narrower reads. Typed
+errors participate in the same fitting calculation, retaining their original
+code, retryability and recovery advice. Alternatives rejected: clipping advice
+can discard effect reconciliation; generic replay advice invents permission
+to repeat effects. Verify `test_typed_error_budget_recovery.py` plus source,
+artifact and compact gateway delivery contracts.
+
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->
