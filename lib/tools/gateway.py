@@ -203,20 +203,18 @@ def execute_program_schema() -> dict[str, Any]:
         'function': {
             'name': EXECUTE_PROGRAM_NAME,
             'description': _PROGRAM_EXECUTION_SCOPE + (
-                'Async JS body, no wrapper. '
-                'await tools.invoke(name,args) makes NEW calls and returns decoded data. Promise.all batches calls. '
-                'programInput.read is a snapshot expression. '
-                'jsonType=type, not completeness. '
-                'tools.result({ref}) or tools.result(name,args) reads retained results, never unread pages. '
-                'Use input_ handles, never artifactRef/tool-result: refs. '
-                'Absent inputs hand off. '
-                'tools.inputs({name:toolName}): {inputs,total,nextOffset}; check inputs.length before indexing. '
-                'An empty page is not empty source data. Read artifactRef via read_tool_artifact. '
-                'tools.keep(value) retains computed JSON, not source evidence. '
-                'tools.observe(reason,data) hands off judgment; keep state first. Stop on incomplete/failed evidence. '
-                'tools.parseJSON(text) preserves BigInt; String() serializes it. '
-                'Limits: 32 KiB code; 16 each calls/reads/queries/keeps; '
-                '1 MiB private inputs/program.'),
+                'Async JS body, no wrapper; return, not console.log. '
+                'Example: return {sum:1+2+3}; '
+                'await tools.invoke(name,args) runs NEW calls; Promise.all batches. '
+                'programInput is metadata, NOT a global; paste programInput.read. '
+                'tools.result(name,args) or tools.result({ref}): retained decoded data only; unavailable hands off. '
+                'tools.inputs({name,offset:0,limit:16}): {inputs,total,nextOffset}; check inputs.length before inputs[i].ref. '
+                'Empty page is not empty source. Use input_ refs; artifactRef needs read_tool_artifact. '
+                'jsonType=type, not coverage. tools.keep(value): computed JSON only. '
+                'tools.observe(reason,data): unresolved judgment; stops with no resume. '
+                'tools.parseJSON(text) preserves BigInt; serialize with String(). '
+                'Never replay completed actions. '
+                '32KiB code;16 calls/reads/queries/keeps each;1MiB inputs.'),
             'parameters': {
                 'type': 'object',
                 'properties': {'code': {
