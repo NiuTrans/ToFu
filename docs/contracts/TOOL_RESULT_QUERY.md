@@ -33,6 +33,29 @@ strands evidence behind a signed cursor; exceeding the response budget causes
 the continuation result itself to spill. This can require more pages, but each
 successful page remains usable evidence.
 
+Problem: the query handler counted full canonical JSON before the common model
+projection removed replay-only metadata. Sixteen 8-byte reads could issue 64
+queries and all refuse, despite every requested model page fitting its share.
+Decision: single-page fitting and aggregate batch fitting count the same declared
+model projection as common delivery. The handler still returns the exact
+authority page, including signed replay/next cursors, provenance and coverage;
+canonical capture and decoded program values keep that JSON. Unknown shapes,
+required next-page cursors, clipped-view replay cursors and unknown metadata
+remain charged. Source scan/byte bounds, response token limits and batch size
+remain in force; oversized model pages still re-query the original immutable
+cursor. Alternatives rejected: raising token limits hides double accounting;
+stripping canonical metadata breaks later recovery; separate filtering rules
+would drift from the common model-view owner.
+
+A 2026-10-21 component probe exercised a real sixteen-read batch over plain and
+canonical sources on both SQLite and TofuDB, using `o200k_base` accounting.
+Before the fix all four cases issued 64 source queries and returned no bodies.
+Afterward each issued 16 queries and returned the requested 128 body bytes;
+model responses used 5,529–6,361 tokens within the unchanged 7,000-token ceiling.
+This measures eliminated false refusals and redundant queries, not whole-task
+latency or throughput. Full pages and retained originals are verified by
+`tests/tools/test_artifact_model_budget.py` and the real backend query suite.
+
 Model-view replay cursor decision: **Problem:** opaque cursors can dominate short
 results even after empty defaults are removed. **Decision:** the declared
 `artifactProjectionReplayCursor` policy keeps the signed page-start cursor in

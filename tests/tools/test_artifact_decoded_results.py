@@ -118,6 +118,7 @@ def test_declared_refusal_and_partial_failure_preserve_owner_boundary(monkeypatc
 def test_search_budget_preserves_complete_hits_across_signed_pages(
         monkeypatch, artifact_store, canonical):
     from lib.tasks_pkg.handlers import tool_result_artifacts as handler
+    from lib.tools.result_surfaces import project_model_source
 
     # UTF-8 byte accounting is a conservative token-counter failure mode.
     # The handler must reduce page size, never shorten individual quotations
@@ -143,7 +144,8 @@ def test_search_budget_preserves_complete_hits_across_signed_pages(
             'artifact_ref': ref, 'query': 'needle', 'cursor': cursor, 'limit': 20})
         assert page['status'] == 'ok'
         assert not page.get('outputTruncated', False)
-        assert len(handler._serialize(page).encode('utf-8')) <= handler._RESPONSE_TOKEN_BUDGET
+        assert len(project_model_source(
+            'search_tool_artifact', handler._serialize(page)).encode('utf-8')) <= handler._RESPONSE_TOKEN_BUDGET
         observed.extend(page['items'])
         assert observed == expected[:len(observed)]
         cursor = page['nextCursor']
