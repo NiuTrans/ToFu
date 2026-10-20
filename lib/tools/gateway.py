@@ -42,6 +42,12 @@ EXECUTE_TOOLS_NAME = 'execute_tools'
 EXECUTE_PROGRAM_NAME = 'execute_program'
 GATEWAY_TOOL_NAMES = frozenset({SEARCH_TOOLS_NAME, EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME})
 
+# Shared model guidance for both JavaScript entry points. Runtime authority
+# remains with the ordinary task gateway and the guest's declared host imports.
+_PROGRAM_EXECUTION_SCOPE = (
+    'Same permissions/approvals. No imports/timers/files/processes/network; '
+    'external effects use tools.*. ')
+
 LOCAL_TOOL_SEARCH_MIN_FUNCTIONS = 12
 LOCAL_TOOL_SEARCH_DEFAULT_LIMIT = 8
 LOCAL_TOOL_SEARCH_MAX_LIMIT = 20
@@ -118,7 +124,7 @@ def execute_tools_schema(*, include_program: bool = True) -> dict[str, Any]:
     The combined form is retained for explicitly enabled legacy program calls.
     Task routing guidance belongs in tail context, never in this schema.
     """
-    description = (
+    description = _PROGRAM_EXECUTION_SCOPE + (
         'Run task-available tools. calls batches independent work; program is an '
         'async JavaScript function body for data-dependent work and compact results. '
         'Use standard JS: await, destructuring, try/catch, loops, map/filter/reduce. '
@@ -132,10 +138,9 @@ def execute_tools_schema(*, include_program: bool = True) -> dict[str, Any]:
         'schemas without executing tools. tools.observe(reason,data) ends the '
         'whole program for model judgment, including through try/catch/finally. '
         'Return only needed evidence. Direct calls suit steps needing model '
-        'judgment. Use exact task names/schemas; search_tools is optional; approvals still apply. '
+        'judgment. Use exact task names/schemas; search_tools is optional. '
         'Choose one lane per action and continue from evidence without repeating '
-        'effects. no imports, timers, filesystem, process or direct network; '
-        'all effects use tools.*. Source 32 KiB, 16 child calls, result 1 MiB.')
+        'effects. Source 32 KiB, 16 child calls, result 1 MiB.')
     if not include_program:
         description = (
             'Run independent calls with known JSON arguments using execution=parallel. '
@@ -197,20 +202,20 @@ def execute_program_schema() -> dict[str, Any]:
         'type': 'function',
         'function': {
             'name': EXECUTE_PROGRAM_NAME,
-            'description': (
+            'description': _PROGRAM_EXECUTION_SCOPE + (
                 'Async JS body, no wrapper. '
                 'await tools.invoke(name,args) makes NEW calls and returns decoded data. Promise.all batches calls. '
                 'programInput.read is a snapshot expression. '
                 'jsonType=type, not completeness. '
                 'tools.result({ref}) or tools.result(name,args) reads retained results, never unread pages. '
                 'Use input_ handles, never artifactRef/tool-result: refs. '
-                'Prefer tools.result(name,args); absent inputs hand off. '
+                'Absent inputs hand off. '
                 'tools.inputs({name:toolName}): {inputs,total,nextOffset}; check inputs.length before indexing. '
                 'An empty page is not empty source data. Read artifactRef via read_tool_artifact. '
                 'tools.keep(value) retains computed JSON, not source evidence. '
                 'tools.observe(reason,data) hands off judgment; keep state first. Stop on incomplete/failed evidence. '
-                'No imports/timers/files/processes/network. tools.parseJSON(text) preserves BigInt; String() serializes it. '
-                'Same permissions/approvals. Limits: 32 KiB code; 16 each calls/reads/queries/keeps; '
+                'tools.parseJSON(text) preserves BigInt; String() serializes it. '
+                'Limits: 32 KiB code; 16 each calls/reads/queries/keeps; '
                 '1 MiB private inputs/program.'),
             'parameters': {
                 'type': 'object',
