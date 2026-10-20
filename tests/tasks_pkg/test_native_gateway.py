@@ -295,7 +295,7 @@ def test_actual_pipeline_executes_one_admitted_handler_and_keeps_tool_round(monk
             project_path=None,project_enabled=False,model='fixture',round_source=lambda:0,
             decision_policy=Policy(),pending_calls=2,pending_bytes=4096)
         from lib.agent_core.native_process import ProgressLimits, ProgressRequest
-        from lib.agent_core.progress_evidence import visible_result_evidence
+        from lib.agent_core.progress_evidence import counted_result_evidence, tool_result_evidence
         progress=gateway.enable_progress(ProgressLimits(2,2),4096)
         args={'path':str(target),'content':'actual pipeline mutation'}
         approval=ApprovalRequest(principal(),owner['id'],'approval','provider-call','write_file','epoch',
@@ -304,7 +304,9 @@ def test_actual_pipeline_executes_one_admitted_handler_and_keeps_tool_round(monk
         request=ToolRequest(principal(),owner['id'],'execute','write_file',args,'provider-call')
         assert await gateway.execute(request)=='written'
         observed=await progress.observe(ProgressRequest(principal(),owner['id'],0,1,threading.Event()))
-        assert observed['resultEvidenceComplete'] and observed['evidenceIds']==[visible_result_evidence('written')]
+        expected = counted_result_evidence({tool_result_evidence(
+            {'function': {'name': 'write_file', 'arguments': args}}, 'written'): 1})
+        assert observed['resultEvidenceComplete'] and observed['evidenceIds']==list(expected)
         assert not observed['nonretryableFailureSignatures'] and not observed['verification']
         with pytest.raises(ValueError):await gateway.execute(request)
         gateway.close()
@@ -314,6 +316,58 @@ def test_actual_pipeline_executes_one_admitted_handler_and_keeps_tool_round(monk
     assert target.read_text()=='actual pipeline mutation'
     assert len(calls)==1 and len(owner['toolRounds'])==1
     assert owner['toolRounds'][0]['status']=='done'
+
+
+def test_actual_read_batch_progress_tracks_target_results_not_callback_order():
+    from lib.agent_core.native_process import ProgressLimits, ProgressRequest, RoundRequest, RoundSettlement
+    from lib.agent_core.progress_ledger import ProgressLedgerV2
+    from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+    owner = task()
+    definitions = [{'type': 'function', 'function': {'name': 'read_files',
+        'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}},
+                       'required': ['path']}}}]
+    owner['_executable_tool_catalog'] = definitions
+    completed = []
+    def handler(task, tc, name, call_id, args, rn, row, *_rest):
+        round_num = int(call_id.split('-')[0])
+        result = 'old' if (args['path'] == 'a') == (round_num < 2) else 'new'
+        _finalize_tool_round(task, rn, row, [{'title': 'read', 'content': result, 'badge': 'done'}])
+        # This synthetic source changes outside the project and has no reusable
+        # file revision. Exercise fresh settled reads through the normal port.
+        row['_cacheableResult'] = False
+        completed.append(call_id)
+        return call_id, result, False
+    owner['_tool_env'] = SimpleNamespace(resolve=lambda name: handler if name == 'read_files' else None)
+    async def run(executor):
+        gateway = NativeGateway(principal=principal(), task=owner, executor=executor,
+            configuration=owner['config'], tool_list=definitions, permissions={'read_files': 'read'},
+            project_path=None, project_enabled=False, model='fixture', round_source=None,
+            decision_policy=None, pending_calls=8, pending_bytes=8192)
+        progress = gateway.enable_progress(ProgressLimits(2, 2), 4096)
+        ledger = ProgressLedgerV2()
+        try:
+            for rnd in range(3):
+                calls = [{'id': f'{rnd}-{path}', 'type': 'function', 'function': {
+                    'name': 'read_files', 'arguments': json.dumps({'path': path})}} for path in ['a', 'b']]
+                gateway.prepare_response(RoundSettlement(
+                    RoundRequest(principal(), owner['id'], f'round-{rnd}', rnd, 0),
+                    {'kind': 'returned', 'model_calls': calls}))
+                order = ['a', 'b'] if rnd == 0 else ['b', 'a']
+                results = await asyncio.gather(*(gateway.execute(ToolRequest(principal(), owner['id'],
+                    f'{rnd}-{path}', 'read_files', {'path': path}, model_round=rnd)) for path in order))
+                assert results == ['old' if (path == 'a') == (rnd < 2) else 'new' for path in order]
+                observation = await progress.observe(ProgressRequest(
+                    principal(), owner['id'], rnd, 2, threading.Event()))
+                assert observation['resultEvidenceComplete']
+                decision = ledger.observe(calls, evidence_ids=observation['evidenceIds'],
+                    evidence_complete=observation['resultEvidenceComplete'])
+                assert decision['noProgressStreak'] == (1 if rnd == 1 else 0)
+        finally:
+            gateway.close()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        asyncio.run(run(executor))
+    assert len(completed) == len(set(completed)) == len(owner['toolRounds']) == 6
+    assert all(row['status'] == 'done' for row in owner['toolRounds'])
 
 
 def test_registered_project_writer_runs_through_the_same_pipeline(tmp_path):
