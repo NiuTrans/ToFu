@@ -1,126 +1,90 @@
 TOFU — EMNLP 2026
-English presentation notes
+English speaking notes for the current-system poster
 
 30-SECOND OPENING
 
-Tofu brings the paper workflow and the agent runtime into one research
-workspace. You can read papers, inspect the requests behind an answer, and
-change the harness policies that produce them. Our focus is which evidence enters its context,
-which steps can run as code, and which facts must survive beyond the prompt.
-You can inspect those choices in the workbench, modify their policies, and
-follow the resulting execution evidence. TofuDB is one part of that design:
-it makes verified continuation a storage operation instead of repeatedly
-reconstructing and validating everything above the database.
+ToFu connects papers, code and manuscript writing with an agent harness you
+can inspect and change. The poster follows three engineering decisions: how
+much context the model sees, which data transformations run beside the tools,
+and how a long history is reconstructed from storage. TofuDB makes verified
+continuation a storage operation. We show the mechanisms and their tradeoffs,
+including a case where the SQL control is faster.
 
 90-SECOND WALK-THROUGH
 
-The question behind Tofu is: what would an agent look like if the harness
-itself were a research instrument?
+Start with the central loop. Research applications share a runtime. Complete
+results and accepted task state are kept separately from the model's current
+view. The context composer can expose a recoverable preview, trim the working
+view, or summarize older history. Request Inspector records what was injected,
+where it came from, its token budget and the reason for inclusion.
 
-First, look at context. We externalize bulky outputs, trim cold results, and
-summarize older history. But fewer tokens alone are not the objective. If a
-rewrite destroys a warm provider cache, it can cost more. The current policy
-considers the expected lifetime and cost of the working context. You can
-inspect the request, injected context, and recorded usage.
+The cache table explains why fewer tokens alone are a poor cost objective.
+These are two adjacent observed requests: nearly the same input and output
+size, but 19% versus 97% cache reads and a 5.95-fold cost ratio. This is not an
+ablation and not a claimed compaction saving. It motivates weighing future
+savings against the summary cost and the disruption of a cached prefix.
 
-Second, many tool steps are deterministic glue. With code programs explicitly
-enabled, a program can call a tool,
-filter its results, and pass them to the next tool without asking the model
-to perform each data transformation. That program runs in an isolated WASM
-environment. Each sub-call still passes through the ordinary execution and
-permission checks. If a decision needs semantic judgment, it returns to
-the model with evidence.
+The program example shows deterministic filtering beside a tool. The complete
+rows are available to isolated JavaScript; the model gets the selected failure
+evidence. This is an illustrative transformation, not a measured token saving.
+Programs require explicit opt-in. Ordinary and JSON tools remain the default,
+and every subcall retains its normal permission checks. Semantic judgment goes
+back to the model.
 
-Third, shrinking a prompt must not erase the system's record of its work.
-TofuDB understands a continuation as an owned, verified operation. After
-certifying a prefix, it can check the terminal boundary and new suffix instead
-of hashing every earlier header again. Changes to old evidence invalidate
-that certificate. Restart revalidates it. This is a specific reduction in
-repeated work, with explicit correctness obligations.
-
-We want researchers to use the assistant for their work and then ask:
-what happens if I change this context, tool, or orchestration policy?
-The two interface panels show the connection: a supplied paper-workspace
-screenshot, and the current CONTEXT renderer with clearly labeled example data.
+The bottom section follows the same principle into storage. The native context
+reader avoids redundant serialization and parsing. After authenticating a
+prefix, continuation can validate the terminal and the new suffix. A two-turn
+extension checks three headers in the tested histories. Compaction commits the
+accepted view, archive and receipt before switching model context. Finally,
+read the latency table: most displayed native paths are faster, but SQL objects
+win on full reads of escaped evidence. That distinction matters.
 
 WHY TRY TOFU IF I ALREADY USE CODEX OR OPENCODE?
 
-Those are capable systems, and open source, MCP, skills, or model choice alone
-do not make Tofu unique. The proposed fit is a research workflow in which you
-want to inspect and modify the orchestration around the model while keeping
-a usable assistant and paper workbench. The poster highlights the integration
-of context decisions, programmatic execution, and agent-aware storage as the
-research surface. It is an invitation to inspect and evaluate that fit, not
-a claim that the other systems lack each feature or that Tofu wins every task.
+The fit is a researcher who wants paper and writing tools connected to a
+modifiable runtime, with context decisions, tool execution and continuation
+available as experimental surfaces. Open source, model choice, MCP and skills
+alone are not exclusive advantages; those systems are capable and extensible.
+We invite researchers to use the workbench for a real task and inspect or alter
+the harness while preserving the surrounding application workflow. The poster
+makes no unsupported claim that competitors lack any single component.
 
-WHY NOT JUST USE SQLITE?
+WHY A TOFUDB LAYER? WHY NOT SQLITE?
 
-SQLite already has transactions, WAL recovery and snapshot isolation.
-You can build agent checkpoints and effect journals on it. These are not
-sufficient reasons to write a database.
+SQLite already has transactions, WAL recovery and snapshots. Those properties
+do not justify writing a new physical engine. The concrete motivation is to
+remove repeated work at the application/storage boundary: reconstruct exact
+model context, validate a growing history incrementally, and acknowledge durable
+progress through one semantic operation. The four-arm control keeps this claim
+honest. It compares production Rust TofuDB to the same Python SQL semantic
+implementation exposed as a Sidecar, in-process JSON, or in-process objects.
+It does not isolate Rust from Python or the engine from its adapter.
 
-The native TofuDB case is narrower: specialize the semantic operations used by
-long-running agents, remove redundant history scans and data copying, and
-preserve exact evidence at the same boundary. A Rust semantic layer over
-SQLite is a legitimate alternative. Native versus Python Sidecar measurements
-combine language, transport and database effects; they do not isolate B-tree
-performance. Tofu keeps SQLite and PostgreSQL behind the same semantic contract.
-
-The cost is owning another engine's recovery, migration, integrity, backup and
-fault testing. The current documentation includes counterexamples where an
-in-process SQLite control is faster. Do not claim universal native superiority.
+In the 1 KiB fixture, continuation takes 0.173 ms in native versus 1.032 ms
+through the SQL Sidecar and 0.675 ms through in-process SQL objects. For the
+64 KiB escaped full read, SQL objects take 22.220 ms versus native 29.799 ms.
+A Rust semantic layer on SQLite remains a legitimate alternative. These are
+storage-operation results, not measured increases in completed agent tasks.
 
 WHAT EXACTLY DOES “3 HEADER CHECKS” MEAN?
 
-It is the logical verification work for an extension by two completed Turns,
-after the previous prefix has been certified within the same open authority
-epoch: the existing terminal boundary and the two added headers. The focused
-fixtures use 8, 128 and 2,048 retained Turns. First certification visits the full
-prefix. Earlier semantic edits invalidate the certificate. Reopen requires
-revalidation, and selected output must still be materialized. It does not mean
-the entire agent task or an arbitrary full-history read takes constant time.
+An authenticated, same-epoch continuation checks the terminal and two added
+headers. Focused fixtures retain N = 8, 128 and 2,048 turns. Initial certification
+scans the prefix; earlier semantic edits invalidate reuse; an authority reopen
+requires reauthentication. Advancing checkpoint saves have the same suffix-work
+property. Full selected output must still be materialized. This is not a claim
+that arbitrary full-history reads or whole agent tasks take constant time.
 
-DOES CONTEXT COMPACTION DELETE THE CONVERSATION?
+DATA AND PRESENTATION SCOPE
 
-The model's working view and the durable record have different responsibilities.
-The current request can omit or summarize old evidence while preserving
-recoverable source and the relevant archive/continuation receipts. In the
-current compaction contract, durable adoption precedes switching to an accepted
-working view. Retention still has an explicit lifecycle; this is not a promise
-of unlimited storage.
+The latency table selects the six XFS rows of the later eight-case four-arm
+matrix recorded on 2026-10-19. Each cell is P50 over two fresh processes with
+200 requests each. The full matrix has 12,800 exactly validated responses. The
+host had 63 affinity CPUs, Python 3.12.13 and SQLite 3.53.4. Full reads were warm
+authority context rebuilds. Measurements were not rerun for poster production.
 
-IS PROGRAMMATIC TOOL EXECUTION AN AUTHORIZATION BYPASS?
-
-No. The task's executable catalog remains the authority. Tool search teaches
-the model a tool's schema; it does not grant permission. Every nested call
-passes through ordinary schema, permission, approval and execution checks.
-An isolated program has no ambient host filesystem, process or direct network
-access. This does not make effects from allowed tools harmless.
-
-DO THESE MECHANISMS EXPLAIN THE OLD BENCHMARK RESULTS?
-
-We do not claim that. The manuscript's historical task-level results evaluate
-a particular system and model configuration. This poster covers newer
-engineering mechanisms and their design rationale. A causal explanation needs
-controlled ablations, including cost and cache receipts and preserved task
-quality. Storage microbenchmarks alone cannot establish task success.
-
-WHAT IS SHOWN IN THE INTERFACE FIGURES?
-
-The paper-reader screenshot comes from the author's manuscript archive. The
-CONTEXT panel runs the current production renderer, icons, disclosure control
-and styles with a synthetic checklist receipt. Its 86-token value is an
-illustration, not an experimental result or a captured private request.
-
-SUGGESTED LIVE DEMO (CHECK BEFORE THE SESSION)
-
-Use an intentionally prepared, non-sensitive research project.
-Open a captured request in Request Inspector, inspect the actual context
-and a tool receipt, and show the corresponding policy source. Explain one
-concrete policy change and its verification. Show the paper reader as the
-research surface. If demonstrating restart or failure handling, use a
-disposable fixture with already verified recovery semantics; do not imply
-that unknown external effects can always be replayed safely.
-
-Keep the demo local to the prepared fixture. Never show credentials, private
-user conversations, or unreviewed production logs to the audience.
+The manuscript supplies the title and author roster. This poster shows current
+system mechanisms; the old SWE-bench results are not used to explain them.
+The institutional marks are official assets from Northeastern University,
+NiuTrans Research and YourProvider LongCat. Community posters inform the composition
+but none of their scientific content or figures is part of the ToFu poster.

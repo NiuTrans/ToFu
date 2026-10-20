@@ -8,6 +8,7 @@ import fitz
 from PIL import Image, ImageChops, ImageStat
 from playwright.sync_api import sync_playwright
 import zxingcpp
+from layout import PROOF_SECTIONS, QR
 
 
 def main():
@@ -19,7 +20,8 @@ def main():
     output = args.output_dir.resolve()
     with fitz.open(output/"tofu-poster-A0.pdf") as pdf:
         mm = 72/25.4
-        clip = fitz.Rect(745*mm, 1114*mm, 810*mm, 1179*mm)
+        qx, qy, qs = QR
+        clip = fitz.Rect(qx*mm, qy*mm, (qx+qs)*mm, (qy+qs)*mm)
         pix = pdf[0].get_pixmap(matrix=fitz.Matrix(300/72, 300/72), clip=clip)
         raster = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         decoded = [code.text for code in zxingcpp.read_barcodes(raster)]
@@ -29,10 +31,7 @@ def main():
         (output/"qr-verification.json").write_text(json.dumps({
             "source": "final PDF at 300 dpi", "decoded": decoded, "passed": True,
         }, indent=2))
-        for name, y0, y1 in [
-            ("header", 0, 234), ("workspace", 234, 573),
-            ("mechanisms", 573, 826), ("tofudb", 826, 1105), ("footer", 1105, 1189),
-        ]:
+        for name, y0, y1 in PROOF_SECTIONS:
             pix = pdf[0].get_pixmap(matrix=fitz.Matrix(1, 1),
                                    clip=fitz.Rect(0, y0*mm, 841*mm, y1*mm))
             pix.save(output/f"proof-{name}.png")

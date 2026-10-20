@@ -1,0 +1,26 @@
+{
+  "cache_trace": {
+    "source": "docs/LLM_COST_OPTIMIZATION.md",
+    "recorded_date": "2026-09-01",
+    "scope": "Two adjacent requests under the same unit prices, observational, not an intervention or compaction ablation.",
+    "requests": [
+      {"label": "A", "input": 56412, "output": 158, "cache_read_percent": 19, "cost_cny": 1.7261},
+      {"label": "B", "input": 57143, "output": 163, "cache_read_percent": 97, "cost_cny": 0.2899}
+    ]
+  },
+  "context_read_control": {
+    "source": "docs/TOFUDB_SQLITE_CONTROLS.md",
+    "recorded_date": "2026-10-19",
+    "units": "P50 milliseconds",
+    "samples_per_cell": 400,
+    "scope": "Six XFS cases from the eight-case four-arm semantic control. Two fresh processes x 200 requests per cell. Native is production Rust TofuDB; SQL arms share the production Python semantic implementation. Rust/Python remains uncontrolled. These are storage operations, not agent task completion or raw B-tree comparisons.",
+    "rows": [
+      {"label": "1 KiB plain / 64 + 2 turns", "mode": "Full", "native": 0.904, "sidecar": 4.379, "sql_object": 3.400, "sql_json": 4.241},
+      {"label": "", "mode": "+2 turns", "native": 0.173, "sidecar": 1.032, "sql_object": 0.675, "sql_json": 0.775},
+      {"label": "64 KiB escaped / 64 + 2 turns", "mode": "Full", "native": 29.799, "sidecar": 47.671, "sql_object": 22.220, "sql_json": 40.603},
+      {"label": "", "mode": "+2 turns", "native": 1.226, "sidecar": 2.418, "sql_object": 1.597, "sql_json": 2.096},
+      {"label": "16 KiB high entropy / 512 + 2", "mode": "Full", "native": 33.636, "sidecar": 84.643, "sql_object": 60.755, "sql_json": 80.356},
+      {"label": "", "mode": "+2 turns", "native": 0.868, "sidecar": 3.595, "sql_object": 3.074, "sql_json": 3.293}
+    ]
+  }
+}

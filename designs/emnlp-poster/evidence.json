@@ -1,12 +1,26 @@
 {
   "snapshot_date": "2026-10-20",
-  "repository_head_at_capture": "f9333d8c02f721e8ba878631607e4f44cdd97b67",
-  "authority_note": "Current shared working files, including concurrent uncommitted changes, are the technical reference. Hashes identify exact inspected bytes; HEAD alone is not a complete source snapshot. No runtime implementation was modified or benchmark rerun for this poster.",
-  "user_scope": "The manuscript is background only; show the latest Tofu technology and reasons for researchers to try it. Include TofuDB; avoid a benchmark-centered story.",
+  "repository_head_at_capture": "b4b9cc99346dfe33c2bb158b0522e6b7f7d654c7",
+  "authority_note": "Exact source hashes identify the inspected shared-checkout contracts. The manuscript is background. No runtime changes or benchmark reruns were performed for poster production.",
+  "user_scope": "Current technology, TofuDB, design tradeoffs and researcher fit; actual community-poster references; replace feature descriptions with mechanism figures and scoped measurement tables. Include all three institutional logos.",
   "claims": [
     {
+      "id": "research_workbench",
+      "claim": "PDF/arXiv grounded reading, code and external tools, LaTeX/Overleaf writing and build/review connect through the shared harness. This is a workflow illustration, not an end-to-end evaluation.",
+      "source_files": [
+        {
+          "path": "docs/modules/ingest_media.md",
+          "sha256": "0a89c37128dea92fd46a9fb544228ff390d75d9ae229da35eaabc0ef732ea2d4"
+        },
+        {
+          "path": "docs/ARCHITECTURE.md",
+          "sha256": "c80d9d0e9bf4136f1e795a8e6d4207a1a8e747c45b0c815d132d13f29adad6b5"
+        }
+      ]
+    },
+    {
       "id": "context_layers",
-      "claim": "Three layers reduce working context while preserving recoverable evidence.",
+      "claim": "L0 recoverable previews, L1 cache-aware working-view trimming, and L2 semantic summary retain recoverable underlying evidence.",
       "source_files": [
         {
           "path": "docs/CONTEXT_COMPACTION.md",
@@ -19,8 +33,28 @@
       ]
     },
     {
+      "id": "request_inspection",
+      "claim": "Request Inspector records context source, placement, token budget and inclusion reason; receipts do not prove model consumption.",
+      "source_files": [
+        {
+          "path": "docs/CONTEXT_INJECTIONS.md",
+          "sha256": "2da86e7d963d8c8d055486bbab81092bb11826d4ea3822aeaf578b0a48394434"
+        }
+      ]
+    },
+    {
+      "id": "cache_cost_trace",
+      "claim": "The displayed pair is the 2026-09-01 adjacent request trace: 56412/158 and 57143/163 input/output; cache 19%/97%; CNY1.7261/0.2899. The ratio is 5.95, observational, not an ablation.",
+      "source_files": [
+        {
+          "path": "docs/LLM_COST_OPTIMIZATION.md",
+          "sha256": "a9480d6e9a37ea47e1d9ceefb63710761ebf05ed9abd353e324ccae2d90e827f"
+        }
+      ]
+    },
+    {
       "id": "compaction_economics",
-      "claim": "Compaction compares expected future savings with summary and warm-prefix disruption costs.",
+      "claim": "Context policy compares expected future savings to summary and cached-prefix rebuild costs.",
       "source_files": [
         {
           "path": "docs/LLM_COST_OPTIMIZATION.md",
@@ -33,60 +67,18 @@
       ]
     },
     {
-      "id": "request_inspection",
-      "claim": "Captured requests and context decision receipts can be inspected; receipts are not proof of model consumption.",
-      "source_files": [
-        {
-          "path": "docs/CONTEXT_INJECTIONS.md",
-          "sha256": "2da86e7d963d8c8d055486bbab81092bb11826d4ea3822aeaf578b0a48394434"
-        },
-        {
-          "path": "docs/CONTEXT_COMPACTION.md",
-          "sha256": "37fccd5e5ac8cc7af0cc22ff27318cdbfa6bc491ded67201efcc726942e4954b"
-        }
-      ]
-    },
-    {
       "id": "programmatic_tools",
-      "claim": "Explicit opt-in exposes execute_program. Isolated WASM JavaScript can aggregate complete tool results before returning selected evidence; subcalls retain ordinary authority checks. Local auto mode retains ordinary/JSON tools, and semantic judgments return to the model.",
+      "claim": "Explicit opt-in enables isolated WASM JavaScript. tools.invoke returns full decoded data; filtering and returning evidence is valid. Ordinary/JSON tools remain default; subcalls preserve authority; semantic judgment returns to the model. The three rows are labeled illustrative.",
       "source_files": [
         {
           "path": "docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md",
           "sha256": "9e50dafeb39e8f88d9a309af3665ad837857c22066726b51fe79ed6ec7b7c1f1"
-        },
-        {
-          "path": "lib/tools/javascript/bootstrap.js",
-          "sha256": "ad719ecd668a399fe8456aa1042701ee74c0d07211acde271e69a3bd2f0fa973"
-        }
-      ]
-    },
-    {
-      "id": "native_continuation",
-      "claim": "A storage-minted certificate reuses a verified prefix within an authority-open epoch. Earlier semantic mutations invalidate it; reopen reauthenticates.",
-      "source_files": [
-        {
-          "path": "docs/TOFUDB_CONTEXT_READ.md",
-          "sha256": "1e315a76b18fa398d37078423234de8198a251fd134a37f10abe45ecc8821a1f"
-        },
-        {
-          "path": "packages/tofu-db/src/turn/model_context.rs",
-          "sha256": "31436861906b26a81b03b4cb1ca6e6e1d355e2f2953b768a387985032de4bc2e"
-        }
-      ]
-    },
-    {
-      "id": "logical_work_example",
-      "claim": "After certification, adding two Turns visits three headers in the focused 8/128/2048 retained-Turn fixtures. This is logical verification work, not a latency ratio.",
-      "source_files": [
-        {
-          "path": "docs/TOFUDB_CONTEXT_READ.md",
-          "sha256": "1e315a76b18fa398d37078423234de8198a251fd134a37f10abe45ecc8821a1f"
         }
       ]
     },
     {
       "id": "native_materialization",
-      "claim": "The native context reader removes private parse/serialize/copy cycles while preserving exact selected evidence and byte bounds.",
+      "claim": "Native semantic context reads remove redundant JSON conversion while preserving evidence. This does not isolate the necessity of the physical engine.",
       "source_files": [
         {
           "path": "docs/TOFUDB_CONTEXT_READ.md",
@@ -95,48 +87,32 @@
       ]
     },
     {
-      "id": "sql_alternative",
-      "claim": "Native, SQLite and PostgreSQL share semantic operations. SQLite already offers transactions and recovery; native engine superiority is not established by the poster.",
+      "id": "native_continuation",
+      "claim": "Initial certification checks N headers. Same-epoch two-turn continuation checks three headers, at N=8,128,2048, for reads and advancing checkpoint saves. Earlier edits invalidate certificates; reopen requires revalidation. Full output remains proportional.",
       "source_files": [
         {
-          "path": "docs/modules/data_tier.md",
-          "sha256": "d5becc8e087498b379625b388cdb2746713951d6186bad5c66f6803a381f3501"
-        },
-        {
-          "path": "docs/TOFUDB_SQLITE_CONTROLS.md",
-          "sha256": "e56d062e592bd669a7ec143af813f892a341d962b36c5cb447a344049f288c32"
-        },
-        {
-          "path": "docs/STORAGE_TOFUDB.md",
-          "sha256": "bc74810f73bd8eda2c91aad384f84f58a8bb830b334a9d226bf2d3ab107f10f3"
+          "path": "docs/TOFUDB_CONTEXT_READ.md",
+          "sha256": "1e315a76b18fa398d37078423234de8198a251fd134a37f10abe45ecc8821a1f"
         }
       ]
     },
     {
-      "id": "research_workbench",
-      "claim": "Paper reader, harness inspection and editable orchestration are offered as an example research workflow, not a measured end-to-end experiment.",
-      "source_files": [
-        {
-          "path": "docs/modules/ingest_media.md",
-          "sha256": "0a89c37128dea92fd46a9fb544228ff390d75d9ae229da35eaabc0ef732ea2d4"
-        },
-        {
-          "path": "docs/modules/context_engineering.md",
-          "sha256": "6f557435c918055760c870eb4246bcfc172dbffb883b2bdf7c03c2b2aadafad6"
-        },
-        {
-          "path": "README.md",
-          "sha256": "929d32e04a6933f41e2d98cddea763eb38387330841b7b1bd2ab21dce911b490"
-        }
-      ]
-    },
-    {
-      "id": "durable_compaction_adoption",
-      "claim": "Summary, archive and receipt commit before changing the model working view. Compaction preserves the original recoverable evidence.",
+      "id": "durable_adoption",
+      "claim": "Accepted context, archive and receipt commit before model-view adoption. Persistence failure preserves original context and stops provider dispatch.",
       "source_files": [
         {
           "path": "docs/CONTEXT_COMPACTION.md",
           "sha256": "37fccd5e5ac8cc7af0cc22ff27318cdbfa6bc491ded67201efcc726942e4954b"
+        }
+      ]
+    },
+    {
+      "id": "four_arm_control",
+      "claim": "Six XFS rows of the later 2026-10-19 four-arm semantic-read control, P50 milliseconds, 400 samples/cell. Full matrix exactly validates 12800 responses. Native loses on escaped full reads to SQL objects. Rust/Python and engine effects are uncontrolled.",
+      "source_files": [
+        {
+          "path": "docs/TOFUDB_SQLITE_CONTROLS.md",
+          "sha256": "e56d062e592bd669a7ec143af813f892a341d962b36c5cb447a344049f288c32"
         }
       ]
     }
@@ -149,35 +125,38 @@
       "author roster",
       "affiliations",
       "mascot",
-      "historical framing",
-      "paper-reader screenshot (historical interface, labeled)"
+      "historical background only"
     ],
     "historical_scores_displayed": false
   },
   "external_references": [
     {
       "url": "https://2026.emnlp.org/poster-printing/",
-      "purpose": "A0 portrait PDF, 841 x 1189 mm"
+      "purpose": "A0 portrait PDF dimensions, verified in the earlier production pass."
     },
     {
-      "url": "https://github.com/K-Dense-AI/scientific-agent-skills/blob/main/skills/latex-posters/SKILL.md",
-      "purpose": "Reviewed poster workflow: physical typography, vector figures, artifact inspection; no LaTeX template or external generator was used."
+      "url": "https://john-b-yang.github.io/static/pictures/posters/2024-SWEagent.png",
+      "purpose": "Downloaded and visually inspected finished poster: method, concrete examples, evidence. No figures reused.",
+      "sha256": "3b6ab6b5683d44f721a8ad19115b037d80ac53fd72df8fec7d83294e55593730"
     },
     {
-      "url": "https://github.com/ZLHe0/Skill-ML-Conference-Poster-Creation/blob/main/SKILL.md",
-      "purpose": "Reviewed editable poster production and layout review; no template or wrapper code copied."
+      "url": "https://john-b-yang.github.io/static/pictures/posters/2025-SWEsmith.png",
+      "purpose": "Downloaded and visually inspected finished poster: central pipeline and supporting measured figures. No figures reused.",
+      "sha256": "3d094833b848e95b177e54284ed514d23256bcb895fbcb813960a44e473cb060"
     },
     {
-      "url": "https://developers.openai.com/blog/codex-as-a-platform",
-      "purpose": "Avoid false claims that Codex is a closed harness or lacks extensibility."
+      "url": "https://aclanthology.org/attachments/2024.emnlp-industry.31.poster.pdf",
+      "purpose": "Downloaded and visually inspected SEED: portrait section bars, mechanism diagram, tables. No figures reused.",
+      "sha256": "80a2137520bd458e4af23f5cfcfb1112d33b410c86f2d92f98d0ba6f5aff8644"
     },
     {
-      "url": "https://opencode.ai/docs/",
-      "purpose": "Avoid unsupported feature-exclusivity claims about OpenCode."
+      "url": "https://aclanthology.org/attachments/2024.emnlp-industry.6.poster.pdf",
+      "purpose": "Inspected dense text-heavy composition; not adopted.",
+      "sha256": "0b10a80f29a3cac9dcabbab3d80e9cc0c29c4db03a5a743097803aa2800da0df"
     },
     {
       "url": "https://github.com/NiuTrans/ToFu",
-      "purpose": "Verified destination for the QR code and project link."
+      "purpose": "QR destination and source-code link."
     }
   ],
   "deliberately_excluded": [
@@ -214,16 +193,11 @@
     }
   ],
   "verification": {
-    "pdf": "A0 portrait, one page; embedded Inter regular/semibold/bold and JetBrains Mono; vector scientific diagram and logos where supplied; four raster figures/marks; no text overlaps or missing glyphs.",
-    "svg": "Independently rendered with Chromium, including embedded fonts and image assets; geometry and visual inspection required.",
-    "qr": "Decoded from a 300-dpi crop of the final PDF; exact target matched.",
-    "visual": "Final PDF and SVG inspected side by side; headline, mechanisms, TofuDB panel and footer checked.",
-    "limitations": [
-      "No physical print proof",
-      "RGB PDF, not certified PDF/X or CMYK",
-      "No runtime or benchmark acceptance is implied"
-    ],
-    "assets": "Official mark provenance and hashes are in asset-sources.json. Inspector fixture values are explicitly illustrative."
+    "pdf": "One A0 page; embedded fonts; bounds, overlaps and glyph coverage; inspect actual PDF raster.",
+    "svg": "Independent Chromium rendering and geometry checks; inspect image.",
+    "qr": "Decode QR from the final PDF at 300 dpi and match the exact GitHub URL.",
+    "data": "Displayed control cells checked against the later source table; observed cache costs checked against the recorded trace."
   },
-  "revision": "Substantial redesign after author feedback: official affiliations, real workspace image, current Inspector component, explicit mechanisms and tradeoffs."
+  "revision": "Substantial redesign after author feedback: official affiliations, real workspace image, current Inspector component, explicit mechanisms and tradeoffs.",
+  "displayed_data_sha256": "9664ec58b272c95d38b5854f7969e1827e06824de7bbba237b05d20ecd820e7a"
 }
