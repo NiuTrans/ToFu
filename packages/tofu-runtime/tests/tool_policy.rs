@@ -1,11 +1,11 @@
-//! Actual Python occurrence/caller oracle, including large integers and revisions.
+//! Caller parity, frozen legacy guard compatibility and live occurrence preservation.
 use serde_json::{json, Value};
 use tofu_runtime::{
     provider::{Budget, ChatStream, Error},
     tool_policy::{normalize_caller, FloodError, FloodGuard},
 };
 #[test]
-fn actual_python_occurrence_and_caller_behavior_matches() {
+fn historical_guard_and_python_caller_behavior_match() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/python_tool_policy.json")).unwrap();
     for (case, c) in fixture["guards"].as_array().unwrap().iter().enumerate() {
@@ -48,38 +48,28 @@ fn budget() -> Budget {
     }
 }
 #[test]
-fn third_identical_complete_call_stops_before_terminal_or_following_bytes() {
+fn equal_arguments_at_distinct_positions_reach_terminal_usage() {
     let mut stream = ChatStream::with_tool_limit(budget(), 2).unwrap();
-    for index in 0..3 {
+    for index in 0..7 {
         let event = json!({"choices":[{"delta":{"tool_calls":[{"index":index,"id":format!("c{index}"),"function":{"name":"lookup","arguments":"{}"}}]}}]});
-        let result = stream.feed(format!("data: {event}\n\n").as_bytes());
-        if index < 2 {
-            assert_eq!(result, Ok(false))
-        } else {
-            assert_eq!(result, Err(Error::ToolFlood { count: 3, limit: 2 }));
-        }
+        assert_eq!(stream.feed(format!("data: {event}\n\n").as_bytes()), Ok(false));
     }
-    assert!(matches!(
-        stream.finish(false),
-        Err(Error::ToolFlood { count: 3, limit: 2 })
-    ));
+    let terminal = json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":37}});
+    stream.feed(format!("data: {terminal}\n\ndata: [DONE]\n\n").as_bytes()).unwrap();
+    let result = stream.finish(false).unwrap();
+    assert_eq!(result.message["tool_calls"].as_array().unwrap().len(), 7);
+    assert_eq!(result.usage["completion_tokens"], 37);
+    assert_eq!(result.state.as_str(), "provider_finished");
 }
 #[test]
-fn empty_argument_calls_are_counted_at_finalization() {
+fn empty_arguments_at_distinct_positions_are_preserved() {
     let mut stream = ChatStream::with_tool_limit(budget(), 2).unwrap();
     let calls: Vec<_> = (0..3)
-        .map(
-            |i| json!({"index":i,"id":format!("c{i}"),"function":{"name":"status","arguments":""}}),
-        )
+        .map(|i| json!({"index":i,"id":format!("c{i}"),"function":{"name":"status","arguments":""}}))
         .collect();
     let event = json!({"choices":[{"delta":{"tool_calls":calls},"finish_reason":"tool_calls"}]});
-    stream
-        .feed(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes())
-        .unwrap();
-    assert!(matches!(
-        stream.finish(false),
-        Err(Error::ToolFlood { count: 3, limit: 2 })
-    ));
+    stream.feed(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes()).unwrap();
+    assert_eq!(stream.finish(false).unwrap().message["tool_calls"].as_array().unwrap().len(), 3);
 }
 #[test]
 fn caller_metadata_is_normalized_and_cannot_change_existing_authority() {

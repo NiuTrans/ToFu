@@ -50,11 +50,6 @@
     }
   },
   "knobs": {
-    "TOFU_TOOL_CALL_FLOOD_HARD_CAP": {
-      "status": "documented",
-      "owner": "lib/llm/tool_call_flood.py",
-      "description": "Occurrences of one exact signature (name + canonical args + caller authority) tolerated in one provider response before the flood salvage collapses the rest; default 2, clamped to 2..4096. With the default, any repeated identical call is collapsed to its first occurrence. Independent of distinct-tool parallel fan-out and checkout admission."
-    },
     "CDPATH": {
       "status": "documented",
       "owner": "lib/project_mod/run_command.py",

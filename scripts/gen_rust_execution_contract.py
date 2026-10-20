@@ -12,7 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'lib/agent_core/execution_session.py'
 REPLAY = ROOT / 'lib/task_replay/task_replay.py'
-TOOL_FLOOD = ROOT / 'lib/llm/tool_call_flood.py'
 TOOL_CALLER = ROOT / 'lib/tool_results/tool_caller_identity.py'
 SSE_CORE = ROOT / 'lib/llm/_sse_core.py'
 STREAM_RESULT = ROOT / 'lib/llm/stream_result.py'
@@ -98,13 +97,12 @@ def generate():
     caller_tree = ast.parse(TOOL_CALLER.read_text())
     caller_limit = next(n for n in caller_tree.body if isinstance(n, ast.Assign) and n.targets[0].id == 'MAX_TOOL_CALLER_ID_CHARS')
     output += ['pub const MAX_TOOL_CALLER_ID_CHARS: usize = '+str(ast.literal_eval(caller_limit.value))+';', '']
-    flood_tree = ast.parse(TOOL_FLOOD.read_text())
-    resolve = next(n for n in flood_tree.body if isinstance(n, ast.FunctionDef) and n.name == 'identical_tool_call_limit')
-    outer = next(n for n in ast.walk(resolve) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id=='max')
-    inner = outer.args[1]
-    assert isinstance(inner, ast.Call) and inner.func.id=='min'
-    env_default = next(n for n in ast.walk(resolve) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='get')
-    for name,value in [('MIN_IDENTICAL_TOOL_CALLS',ast.literal_eval(outer.args[0])),('MAX_IDENTICAL_TOOL_CALLS',ast.literal_eval(inner.args[0])),('DEFAULT_IDENTICAL_TOOL_CALLS',int(ast.literal_eval(env_default.args[1])))]:
+    # Frozen v1 source/wire compatibility. Streams no longer count argument
+    # signatures; legacy constructors still validate these retired inputs.
+    output += ['// Retired v1 argument limits: compatibility validation only.']
+    for name, value in [('MIN_IDENTICAL_TOOL_CALLS', 2),
+                        ('MAX_IDENTICAL_TOOL_CALLS', 4096),
+                        ('DEFAULT_IDENTICAL_TOOL_CALLS', 32)]:
         output += ['pub const '+name+': usize = '+str(value)+';', '']
     def flood_branch(tree):
         return next(n for n in ast.walk(tree) if isinstance(n, ast.If) and isinstance(n.test,ast.Call) and isinstance(n.test.func,ast.Name) and n.test.func.id=='isinstance' and isinstance(n.test.args[1],ast.Name) and n.test.args[1].id=='ProviderToolCallFloodError')

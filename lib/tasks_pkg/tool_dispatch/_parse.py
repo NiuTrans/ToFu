@@ -17,7 +17,6 @@ from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tool_results.tool_caller_identity import normalize_tool_caller
-from lib.llm.tool_call_flood import dedupe_tool_call_response
 from lib.tool_input_repair import HALLUCINATION_ABORT_THRESHOLD, ingest_tool_call
 from lib.tool_results.tool_rejection import stamp_tool_rejection
 
@@ -143,7 +142,7 @@ def parse_tool_calls(
     tool_round_num: int,
     project_enabled: bool,
     early_announced: dict[str, tuple] | None = None,
-    *, tool_entry_publisher=None, collapse_provider_repetitions: bool = True,
+    *, tool_entry_publisher=None,
 ) -> tuple[list[tuple], int]:
     """Parse raw tool_calls from the assistant message into structured tuples.
 
@@ -172,10 +171,6 @@ def parse_tool_calls(
         Map of ``tc_id → (roundNum, round_entry)`` for tools already announced
         via ``StreamingToolAccumulator.on_tool_call_ready``.  These will reuse
         the existing round entry and skip SSE emission.
-    collapse_provider_repetitions : bool
-        Apply the physical provider-response repetition guard. Host-constructed
-        gateway batches pass False: each child is an explicit occurrence and
-        still goes through ordinary contract, authority and execution admission.
 
     Returns
     -------
@@ -198,14 +193,9 @@ def parse_tool_calls(
         # other scalar shapes become one independently rejected receipt.
         tool_calls = [raw_tool_calls]
     assistant_msg['tool_calls'] = tool_calls
-    # Callback-free resends and non-streaming adapters share stream admission.
-    # A repeated identical occurrence is collapsed, not rejected: keep the
-    # first of each exact signature, stamp the bounded evidence, and proceed.
-    if collapse_provider_repetitions:
-        tool_calls, _flood_evidence = dedupe_tool_call_response(tool_calls)
-        if _flood_evidence is not None:
-            assistant_msg['tool_calls'] = tool_calls
-            assistant_msg['_flood_collapsed'] = _flood_evidence
+    # Every response position is an independent occurrence. Equal arguments
+    # or provider IDs do not imply the same effect; dispatch remints ambiguous
+    # IDs and retains one receipt per position under the common tool budget.
     parsed_tcs = []
     _early = early_announced or {}
     _early_claimed: set[str] = set()

@@ -1,5 +1,6 @@
-//! Response-local tool caller normalization and identical-occurrence admission.
-//! Python authorities: tool_caller_identity.py and llm/tool_call_flood.py.
+//! Tool caller normalization and lossless argument/approval fingerprints.
+//! Python caller authority: tool_results/tool_caller_identity.py.
+//! FloodGuard is retained only as a legacy library API, never stream admission.
 //! No schema authorization, execution, storage or user-content diagnostics.
 use crate::execution_contract::{
     MAX_IDENTICAL_TOOL_CALLS, MAX_TOOL_CALLER_ID_CHARS, MIN_IDENTICAL_TOOL_CALLS,

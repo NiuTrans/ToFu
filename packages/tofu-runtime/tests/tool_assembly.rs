@@ -66,17 +66,15 @@ fn namespace_catalog_uses_callable_names_and_excludes_search_wrappers() {
     );
 }
 #[test]
-fn fresh_ids_under_one_upstream_index_still_count_distinct_flood_positions() {
+fn fresh_ids_under_one_upstream_index_keep_independent_occurrences() {
     let mut stream = ChatStream::with_tool_limit(budget(), 2).unwrap();
     for i in 0..3 {
         let event = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("c{i}"),"function":{"name":"lookup","arguments":"{}"}}]}}]});
-        let result = stream.feed(format!("data: {event}\n\n").as_bytes());
-        if i < 2 {
-            assert!(result.is_ok());
-        } else {
-            assert_eq!(result, Err(Error::ToolFlood { count: 3, limit: 2 }));
-        }
+        assert_eq!(stream.feed(format!("data: {event}\n\n").as_bytes()), Ok(false));
     }
+    let result = stream.finish(false).unwrap();
+    let ids: Vec<_> = result.message["tool_calls"].as_array().unwrap().iter().map(|call| call["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["c0", "c1", "c2"]);
 }
 #[test]
 fn split_occurrences_obey_the_declared_capacity() {

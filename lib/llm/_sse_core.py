@@ -50,7 +50,6 @@ from typing import Any, Optional
 
 import lib as _lib
 from lib.llm._sse_framer import SSEEvent
-from lib.llm.tool_call_flood import ToolCallFloodGuard
 from lib.llm.llm_errors import ProviderToolCallFloodError as ProviderToolCallFloodError
 from lib.llm._transport import StreamProgress, chat_url, headers
 from lib.llm.cache import add_cache_breakpoints
@@ -1114,7 +1113,6 @@ class SSEAccumulator:
         self.thinking_text = ''
         self.thinking_signature = ''
         self.tool_calls_acc: dict = {}
-        self._tool_call_flood_guard = ToolCallFloodGuard()
         # No provider finish reason exists until a terminal choice frame says
         # so.  The historical tuple adapter still exposes ``stop`` to callers
         # that unpack the result, but semantic completion never comes from a
@@ -1148,10 +1146,6 @@ class SSEAccumulator:
         # These counters change NO behaviour.
         self._tc_obs_index_absent = 0
         self._tc_obs_name_reissue = 0
-        # Set when the flood guard has triggered: the transport must stop
-        # reading upstream, and finalize collapses the accumulated prefix.
-        self._flood_salvage = False
-        self._flood_evidence: dict = {}
         # Slot the unindexed deltas of the CURRENT call accumulate into.
         # ``None`` = no unindexed call open yet.
         self._tc_unindexed_slot = None
@@ -1267,7 +1261,7 @@ class SSEAccumulator:
         ``SSEFramer`` + ``feed_event``. No transport fabricates a ``data:``
         line merely to reach the provider translator.
         """
-        if self._protocol_mismatch_stop or self._flood_salvage:
+        if self._protocol_mismatch_stop:
             return True
         if not isinstance(data_str, str):
             self.record_malformed_frames(
@@ -1978,11 +1972,6 @@ class SSEAccumulator:
                 if (fn.get('arguments') is not None
                         and not _ignore_reissued_arguments):
                     self.tool_calls_acc[idx]['function']['arguments'] += fn.get('arguments', '')
-                # A complete object can arrive before the next call or stream
-                # terminal event. Stop immediately, even if this provider keeps
-                # the connection alive after its repeated tool block.
-                if self.tool_calls_acc[idx]['function']['arguments'].rstrip().endswith('}'):
-                    self._observe_tool_call(idx, self.tool_calls_acc[idx])
 
     def _tc_is_name_fragment(self, prev_name, incoming, tc, idx):
         """Is ``incoming`` the CONTINUATION of ``prev_name``, not a new call?
@@ -2070,84 +2059,8 @@ class SSEAccumulator:
                     self._mm_buf = self._mm_buf[start_idx + len('<think>'):]
                     self._mm_in_think = True
 
-    def _observe_tool_call(self, index, call, *, final=False):
-        """Watch one position; abort the stream when a flood is triggered.
-
-        The guard returns the triggering :class:`ProviderToolCallFloodError`
-        instead of raising it. On the first trigger we keep the evidence
-        (positions, native wire identity, raw archive), stamp the anomaly,
-        and mark the accumulator so the transport stops reading upstream.
-        """
-        error = self._tool_call_flood_guard.observe(index, call, final=final)
-        if error is not None and not self._flood_salvage:
-            positions = error.matching_positions
-            call_ids = {self.tool_calls_acc[position].get('id')
-                        for position in positions
-                        if position in self.tool_calls_acc}
-            call_ids.discard(None)
-            call_ids.discard('')
-            evidence = {
-                'traceId': self.trace_id,
-                'canonicalMatchedPositions': len(positions),
-                'canonicalPositionSample': list(positions[:3] + positions[-3:])
-                if len(positions) > 6 else list(positions),
-                'distinctCallIds': len(call_ids),
-                'indexAbsentFrames': self._tc_obs_index_absent,
-                'nameReissues': self._tc_obs_name_reissue,
-                'slotSplits': self._tc_obs_slot_split,
-                'origin': 'canonical_response',
-            }
-            native_evidence = getattr(self.wire_translator, 'tool_call_evidence', None)
-            if native_evidence is not None:
-                evidence.update(native_evidence(call_ids))
-                if (evidence['wireMatchedPositions'] == len(positions)
-                        and len(call_ids) == len(positions)):
-                    evidence['origin'] = 'provider_wire'
-            error.tool_call_evidence = evidence
-            archive_ref = getattr(self.raw_dumper, 'raw_archive_ref', None)
-            if isinstance(archive_ref, dict):
-                error.raw_archive_ref = dict(archive_ref)
-            logger.warning(
-                '%s Tool-call admission rejected trace=%s archive=%s evidence=%s',
-                self.log_prefix, self.trace_id,
-                archive_ref.get('archiveId', '') if isinstance(archive_ref, dict) else '',
-                json.dumps(evidence, sort_keys=True),
-                extra={'tofu_event_name': 'llm.tool_call_flood',
-                       'tofu_event_fields': {'trace_id': self.trace_id,
-                       'tool_call_evidence': evidence,
-                       'raw_archive_ref': archive_ref}})
-            try:
-                self.raw_dumper.dump_anomaly('tool_call_flood', **evidence)
-            except Exception as diagnostic_error:
-                logger.debug('%s tool-call anomaly capture failed: %s',
-                             self.log_prefix, type(diagnostic_error).__name__)
-            # Salvage, never rejection: stop reading the upstream stream and
-            # let finalize collapse the accumulated prefix to one occurrence
-            # per flooded signature. The transcript never admits the repeat.
-            self._flood_salvage = True
-            self._flood_evidence = {
-                'tool': error.tool_name,
-                'count': error.count,
-                'limit': error.limit,
-                'traceId': self.trace_id,
-            }
-            archive_ref = getattr(self.raw_dumper, 'raw_archive_ref', None)
-            if isinstance(archive_ref, dict):
-                self._flood_evidence['rawArchiveRef'] = dict(archive_ref)
-            logger.warning(
-                '%s Tool-call flood SALVAGE: %s repeated %d times (limit %d); '
-                'aborting upstream and collapsing to one occurrence. '
-                'trace=%s archive=%s',
-                self.log_prefix, error.tool_name, error.count, error.limit,
-                self.trace_id,
-                (archive_ref or {}).get('archiveId', '')
-                if isinstance(archive_ref, dict) else '')
-
     def _notify_tool_call_ready(self, index):
         call = self.tool_calls_acc[index]
-        # Admission is outside the observer exception boundary: an optional
-        # callback cannot swallow the stop or disable it by being absent.
-        self._observe_tool_call(index, call)
         if self.on_tool_call_ready and call['function']['name']:
             try:
                 self.on_tool_call_ready(call)
@@ -2166,19 +2079,9 @@ class SSEAccumulator:
         Returns a typed, tuple-compatible ``ProviderStreamResult`` with the
         former message/finish/usage projection and one closed semantic state.
         """
-        # Final validation also covers reused upstream slots, interleaved
-        # deltas and callback-free streams before any response is adopted.
-        for index, call in self.tool_calls_acc.items():
-            self._observe_tool_call(index, call, final=True)
-        # Salvage collapse: a triggered flood admits only the first occurrence
-        # of each exact signature; the repeated occurrences never exist in the
-        # adopted response, so the assistant message carries one tool call and
-        # one honest marker instead of a rejected batch or N synthetic rows.
-        if self._flood_salvage and self.tool_calls_acc:
-            from lib.llm.tool_call_flood import dedupe_tool_call_response
-            ordered = [self.tool_calls_acc[i] for i in sorted(self.tool_calls_acc)]
-            kept, _collapse_evidence = dedupe_tool_call_response(ordered)
-            self.tool_calls_acc = {i: call for i, call in enumerate(kept)}
+        # Slots represent provider occurrences, including equal arguments and
+        # recycled IDs. Only the assembly layer can recognize retransmission
+        # within the same stable slot; content equality cannot erase actions.
 
         # Flush MiniMax buffer
         if self._mm_mode and self._mm_buf:
@@ -2355,14 +2258,6 @@ class SSEAccumulator:
                 msg['content'] = content
         else:
             msg['content'] = content
-        # Honest, bounded evidence of the salvage on the adopted message and
-        # in usage (for the stream-handler exemption and the UI badge).
-        if self._flood_salvage:
-            msg['_flood_collapsed'] = dict(self._flood_evidence)
-            if usage is None:
-                usage = {}
-            usage['_flood_salvage'] = dict(self._flood_evidence)
-
         # Log cache info. Stamp the canonical cache keys onto the raw usage
         # dict FIRST so every downstream raw-dict consumer (api_rounds, the
         # SSE usage payload, persisted metadata, the frontend popover) sees

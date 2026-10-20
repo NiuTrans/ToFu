@@ -166,6 +166,7 @@ pub const MAX_TOOL_CALL_ID_CHARS: usize = 512;
 
 pub const MAX_TOOL_CALLER_ID_CHARS: usize = 512;
 
+// Retired v1 argument limits: compatibility validation only.
 pub const MIN_IDENTICAL_TOOL_CALLS: usize = 2;
 
 pub const MAX_IDENTICAL_TOOL_CALLS: usize = 4096;
