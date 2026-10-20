@@ -11,6 +11,10 @@
 
 ## Unreleased
 
+- Use bounded, lazy HTTP/2 negotiation for free DDG HTML search through the
+  existing transport-policy owner. Preserve selected proxies, certificate
+  validation, freshness and error classifications; close response/client
+  resources before parsing and reject incomplete or redirected responses.
 - Preserve free search as the core: no required paid APIs or credentials.
 - Recover beyond weak SearXNG instance results without changing queries or
   source scope. Retain partial evidence and expose upstream/instance coverage

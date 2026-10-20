@@ -16,6 +16,9 @@ stays dependency-free when used standalone.
   through configured instances when initial evidence is weak, preserves partial
   results and reports lost upstream coverage. See
   [free search reliability](docs/free-search.md) for limits and verification.
+- **HTTP/2 search compatibility**: DDG HTML negotiates HTTP/2 while retaining
+  the shared query, proxy, retry and parser policies. The lazy transport closes
+  each response/client and bounds decoded HTML and remaining attempt time.
 - **Multi-engine search (parallel)**: DuckDuckGo (HTML + API), Brave, Bing,
   SearXNG, Marginalia. Native site capabilities are **explicit only**: use
   `engines=['Site:catalog']` with a registered site provider, or

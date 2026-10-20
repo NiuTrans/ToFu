@@ -7,6 +7,53 @@ optional, and deployment resources still belong to that caller. Provider
 documentation can inform local algorithms without making that provider a
 runtime dependency.
 
+## Anonymous HTTP protocol compatibility
+
+Problem: an HTML search endpoint can return challenges or timeouts on one
+transport while completing the same query over another. Retrying the same
+HTTP/1.1 request does not necessarily recover useful evidence.
+
+Decision: DDG HTML uses HTTPX with HTTP/2 negotiation through the existing
+search envelope's transport port. The query, freshness, parser, engine
+selection, throttle, circuit breaker and ordered proxy attempts keep their
+existing owners. Other engines retain their current transport. The
+[HTTPX protocol contract](https://www.python-httpx.org/http2/) includes HTTP/1.1
+negotiation when an origin lacks HTTP/2; selecting HTTP/2 is not proof of the
+protocol actually used or of search availability.
+
+The adapter consumes the envelope's explicit proxy mapping, including its
+direct-route marker. Environment proxy resolution applies only to an
+environment-owned route; HTTPX cannot independently override that selection.
+TLS verification stays enabled, including configured `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE` trust roots. Redirects are not followed. Only HTTP 200 can
+complete a search; 202, 204, partial responses and redirects remain failures.
+Transport errors retain the common connection/timeout distinctions without
+exposing private exception text.
+
+HTTPX and its HTTP/2 support load on the first applicable request. One admitted
+search attempt owns one transient client and response, which close before
+parsing. Decoded HTML is capped at 2 MiB; unsuccessful statuses and explicit
+challenge headers do not require body download. Requests share the existing
+20-second engine ceiling, shortened by the caller's search budget; no subsequent
+attempt starts after that deadline. Chunk checks enforce the remaining budget
+between reads. Socket-phase timeouts still are not hard cancellation of a
+running network operation. No persistent client cache, cookie jar or new
+background worker is created.
+
+Alternatives considered: header-only changes did not consistently recover the
+observed failures; adding a browser or native fingerprint library would add
+another runtime lifecycle. The HTTP/2 transport preserves the existing engine
+and parser rather than adding another search service. The investigation was
+informed by [DDGS's HTTP client](https://github.com/deedy5/ddgs/blob/main/ddgs/http_client.py),
+but that implementation is not a dependency.
+
+`tests/test_search_http2.py` exercises real HTTPX response lifecycles with
+controlled I/O, public search delivery, proxy/CA policy, byte limits, error
+classification and cumulative attempt budgets. Live comparisons must retain
+actual negotiated protocol, outcomes and failures in alternating fresh
+processes. Small paired probes establish compatibility on the measured route,
+not broad search-quality superiority.
+
 ## SearXNG response and recovery contract
 
 Problem: accepting the first nonempty response let generic listings prevent

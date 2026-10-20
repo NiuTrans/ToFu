@@ -1,5 +1,6 @@
 # ── Core (required) ──
 requests>=2.32.4
+httpx[http2,socks]>=0.28,<1
 trafilatura>=1.6
 beautifulsoup4>=4.13.4
 python-dateutil>=2.8

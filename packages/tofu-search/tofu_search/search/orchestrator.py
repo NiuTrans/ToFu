@@ -474,7 +474,15 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         fallback_attempts.append('DDG-HTML')
         time.sleep(0.8)
         try:
-            retry = search_ddg_html(query, max_results, freshness)
+            retry_left = _budget_left()
+            if retry_left is not None and retry_left <= 0:
+                _deadline_hit = True
+                raise TimeoutError('Search budget expired before recovery')
+            # Recovery is part of this search, not a new full-budget call.
+            retry_config = (config.copy(search_deadline_secs=retry_left)
+                            if retry_left is not None else config)
+            with bind_call_config(retry_config):
+                retry = search_ddg_html(query, max_results, freshness)
         except Exception as e:
             # A raising engine is a network failure, not "no matches" — the
             # diag classifier reads engine_errors, so record it there.
