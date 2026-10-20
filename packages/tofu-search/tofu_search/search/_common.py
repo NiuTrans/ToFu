@@ -515,8 +515,10 @@ def http_search_get(
         path gets unpinned."""
         logger.info('%s racing %d alternate network paths in parallel: %s',
                     tag, len(attempts), [m for m, _ in attempts])
+        from tofu_search.providers import submit_with_provider_context
+
         pool = _race_executor()
-        futures = {pool.submit(_attempt, m, kw): m for m, kw in attempts}
+        futures = {submit_with_provider_context(pool, _attempt, m, kw): m for m, kw in attempts}
         fatal_exc = conn_exc = None
         status = None
         for fut in as_completed(futures):
