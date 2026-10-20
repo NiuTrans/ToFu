@@ -36,8 +36,16 @@ def search(monkeypatch, rows, arm='tofu'):
 
         monkeypatch.setitem(sys.modules, 'ddgs', SimpleNamespace(DDGS=DDGS))
         monkeypatch.setattr(worker, 'identity', lambda arm: {})
-    return worker.operation({'arm': arm, 'operation': 'search', 'query': 'technical manual',
-                             'proxy': '', 'seed': 1, 'region': 'us-en'})
+    # Production owns a disposable process; direct unit calls must restore the
+    # parent's environment and random generator rather than leaking child setup.
+    random_state = worker.random.getstate()
+    with monkeypatch.context() as operation_state:
+        operation_state.setattr(worker.os, 'environ', dict(worker.os.environ))
+        try:
+            return worker.operation({'arm': arm, 'operation': 'search', 'query': 'technical manual',
+                                     'proxy': '', 'seed': 1, 'region': 'us-en'})
+        finally:
+            worker.random.setstate(random_state)
 
 
 def test_empty_primary_list_retains_uncertain_candidate_and_bounded_diagnostics(monkeypatch):
