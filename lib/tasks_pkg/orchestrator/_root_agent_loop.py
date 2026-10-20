@@ -293,10 +293,28 @@ class _RootLoopHooks:
         if self.round_num < 0:
             self.task['_firstDispatchRound'] = round_num
         self.round_num = round_num
+        record_active_round(self.task, round_num)
+        emit_round_open(self.task, self.state, round_num)
+        try:
+            return self._dispatch_open_round(round_num, round_tools)
+        except BaseException:
+            # Failed dispatch skips normal round settlement. Close the announced
+            # round before fatal handling can start another turn attempt. Let a
+            # rejected close propagate as a delivery failure, preserving the
+            # provider error as its cause context instead of blindly replaying it.
+            from lib.agent_core.events import EventType, build_event
+            from lib.tasks_pkg.manager import append_event
+            append_event(self.task, build_event(
+                EventType.ROUND_END, roundNum=round_num, reason='error'))
+            raise
+
+    def _dispatch_open_round(
+        self,
+        round_num: int,
+        round_tools: Any,
+    ) -> ProviderStreamResult:
         request = self.request
         state = self.state
-        record_active_round(self.task, round_num)
-        emit_round_open(self.task, state, round_num)
         prepare_round_context(self.task, self.messages, round_num=round_num,
             tid=request.tid, model=state.model, project_path=request.project_path,
             project_enabled=request.project_enabled, round_tools=round_tools)

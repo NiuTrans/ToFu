@@ -1,0 +1,5 @@
+{
+  "description": "A synthetic gateway outage exits the configured inner wait, then the real root invocation performs one bounded whole-turn retry and completes. Strict request digests verify that regeneration restores the pristine input; durable events must retain paired model rounds and one terminal settlement.",
+  "recorded_at": "2026-10-21",
+  "mode": "replay"
+}

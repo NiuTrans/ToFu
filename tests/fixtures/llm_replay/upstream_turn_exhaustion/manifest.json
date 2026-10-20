@@ -1,0 +1,5 @@
+{
+  "description": "Two synthetic gateway outages exercise the real root invocation with a one-retry whole-turn allowance. Exhaustion retains the typed upstream failure and closes both model rounds before one terminal settlement. The explicit opt-out variant consumes only the first failure and performs no reset.",
+  "recorded_at": "2026-10-21",
+  "mode": "replay"
+}

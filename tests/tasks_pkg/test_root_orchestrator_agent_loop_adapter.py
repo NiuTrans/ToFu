@@ -56,6 +56,9 @@ def _install_common(monkeypatch, events, *, tool_timeout=False):
         root_loop, 'emit_round_open',
         lambda task, state, rnd: events.append(('open', rnd)))
     monkeypatch.setattr(
+        'lib.tasks_pkg.manager.append_event',
+        lambda task, event: events.append(('wire_event', event)))
+    monkeypatch.setattr(
         root_loop, 'run_round_message_hygiene',
         lambda *a, **k: events.append(('hygiene', k['round_num'])))
     monkeypatch.setattr(
@@ -334,6 +337,8 @@ def test_provider_exception_closes_stream_prefetch_and_preserves_error(
 
     assert ('stream_close', True, False) in events
     assert not [event for event in events if event[0] == 'settle']
+    assert [event[1]['roundNum'] for event in events
+            if event[0] == 'wire_event' and event[1]['type'] == 'round_end'] == [0]
 
 
 def test_tool_round_then_verified_natural_completion(monkeypatch):
@@ -633,6 +638,8 @@ def test_local_admission_failure_has_public_round_without_dispatch(monkeypatch, 
     with pytest.raises(PromptTooLongError) as caught:
         root_loop._RootLoopHooks(_request(task, _state())).dispatch(round_index, [])
 
+    assert [event[1]['roundNum'] for event in events
+            if event[0] == 'wire_event' and event[1]['type'] == 'round_end'] == [round_index]
     envelope = attach_failure_attribution(
         from_exception(caught.value, model='kimi-k3', context='task-fatal'),
         task, phase='task-fatal')
