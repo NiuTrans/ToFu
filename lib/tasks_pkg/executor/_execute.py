@@ -22,6 +22,22 @@ from lib.tasks_pkg.executor._effects import (
 logger = get_logger(__name__)
 
 
+def _audit_direct_executor_outcome(task, round_entry, *, status=None):
+    """Direct consumers settle here; pipelines own their later deadline verdict."""
+    if not isinstance(round_entry, dict) or round_entry.get('_outcomeAuditOwner') == 'pipeline':
+        return
+    if status is None:
+        runtime_state = round_entry.get('_runtimeState')
+        if runtime_state in ('error', 'cancelled'):
+            status = 'aborted' if runtime_state == 'cancelled' else 'error'
+        else:
+            status = round_entry.get('status')
+            if status in (None, 'searching', 'executing'):
+                status = 'done'
+    from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
+    audit_round_outcome(task, round_entry, status=status)
+
+
 def _execute_tool_one(
     task: dict[str, Any],
     tc: dict[str, Any],
@@ -74,6 +90,7 @@ def _execute_tool_one(
                              reason=refusal, retryable=False)
         _finalize_tool_round(task, rn, round_entry,
             [build_tool_result_meta(fn_name, fn_args, refusal)], status='rejected')
+        _audit_direct_executor_outcome(task, round_entry)
         return tc_id, refusal, False
 
     budget=task.get('_executionBudget')
@@ -84,6 +101,7 @@ def _execute_tool_one(
     event=budget.begin_tool_attempt(task,tc_id,fn_name,rn) if budget is not None else None
     from lib.tasks_pkg.working_tool_sources import begin_tool_source
     begin_tool_source(task, fn_name, tc_id)
+    outcome_status = None
     try:
         from lib.tools.execution_timing import tool_execution_timing
         with tool_execution_timing(fn_name, task_id=task.get('id'),
@@ -91,6 +109,7 @@ def _execute_tool_one(
             result=_dispatch_admitted_tool_one(task,tc,fn_name,tc_id,fn_args,rn,round_entry,
                                               cfg,project_path,project_enabled,all_tools)
     except Exception:
+        outcome_status = 'error'
         if budget is not None:budget.finish_tool_attempt(event,phase='executor_exception')
         raise
     else:
@@ -108,6 +127,8 @@ def _execute_tool_one(
             except (TypeError,ValueError,IndexError):pass
         if budget is not None:budget.finish_tool_attempt(event,phase='executor_returned',result_sha256=digest)
         return result
+    finally:
+        _audit_direct_executor_outcome(task, round_entry, status=outcome_status)
 
 
 def _dispatch_admitted_tool_one(
@@ -249,15 +270,19 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
         f'{type(exc).__name__}: {exc}. '
         f'Arguments received: {arg_preview}'
     )
-    if round_entry is not None and round_entry.get('status') != 'done':
+    content = uncertain_effect_error(round_entry, err_msg)
+    if round_entry is not None:
+        # Handler presentation can precede receipt decoding or cleanup. A
+        # subsequent exception still owns the final execution verdict.
+        round_entry['_cacheableResult'] = False
         try:
             _finalize_tool_round(
                 task, rn, round_entry,
-                [{'type': 'error', 'content': err_msg, 'toolName': fn_name}],
+                [{'type': 'error', 'content': content, 'toolName': fn_name}],
                 query_override=round_entry.get('query', fn_name),
                 status='error',
             )
         except Exception as finalize_exc:
             logger.debug('[Executor] _finalize_tool_round on error path failed '
                          'for %s: %s', fn_name, finalize_exc)
-    return tc_id, uncertain_effect_error(round_entry, err_msg), False
+    return tc_id, content, False

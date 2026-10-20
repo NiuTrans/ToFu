@@ -636,6 +636,15 @@ def _settle_tool_result(
         canonical_content if canonical_content is not None else tool_content,
         execution_status=terminal_status,
         source_coverage='partial' if (producer_metadata or {}).get('truncated') else (producer_metadata or {}).get('sourceCoverage'))
+    if captured_result.execution_status != 'ok':
+        # A failed observation is not a reusable result. In particular, a
+        # declared timeout can replace an otherwise successful worker return
+        # after the parallel lane has populated its cache. Evict at the shared
+        # settlement boundary so a later authorized call can observe recovery.
+        if isinstance(round_entry, dict):
+            round_entry['_cacheableResult'] = False
+        if fn_name in idempotent_tools:
+            cache.pop(_make_cache_key(fn_name, fn_args), None)
     if isinstance(tool_content, str):
         tool_content = TrustedResultText(tool_content, canonical=captured_result,
                                          envelope=isinstance(tool_content, TrustedResultText) and tool_content.envelope)
@@ -988,6 +997,10 @@ def _settle_tool_result(
         'name': fn_name,
         'status': terminal_status or (round_entry or {}).get('status') or 'done',
     })
+    from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
+    audit_round_outcome(
+        task, round_entry,
+        status=terminal_status or (round_entry or {}).get('status') or 'done')
     return tool_content
 
 
@@ -2125,6 +2138,10 @@ def execute_tool_pipeline(
     _call_id_receipts = _ensure_tool_call_id_receipts(task)
     _current_round_entries = tuple(
         item[5] for item in parsed_tcs if isinstance(item[5], dict))
+    for round_entry in _current_round_entries:
+        # Direct executor callers audit on return. Here the pipeline must
+        # first resolve its deadline/cancellation verdict and canonical result.
+        round_entry['_outcomeAuditOwner'] = 'pipeline'
     _historical_used_call_ids = _collect_used_tool_call_ids(
         task, messages, current_round_entries=_current_round_entries,
         exclude_trailing_assistant=True)

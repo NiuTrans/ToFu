@@ -48,6 +48,11 @@ def audit_round_outcome(
     finalize (pool-timeout lane finishing after the pipeline recorded a
     verdict) cannot double-count one model action.
 
+    Execution audits enter from canonical pipeline settlement, after handler
+    returns and timeout decisions. Direct executor consumers audit on executor
+    exit. Handler presentation updates are not final execution evidence.
+    Admission may separately audit a proven rejection.
+
     Outcome mapping:
       * ``status='rejected'`` → ``rejected`` + ``rejection_kind`` from the
         typed descriptor (hallucinated / tool_contract_invalid /
