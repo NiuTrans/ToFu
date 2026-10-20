@@ -198,8 +198,9 @@ human-guidance resolution.
 Problem: a failed read's unconditional query-cache eviction could erase a
 successful concurrent read. Decision: each invocation retains the exact receipt
 it published under the shared receipt lock; failed settlement withdraws only
-that receipt if still current. Failed results never rewrite a success during
-compaction. Alternatives rejected: argument or body equality cannot establish
+that receipt if still current. Successful compaction also carries the producer's
+exact receipt; failed results never rewrite a success. Alternatives rejected:
+argument or body equality cannot establish
 receipt ownership, including when a successful document contains error-shaped
 JSON. No task-wide receipt history is added. Verify settlement/cache tests and
 the ordinary timeout/outcome-finality ladder.

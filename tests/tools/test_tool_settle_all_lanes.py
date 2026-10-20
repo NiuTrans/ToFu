@@ -189,6 +189,23 @@ def test_failed_settlement_withdraws_only_its_own_published_receipt(rec, monkeyp
     assert task['_tool_result_cache'].get(key) is (newer if replaced else None)
 
 
+def test_compaction_cannot_rewrite_identical_bytes_from_another_producer(rec, monkeypatch):
+    from lib.tasks_pkg.tool_dispatch import _pipeline as pipeline
+    from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key, _store_tool_result_cache_entry
+    task = _mk_task(config={'tools': {'resultEnvelope': 'legacy'}})
+    parsed = _mk_tc('first', 'fetch_url', 1)
+    key = _make_cache_key('fetch_url', {})
+    produced = ('same response body', False, 'dedup', [{'title': 'first observation'}])
+    newer = ('same response body', False, 'dedup', [{'title': 'new observation'}])
+    _store_tool_result_cache_entry(task, key, produced)
+    _store_tool_result_cache_entry(task, key, newer)
+    monkeypatch.setattr(pipeline, 'budget_tool_result', lambda *a, **kw: 'compact')
+    pipeline._settle_tool_result(task, 'fetch_url', 'first', {}, parsed[4], parsed[5],
+        produced[0], idempotent_tools={'fetch_url'}, cache=task['_tool_result_cache'],
+        tid=task['id'], round_num=0, settled_results={}, produced_cache_entry=produced)
+    assert task['_tool_result_cache'].get(key) is newer
+
+
 class _Recorder:
     def __init__(self):
         self.events: list[dict] = []

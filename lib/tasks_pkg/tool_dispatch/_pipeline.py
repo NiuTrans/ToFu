@@ -630,7 +630,8 @@ def _settle_tool_result(
     # A concurrent occurrence may publish the same query while this result is
     # compacted. Rewrite only this producer's observed receipt, by identity.
     _sync_key = _make_cache_key(fn_name, fn_args) if fn_name in idempotent_tools else None
-    _producer_cache_entry = cache.get(_sync_key) if _sync_key is not None else None
+    _producer_cache_entry = (produced_cache_entry if produced_cache_entry is not None
+                             else cache.get(_sync_key) if _sync_key is not None else None)
     if (not isinstance(_producer_cache_entry, (tuple, list)) or not _producer_cache_entry
             or not isinstance(tool_content, str) or _producer_cache_entry[0] != tool_content):
         _producer_cache_entry = None
