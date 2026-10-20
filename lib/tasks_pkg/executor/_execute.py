@@ -22,6 +22,25 @@ from lib.tasks_pkg.executor._effects import (
 logger = get_logger(__name__)
 
 
+class _InvalidToolHandlerResult(RuntimeError):
+    """The handler did not acknowledge this dispatched occurrence."""
+
+
+def _validate_handler_result(result, call_id):
+    """Check correlation before effect ACK, cache admission or sibling delivery."""
+    if not isinstance(result, (tuple, list)) or len(result) != 3:
+        raise _InvalidToolHandlerResult(
+            'Tool handler must return (call_id, content, is_search).')
+    if not isinstance(result[0], str) or result[0] != call_id:
+        raise _InvalidToolHandlerResult(
+            'Tool handler returned a call ID that does not match this occurrence; '
+            'the unverified payload was withheld.')
+    if type(result[2]) is not bool:
+        raise _InvalidToolHandlerResult(
+            'Tool handler returned a non-boolean is_search flag; '
+            'the unverified payload was withheld.')
+
+
 def _audit_direct_executor_outcome(task, round_entry, *, status=None):
     """Direct consumers settle here; pipelines own their later deadline verdict."""
     if not isinstance(round_entry, dict) or round_entry.get('_outcomeAuditOwner') == 'pipeline':
@@ -211,6 +230,7 @@ def _dispatch_admitted_tool_one(
                         task, tc, fn_name, tc_id, fn_args, rn, round_entry,
                         cfg, project_path, project_enabled, all_tools,
                     )
+                    _validate_handler_result(result, tc_id)
         except Exception as exc:
             finish_tool_effect(round_entry)
             context.settle_once(
@@ -291,6 +311,16 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
         f'Arguments received: {arg_preview}'
     )
     content = uncertain_effect_error(round_entry, err_msg)
+    if isinstance(exc, _InvalidToolHandlerResult) and content == err_msg:
+        from lib.tools.result_envelope import typed_tool_error
+        content = typed_tool_error(
+            'tool_result_invalid', retryable=False,
+            next_action=(
+                'Use another available tool to verify the outcome. Repair the '
+                'handler receipt before retrying this tool; independent '
+                'authorized work can continue.'),
+            message=err_msg,
+        ).to_envelope_text()
     if round_entry is not None:
         # Handler presentation can precede receipt decoding or cleanup. A
         # subsequent exception still owns the final execution verdict.
