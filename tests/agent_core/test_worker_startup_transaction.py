@@ -5,6 +5,8 @@ from concurrent.futures import TimeoutError
 import pytest
 from tofu_workers import DemandExecutor
 
+pytestmark = pytest.mark.unit
+
 
 def kernel(prefix='startup-causal'):
     return DemandExecutor(max_workers=1, queue_capacity=0,
@@ -75,20 +77,42 @@ def test_shutdown_does_not_wait_start_and_final_join_owns_reservation(monkeypatc
 
 @pytest.mark.parametrize('physically_started',[False,True])
 def test_late_start_failure_never_executes_rejected_item(monkeypatch,physically_started):
+    class StartupInterrupted(BaseException):
+        pass
     pool=kernel('startup-late-fail');ran=threading.Event();real=threading.Thread.start
     def start(thread):
         if thread.name.startswith('startup-late-fail_'):
             if physically_started:real(thread)
-            raise RuntimeError('controlled late startup rejection')
+            raise StartupInterrupted('controlled late startup rejection')
         return real(thread)
     monkeypatch.setattr(threading.Thread,'start',start)
     try:
-        with pytest.raises(RuntimeError,match='controlled late'):
+        with pytest.raises(StartupInterrupted,match='controlled late'):
             pool.submit_task('rejected',ran.set)
         assert not ran.is_set()
         assert pool.scheduling_snapshot('rejected')['taskState']=='unknown'
     finally:pool.shutdown(wait=True,cancel_futures=True)
     assert not ran.is_set();assert pool.scheduling_snapshot()['startingWorkers']==0
+
+
+def test_late_recoverable_start_failure_uses_its_existing_physical_carrier(monkeypatch):
+    pool = kernel('startup-late-recover')
+    calls, starts = [], []
+    real = threading.Thread.start
+    def start(thread):
+        result = real(thread)
+        if thread.name.startswith('startup-late-recover'):
+            starts.append(thread.name)
+            raise RuntimeError('startup response lost after physical start')
+        return result
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    try:
+        future = pool.submit_task('owned', lambda: calls.append('effect'))
+        future.result(2)
+        assert calls == ['effect'] and len(starts) == 1
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert not pool.worker_threads_snapshot()
 
 
 def test_constructor_failure_rolls_back_provisional_job(monkeypatch):

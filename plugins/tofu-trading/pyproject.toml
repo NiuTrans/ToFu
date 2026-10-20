@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-trading"
-version = "0.2.0"
+version = "0.2.1"
 description = "Trading subsystem for Tofu (豆腐) — portfolio, market intel, autopilot, backtest & strategy engines. Mounts into a Tofu host via entry points."
 readme = "README.md"
 requires-python = ">=3.10"

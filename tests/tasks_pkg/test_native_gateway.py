@@ -150,10 +150,20 @@ def test_preapproved_identical_call_does_not_repeat_human_gate(monkeypatch):
 
 
 @pytest.mark.parametrize('auto,approved', [(True,True),(False,True),(False,False)])
-def test_default_application_policy_uses_one_prepared_occurrence(monkeypatch,tmp_path,auto,approved):
+@pytest.mark.parametrize('startup_fault', [False, True])
+def test_default_application_policy_uses_one_prepared_occurrence(monkeypatch,tmp_path,auto,approved,startup_fault):
     from lib.tasks_pkg.tool_dispatch import _approval
     from lib.tasks_pkg.executor._finalize import _finalize_tool_round
     from contextvars import ContextVar
+    from lib.observability import InstrumentedThreadPoolExecutor
+    original_start = threading.Thread.start
+    failures = []
+    def start(thread):
+        if startup_fault and thread.name.startswith('gateway-approval-recovery') and not failures:
+            failures.append(thread.name)
+            raise OSError('temporary approval worker refusal')
+        return original_start(thread)
+    monkeypatch.setattr(threading.Thread, 'start', start)
     marker = ContextVar('gateway-context-fixture', default='unbound')
     owner=task();definitions=catalog();owner['_executable_tool_catalog']=definitions
     target=tmp_path/'default-native-write.txt';calls=[];prompts=[]
@@ -191,7 +201,8 @@ def test_default_application_policy_uses_one_prepared_occurrence(monkeypatch,tmp
                 await gateway.execute(ToolRequest(principal(),owner['id'],'duplicate','write_file',args,'provider-call',model_round=0))
         assert gateway._bytes==0 and not gateway._pending
         gateway.close()
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with InstrumentedThreadPoolExecutor(max_workers=1, metric_pool='tool',
+            thread_name_prefix='gateway-approval-recovery') as executor:
         asyncio.run(run(executor))
         assert executor.submit(marker.get).result() == 'unbound'
     assert marker.get() == 'unbound'
@@ -199,6 +210,7 @@ def test_default_application_policy_uses_one_prepared_occurrence(monkeypatch,tmp
     assert len(prompts)==(0 if auto else 1)
     assert len(calls)==int(auto or approved)
     assert target.exists()==(auto or approved)
+    assert len(failures) == int(startup_fault)
 
 
 def test_default_approval_budget_fault_settles_occurrence_before_effect(monkeypatch,tmp_path):
@@ -370,8 +382,18 @@ def test_actual_read_batch_progress_tracks_target_results_not_callback_order():
     assert all(row['status'] == 'done' for row in owner['toolRounds'])
 
 
-def test_registered_project_writer_runs_through_the_same_pipeline(tmp_path):
+@pytest.mark.parametrize('startup_fault', [False, True])
+def test_registered_project_writer_runs_through_the_same_pipeline(tmp_path,monkeypatch,startup_fault):
     from lib.tasks_pkg.handlers import project  # noqa: F401 — register retained built-in handler
+    from lib.observability import InstrumentedThreadPoolExecutor
+    original_start = threading.Thread.start
+    failures = []
+    def start(thread):
+        if startup_fault and thread.name.startswith('gateway-write-recovery') and not failures:
+            failures.append(thread.name)
+            raise OSError('temporary write worker refusal')
+        return original_start(thread)
+    monkeypatch.setattr(threading.Thread, 'start', start)
     owner=task();definitions=catalog();owner['_executable_tool_catalog']=definitions
     target=tmp_path/'registered-write.txt'
     class Policy:
@@ -388,9 +410,12 @@ def test_registered_project_writer_runs_through_the_same_pipeline(tmp_path):
         request=ToolRequest(principal(),owner['id'],'execute','write_file',args,'provider-call')
         result=await gateway.execute(request)
         assert 'File created:' in result, result
-    with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+    with InstrumentedThreadPoolExecutor(max_workers=1, metric_pool='tool',
+            thread_name_prefix='gateway-write-recovery') as executor:
+        asyncio.run(run(executor))
     assert target.read_text()=='registered handler mutation'
     assert len(owner['toolRounds'])==1 and owner['toolRounds'][0]['status']=='done'
+    assert len(failures) == int(startup_fault)
 
 
 def test_pre_execution_hook_still_blocks_an_approved_native_call(monkeypatch,tmp_path):

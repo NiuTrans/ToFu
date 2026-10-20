@@ -828,6 +828,13 @@ def record_executor_rejection(pool: str, *, reason: str) -> None:
     )
 
 
+def record_executor_startup_recovery(pool: str, *, outcome: str) -> None:
+    """Observe bounded pre-entry recovery separately from refused submissions."""
+    _STORE.inc('tofu_executor_startup_recoveries_total',
+        pool=_bounded(pool, limit=32),
+        outcome=outcome if outcome in {'accepted', 'failed', 'cancelled'} else 'unknown')
+
+
 def record_executor_abandonment(
     pool: str,
     *,

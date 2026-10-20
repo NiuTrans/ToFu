@@ -161,14 +161,16 @@ def test_cross_pass_merge_preserves_client_and_payload_identity():
     assert not warmup._inflight
 
 
-def test_unstarted_probe_failure_does_not_suppress_other_reads(monkeypatch):
+@pytest.mark.parametrize('failed_starts', [1, 2])
+def test_unstarted_probe_failure_does_not_suppress_other_reads(monkeypatch, failed_starts):
     from lib.observability import InstrumentedThreadPoolExecutor
 
     pool = InstrumentedThreadPoolExecutor(max_workers=1, metric_pool='storage-warmup',
                                          thread_name_prefix='warmup-start-proof')
     original = threading.Thread.start
     count = 0
-    rendezvous = threading.Barrier(5, timeout=10)
+    expected_failures = ['conversation.list'] if failed_starts == 2 else []
+    rendezvous = threading.Barrier(6 - len(expected_failures), timeout=10)
     called = []
     lock = threading.Lock()
 
@@ -176,7 +178,7 @@ def test_unstarted_probe_failure_does_not_suppress_other_reads(monkeypatch):
         nonlocal count
         if thread.name.startswith('warmup-start-proof'):
             count += 1
-            if count == 2:
+            if 2 <= count < 2 + failed_starts:
                 raise RuntimeError('unstarted probe creation failed')
         return original(thread)
 
@@ -190,10 +192,10 @@ def test_unstarted_probe_failure_does_not_suppress_other_reads(monkeypatch):
     monkeypatch.setattr(warmup, '_warmup_pool', lambda: pool)
     try:
         stats = warmup.run_warmup_pass(Client(), budget_seconds=15)
-        assert stats['failed'] == ['conversation.list']
-        assert len(stats['warmed']) == 5
-        assert 'conversation.list' not in called
-        assert len(called) == 5
+        assert stats['failed'] == expected_failures
+        assert len(stats['warmed']) == 6 - len(expected_failures)
+        assert ('conversation.list' in called) == (failed_starts == 1)
+        assert len(called) == len(set(called)) == 6 - len(expected_failures)
     finally:
         pool.shutdown(wait=True)
     assert not warmup._inflight
