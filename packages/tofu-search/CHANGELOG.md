@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.3
+
+- Preserve adjacent inline-only HTML value cells in their source position,
+  including short multilingual schedules and linked identifiers. Keep article,
+  navigation, code and table boundaries; add no service or model dependency.
+- Exclude explicitly hidden content from both extraction paths without losing
+  visible following text.
+- Scope Trafilatura's deduplication cache to each extraction. Upgrading to 2.3.1
+  alone did not isolate the boolean cache option; repeated reads could still
+  lose evidence. Exercise enough repeated calls to expose that failure.
+
 ## 0.12.2
 
 - Recover once from pre-body read failures, including proxy CONNECT response
@@ -13,8 +24,8 @@
 ## 0.12.1
 
 - Require Trafilatura 2.3.1 or newer for source-faithful HTML extraction:
-  preserve nested inline text order, code indentation and bracketed identifiers,
-  and keep deduplication scoped to the document. Add real-dependency regression
+  preserve nested inline text order, code indentation and bracketed identifiers.
+  Add real-dependency regression
   tests so an allowed installation cannot silently retain the older behavior.
 - Recover original preformatted source when article extraction still changes
   its whitespace. Retain indentation and blank lines, safely fence literal

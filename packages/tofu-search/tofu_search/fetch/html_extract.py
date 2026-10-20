@@ -13,6 +13,8 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 import trafilatura
+from trafilatura.deduplication import LRUCache
+from trafilatura.settings import LRU_SIZE
 
 from tofu_search.fetch.utils import _get_bs4
 from tofu_search.log import get_logger
@@ -380,6 +382,87 @@ def _try_extract_code_blob(html_text, url):
 #  HTML text extraction
 # ═══════════════════════════════════════════════════════
 
+_INLINE_VALUE_TAGS = frozenset({
+    'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'data', 'del', 'dfn',
+    'em', 'i', 'img', 'ins', 'kbd', 'mark', 'q', 'ruby', 's', 'samp', 'small',
+    'span', 'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr',
+})
+_PROTECTED_VALUE_ANCESTORS = frozenset({
+    'nav', 'header', 'footer', 'aside', 'form', 'svg', 'math', 'pre', 'code', 'table',
+})
+_DISPLAY_NONE = re.compile(r'display\s*:\s*none', re.I)
+
+
+def _explicitly_hidden(element):
+    """Shared visibility boundary for the article tree and BS4 fallback."""
+    return (
+        element.get('hidden') is not None
+        or str(element.get('aria-hidden', '')).strip().lower() == 'true'
+        or bool(_DISPLAY_NONE.search(str(element.get('style', ''))))
+    )
+
+
+def _prepare_article_tree(html):
+    """Represent adjacent div values as paragraphs for the upstream extractor.
+
+    Only change extraction markup; keep text, attributes, siblings and inline
+    structure intact. Do not infer CSS grid columns, labels or relationships.
+    Native tree work must remain inside _TRAFILATURA_LOCK.
+    """
+    tree = trafilatura.load_html(html)
+    if tree is None:
+        return None
+    for element in list(tree.iter()):
+        if _explicitly_hidden(element):
+            if element is tree:
+                return None
+            # Unlike parent.remove(), drop_tree keeps the visible following tail.
+            element.drop_tree()
+
+    def value_cell(element):
+        return element.tag == 'div' and all(
+            not isinstance(child.tag, str) or child.tag in _INLINE_VALUE_TAGS
+            for child in element.iterdescendants())
+
+    def preserve_run(parent, cells):
+        # A run of linked cards is navigation, not a field group. Preserve
+        # the upstream link-density decision unless at least two cells
+        # carry their own non-link words (inline linked values still fit).
+        def has_unlinked_words(cell):
+            return any(re.search(r'\w', text) for text in
+                       cell.xpath('.//text()[not(ancestor::a)]'))
+
+        if sum(has_unlinked_words(cell) for cell in cells) < 2:
+            return
+        paragraph = parent.makeelement('p')
+        position = parent.index(cells[0])
+        for index, cell in enumerate(cells):
+            cell.tag = 'span'
+            parent.remove(cell)
+            paragraph.append(cell)
+            if index + 1 < len(cells):
+                paragraph.append(parent.makeelement('br'))
+        parent.insert(position, paragraph)
+
+    # Process inner groups first. A parent containing paragraphs then remains
+    # a structural container; its prose is never folded into the value group.
+    for parent in reversed(list(tree.iter())):
+        if parent.tag not in {'div', 'section', 'main', 'article'}:
+            continue
+        if any(ancestor.tag in _PROTECTED_VALUE_ANCESTORS for ancestor in parent.iterancestors()):
+            continue
+        run = []
+
+        for child in list(parent):
+            if value_cell(child):
+                run.append(child)
+            else:
+                preserve_run(parent, run)
+                run = []
+        preserve_run(parent, run)
+    return tree
+
+
 def extract_html_text(html, max_chars, url=''):
     """Extract readable text from HTML. Preserves links as a markdown section at the end."""
 
@@ -396,8 +479,12 @@ def extract_html_text(html, max_chars, url=''):
     main_text = None
     try:
         with _TRAFILATURA_LOCK:
-            main_text = trafilatura.extract(html, include_comments=False, include_tables=True,
-                                            no_fallback=False, favor_recall=True, deduplicate=True,
+            # True selects upstream's process-global cache even in 2.3.1.
+            # Keep its existing capacity, but scope every entry to this document.
+            main_text = trafilatura.extract(_prepare_article_tree(html),
+                                            include_comments=False, include_tables=True,
+                                            no_fallback=False, favor_recall=True,
+                                            deduplicate=LRUCache(maxsize=LRU_SIZE),
                                             include_links=True,        # ★ include_links!
                                             include_formatting=True)   # ★ keep headings/lists/emphasis as markdown
     except Exception as e:
@@ -409,9 +496,8 @@ def extract_html_text(html, max_chars, url=''):
         for tag in ['script','style','nav','header','footer','aside','iframe',
                      'noscript','form','svg','input','select','textarea']:
             for el in soup.find_all(tag): el.decompose()
-        for el in soup.find_all(attrs={'style': re.compile(r'display\s*:\s*none', re.I)}):
+        for el in soup.find_all(_explicitly_hidden):
             el.decompose()
-        for el in soup.find_all(attrs={'hidden': True}): el.decompose()
         for el in soup.find_all(class_=re.compile(
                 r'\b(cookie|popup|modal|banner|advert|sidebar|menu|nav)\b', re.I)):
             el.decompose()

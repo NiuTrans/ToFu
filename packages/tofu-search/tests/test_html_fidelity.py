@@ -83,7 +83,19 @@ def test_repeated_extractions_do_not_consume_each_others_evidence():
     )
     first = extract(body)
     assert 'It then returns the collected failures.' in first
-    assert extract(body) == first
+    for _ in range(8):
+        assert extract(body) == first
+
+
+def test_repeated_pages_keep_short_structured_values_and_formatting():
+    body = (
+        '<div><div>Service</div><div>Standard</div>'
+        '<div>Delivery days</div><div>3–5</div></div>'
+    )
+    first = extract(body)
+    assert 'Standard' in first and '3–5' in first
+    for _ in range(8):
+        assert extract(body) == first
 
 
 def test_highlighted_code_inside_a_list_preserves_blank_lines_and_indents():

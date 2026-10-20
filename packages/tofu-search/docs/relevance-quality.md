@@ -17,6 +17,29 @@ link inventories and the BeautifulSoup fallback retain their current owners.
 calls, rather than mocking its output. Published package metadata and the
 workspace lockfile must both exclude the affected versions.
 
+The boolean `deduplicate=True` still selects Trafilatura's process-global cache.
+Upgrading alone does not isolate repeated document reads: after several calls,
+valid source paragraphs and short values can disappear or trigger a different
+fallback. Pass a fresh `LRUCache` through the documented extraction parameter
+for each document, retaining the upstream capacity. The cache lives only inside
+the already serialized extraction call; it creates no resident cache or worker.
+Repeated-call specifications exceed the upstream repetition threshold.
+
+Adjacent terminal `div` values can disappear when the surrounding page has
+longer prose. Before article extraction, group consecutive inline-only cells
+into a paragraph with explicit line breaks, keeping their source order,
+attributes, inline markup and following text. Require at least two cells with
+words outside links so linked recommendations keep their existing extraction
+heuristics. Do not rewrite block-bearing containers, navigation elements,
+tables or preformatted content, or infer CSS columns and label/value mappings.
+The native tree is call-local and remains under the existing extraction lock.
+
+Both extraction paths exclude explicit `hidden`, `aria-hidden="true"` and
+inline `display:none` elements while retaining visible following text. This
+does not evaluate stylesheets or JavaScript. `tests/test_html_value_blocks.py`
+covers short multilingual fields, mixed inline links, hidden content, nearby
+prose, related cards and source order through the real dependency.
+
 Article heuristics can still flatten list-nested or highlighted code and remove
 blank lines. The existing supplemental-structure pass therefore compares
 preformatted DOM text literally, preserves indentation and internal newlines,
@@ -28,7 +51,13 @@ read or query-focused excerpt can be needed for code late in a long page.
 
 **Alternatives rejected:** flattening all markup loses source structure;
 reconstructing sentences with an LLM invents evidence; copying upstream parser
-internals creates a second maintenance owner. Passing the new tests proves
+internals creates a second maintenance owner. Converting every terminal `div`
+into a paragraph can displace article bodies. Converting a selected DOM subtree
+directly to Markdown retains more navigation; disabling deduplication also
+changes upstream article selection. Neither replacement improved the frozen
+[Mozilla Readability fixture](https://github.com/mozilla/readability/tree/ab4027a8b37669745016869a37a504727992b2ba/test/test-pages)
+comparison consistently. Those reference pages primarily test article parsing,
+not field completeness or agent answers. Passing the new tests proves
 these extraction behaviors, not general retrieval superiority or that an agent
 will quote the evidence correctly.
 
