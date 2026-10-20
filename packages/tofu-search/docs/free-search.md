@@ -31,6 +31,13 @@ complete a search; 202, 204, partial responses and redirects remain failures.
 Transport errors retain the common connection/timeout distinctions without
 exposing private exception text.
 
+Parallel proxy attempts use the shared context-copying submission owner.
+Problem: bare worker submission lost bound request configuration and context.
+Decision: preserve the caller's context for every alternate, including parsing
+and throttling. Reading process defaults in those workers is rejected because
+it can apply another request's policy. `tests/test_proxy_race_context.py`
+verifies concurrent alternates against a distinct process default.
+
 HTTPX and its HTTP/2 support load on the first applicable request. One admitted
 search attempt owns one transient client and response, which close before
 parsing. Decoded HTML is capped at 2 MiB; unsuccessful statuses and explicit

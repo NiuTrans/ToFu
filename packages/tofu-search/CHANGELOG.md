@@ -11,6 +11,8 @@
 
 ## Unreleased
 
+- Preserve request-bound configuration and provider context in concurrent
+  proxy attempts using the existing context-copying submission owner.
 - Recover failed DDG HTML searches through its free Lite endpoint within the
   same query, proxy and time budget. Share browser/HTTP parsing, keep snippets
   attached to their source, and preserve escaped destination URLs.
