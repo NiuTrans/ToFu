@@ -4,11 +4,14 @@ from __future__ import annotations
 
 _AUDIT_SYNTHETIC_REPO_PATHS = {
     'lib/business.py', 'lib/service.py', 'scripts/offline_migration.py',
+    'lib/untracked_driver.py',
 }
 
 import ast
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
@@ -228,30 +231,33 @@ def _driver_imports(path: Path) -> list[str]:
 
 
 def _matching_files(pattern: str) -> list[Path]:
-    # Ratchet candidates are COMMITTED files only: untracked/gitignored
-    # one-shots (e.g. a sibling's in-flight
-    # scripts/repair_turn_archive_straddlers.py) flicker in and out of
-    # shared dev checkouts and made this inventory non-deterministic red
-    # with no committed change (2026-08-23, same class fix as
-    # tests/meta/test_database_access_boundary.py).  CI fresh checkouts see
-    # every file tracked, so gating on ``git ls-files`` changes nothing.
+    # This ratchet inspects tracked sources, excluding unrelated untracked
+    # operator scripts in shared checkouts. Archives without Git inspect their
+    # available sources. The separate runtime gate also covers untracked code.
     roots = ['lib', 'routes', 'scripts', 'server.py']
-    result = subprocess.run(
-        ['rg', '-l', '--glob', '*.py', pattern, *roots],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode in (0, 1), result.stderr
-    tracked = subprocess.run(
-        ['git', 'ls-files'], cwd=ROOT, text=True,
-        capture_output=True, check=False)
-    if tracked.returncode != 0:  # fail open: no git → scan everything
-        return [ROOT / relative for relative in result.stdout.splitlines()]
-    tracked_set = set(tracked.stdout.splitlines())
-    return [ROOT / relative for relative in result.stdout.splitlines()
-            if relative in tracked_set]
+    try:
+        tracked = subprocess.run(
+            ['git', 'ls-files', '-z', '--', *roots], cwd=ROOT, text=True,
+            capture_output=True, check=True, timeout=10)
+        candidates = [ROOT / relative for relative in tracked.stdout.split('\0')
+                      if relative]
+    except (OSError, subprocess.SubprocessError):
+        # Source archives still run the guard. Missing optional search binaries
+        # must not turn a real boundary assertion into a skipped/failed check.
+        candidates = []
+        for root in (ROOT / name for name in roots):
+            if root.is_file():
+                candidates.append(root)
+            elif root.is_dir():
+                for directory, names, files in os.walk(root):
+                    names[:] = [name for name in names if not name.startswith('.')
+                                and name not in {'__pycache__', 'node_modules'}]
+                    candidates.extend(Path(directory) / name for name in files
+                                      if name.endswith('.py'))
+    matcher = re.compile(pattern, re.MULTILINE)
+    return [path for path in candidates
+            if path.suffix == '.py' and path.is_file() and not path.is_symlink()
+            and matcher.search(path.read_text(encoding='utf-8'))]
 
 
 def test_client_and_business_routes_cannot_import_database_drivers():
@@ -277,6 +283,41 @@ def test_only_offline_tools_import_drivers_outside_sidecar():
     assert offenders <= OFFLINE_DRIVER_IMPORT_ALLOWLIST, (
         'a new process imported a database driver outside the Sidecar: '
         + ', '.join(sorted(offenders - OFFLINE_DRIVER_IMPORT_ALLOWLIST)))
+
+
+@pytest.mark.parametrize('indexed', [False, True])
+def test_offline_driver_gate_still_enforces_imports_without_search_binaries(
+        tmp_path, monkeypatch, indexed):
+    business = tmp_path / 'lib' / 'business.py'
+    offline = tmp_path / 'scripts' / 'offline_migration.py'
+    for path in (business, offline):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('import sqlite3\n', encoding='utf-8')
+    if indexed:
+        subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+        subprocess.run(['git', '-C', str(tmp_path), 'add', '.'], check=True)
+    original_run = subprocess.run
+
+    def unavailable_search(command, *args, **kwargs):
+        if command[0] == 'rg' or command[0] == 'git' and not indexed:
+            raise FileNotFoundError(command[0])
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', unavailable_search)
+    monkeypatch.setitem(globals(), 'ROOT', tmp_path)
+    monkeypatch.setitem(globals(), 'OFFLINE_DRIVER_IMPORT_ALLOWLIST',
+                        {'scripts/offline_migration.py'})
+    with pytest.raises(AssertionError, match='lib/business.py'):
+        test_only_offline_tools_import_drivers_outside_sidecar()
+    business.write_text('value = 1\n', encoding='utf-8')
+    test_only_offline_tools_import_drivers_outside_sidecar()
+    untracked = tmp_path / 'lib' / 'untracked_driver.py'
+    untracked.write_text('import sqlite3\n', encoding='utf-8')
+    if indexed:
+        test_only_offline_tools_import_drivers_outside_sidecar()
+    else:
+        with pytest.raises(AssertionError, match='lib/untracked_driver.py'):
+            test_only_offline_tools_import_drivers_outside_sidecar()
 
 
 def test_only_sidecar_owns_new_storage_connections_and_paths():
