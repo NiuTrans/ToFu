@@ -52,6 +52,15 @@ first mismatch behind repeated backoff. Decision: preserve strict digest checks
 and repair reviewed fixture recordings. Weakening normalization or consuming
 provider retry budgets cannot repair a local recording.
 
+Each recorded scenario owns one generated fixture. Problem: a derived
+retry-exhaustion test appended its borrowed prefix to the canonical recording.
+Decision: root-loop variants declare `record_fixture=False`; they still execute
+the real loop against the seed during authoring and strict replay otherwise,
+without writing the owning scenario's generation. Alternatives rejected:
+trimming appended rows after recording hides ownership mistakes; skipping the
+variant loses its lifecycle checks. Review generation lengths, provider events
+and results as well as request digests before promoting `.next` files.
+
 ## Development and delivery loop
 
 **Problem:** written policies and numerous tests do not prove the changed user

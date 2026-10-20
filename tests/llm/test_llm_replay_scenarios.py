@@ -182,19 +182,22 @@ def _install_replay_route() -> None:
 
 
 def _install_transport(fixture_dir: Path, monkeypatch, cwd: str,
-                       after_event=None) -> str:
+                       after_event=None, *, record_fixture: bool = True) -> str:
     """Install recorder (author/record modes) or replayer (default)."""
     script_path = fixture_dir / 'script.jsonl'
     if os.environ.get('TOFU_LLM_REPLAY_AUTHOR') == '1':
         seed = ReplaySession(script_path, cwd=cwd, verify=False,
                              after_event=after_event)
-        Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd).install(
-            monkeypatch,
-            stream_chat=seed.stream_chat,
-            async_stream_chat=seed.async_stream_chat,
-            chat=seed.chat)
+        if record_fixture:
+            Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd).install(
+                monkeypatch,
+                stream_chat=seed.stream_chat,
+                async_stream_chat=seed.async_stream_chat,
+                chat=seed.chat)
+        else:
+            seed.install(monkeypatch)
         return 'author'
-    if mode_from_env() == 'record':
+    if record_fixture and mode_from_env() == 'record':
         Recorder(fixture_dir / RECORD_OUTPUT_NAME, cwd=cwd).install(
             monkeypatch)
         return 'record'
@@ -230,7 +233,7 @@ def _make_task(conv_id: str, user_prompt: str,
 def _run_loop_scenario(name: str, *, tmp_path: Path, monkeypatch,
                        user_prompt: str, with_project: bool = False,
                        after_event=None,
-                       prepare=None) -> dict:
+                       prepare=None, record_fixture: bool = True) -> dict:
     """Drive one replayed scenario through the real root agent loop.
 
     Real prep helpers (model config resolution + tool assembly) build the
@@ -295,7 +298,7 @@ def _run_loop_scenario(name: str, *, tmp_path: Path, monkeypatch,
         search_enabled=False,
     )
     mode = _install_transport(fixture_dir, monkeypatch, cwd=str(tmp_path),
-                              after_event=after_event)
+                              after_event=after_event, record_fixture=record_fixture)
     if prepare is not None:
         prepare(task)
     loop_result = root_loop.run_root_agent_loop(request)
@@ -453,7 +456,7 @@ def test_incomplete_tool_stream_exhaustion_closes_announcements_and_round(tmp_pa
     run = _run_loop_scenario(
         'incomplete_tool_stream', tmp_path=tmp_path, monkeypatch=monkeypatch,
         user_prompt='Create the replay marker file, then confirm.',
-        with_project=True, prepare=exhaust)
+        with_project=True, prepare=exhaust, record_fixture=False)
     assert not (run['project_path'] / 'unverified-write.txt').exists()
     assert not (run['project_path'] / 'replay-marker.txt').exists()
     assert run['task']['finishReason'] == 'premature_close'
@@ -461,6 +464,26 @@ def test_incomplete_tool_stream_exhaustion_closes_announcements_and_round(tmp_pa
     assert len(run['state'].api_rounds) == 1
     assert not _tool_result_messages(run['messages'])
     _assert_invariants_clean(run['task'])
+
+
+def test_derived_authoring_preserves_the_canonical_generation(tmp_path, monkeypatch):
+    """A derived prefix may run, but must not append to its owner's fixture."""
+    import lib.llm
+
+    fixture_dir = tmp_path / 'scenario'
+    fixture_dir.mkdir()
+    (fixture_dir / 'script.jsonl').write_bytes(
+        (FIXTURES_ROOT / 'text_reply' / 'script.jsonl').read_bytes())
+    monkeypatch.setenv('TOFU_LLM_REPLAY_AUTHOR', '1')
+    request = {'model': 'fixture', 'messages': [], 'tools': []}
+    _install_transport(fixture_dir, monkeypatch, cwd=str(tmp_path))
+    original = lib.llm.stream_chat(request)
+    generated = (fixture_dir / RECORD_OUTPUT_NAME).read_bytes()
+
+    _install_transport(fixture_dir, monkeypatch, cwd=str(tmp_path), record_fixture=False)
+    derived = lib.llm.stream_chat(request)
+    assert derived.message == original.message
+    assert (fixture_dir / RECORD_OUTPUT_NAME).read_bytes() == generated
 
 
 # ═════════════════════════════════════════════════════════════════════
