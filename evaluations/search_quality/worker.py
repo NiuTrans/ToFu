@@ -16,7 +16,47 @@ import sys
 import time
 import tomllib
 
-from .contracts import DDGS_VERSION, PAGE_CHARS, RESULTS, SNIPPET_CHARS, python_tree_digest
+from .contracts import DDGS_VERSION, PAGE_CHARS, RESULTS, SNIPPET_CHARS, python_tree_digest, url_key
+
+
+def search_observation(rows, *, url_field='url', snippet_field='snippet'):
+    """Keep discovery candidates and safe diagnostics within the shared budget.
+
+    Search snippets and uncertain follow-ups are not fetched-source evidence.
+    URL strings must remain exact: truncating one would invent fetch authority.
+    """
+    followups = getattr(rows, '_unverified_candidates', None) or []
+    results, seen, omitted_urls = [], set(), 0
+    for candidates, status in ((rows, 'search_snippet'), (followups, 'unverified_candidate')):
+        for row in candidates:
+            if len(results) == RESULTS:
+                break
+            url = row.get(url_field, '')
+            key = url_key(url) if isinstance(url, str) and len(url) <= 4000 else ''
+            if not key:
+                omitted_urls += 1
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({'title': str(row.get('title') or '')[:500], 'url': url,
+                            'snippet': str(row.get(snippet_field) or '')[:SNIPPET_CHARS],
+                            'evidence_status': status})
+    diagnostic = {'omitted_url_count': omitted_urls}
+    native = getattr(rows, '_search_diag', None) or {}
+    # Do not expose arbitrary provider messages, which may contain route details.
+    if native:
+        reason = native.get('reason')
+        if reason in {'no_usable_evidence', 'network_error', 'partial_network_error',
+                      'no_results', 'deadline'}:
+            diagnostic['reason'] = reason
+        for name in ('unverified_count', 'weak_match_count', 'usable_count', 'constraint_rejected'):
+            value = native.get(name)
+            if type(value) is int and value >= 0:
+                diagnostic[name] = value
+        diagnostic['engine_error_count'] = len(native.get('engine_errors') or {})
+        diagnostic['deadline_hit'] = bool(native.get('deadline_hit'))
+    return {'results': results, 'search_diagnostic': diagnostic}
 
 
 def identity(arm):
@@ -77,10 +117,7 @@ def operation(request):
         with DDGS(proxy=proxy or None, timeout=10, verify=True) as engine:
             rows = engine.text(request['query'], region=request['region'],
                                safesearch='moderate', max_results=RESULTS, backend='auto')
-        return {'results': [{'title': str(r.get('title', ''))[:500],
-                             'url': str(r.get('href', ''))[:4000],
-                             'snippet': str(r.get('body', ''))[:SNIPPET_CHARS]}
-                            for r in rows[:RESULTS]]}
+        return search_observation(rows, url_field='href', snippet_field='body')
     from tofu_search import SearchConfig, fetch_page_content, get_playwright_pool, perform_web_search
     from tofu_search.config import bind_call_config
     cfg = SearchConfig(proxy_url=proxy, proxy_dual_attempt=False,
@@ -90,10 +127,7 @@ def operation(request):
         if request['operation'] == 'search' and arm == 'tofu':
             rows = perform_web_search(request['query'], max_results=RESULTS,
                                       fetch_pages=False, filter_pages=False, config=cfg)
-            return {'results': [{'title': str(r.get('title', ''))[:500],
-                                 'url': str(r.get('url', ''))[:4000],
-                                 'snippet': str(r.get('snippet', ''))[:SNIPPET_CHARS]}
-                                for r in rows[:RESULTS]]}
+            return search_observation(rows)
         if request['operation'] == 'fetch':
             diag = {}
             with bind_call_config(cfg):

@@ -111,6 +111,26 @@ joined cleanup. Alternatives rejected: increasing network-operation limits,
 silently retrying expired callbacks, or counting that harness failure as poor
 search quality. Earlier cohorts keep their original grades and invalid pairs.
 
+Contract v4 preserves Tofu's uncertain follow-up candidates after primary
+results, within the same six-URL budget. Both arms use one projection for
+title/snippet limits and URL admission. A candidate's `evidence_status`
+distinguishes `search_snippet` from `unverified_candidate`; neither establishes
+a fact without a successful fetch and observed quotation. Original URL strings
+are retained, duplicates share one slot, and invalid or over-budget URLs are
+omitted rather than truncated into a different fetch target. The projection
+includes allowlisted reason/count/deadline diagnostics, never provider messages.
+
+Problem: iterating only the primary list discarded metadata-held candidates
+that the native tool presents for follow-up, making some searches appear empty.
+Decision: preserve their discovery authority and uncertainty in the common
+adapter, without changing ranking, tool schemas or budgets. Alternatives
+rejected: treating uncertain snippets as verified evidence, guessing canonical
+URLs, or changing earlier cohort grades. Quote length validity is now reported
+separately from literal source membership; both remain required. This separates
+an overlong observed quotation from an invented one without weakening grading.
+Verify `tests/evaluations/test_search_candidate_projection.py` alongside the
+existing runner and native HTTP contracts before a new cohort.
+
 Reference sources, checked 2026-10-21:
 
 - [Python 3.13 TaskGroup](https://docs.python.org/3.13/library/asyncio-task.html)
