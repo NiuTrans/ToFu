@@ -21,7 +21,7 @@ def actor_checkpoint_factory(values, transport):
         task = request.task
         storage = get_storage_client(write=True)
         from lib.goal_runs.native_recovery import NativeGoalRecoveryConfiguration
-        bounds = NativeGoalRecoveryConfiguration(**values.get('goal_checkpoint_bounds', {})).bounds(transport, storage=storage)
+        bounds = NativeGoalRecoveryConfiguration(**(values.get('goal_checkpoint_bounds') or {})).bounds(transport, storage=storage)
         async def restored(callback, state):
             (directory / ('restored-' + task['id'] + '.json')).write_text(json.dumps(state, indent=2))
 

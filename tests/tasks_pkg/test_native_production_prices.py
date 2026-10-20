@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @contextmanager
-def application(directory, archive, generation, *, file_checkpoint=False, crash_pending=False, port=None, unreconciled_batches=False, goal_checkpoint=False, goal_checkpoint_round=None, transport='embedded', durability='strict', storage_backend='tofudb'):
+def application(directory, archive, generation, *, file_checkpoint=False, crash_pending=False, port=None, unreconciled_batches=False, goal_checkpoint=False, goal_checkpoint_round=None, goal_checkpoint_bounds=None, transport='embedded', durability='strict', storage_backend='tofudb'):
     assert storage_backend in {'tofudb', 'sqlite', 'postgres'}
     assert storage_backend == 'tofudb' or (transport, durability) == ('daemon', 'strict')
     assert (transport, durability) in {('embedded', 'strict'), ('daemon', 'strict'), ('daemon', 'normal')}
@@ -45,6 +45,7 @@ def application(directory, archive, generation, *, file_checkpoint=False, crash_
         'file_checkpoint': file_checkpoint, 'crash_pending': crash_pending,
         'unreconciled_batches': unreconciled_batches, 'goal_checkpoint': goal_checkpoint,
         'goal_checkpoint_round': goal_checkpoint_round, 'generation': generation,
+        'goal_checkpoint_bounds': goal_checkpoint_bounds,
         'storage_backend': storage_backend}))
     environment = dict(os.environ, PYTHONPATH=str(ROOT), TOFU_DATA_DIR=str(directory),
         TOFU_STORAGE_PROJECT_ROOT=str(directory), TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE='1',

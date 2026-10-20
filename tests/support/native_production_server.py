@@ -47,14 +47,14 @@ def main(values):
             from lib.storage_authority_sql.native_checkpoint_config import NativeCheckpointConfiguration
             scope = NativeCheckpointConfiguration.from_environment()
             assert scope is not None
-            values['goal_checkpoint_bounds'] = dict(header_bytes=scope.document_bytes,
+            values['goal_checkpoint_bounds'] = values.get('goal_checkpoint_bounds') or dict(header_bytes=scope.document_bytes,
                 snapshot_bytes=scope.document_bytes, identity_bytes=scope.identity_bytes,
                 evidence_bytes=scope.document_bytes)
         flow_profile = dict(configuration, checkpoint_actor_account=True,
             checkpoint_shared_account=True, checkpoint_frame_bytes=budget.frame_bytes)
         flow_options = dict(flow_configuration=flow_profile, flow_archive=True,
             flow_checkpoint_factory=actor_checkpoint_factory(values, budget),
-            goal_recovery=NativeGoalRecoveryConfiguration(**values.get('goal_checkpoint_bounds', {})))
+            goal_recovery=NativeGoalRecoveryConfiguration(**(values.get('goal_checkpoint_bounds') or {})))
     native = compose_native_application(archive=archive,
         sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
         working_directory=directory / 'project', launch_policy=policy, shutdown_seconds=10,
