@@ -342,7 +342,7 @@ def _programmatic_guidance(request: ComposeRequest) -> str:
         logger.debug("[ContextComposer] programmatic mode unavailable: %s", exc)
         return ""
     return """<programmatic_execution>
-execute_program reuses evidence and computes. Parallelize independent work; await dependencies. tools.observe yields uncertainty.
+Prefer direct tools for single actions and execute_tools for known independent batches. Use execute_program for useful computation or data-dependent workflows: write statements ending in return, not an async wrapper. Return routine results; tools.observe ends the script only for unresolved judgment. The sandbox has no IO/imports/timers and uses ordinary tool approvals. Never replay completed actions to repair a later script error.
 </programmatic_execution>"""
 
 
@@ -444,10 +444,83 @@ def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
         except Exception as exc:
             logger.debug('Coordinator role unavailable: %s', type(exc).__name__)
             role_reason = 'provider_unavailable'
+    presence = ''
+    presence_reason = 'empty'
+    if (request.project_enabled and request.project_path
+            and 'project_presence' not in request.disabled_blocks):
+        try:
+            presence = _project_presence_block(request)
+            presence_reason = '' if presence else 'empty'
+        except Exception as exc:
+            logger.debug('[ContextComposer] Project presence unavailable: %s', exc)
+            presence_reason = 'provider_unavailable'
     return [_block('project_context', context, reason=reason),
-            _block('project_coordinator', role, reason=role_reason)]
+            _block('project_coordinator', role, reason=role_reason),
+            _block('project_presence', presence, reason=presence_reason)]
 
 
+def _project_presence_block(request: ComposeRequest) -> str:
+    """Render live same-project worker status for the bound Coordinator.
+
+    Reads the in-memory task runtime — no DB writes, no new storage. Returns
+    empty string for non-Coordinator conversations so the block costs nothing
+    outside its intended scope.
+    """
+    task = request.task or {}
+    # Only the bound Coordinator conversation gets presence.
+    from lib.conversations.project_coordination import ProjectCoordinationRepository
+    binding = ProjectCoordinationRepository(request.user_id).read(request.project_path)
+    if (binding['availability'] != 'available'
+            or binding['conversationId'] != request.conv_id):
+        return ''
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.conversations.project_identity import normalize_project_path
+    project_path = normalize_project_path(request.project_path)
+    peers = chat_task_runtime.snapshot_owned(user_id=request.user_id)
+    rows: list[str] = []
+    for peer in peers:
+        peer_cfg = (peer.get('config') or {})
+        peer_path = normalize_project_path(peer_cfg.get('projectPath') or '')
+        if peer_path != project_path:
+            continue
+        conv_id = str(peer.get('convId') or '')
+        status = str(peer.get('status') or '')
+        events = peer.get('events') or []
+        updated_at = float(peer.get('updated_at') or 0)
+        now = time.time()
+        elapsed = max(0, int(now - updated_at))
+        if status in ('pending', 'running'):
+            if elapsed > 120:
+                symbol = '◐'
+                elapsed_str = f'stalled {elapsed // 60}m'
+            else:
+                symbol = '●'
+                elapsed_str = f'running {elapsed // 60}m' if elapsed >= 60 else 'running <1m'
+        elif status in ('done', 'error', 'aborted'):
+            symbol = '○'
+            elapsed_str = f'{status} {elapsed // 60}m ago'
+        else:
+            continue
+        last_event_text = ''
+        if events:
+            last = events[-1]
+            etype = str(last.get('type') or '')
+            if etype == 'tool_call':
+                tool_name = str(last.get('name') or '')
+                last_event_text = f'last: {tool_name}'
+            elif etype == 'text':
+                text = str(last.get('text') or '')[:60].replace('\n', ' ')
+                last_event_text = f'last: "{text}"'
+        peer_meta = peer.get('meta')
+        title = str(peer_meta.get('title') or '') if isinstance(peer_meta, dict) else ''
+        label = f'"{title}"' if title else conv_id
+        parts = [f'{symbol} {label} ({conv_id}) — {elapsed_str}']
+        if last_event_text:
+            parts.append(f', {last_event_text}')
+        rows.append(''.join(parts))
+    if not rows:
+        return ''
+    return '[Project Presence]\n' + '\n'.join(rows)
 def _plan_mode_block(request: ComposeRequest) -> str:
     """Plan Mode behavioural contract (Codex plan.md adapted to Tofu).
 

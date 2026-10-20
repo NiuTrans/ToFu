@@ -52,6 +52,9 @@ class CommandHandoffControl:
         self.round_num = round_num
         self.tool_call_id = tool_call_id
         self.pid: int | None = None
+        # The detachable proxy carries the worker's own phase evidence; the
+        # parent task only mirrors a live PID.
+        self.worker_task: dict[str, Any] | None = None
         self._lock = threading.Lock()
         self._resolved = threading.Event()
         self._requested = False
@@ -77,7 +80,16 @@ class CommandHandoffControl:
         with self._lock:
             if round_num != self.round_num or tool_call_id != self.tool_call_id:
                 return {'backgrounded': False, 'reason': 'command_changed'}
-            if self._finished or not self.pid or self.task.get('_subprocess_pid') != self.pid:
+            if self._finished:
+                return {'backgrounded': False, 'reason': 'no_active_command'}
+            if self.pid is None:
+                # No process yet: the only adoptable worker state is a wait for
+                # workspace admission. Anything else (validation, approval,
+                # stdin) still owns the foreground round.
+                worker = self.worker_task or self.task
+                if not isinstance(worker.get('_workspaceAdmission'), dict):
+                    return {'backgrounded': False, 'reason': 'no_active_command'}
+            elif self.task.get('_subprocess_pid') != self.pid:
                 return {'backgrounded': False, 'reason': 'no_active_command'}
             abort_event = self.task.get('abort_event')
             if (self.task.get('aborted') or self.task.get('status') != 'running'
@@ -346,6 +358,8 @@ def run_with_steer_handoff(
     if handoff is not None:
         task['_cmd_handoff_control'] = handoff
     command_task = DetachableCommandTask(task, handoff)
+    if handoff is not None:
+        handoff.worker_task = command_task
     done = threading.Event()
     state_lock = threading.Lock()
     state: dict[str, Any] = {
@@ -413,8 +427,17 @@ def run_with_steer_handoff(
                 handoff.resolve(False, 'task_not_running')
             continue
         spawned_at = command_task.spawned_at
+        now = time.monotonic()
         timed_handoff = (spawned_at is not None and
-                         time.monotonic() - spawned_at >= AUTO_BACKGROUND_AFTER_S)
+                         now - spawned_at >= AUTO_BACKGROUND_AFTER_S)
+        admission = command_task.get('_workspaceAdmission')
+        admission_active = isinstance(admission, dict)
+        if admission_active and not command_task.has_spawned:
+            # A command blocked before spawn has no process clock, so the
+            # ordinary timer can never fire: measure the admission wait itself.
+            since = admission.get('since')
+            if isinstance(since, (int, float)):
+                timed_handoff = timed_handoff or (now - since >= AUTO_BACKGROUND_AFTER_S)
         steered = has_pending(conv_id, modes=['user-steer'])
         manually_requested = (handoff is not None and
                               handoff.requested_for(command_task.get('_subprocess_pid')))
@@ -424,7 +447,7 @@ def run_with_steer_handoff(
         # only after a real subprocess existed, so restriction context,
         # command rewriting, and pre-execution display callbacks have already
         # run on the worker before the original round can settle.
-        if not command_task.has_spawned:
+        if not command_task.has_spawned and not admission_active:
             continue
         # An explicit stdin prompt remains foreground-owned. Its response has
         # a separate endpoint and detaching it would strand that prompt.
@@ -444,7 +467,9 @@ def run_with_steer_handoff(
             # drift onto a later subprocess in the same tool call.
             with command_task._handoff_lock:
                 pid = command_task.get('_subprocess_pid')
-                if not pid or task.get('_subprocess_pid') != pid:
+                if pid is None and admission_active:
+                    pass  # Admitted-but-not-spawned: the worker keeps waiting.
+                elif not pid or task.get('_subprocess_pid') != pid:
                     if manually_requested:
                         handoff.resolve(False, 'no_active_command')
                     continue
@@ -488,10 +513,12 @@ def run_with_steer_handoff(
                     '[BackgroundCommand:%s] presentation detach failed: %s',
                     command_id, exc)
         logger.info(
-            '[BackgroundCommand:%s] %s handed off PID=%s conv=%s',
+            '[BackgroundCommand:%s] %s handed off PID=%s phase=%s conv=%s',
             command_id, ('operator request' if manually_requested else
                          'elapsed-time' if timed_handoff else 'operator steer'),
-            command_task.get('_subprocess_pid'), conv_id[:8])
+            command_task.get('_subprocess_pid'),
+            'running' if command_task.has_spawned else 'workspace-admission',
+            conv_id[:8])
         if handoff is not None and task.get('_cmd_handoff_control') is handoff:
             task.pop('_cmd_handoff_control', None)
         if on_handoff is not None:

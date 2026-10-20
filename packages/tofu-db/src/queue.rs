@@ -294,6 +294,22 @@ fn public_item(
     identity: &IndexIdentity,
     include_documents: bool,
 ) -> io::Result<Value> {
+    public_item_view(database, tx, identity, include_documents, false)
+}
+
+/// One queue row's public projection.
+///
+/// `queue.list` serves the queue bar (optionally with the stored documents);
+/// `turn.sync.snapshot` serves the transcript, where a queued row is the only
+/// explanation for its pending output Turn. Both go through this body so the
+/// two surfaces cannot disagree about what a queued row says.
+fn public_item_view(
+    database: &AuthorityDatabase,
+    tx: &mut AuthorityTransaction,
+    identity: &IndexIdentity,
+    include_documents: bool,
+    embedded_user_message: bool,
+) -> io::Result<Value> {
     if read_identity(database, tx, &identity.id, identity.owner)?.as_ref() != Some(identity) {
         return Err(invalid_data("queue order index differs from its ID claim"));
     }
@@ -308,7 +324,36 @@ fn public_item(
         .and_then(Value::as_object)
         .ok_or_else(|| invalid_data("queue config is malformed"))?;
     let peer = python_truthy(payload.get("_peerMessage"));
-    let mut result = json!({"queueId":identity.id,"userId":identity.owner,"position":state.position,"kind":identity.kind,"priority":identity.priority,"timestamp":identity.created_at_ms,"text":if peer {payload.get("_peerText").and_then(Value::as_str).unwrap_or("")}else{payload.get("text").and_then(Value::as_str).unwrap_or("")}.chars().take(2000).collect::<String>(),"hasImages":python_truthy(payload.get("images")),"hasPdfs":python_truthy(payload.get("pdfTexts")),"hasAttachments":python_truthy(payload.get("attachments")),"hasRefs":python_truthy(payload.get("convRefs")),"hasQuotes":python_truthy(payload.get("replyQuotes"))});
+    // The transcript shows the operator's own wording: a queued Turn stores it
+    // in the embedded `_user_msg`, while `payload.text` may be the model-facing
+    // framed body. The queue bar keeps its own precedence.
+    let user_message = payload.get("_user_msg").and_then(Value::as_object);
+    let text = if embedded_user_message {
+        user_message
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .or_else(|| payload.get("_peerText").and_then(Value::as_str)
+                .filter(|value| !value.is_empty()))
+            .or_else(|| payload.get("text").and_then(Value::as_str))
+            .unwrap_or("")
+    } else if peer {
+        payload.get("_peerText").and_then(Value::as_str).unwrap_or("")
+    } else {
+        payload.get("text").and_then(Value::as_str).unwrap_or("")
+    };
+    let timestamp = if embedded_user_message {
+        user_message
+            .and_then(|value| value.get("timestamp"))
+            .and_then(Value::as_u64)
+            .filter(|value| *value != 0)
+            .or_else(|| payload.get("timestamp").and_then(Value::as_u64)
+                .filter(|value| *value != 0))
+            .unwrap_or(identity.created_at_ms)
+    } else {
+        identity.created_at_ms
+    };
+    let mut result = json!({"queueId":identity.id,"userId":identity.owner,"position":state.position,"kind":identity.kind,"priority":identity.priority,"timestamp":timestamp,"text":text.chars().take(2000).collect::<String>(),"hasImages":python_truthy(payload.get("images")),"hasPdfs":python_truthy(payload.get("pdfTexts")),"hasAttachments":python_truthy(payload.get("attachments")),"hasRefs":python_truthy(payload.get("convRefs")),"hasQuotes":python_truthy(payload.get("replyQuotes"))});
     let object = result.as_object_mut().unwrap();
     if include_documents {
         object.insert("payload".into(), Value::Object(payload.clone()));
@@ -403,6 +448,37 @@ fn public_item(
         object.insert("steerFallback".into(), json!(true));
     }
     Ok(result)
+}
+
+/// Owner-scoped queue projection for the Turn sync snapshot.
+///
+/// A queued Turn pair is durable before its attempt starts, so this row is the
+/// browser's only explanation for the pending output Turn. The item shape is
+/// the contract's `ConversationQueueItem`, which forbids storage documents
+/// (`userId`, `payload`, `config`); preference for the embedded user message
+/// mirrors the SQL-side snapshot projection.
+pub(crate) fn snapshot_items(
+    database: &AuthorityDatabase,
+    tx: &mut AuthorityTransaction,
+    conversation_id: &str,
+    deadline: &mut dyn FnMut() -> bool,
+) -> io::Result<Vec<Value>> {
+    let mut items = Vec::new();
+    for identity in rows(database, tx, conversation_id)? {
+        if deadline() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "queue snapshot deadline elapsed",
+            ));
+        }
+        let mut value = public_item_view(database, tx, &identity, false, true)?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| invalid_data("queue snapshot item is malformed"))?
+            .remove("userId");
+        items.push(value);
+    }
+    Ok(items)
 }
 fn is_legacy_completion(
     database: &AuthorityDatabase,

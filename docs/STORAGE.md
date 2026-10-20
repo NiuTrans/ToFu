@@ -814,7 +814,35 @@ The existing authority and shadow remain untouched for explicit recovery.
 `storage_queue_items` is the owner-scoped authority for human, Goal,
 peer, and workflow turn sources waiting behind a conversation task. Dequeue
 leases rather than deletes a source; only accepted Turn/attempt creation may
-finalize it. Normal 60-second maintenance calls
+finalize it.
+leases rather than deletes a source; only accepted Turn/attempt creation may
+finalize it.
+
+**Problem:** a queued Turn pair commits its input Turn plus a `pending` output
+Turn whose attempt carries `queueBinding`, long before any executor task owns
+that attempt. The transcript therefore has exactly one explanation for the
+output Turn: the queue row. The native `turn.sync.snapshot` step answered
+`queueItems: []` unconditionally (`queue_items: Vec::new()` in
+`turn.rs::sync_snapshot_with_proof`) while the SQL projection and
+`queue.list` both served the row, so the browser hid the queued output Turn
+(by its binding) and drew nothing in its place — a header-only ghost bubble —
+and every timing receipt for that attempt was rejected for having no task
+identity.
+
+**Decision:** `turn.sync.snapshot` composes `queueItems` in the same read
+transaction through `queue::snapshot_items`, sharing the `queue.list`
+projection body so the two surfaces cannot disagree, and the item is the
+contract's `ConversationQueueItem` (no `userId`/`payload`/`config`; the
+transcript text prefers the embedded user message). The browser additionally
+derives "this Turn is queued" from the attempt's durable `queueBinding`, so a
+lagging queue read degrades to an unpositioned chip instead of an empty Turn.
+
+**Alternatives rejected:** a browser-side transcript refresh on every queue
+change adds a second read authority to explain one commit; leaving the
+snapshot empty and rendering a synthetic "waiting" block invents state the
+server never confirmed; bounding the row read behind a capability probe would
+make the queue row disappear for the browser that needs it most.
+ Normal 60-second maintenance calls
 `queue.conversations.list_all` with the additive
 `tofu.queue.reap-probe/v1` selector. One read-pool grouped query returns the
 existing oldest-first conversation list plus whether any non-autopilot lease

@@ -450,20 +450,35 @@ def set_proxy_pool(entries: list) -> int:
     learned routing verdicts (:func:`_on_proxy_topology_changed`). Bad rows
     are skipped with a warning (startup loads persisted config). Returns
     the applied entry count.
+
+    An IDENTICAL pool is a no-op. Settings Save re-POSTs the complete pool
+    editor state on every save, and invalidating on that no-change write threw
+    away every learned route measurement: hosts fell back to unmeasured paths,
+    the netpath prober re-probed them all through ~1s proxy round-trips, and
+    the UI's push-pong latency reading spiked past its 400ms ``poor``
+    threshold immediately after a save. Behaviour on an actual change is
+    unchanged.
     """
     global _proxy_pool
     clean = []
+    for e in entries or []:
+        if not isinstance(e, dict) or not e.get('url'):
+            logger.warning('[Proxy] pool entry skipped (malformed): %s',
+                           str(e)[:120])
+            continue
+        clean.append(dict(e))
     with _pool_lock:
-        for e in entries or []:
-            if not isinstance(e, dict) or not e.get('url'):
-                logger.warning('[Proxy] pool entry skipped (malformed): %s',
-                               str(e)[:120])
-                continue
-            clean.append(dict(e))
+        # Resolved credentials are always dropped: a rotated vault secret keeps
+        # the same row identity, so retaining the resolution would route on the
+        # old password even though the pool itself compares equal.
+        _cred_cache.clear()
+        if clean == _proxy_pool:
+            logger.debug('[Proxy] pool unchanged (%d entries); keeping learned '
+                         'routing state', len(clean))
+            return len(clean)
         _proxy_pool = clean
         _pool_health.clear()
         _pool_choice.clear()
-        _cred_cache.clear()
     _on_proxy_topology_changed()
     logger.info('[Proxy] pool updated: %d entries (%s)', len(clean),
                 ', '.join('%s:%s' % (e.get('id') or '?', e.get('scope'))
@@ -1490,9 +1505,16 @@ def set_bypass_domains(domains: list):
         clean = [str(d).strip().lower() for d in legacy_values
                  if str(d).strip()]
     with _lock:
+        # An unchanged list is what every Settings Save sends; it must not
+        # invalidate learned routing verdicts (see set_proxy_pool).
+        unchanged = tuple(clean) == _settings_domains
         _settings_domains = tuple(clean)
         _rebuild()
         _sync_no_proxy()
+    if unchanged:
+        logger.debug('[Proxy] Bypass domains unchanged; keeping learned '
+                     'routing state')
+        return
     if _settings_domains:
         logger.info('[Proxy] Bypass domains updated: %s (no_proxy synced)',
                     ', '.join(_settings_domains))

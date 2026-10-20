@@ -15795,6 +15795,13 @@ pub(crate) fn sync_snapshot_with_proof(
         )?;
     }
     let attempts = json!(attempts_for_turns(database, transaction, &turns, deadline_elapsed)?);
+    // A queued Turn pair is durable before its attempt starts, so its only
+    // browser-visible explanation is the queue row. Omitting it leaves the
+    // pending output Turn with no block at all; the snapshot must carry the
+    // same owner-scoped projection `queue.list` serves, read in this same
+    // transaction so the response stays a function of one entity snapshot.
+    let queue_items = crate::queue::snapshot_items(
+        database, transaction, conversation_id, deadline_elapsed)?;
     let active_attempt_phase = snapshot_phase::active_attempt_phase(
         database, transaction, conversation_id, &turns, &attempts)?;
     let sync_sequence = sync_head(database, transaction, conversation_id)?;
@@ -15807,7 +15814,7 @@ pub(crate) fn sync_snapshot_with_proof(
     // response would clone them. No parsed cache or escaped mutable view exists.
     SyncSnapshotResponse { active_attempt_phase, attempts,
         conversation_id: conversation_id.to_owned(), conversation_revision: revision,
-        has_artifacts, queue_items: Vec::new(),
+        has_artifacts, queue_items,
         settings, sync_sequence, turn_window, turns }.into_encoded().map(Some)
 }
 

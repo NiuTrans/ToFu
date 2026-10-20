@@ -408,6 +408,42 @@ class TestEgressIntegration(unittest.TestCase):
         self.assertIsNone(
             egress._probe_network_fail_cache.get('chatgpt.com'))
 
+
+    def test_identical_pool_preserves_learned_routing_state(self):
+        """Settings Save re-POSTs the whole pool editor state. An unchanged
+        pool must not invalidate learned verdicts or reset measurements:
+        that sent every host back onto unmeasured paths and made the app
+        re-probe (and re-route through ~1s proxy round-trips) on every save."""
+        proxy.set_proxy_pool([_entry('hk')])
+        egress._probe_cache.set('auth.openai.com', 'ok')
+        proxy._pool_health['hk'] = {'fails': 0, 'cooldown_until': 0.0}
+        epoch = proxy._proxy_topology_epoch
+
+        proxy.set_proxy_pool([_entry('hk')])
+
+        self.assertEqual(proxy._proxy_topology_epoch, epoch)
+        self.assertEqual(egress._probe_cache.get('auth.openai.com'), 'ok')
+        self.assertIn('hk', proxy._pool_health)
+
+    def test_identical_bypass_domains_preserve_learned_routing_state(self):
+        proxy.set_bypass_domains(['.corp.net'])
+        egress._probe_cache.set('auth.openai.com', 'ok')
+        epoch = proxy._proxy_topology_epoch
+
+        proxy.set_bypass_domains(['.corp.net'])
+
+        self.assertEqual(proxy._proxy_topology_epoch, epoch)
+        self.assertEqual(egress._probe_cache.get('auth.openai.com'), 'ok')
+
+    def test_changed_pool_still_invalidates_learned_routing_state(self):
+        proxy.set_proxy_pool([_entry('hk')])
+        egress._probe_cache.set('auth.openai.com', 'ok')
+        epoch = proxy._proxy_topology_epoch
+
+        proxy.set_proxy_pool([_entry('hk2', url='http://gw2.example.com:8080')])
+
+        self.assertGreater(proxy._proxy_topology_epoch, epoch)
+        self.assertIsNone(egress._probe_cache.get('auth.openai.com'))
     def test_pool_probe_order_includes_global_fallback(self):
         proxy.set_proxy_pool([
             _entry('global', scope='global',

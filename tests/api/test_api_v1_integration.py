@@ -1090,6 +1090,52 @@ class IntegrationTest(unittest.TestCase):
 
         _run(go())
 
+    def test_unchanged_server_config_save_leaves_the_file_untouched(self):
+        # Settings Save re-POSTs every tab's current values. Rewriting the
+        # whole config (fsync on a network mount) for identical bytes delayed
+        # the single event loop and the UI's latency reading with it, so an
+        # unchanged save must not touch the file or claim any change.
+        async def go():
+            import routes.config as config_route
+
+            original = await self._client().get(
+                '/api/v1/server-config', headers=self.fix.auth_headers)
+            original_presets = (await original.get_json()).get('presets') or {}
+            try:
+                first = await self._client().post(
+                    '/api/v1/server-config',
+                    headers=self.fix.auth_headers,
+                    json={'presets': original_presets})
+                self.assertEqual(first.status_code, 200)
+
+                path = config_route._SERVER_CONFIG_PATH
+                before = os.stat(path)
+                same = await self._client().post(
+                    '/api/v1/server-config',
+                    headers=self.fix.auth_headers,
+                    json={'presets': original_presets})
+                self.assertEqual(same.status_code, 200)
+                body = await same.get_json()
+                self.assertEqual(body['changes'], [])
+                after = os.stat(path)
+                self.assertEqual(
+                    (after.st_mtime_ns, after.st_ino),
+                    (before.st_mtime_ns, before.st_ino))
+
+                changed = await self._client().post(
+                    '/api/v1/server-config',
+                    headers=self.fix.auth_headers,
+                    json={'presets': dict(original_presets,
+                                          opus='test-unchanged-save-probe')})
+                self.assertEqual(changed.status_code, 200)
+                self.assertIn('presets', (await changed.get_json())['changes'])
+            finally:
+                await self._client().post(
+                    '/api/v1/server-config',
+                    headers=self.fix.auth_headers,
+                    json={'presets': original_presets})
+
+        _run(go())
     def test_legacy_provider_templates_is_404(self):
         async def go():
             r = await self._client().get(

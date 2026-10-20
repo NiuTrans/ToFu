@@ -10,6 +10,9 @@ import time
 import pytest
 
 from lib.llm.request import ModelRequestBudgetScope, dispatch_model_request
+from lib.llm.request import (
+    ModelRequestBudgetScope, dispatch_model_request, mark_model_request_dispatched,
+)
 from lib.llm._sse_core import prepare_request
 from lib.llm.stream_result import ProviderStreamResult
 from lib.llm.llm_errors import AbortedError, RateLimitError
@@ -262,6 +265,32 @@ def test_budget_delegate_settles_unsent_scope_denial(mailbox):
     with pytest.raises(receipts.MessageInputScopeError):
         physical(dict(body(), _model_budget_admit=observer),
                  lambda wire: pytest.fail('scope denied before transport'))
+    assert task['_executionBudget'].consumption_snapshot() == (0, 0, True)
+
+
+def test_receipt_lease_forwards_refusal_to_the_budget_account(mailbox):
+    """The composed lease must not swallow proven-zero settlement evidence.
+
+    Chat rounds admit through the receipt observer, which wraps the budget
+    lease. A 429 arrives as ``RateLimitError`` from the transport, so the
+    wrapper is the only place that can carry that proof to the account.
+    """
+    from lib.agent_core.execution_budget import model_budget_admission
+    from lib.llm.llm_errors import RateLimitError, mark_provider_refusal
+    task, state, family = mailbox
+    task['config']['executionLimits'] = {
+        'max_tokens': 10000, 'max_tool_calls': 0, 'deadline': time.time() + 60}
+    observer = receipts.receipt_admission(task, model_budget_admission(task))
+
+    def refuse(wire):
+        # The transport marks the waitable rejection; everything downstream is
+        # the real scope, the real receipt wrapper and the real account.
+        raise mark_provider_refusal(
+            RateLimitError('rate limited', status_code=429))
+
+    with pytest.raises(RateLimitError):
+        physical(dict(body(), _model_budget_admit=observer), refuse)
+    assert task.get('_executionActualsComplete') is not False
     assert task['_executionBudget'].consumption_snapshot() == (0, 0, True)
 
 

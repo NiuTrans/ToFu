@@ -2032,6 +2032,42 @@ def test_provider_stream_failure_never_settles_as_completed(finish_reason):
                for option in settlement['resumeOptions'])
 
 
+def test_unconfirmed_usage_offers_no_resume_that_the_fence_would_refuse():
+    """A settled unknown-usage Turn must not advertise a dead continuation.
+
+    ``continue``/``checkpoint_resume`` restore the settled projection's
+    ``usageComplete=false``, so the restarted account refuses its very first
+    model dispatch with the same error. Only ``regenerate`` is left; the
+    confirmed usage-recovery command is the supported way to continue and is
+    not a Turn resume operation.
+    """
+    from lib.error_envelope import make_envelope
+    from lib.turn_lifecycle import _settlement
+
+    error = make_envelope(
+        'execution_token_usage_unknown',
+        detail='execution_token_usage_unknown',
+        source='execution-budget', retryable=False,
+    )
+    task = {
+        'status': 'done', 'finishReason': 'error', 'model': 'gpt-4o',
+        'config': {'model': 'gpt-4o'}, 'error': error,
+        'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15},
+        '_executionActualsComplete': False,
+    }
+    status, settlement = _settlement(
+        task, {'type': 'done', 'finishReason': 'error', 'error': error},
+        {'content': 'saved tail', 'toolRounds': [
+            {'toolName': 'read_files', 'toolCallId': 'r1', 'status': 'done',
+             'result': 'ok'},
+        ]},
+    )
+
+    assert status == 'failed'
+    assert settlement['error']['kind'] == 'execution_token_usage_unknown'
+    assert [option['operation'] for option in settlement['resumeOptions']] == [
+        'regenerate']
+
 def test_malformed_stream_prefix_and_verdict_commit_together(chat_sidecar):
     """The authority persists the exact parsed prefix and the failed stream
     verdict atomically; storage must neither truncate text nor relabel it as a

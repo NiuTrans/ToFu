@@ -5,6 +5,7 @@ Handles miscellaneous settings such as Feishu, search, proxy, and experiments.
 Provider/model authority lives exclusively in ``routes.api_v1.providers``.
 """
 
+import json
 import os
 import sys
 
@@ -684,6 +685,14 @@ def save_server_config():
         nonlocal dispatch_reset_needed
         if not isinstance(existing, dict):
             existing = {}
+        # Settings Save re-POSTs every tab's current values, so an unchanged
+        # save is the common case. Rewriting the 173KB file (fsync on a network
+        # mount) for identical bytes delayed the event loop and the push-pong
+        # latency reading with it, so compare the resulting document and leave
+        # an existing file alone when it matches. A missing file is still
+        # created so the durable config keeps its first-write semantics.
+        before_json = (json.dumps(existing, ensure_ascii=False)
+                       if os.path.exists(_SERVER_CONFIG_PATH) else None)
         final_cost_experiment = cost_experiment_prep
 
         # Validate before any other config mutation or hot-reload side effect.
@@ -801,12 +810,20 @@ def save_server_config():
                        final_cost_experiment['traffic_percent'],
                        final_cost_experiment['treatment_percent']))
 
-        return existing
+        if before_json is None:
+            return existing
+        return (None if json.dumps(existing, ensure_ascii=False) == before_json
+                else existing)
 
     # ── Persist to disk (locked read-modify-write) ──
     try:
-        update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
-        logger.info('[ServerConfig] Saved server_config.json')
+        written = update_json_atomic(_SERVER_CONFIG_PATH, _mutate, default={})
+        if written is None:
+            changes.clear()
+            logger.info('[ServerConfig] No configuration change; file left '
+                        'untouched')
+        else:
+            logger.info('[ServerConfig] Saved server_config.json')
     except CostExperimentTransitionError as e:
         logger.warning('[ServerConfig] rejected cost experiment transition: %s',
                        e)

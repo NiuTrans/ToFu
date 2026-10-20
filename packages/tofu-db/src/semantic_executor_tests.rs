@@ -764,6 +764,40 @@
             1
         );
 
+        // A queued Turn pair is durable before its attempt starts, so the
+        // transcript has no other block that could explain the pending output
+        // Turn. The snapshot must carry this row, not an empty list that leaves
+        // that Turn rendering as a header-only ghost.
+        let queued_snapshot = execute(
+            &mut database,
+            &request(
+                "turn.sync.snapshot",
+                11,
+                json!({"conversation_id": "queued-pair", "user_id": 11}),
+                None,
+            ),
+            2_005,
+        )
+        .unwrap();
+        let snapshot_queue = queued_snapshot["queueItems"].as_array().unwrap();
+        assert_eq!(snapshot_queue.len(), 1);
+        assert_eq!(snapshot_queue[0]["queueId"], "queue-pair");
+        assert_eq!(snapshot_queue[0]["position"], 1);
+        assert_eq!(snapshot_queue[0]["text"], "queued hello");
+        assert_eq!(
+            snapshot_queue[0]["outputTurnId"],
+            queued["turn"]["turnId"]
+        );
+        assert_eq!(
+            snapshot_queue[0]["attemptId"],
+            queued["attempt"]["attemptId"]
+        );
+        // Storage documents belong to `queue.list`, never to the transcript
+        // contract (`ConversationQueueItem.additionalProperties: false`).
+        assert!(snapshot_queue[0].get("payload").is_none());
+        assert!(snapshot_queue[0].get("config").is_none());
+        assert!(snapshot_queue[0].get("userId").is_none());
+
         let activate_request = request(
             "turn.queue.activate",
             11,

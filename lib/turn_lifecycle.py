@@ -1242,7 +1242,18 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
     options: list[dict[str, Any]] = []
     checkpoint_prefix = scan_replayable_tool_round_prefix(
         projection.get('toolRounds') or [])
-    resumable = status in {'interrupted', 'truncated', 'failed'}
+    # ``continue``/``checkpoint_resume``/``answer_guidance`` restore the settled
+    # checkpoint, whose explicit ``usageComplete=false`` makes the restarted
+    # account refuse its first model dispatch with this very error. For an
+    # unknown-usage failure they were therefore guaranteed dead ends — click
+    # once, get an identical refusal, and no way forward. The confirmed
+    # usage-recovery command owns that continuation instead, so do not
+    # advertise a control it will refuse. ``regenerate`` starts a fresh Turn
+    # with no restored checkpoint and stays available.
+    usage_unconfirmed = (error is not None
+                         and error.get('kind') == 'execution_token_usage_unknown')
+    resumable = (status in {'interrupted', 'truncated', 'failed'}
+                 and not usage_unconfirmed)
     if resumable and _supports_lossless_prefill(task, projection):
         options.append({
             'operation': 'continue',
@@ -1287,8 +1298,9 @@ def _settlement(task: dict[str, Any], raw_event: dict[str, Any],
                 'content': '', 'thinking': '', 'segments': [],
             },
         })
-    if (status in {'interrupted', 'truncated', 'failed'}
-            and checkpoint_prefix.blocked_position is not None
+    # A late ask_human answer also restarts from the checkpoint, so it shares
+    # the same unknown-usage fence as the resumes above.
+    if (resumable and checkpoint_prefix.blocked_position is not None
             and checkpoint_prefix.blocked_reason == 'missing_tool_result'):
         raw_rounds = projection.get('toolRounds') or []
         gap_round = (

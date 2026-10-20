@@ -93,6 +93,13 @@ class _ReceiptLease:
             if callable(confirm):
                 confirm(successful=successful)
 
+    def note_provider_refusal(self):
+        # Only the budget delegate distinguishes proven-zero from unconfirmed
+        # spend; a plain input observer has no account to settle.
+        note = getattr(self.delegate, 'note_provider_refusal', None)
+        if callable(note):
+            note()
+
     def settle(self, usage=None, *, unsent=False):
         if self.delegate is not None:
             self.delegate.settle(usage, unsent=unsent)
