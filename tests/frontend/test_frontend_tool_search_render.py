@@ -138,6 +138,52 @@ check('tool_catalog_card_count_has_a_visible_hard_bound',
   occurrences(boundedCatalogHtml, '<div class="ptool-tool-search-card">') === 64
   && boundedCatalogHtml.includes('600 candidate matches · showing 64')
   && boundedCatalogHtml.includes('Showing first 64 of 600 matches.'));
+const retainedCatalog = {
+  status: 'ok', total: 3, next_cursor: 'next', fail_open: true,
+  items: [{ name: 'send_agent_message', namespace: 'swarm',
+    summary: 'Send <a> message.', arguments_schema: {
+      properties: { content: { type: 'string' } }, required: ['content'],
+    } }],
+};
+const cachedRows = [{ toolName: 'search_tools', badge: 'cached', source: 'Cache' }];
+const legacyCachedRound = {
+  status: 'done', toolName: 'search_tools', toolContent: JSON.stringify(retainedCatalog),
+};
+const legacyBefore = JSON.stringify([legacyCachedRound, cachedRows]);
+const recoveredHtml = presentation.renderSearchHtml(legacyCachedRound, cachedRows, header);
+check('legacy_cached_catalog_recovers_matches_count_and_page_state',
+  recoveredHtml.includes('3 candidate matches · showing 1')
+  && recoveredHtml.includes('send_agent_message')
+  && recoveredHtml.includes('swarm')
+  && recoveredHtml.includes('content')
+  && recoveredHtml.includes('ptool-tool-arg-required')
+  && recoveredHtml.includes('more candidates available')
+  && recoveredHtml.includes('full catalog restored')
+  && !recoveredHtml.includes('No matching tools'));
+check('legacy_recovery_escapes_content_without_mutating_turns',
+  recoveredHtml.includes('Send &lt;a&gt; message.')
+  && !recoveredHtml.includes('Send <a>')
+  && JSON.stringify([legacyCachedRound, cachedRows]) === legacyBefore);
+check('native_totals_and_rows_override_legacy_json',
+  presentation.renderSearchHtml({ ...legacyCachedRound, toolSearchTotal: 0 },
+    cachedRows, header).includes('0 candidate matches · showing 0')
+  && !presentation.renderSearchHtml(legacyCachedRound,
+    [...cachedRows, ...catalogResults], header).includes('send_agent_message'));
+for (const content of ['not JSON', JSON.stringify({ ...retainedCatalog, status: 'error' }),
+  JSON.stringify({ ...retainedCatalog, items: 'bad' }),
+  JSON.stringify({ ...retainedCatalog, total: '3' }),
+  JSON.stringify(retainedCatalog) + ' '.repeat(65536)]) {
+  check('bad_retained_catalog_fails_closed_' + content.length,
+    !presentation.renderSearchHtml({ ...legacyCachedRound, toolContent: content },
+      cachedRows, header).includes('send_agent_message'));
+}
+check('legacy_recovery_requires_done_search_and_cache_evidence',
+  presentation.renderSearchHtml({ ...legacyCachedRound, status: 'searching' },
+    cachedRows, header) === ''
+  && !presentation.renderSearchHtml(legacyCachedRound, [], header)
+    .includes('send_agent_message')
+  && !presentation.renderSearchHtml({ ...legacyCachedRound, toolName: 'read_files' },
+    cachedRows, header).includes('send_agent_message'));
 const emptyCatalogHtml = presentation.renderSearchHtml(
   { status: 'done', toolName: 'search_tools', toolSearchTotal: 0 },
   [],
@@ -532,7 +578,7 @@ def test_tool_search_presentation_owner_contract() -> None:
     passes = [
         line for line in process.stdout.splitlines() if line.startswith('PASS ')
     ]
-    assert len(passes) == 39, process.stdout
+    assert len(passes) == 48, process.stdout
 
 
 def test_retained_dispatch_wires_search_owner_and_filters_gateway() -> None:

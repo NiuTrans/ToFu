@@ -101,9 +101,39 @@ def audit_round_outcome(
         else:
             detail['outcome'] = (
                 status if status in _OUTCOME_STATUSES else 'error')
+            detail.update(_typed_error_fields(round_entry.get('results')))
         audit_log('tool_call_outcome', **detail)
     except Exception as exc:  # diagnostics never fail the round
         logger.debug('[tool_call_outcome] round audit skipped: %s', exc)
+
+
+def _typed_error_fields(results: Any) -> dict[str, Any]:
+    """Extract the stable error class from a failed round's results.
+
+    ``status='error'`` used to be audited with no failure class, so a daily
+    pass could count failures but never cluster them. The canonical envelope
+    already carries ``code`` / ``retryable`` / ``next_action``; legacy prose
+    results fail open (no fields) exactly like ``tool_result_error`` does.
+    Argument values are never read — only the typed error header.
+    """
+    if not isinstance(results, (list, tuple)):
+        return {}
+    try:
+        from lib.tools.result_envelope import tool_result_error
+    except Exception as exc:  # diagnostics must not depend on import order
+        logger.debug('[tool_call_outcome] error envelope import skipped: %s', exc)
+        return {}
+    for meta in results[:4]:
+        value = meta.get('content') if isinstance(meta, dict) else meta
+        error = tool_result_error(value)
+        if error is None:
+            continue
+        fields: dict[str, Any] = {'error_code': error.code}
+        fields['retryable'] = bool(error.retryable)
+        if error.next_action:
+            fields['next_action'] = error.next_action[:120]
+        return fields
+    return {}
 
 
 def audit_gateway_rejected_call(

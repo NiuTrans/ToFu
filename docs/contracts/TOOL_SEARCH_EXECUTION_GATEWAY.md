@@ -67,10 +67,10 @@ JavaScript 在执行端处理循环、分支、筛选和结果组合，仅把有
 `tools.call(name, arguments)` 返回回执而非裸业务对象：成功为 `status: "done"` 和 `output`，失败提供 `error`；`output_truncated` 表示内部结果是否不完整。JSON 文本通过 `JSON.parse(receipt.output)` 读取，不对普通文本盲目解析。以下示意使用已知 schema 的两个测试工具，在一次 `execute_program.code` 中完成两步依赖：
 
 ```js
-const first = tools.call("lookup_record", {key: "example"});
+const first = await tools.call("lookup_record", {key: "example"});
 if (first.status != "done" || first.output_truncated) return first;
 const record = JSON.parse(first.output);
-const second = tools.call("read_details", {record_id: record.id});
+const second = await tools.call("read_details", {record_id: record.id});
 if (second.status != "done" || second.output_truncated) return second;
 return JSON.parse(second.output);
 ```
@@ -111,6 +111,10 @@ return JSON.parse(second.output);
 **Problem:** 扩展断线使工具消失，模型无法区分未知名称、暂不可用和任务策略限制。**Decision:** `lib/browser/availability.py` 从 owner-scoped bridge registry 只读投影连接证据，注册器、每轮 `environment`、普通/程序内本地搜索共用此来源。搜索返回 `capability_availability`（`capability`、`namespace`、`available`、`reason_code`、`message`、`recovery_hint`，精确已知工具额外返回 `tool_name`）。原因分别为 `browser_extension_disconnected`、已连接但目录不允许的 `browser_tools_outside_task_catalog`、缺少身份的 `browser_owner_required` 和探测失败的 `browser_extension_status_unknown`；不附可调用 schema、不授予权限、不暴露客户端或其他用户。服务端无法读取未连接扩展的配置地址，只建议检查服务地址和认证，不断言地址填错。独立的服务端页面预览不依赖扩展。目录逐轮更新，连接恢复后下一轮重新判断；重复查询计数按目录名称指纹隔离。精确名（含单个前导 `+`）缺失返回零候选，不拆词推荐；namespace 是否存在按完整目录判定，不受可见/已披露排除影响。前端只展示同一结果的 `tool_catalog_availability` 最小原因/恢复投影，不另查连接真值。**Alternatives:** 仅前端告警无法让模型感知；给未连接工具 schema 混淆权限；查询全局客户端越过用户边界；断言地址填错缺少证据，均不采用。
 
 ## 搜索结果展示
+
+Previously saved generic cached search rows may recover their presentation from the same round’s successful retained `toolContent` JSON (at most 65,536 characters). This is a bounded, render-only compatibility adapter: native catalog/availability rows and explicit totals take precedence; malformed, oversized, non-search or unfinished rounds are not reinterpreted. It never writes Turn state, changes revisions, or reruns tools. A revision-free server read repair of running Turns was rejected because it would alter the base of subsequent projection patches.
+
+**Cached search presentation:** A cached `search_tools` response retains the same match/availability rows, total count, pagination cursor and fail-open state as a fresh response, including genuine zero-result pages. Fresh execution and cache replay use one server-owned display projection of the unchanged result JSON; a generic “cached result” row is not a catalog match. Malformed cached responses are discarded and the normal handler runs instead. This fixes successful cached searches being displayed as zero matches without changing tool execution authority or the model-facing payload. Re-executing every valid cached search or adding a second cache metadata format was rejected: the retained JSON already carries the required presentation data.
 
 `search_tools` 的模型结果保持机器可读 JSON；前端事件额外携带最小展示投影：工具名、namespace、描述和参数摘要。界面以卡片明确列出本次命中的工具，并标识必填参数、更多分页结果和 fail-open 状态。`execute_tools` 是纯协议适配层，不显示、不计入工具数；真实子工具照常显示成功、错误和审批。子调用尚未生成生命周期事件就被参数校验拒绝时，活动时间线显示“目标子工具已跳过”、稳定错误码、原因和重试提示，而不是显示 `execute_tools 执行失败`；已执行子工具的错误事件始终优先，外壳不得重复报错。未生成子调用的程序错误保留实际 `execute_tools` 身份及错误消息、恢复建议，不再显示已退役的 ToolScript 名称。冷回放前端会从对应 round 的有界 `toolContent` 恢复旧版校验诊断，无法恢复的外壳行才直接过滤。MCP 私有 `_meta`、完整索引字段和权限信息不会进入展示投影。
 
@@ -270,6 +274,46 @@ all inputs or counters in the model answer defeats private processing;
 inventing an output schema from one sample hides uncertainty. These changes
 do not establish model quality, adoption or latency benefit.
 
+## Choosing direct calls, batches, and programs
+
+**Problem:** Treating every tool use as a program adds script-authoring risk
+without useful computation. Ambiguous body/return guidance also turns missing
+results into spurious judgment handoffs; swallowed promise failures and lossy
+object encoding can make an incorrect computation look successful.
+
+**Decision:** Prefer a direct tool for one action and `execute_tools` for known
+independent calls. Use `execute_program` for useful aggregation or data-dependent
+workflows. The canonical action schema teaches an async **body**, an executable
+`return` example, and terminal observation semantics. Routine computed results
+are returned, not passed to `tools.observe`. Observation remains available only
+when evidence needs unresolved model judgment; it ends the script, never resumes
+it, and does not roll back effects.
+
+- Missing/undefined returns are `missing_program_result` errors, with settled
+  progress and existing replay protection. Repeated no-effect authoring failures
+  use the existing program fallback; no automatic repair or action replay is added.
+- Unhandled Promise rejections fail the run after draining current microtasks,
+  before further tool dispatch or success. Handled rejections and `Promise.all`
+  remain valid. The per-instance tracker retains at most 1,024 outstanding
+  promise identities, releases handled entries, and closes with its Store.
+- Catalog search and retained-input discovery each admit at most 16 queries,
+  counted separately. The 17th catalog query fails before its host callback.
+- Results and bridge values support JSON values, BigInt, arrays and plain or
+  null-prototype records. Unsupported object kinds such as Error, Date, Map and
+  Set fail explicitly instead of silently becoming `{}`. Convert them explicitly
+  (for example `{message: error.message}` or `Array.from(map)`); the bridge does
+  not invoke arbitrary `toJSON` hooks.
+- `programInput` is receipt metadata, not a runtime global. Copy its shown read
+  expression, or discover existing inputs with
+  `tools.inputs({name: exactToolName, offset: 0, limit: 16})`. An empty input
+  directory proves no matching retained input, not an empty source dataset.
+
+**Alternatives:** Forcing singleton calls into scripts, synthesizing implicit
+returns, adding compatibility globals, and replaying failed programs each hide
+the actual contract or risk repeating effects. A second workflow engine, new
+retry ladder, and model-specific routing are unnecessary for these fixes.
+No claim of measured end-to-end model improvement follows from runtime tests.
+
 ## Program reasoning boundaries
 
 **Problem:** A predetermined chain is only one use of programmatic calling.
@@ -295,8 +339,9 @@ measurements, not measured token/cost savings or a proven direct-call baseline.
 `successful_tool_calls` counts returned `done` receipts once at dispatch. It
 does not certify source coverage or business correctness. Every settled sibling
 is counted before an observation can stop unwrapping; receipt/value rereads and
-retained reads add no successful call. Missing-return evidence distinguishes
-`completedToolCalls` from `toolCallAttempts`. Cards show success versus attempts
+retained reads add no successful call. Missing returns fail with
+`missing_program_result` and an `executionReceipt` distinguishing successful
+calls from attempts; they are authoring errors, not requests for judgment. Cards show success versus attempts
 only when both observed counts are consistent; old records keep their old view.
 Actual host handoffs also carry `executionReceipt` with attempted/successful
 tool calls and retained reads, so the model sees progress without private
@@ -490,8 +535,8 @@ for unknown structure. Raw data remains available when semantic judgment needs i
 the code API advertises undeclared outputs without inventing a result schema.
 The isolated guest
 marks only the root `undefined` result; the host returns a
-`missing_program_result` observation with `outcome=needs_model`, measured
-completed calls and explicit return guidance. Definitions are never invoked
+`missing_program_result` error with `outcome=error`, an `executionReceipt`
+reporting attempts/successes/retained reads, and explicit return guidance. Definitions are never invoked
 automatically. Completed effects and replay settlement remain authoritative;
 repair code must not repeat those effects. Explicit `return null`, absent object
 properties and undefined array elements retain their existing JSON behavior.

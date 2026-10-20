@@ -36,11 +36,12 @@ from lib.tasks_pkg.compaction.api import (
 from lib.tasks_pkg.executor import _execute_tool_one, _finalize_tool_round
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
+from lib.tasks_pkg.tool_search_projection import cached_tool_search_projection
 from lib.tool_results.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
 )
-from lib.tools.gateway import EXECUTE_TOOLS_NAME, GATEWAY_TOOL_NAMES
+from lib.tools.gateway import EXECUTE_TOOLS_NAME, GATEWAY_TOOL_NAMES, SEARCH_TOOLS_NAME
 from lib.tools.result_projection import (
     TOOL_RESULT_PRODUCER_METADATA_KEY,
     TOOL_RESULT_PROJECTION_ITEMS_KEY,
@@ -2395,6 +2396,15 @@ def execute_tool_pipeline(
                 except Exception as _fe:
                     logger.debug('[FreshGate] cached-read staleness check '
                                  'failed (non-fatal): %s', _fe)
+            search_projection = None
+            if cached is not None and fn_name == SEARCH_TOOLS_NAME:
+                search_projection = cached_tool_search_projection(
+                    _unpack_cache_entry(cached)[0])
+                if search_projection is None:
+                    # Invalid cache data is not evidence of zero matches.
+                    # Let the normal handler produce a fresh typed result.
+                    _cache.pop(cache_key, None)
+                    cached = None
             if cached is not None:
                 cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn, cached_vertical, cached_search_diag = \
                     _unpack_cache_entry(cached)
@@ -2432,7 +2442,19 @@ def execute_tool_pipeline(
                     # Use stored display_results for web_search / fetch_url if available
                     # — this preserves per-result rows (titles, URLs, snippets) in the UI
                     # instead of collapsing to a single generic meta row.
-                    if fn_name == 'web_search' or (cached_display and fn_name == 'fetch_url'):
+                    if search_projection is not None:
+                        search_results, search_meta = search_projection
+                        extra = {
+                            **search_meta,
+                            'cacheSource': 'prefetch' if is_prefetch else 'cache',
+                        }
+                        round_entry.update(extra)
+                        _finalize_tool_round(
+                            task, rn, round_entry, search_results,
+                            query_override=str(fn_args.get('query') or fn_name),
+                            extra_event_fields=extra,
+                        )
+                    elif fn_name == 'web_search' or (cached_display and fn_name == 'fetch_url'):
                         extra = {}
                         extra['cacheSource'] = 'prefetch' if is_prefetch else 'cache'
                         round_entry['cacheSource'] = extra['cacheSource']

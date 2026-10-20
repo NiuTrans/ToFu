@@ -97,6 +97,73 @@ function boundedRecordArray(value: unknown, limit: number): UnknownRecord[] {
   return Array.isArray(value) ? value.slice(0, limit).map(record) : [];
 }
 
+function legacyCachedToolCatalog(
+  round: UnknownRecord,
+  results: readonly UnknownRecord[],
+): { round: UnknownRecord; results: UnknownRecord[] } | null {
+  // Old cache replay preserved JSON but replaced catalog rows with a generic
+  // cache badge. Recover display only; never change the live patch baseline.
+  if (!isToolSearchRound(round) || round.status !== 'done'
+    || Object.prototype.hasOwnProperty.call(round, 'toolSearchTotal')
+    || results.some((item) => (
+      item.type === 'tool_catalog_match' || item.type === 'tool_catalog_availability'
+    ))
+    || !results.some((item) => item.badge === 'cached' || item.source === 'Cache')) {
+    return null;
+  }
+  const content = stringField(round, 'toolContent');
+  if (!content || content.length > 65_536) return null;
+  let payload: UnknownRecord;
+  try {
+    payload = record(JSON.parse(content));
+  } catch {
+    return null;
+  }
+  if (payload.status !== 'ok' || !Array.isArray(payload.items)
+    || typeof payload.total !== 'number' || !Number.isSafeInteger(payload.total)
+    || payload.total < 0) return null;
+  const items = boundedRecordArray(
+    payload.items, TOOL_SEARCH_PRESENTATION_LIMITS.toolCatalogRecordsScanned,
+  );
+  if (items.some((item) => !stringField(item, 'name'))
+    || (payload.capability_availability !== undefined
+      && !Array.isArray(payload.capability_availability))) return null;
+  const availabilityRows = boundedRecordArray(payload.capability_availability, 4);
+  if (availabilityRows.some((item) => (
+    !stringField(item, 'namespace') || !stringField(item, 'reason_code')
+      || !stringField(item, 'message') || !stringField(item, 'recovery_hint')
+  ))) return null;
+  const rows: UnknownRecord[] = items.map((item) => {
+    const schema = record(item.arguments_schema);
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    return {
+      type: 'tool_catalog_match', toolName: item.name, title: item.name,
+      namespace: stringField(item, 'namespace') || 'general',
+      snippet: stringField(item, 'summary') || stringField(item, 'description'),
+      arguments: Object.entries(record(schema.properties)).map(([name, value]) => {
+        const property = record(value);
+        const type = Array.isArray(property.type)
+          ? property.type.filter((entry) => entry !== 'null').join(' | ')
+          : stringField(property, 'type');
+        return { name, type: type || 'value', required: required.includes(name) };
+      }),
+    };
+  });
+  for (const availability of availabilityRows) {
+    rows.push({
+      type: 'tool_catalog_availability', namespace: availability.namespace,
+      reasonCode: availability.reason_code, message: availability.message,
+      recoveryHint: availability.recovery_hint,
+    });
+  }
+  return {
+    round: { ...round, toolSearchTotal: payload.total,
+      toolSearchNextCursor: payload.next_cursor,
+      toolSearchFailOpen: Boolean(payload.fail_open) },
+    results: rows,
+  };
+}
+
 function displayNumber(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -787,12 +854,18 @@ export function createToolSearchPresentation(
     projectedResults: unknown,
     header: ToolSearchHeaderHtml,
   ): string {
-    const round = record(roundValue);
-    const projectedResultCount = arrayLength(projectedResults);
+    let round = record(roundValue);
+    let projectedResultCount = arrayLength(projectedResults);
     const scanLimit = isToolSearchRound(round)
       ? TOOL_SEARCH_PRESENTATION_LIMITS.toolCatalogRecordsScanned
       : TOOL_SEARCH_PRESENTATION_LIMITS.webResultRows;
-    const results = boundedRecordArray(projectedResults, scanLimit);
+    let results = boundedRecordArray(projectedResults, scanLimit);
+    const recovered = legacyCachedToolCatalog(round, results);
+    if (recovered) {
+      round = recovered.round;
+      results = recovered.results;
+      projectedResultCount = results.length;
+    }
     return renderToolCatalogHtml(round, results, projectedResultCount, header)
       || renderWebSearchHtml(round, results, projectedResultCount, header);
   }

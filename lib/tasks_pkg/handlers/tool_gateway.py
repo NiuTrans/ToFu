@@ -17,6 +17,10 @@ from lib.tasks_pkg.tool_dispatch._flags import (
     _execute_gateway_delegation_scope,
 )
 from lib.tasks_pkg.tool_search_outcome import audit_search_outcome
+from lib.tasks_pkg.tool_search_projection import (
+    tool_search_display_results,
+    tool_search_metadata,
+)
 from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 from lib.weak_lock_pool import WeakLockPool
 from lib.tools.gateway import (
@@ -37,7 +41,8 @@ _MAX_EXECUTE_GATEWAY_RECEIPTS = 256
 _PROGRAM_BATCH_FALLBACK_AFTER = 2
 _PROGRAM_AUTHORING_ERRORS = frozenset({
     'syntax_error', 'javascript_error', 'unawaited_tools', 'unresolved_promise',
-    'type_error', 'invalid_call',
+    'type_error', 'invalid_call', 'missing_program_result',
+    'unhandled_promise_rejection',
 })
 
 
@@ -183,60 +188,6 @@ def _finalize(task: dict[str, Any], rn: int, round_entry: dict[str, Any],
         query_override=query_override or name,
         extra_event_fields=extra_event_fields,
         status='done' if ok else 'error')
-
-
-def _schema_type_label(schema: Any) -> str:
-    if not isinstance(schema, dict):
-        return 'value'
-    raw_type = schema.get('type')
-    if isinstance(raw_type, list):
-        types = [str(value) for value in raw_type if value != 'null']
-        return ' | '.join(types) or 'value'
-    if raw_type:
-        return str(raw_type)
-    if 'enum' in schema:
-        return 'enum'
-    if 'oneOf' in schema or 'anyOf' in schema:
-        return 'variant'
-    return 'value'
-
-
-def _search_display_results(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Project model-facing search JSON into compact, safe UI card data."""
-    rows: list[dict[str, Any]] = []
-    for item in result.get('items') or []:
-        if not isinstance(item, dict) or not item.get('name'):
-            continue
-        schema = item.get('arguments_schema')
-        schema = schema if isinstance(schema, dict) else {}
-        properties = schema.get('properties')
-        properties = properties if isinstance(properties, dict) else {}
-        required = {str(value) for value in (schema.get('required') or [])}
-        arguments = []
-        for arg_name, arg_schema in properties.items():
-            arguments.append({
-                'name': str(arg_name),
-                'type': _schema_type_label(arg_schema),
-                'required': str(arg_name) in required,
-            })
-        rows.append({
-            'type': 'tool_catalog_match',
-            'toolName': str(item['name']),
-            'title': str(item['name']),
-            'namespace': str(item.get('namespace') or 'general'),
-            'snippet': str(item.get('description') or ''),
-            'arguments': arguments,
-            'score': item.get('score'),
-        })
-    for availability in result.get('capability_availability') or []:
-        rows.append({
-            'type': 'tool_catalog_availability',
-            'namespace': availability['namespace'],
-            'reasonCode': availability['reason_code'],
-            'message': availability['message'],
-            'recoveryHint': availability['recovery_hint'],
-        })
-    return rows
 
 
 
@@ -405,15 +356,11 @@ def handle_search_tools(
         exception=search_exception,
         duration_ms=(time.monotonic() - search_started) * 1000)
     content = _json(result)
-    search_meta = {
-        'toolSearchTotal': int(result.get('total') or 0),
-        'toolSearchNextCursor': result.get('next_cursor'),
-        'toolSearchFailOpen': bool(result.get('fail_open')),
-    }
+    search_meta = tool_search_metadata(result)
     round_entry.update(search_meta)
     _finalize(task, rn, round_entry, fn_name, content,
               ok=result.get('status') == 'ok',
-              results=(_search_display_results(result)
+              results=(tool_search_display_results(result)
                        if result.get('status') == 'ok' else None),
               query_override=str(fn_args.get('query') or fn_name),
               extra_event_fields=search_meta)

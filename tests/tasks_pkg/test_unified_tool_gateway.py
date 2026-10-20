@@ -1558,9 +1558,9 @@ def test_anthropic_native_search_skips_small_or_all_eager_catalogs():
 
 
 def test_search_results_project_to_rich_ui_cards_without_private_schema():
-    from lib.tasks_pkg.handlers.tool_gateway import _search_display_results
+    from lib.tasks_pkg.tool_search_projection import tool_search_display_results
 
-    cards = _search_display_results({'items': [{
+    cards = tool_search_display_results({'items': [{
         'name': 'mcp__xuecheng__update_doc',
         'namespace': 'xuecheng',
         'description': 'Update a Xuecheng document.',
