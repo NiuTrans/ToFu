@@ -1,8 +1,8 @@
 """Concurrent proxy attempts retain request-owned configuration and context."""
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
-import threading
 
 import pytest
 import requests
