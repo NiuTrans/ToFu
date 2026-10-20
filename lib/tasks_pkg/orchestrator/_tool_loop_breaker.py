@@ -43,6 +43,15 @@ stall signal: incident ``mtjka09o7g8mit`` produced 33 unique calls and 33
 unique visible results across 24 read-only rounds before the old counter
 stopped it immediately before an edit. ``TOFU_LOOP_EXTENDED=0`` disables both
 extended detectors; every threshold is env-overridable.
+
+Corrective nudges name only tools the agent can actually call.  The visible
+action list is derived from the task's own executable tool catalog
+(``_invocationTools`` for child invocations, ``_tool_schema`` for the root
+loop), which has already been narrowed by role scope and read-only
+orchestration.  A researcher/analyst/reviewer/critic will NOT see
+``edit_file``/``write_file``/``run_command`` named in its nudge — those
+tools are absent from its scope, and suggesting them only feeds the stall
+loop (incident ``mvdapxexnid4hg``, agent-general-751ce80f).
 """
 
 from __future__ import annotations
@@ -649,7 +658,19 @@ def _read_round_added_evidence(
 
 
 def _visible_action_tools(task: dict[str, Any]) -> list[str]:
-    catalog = task.get('_tool_schema')
+    """Action tools the agent can actually invoke, in preference order.
+
+    The authoritative source is the task's own executable tool list
+    (``_invocationTools`` for child invocations, ``_tool_schema`` for the root
+    loop).  For a swarm sub-agent this list has already been narrowed by role
+    scope and read-only orchestration, so a researcher/analyst/reviewer/critic
+    will NOT see ``edit_file``/``write_file``/``run_command`` here — those
+    names are absent from its tools, and suggesting them only feeds the
+    stall loop.
+    """
+    catalog = task.get('_invocationTools')
+    if not isinstance(catalog, list):
+        catalog = task.get('_tool_schema')
     if not isinstance(catalog, list):
         catalog = task.get('_executable_tool_catalog')
     names: set[str] = set()
@@ -666,17 +687,29 @@ def _visible_action_tools(task: dict[str, Any]) -> list[str]:
 
 def _nudge_text(task: dict[str, Any], reason: str) -> str:
     tools = _visible_action_tools(task)
-    visible = (', '.join(tools) if tools
-               else 'a substantive tool that is visible in this turn')
+    if tools:
+        action_hint = (
+            f'either issue the real next action ({", ".join(tools)}), '
+            'inspect genuinely new evidence, or finish now and report your '
+            'findings'
+        )
+    else:
+        # Read-only / scoped agent: no write or shell tools are in scope.
+        # The only correct exit is to finish with the evidence already gathered.
+        action_hint = (
+            'finish now and report your findings, or inspect genuinely new '
+            'evidence with the read-only tools available to you'
+        )
     if reason == 'exact_repetition':
         return (
             '[SYSTEM: IDENTICAL TOOL LOOP DETECTED]\n'
             'The same tool call has now returned the exact same outcome four '
-            'rounds in a row. No new visible evidence has been observed from these repetitions.\n\n'
+            'rounds in a row. No new visible evidence has been observed from '
+            'these repetitions.\n\n'
             'Change strategy now: inspect genuinely new evidence, use '
-            'different arguments or another available tool, or finish and '
-            'state the concrete blocker. Do not issue the identical call '
-            'again; one more identical round will be stopped by the harness.'
+            'different arguments or another available tool, or finish now and '
+            'report your findings. Do not issue the identical call again; one '
+            'more identical round will be stopped by the harness.'
         )
     if reason == 'unresolved_artifact':
         return (
@@ -710,9 +743,8 @@ def _nudge_text(task: dict[str, Any], reason: str) -> str:
         f'{observation}\n\n'
         'Do not issue placeholder tools or re-read covered evidence merely to '
         'obtain another model round. Continue reasoning in this response, then '
-        f'either issue the real next action ({visible}), inspect genuinely new '
-        'evidence, or finish and state the concrete blocker. A further '
-        'no-progress tool round will be stopped by the harness.'
+        f'{action_hint}. A further no-progress tool round will be stopped by '
+        'the harness.'
     )
 
 
