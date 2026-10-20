@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.6
+
+- Mark query-only English collection descriptions as uncertain even when they
+  repeat every query term. Preserve their original text and follow-up URL;
+  additional facts or qualifications retain existing classification, and fetched
+  body evidence can independently establish relevance. No paid service or model
+  call is introduced.
+
 ## 0.12.5
 
 - Apply the existing relevance ranking at the public search boundary even when
