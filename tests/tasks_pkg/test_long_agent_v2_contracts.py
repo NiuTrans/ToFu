@@ -17,6 +17,21 @@ from lib.tools.result_envelope import model_text_from_tool_result
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture
+def unbound_project_binding(monkeypatch, tmp_path):
+    """Exercise file tools with an explicit owner-scoped, ordinary project."""
+    from lib.conversations.project_coordination import ProjectCoordinationRepository
+
+    def no_binding(repository, path, key):
+        assert repository.user_id == 7
+        assert path == str(tmp_path.resolve())
+        return None
+
+    # Keep the real identity/public-state and Coordinator policy paths. Replace
+    # only the binding read, not the importable repository class or policy.
+    monkeypatch.setattr(ProjectCoordinationRepository, '_record', no_binding)
+
+
 def _context_block(block_id: str, content: str, *, required: bool = False,
                    layer: str = "cold_history", stability: str = "turn",
                    permissions: frozenset[str] = frozenset()):
@@ -489,7 +504,7 @@ def test_grep_producer_truncation_becomes_partial_source_recovery(monkeypatch):
 
 
 def test_streaming_grep_truncation_sidecar_survives_prefetch_cache(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, unbound_project_binding):
     from concurrent.futures import Future
     import time
 
@@ -791,7 +806,7 @@ def test_tool_result_v2_batch_read_preserves_every_file_before_preview(
 
 
 def test_tool_pipeline_carries_batch_read_projection_to_model_context(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, unbound_project_binding):
     """The production handler/settlement seam must not drop producer items."""
     import lib.tasks_pkg.compaction._budget as _budget
     from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
@@ -862,7 +877,7 @@ def test_tool_pipeline_carries_batch_read_projection_to_model_context(
 
 
 def test_streaming_prefetch_carries_batch_read_projection_to_model_context(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, unbound_project_binding):
     """The dominant pre-execution cache path must preserve file boundaries."""
     from concurrent.futures import Future
     import time
