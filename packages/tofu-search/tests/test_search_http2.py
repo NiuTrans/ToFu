@@ -154,6 +154,21 @@ def test_configured_ca_bundle_keeps_certificate_and_hostname_verification(transp
     assert verify.check_hostname and verify.verify_mode == ssl.CERT_REQUIRED
 
 
+@pytest.mark.parametrize('variable', ['REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'])
+def test_configured_ca_bundle_also_verifies_https_proxy_tls(transport, monkeypatch, variable):
+    for name in ('REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, requests.certs.where())
+    direct_get(proxies={'https': 'https://chosen.invalid:8443'})
+    options, = transport['options']
+    proxy = options['proxy']
+    assert isinstance(proxy, httpx.Proxy)
+    assert proxy.url == httpx.URL('https://chosen.invalid:8443')
+    assert proxy.ssl_context is options['verify']
+    assert proxy.ssl_context.check_hostname
+    assert proxy.ssl_context.verify_mode == ssl.CERT_REQUIRED
+
+
 @pytest.mark.parametrize('headers', [{}, {'content-length': '99'}, {'content-length': 'invalid'}])
 def test_decoded_byte_budget_or_invalid_length_fails_and_closes(transport, monkeypatch, headers):
     monkeypatch.setattr(http_client, '_SEARCH_RESPONSE_BYTES', 3)

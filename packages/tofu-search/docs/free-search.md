@@ -25,7 +25,8 @@ The adapter consumes the envelope's explicit proxy mapping, including its
 direct-route marker. Environment proxy resolution applies only to an
 environment-owned route; HTTPX cannot independently override that selection.
 TLS verification stays enabled, including configured `REQUESTS_CA_BUNDLE` /
-`CURL_CA_BUNDLE` trust roots. Redirects are not followed. Only HTTP 200 can
+`CURL_CA_BUNDLE` trust roots for both the destination and an HTTPS proxy's outer
+TLS connection. Redirects are not followed. Only HTTP 200 can
 complete a search; 202, 204, partial responses and redirects remain failures.
 Transport errors retain the common connection/timeout distinctions without
 exposing private exception text.
