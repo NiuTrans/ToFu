@@ -95,6 +95,18 @@ Anchors: `lib/agent_core/execution_session.py` (private resource stack
 settlement), `lib/tasks_pkg/tool_dispatch/_pipeline.py`
 (`_drain_cancelled_tool_workers`).
 
+### Nested publication authority
+
+Nested publication authority uses the same revocable fence as child delivery.
+Problem: replacing the active fence on nested delivery let an open child
+publish after its parent closed. Decision: retain every enclosing fence and
+check them in parent-to-child order at bounded local commits. Re-entering one
+fence does not duplicate it; scope exit restores the prior context. Observer
+I/O holds no fence lock, so closing publication never waits for that observer.
+Explicit root FIFO acceptance still transfers to the receiving owner's
+context. Alternatives rejected: retaining only the newest fence drops parent
+authority; holding locks over observer I/O makes revocation wait on callbacks.
+
 ### Interrupted resource settlement
 
 Problem: a service can close its native child clients while an ordinary Flow
