@@ -15,7 +15,7 @@ from typing import Any
 from lib.log import get_logger
 
 from ..commit import commit_translation_to_turn, _is_retryable_storage_error
-from ..engine import _translate_freetext
+from ..engine import _translate_freetext, translation_total_deadline_seconds
 from ..notranslate import (
     _extract_notranslate_blocks,
     _has_translatable_text,
@@ -35,6 +35,13 @@ logger = get_logger(__name__)
 # out-of-band instead of being lost. The task stays running until a retry
 # settles it; a timer delays each attempt without occupying a lane worker.
 _COMMIT_RETRY_DELAYS_S = (30.0, 120.0, 300.0)
+
+# Stable segment id of the terminal deliverable in a turn projection
+# (lib/tasks_pkg/segments/_assemble.py and lib/turn_projection_segments.py).
+# The pending-preview renderer addresses streamed text by this id, so the
+# worker publishes its streaming translation under it rather than only as a
+# whole-turn ``partial``.
+_TERMINAL_DELIVERABLE_BLOCK_ID = 'text:terminal'
 
 
 def _enrich_committed_turn_segments(
@@ -438,13 +445,30 @@ def _do_translate(
         visible_partial = _reattach_notranslate_blocks_partial(
             partial, protected_blocks,
         )
+        # The transcript's text/thinking blocks render a pending turn's streamed
+        # translation from ``partialByRound[blockId]`` — the same key the live
+        # incremental worker publishes — so the deliverable must appear under
+        # its stable segment id or the reader stares at an untranslated turn for
+        # the whole call. ``partial`` stays for the proposed-plan preview, which
+        # joins the whole body.
+        by_block = (
+            {_TERMINAL_DELIVERABLE_BLOCK_ID: visible_partial}
+            if bound_to_turn else None
+        )
         updated = _translate_runtime.update_fields(
             task_id,
-            fields={"partial": visible_partial, "partialUpdatedAt": now},
+            fields={
+                "partial": visible_partial,
+                "partialUpdatedAt": now,
+                **({"partialByRound": by_block} if by_block else {}),
+            },
             only_if_status="running",
         )
         if updated:
-            push_running(partial=visible_partial)
+            # Both shapes are load-bearing: the transcript block renderer reads
+            # the per-block index, while the proposed-plan preview reads the
+            # whole-turn ``partial``.
+            push_running(partial=visible_partial, partial_by_round=by_block)
 
     push_running(status_kind="started")
     translated = ""
@@ -463,7 +487,10 @@ def _do_translate(
                 status_cb=on_status,
                 progress_cb=on_progress,
                 abort_check=task['abort_event'].is_set,
-                overall_deadline=90.0 if bound_to_turn else None,
+                overall_deadline=(
+                    translation_total_deadline_seconds(len(translatable_text))
+                    if bound_to_turn else None
+                ),
             )
             translated = (translated or "").strip()
             if protected_blocks:

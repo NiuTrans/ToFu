@@ -54,6 +54,14 @@ _PREVIEW_MAX_429_ATTEMPTS = resolve_resource_budget(
 _TASK_PREVIEW_STATE = '_incremental_translate_preview_state'
 _PREVIEW_STATE_DISABLED = 'disabled'
 _PREVIEW_STATE_STARTED = 'started'
+_PREVIEW_STATE_FAILURES = 'failures'
+# Consecutive preview failures that retire the rest of this turn's previews.
+# One transient 429 or read timeout used to disable them permanently, so a long
+# turn kept its opening translation and then silently reverted to the source
+# language for every later round. Retry across rounds instead; three misses in a
+# row means the provider is genuinely unavailable and the terminal deliverable
+# translation (a separate path) should have the capacity.
+_PREVIEW_FAILURE_LIMIT = 3
 
 
 _accumulators: dict[str, "_Accumulator"] = {}
@@ -174,6 +182,8 @@ class _Accumulator:
         self._preview_segments_started = _task_preview_started(task)
         self._preview_disabled = bool(
             self._preview_state.get(_PREVIEW_STATE_DISABLED))
+        self._preview_failures = int(
+            self._preview_state.get(_PREVIEW_STATE_FAILURES) or 0)
         self._cancel_event = threading.Event()
         self._startup_gate = threading.Event()
         self._startup_requested = False
@@ -319,18 +329,27 @@ class _Accumulator:
         except Exception as exc:
             # A preview is reconstructible enrichment. Do not tear down the
             # accumulator and lose its final translation because a saturated
-            # provider or malformed intermediate segment failed once.
+            # provider or malformed intermediate segment failed.
             if not terminal_reasoning:
-                self._preview_disabled = True
-                self._preview_state[_PREVIEW_STATE_DISABLED] = True
+                self._preview_failures += 1
+                self._preview_state[_PREVIEW_STATE_FAILURES] = (
+                    self._preview_failures)
+                if self._preview_failures >= _PREVIEW_FAILURE_LIMIT:
+                    self._preview_disabled = True
+                    self._preview_state[_PREVIEW_STATE_DISABLED] = True
             logger.warning(
-                '[IncTranslate] task=%s %s segment %s failed; terminal '
-                'translation remains enabled: %s',
+                '[IncTranslate] task=%s %s segment %s failed '
+                '(consecutive=%d/%d); terminal translation remains enabled: %s',
                 self.task_id[:8],
                 ('terminal reasoning' if terminal_reasoning
-                 else 'preview disabled after'),
-                key, str(exc)[:300],
+                 else 'preview retrying after'),
+                key, self._preview_failures, _PREVIEW_FAILURE_LIMIT,
+                str(exc)[:300],
             )
+        else:
+            if self._preview_failures:
+                self._preview_failures = 0
+                self._preview_state[_PREVIEW_STATE_FAILURES] = 0
 
     def _translate_segment(
         self,

@@ -22,6 +22,7 @@ from lib.log import get_logger
 from lib.text_lang import is_predominantly_chinese
 
 from ..engine import _translate_freetext
+from ..policy import translation_max_429_attempts
 from ..notranslate import (
     _extract_notranslate_blocks,
     _has_translatable_text,
@@ -40,9 +41,30 @@ _SEGMENT_BATCH_MAX_CHARS = 6000
 _SEGMENT_BOUNDARY_OVERHEAD_CHARS = 32
 # Settled-turn segment text is reconstructible enrichment. It must never hold
 # the already-completed whole-turn result behind the engine's default ten-
-# minute deadline. One worker invocation shares this wall budget across its
-# batch and any validation-only singleton fallback.
-_SEGMENT_ENRICHMENT_DEADLINE_SECONDS = 15.0
+# minute deadline, so one worker invocation shares a bounded wall budget across
+# its batches and any validation-only singleton fallback.
+#
+# A flat 15s could not cover a real multi-batch turn: a 36-segment answer needs
+# several sequential provider calls, so the budget expired after the first one
+# and the remaining segments were skipped as "optional" — the turn kept its
+# whole-document translation while every narration/reasoning segment stayed in
+# English forever. Scale the budget with the text it has to translate, keeping
+# a hard ceiling so enrichment can never park a worker.
+_SEGMENT_ENRICHMENT_DEADLINE_FLOOR_SECONDS = 15.0
+_SEGMENT_ENRICHMENT_DEADLINE_CEILING_SECONDS = 180.0
+_SEGMENT_ENRICHMENT_CHARS_PER_SECOND = 80.0
+
+
+def _segment_enrichment_deadline_seconds(total_chars):
+    """Return the wall budget for translating ``total_chars`` of segments."""
+    return min(
+        _SEGMENT_ENRICHMENT_DEADLINE_CEILING_SECONDS,
+        max(
+            _SEGMENT_ENRICHMENT_DEADLINE_FLOOR_SECONDS,
+            _SEGMENT_ENRICHMENT_DEADLINE_FLOOR_SECONDS
+            + max(0, int(total_chars)) / _SEGMENT_ENRICHMENT_CHARS_PER_SECOND,
+        ),
+    )
 
 
 class _SegmentBatchValidationError(ValueError):
@@ -370,6 +392,12 @@ def _build_segment_translation_map(conv_id, turn_id, system_prompt,
     segs = _read_turn_segments(conv_id, turn_id, user_id=user_id)
     if not segs:
         return None
+    # Budget the enrichment by the text it actually covers. This sums the raw
+    # segment text (an upper bound — already-translated and protected-only
+    # segments need no provider call), which is all a wall budget needs.
+    _total_chars = sum(
+        len(seg.get('text') or '') for seg in segs if isinstance(seg, dict)
+    )
     seg_map = _translate_segments_to_map(
         segs,
         system_prompt,
@@ -378,8 +406,12 @@ def _build_segment_translation_map(conv_id, turn_id, system_prompt,
         log_tag=(conv_id or '?')[:8],
         progress_cb=progress_cb,
         abort_check=abort_check,
-        overall_deadline=_SEGMENT_ENRICHMENT_DEADLINE_SECONDS,
-        max_429_attempts=1,
+        overall_deadline=_segment_enrichment_deadline_seconds(_total_chars),
+        # A single 429 used to end the whole enrichment pass, so one per-minute
+        # model limit silently left every settled narration/reasoning segment in
+        # the source language. Retry within the wall budget above instead;
+        # sharing stays polite through ``defer_on_shared_contention``.
+        max_429_attempts=translation_max_429_attempts(),
         defer_on_shared_contention=True,
     )
     if segment_sources is not None:

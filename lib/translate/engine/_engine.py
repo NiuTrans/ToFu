@@ -397,6 +397,36 @@ def _translation_chunk_attempt_limits(clen):
     return _mt, _timeout, _retries
 
 
+# A whole-document translation is ONE provider call, so its total budget must
+# cover that call's own per-attempt timeout. A caller-supplied budget below the
+# dispatch timeout aborts the only attempt it authorized: the stream is killed
+# mid-generation and the already-produced output is discarded, so the caller
+# reports a failure for work that was about to succeed. Derive the total budget
+# from the same size table instead of a flat number.
+_TRANSLATION_TOTAL_DEADLINE_FLOOR_SECONDS = 90.0
+# Content-shape failures (empty / truncated / no-op / wrong-language) and
+# transport failures share this retry budget: a different model or slot usually
+# fixes both, and past it the input itself is the likelier cause.
+_MAX_CONTENT_RETRIES = 5
+_TRANSLATION_TOTAL_DEADLINE_RETRY_ALLOWANCE = 1.5
+
+
+def translation_total_deadline_seconds(chars):
+    """Return the wall budget for translating ``chars`` in one call.
+
+    ``1.5x`` the size-appropriate attempt timeout leaves room for exactly one
+    retry after a fast failure (429 rotation, empty reply, stalled slot) while
+    never expiring inside a legitimately-running first attempt. The floor keeps
+    short texts at the historical 90s; the engine's own 600s default remains the
+    ceiling for the largest documents.
+    """
+    _mt, attempt_timeout, _retries = _translation_chunk_attempt_limits(chars)
+    return max(
+        _TRANSLATION_TOTAL_DEADLINE_FLOOR_SECONDS,
+        float(attempt_timeout) * _TRANSLATION_TOTAL_DEADLINE_RETRY_ALLOWANCE,
+    )
+
+
 @observed_engine
 def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                          source='', target='', status_cb=None,
@@ -462,7 +492,6 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     #   • Empty / truncated output       → retry up to _MAX_CONTENT_RETRIES
     #     times (different model usually fixes it; after that the issue
     #     is more likely with the input itself).
-    _MAX_CONTENT_RETRIES = 5
     _OVERALL_DEADLINE_SEC = (
         max(0.0, float(overall_deadline))
         if overall_deadline is not None else 600.0)
@@ -603,6 +632,49 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             )
             raise
         except (BadRequestError, RequestScopedError) as deterministic_error:
+            # A read timeout is a TRANSPORT failure that the error taxonomy
+            # explicitly marks retryable (``ResponseReadTimeoutError`` mixes in
+            # ``RetryableAPIError``), and no payload is at fault. Treating it as
+            # deterministic ended the translation after the first slow slot: the
+            # whole document and every enrichment segment were dropped on a
+            # single 14s read timeout. Route it to the bounded transient retry
+            # instead, where a different slot can serve the same payload.
+            from lib.llm.llm_errors import RetryableAPIError
+
+            if isinstance(deterministic_error, RetryableAPIError):
+                _dispatch_fail_count += 1
+                _last_err = (
+                    f'{type(deterministic_error).__name__}: '
+                    f'{deterministic_error}'
+                )
+                if _deadline_exceeded():
+                    _notify('deadline_exceeded', _attempt, _elapsed,
+                            'translation deadline expired during dispatch')
+                    break
+                if _dispatch_fail_count >= _MAX_CONTENT_RETRIES + 1:
+                    logger.error(
+                        '[Translate%s] Too many transport failures (%d): %s',
+                        chunk_label, _dispatch_fail_count, deterministic_error,
+                        exc_info=True)
+                    _terminal_dispatch_error = deterministic_error
+                    _notify('dispatch_failed_final', _attempt, _elapsed,
+                            str(deterministic_error)[:160])
+                    break
+                _sleep = min(
+                    _BACKOFF_MAX,
+                    _BACKOFF_MIN * (2 ** min(_dispatch_fail_count - 1, 5)),
+                )
+                logger.warning(
+                    '[Translate%s] Retryable transport failure (attempt %d, '
+                    'fails=%d): %s — sleeping %.1fs and retrying',
+                    chunk_label, _attempt, _dispatch_fail_count,
+                    deterministic_error, _sleep)
+                _notify('dispatch_error', _attempt, _elapsed,
+                        f'{type(deterministic_error).__name__}: '
+                        f'{str(deterministic_error)[:120]}')
+                _sleep_backoff(min(_sleep, _remaining_deadline_seconds()))
+                continue
+
             # Dispatch already applied its bounded pair/model policy. Replaying
             # the identical payload in this outer loop cannot repair a 400,
             # 404, or 422 and previously multiplied one terminal rejection into

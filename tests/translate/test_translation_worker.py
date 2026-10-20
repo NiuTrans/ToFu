@@ -448,9 +448,13 @@ def test_settled_turn_segment_enrichment_has_one_shared_tight_budget(
         'thinking:one': '译文 one',
         'thinking:two': '译文 two',
     }
+    # One shared wall budget across the batch and any singleton fallback, and
+    # it never exceeds the hard ceiling that keeps enrichment from parking a
+    # worker.
     assert 0 < calls[0]['overall_deadline'] <= (
-        segments_mod._SEGMENT_ENRICHMENT_DEADLINE_SECONDS)
-    assert calls[0]['max_429_attempts'] == 1
+        segments_mod._SEGMENT_ENRICHMENT_DEADLINE_CEILING_SECONDS)
+    # The configured translation policy, not a one-strike circuit.
+    assert calls[0]['max_429_attempts'] >= 1
     assert calls[0]['defer_on_shared_contention'] is True
 
 
@@ -901,4 +905,51 @@ def test_automatic_translation_has_short_dispatch_deadline(monkeypatch):
     monkeypatch.setattr(worker, "_finish_done", lambda *a, **k: None)
     worker._do_translate("bounded-auto-translation", "English answer", "Chinese",
                          "English", "conv", "turn", "translatedContent", user_id=7)
-    assert calls[0]["overall_deadline"] == 90.0
+    # The budget must cover the attempt timeout the same call authorizes, so a
+    # long answer is not aborted mid-stream after one attempt.
+    from lib.translate.engine import _engine
+
+    budget = calls[0]["overall_deadline"]
+    attempt_timeout = _engine._translation_chunk_attempt_limits(
+        len("English answer"))[1]
+    assert budget >= attempt_timeout
+    assert budget >= 90.0
+
+
+def test_bound_worker_publishes_streaming_translation_to_the_deliverable(
+        monkeypatch):
+    """The transcript renders pending text by blockId, not by whole-turn partial."""
+    import lib.translate.runtime._worker as worker
+
+    task = _register_task("worker-streams-deliverable", userId=7)
+    frames = []
+    seen_partials = []
+
+    def stream_translation(_text, _prompt, **kwargs):
+        kwargs["progress_cb"]("这是流式译文")
+        seen_partials.append(task.get("partial"))
+        return "这是最终的完整译文", {"_dispatch": {"model": "translator"}}
+
+    monkeypatch.setattr(worker, "_translate_freetext", stream_translation)
+    monkeypatch.setattr(worker, "commit_translation_to_turn", lambda *a, **k: {})
+    monkeypatch.setattr(worker, "_schedule_segment_enrichment", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_finish_done", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "lib.agent_core.push.push_event",
+        lambda channel, task_id, frame, *, user_id: frames.append(frame),
+    )
+
+    worker._do_translate(
+        "worker-streams-deliverable", "English answer", "Chinese", "English",
+        "conv", "turn", "translatedContent", user_id=7,
+    )
+
+    streamed = [frame for frame in frames if frame.get("partialByRound")]
+    assert streamed, "no streaming preview frame was published"
+    assert streamed[0]["partialByRound"] == {
+        worker._TERMINAL_DELIVERABLE_BLOCK_ID: "这是流式译文",
+    }
+    # Pollers read the stored field, and the proposed-plan preview still needs
+    # the whole-turn shape on the same frame.
+    assert seen_partials == ["这是流式译文"]
+    assert streamed[0]["partial"] == "这是流式译文"

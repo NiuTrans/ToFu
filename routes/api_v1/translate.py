@@ -98,6 +98,8 @@ def _build_poll_payload(task):
             r['statusKind'] = task.get('statusKind', '')
         if task.get('partial'):
             r['partial'] = task['partial']
+        if task.get('partialByRound'):
+            r['partialByRound'] = task['partialByRound']
     return r
 
 

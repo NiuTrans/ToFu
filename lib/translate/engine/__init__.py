@@ -40,6 +40,7 @@ from ._engine import (
     _build_trace,
     _translate_freetext,
     _translate_one_chunk,
+    translation_total_deadline_seconds,
 )
 
 logger = get_logger(__name__)
@@ -53,6 +54,8 @@ __all__ = [
     '_ends_midsentence',
     # provenance helper
     '_build_trace',
+    # size-derived wall budget shared with the async worker
+    'translation_total_deadline_seconds',
     # typed content-guard refusal (REST surface maps it to 502 + envelope)
     'TranslationContentRefused',
     # module ref re-exported for parity with the original top-level import

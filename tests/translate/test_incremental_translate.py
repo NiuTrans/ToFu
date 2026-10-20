@@ -465,7 +465,9 @@ def test_incremental_preview_failure_isolated_from_terminal(monkeypatch):
 
     monkeypatch.setattr(incremental._Accumulator, '_translate', fake_translate)
     accumulator._process_preview_segment(1, 'first')
-    accumulator._process_preview_segment(2, 'must be skipped')
+    # A transient preview failure no longer retires the rest of the turn: the
+    # next round is attempted with the same bounded preview budget.
+    accumulator._process_preview_segment(2, 'retried after one failure')
     accumulator._process_preview_segment(
         'thinking:terminal', 'terminal reasoning')
 
@@ -475,6 +477,7 @@ def test_incremental_preview_failure_isolated_from_terminal(monkeypatch):
                                                       'translator')
     assert calls == [
         ('first', incremental._PREVIEW_DEADLINE_SECONDS, 1),
+        ('retried after one failure', incremental._PREVIEW_DEADLINE_SECONDS, 1),
         ('terminal reasoning', incremental._PREVIEW_DEADLINE_SECONDS, None),
         ('final answer', None, None),
     ]
@@ -504,18 +507,21 @@ def test_preview_failure_circuit_survives_accumulator_recreation(monkeypatch):
 
     monkeypatch.setattr(incremental._Accumulator, '_translate', fake_translate)
     first = incremental._Accumulator(task)
-    first._process_preview_segment('text:first', 'first preview')
+    for index in range(incremental._PREVIEW_FAILURE_LIMIT):
+        first._process_preview_segment('text:first', 'first preview')
     assert task[incremental._TASK_PREVIEW_STATE][
         incremental._PREVIEW_STATE_DISABLED] is True
 
-    # This is the state after the five-minute idle worker removed itself.
+    # This is the state after the five-minute idle worker removed itself: the
+    # retired circuit must not buy the Turn another preview attempt.
     recreated = incremental._Accumulator(task)
     recreated._process_preview_segment('text:later', 'later preview')
     recreated._process_preview_segment(
         'thinking:terminal', 'terminal reasoning')
 
     assert calls == [
-        ('first preview', incremental._PREVIEW_MAX_429_ATTEMPTS),
+        *[('first preview', incremental._PREVIEW_MAX_429_ATTEMPTS)] * (
+            incremental._PREVIEW_FAILURE_LIMIT),
         ('terminal reasoning', None),
     ]
 
