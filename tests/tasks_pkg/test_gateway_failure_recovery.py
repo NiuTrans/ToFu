@@ -202,13 +202,29 @@ def test_incomplete_failure_identity_cannot_claim_an_unchanged_batch(items, obse
     assert sorted(executed) == [0, 1]
 
 
+@pytest.mark.parametrize("aggregate_pressure", [False, True])
 @pytest.mark.parametrize("corrected", [False, True])
 def test_root_breaker_stops_unchanged_batches_but_allows_correction(
-        corrected, observations, monkeypatch):
+        corrected, aggregate_pressure, observations, monkeypatch):
     from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     from lib.tasks_pkg.orchestrator import _root_agent_loop as root
 
-    first = run_batch(["permanent", "permanent"])
+    def batch_result(outcomes, **kwargs):
+        return run_batch(
+            outcomes, through_pipeline=aggregate_pressure,
+            error_prefix="classified_failure_" * 3 if aggregate_pressure else "source",
+            **kwargs)
+
+    if aggregate_pressure:
+        monkeypatch.setattr(
+            "lib.tasks_pkg.compaction._budget.ROUND_TOOL_RESULT_V2_MAX_TOKENS", 220)
+        monkeypatch.setattr(
+            "lib.tasks_pkg.compaction._budget._store_tool_result_artifact",
+            lambda *a, **kw: "")
+    first = batch_result(["permanent", "permanent"])
+    if aggregate_pressure:
+        assert json.loads(first[2])["truncated"] is True
+        assert nonretryable_failure_signature(first[1], first[2])
     task = first[0]
     request = SimpleNamespace(
         task=task, state=SimpleNamespace(), messages=[], all_search_results_text=[],
@@ -223,7 +239,7 @@ def test_root_breaker_stops_unchanged_batches_but_allows_correction(
             return {"role": "assistant", "content": "completed"}, "stop", {}
         outcomes = ["success", "success"] if corrected and round_num == 3 else ["permanent", "permanent"]
         prefix = "https://alternative.test" if corrected and round_num >= 2 else "https://example.test"
-        batch = first if round_num == 0 else run_batch(outcomes, url_prefix=prefix)
+        batch = first if round_num == 0 else batch_result(outcomes, url_prefix=prefix)
         _, call, text, _, entered = batch
         executed.extend(entered)
         call = deepcopy(call)

@@ -362,3 +362,31 @@ authority. Checked reuse of the existing archive avoids those changes.
 Verification: `tests/compaction/test_dispatch_context_recovery.py`, calibrated
 token/admission tests, archive receipt contracts, Continue wire-parity tests,
 and existing compaction pairing/cancellation/model-replay suites.
+
+### Round result evidence
+
+**Problem.** A second reduction under aggregate pressure can erase a typed
+failure or its compact cause identifiers after single-result budgeting retained
+them. Generic overflow advice can also recommend repeating a completed operation,
+and replacing small facts with longer recovery hints increases the real budget.
+
+**Decision.** The common result fitter counts typed error metadata and prioritizes
+its compact items ahead of optional diagnostic prose. Aggregate reduction keeps
+the original error code, retryability, advice, canonical result and explicit
+producer recovery. It never synthesizes a source retry for a failed execution;
+unclassified host failures retain their error status without an invented code.
+Missing retained bytes call for inspecting the prior outcome; declared source
+recovery for successful observations keeps its existing narrowing rules.
+Only a strictly smaller final model projection is adopted, after program metadata
+and execution/retention fields are restored. Irreducible facts remain subject to
+complete-prompt admission. Mandatory retention still refuses lossy replacement.
+
+**Alternatives rejected.** Raising the round limit hides the loss without
+repairing it; dropping failure identities makes unchanged failures appear
+recoverable; replaying the source can repeat effects and cannot recover historical
+evidence. Application JSON never gains authority from resembling an error record.
+
+Verify `tests/tools/test_aggregate_result_recovery.py`, the single-result typed
+error budgets, and `tests/tasks_pkg/test_gateway_failure_recovery.py`. The latter
+drives the real outer tool pipeline and shared root loop under aggregate pressure,
+including changed arguments, successful correction and unchanged-failure stopping.
