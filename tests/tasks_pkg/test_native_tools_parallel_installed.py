@@ -25,6 +25,7 @@ pytestmark = pytest.mark.api
 
 
 @pytest.mark.parametrize('count,mode', [(2, 'legacy'), (8, 'v2'), (8, 'failure'), (8, 'cancel'),
+    (8, 'tool_recovery_legacy'), (8, 'tool_recovery_v2'),
     (2, 'measure_ordered'), (2, 'measure_parallel'), (8, 'measure_ordered'), (8, 'measure_parallel')])
 def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property):
     source = os.environ.get('TOFU_NATIVE_WORKER_TEST_ARCHIVE')
@@ -33,9 +34,16 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     archive = Path(source)
     manifest = verify(archive)
     owner = task()
-    owner['config']['tools']['resultEnvelope'] = 'v2' if mode == 'v2' else 'legacy'
+    recover_tool = mode.startswith('tool_recovery_')
+    expected_count = count + int(recover_tool)
+    owner['config']['tools']['resultEnvelope'] = 'v2' if mode == 'v2' or mode.endswith('_v2') else 'legacy'
     definitions = [{'type': 'function', 'function': {'name': 'fetch_url', 'parameters': {'type': 'object'}}}]
     owner['_executable_tool_catalog'] = definitions
+    if recover_tool:
+        from lib.tools.contracts import ToolContractV2
+        owner['_toolContractDocumentsByName'] = {'fetch_url': ToolContractV2(
+            name='fetch_url', parameters={'type': 'object'}, model_description='Read a source.',
+            permission='read', idempotency='read_only', effect_recovery='read_only').search_document()}
     entered, exited = [], []
     lock = threading.Lock()
     all_entered = threading.Event()
@@ -46,6 +54,10 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     if mode.startswith('measure_'):
         for release in releases: release.set()
     calls = [{'id': f'original-{i}', 'type': 'function', 'function': {'name': 'fetch_url', 'arguments': '{}'}} for i in range(count)]
+    retry = {'id': 'recovered-0', 'type': 'function', 'function': {
+        'name': 'fetch_url', 'arguments': json.dumps({'url': 'https://example.test/recover'})}}
+    if recover_tool:
+        calls[0]['function']['arguments'] = retry['function']['arguments']
     def read(task, tc, name, call_id, args, rn, row, *_rest):
         nonlocal peak
         index = int(call_id.rsplit('-', 1)[1])
@@ -58,6 +70,8 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             assert releases[index].wait(10), 'test did not release its owned read'
             if mode.startswith('measure_'): time.sleep(.04)
             row['_cacheableResult'] = False  # Both lanes perform identical live work.
+            if recover_tool and call_id == 'original-0':
+                raise ConnectionResetError('source disconnected during read')
             result = 'evidence:' + call_id
             _finalize_tool_round(task, rn, row, [{'content': result, 'badge': 'done'}])
             return call_id, result, False
@@ -73,8 +87,9 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             seen.append(body)
-            delta = {'tool_calls': [dict(call, index=i) for i, call in enumerate(calls)]} if len(seen) == 1 else {'content': 'complete'}
-            wire = ('data: ' + json.dumps({'choices': [{'delta': delta, 'finish_reason': 'tool_calls' if len(seen) == 1 else 'stop'}]}) + '\n\ndata: [DONE]\n\n').encode()
+            declarations = calls if len(seen) == 1 else [retry] if recover_tool and len(seen) == 2 else []
+            delta = {'tool_calls': [dict(call, index=i) for i, call in enumerate(declarations)]} if declarations else {'content': 'complete'}
+            wire = ('data: ' + json.dumps({'choices': [{'delta': delta, 'finish_reason': 'tool_calls' if declarations else 'stop'}]}) + '\n\ndata: [DONE]\n\n').encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(wire)))
@@ -106,17 +121,18 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
                 return result
         class Terminal:
             async def persist(self, request):
-                assert len(exited) == count
+                assert len(exited) == expected_count
                 assert request.receipt['invariants_satisfied']
                 terminals.append(request)
                 return 'accepted'
         async def callback(request):
-            assert request.model_call_id in {call['id'] for call in calls}
+            assert request.model_call_id in {call['id'] for call in calls} | ({retry['id']} if recover_tool else set())
             result = await gateway.execute(request)
             if mode == 'failure' and request.model_call_id == 'original-0':
                 raise ValueError('injected host failure after joined tool settlement')
             return result
         settings = config(f'http://127.0.0.1:{server.server_port}/chat', owner['id'])
+        settings['tool_calls'] = max(settings['tool_calls'], expected_count)
         settings.update(owner_user_id=1, tools=compile_native_tool_catalog(owner, definitions),
             parallel_tool_names=sorted(gateway.parallel_names), tool_sibling_control=True,
             tool_result_join=True, deadline_ms=15000,
@@ -157,7 +173,21 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
                 assert len(host._worker_pool.idle) == 1
                 results = [row for row in seen[1]['messages'] if row['role'] == 'tool']
                 assert [row['tool_call_id'] for row in results] == [call['id'] for call in calls]
-                assert all('evidence:' + row['tool_call_id'] in row['content'] for row in results)
+                for row in results:
+                    if recover_tool and row['tool_call_id'] == 'original-0':
+                        from lib.tools.result_envelope import tool_result_error
+                        error = tool_result_error(row['content'])
+                        assert error.code == 'tool_connection_failed' and error.retryable
+                        assert 'gateway' in error.next_action and 'independent' in error.next_action
+                    else:
+                        assert 'evidence:' + row['tool_call_id'] in row['content']
+                if recover_tool:
+                    assert len(seen) == 3
+                    retry_results = [row for row in seen[2]['messages']
+                        if row.get('role') == 'tool' and row.get('tool_call_id') == retry['id']]
+                    assert len(retry_results) == 1 and 'evidence:recovered-0' in retry_results[0]['content']
+                    assert {row['toolCallId']: row['status'] for row in owner['toolRounds']} == {
+                        **{call['id']: 'done' for call in calls}, 'original-0': 'error', retry['id']: 'done'}
                 assert observations[0]['resultEvidenceComplete'] and len(observations[0]['evidenceIds']) == count
         finally:
             gateway.close()
@@ -168,7 +198,8 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             asyncio.run(run(executor))
     finally:
         server.shutdown(); server.server_close(); thread.join()
-    assert sorted(entered) == sorted(exited) == [f'original-{i}' for i in range(count)]
+    expected_ids = [f'original-{i}' for i in range(count)] + ([retry['id']] if recover_tool else [])
+    assert sorted(entered) == sorted(exited) == sorted(expected_ids)
     assert peak == (1 if mode == 'measure_ordered' else count)
     record_property('tool_work_seconds', timing[1] - timing[0])
     record_property('peak_active_tools', peak)

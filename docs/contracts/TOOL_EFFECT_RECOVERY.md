@@ -42,6 +42,29 @@ ownership.
 Alternatives rejected: discarding a known failure loses actionable recovery; treating all timeouts as transient
 can duplicate effects; classifying exception text grants authority to untrusted payloads.
 
+Problem: uncaught handler/worker exceptions reached the model as unclassified prose,
+including when the collection fallback recovered a completed failed Future.
+Decision: the common effect projection emits sparse typed failures through the
+existing result envelope. `ConnectionError` maps to `tool_connection_failed`;
+retryability requires agreement between the current authoritative recovery policy
+and captured effect policy, exactly as for timeouts. `FileNotFoundError` and
+`NotADirectoryError` map to `tool_resource_missing`; `PermissionError` maps to
+`tool_permission_denied`. Other execution exceptions use `tool_execution_failed`,
+preserving their type and cause and directing environment repair or an available
+alternative, without unconditional retry. `ValueError` is not proof of bad arguments.
+Cancellation uses `tool_execution_cancelled` and never suggests resuming. Unknown
+non-repeatable effects retain `tool_effect_unknown` and exact inspection references
+ahead of these diagnostic categories; captured owner-classified results and invalid
+handler receipts keep their existing owners. Independent authorized work may continue.
+
+This projection handles exceptions already caught by execution/collection; it does
+not broaden catches, convert native host/control failures into successful callbacks,
+or introduce retries, storage, resident workers, or a second taxonomy for provider
+errors. Alternatives rejected: keyword matching cannot prove a network failure or
+safe replay; terminating useful work on every tool error loses completed siblings.
+Verify `test_tool_exception_recovery.py`, timeout/effect finality, collection gaps,
+and installed native parallel recovery across a subsequent provider round.
+
 Cost measurement (64 synthetic occurrences per disposable store, 60 warm): intent commit p95 was 1.87 ms on
 SQLite and 2.58 ms on native TofuDB; the marker was 109 JSON bytes and the complete carried event 533 bytes
 (median). These are local fixture measurements, not a throughput claim. One event is added per non-read-only

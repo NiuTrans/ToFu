@@ -333,7 +333,7 @@ def _completed_tools_until_cancel(futures, task, deadline):
 
 
 def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
-                                   *, round_num, reason):
+                                   *, round_num, reason, items_by_id):
     """Recover omitted executor receipts without waiting, retrying or resettling."""
     for future, (call_id, name, _generation) in futures.items():
         if call_id in tool_results or not future.done():
@@ -354,7 +354,10 @@ def _harvest_completed_tool_results(futures, task, tool_results, tool_verdicts,
                 'at round=%d after %s: %s',
                 task['id'][:8], task.get('convId', ''), name, call_id,
                 round_num, reason, error)
-            tool_results[call_id] = (f'Tool execution error: {error}', False)
+            from lib.tasks_pkg.executor._effects import tool_exception_result
+            item = items_by_id.get(call_id)
+            tool_results[call_id] = (tool_exception_result(
+                task, name, item[5] if item is not None else None, error), False)
             tool_verdicts[call_id] = 'error'
 
 
@@ -577,6 +580,7 @@ def _settle_tool_result(
     settled_results: dict[str, Any] | None = None,
     pending_envelopes: dict[str, Any] | None = None,
     canonical_content: Any = None,
+    produced_cache_entry: Any = None,
 ) -> Any:
     """Settle ONE tool call: budget its result, stamp the round, emit
     ``tool_complete``. Returns the final (budgeted) content for the message.
@@ -626,7 +630,8 @@ def _settle_tool_result(
     # A concurrent occurrence may publish the same query while this result is
     # compacted. Rewrite only this producer's observed receipt, by identity.
     _sync_key = _make_cache_key(fn_name, fn_args) if fn_name in idempotent_tools else None
-    _producer_cache_entry = cache.get(_sync_key) if _sync_key is not None else None
+    _producer_cache_entry = (produced_cache_entry if produced_cache_entry is not None
+                             else cache.get(_sync_key) if _sync_key is not None else None)
     if (not isinstance(_producer_cache_entry, (tuple, list)) or not _producer_cache_entry
             or not isinstance(tool_content, str) or _producer_cache_entry[0] != tool_content):
         _producer_cache_entry = None
@@ -691,8 +696,8 @@ def _settle_tool_result(
         # settlement boundary so a later authorized call can observe recovery.
         if isinstance(round_entry, dict):
             round_entry['_cacheableResult'] = False
-        if fn_name in idempotent_tools:
-            cache.pop(_make_cache_key(fn_name, fn_args), None)
+        if _sync_key is not None and produced_cache_entry is not None:
+            _discard_tool_result_cache_entry(task, _sync_key, produced_cache_entry)
     if isinstance(tool_content, str):
         tool_content = TrustedResultText(tool_content, canonical=captured_result,
                                          envelope=isinstance(tool_content, TrustedResultText) and tool_content.envelope)
@@ -829,7 +834,8 @@ def _settle_tool_result(
     # so the rich UI-replay path is unchanged. Producer sidecars in slots 8–9
     # are consumed here: the cache then owns the final internal envelope and
     # must not retain a second preview/omission representation.
-    if isinstance(tool_content, str) and fn_name in idempotent_tools:
+    if (captured_result.execution_status == 'ok'
+            and isinstance(tool_content, str) and fn_name in idempotent_tools):
         _cached_entry = _producer_cache_entry
         if (_cached_entry is not None
                 and isinstance(_cached_entry, (tuple, list))
@@ -2141,6 +2147,7 @@ def execute_tool_pipeline(
     # complete results through the task dict.
     _settled_results: dict[str, Any] = {}
     _pending_envelopes: dict[str, Any] = {}
+    _produced_cache_entries: dict[str, Any] = {}
     task.pop('_settled_tool_results', None)  # repair pre-C234 live task state
 
     def _settle_current(*args: Any, **kwargs: Any) -> Any:
@@ -2149,6 +2156,7 @@ def execute_tool_pipeline(
         kwargs['unchanged_receipt_tools'] = unchanged_receipt_tools
         kwargs['settled_results'] = _settled_results
         kwargs['pending_envelopes'] = _pending_envelopes
+        kwargs['produced_cache_entry'] = _produced_cache_entries.get(args[2])
         return _settle_tool_result(*args, **kwargs)
     # Auto-apply default (2026-08-21 policy): writes do NOT require approval
     # unless the user explicitly switched this conversation to Manual
@@ -2942,9 +2950,17 @@ def execute_tool_pipeline(
                                     _pi_search_diag)
                                 if _pi_projection is not None:
                                     _pi_cache_entry += (_pi_projection,)
-                                _store_tool_result_cache_entry(
-                                    task, _pi_cache_key, _pi_cache_entry,
-                                    generation=_start_generation)
+                                # Retain this occurrence's actual publication,
+                                # including a freshness wrapper, before another
+                                # pipeline can replace the same query receipt.
+                                with _tool_receipt_lock(task):
+                                    previous = _cache.get(_pi_cache_key)
+                                    _store_tool_result_cache_entry(
+                                        task, _pi_cache_key, _pi_cache_entry,
+                                        generation=_start_generation)
+                                    published = _cache.get(_pi_cache_key)
+                                    if published is not None and published is not previous:
+                                        _produced_cache_entries[ret_tc_id] = published
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                              'insert_content', 'insert_contents',
@@ -3004,7 +3020,10 @@ def execute_tool_pipeline(
                                 '[Task %s] conv=%s Tool %s (tc_id=%s) execution failed at round %d model=%s',
                                 tid, task.get('convId', ''), fut_fn_name, fut_tc_id, round_num, model, exc_info=True)
 
-                        tool_results[fut_tc_id] = (f'Tool execution error: {e}', False)
+                        from lib.tasks_pkg.executor._effects import tool_exception_result
+                        item = _parallel_by_id.get(fut_tc_id)
+                        tool_results[fut_tc_id] = (tool_exception_result(
+                            task, fut_fn_name, item[5] if item is not None else None, e), False)
                         tool_verdicts[fut_tc_id] = 'error'
             except (TimeoutError, _FuturesTimeoutError):
                 _timed_out = True
@@ -3020,7 +3039,7 @@ def execute_tool_pipeline(
                 # verdict always wins over later worker completion.
                 _harvest_completed_tool_results(
                     _futures, task, tool_results, tool_verdicts,
-                    round_num=round_num, reason='collector timeout')
+                    round_num=round_num, reason='collector timeout', items_by_id=_parallel_by_id)
                 for fut, (fut_tc_id, fut_fn_name, _generation) in _futures.items():
                     if fut_tc_id not in tool_results:
                         fut.cancel()
@@ -3050,7 +3069,7 @@ def execute_tool_pipeline(
         # before classifying the gap; do not enter handlers or add a new wait.
         _harvest_completed_tool_results(
             _futures, task, tool_results, tool_verdicts,
-            round_num=round_num, reason='collector gap')
+            round_num=round_num, reason='collector gap', items_by_id=_parallel_by_id)
 
     # ══════════════════════════════════════════
     #  Post-phase: Add tool messages in original order

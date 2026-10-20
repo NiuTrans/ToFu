@@ -195,6 +195,16 @@ human-guidance resolution.
 
 **Error recovery guidance.** Problem: a blanket "stop and report" can end useful work, while "retry" after interrupted execution can repeat effects. Decision: the common typed-error fallback scopes recovery to the failed operation, asks for outcome verification before repetition, and allows independent authorized work. `retryable` alone is neither replay authority nor a task-stop instruction. Owner-specific advice and error codes retain precedence. Command watchdog and restart receipts preserve partial output and describe unconfirmed effects; an absent process and exit receipt do not prove failure before execution. Custom-tool timeouts, transport failures and rejected oversized results likewise require outcome inspection. A result rejection does not undo the tool operation. JavaScript failures after child calls prefix specific authoring advice with effect reconciliation and retained-input reuse, in both program entry points and before the bounded hint can truncate it. Missing retained inputs explain the evidence gap; byte-budget failures recommend smaller retained-input groups or artifact pages, never source re-execution. Alternatives rejected: treating all failures as retryable weakens duplicate-effect protection; blanket aborts discard independent progress. Cancellation, admission and settlement policy remain with their existing owners. Runtime failures suggest environment repair or available direct tools; cancellation advice never asks to resume execution.
 
+Problem: a failed read's unconditional query-cache eviction could erase a
+successful concurrent read. Decision: each invocation retains the exact receipt
+it published under the shared receipt lock; failed settlement withdraws only
+that receipt if still current. Successful compaction also carries the producer's
+exact receipt; failed results never rewrite a success. Alternatives rejected:
+argument or body equality cannot establish
+receipt ownership, including when a successful document contains error-shaped
+JSON. No task-wide receipt history is added. Verify settlement/cache tests and
+the ordinary timeout/outcome-finality ladder.
+
 `execute_tools` receipts key call ID with canonical arguments, model round, and
 world version because a provider may recycle a positional call ID. A proven
 redispatch of the same gateway occurrence may reuse its receipt; changed calls

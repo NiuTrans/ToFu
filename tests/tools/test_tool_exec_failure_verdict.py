@@ -229,8 +229,11 @@ def test_exception_lane_stamps_and_ships_error(rec, scripted_tools):
         % (ev,))
     tool_msgs = [m for m in messages if m.get('role') == 'tool']
     bad_msg = [m for m in tool_msgs if m.get('tool_call_id') == 'tc-bad']
-    assert bad_msg and bad_msg[0]['content'].startswith(
-        'Tool execution error:'), bad_msg
+    from lib.tools.result_envelope import tool_result_error
+    assert bad_msg
+    error = tool_result_error(bad_msg[0]['content'])
+    assert error is not None and error.code == 'tool_execution_failed'
+    assert error.retryable is False and 'independent' in error.next_action
 
     assert fast[5]['status'] == 'done'
     assert 'status' not in rec.find('tc-fast', 'tool_complete')
