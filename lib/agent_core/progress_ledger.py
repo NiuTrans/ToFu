@@ -12,27 +12,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-
-def _call_signature(tool_calls: Iterable[Any]) -> str:
-    normalized: list[dict[str, Any]] = []
-    for call in tool_calls or ():
-        if not isinstance(call, dict):
-            continue
-        function = call.get("function")
-        function = function if isinstance(function, dict) else call
-        arguments = function.get("arguments", call.get("arguments", {}))
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except (TypeError, ValueError):
-                pass
-        normalized.append({
-            "name": str(function.get("name") or call.get("name") or ""),
-            "arguments": arguments,
-        })
-    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True,
-                         separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+from lib.agent_core.progress_evidence import tool_calls_signature
 
 
 @dataclass
@@ -88,7 +68,7 @@ class ProgressLedgerV2:
                 evidence_ids: Iterable[str] = (),
                 verification: str = "",
                 evidence_complete: bool = False) -> dict[str, Any]:
-        signature = _call_signature(tool_calls)
+        signature = tool_calls_signature(tool_calls)
         incoming = {str(value) for value in evidence_ids if str(value)}
         new_evidence = sorted(incoming - self.observed_evidence_ids)
         evidence_signature = ""

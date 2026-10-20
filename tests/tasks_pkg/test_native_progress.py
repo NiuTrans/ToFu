@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from lib.agent_core.native_process import ProgressLimits, ProgressRequest
-from lib.agent_core.progress_evidence import visible_result_evidence, nonretryable_failure_signature
+from lib.agent_core.progress_evidence import (
+    counted_result_evidence, nonretryable_failure_signature, tool_result_evidence,
+)
 from lib.identity import PrincipalContext
 from lib.tasks_pkg.native_progress import NativeGatewayProgress
 from lib.tools.result_envelope import ToolResultEnvelopeV2, ToolResultErrorV2
@@ -41,7 +43,7 @@ def failure(retryable=False):
 def test_complete_result_batch_is_detached_and_consumed_once():
     p=policy();p.record(0,call(),'visible')
     observation=asyncio.run(p.observe(request()))
-    assert observation==dict(worldVersion='v1', evidenceIds=[visible_result_evidence('visible')],
+    assert observation==dict(worldVersion='v1', evidenceIds=list(counted_result_evidence({tool_result_evidence(call(),'visible'):1})),
                             resultEvidenceComplete=True, verification='', nonretryableFailureSignatures=[])
     assert p.batch is None
     observation['evidenceIds'].append('mutation')
@@ -80,6 +82,19 @@ def test_evidence_overflow_is_bounded_and_resets_at_next_round():
     assert not asyncio.run(p.observe(request()))['resultEvidenceComplete']
     p.gateway.task['_worldVersion']='v2';p.record(1,call(),'new')
     assert asyncio.run(p.observe(request(round_num=1)))['resultEvidenceComplete']
+
+
+def test_repeated_result_counts_stay_compact_and_are_released():
+    p = policy(128)
+    for _ in range(10000):
+        p.record(0, call(), 'same')
+    assert len(p.batch.evidence) == 1 and p.batch.bytes <= 128
+    observation = asyncio.run(p.observe(request(calls=10000)))
+    assert observation['resultEvidenceComplete']
+    assert len(observation['evidenceIds']) == 1
+    assert p.batch is None
+    p.close()
+    assert p.gateway is None
 
 
 @pytest.mark.parametrize('change',['owner','task','closed','terminal'])

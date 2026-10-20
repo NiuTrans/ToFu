@@ -104,7 +104,7 @@ Verify generated native tool projection, route-window/output isolation, joined
 preparation, unauthorized-summary refusal and installed context application tests.
 Use the existing compactor/accounting owners; never create slots or fallback routes.
 
-NativeGatewayProgress owns one current settled batch of hashes; run_native_task
+NativeGatewayProgress owns one current settled batch of hashes/counts; run_native_task
 binds it from explicit breaker limits. Verify native-progress/gateway tests and
 installed context execution. Match native call counts, withdraw incomplete or
 oversized evidence, and release borrowed gateway references on close.

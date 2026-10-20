@@ -1,6 +1,6 @@
 """Native gateway evidence composition; Rust owns streaks and stop decisions.
 
-One immutable current batch retains hashes only, bounded by the existing native
+One immutable current batch retains hashes/counts, bounded by the existing native
 feedback budget. Tools publish evidence after canonical settlement in their
 existing worker. The stdio observer copies this small completed snapshot without
 another executor, message history or task/financial state machine.
@@ -11,14 +11,16 @@ from dataclasses import dataclass
 import time
 
 from lib.agent_core.native_process import ProgressLimits
-from lib.agent_core.progress_evidence import nonretryable_failure_signature, visible_result_evidence
+from lib.agent_core.progress_evidence import (
+    counted_result_evidence, nonretryable_failure_signature, tool_result_evidence,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class _Batch:
     round: int
     calls: int = 0
-    evidence: tuple[str, ...] = ()
+    evidence: tuple[tuple[str, int], ...] = ()
     failures: tuple[str, ...] = ()
     all_failed: bool = True
     complete: bool = True
@@ -40,10 +42,15 @@ class NativeGatewayProgress:
         evidence, failures, size, complete = batch.evidence, batch.failures, batch.bytes, batch.complete
         if complete:
             if self.limits.no_progress_rounds:
-                digest = visible_result_evidence(result)
-                evidence = tuple(sorted(set(evidence) | {digest}))
+                digest = tool_result_evidence(call, result)
+                counts = dict(evidence)
+                counts[digest] = counts.get(digest, 0) + 1
+                evidence = tuple(counts.items())
             failures = tuple(sorted(set(failures) | {signature})) if all_failed else ()
-            size = sum(len(value.encode('utf-8')) for value in (*evidence, *failures))
+            # Result digests/counts are ASCII; charge their emitted form without
+            # sorting or allocating the observation on every tool completion.
+            size = sum(len(digest) + len(str(count)) + 1 for digest, count in evidence)
+            size += sum(len(value.encode('utf-8')) for value in failures)
             if size > self.feedback_bytes:
                 evidence, failures, size, complete = (), (), 0, False
         self.batch = _Batch(round_num, batch.calls + 1, evidence, failures, all_failed, complete, size)
@@ -64,7 +71,8 @@ class NativeGatewayProgress:
         # Leave room for both always-present strings under the Rust byte rule.
         if len(world.encode('utf-8')) + (batch.bytes if complete else 0) + 2 > self.feedback_bytes:
             world, complete = '', False
-        observation = dict(worldVersion=world, evidenceIds=list(batch.evidence) if complete else [],
+        observation = dict(worldVersion=world,
+                           evidenceIds=list(counted_result_evidence(dict(batch.evidence))) if complete else [],
                            resultEvidenceComplete=complete, verification='',
                            nonretryableFailureSignatures=list(batch.failures) if complete and batch.all_failed else [])
         self.batch = None  # Completed-batch evidence is reconstructible, not durable state.

@@ -7,6 +7,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any, Iterable, Mapping
+
+
+def _normalized_call(call: dict) -> dict:
+    function = call.get('function')
+    function = function if isinstance(function, dict) else call
+    arguments = function.get('arguments', call.get('arguments', {}))
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            pass
+    return {'name': str(function.get('name') or call.get('name') or ''),
+            'arguments': arguments}
+
+
+def tool_calls_signature(tool_calls: Iterable[Any]) -> str:
+    """Ordered operation identity; provider correlation IDs carry no progress."""
+    normalized = [_normalized_call(call) for call in tool_calls or ()
+                  if isinstance(call, dict)]
+    payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':'), default=str)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
 def visible_result_evidence(result) -> str:
@@ -16,6 +39,16 @@ def visible_result_evidence(result) -> str:
     except (TypeError, ValueError):
         payload = repr(result)
     return hashlib.sha256(payload.encode('utf-8', 'replace')).hexdigest()
+
+
+def tool_result_evidence(call: dict, result) -> str:
+    """Bind visible content to its operation, independent of callback order."""
+    return visible_result_evidence([_normalized_call(call), result])
+
+
+def counted_result_evidence(counts: Mapping[str, int]) -> tuple[str, ...]:
+    """Keep repeated outcomes distinct in a ledger that accepts a set of IDs."""
+    return tuple(f'{count}:{digest}' for digest, count in sorted(counts.items()))
 
 
 def nonretryable_failure_signature(call: dict, result) -> str | None:

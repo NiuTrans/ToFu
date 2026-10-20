@@ -33,8 +33,9 @@ This package defines execution contracts shared by the full application and
 shared `lib/agent_loop/agent_loop.py` completed-round restoration ports are documented in
 `docs/RUN_CONTINUITY.md` and verified by `test_agent_loop_recovery.py`.
 
-progress_evidence.py owns pure visible-result and nonretryable-operation hashes
-shared by the Python runner and native gateway. Verify native-progress, root
+progress_evidence.py owns normalized operation/result hashes, counted result
+evidence and nonretryable-operation hashes shared by the Python runner and native
+gateway. Verify result-evidence, native-progress, root
 adapter, breaker and checkpoint neighbors; it grants no execution authority.
 execution_deadline_unix_ms reads the earliest validated task/shared-tree expiry
 without creating a ledger; verify parent/child, zero, invalid and integer bounds.

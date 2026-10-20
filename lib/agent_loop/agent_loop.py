@@ -414,7 +414,8 @@ def run_agent_loop(
             reads ``'timed_out'`` (bool),
             ``'nonretryable_failure_signatures'`` (stable error codes), and
             the no-progress evidence pair ``'progress_evidence_ids'`` plus
-            ``'result_evidence_complete'``. See the matching breaker
+            ``'result_evidence_complete'`` (string-ID collection and boolean).
+            Malformed evidence cannot establish a stall. See the matching breaker
             arguments below.
         decide_round: optional typed policy hook fired after a successful
             dispatch (and the legacy ``retry_bonus`` hook) but before the
@@ -702,12 +703,14 @@ def run_agent_loop(
                 if visible_result is None:
                     direct_result_evidence_complete = False
                 else:
-                    from lib.agent_core.progress_evidence import visible_result_evidence
-                    direct_result_evidence.append(visible_result_evidence(visible_result))
+                    from lib.agent_core.progress_evidence import tool_result_evidence
+                    direct_result_evidence.append(tool_result_evidence(tc, visible_result))
 
             if not outcome.aborted:
+                from collections import Counter
+                from lib.agent_core.progress_evidence import counted_result_evidence
                 note = {
-                    'progress_evidence_ids': direct_result_evidence,
+                    'progress_evidence_ids': counted_result_evidence(Counter(direct_result_evidence)),
                     'result_evidence_complete':
                         direct_result_evidence_complete,
                 }
@@ -744,17 +747,19 @@ def run_agent_loop(
             probe = probe if isinstance(probe, dict) else {}
             note_evidence = note_dict.get('progress_evidence_ids')
             probe_evidence = probe.get('evidenceIds')
-            note_evidence_complete = bool(
-                note_dict.get('result_evidence_complete'))
-            probe_evidence_complete = bool(
-                probe.get('resultEvidenceComplete'))
+            note_evidence_complete = (
+                note_dict.get('result_evidence_complete') is True
+                and isinstance(note_evidence, (list, tuple, set))
+                and all(isinstance(value, str) for value in note_evidence))
+            probe_evidence_complete = (
+                probe.get('resultEvidenceComplete') is True
+                and isinstance(probe_evidence, (list, tuple, set))
+                and all(isinstance(value, str) for value in probe_evidence))
             evidence_ids = (
                 note_evidence
-                if (note_evidence_complete
-                    and isinstance(note_evidence, (list, tuple, set)))
+                if note_evidence_complete
                 else probe_evidence
-                if (probe_evidence_complete
-                    and isinstance(probe_evidence, (list, tuple, set)))
+                if probe_evidence_complete
                 else ()
             )
             evidence_complete = bool(
