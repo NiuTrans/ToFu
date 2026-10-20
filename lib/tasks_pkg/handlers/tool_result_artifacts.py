@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 from lib.log import get_logger
+from lib.agent_core.storage_errors import StorageError
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
@@ -157,25 +158,35 @@ def _parse_cursor(arguments: dict) -> int | str:
     except (TypeError, ValueError) as exc:
         raise ToolContractError(
             'invalid_cursor', 'cursor must be a non-negative integer or a returned continuation cursor',
-            path='$.cursor') from exc
+            path='$.cursor', retryable=False,
+            next_action=CONTRACT['failures']['invalid_cursor']['nextAction']) from exc
     if cursor < 0:
         raise ToolContractError(
-            'invalid_cursor', 'cursor must be non-negative', path='$.cursor')
+            'invalid_cursor', 'cursor must be non-negative', path='$.cursor',
+            retryable=False, next_action=CONTRACT['failures']['invalid_cursor']['nextAction'])
     return cursor
 
 
 def _error_result(exc: Exception) -> dict:
     if isinstance(exc, ToolContractError):
         return {"status": "error", "error": exc.to_dict()}
-    if getattr(exc, 'code', '') == 'database_protocol_error':
-        return {'status': 'error', 'error': {'code': 'invalid_cursor', 'retryable': False}}
+    if isinstance(exc, StorageError):
+        for code, failure in CONTRACT['failures'].items():
+            if exc.code == failure['storageCode']:
+                return {'status': 'error', 'error': {
+                    'code': code, 'retryable': failure['retryable'],
+                    'nextAction': failure['nextAction']}}
     logger.warning('[ToolArtifact] owner-scoped read failed: %s', exc, exc_info=True)
+    retryable = isinstance(exc, StorageError) and exc.retryable
     return {
         "status": "error",
         "error": {
             "code": "artifact_store_unavailable",
-            "retryable": True,
-            "nextAction": "Retry this read once; do not re-execute the source tool to recover historical evidence.",
+            "retryable": retryable,
+            "nextAction": (
+                "Retry this read once; do not re-execute the source tool to recover historical evidence."
+                if retryable else
+                "The artifact store could not complete this read. Continue independent work and report the storage failure; do not repeat the source tool to recover historical evidence."),
         },
     }
 
@@ -304,7 +315,8 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
                           "retryable": True},
             })} for index, result in enumerate(results)]
             content = _fit_batch_to_budget(fn_name, indexed, model)
-            succeeded = all(item.get('status') == 'ok' for item in indexed)
+            batch_result = json.loads(content)
+            succeeded = batch_result['status'] == 'ok'
         else:
             result = _execute_one(
                 fn_name, calls[0], user_id=owner, repository=repository,
@@ -326,12 +338,12 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
     # blind) and ``imageDataUris`` on the row meta (the frontend renders the
     # same images as tiles). Search results are text-only by contract scope.
     media_refs = []
-    if fn_name == 'read_tool_artifact' and succeeded:
+    if fn_name == 'read_tool_artifact':
         if is_batch:
-            for item in indexed:
+            for item in batch_result['items']:
                 if item.get('status') == 'ok':
                     media_refs.extend(_media_descriptors_of(item))
-        else:
+        elif succeeded:
             media_refs = _media_descriptors_of(result)
     media_capped = len(media_refs) > _MAX_MEDIA_REPLAY
     media_refs = media_refs[:_MAX_MEDIA_REPLAY]
@@ -366,5 +378,6 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
              'format': _mime_ext(mime),
              'filename': f'artifact-media-{index + 1}.{_mime_ext(mime)}'}
             for index, (ref, mime) in enumerate(media_refs)]
-    _finalize_tool_round(task, rn, round_entry, [meta])
+    _finalize_tool_round(task, rn, round_entry, [meta],
+                         status='done' if succeeded else 'error')
     return tc_id, content, False

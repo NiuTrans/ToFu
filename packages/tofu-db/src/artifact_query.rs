@@ -23,6 +23,36 @@ fn cursor_max() -> usize {
         .as_u64()
         .expect("cursor limit") as usize
 }
+
+#[derive(Debug)]
+struct QueryFailure {
+    kind: &'static str,
+    message: &'static str,
+}
+
+impl std::fmt::Display for QueryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+
+impl std::error::Error for QueryFailure {}
+
+fn query_failure(kind: &'static str, message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, QueryFailure { kind, message })
+}
+
+pub(crate) fn failure_classification(error: &io::Error) -> Option<(&'static str, bool)> {
+    let failure = error.get_ref()?.downcast_ref::<QueryFailure>()?;
+    let policy = &CONTRACT["failures"][failure.kind];
+    Some((
+        policy["storageCode"].as_str().expect("query failure code"),
+        policy["retryable"]
+            .as_bool()
+            .expect("query failure retryability"),
+    ))
+}
+
 fn signed_cursor(raw: &str) -> bool {
     raw.split_once('.').is_some_and(|(prefix, _)| {
         Some(prefix) == CONTRACT["cursor"]["currentPrefix"].as_str()
@@ -61,7 +91,10 @@ fn signing_key(
         .entity_get(transaction, &private_key(transaction)?)?
         .filter(|bytes| bytes.len() == 32)
         .ok_or_else(|| {
-            invalid_input("Continuation key unavailable; publish an artifact before querying")
+            query_failure(
+                "artifact_query_unavailable",
+                "Continuation key unavailable; publish an artifact before querying",
+            )
         })
 }
 
@@ -72,19 +105,25 @@ pub(crate) fn validate_input(cursor: &Value, selector: &str) -> io::Result<()> {
                 && (s.is_empty() || s.bytes().all(|b| b.is_ascii_digit()) || signed_cursor(s))
         })
     {
-        return Err(invalid_input("Invalid continuation cursor"));
+        return Err(query_failure(
+            "invalid_cursor",
+            "Invalid continuation cursor",
+        ));
     }
     if !selector.is_empty() {
         if !selector.starts_with('/')
             || selector.chars().count() > 1024
             || selector[1..].split('/').count() > bound("pointerDepth")
         {
-            return Err(invalid_input("Invalid JSON pointer"));
+            return Err(query_failure("invalid_selector", "Invalid JSON pointer"));
         }
         let mut chars = selector.chars();
         while let Some(ch) = chars.next() {
             if ch == '~' && !matches!(chars.next(), Some('0' | '1')) {
-                return Err(invalid_input("Invalid JSON pointer escape"));
+                return Err(query_failure(
+                    "invalid_selector",
+                    "Invalid JSON pointer escape",
+                ));
             }
         }
     }
@@ -250,7 +289,10 @@ fn sign(key: &[u8], binding: &Value, position: &Position) -> io::Result<String> 
         URL_SAFE_NO_PAD.encode(signature)
     );
     if token.len() > cursor_max() {
-        return Err(invalid_input("Continuation metadata too large"));
+        return Err(query_failure(
+            "artifact_query_unavailable",
+            "Continuation metadata too large",
+        ));
     }
     Ok(token)
 }
@@ -261,7 +303,7 @@ fn decode(
     search: bool,
     now: u64,
 ) -> io::Result<Position> {
-    let fail = || invalid_input("Invalid continuation cursor");
+    let fail = || query_failure("invalid_cursor", "Invalid continuation cursor");
     let string = raw
         .as_str()
         .map(str::to_owned)
@@ -323,7 +365,8 @@ fn decode(
         return Err(fail());
     }
     if position.expiry != 0 && position.expiry <= now {
-        return Err(invalid_input(
+        return Err(query_failure(
+            "continuation_unavailable",
             "Continuation evidence expired; start a new query",
         ));
     }
@@ -433,7 +476,10 @@ impl Walker<'_> {
             };
             let Some(manifest) = node.manifest else {
                 if self.state.r.len() != depth {
-                    return Err(invalid_input("Continuation route unavailable"));
+                    return Err(query_failure(
+                        "continuation_unavailable",
+                        "Continuation route unavailable",
+                    ));
                 }
                 return Ok(Resolved {
                     segment: Segment::Raw(node.document),
@@ -473,7 +519,10 @@ impl Walker<'_> {
                 path.push(json!(format!("/parts/{index}")));
                 if parts[index]["kind"] != "artifact" {
                     if self.state.r.len() != depth + 1 {
-                        return Err(invalid_input("Continuation route unavailable"));
+                        return Err(query_failure(
+                            "continuation_unavailable",
+                            "Continuation route unavailable",
+                        ));
                     }
                     return Ok(Resolved {
                         segment: Segment::Part(manifest, index),
@@ -508,7 +557,10 @@ impl Walker<'_> {
     fn raw_window(&self, document: &ToolResultDocument) -> io::Result<(String, bool)> {
         let offset = self.state.b as u64;
         if offset > document.size_bytes {
-            return Err(invalid_input("Continuation segment unavailable"));
+            return Err(query_failure(
+                "continuation_unavailable",
+                "Continuation segment unavailable",
+            ));
         }
         let reader = self.database.blob_reader(
             self.transaction.tenant_id(),
@@ -583,7 +635,10 @@ pub(crate) fn run(
             .or_else(|| raw.as_str().and_then(|s| s.parse().ok()))
             .is_some_and(|n| n != 0)
     {
-        return Err(invalid_input("Invalid continuation cursor"));
+        return Err(query_failure(
+            "invalid_cursor",
+            "Invalid continuation cursor",
+        ));
     }
     let operation = if query.is_some() { "search" } else { "read" };
     let binding = json!([
@@ -599,7 +654,10 @@ pub(crate) fn run(
         .is_none()
     {
         if raw.as_str().is_some_and(signed_cursor) {
-            return Err(invalid_input("Continuation root unavailable"));
+            return Err(query_failure(
+                "continuation_unavailable",
+                "Continuation root unavailable",
+            ));
         }
         return Ok(None);
     }
@@ -640,7 +698,8 @@ pub(crate) fn run(
         let (piece, eof) = match resolved.segment {
             Segment::Issue(reason) => {
                 if reason == "unavailable" && initial.expiry != 0 {
-                    return Err(invalid_input(
+                    return Err(query_failure(
+                        "continuation_unavailable",
                         "Continuation child unavailable; start a new query",
                     ));
                 }
@@ -799,10 +858,14 @@ pub(crate) fn run(
         && walker.state.o == initial.o
         && walker.state.skip == initial.skip
     {
-        return Err(invalid_input("Query budget too small to make progress"));
+        return Err(query_failure(
+            "query_budget_exhausted",
+            "Query budget too small to make progress",
+        ));
     }
     if !finished && walker.issues.iter().any(|v| v["reason"] == "unavailable") {
-        return Err(invalid_input(
+        return Err(query_failure(
+            "continuation_unavailable",
             "Continuation child unavailable; start a new query",
         ));
     }
@@ -842,6 +905,23 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_failures_keep_typed_recovery_through_semantic_settlement() {
+        for (kind, policy) in CONTRACT["failures"].as_object().unwrap() {
+            let failure = crate::semantic_executor::map_storage_error(query_failure(
+                kind,
+                "a diagnostic cannot change the classification",
+            ));
+            assert_eq!(failure.code(), policy["storageCode"].as_str().unwrap());
+            assert_eq!(failure.retryable(), policy["retryable"].as_bool().unwrap());
+        }
+        let untyped = crate::semantic_executor::map_storage_error(invalid_input(
+            "Invalid continuation cursor",
+        ));
+        assert_eq!(untyped.code(), "database_protocol_error");
+        assert!(!untyped.retryable());
+    }
 
     fn cursor_vectors() -> Value {
         serde_json::from_str(include_str!(

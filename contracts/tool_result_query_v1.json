@@ -102,5 +102,32 @@
     "quotaPolicy": "reject; bounded expired cleanup",
     "missing": "unavailable; never reexecute",
     "ownerCheck": "every referenced child access"
+  },
+  "failures": {
+    "invalid_cursor": {
+      "storageCode": "tool_result_invalid_cursor",
+      "retryable": false,
+      "nextAction": "Pass the returned cursor unchanged with the same artifact reference, operation, query and selector. To start a fresh read of retained evidence, omit cursor or use 0; do not repeat the source tool."
+    },
+    "invalid_selector": {
+      "storageCode": "tool_result_invalid_selector",
+      "retryable": false,
+      "nextAction": "Correct the RFC6901 selector (escape ~ as ~0 and / as ~1), or omit it to inspect the retained JSON. Use cursor 0 after changing selector; do not repeat the source tool."
+    },
+    "continuation_unavailable": {
+      "storageCode": "tool_result_continuation_unavailable",
+      "retryable": false,
+      "nextAction": "The prior continuation is no longer available. Start a fresh read of the same retained artifact with cursor 0 and check its coverage. If evidence is unavailable, report the gap; repeating the source tool is a new observation."
+    },
+    "query_budget_exhausted": {
+      "storageCode": "tool_result_query_budget_exhausted",
+      "retryable": true,
+      "nextAction": "No query progress was made within the scan budget. Retry this read once; if it still fails, narrow the retained source or selector. Do not repeat the source tool to recover historical evidence."
+    },
+    "artifact_query_unavailable": {
+      "storageCode": "tool_result_query_unavailable",
+      "retryable": false,
+      "nextAction": "The retained-evidence query cannot establish a continuation. Continue independent work and report the query failure. Do not replace evidence or repeat the source tool to recover historical output."
+    }
   }
 }

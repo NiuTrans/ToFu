@@ -4,6 +4,12 @@ from __future__ import annotations
 
 
 from lib.tools.contracts import ToolContractV2, ToolErrorContract
+from lib.tool_results.tool_result_query_generated import CONTRACT as _QUERY_CONTRACT
+
+
+_QUERY_ERRORS = tuple(
+    ToolErrorContract(code, failure['retryable'], failure['nextAction'])
+    for code, failure in _QUERY_CONTRACT['failures'].items())
 
 
 def _decoded_artifact_result_schema(operation):
@@ -104,8 +110,7 @@ READ_TOOL_ARTIFACT = ToolContractV2(
     errors=(
         ToolErrorContract("artifact_unavailable", False,
                           "Historical evidence is unavailable; a separately authorized source call is a new observation."),
-        ToolErrorContract("invalid_cursor", True,
-                          "Use the cursor returned by the previous range."),
+        *_QUERY_ERRORS,
     ),
 )
 
@@ -166,8 +171,7 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
     errors=(
         ToolErrorContract("artifact_unavailable", False,
                           "Historical evidence is unavailable; a separately authorized source call is a new observation."),
-        ToolErrorContract("invalid_cursor", True,
-                          "Use the cursor returned by the previous search."),
+        *_QUERY_ERRORS,
     ),
 )
 

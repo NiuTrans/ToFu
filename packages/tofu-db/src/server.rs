@@ -1524,6 +1524,7 @@ fn error_response(
         SessionDispatchError::Execution(execution) => {
             let status = match execution {
                 SemanticExecutionError::InvalidPayload
+                | SemanticExecutionError::ToolResultQuery(_, _)
                 | SemanticExecutionError::DiagnosticInvalidPayload => STATUS_BAD_REQUEST,
                 SemanticExecutionError::DiagnosticUnsupported => STATUS_NOT_IMPLEMENTED,
                 SemanticExecutionError::NotFound => STATUS_BAD_REQUEST,

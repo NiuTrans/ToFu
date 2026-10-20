@@ -1,14 +1,17 @@
 """Backend-neutral failure contract for execution ports and storage adapters.
 
 StorageError, diagnostic formatting and HTTP mapping are shared with the sidecar.
-Only standard-library dependencies are allowed; importing this module never
-initializes application storage. lib.storage.errors re-exports the same objects.
+Only standard-library and generated data contracts are dependencies; importing
+this module never initializes application storage. lib.storage.errors re-exports
+the same objects.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+from lib.tool_results.tool_result_query_generated import CONTRACT as _ARTIFACT_QUERY_CONTRACT
 
 
 ERROR_CODES = frozenset({
@@ -49,7 +52,8 @@ ERROR_CODES = frozenset({
     'database_protocol_error',
     'database_internal',
     'plugin_storage_incompatible',
-})
+}) | frozenset(failure['storageCode'] for failure in
+              _ARTIFACT_QUERY_CONTRACT['failures'].values())
 
 
 @dataclass(slots=True)

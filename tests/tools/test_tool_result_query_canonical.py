@@ -149,8 +149,11 @@ def test_depth_and_no_progress_deadline_are_explicit(store, monkeypatch):
     assert page['nextCursor'] is None
     leaf = save(store,'needle')
     monkeypatch.setitem(q.LIMITS,'scanSeconds',0)
-    with pytest.raises(Exception,match='progress'):
+    from lib.agent_core.storage_errors import StorageError
+    with pytest.raises(StorageError, match='progress') as failure:
         search(store,args(leaf,query='needle'))
+    assert failure.value.code == 'tool_result_query_budget_exhausted'
+    assert failure.value.retryable is True
 
 
 @pytest.mark.parametrize('change', [

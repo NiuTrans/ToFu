@@ -16,14 +16,16 @@ MAX_BYTES = LIMITS['scanBytes']
 WINDOW = 65536
 
 
-def invalid(message='Invalid continuation cursor'):
-    raise StorageError('database_protocol_error', message)
+def invalid(message='Invalid continuation cursor', *, kind='invalid_cursor'):
+    failure = CONTRACT['failures'][kind]
+    raise StorageError(failure['storageCode'], message,
+                       retryable=failure['retryable'])
 
 
 def cursor_key(session):
     row = session.fetch_one('SELECT value_json FROM storage_records WHERE namespace=? AND record_key=?', ('tool_result_private', 'cursor-key-v1'))
     if not row:
-        invalid('Continuation key unavailable')
+        invalid('Continuation key unavailable', kind='artifact_query_unavailable')
     return bytes.fromhex(json.loads(row['value_json']))
 
 
@@ -62,7 +64,7 @@ def encode_cursor(session, payload, operation, state):
     token = '.'.join((CONTRACT['cursor']['currentPrefix'], _base64url(data),
                       _base64url(signature)))
     if len(token) > CONTRACT_CURSOR_MAX:
-        invalid('Continuation metadata too large')
+        invalid('Continuation metadata too large', kind='artifact_query_unavailable')
     return token
 
 
@@ -107,7 +109,7 @@ def decode_cursor(session, payload, operation):
         if any(type(state[k]) is not int or state[k] < 0 for k in ('p', 'o', 'skip', 'expiry')) or type(state['partial']) is not bool:
             invalid()
         if state['expiry'] and state['expiry'] <= int(payload['now_ms']):
-            invalid('Continuation evidence expired; start a new query')
+            invalid('Continuation evidence expired; start a new query', kind='continuation_unavailable')
         return state
     except (ValueError, TypeError, KeyError):
         invalid()
@@ -117,15 +119,15 @@ def select_json(text, selector):
     if not selector:
         return text
     if not isinstance(selector, str) or not selector.startswith('/') or len(selector) > 1024:
-        invalid('Invalid JSON pointer')
+        invalid('Invalid JSON pointer', kind='invalid_selector')
     tokens = selector[1:].split('/')
     if len(tokens) > LIMITS['pointerDepth']:
-        invalid('JSON pointer depth exceeded')
+        invalid('JSON pointer depth exceeded', kind='invalid_selector')
     value = json.loads(text)
     import re
     for token in tokens:
         if re.search(r'~(?![01])', token):
-            invalid('Invalid JSON pointer escape')
+            invalid('Invalid JSON pointer escape', kind='invalid_selector')
         key = token.replace('~1', '/').replace('~0', '~')
         if isinstance(value, list):
             if not key.isdigit() or (len(key) > 1 and key[0] == '0'):
@@ -183,7 +185,7 @@ def query_result(session, payload, operation):
     first = load(root)
     if first is None:
         if initial['expiry']:
-            invalid('Continuation root unavailable')
+            invalid('Continuation root unavailable', kind='continuation_unavailable')
         return None
     if first[1]:
         metadata = {k: first[1][k] for k in ('resultId', 'executionStatus', 'sourceCoverage', 'retentionCoverage')}
@@ -208,7 +210,7 @@ def query_result(session, payload, operation):
                             'executionStatus': manifest['executionStatus']}
             if not manifest:
                 if len(route) != depth:
-                    invalid('Continuation route unavailable')
+                    invalid('Continuation route unavailable', kind='continuation_unavailable')
                 return ('raw', row, ref, path, frames)
             for key in ('sourceCoverage', 'retentionCoverage'):
                 if manifest[key] not in ('complete', 'full'):
@@ -226,7 +228,7 @@ def query_result(session, payload, operation):
                 kind = item['kind']
                 if kind != 'artifact':
                     if len(route) != depth + 1:
-                        invalid('Continuation route unavailable')
+                        invalid('Continuation route unavailable', kind='continuation_unavailable')
                     return (kind, item, ref, child_path, frames)
                 ref = item['artifactRef']
             else:
@@ -255,7 +257,7 @@ def query_result(session, payload, operation):
         kind, value, ref, path, frames = resolve()
         if kind in ('issue', 'end', 'media'):
             if kind == 'issue' and value == 'unavailable' and initial['expiry']:
-                invalid('Continuation child unavailable; start a new query')
+                invalid('Continuation child unavailable; start a new query', kind='continuation_unavailable')
             if kind == 'issue':
                 # Missing children never alter route offsets. Once an unavailable
                 # node was observed, refusal prevents a later availability shift.
@@ -357,7 +359,7 @@ def query_result(session, payload, operation):
                 break
     # A no-progress cutoff is an explicit refusal, never a self-loop cursor.
     if not finished and all(state[k] == initial[k] for k in ('r', 'p', 'o', 'skip')):
-        invalid('Query budget too small to make progress')
+        invalid('Query budget too small to make progress', kind='query_budget_exhausted')
     result = {'artifactRef': root, **metadata, 'scope': 'text_and_media_descriptors' if operation == 'read' else 'text_only',
               'coverage': 'incomplete' if state['partial'] or not finished else 'complete',
               'unavailable': issues, 'nextCursor': None, 'truncated': not finished}
@@ -369,7 +371,7 @@ def query_result(session, payload, operation):
         result.update(query=payload['query'], items=matches)
     if not finished:
         if any(item['reason'] == 'unavailable' for item in issues):
-            invalid('Continuation child unavailable; start a new query')
+            invalid('Continuation child unavailable; start a new query', kind='continuation_unavailable')
         result['nextCursor'] = encode_cursor(session, payload, operation, state)
     result['resumeCursor'] = encode_cursor(session, payload, operation, initial)
     return result
