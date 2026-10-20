@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.8
+
+- Recover one transient worker startup refusal before a fetch/filter/MCP
+  callable enters. Retain the same unpublished Future and cancellation owner;
+  persistent refusal remains per-item, while accepted siblings complete.
+  No network request, model call or initializer is replayed by this recovery.
+
 ## 0.12.7
 
 - Fuse upstream and local lexical ranks for snippet-only candidates, preserving

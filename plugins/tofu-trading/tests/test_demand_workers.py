@@ -68,19 +68,20 @@ def test_intel_hint_one_starts_all_queries_with_separate_owned_handles(monkeypat
     assert {id(value) for value in opened} == {id(value) for value in closed}
 
 
-def test_start_failure_preserves_every_query_and_closes_accepted_handles(monkeypatch):
+@pytest.mark.parametrize('failed_starts', [1, 2])
+def test_start_failure_preserves_every_query_and_closes_accepted_handles(monkeypatch, failed_starts):
     from tofu_trading import storage
     from tofu_trading.trading import intel_mega_crawler as crawler
     original = threading.Thread.start
     starts = 0
-    gate = threading.Barrier(31, timeout=5)
+    gate = threading.Barrier(32 if failed_starts == 1 else 31, timeout=5)
     closed = []
     effects = []
     def start(thread):
         nonlocal starts
         if thread.name.startswith('tofu-demand'):
             starts += 1
-            if starts == 8:
+            if 8 <= starts < 8 + failed_starts:
                 raise OSError('injected physical thread failure')
         return original(thread)
     def handle(domain, *, owner_user_id):
@@ -98,6 +99,9 @@ def test_start_failure_preserves_every_query_and_closes_accepted_handles(monkeyp
         'synthetic', queries, None, None, crawler.MegaCrawlConfig(max_workers=1))
     assert {row['query'] for row in result} == set(queries)
     failed = [row for row in result if row.get('error')]
-    assert failed == [{'query': '7', 'fetched': 0, 'error': 'injected physical thread failure'}]
-    assert sorted(effects) == sorted(set(queries) - {'7'})
-    assert closed == [73] * 31
+    expected_failures = [] if failed_starts == 1 else [
+        {'query': '7', 'fetched': 0, 'error': 'injected physical thread failure'}]
+    assert failed == expected_failures
+    expected_queries = set(queries) if failed_starts == 1 else set(queries) - {'7'}
+    assert sorted(effects) == sorted(expected_queries)
+    assert closed == [73] * len(expected_queries)

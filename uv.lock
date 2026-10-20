@@ -3062,7 +3062,7 @@ provides-extras = ["full", "storage", "release", "app", "test", "dev", "worker",
 
 [[package]]
 name = "tofu-search"
-version = "0.12.7"
+version = "0.12.8"
 source = { editable = "packages/tofu-search" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -3128,7 +3128,7 @@ provides-extras = ["playwright", "pdf", "all", "mcp", "test", "dev"]
 
 [[package]]
 name = "tofu-trading"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "plugins/tofu-trading" }
 dependencies = [
     { name = "tofu-agent" },

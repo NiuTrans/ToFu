@@ -67,17 +67,18 @@ def test_filter_calls_overlap_with_legacy_hint_one(monkeypatch):
         url: 'clean:' + text for url, text in items}
 
 
-def test_start_failure_withdraws_one_fetch_and_drains_siblings(monkeypatch):
+@pytest.mark.parametrize('failed_starts', [1, 2])
+def test_start_failure_recovers_or_withdraws_one_fetch_and_drains_siblings(monkeypatch, failed_starts):
     from tofu_search.fetch import core
     original = threading.Thread.start
-    gate = threading.Barrier(31, timeout=5)
+    gate = threading.Barrier(32 if failed_starts == 1 else 31, timeout=5)
     calls = []
     starts = 0
     def start(thread):
         nonlocal starts
         if thread.name.startswith('tofu-demand'):
             starts += 1
-            if starts == 8:
+            if 8 <= starts < 8 + failed_starts:
                 raise OSError('injected physical startup failure')
         return original(thread)
     def fetch(url, **kwargs):
@@ -88,9 +89,10 @@ def test_start_failure_withdraws_one_fetch_and_drains_siblings(monkeypatch):
     monkeypatch.setattr(core, 'fetch_page_content', fetch)
     urls = [f'https://example.test/{i}' for i in range(32)]
     result = core.fetch_urls(urls)
-    expected = set(urls) - {urls[7]}
+    expected = set(urls) if failed_starts == 1 else set(urls) - {urls[7]}
     assert set(result) == expected
     assert set(calls) == expected
+    assert len(calls) == len(expected)
 
 
 def test_closed_executor_returns_terminal_failure_without_effect():

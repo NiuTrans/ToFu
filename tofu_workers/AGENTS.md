@@ -11,6 +11,9 @@ and copy-helper tests, then a wheel import in a fresh process.
 joined non-daemon fan-out. `scripts/gen_packaged_demand_workers.py` emits its
 private installed-package copy; verify drift and fresh wheel execution after
 kernel changes. Package copies are generated, never separate implementations.
+`test_worker_start_recovery.py` covers unpublished startup recovery, bounded
+refusal, owner withdrawal and observation isolation. Native approval/parallel
+tests prove context and occurrence ownership across the application adapter.
 
 `json_frames.py` owns shared immutable JSON file ranges and demand encoding/read
 workers and associated blocking transport I/O. Callers inject reuse hints and transport identity; no app imports or

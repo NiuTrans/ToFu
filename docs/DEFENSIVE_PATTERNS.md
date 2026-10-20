@@ -276,8 +276,10 @@ This is a component fault test, not a live latency or native-storage SLO claim.
 Decision: `tofu_workers/executor.py` keeps physical-start transactions serialized
 under a separate startup lock, with consistent startup→condition lock order.
 Registration and startup reservations share one condition hold. New pending
-items remain provisional and non-consumable until physical startup succeeds;
-start/constructor failures remove and cancel that item before reporting rejection.
+items remain provisional and non-consumable until physical startup succeeds.
+A start/constructor exception can re-reserve once while that same item/Future is
+still owned and the executor remains open and healthy. Final refusal removes
+and cancels the item before reporting rejection, retaining both startup causes.
 The condition is released for actual `Thread.start()`. Completion, cancellation,
 Future callbacks, snapshots and retirement bookkeeping never need the startup
 lock. Worker-exit bookkeeping happens first; only replacement creation waits
@@ -289,6 +291,18 @@ quarantine only after replacement startup, without adding active work back if
 the original job completed meanwhile. Resize retains its original idle-hint
 rollback. Resident metrics count registered live carriers; `startingWorkers`
 separately exposes unresolved startup reservations, including zero.
+
+Problem: one transient physical startup failure could terminate an otherwise
+productive native task or discard one independent search result. Decision:
+recover at this shared unpublished admission boundary, with no sleep, extra
+queue, executor or handler retry. Already-live carriers from a late start remain
+usable. Cancellation, shutdown and initializer failure fence recovery; control
+exceptions propagate. The task's original Future and copied context remain the
+same, so approval prompts and writes cannot be replayed by startup recovery.
+The optional `tofu_executor_startup_recoveries_total` counter records bounded
+`accepted`/`failed`/`cancelled` outcomes; observation failure cannot change the
+execution outcome. Verify worker-start recovery/transaction tests, native
+approval and installed parallel scenarios, plus independent package fan-out.
 
 Alternatives rejected: merely dropping the condition around start lets a worker
 execute a provisional item after submission later reports failure; a new starter

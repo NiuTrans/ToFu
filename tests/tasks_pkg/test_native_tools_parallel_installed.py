@@ -25,14 +25,25 @@ pytestmark = pytest.mark.api
 
 
 @pytest.mark.parametrize('count,mode', [(2, 'legacy'), (8, 'v2'), (8, 'failure'), (8, 'cancel'),
+    (8, 'startup_recovery'),
     (8, 'tool_recovery_legacy'), (8, 'tool_recovery_v2'),
     (2, 'measure_ordered'), (2, 'measure_parallel'), (8, 'measure_ordered'), (8, 'measure_parallel')])
-def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property):
+def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property, monkeypatch):
     source = os.environ.get('TOFU_NATIVE_WORKER_TEST_ARCHIVE')
     if not source:
         pytest.skip('explicit verified native worker archive required')
     archive = Path(source)
     manifest = verify(archive)
+    starts, startup_faults = [], []
+    original_start = threading.Thread.start
+    def start(thread):
+        if mode == 'startup_recovery' and thread.name.startswith('native-parallel-recovery'):
+            starts.append(thread.name)
+            if len(starts) == 2:
+                startup_faults.append(thread.name)
+                raise OSError('transient native callback worker refusal')
+        return original_start(thread)
+    monkeypatch.setattr(threading.Thread, 'start', start)
     owner = task()
     recover_tool = mode.startswith('tool_recovery_')
     expected_count = count + int(recover_tool)
@@ -194,7 +205,8 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             await host.close()
         assert not host._worker_pool.workers and image._closed
     try:
-        with InstrumentedThreadPoolExecutor(max_workers=1, metric_pool='tool') as executor:
+        with InstrumentedThreadPoolExecutor(max_workers=1, metric_pool='tool',
+                thread_name_prefix='native-parallel-recovery') as executor:
             asyncio.run(run(executor))
     finally:
         server.shutdown(); server.server_close(); thread.join()
@@ -205,3 +217,4 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     record_property('peak_active_tools', peak)
     record_property('active_tools_after_join', len(entered) - len(exited))
     assert not owner.get('_activeToolContexts') and '_pending_tool_result_envelopes' not in owner
+    assert len(startup_faults) == int(mode == 'startup_recovery')

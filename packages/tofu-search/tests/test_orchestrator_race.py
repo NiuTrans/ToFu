@@ -41,8 +41,13 @@ def stub_engines(monkeypatch):
 
     # Subject evidence comes from the fetched body, not the deliberately
     # unrelated SERP fixture. A successful transport alone is not relevance.
-    monkeypatch.setattr(orchestrator, "fetch_page_content",
-                        lambda url, **kw: f"Substantive test query evidence at {url}. " + "x" * 500)
+    def fetch_distinct_article(url, **kwargs):
+        identity = url.rsplit('/', 1)[-1]
+        # Fetched articles must be distinct too: identical filler is a mirror
+        # and makes Race-to-N assertions depend on which fetches finish first.
+        evidence = ' '.join(f'article_{identity}_fact_{part}' for part in range(40))
+        return f'Substantive test query evidence at {url}. {evidence}'
+    monkeypatch.setattr(orchestrator, 'fetch_page_content', fetch_distinct_article)
     # Disable deepen.
     monkeypatch.setattr(orchestrator, "is_deepen_enabled", lambda: False)
     # Disable the pre-fetch relevance gate — this fixture's synthetic results
@@ -56,6 +61,15 @@ def stub_engines(monkeypatch):
     configure(prefetch_gate_enabled=False)
     yield
     configure(prefetch_gate_enabled=_prev_gate)
+
+
+def test_race_fixture_pages_represent_independent_article_evidence(stub_engines):
+    from tofu_search.search.dedup import dedup_by_full_content
+
+    pages = orchestrator.search_ddg_html('test query', n=20)
+    for page in pages:
+        page['full_content'] = orchestrator.fetch_page_content(page['url'])
+    assert len(dedup_by_full_content(pages)) == len(pages)
 
 
 def test_pipeline_returns_content_results(stub_engines):

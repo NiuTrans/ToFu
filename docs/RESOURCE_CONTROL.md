@@ -1,5 +1,31 @@
 # Automatic resource control
 
+## Recover provisional worker startup without adding resource owners
+
+**Problem:** a transient physical thread-construction/start failure refused an
+otherwise eligible tool or independent search/read item before its callable ran.
+**Decision:** the shared demand executor makes at most one additional immediate
+admission attempt for the same unpublished Future. Cancellation, shutdown and
+initializer failure still withdraw ownership; persistent failure preserves both
+startup causes. Recovery adds no resident worker pool, queue, timer, retry history
+or durable state. Ordinary demand still determines physical concurrency and
+joined shutdown releases every carrier. The optional bounded outcome counter
+cannot replace the execution result. **Alternatives rejected:** retrying handlers
+can duplicate effects; queuing behind busy carriers can deadlock nested work;
+unbounded admission loops can monopolize a submitting thread.
+
+A 2026-10-21 Python 3.12.13 comparison against `4761079b8241` submitted 32 held
+callables and failed the eighth physical start once. Baseline completed 31 with
+one refusal; recovery completed all 32 exactly once, using 33 start attempts and
+32 peak physical workers. Both retained zero workers after joined shutdown.
+Seven alternating 500-call warm submit/result samples measured medians of
+39.69 / 39.84 microseconds (baseline / recovery), with one resident worker in each
+sample. These local synthetic measurements exclude RSS, network, model latency
+and production throughput. Installed standalone wheel checks and the installed
+native tool loop separately verify retained results, bounded persistent failure,
+approval ownership and no repeated callable entry. See
+[DEFENSIVE_PATTERNS.md](DEFENSIVE_PATTERNS.md) for the startup transaction.
+
 ## Sidebar review receipts
 
 `frontend/src/conversation-review.ts` keeps one browser-local receipt per encountered conversation and authenticated owner, overwriting it on the next completion/view. It retains only turn/attempt identity, ordering and a viewed bit; no transcript, polling, request, worker or timer is added. Receipts persist as user interface history; the in-memory read cache clears on owner change/disposal. The focused 1,000-completion test retains exactly one record for its conversation. Its final key plus value measured 117 UTF-16 code units (234 bytes before browser storage overhead), independent of completion count; IDs affect record size. Unavailable/quota-exhausted storage degrades to the current tab's memory receipt.
