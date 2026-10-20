@@ -11,6 +11,11 @@
 
 ## Unreleased
 
+- Recover failed DDG HTML searches through its free Lite endpoint within the
+  same query, proxy and time budget. Share browser/HTTP parsing, keep snippets
+  attached to their source, and preserve escaped destination URLs.
+- Reject unmocked HTTPX network calls in offline package tests; challenge
+  regression tests now intercept the current transport boundary.
 - Use bounded, lazy HTTP/2 negotiation for free DDG HTML search through the
   existing transport-policy owner. Preserve selected proxies, certificate
   validation, freshness and error classifications; close response/client
