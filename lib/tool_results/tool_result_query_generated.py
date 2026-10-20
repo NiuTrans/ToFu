@@ -68,6 +68,9 @@ CONTRACT = {'version': 1,
  'quotaAuthority': 'lib.tool_results.tool_result_query_contract reads these hard ceilings; '
                    'launch TOFU_BROWSER_STAGING_MAX_MIB may tighten byte admission',
  'response': {'tokens': 7000,
+              'budgetSurface': 'declared model projection from '
+                               'contracts/tool_result_surfaces_v1.json; canonical and decoded '
+                               'query JSON remain exact',
               'overflow': 'requery same cursor with smaller limit; metadata-only overflow '
                           'explicitly refuses without self-loop continuation'},
  'lifecycle': {'ttlDefaultHours': 24,

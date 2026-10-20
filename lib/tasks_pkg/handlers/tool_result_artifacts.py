@@ -2,7 +2,8 @@
 
 Single-call arguments remain wire-compatible. Native ``reads`` / ``searches``
 batches execute through the shared bounded runner, isolate per-item failures,
-and return input-ordered results under one aggregate token budget.
+and return input-ordered results under one aggregate model-view token budget.
+Canonical query JSON and decoded program values retain the complete page.
 """
 
 from __future__ import annotations
@@ -87,6 +88,12 @@ def _serialize(result: dict) -> str:
                       separators=(",", ":"))
 
 
+def _model_tokens(fn_name: str, text: str, model: str) -> int:
+    """Use the common delivery projection; returned/captured JSON stays exact."""
+    from lib.tools.result_surfaces import project_model_source
+    return _count_tokens(project_model_source(fn_name, text), model)
+
+
 def _metadata_refusal(result=None):
     identity = {key: result[key] for key in ('index', 'artifactRef', 'query')
                 if result is not None and key in result}
@@ -96,7 +103,7 @@ def _metadata_refusal(result=None):
 
 def _fit_read_result(result, model, token_budget):
     # Opaque cursors cannot be reconstructed after trimming text locally.
-    if _count_tokens(_serialize(result), model) <= token_budget:
+    if _model_tokens('read_tool_artifact', _serialize(result), model) <= token_budget:
         return result
     if result.get('resumeCursor') or str(result.get('nextCursor', '')).startswith('trq1.'):
         return _metadata_refusal(result)
@@ -106,7 +113,7 @@ def _fit_read_result(result, model, token_budget):
         mid = (low + high) // 2
         prefix = visible[:mid]
         candidate = {**result, 'content': prefix, 'nextCursor': str(int(result.get('offset', 0)) + len(prefix.encode())), 'truncated': True, 'outputTruncated': True}
-        if _count_tokens(_serialize(candidate), model) <= token_budget:
+        if _model_tokens('read_tool_artifact', _serialize(candidate), model) <= token_budget:
             best, low = candidate, mid + 1
         else:
             high = mid - 1
@@ -114,7 +121,7 @@ def _fit_read_result(result, model, token_budget):
 
 
 def _fit_search_result(result, model, token_budget):
-    if _count_tokens(_serialize(result), model) <= token_budget:
+    if _model_tokens('search_tool_artifact', _serialize(result), model) <= token_budget:
         return result
     # The cursor has consumed every match in this page. Shortening a quotation
     # (or dropping a match) would strand evidence behind that cursor, including
@@ -131,11 +138,11 @@ def _fit_one_result(fn_name, result, model, token_budget):
 def _fit_batch_to_budget(fn_name, results, model):
     wrapper = {'status': 'ok' if all(x.get('status') == 'ok' for x in results) else 'partial_failure', 'items': results}
     text = _serialize(wrapper)
-    if _count_tokens(text, model) > _RESPONSE_TOKEN_BUDGET:
+    if _model_tokens(fn_name, text, model) > _RESPONSE_TOKEN_BUDGET:
         share = max(1, (_RESPONSE_TOKEN_BUDGET - 64) // max(1, len(results)))
         fitted = [_fit_one_result(fn_name, item, model, share) for item in results]
         text = _serialize({**wrapper, 'items': fitted, 'status': 'ok' if all(x.get('status') == 'ok' for x in fitted) else 'partial_failure'})
-        if _count_tokens(text, model) > _RESPONSE_TOKEN_BUDGET:
+        if _model_tokens(fn_name, text, model) > _RESPONSE_TOKEN_BUDGET:
             return _serialize(_metadata_refusal())
     return text
 

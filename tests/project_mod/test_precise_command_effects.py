@@ -68,7 +68,7 @@ def test_dynamic_significant_write_fails_closed(checkout):
 
 
 def test_unknown_worktree_option_refused(checkout):
-    with pytest.raises(ValueError, match='lifecycle option'):
+    with pytest.raises(ValueError, match='Git worktree lifecycle'):
         command_write_lease_claims(str(checkout), 'git worktree move --unknown a b')
 
 

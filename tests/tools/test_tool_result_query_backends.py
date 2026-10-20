@@ -103,6 +103,7 @@ def test_search_adjacent_unicode_and_window_boundary_offsets(repo):
 def test_handler_search_budget_retains_authority_quotes_and_cursors(
         repo, monkeypatch, canonical):
     from lib.tasks_pkg.handlers import tool_result_artifacts as handler
+    from lib.tools.result_surfaces import project_model_source
 
     monkeypatch.setattr(
         handler, '_count_tokens', lambda text, _model: len(text.encode('utf-8')))
@@ -119,11 +120,88 @@ def test_handler_search_budget_retains_authority_quotes_and_cursors(
     expected = repo.search(user_id=1, **{**arguments, 'limit': len(page['items'])})
     assert page == {'status': 'ok', **expected}
     assert all('needle' in item['text'] for item in page['items'])
-    assert len(handler._serialize(page).encode('utf-8')) <= 7000
+    assert len(project_model_source(
+        'search_tool_artifact', handler._serialize(page)).encode('utf-8')) <= 7000
     resumed = handler._execute_one('search_tool_artifact', {
         **arguments, 'cursor': page['nextCursor']}, user_id=1, repository=repo)
     assert resumed['status'] == 'ok' and resumed['items']
     assert resumed['items'][0]['offset'] > page['items'][-1]['offset']
+
+
+@pytest.mark.parametrize('canonical', [False, True])
+@pytest.mark.parametrize('operation', ['read_tool_artifact', 'search_tool_artifact'])
+def test_handler_admits_exact_page_using_its_declared_model_budget(
+        repo, monkeypatch, canonical, operation):
+    from types import SimpleNamespace
+    from lib.tasks_pkg.handlers import tool_result_artifacts as handler
+    from lib.tools.result_surfaces import project_model_source
+
+    body = 'needle 中🙂\n' * 48
+    ref = (manifest(repo, [{'kind': 'text', 'text': body}], ttl=120000)
+           if canonical else put(repo, body, ttl=120000))
+    arguments = {'artifact_ref': ref, 'limit': 8 if operation == 'read_tool_artifact' else 1}
+    if operation == 'search_tool_artifact':
+        arguments['query'] = 'needle'
+    queries = []
+
+    def query(**values):
+        queries.append(values)
+        return (repo.read_range(**values) if operation == 'read_tool_artifact'
+                else repo.search(**values))
+
+    raw_page = query(user_id=1, **arguments)
+    queries.clear()
+    expected = {'status': 'ok', **raw_page}
+    source = handler._serialize(expected)
+    budget = len(project_model_source(operation, source).encode('utf-8'))
+    assert budget < len(source.encode('utf-8'))
+    monkeypatch.setattr(handler, '_count_tokens', lambda text, model: len(text.encode('utf-8')))
+
+    result = handler._execute_one(
+        operation, arguments, user_id=1,
+        repository=SimpleNamespace(read_range=query, search=query),
+        token_budget=budget)
+
+    assert result == expected
+    assert len(queries) == 1
+    assert result['resumeCursor'] and result['nextCursor']
+
+
+@pytest.mark.parametrize('canonical', [False, True])
+def test_default_sixteen_read_batch_returns_each_requested_source_page(
+        repo, monkeypatch, canonical):
+    from types import SimpleNamespace
+    from lib.tasks_pkg.handlers import tool_result_artifacts as handler
+    from lib.token_counter.tiktoken_counter import count_text
+    from lib.tools.result_surfaces import project_model_source
+
+    body = 'needle\n' * 48
+    ref = (manifest(repo, [{'kind': 'text', 'text': body}], ttl=120000)
+           if canonical else put(repo, body, ttl=120000))
+    expected = {'status': 'ok', **repo.read_range(user_id=1, artifact_ref=ref, limit=8)}
+    model_page = project_model_source('read_tool_artifact', handler._serialize(expected))
+    assert count_text(model_page, 'gpt-4o') < (handler._RESPONSE_TOKEN_BUDGET - 256) // 16
+    queries = []
+
+    def query(**values):
+        queries.append(values)
+        return repo.read_range(**values)
+
+    monkeypatch.setattr(handler, 'ToolResultArtifactRepository',
+                        lambda: SimpleNamespace(read_range=query))
+    monkeypatch.setattr(handler, 'task_user_id', lambda task: 1)
+    monkeypatch.setattr(handler, '_finalize_tool_round', lambda *args: None)
+    _, content, _ = handler._handle_tool_result_artifact(
+        {'model': 'gpt-4o'}, {}, 'read_tool_artifact', 'small-page-batch',
+        {'reads': [{'artifact_ref': ref, 'limit': 8} for _ in range(16)]},
+        1, {}, {}, '', False)
+
+    result = json.loads(content)
+    assert result['status'] == 'ok'
+    assert len(queries) == 16
+    assert result['items'] == [
+        {'index': index, **expected} for index in range(16)]
+    assert count_text(project_model_source('read_tool_artifact', content), 'gpt-4o') <= 7000
 
 
 @pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
@@ -214,8 +292,14 @@ def test_private_key_operations_and_invalid_manifest_are_denied(repo, storage):
 
 
 def test_search_graph_larger_than_scan_budget_reaches_each_child(repo):
-    children = [{'name': 'large', 'callId': str(i), 'artifactRef': put(repo, 'x' * (1024 * 1024) + f' needle-{i}')} for i in range(18)]
-    root = manifest(repo, children=children)
+    # Real expiry maintenance continues between pages. Keep this positive
+    # traversal fixture live beyond the test timeout, including debug engines;
+    # signed-cursor expiry is exercised separately with explicit timestamps.
+    lifetime_ms = 600_000
+    children = [{'name': 'large', 'callId': str(i), 'artifactRef': put(
+        repo, 'x' * (1024 * 1024) + f' needle-{i}', ttl=lifetime_ms)}
+        for i in range(18)]
+    root = manifest(repo, children=children, ttl=lifetime_ms)
     cursor, seen, found = 0, set(), []
     for _ in range(100):
         page = repo.search(user_id=1, artifact_ref=root, query='needle-', cursor=cursor, limit=20, now_ms=repo.query_test_now_ms + 1)
