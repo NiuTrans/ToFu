@@ -71,18 +71,18 @@ def _diversify_by_entity(
     """Coverage-first selection for multi-entity comparison queries.
 
     ``scored`` is ``[(score, orig_idx, result)]`` already sorted by descending
-    score (BM25 + authority boost). When the query names ≥2 distinct entities
-    that are actually present in the candidate hosts (e.g. "compare Cloudflare
+    score (BM25 plus weak priors). When the query names ≥2 distinct tokens
+    that are present in query-relevant candidate hosts (e.g. "compare Cloudflare
     Fastly CloudFront …"), plain top-K can fill every slot from the single
     highest-scoring entity, leaving the others unrepresented. This guarantees
     each named entity gets its best candidate into the top-K before remaining
     slots are filled by global score.
 
-    An "entity" is a query brand token (``brand_tokens``) that matches the
+    An "entity" here is a query token (``brand_tokens``) that matches the
     non-generic host label of at least one candidate (``host_brand_labels``).
     Within one entity the candidates are already in global-score order, so the
-    authority boost still decides that entity's winner (official/primary over
-    aggregator). Returns ``None`` — signalling the caller to use the plain
+    weak URL hints can break close relevance ties; a host-token match does not
+    verify the publisher's identity. Returns ``None`` — use the plain
     global top-K — when the query names fewer than 2 present entities.
     """
     entity_toks = brand_tokens(query)
@@ -92,6 +92,9 @@ def _diversify_by_entity(
     present: dict[str, list[int]] = {}
     covers_at: dict[int, set[str]] = {}
     for rank, (_score, _idx, result) in enumerate(scored):
+        if _score <= 0:
+            covers_at[rank] = set()
+            continue
         covered = host_brand_labels(result.get('url') or '') & entity_toks
         covers_at[rank] = covered
         for e in covered:
@@ -153,6 +156,8 @@ def _diversify_by_domain(
     chosen_ids: set[int] = set()
     counts: dict[str, int] = {}
     for _score, idx, result in scored:
+        if _score <= 0:
+            continue
         domain = _domain_key(result.get('url') or '')
         if domain and counts.get(domain, 0) >= max_per_domain:
             continue
@@ -237,20 +242,21 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
             denominator = tf + BM25_K1 * (1 - BM25_B + BM25_B * dl / avg_dl)
             score += idf * numerator / denominator
 
-        # Primary-source authority: a modest additive nudge so the vendor's own
-        # domain / official docs outrank SEO aggregators when relevance is
-        # comparable (never large enough to beat a much stronger lexical match).
-        tier = classify_authority(result.get('url') or '', subject)
-        score += AUTHORITY_BOOST.get(tier, 0.0)
+        if score > 0:
+            # Retain useful prior ceilings, but a URL cannot contribute more
+            # than the lexical evidence itself or erase all matching evidence.
+            tier = classify_authority(result.get('url') or '', subject)
+            prior = AUTHORITY_BOOST.get(tier, 0.0)
+            score += max(-score / 2, min(prior, score))
 
-        # Reciprocal-rank fusion is accumulated by the orchestrator when the
-        # same canonical URL appears in multiple engine lists. A SearXNG result
-        # may also carry its own upstream engine_count.
-        score += float(result.get('rrf_score') or 0.0) * RRF_WEIGHT
-        engine_count = max(1, int(result.get('engine_count') or 1))
-        score += min(0.9, math.log2(engine_count) * 0.3)
-        if result.get('full_content'):
-            score += CONTENT_AVAILABLE_BOOST
+            # Engine agreement and extraction success also require some query
+            # evidence. A popular/fetched unrelated page must not outrank an
+            # answer or reserve an entity-diversification slot.
+            score += float(result.get('rrf_score') or 0.0) * RRF_WEIGHT
+            engine_count = max(1, int(result.get('engine_count') or 1))
+            score += min(0.9, math.log2(engine_count) * 0.3)
+            if result.get('full_content'):
+                score += CONTENT_AVAILABLE_BOOST
 
         scored.append((score, i, result))
 

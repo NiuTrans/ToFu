@@ -26,7 +26,7 @@ identity and relevant body evidence can both reach a relevance filter.
 `search/rerank.py` builds its bounded BM25 representation from those passages
 and SERP metadata. The representation limit is not a source-prefix limit.
 Ranking also applies when the candidate pool is smaller than the requested
-count. Existing primary-source, engine-agreement and diversity signals remain.
+count. URL source hints, engine-agreement and diversity signals remain.
 Original result dictionaries and bodies are preserved for fetch follow-up.
 
 **Alternatives considered:** increasing the prefix limit moves the same failure
@@ -40,6 +40,40 @@ The algorithm allocates only call-local structures and creates no workers,
 caches or persistent data. Chunk scoring scans the body, while heap selection
 updates priorities only when chosen evidence changes. It does not repeatedly
 sort every remaining candidate when none fits the remaining budget.
+
+## Source hints and relevance
+
+**Problem:** a hostname suffix collision could inherit a reference-host hint,
+and a query word in an arbitrary subdomain was presented as verified official
+identity. Absolute URL bonuses could put a page with no query evidence above
+an answer. Engine agreement and entity coverage could repeat that mistake.
+
+**Decision:** `search/authority.py` matches normalized HTTP(S) DNS hostnames at
+label boundaries. Query/host spelling, reference/documentation host patterns,
+and aggregator-like names are explicitly **unverified hints**. They do not
+certify ownership, primary-source status, or factual accuracy, including on
+shared repositories, registries, documentation platforms, and `.edu` hosts.
+The existing `Authority:` output field retains this qualification per result,
+including in the host's compact persisted index.
+
+Source hints retain their existing adjustment ceilings, but a positive hint
+cannot contribute more than the lexical score itself, and a negative hint
+cannot remove more than half of it. Engine agreement and successful extraction
+also require query evidence; results with no positive lexical score cannot
+reserve an entity or domain-diversity slot. They remain available when filling
+remaining result slots rather than being deleted.
+
+**Alternatives rejected:** hostname spelling cannot establish publisher
+identity, even with better suffix parsing. A larger absolute bonus still lets
+a URL replace missing evidence. Replacing the ceilings with small fractional
+weights demoted useful documentation in recorded candidates; removing all
+source hints also discards useful tie-breaking information. These conservative
+hints require no remote verification service, model, new cache, or additional
+network requests.
+
+`tests/test_source_hint_boundaries.py` specifies suffix collisions, URL
+normalization, unverified labels, lexical relevance, and coverage behavior.
+The host persistence test carries the qualifier through disk offload.
 
 ## Verification and measurement
 

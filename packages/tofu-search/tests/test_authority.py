@@ -1,11 +1,8 @@
-"""Tests for primary-source domain authority (authority.py) and its two
-integration points: the BM25 rerank boost and the format.py Authority tag.
+"""URL source hints affect comparable ranking without certifying authority.
 
-The motivating bug: an SEO aggregator (latencycost.com) outranked the vendor's
-own pricing page (aws.amazon.com), so the model synthesized a wrong number.
-These tests pin the fix: the vendor domain NAMED IN THE QUERY is 'official',
-structural docs/registries are 'primary', SEO price-farms are 'aggregator',
-and the rerank boost + format tag reflect that.
+Queries can match host tokens; documentation and registry hosts supply weak
+structural hints. Ranking, diversification, and formatting retain these hints
+while identifying their uncertainty to the model.
 """
 
 from tofu_search.search.authority import (
@@ -16,44 +13,41 @@ from tofu_search.search.authority import (
 from tofu_search.search.format import format_search_for_tool_response as fmt
 from tofu_search.search.rerank import rerank_by_bm25
 
-# ── classifier: OFFICIAL (brand named in query) ──
+# ── classifier: query/host token matches ──
 
-def test_official_when_vendor_named_in_query():
+def test_query_hint_when_vendor_named_in_query():
     q = "对比 Cloudflare Fastly AWS CloudFront 免费额度"
-    assert classify_authority("https://aws.amazon.com/cloudfront/pricing/", q) == "official"
-    assert classify_authority("https://www.cloudflare.com/plans/free/", q) == "official"
-    assert classify_authority("https://www.fastly.com/pricing", q) == "official"
+    assert classify_authority("https://aws.amazon.com/cloudfront/pricing/", q) == "query_match"
+    assert classify_authority("https://www.cloudflare.com/plans/free/", q) == "query_match"
+    assert classify_authority("https://www.fastly.com/pricing", q) == "query_match"
 
 
-def test_official_needs_the_brand_in_query():
-    # Same vendor domain, but the query does NOT name it → not 'official'.
+def test_query_hint_needs_a_host_token_in_query():
     assert classify_authority("https://www.cloudflare.com/plans/free/",
-                              "how do I bake sourdough bread") != "official"
+                              "how do I bake sourdough bread") != "query_match"
 
 
-def test_official_ignores_generic_host_labels():
-    # amazonaws / com / www must never make a random host 'official' just
-    # because the query happens to contain the word 'aws'.
+def test_query_hint_ignores_generic_host_labels():
     assert classify_authority("https://random-blog.s3.amazonaws.com/post",
-                              "aws cloudfront pricing") != "official"
+                              "aws cloudfront pricing") != "query_match"
 
 
-# ── classifier: PRIMARY (structural, query-independent) ──
+# ── classifier: structural reference/documentation hints ──
 
-def test_primary_docs_and_registries():
-    assert classify_authority("https://docs.astral.sh/ruff/faq/", "ruff vs flake8") == "primary"
-    assert classify_authority("https://pypi.org/project/numpy/", "numpy version") == "primary"
-    assert classify_authority("https://nvd.nist.gov/vuln/detail/CVE-2021-44228", "log4shell") == "primary"
-    assert classify_authority("https://developer.mozilla.org/en-US/docs/Web/HTTP", "http caching") == "primary"
+def test_reference_docs_and_registries():
+    assert classify_authority("https://docs.astral.sh/ruff/faq/", "ruff vs flake8") == "reference_host"
+    assert classify_authority("https://pypi.org/project/numpy/", "numpy version") == "reference_host"
+    assert classify_authority("https://nvd.nist.gov/vuln/detail/CVE-2021-44228", "log4shell") == "reference_host"
+    assert classify_authority("https://developer.mozilla.org/en-US/docs/Web/HTTP", "http caching") == "reference_host"
 
 
-# ── classifier: AGGREGATOR (SEO/price farms) ──
+# ── classifier: aggregator-like domain names ──
 
-def test_aggregator_seo_price_farms():
+def test_aggregator_name_hints():
     q = "AWS CloudFront pricing"
-    assert classify_authority("https://latencycost.com/cdn-comparison", q) == "aggregator"
-    assert classify_authority("https://costbench.com/software/cdn-edge/aws-cloudfront/", q) == "aggregator"
-    assert classify_authority("https://comparetiers.com/tools/fastly", "fastly") == "aggregator"
+    assert classify_authority("https://latencycost.com/cdn-comparison", q) == "aggregator_hint"
+    assert classify_authority("https://costbench.com/software/cdn-edge/aws-cloudfront/", q) == "aggregator_hint"
+    assert classify_authority("https://comparetiers.com/tools/fastly", "fastly") == "aggregator_hint"
 
 
 def test_neutral_news_and_wiki():
@@ -197,24 +191,25 @@ def test_rerank_boost_does_not_beat_much_stronger_relevance():
 
 
 def test_boost_values_ordered():
-    assert AUTHORITY_BOOST["official"] > AUTHORITY_BOOST["primary"] > 0
-    assert AUTHORITY_BOOST["aggregator"] < 0
+    assert AUTHORITY_BOOST["query_match"] > AUTHORITY_BOOST["reference_host"] > 0
+    assert AUTHORITY_BOOST["aggregator_hint"] < 0
     assert AUTHORITY_BOOST["neutral"] == 0.0
 
 
 # ── format: Authority tag surfaces for non-neutral tiers only ──
 
-def test_format_emits_authority_tag_for_official():
+def test_format_emits_unverified_hint_for_query_match():
     q = "AWS CloudFront pricing"
     out = fmt([_r("https://aws.amazon.com/cloudfront/pricing/", "Pricing", "…")], query=q)
-    assert "Authority: OFFICIAL SOURCE" in out
+    assert "Authority: Unverified" in out
+    assert "query/host token match" in out
     assert "URL: https://aws.amazon.com/cloudfront/pricing/" in out
 
 
 def test_format_flags_aggregator():
     q = "AWS CloudFront pricing"
     out = fmt([_r("https://latencycost.com/cdn", "CDN compare", "…")], query=q)
-    assert "third-party aggregator" in out
+    assert "Unverified — aggregator-like domain name" in out
 
 
 def test_format_no_tag_when_neutral_or_no_query():
