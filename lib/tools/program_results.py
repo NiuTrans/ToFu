@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import uuid
+import threading
 
 from lib.tools.program_contract import MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES, ProgramExecutionError
 from lib.tools.resource_policy import tool_result_cache_capacity
@@ -54,30 +55,34 @@ def _active_owner(task, user_id):
 
 
 def _admit(task, key, entry):
-    capacity = tool_result_cache_capacity()
-    if entry['retainedBytes'] > capacity * _BYTES_PER_RECEIPT:
-        return False
-    index = task.setdefault('_programResultRefs', {})
-    if not isinstance(index, dict):
-        return False
-    index.pop(key, None)
-    index[key] = entry
-    resident_bytes = sum(row['retainedBytes'] for row in index.values())
-    while len(index) > capacity or resident_bytes > capacity * _BYTES_PER_RECEIPT:
-        evicted = index.pop(next(iter(index)), None)
-        if evicted is not None:
-            resident_bytes -= evicted['retainedBytes']
-    if task.get('id') and not task.get('_programResultCleanupBound'):
-        from lib.agent_core.admission import on_terminal
-        task['_programResultCleanupBound'] = True
-        def cleanup(_task_id):
+    with task.setdefault('_programResultLock', threading.RLock()):
+        if task.get('aborted') or task.get('status') in {'done', 'error', 'aborted', 'interrupted'}:
+            return False
+        capacity = tool_result_cache_capacity()
+        if entry['retainedBytes'] > capacity * _BYTES_PER_RECEIPT:
+            return False
+        index = task.setdefault('_programResultRefs', {})
+        if not isinstance(index, dict):
+            return False
+        index.pop(key, None)
+        index[key] = entry
+        resident_bytes = sum(row['retainedBytes'] for row in index.values())
+        while len(index) > capacity or resident_bytes > capacity * _BYTES_PER_RECEIPT:
+            evicted = index.pop(next(iter(index)), None)
+            if evicted is not None:
+                resident_bytes -= evicted['retainedBytes']
+        if task.get('id') and not task.get('_programResultCleanupBound'):
+            from lib.agent_core.admission import on_terminal
+            task['_programResultCleanupBound'] = True
+            def cleanup(_task_id):
+                with task['_programResultLock']:
+                    task.pop('_programResultRefs', None)
+                    task.pop('_programResultCleanupBound', None)
+            on_terminal(task['id'], cleanup)
+        if task.get('aborted'):
             task.pop('_programResultRefs', None)
-            task.pop('_programResultCleanupBound', None)
-        on_terminal(task['id'], cleanup)
-    if task.get('aborted'):
-        task.pop('_programResultRefs', None)
-        return False
-    return task.get('_programResultRefs') is index and index.get(key) is entry
+            return False
+        return task.get('_programResultRefs') is index and index.get(key) is entry
 
 
 def keep_program_value(task, value, *, user_id, catalog_names, call_id):

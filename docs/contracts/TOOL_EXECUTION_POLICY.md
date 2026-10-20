@@ -13,6 +13,22 @@ instruction disclosure are owned by [the skills contract](../modules/skills.md).
 
 ## Native application approval composition
 
+Native parallel qualification uses the same live write and ordered-state
+classification as ordinary dispatch. Only explicitly admitted read names may
+overlap; `todo_write` and writes remain ordered. Scheduling metadata supplies
+neither approval nor tool visibility. Original model occurrence IDs and argument
+proofs must both match the settled response before execution; equal arguments
+do not make two model occurrences interchangeable.
+
+Concurrent pipeline invocations own separate settlement/envelope carriers.
+Shared result caches, call-ID receipts, unchanged-result receipts and search
+accumulator budgets publish under a task-local lock; program input receipts use
+their existing owner with a separate publication lock. No such lock covers tool
+execution. Cache compaction/discard compares the exact observed receipt so an
+older call cannot replace a newer result. Progress hashes are computed outside
+the lock and merged atomically; closing the carrier prevents later publication.
+Success, failure and Stop join every admitted callback before terminal delivery.
+
 `NativeGateway` uses the application's canonical decision gate when no explicit
 `decision_policy` is supplied. `authorize_prepared_tool_call` admits one already
 parsed occurrence through the same task partitions, Auto/Manual exceptions,

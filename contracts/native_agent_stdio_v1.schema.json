@@ -109,6 +109,11 @@
         "caller": {
           "type": "object"
         },
+        "model_call_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Original model occurrence identity; grants no approval. Required for qualified parallel callbacks."
+        },
         "model_round": {
           "type": "integer",
           "minimum": 0
@@ -417,6 +422,15 @@
         },
         "checkpoint_fee_payer_origins": {
           "type": "boolean"
+        },
+        "parallel_tool_names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Trusted read-tool scheduling qualification. Names must belong to the admitted read catalog. Omission preserves ordered dispatch; callbacks and replies retain request ownership and joined teardown."
         }
       },
       "additionalProperties": false

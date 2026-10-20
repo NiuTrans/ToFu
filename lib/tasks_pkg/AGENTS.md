@@ -42,6 +42,12 @@ Parallel tools and streaming prefetch use the shared demand executor in
 `lib/observability.py`. Worker knobs size idle reuse only; prefetch preserves
 qualified occurrences and never restores a local count gate.
 
+NativeGateway qualifies parallel reads through tool_dispatch.api and binds
+original model declarations before execution. tool_dispatch owns invocation-local
+result/envelope carriers and locked shared receipt publication; native_progress
+merges completed evidence atomically. Verify native_gateway_parallel, receipt
+cache/settlement tests and installed native_tools_parallel before changing overlap.
+
 `requirement_source.py` carries read-only owner Turn/Attempt context through
 `child_invocation.py` and frozen assignment reconstruction; final admission
 revalidates the source through `acceptance.turns`. No child lifecycle rights.

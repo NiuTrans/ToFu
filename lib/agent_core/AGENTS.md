@@ -46,6 +46,12 @@ Verify joined cancel/timeout, expired ACK suppression, frozen usage retry and
 process-loss cleanup after native join; callbacks cannot create another account.
 ExecutionBudget.authorizes_model_owner checks the actual root/actor identities.
 
+native_tool_control owns active request-bound callbacks on that same reader.
+Verify native_tool_control and installed native_tools_parallel tests for reverse
+replies, identical occurrences, sibling failure, repeated Stop and joined reuse.
+model_call_id is correlation only; call_id remains approval authority. A callback
+cannot close its own client; transport errors must still join other callbacks.
+
 ## Verification
 
 Run `pytest -q tests/agent_core/test_agent_core_boundary.py` plus focused run-contract and

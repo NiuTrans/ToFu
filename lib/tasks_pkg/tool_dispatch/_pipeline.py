@@ -49,6 +49,7 @@ from lib.tools.result_projection import (
 
 from lib.tasks_pkg.tool_dispatch._approval import _handle_approval
 from lib.tasks_pkg.tool_dispatch._flags import (
+    ORDERED_STATE_TOOLS as _ORDERED_STATE_TOOLS,
     _cache_entry_producer_metadata,
     _cache_entry_projection_items,
     _project_cache_entry_is_current,
@@ -56,6 +57,8 @@ from lib.tasks_pkg.tool_dispatch._flags import (
     _call_id_signature,
     _ensure_tool_call_id_receipts,
     _ensure_tool_result_cache,
+    _discard_tool_result_cache_entry,
+    _tool_receipt_lock,
     _publish_execute_gateway_direct_siblings,
     _invalidate_project_cache,
     _make_cache_key,
@@ -87,7 +90,6 @@ logger = get_logger(__name__)
 # therefore must not trigger Manual-mode write approval or project-cache
 # invalidation.  Keep this list narrow; the serial lane preserves
 # ``parsed_tcs`` order exactly.
-_ORDERED_STATE_TOOLS = frozenset({'todo_write'})
 
 
 # Read tools whose dedup-cache entry a same-round WRITE can make stale. When a
@@ -179,7 +181,8 @@ def _collect_used_tool_call_ids(
             seen.add(str(row.get('toolCallId')))
     receipts = (task or {}).get('_tool_call_id_receipts')
     if isinstance(receipts, dict):
-        seen.update(str(call_id) for call_id in receipts)
+        with _tool_receipt_lock(task):
+            seen.update(str(call_id) for call_id in receipts)
     return seen
 
 
@@ -228,6 +231,7 @@ def _repair_current_tool_call_identity(
     used_ids: set[str],
     claimed_ids: set[str],
     settled_results: dict[str, Any],
+    pending_envelopes: dict[str, Any],
 ) -> tuple:
     """Remint recycled/history and same-response duplicate correlation IDs.
 
@@ -244,9 +248,7 @@ def _repair_current_tool_call_identity(
             receipt.get('signature') == call_signature
             and receipt.get('name') == fn_name)
         settled_results.pop(tc_id, None)
-        pending_envelopes = task.get('_pending_tool_result_envelopes')
-        if isinstance(pending_envelopes, dict):
-            pending_envelopes.pop(tc_id, None)
+        pending_envelopes.pop(tc_id, None)
 
         original_id = tc_id
         tc_id = _mint_fresh_call_id(
@@ -573,6 +575,7 @@ def _settle_tool_result(
     context_messages: list[dict[str, Any]] | None = None,
     unchanged_receipt_tools: frozenset[str] = frozenset(),
     settled_results: dict[str, Any] | None = None,
+    pending_envelopes: dict[str, Any] | None = None,
     canonical_content: Any = None,
 ) -> Any:
     """Settle ONE tool call: budget its result, stamp the round, emit
@@ -619,6 +622,14 @@ def _settle_tool_result(
                 else task.setdefault('_settled_tool_results', {}))
     if tc_id in _settled:
         return _settled[tc_id]
+
+    # A concurrent occurrence may publish the same query while this result is
+    # compacted. Rewrite only this producer's observed receipt, by identity.
+    _sync_key = _make_cache_key(fn_name, fn_args) if fn_name in idempotent_tools else None
+    _producer_cache_entry = cache.get(_sync_key) if _sync_key is not None else None
+    if (not isinstance(_producer_cache_entry, (tuple, list)) or not _producer_cache_entry
+            or not isinstance(tool_content, str) or _producer_cache_entry[0] != tool_content):
+        _producer_cache_entry = None
 
     # The result owner now controls presentation. A timed-out worker can still
     # own resources, but cannot replace this occurrence's published evidence.
@@ -819,8 +830,7 @@ def _settle_tool_result(
     # are consumed here: the cache then owns the final internal envelope and
     # must not retain a second preview/omission representation.
     if isinstance(tool_content, str) and fn_name in idempotent_tools:
-        _sync_key = _make_cache_key(fn_name, fn_args)
-        _cached_entry = cache.get(_sync_key)
+        _cached_entry = _producer_cache_entry
         if (_cached_entry is not None
                 and isinstance(_cached_entry, (tuple, list))
                 and len(_cached_entry) >= 1
@@ -837,7 +847,8 @@ def _settle_tool_result(
                     _cache_tail = _cache_tail[:6]
                 _store_tool_result_cache_entry(
                     task, _sync_key, (tool_content, *_cache_tail),
-                    generation=getattr(_cached_entry, 'generation', None))
+                    generation=getattr(_cached_entry, 'generation', None),
+                    expected_entry=_cached_entry)
 
     _program_input = None
     _program_latch = task.get('_ptc_local')
@@ -867,8 +878,8 @@ def _settle_tool_result(
         tool_content = _project_spilled_artifact_alias(
             task, round_entry, fn_name, internal_envelope, delivery.model_text)
         tool_result_evidence = delivery.evidence
-        task.setdefault('_pending_tool_result_envelopes', {})[tc_id] = (
-            internal_envelope)
+        if pending_envelopes is not None:
+            pending_envelopes[tc_id] = internal_envelope
 
     # Stamp semantic compaction against the model-visible value, not against
     # the larger server envelope that never enters provider context. The L0
@@ -1125,14 +1136,16 @@ def _prepare_screenshot_replay(task, row, screenshot, model, tool_name, call_id)
                 url = block['image_url']['url']
                 encoded_bytes = (len(url.encode('utf-8')) if len(url) <= _INLINE_MODEL_IMAGE_MAX_BYTES
                                  else _INLINE_MODEL_IMAGE_MAX_BYTES + 1)
-                inline_used = int(task.get('_inlineModelImageBytes') or 0)
-                if (encoded_bytes <= _INLINE_MODEL_IMAGE_MAX_BYTES
-                        and inline_used + encoded_bytes <= _INLINE_MODEL_IMAGES_PER_TURN_MAX_BYTES):
-                    projected.append(block)
-                    task['_inlineModelImageBytes'] = inline_used + encoded_bytes
-                else:
-                    projected.append({'type': 'text', 'text':
-                        '[Image unavailable on cold replay: the source could not be retained.]'})
+                with task['_mcpMediaLock']:
+                    inline_used = int(task.get('_inlineModelImageBytes') or 0)
+                    if (encoded_bytes <= _INLINE_MODEL_IMAGE_MAX_BYTES
+                            and inline_used + encoded_bytes <= _INLINE_MODEL_IMAGES_PER_TURN_MAX_BYTES):
+                        retain_inline = True
+                        task['_inlineModelImageBytes'] = inline_used + encoded_bytes
+                    else:
+                        retain_inline = False
+                projected.append(block if retain_inline else {'type': 'text', 'text':
+                    '[Image unavailable on cold replay: the source could not be retained.]'})
                 live_projected.append(block)
             ordinal += 1
         blocks = projected
@@ -1151,6 +1164,7 @@ def _apply_round_aggregate_budget(
     appended_tool_messages: list[dict[str, Any]],
     *,
     settled_results: dict[str, Any] | None = None,
+    pending_envelopes: dict[str, Any] | None = None,
 ) -> None:
     """Compact oversized model-visible results and reconcile their UI rows.
 
@@ -1158,21 +1172,14 @@ def _apply_round_aggregate_budget(
     positional call id can recur in history, so scanning the full message list
     would mutate an already-cached result and break the next request prefix.
     """
+    pending_envelopes = pending_envelopes if pending_envelopes is not None else {}
     if not round_results:
-        pending_envelopes = task.get('_pending_tool_result_envelopes')
-        if isinstance(pending_envelopes, dict):
-            for parsed_call in parsed_tcs:
-                pending_envelopes.pop(parsed_call[2], None)
-            if not pending_envelopes:
-                task.pop('_pending_tool_result_envelopes', None)
+        pending_envelopes.clear()
         return
 
     from lib.context_experiment_flags import normalize_context_experiment_flags
     result_contract = normalize_context_experiment_flags(
         (task or {}).get('config') or {})['tools']['resultEnvelope']
-    pending_envelopes = task.get('_pending_tool_result_envelopes')
-    if not isinstance(pending_envelopes, dict):
-        pending_envelopes = {}
     aggregate_results = {
         tool_call_id: (
             pending_envelopes.get(tool_call_id, content)
@@ -1342,8 +1349,6 @@ def _apply_round_aggregate_budget(
     # this transient map must not grow with a long-running task.
     for tool_call_id, _, _ in round_results:
         pending_envelopes.pop(tool_call_id, None)
-    if not pending_envelopes:
-        task.pop('_pending_tool_result_envelopes', None)
 
 
 def _git_guard_presence_roots(command, project_path, fn_args, conv_id):
@@ -1396,6 +1401,7 @@ def _approval_stops_tool_call(
     tid: str,
     internal_result_sink: Any = None,
     settled_results: dict[str, Any] | None = None,
+    pending_envelopes: dict[str, Any] | None = None,
     receipt_required: bool = False,
 ) -> bool:
     """Apply confirmation/manual-write policy; return true when rejected.
@@ -1437,7 +1443,7 @@ def _approval_stops_tool_call(
         _settle_tool_result(task, fn_name, tc_id, fn_args, rn, round_entry, recovery_refusal,
             idempotent_tools=idempotent_tools, cache=cache, tid=tid, round_num=round_num,
             terminal_status='rejected', internal_result_sink=internal_result_sink,
-            settled_results=settled_results)
+            settled_results=settled_results, pending_envelopes=pending_envelopes)
         return True
 
     # ── Git workspace guard (docs/runbooks/GIT_WORKSPACE_GUARD.md) ──
@@ -1534,7 +1540,7 @@ def _approval_stops_tool_call(
                 cache=cache, tid=tid, round_num=round_num,
                 terminal_status='rejected',
                 internal_result_sink=internal_result_sink,
-                settled_results=settled_results)
+                settled_results=settled_results, pending_envelopes=pending_envelopes)
             return True
 
     # Only registry-declared writes accept Auto as receipt authority. Custom
@@ -1611,7 +1617,7 @@ def _approval_stops_tool_call(
             cache=cache, tid=tid, round_num=round_num,
             terminal_status='rejected',
             internal_result_sink=internal_result_sink,
-            settled_results=settled_results)
+            settled_results=settled_results, pending_envelopes=pending_envelopes)
         return True
 
     needs_approval = requires_confirmation or (
@@ -1708,7 +1714,7 @@ def _approval_stops_tool_call(
                     cache=cache, tid=tid, round_num=round_num,
                     terminal_status='rejected',
                     internal_result_sink=internal_result_sink,
-                    settled_results=settled_results)
+                    settled_results=settled_results, pending_envelopes=pending_envelopes)
                 return True
 
     approved, reject_content = _handle_approval(
@@ -1733,7 +1739,7 @@ def _approval_stops_tool_call(
         cache=cache, tid=tid, round_num=round_num,
         terminal_status='rejected',
         internal_result_sink=internal_result_sink,
-        settled_results=settled_results)
+        settled_results=settled_results, pending_envelopes=pending_envelopes)
     return True
 
 
@@ -1934,7 +1940,8 @@ def _append_ordered_tool_replay(
                 _missing_tool_result(task, fn_name, tc_id, round_entry), False)
             tool_verdicts[tc_id] = 'error'
         if is_search:
-            _append_search_result_text(all_search_results_text, tool_content)
+            with _tool_receipt_lock(task):
+                _append_search_result_text(all_search_results_text, tool_content)
 
         # Convert screenshot dict → image_url content block for vision models.
         # The MESSAGE append is what genuinely belongs here ():
@@ -2133,6 +2140,7 @@ def execute_tool_pipeline(
     # nested execute_tools pipeline must not share or retain the outer call's
     # complete results through the task dict.
     _settled_results: dict[str, Any] = {}
+    _pending_envelopes: dict[str, Any] = {}
     task.pop('_settled_tool_results', None)  # repair pre-C234 live task state
 
     def _settle_current(*args: Any, **kwargs: Any) -> Any:
@@ -2140,6 +2148,7 @@ def execute_tool_pipeline(
         kwargs['context_messages'] = messages
         kwargs['unchanged_receipt_tools'] = unchanged_receipt_tools
         kwargs['settled_results'] = _settled_results
+        kwargs['pending_envelopes'] = _pending_envelopes
         return _settle_tool_result(*args, **kwargs)
     # Auto-apply default (2026-08-21 policy): writes do NOT require approval
     # unless the user explicitly switched this conversation to Manual
@@ -2228,7 +2237,7 @@ def execute_tool_pipeline(
             round_num=round_num, tid=tid, receipts=_call_id_receipts,
             historical_used_ids=_historical_used_call_ids,
             used_ids=_used_call_ids, claimed_ids=claimed_model_call_ids,
-            settled_results=_settled_results)
+            settled_results=_settled_results, pending_envelopes=_pending_envelopes)
         tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
 
         # JSON parse failure / hallucinated-tool rejection: never execute.
@@ -2367,7 +2376,7 @@ def execute_tool_pipeline(
 
             if (cached is not None
                     and not _project_cache_entry_is_current(fn_name, cached)):
-                _cache.pop(cache_key, None)
+                _discard_tool_result_cache_entry(task, cache_key, cached)
                 cached = None
             # ── FreshGate: never serve a STALE cached read ──
             # The streaming pre-exec/dedup cache bypasses the project-tool
@@ -2386,7 +2395,7 @@ def execute_tool_pipeline(
                     if (fn_name in FILE_READ_TOOLS
                             and cached_read_is_stale(task, fn_args,
                                                      project_path)):
-                        _cache.pop(cache_key, None)
+                        _discard_tool_result_cache_entry(task, cache_key, cached)
                         cached = None
                         logger.info(
                             '[Task %s] conv=%s FreshGate: %s cache hit '
@@ -2403,7 +2412,7 @@ def execute_tool_pipeline(
                 if search_projection is None:
                     # Invalid cache data is not evidence of zero matches.
                     # Let the normal handler produce a fresh typed result.
-                    _cache.pop(cache_key, None)
+                    _discard_tool_result_cache_entry(task, cache_key, cached)
                     cached = None
             if cached is not None:
                 cached_content, cached_is_search, cached_source, cached_display, cached_engine_bkdn, cached_vertical, cached_search_diag = \
@@ -2533,7 +2542,7 @@ def execute_tool_pipeline(
             round_num=round_num, model=model, tool_results=tool_results,
             idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
             internal_result_sink=internal_result_sink,
-            settled_results=_settled_results,
+            settled_results=_settled_results, pending_envelopes=_pending_envelopes,
         ):
             continue
 
@@ -2840,7 +2849,7 @@ def execute_tool_pipeline(
                 _hb_stop.set()
         tool_results[tc_id_ret] = (tool_content, is_search)
         if fn_name in _write_tools:
-            _invalidate_project_cache(_cache, trigger=fn_name)
+            _invalidate_project_cache(task, trigger=fn_name)
         # Settle at THIS tool's own completion () — a serial write
         #   used to run before the parallel pool started, so deferring its
         #   settle to the post-phase made it wait for every read tool in the
@@ -2940,7 +2949,7 @@ def execute_tool_pipeline(
                         elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                              'insert_content', 'insert_contents',
                                              'code_exec', 'bash_exec', 'run_command'):
-                            _invalidate_project_cache(_cache, trigger=fut_fn_name)
+                            _invalidate_project_cache(task, trigger=fut_fn_name)
 
                         # SETTLE NOW, not after the barrier ().
                         #   This tool is done; budget its result, stamp the
@@ -3067,7 +3076,7 @@ def execute_tool_pipeline(
         parsed_tcs,
         _round_results_for_budget,
         _appended_tool_msgs,
-        settled_results=_settled_results,
+        settled_results=_settled_results, pending_envelopes=_pending_envelopes,
     )
 
     # Measure the exact content that the next Responses request will replay.

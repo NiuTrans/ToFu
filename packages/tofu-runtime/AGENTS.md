@@ -271,8 +271,11 @@ The native-agent stdio schema owns frames; verify `tests/agent_stdio.rs` with
 real subprocess/TCP, exact response IDs, EOF/byte limits, silent deadline, one
 terminal and write refusal before network effects. Never infer host authority.
 
-`cli_agent_control.rs` owns the one-slot reactor reader and required joined
-Upstream lease. Verify silent-provider cancel, unissued/duplicate frame refusal,
+`cli_agent_control.rs` owns the single reactor reader, exclusive control slot,
+request-bound concurrent tool replies and required joined Upstream lease.
+`parallel_tool_names` binds the existing Scheduler; model_call_id carries exact
+occurrence correlation separately from approval. Verify reverse tool replies,
+half-close after delivered replies, silent-provider cancel, unissued/duplicate frame refusal,
 weak parent lifetime, original stdin flags before terminal, and actor-fault
 cleanup. Never replace it with a detached blocking stdin reader.
 

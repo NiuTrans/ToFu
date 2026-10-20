@@ -120,6 +120,9 @@ class NativeGateway:
         self.configuration = json.dumps(configuration, allow_nan=False)
         self.tool_list = json.dumps(tool_list, allow_nan=False)
         self.permissions = dict(permissions)
+        from lib.tasks_pkg.tool_dispatch.api import parallel_tool_names
+        self.parallel_names = parallel_tool_names(task,
+            (name for name, permission in permissions.items() if permission == 'read'))
         self.project_path, self.project_enabled, self.model = project_path, project_enabled, model
         self.round_source, self.decision_policy = round_source, decision_policy
         self.pending_calls, self.pending_bytes = pending_calls, pending_bytes
@@ -238,25 +241,31 @@ class NativeGateway:
 
     async def execute(self, request: ToolRequest):
         self._identity(request)
+        if request.name in self.parallel_names:
+            from lib.tasks_pkg.tool_dispatch.api import parallel_tool_names
+            if request.name not in parallel_tool_names(self.task, [request.name]):
+                raise ValueError('native parallel tool classification changed')
+            return await self._execute_callback(request)
         async with self._lock:
-            self._identity(request)
-            approved = None
-            if self.permissions[request.name] != 'read':
-                proof = self._proof(request.name, request.arguments, request.caller)
-                with self._pending_lock:
-                    approved = self._pending.pop(request.call_id, None)
+            return await self._execute_callback(request)
+
+    async def _execute_callback(self, request):
+        self._identity(request)
+        approved = None
+        if self.permissions[request.name] != 'read':
+            proof = self._proof(request.name, request.arguments, request.caller)
+            with self._pending_lock:
+                approved = self._pending.pop(request.call_id, None)
+                if approved is not None:
+                    self._bytes -= len(approved.proof)
+                if (approved is None or approved.authority is None or approved.proof != proof):
                     if approved is not None:
-                        self._bytes -= len(approved.proof)
-                    if (approved is None or approved.authority is None
-                            or approved.proof != proof):
-                        if approved is not None:
-                            self._release_prepared(approved)
-                        raise ValueError('application gateway has no exact unused approval')
-            # The native host owns callback cancellation/result joining. This
-            # future owns the actual canonical pipeline work through completion.
-            work = asyncio.get_running_loop().run_in_executor(
-                self.executor, copy_context().run, self._execute, request, approved)
-            return await self._await_owned(request, work)
+                        self._release_prepared(approved)
+                    raise ValueError('application gateway has no exact unused approval')
+        # The native host joins callbacks; this future owns canonical execution.
+        work = asyncio.get_running_loop().run_in_executor(
+            self.executor, copy_context().run, self._execute, request, approved)
+        return await self._await_owned(request, work)
 
     async def _await_owned(self, request, work):
         stop = asyncio.create_task(request.cancelled.wait()) if request.cancelled is not None else None
@@ -456,7 +465,18 @@ class NativeGateway:
                 prepared=self._response_prepared.get(proof)
                 if round_num!=self._response_round or not prepared:
                     raise ValueError('native callback differs from its settled model declaration')
-                parsed,assistant,announcement=prepared.popleft()
+                # Approval requests already carry the exact model occurrence
+                # as call_id; tool correlation remains separate from that grant.
+                identity = (request.call_id if isinstance(request, ApprovalRequest)
+                            else request.model_call_id or request.call_id)
+                if identity is None:
+                    parsed,assistant,announcement=prepared.popleft()
+                else:
+                    match = next((item for item in prepared if item[0][0][2] == identity), None)
+                    if match is None:
+                        raise ValueError('native callback occurrence differs from its model declaration')
+                    prepared.remove(match)
+                    parsed,assistant,announcement=match
                 if not prepared:
                     del self._response_prepared[proof]
                 if not self._response_prepared:

@@ -483,7 +483,9 @@ impl Agent<'_> {
                                 }
                             }
                         }
-                        invocations.push(crate::tool_scheduler::Invocation { position, proof })
+                        invocations.push(crate::tool_scheduler::Invocation {
+                            position, proof: proof.with_model_call_id(&call.id),
+                        })
                     }
                 }
             }

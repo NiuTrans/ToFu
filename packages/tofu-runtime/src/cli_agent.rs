@@ -52,13 +52,21 @@ pub(crate) async fn publish_request(
 ) -> io::Result<()> {
     publish_frame(runtime, bytes, cancelled, Some(control)).await
 }
+async fn publish_tool_request(
+    runtime: &tokio::runtime::Runtime, bytes: &[u8],
+    cancelled: impl std::future::Future<Output = ()>,
+    control: &crate::cli_agent_control::Exchange, id: &str,
+) -> io::Result<()> {
+    publish_frame_mode(runtime, bytes, cancelled, Some(control), false,
+        std::future::pending(), Some(id)).await
+}
 pub(crate) async fn publish_preparation(
     runtime: &tokio::runtime::Runtime, bytes: &[u8],
     cancelled: impl std::future::Future<Output = ()>,
     control: &crate::cli_agent_control::Exchange,
     session: &tofu_runtime::session::ExecutionSession,
 ) -> io::Result<()> {
-    publish_frame_mode(runtime, bytes, cancelled, Some(control), true, crate::cli_agent_rounds::deadline(session)).await
+    publish_frame_mode(runtime, bytes, cancelled, Some(control), true, crate::cli_agent_rounds::deadline(session), None).await
 }
 pub(crate) async fn publish_frame(
     runtime: &tokio::runtime::Runtime,
@@ -66,14 +74,20 @@ pub(crate) async fn publish_frame(
     cancelled: impl std::future::Future<Output = ()>,
     control: Option<&crate::cli_agent_control::Exchange>,
 ) -> io::Result<()> {
-    publish_frame_mode(runtime, bytes, cancelled, control, false, std::future::pending()).await
+    publish_frame_mode(runtime, bytes, cancelled, control, false, std::future::pending(), None).await
 }
 async fn publish_frame_mode(
     runtime: &tokio::runtime::Runtime, bytes: &[u8],
     cancelled: impl std::future::Future<Output = ()>,
     control: Option<&crate::cli_agent_control::Exchange>, allow_large: bool,
     deadline: impl std::future::Future<Output = ()>,
+    tool_id: Option<&str>,
 ) -> io::Result<()> {
+    // One frame writer owns descriptor flags and any partial exclusive frame.
+    // Callback execution/reply waits never hold this short publication lane.
+    let _publication = if let Some(control) = control {
+        Some(control.publication.lock().await)
+    } else { None };
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(1, stat.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
@@ -117,15 +131,19 @@ async fn publish_frame_mode(
             ready = fd.writable() => ready?,
         };
         match ready.try_io(|fd| {
-            let n=unsafe {libc::write(fd.get_ref().as_raw_fd(),frame[offset..].as_ptr().cast(),frame.len()-offset)};
-            if n<0 {Err(io::Error::last_os_error())}
-            else if n==0 || (!allow_large && n as usize != frame.len()) {Err(io::ErrorKind::WriteZero.into())}
-            else {Ok(n as usize)}
+            let write = || {
+                let n=unsafe {libc::write(fd.get_ref().as_raw_fd(),frame[offset..].as_ptr().cast(),frame.len()-offset)};
+                if n<0 {Err(io::Error::last_os_error())}
+                else if n==0 || (!allow_large && n as usize != frame.len()) {Err(io::ErrorKind::WriteZero.into())}
+                else {Ok(n as usize)}
+            };
+            if let Some(control) = control {
+                control.write_request(tool_id, frame.len()-offset, write)
+            } else { write() }
         }) {
             Ok(Ok(n)) => {
                 offset += n;
                 if offset==frame.len() {
-                    if let Some(control)=control {control.published().map_err(|_|io::Error::from(io::ErrorKind::InvalidData))?;}
                     return Ok(());
                 }
             },
@@ -247,6 +265,7 @@ impl Handler for ClientTool {
             .map_err(|_| fail())?;
         let mut request = json!({"version":self.version,"type":"tool_request","request_id":format!("{}-{sequence}",self.task_id),"owner_user_id":context.owner,"task_id":self.task_id,"name":self.name,"arguments":arguments});
         request["model_round"] = context.model_round.ok_or_else(fail)?.into();
+        if let Some(id) = context.model_call_id { request["model_call_id"] = id.into(); }
         if let Some(id) = context.approved_call_id { request["call_id"] = id.into(); }
         if let Some(caller) = context.caller { request["caller"] = caller.clone(); }
         self.schemas
@@ -256,25 +275,24 @@ impl Handler for ClientTool {
         if encoded.len() > self.frame_bytes {
             return Err(fail());
         }
-        self.control.prepare(
-            request["request_id"].as_str().ok_or_else(fail)?.into(),
-            "tool_result",
-        )?;
+        let id = request["request_id"].as_str().ok_or_else(fail)?;
+        let mut exchange = self.control.prepare_tool(id.into())?;
         self.runtime
-            .block_on(publish_request(
+            .block_on(publish_tool_request(
                 &self.runtime,
                 &encoded,
                 context.runtime.cancelled(),
                 &self.control,
+                id,
             ))
             .map_err(|_| fail())?;
         // A published request owns external work. Keep the existing reader
         // until its result/EOF; parent Stop cannot detach the host invocation.
         let response = if self.joined_host || context.approved_call_id.is_some() {
-            self.runtime.block_on(self.control.response())?
+            self.runtime.block_on(exchange.response())?
         } else {
             self.runtime.block_on(async {tokio::select!{biased;
-                _=context.runtime.cancelled()=>Err(fail()),value=self.control.response()=>value
+                _=context.runtime.cancelled()=>Err(fail()),value=exchange.response()=>value
             }})?
         };
         let response = self
@@ -381,6 +399,13 @@ pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: In
         }
         Some(Arc::new(tofu_runtime::prepared_tool_wire::PreparedToolWire::new(template.clone(),tools.clone())?))
     } else { None };
+    let parallel_names = config.get("parallel_tool_names").and_then(Value::as_array)
+        .map(|names| names.iter().map(|name|name.as_str().unwrap().to_owned()).collect::<std::collections::BTreeSet<_>>())
+        .unwrap_or_default();
+    if config.get("parallel_tool_names").and_then(Value::as_array).is_some_and(|names| names.len() != parallel_names.len())
+        || parallel_names.iter().any(|name| tools.get(name).is_none_or(|tool|tool["permission"] != "read")) {
+        return Err("parallel tools must belong to the admitted read catalog".into());
+    }
     let model_tools = if prepared_tools.is_some() {Vec::new()} else {tofu_runtime::model_tool_wire::project(tools, config.get("wire_tools"))?};
     template.insert("tools".into(),Value::Array(model_tools));
     let messages = config["messages"]
@@ -738,6 +763,11 @@ pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: In
         ).map_err(|_|"invalid approval composition")?)
     } else {None};
     let authorization = HostPolicy { owner, writes: approvals.is_some() };
+    let scheduling = if parallel_names.is_empty() { None } else {
+        Some(tofu_runtime::tool_scheduler::Scheduler::new(tofu_runtime::tool_scheduler::Budget {
+            workers: runtime.metrics().num_workers(), inflight_calls: 0, inflight_bytes: 0,
+        }, parallel_names).map_err(|_|"invalid native tool scheduler")?)
+    };
     let agent = Agent {
         provider: &provider,
         catalog: &catalog,
@@ -764,7 +794,7 @@ pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: In
         },
         checkpoints: if config["checkpoint_control"]==true {Some(&rounds)}else{None},
         progress: if config["progress_control"] == true {Some(&rounds)} else {None},
-        scheduling: None,
+        scheduling: scheduling.as_ref(),
     };
     let mut finished = if config["retain_execution_history"] == true {
         agent.run_retained(&task, owner, task_id, messages)

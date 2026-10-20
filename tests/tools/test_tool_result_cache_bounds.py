@@ -14,6 +14,41 @@ from lib.tasks_pkg.tool_dispatch._flags import (
 pytestmark = pytest.mark.unit
 
 
+def test_parallel_receipt_publication_keeps_exact_eviction_counts_and_caps():
+    import sys
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    task = _task()
+    barrier = threading.Barrier(8)
+    def publish(worker):
+        barrier.wait(5)
+        for index in range(64):
+            key = f'{worker}-{index}'
+            _store_tool_result_cache_entry(task, f'fetch_url::{key}', (key, False))
+            _store_tool_call_id_receipt(task, key, {'signature': key, 'name': 'fetch_url'})
+    original = sys.getswitchinterval()
+    try:
+        sys.setswitchinterval(0.000001)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(publish, range(8)))
+    finally:
+        sys.setswitchinterval(original)
+    for field in ('_tool_result_cache', '_tool_call_id_receipts'):
+        assert len(task[field]) == 16
+    assert task['_tool_result_cache_evictions'] == 512 - 16
+    assert task['_tool_call_id_receipt_evictions'] == 512 - 16
+
+
+def test_stale_read_cannot_discard_newer_published_receipt():
+    from lib.tasks_pkg.tool_dispatch._flags import _discard_tool_result_cache_entry
+    task = _task()
+    before, after = ('old', False), ('new', False)
+    _store_tool_result_cache_entry(task, 'fetch_url::same', before)
+    _store_tool_result_cache_entry(task, 'fetch_url::same', after)
+    _discard_tool_result_cache_entry(task, 'fetch_url::same', before)
+    assert task['_tool_result_cache']['fetch_url::same'] is after
+
+
 def _task(capacity: int = 16) -> dict:
     return {
         'id': 'bounded-dedup-task',
