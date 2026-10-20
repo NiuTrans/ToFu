@@ -66,6 +66,7 @@ files, but the import graph stays clean.
 import logging
 import os
 import shutil
+import subprocess
 import sys
 
 __all__ = [
@@ -205,15 +206,6 @@ def ensure_chromium_env(env=None, env_prefix=None):
         'ld_library_path': str, 'platform_skipped': bool}``
     """
     target = os.environ if env is None else env
-    # A locally provisioned Node can run the Playwright driver on old Linux
-    # hosts where the package's newer bundled Node cannot load system glibc.
-    # Explicit Playwright selection always wins; no process runs at startup.
-    if sys.platform.startswith('linux') and not target.get('PLAYWRIGHT_NODEJS_PATH'):
-        home = target.get('HOME')
-        local_node = (shutil.which('node', path=os.path.join(home, '.local', 'bin'))
-                      if home else None)
-        if local_node:
-            target['PLAYWRIGHT_NODEJS_PATH'] = local_node
     # install.sh downloads outside the Python env, and its shell exports do
     # not survive a later independent server/bootstrap invocation. Restore
     # that same cache only when it exists; explicit Playwright overrides
@@ -243,6 +235,28 @@ def ensure_chromium_env(env=None, env_prefix=None):
         target['FONTCONFIG_PATH'] = conf_dir
         target['FONTCONFIG_FILE'] = conf_file
         report['fontconfig'] = conf_file
+
+    # A provisioned Node can support old Linux hosts, but an executable file
+    # can still fail to load glibc. Export only a runnable automatic choice,
+    # using the same library environment the driver will inherit. Otherwise
+    # leave selection to Playwright or the build's already-running Node.
+    # Explicit selections remain authoritative and are never probed here.
+    if sys.platform.startswith('linux') and not target.get('PLAYWRIGHT_NODEJS_PATH'):
+        home = target.get('HOME')
+        local_node = (shutil.which('node', path=os.path.join(home, '.local', 'bin'))
+                      if home else None)
+        if local_node:
+            try:
+                probe = subprocess.run(
+                    [local_node, '--version'], env=target,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=2,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            else:
+                if probe.returncode == 0:
+                    target['PLAYWRIGHT_NODEJS_PATH'] = local_node
 
     if report['lib_dirs_added'] or report['fontconfig']:
         _log().debug('[ChromiumEnv] libs=%s fontconfig=%s',

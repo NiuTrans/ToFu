@@ -639,3 +639,78 @@ def test_playwright_driver_uses_provisioned_node_without_overriding_operator(tmp
         env['PLAYWRIGHT_NODEJS_PATH'] = override
     chromium_env.ensure_chromium_env(env=env)
     assert env['PLAYWRIGHT_NODEJS_PATH'] == (override or str(local))
+
+
+@pytest.mark.parametrize('failure', ['loader', 'executable', 'timeout'])
+def test_playwright_driver_does_not_export_an_unrunnable_automatic_node(
+        tmp_path, monkeypatch, failure):
+    """A discovered file must not poison a later build's working Node choice."""
+    local = tmp_path / '.local/bin/node'
+    local.parent.mkdir(parents=True)
+    local.write_text('#!/bin/sh\necho "GLIBC version not found" >&2\nexit 1\n')
+    local.chmod(0o755)
+    monkeypatch.setattr(chromium_env.sys, 'platform', 'linux')
+    env = {'HOME': str(tmp_path)}
+    if failure != 'loader':
+        def fail_probe(command, **kwargs):
+            if failure == 'executable':
+                raise OSError('Exec format error')
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        monkeypatch.setattr(subprocess, 'run', fail_probe)
+
+    chromium_env.ensure_chromium_env(env=env)
+
+    assert 'PLAYWRIGHT_NODEJS_PATH' not in env
+
+
+def test_playwright_automatic_node_probe_uses_final_child_environment(
+        tmp_path, monkeypatch):
+    local = tmp_path / '.local/bin/node'
+    local.parent.mkdir(parents=True)
+    local.write_text('#!/bin/sh\nexit 0\n')
+    local.chmod(0o755)
+    monkeypatch.setattr(chromium_env.sys, 'platform', 'linux')
+    monkeypatch.setattr(chromium_env, 'chromium_lib_dirs', lambda _: ['/browser/lib'])
+    monkeypatch.setattr(chromium_env, 'fontconfig_paths', lambda _: (None, None))
+    env = {'HOME': str(tmp_path), 'LD_LIBRARY_PATH': '/operator/lib'}
+    probes = []
+
+    def probe(command, **kwargs):
+        probes.append(command)
+        assert kwargs['env'] == env
+        assert kwargs['env']['LD_LIBRARY_PATH'] == '/browser/lib:/operator/lib'
+        assert 0 < kwargs['timeout'] <= 5
+        assert kwargs['stdin'] == subprocess.DEVNULL
+        assert kwargs['stdout'] == subprocess.DEVNULL
+        assert kwargs['stderr'] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, 'run', probe)
+    chromium_env.ensure_chromium_env(env=env)
+    chromium_env.ensure_chromium_env(env=env)
+
+    assert env['PLAYWRIGHT_NODEJS_PATH'] == str(local)
+    assert probes == [[str(local), '--version']]
+
+
+@pytest.mark.parametrize('platform,override', [
+    ('linux', '/operator/node'), ('darwin', None), ('win32', None),
+])
+def test_playwright_automatic_node_probe_respects_operator_and_platform(
+        tmp_path, monkeypatch, platform, override):
+    local = tmp_path / '.local/bin/node'
+    local.parent.mkdir(parents=True)
+    local.write_text('#!/bin/sh\nexit 1\n')
+    local.chmod(0o755)
+    monkeypatch.setattr(chromium_env.sys, 'platform', platform)
+    env = {'HOME': str(tmp_path)}
+    if override:
+        env['PLAYWRIGHT_NODEJS_PATH'] = override
+
+    def unexpected_probe(*args, **kwargs):
+        pytest.fail('Explicit selections and other platforms must not be probed')
+
+    monkeypatch.setattr(subprocess, 'run', unexpected_probe)
+    chromium_env.ensure_chromium_env(env=env)
+
+    assert env.get('PLAYWRIGHT_NODEJS_PATH') == override
