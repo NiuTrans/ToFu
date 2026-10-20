@@ -87,6 +87,21 @@ runtime distinguishes transport failure, invalid arguments, unavailable tool,
 permission denial, handler failure, and user abort. Repair is limited to
 syntax/shape problems and cannot silently change the requested capability.
 
+Handler presentation is provisional until execution returns and deadline
+decisions settle. Problem: an exception after a handler's `done` update kept a
+successful card and audit, while cached failures prevented a fresh observation
+on a later call. Decision: the common executor corrects the verdict and shares
+its effect-recovery error between presentation and model delivery; canonical
+settlement evicts non-success observations and emits the execution outcome
+audit once. Proven admission refusals may still audit before dispatch.
+The pipeline marks its ownership on each round before dispatch; direct executor
+consumers (Paper, Timer) audit on executor exit instead of handler presentation.
+Alternatives rejected: rewriting exception text cannot correct cached or
+persisted state; retrying automatically could duplicate an uncertain write.
+Each subsequent call still passes normal authority and recovery admission.
+Verify `tests/tasks_pkg/test_tool_outcome_finality.py` for legacy/V2 delivery,
+late exceptions, unknown writes, timeout attribution and successful read retry.
+
 
 Root MCP authority refreshes before each request through ordinary owner/policy
 assembly on detached carriers. Only names in the root's initial MCP candidate

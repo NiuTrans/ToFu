@@ -135,8 +135,9 @@ def _finalize_tool_round(
         # pool-timeout lane stamped 'error') outranks a late success settle.
         _status = _prior
     round_entry['status'] = _status
-    from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
-    audit_round_outcome(task, round_entry, status=_status)
+    # This is a handler presentation update. The handler may still raise, or
+    # its declared deadline may replace the return value. The common pipeline
+    # audits the final outcome after those execution decisions have settled.
 
     # Timing contract (). `tEnd` is stamped HERE — the shared
     #   finalize seam every one of the ~44 handler call sites already funnels
