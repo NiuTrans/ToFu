@@ -114,6 +114,48 @@ def test_declared_refusal_and_partial_failure_preserve_owner_boundary(monkeypatc
     assert 'secret' not in json.dumps(batch)
 
 
+@pytest.mark.parametrize('canonical', [False, True])
+def test_search_budget_preserves_complete_hits_across_signed_pages(
+        monkeypatch, artifact_store, canonical):
+    from lib.tasks_pkg.handlers import tool_result_artifacts as handler
+
+    # UTF-8 byte accounting is a conservative token-counter failure mode.
+    # The handler must reduce page size, never shorten individual quotations
+    # while forwarding a cursor that has already consumed those matches.
+    monkeypatch.setattr(
+        handler, '_count_tokens', lambda text, _model: len(text.encode('utf-8')))
+    body = ('中🙂' * 80 + 'needle' + '背景' * 160) * 24
+    ref = save(artifact_store, body, canonical=canonical)
+    expected, cursor = [], 0
+    while True:
+        page = _tool_result_artifact_search(artifact_store, {
+            'user_id': 17, 'artifact_ref': ref, 'query': 'needle',
+            'cursor': cursor, 'limit': 20, 'now_ms': 2})
+        expected.extend(page['items'])
+        cursor = page['nextCursor']
+        if cursor is None:
+            break
+    assert len(expected) == 24
+
+    observed, cursors, cursor = [], set(), '0'
+    for _ in range(len(expected) + 1):
+        page = invoke(monkeypatch, artifact_store, 'search_tool_artifact', {
+            'artifact_ref': ref, 'query': 'needle', 'cursor': cursor, 'limit': 20})
+        assert page['status'] == 'ok'
+        assert not page.get('outputTruncated', False)
+        assert len(handler._serialize(page).encode('utf-8')) <= handler._RESPONSE_TOKEN_BUDGET
+        observed.extend(page['items'])
+        assert observed == expected[:len(observed)]
+        cursor = page['nextCursor']
+        if cursor is None:
+            break
+        assert page['items'] and cursor not in cursors
+        cursors.add(cursor)
+    else:
+        pytest.fail('budgeted search failed to reach the terminal page')
+    assert observed == expected
+
+
 @pytest.mark.parametrize("source_coverage", ["complete", "partial"])
 def test_real_vm_follows_query_cursors_without_inventing_source_completeness(monkeypatch, artifact_store, source_coverage):
     from lib.tools.javascript import execute_javascript_program

@@ -35,6 +35,14 @@ they are deliberately few and high value.
 `make test-affected` is a transparent selection hint for the inner loop. It
 does not replace domain or release gates. Do not rerun an unchanged suite.
 
+Replay drift and script exhaustion are local validation failures. The replayer
+raises an assertion through the existing local request-preparation boundary, so
+real dispatch releases its slot without retry, credential cooldown or model
+fallback. Problem: treating stale fixtures as provider failures obscured the
+first mismatch behind repeated backoff. Decision: preserve strict digest checks
+and repair reviewed fixture recordings. Weakening normalization or consuming
+provider retry budgets cannot repair a local recording.
+
 ## Development and delivery loop
 
 **Problem:** written policies and numerous tests do not prove the changed user

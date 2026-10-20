@@ -99,6 +99,33 @@ def test_search_adjacent_unicode_and_window_boundary_offsets(repo):
         assert found == expected
 
 
+@pytest.mark.parametrize('canonical', [False, True])
+def test_handler_search_budget_retains_authority_quotes_and_cursors(
+        repo, monkeypatch, canonical):
+    from lib.tasks_pkg.handlers import tool_result_artifacts as handler
+
+    monkeypatch.setattr(
+        handler, '_count_tokens', lambda text, _model: len(text.encode('utf-8')))
+    text = ('中🙂' * 80 + 'needle' + '背景' * 160) * 24
+    ref = (manifest(repo, [{'kind': 'text', 'text': text}], ttl=120000)
+           if canonical else put(repo, text, ttl=120000))
+    arguments = {'artifact_ref': ref, 'query': 'needle', 'limit': 20}
+    original = repo.search(user_id=1, **arguments)
+    assert len(handler._serialize(original).encode('utf-8')) > 7000
+
+    page = handler._execute_one(
+        'search_tool_artifact', arguments, user_id=1, repository=repo)
+    assert page['status'] == 'ok' and 0 < len(page['items']) < len(original['items'])
+    expected = repo.search(user_id=1, **{**arguments, 'limit': len(page['items'])})
+    assert page == {'status': 'ok', **expected}
+    assert all('needle' in item['text'] for item in page['items'])
+    assert len(handler._serialize(page).encode('utf-8')) <= 7000
+    resumed = handler._execute_one('search_tool_artifact', {
+        **arguments, 'cursor': page['nextCursor']}, user_id=1, repository=repo)
+    assert resumed['status'] == 'ok' and resumed['items']
+    assert resumed['items'][0]['offset'] > page['items'][-1]['offset']
+
+
 def test_selector_media_and_missing_children_are_explicit(repo):
     root = manifest(repo, [{'kind': 'text', 'text': 'not JSON'},
         {'kind': 'json', 'text': '{"a/b":{"~":[1,"中"]}}'},

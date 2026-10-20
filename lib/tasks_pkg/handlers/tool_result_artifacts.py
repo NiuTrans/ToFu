@@ -88,7 +88,9 @@ def _serialize(result: dict) -> str:
 
 
 def _metadata_refusal(result=None):
-    return {'status': 'error', 'error': {'code': 'response_metadata_too_large',
+    identity = {key: result[key] for key in ('index', 'artifactRef', 'query')
+                if result is not None and key in result}
+    return {**identity, 'status': 'error', 'error': {'code': 'response_metadata_too_large',
             'retryable': False, 'nextAction': 'Use fewer references or a narrower source query.'}}
 
 
@@ -97,7 +99,7 @@ def _fit_read_result(result, model, token_budget):
     if _count_tokens(_serialize(result), model) <= token_budget:
         return result
     if result.get('resumeCursor') or str(result.get('nextCursor', '')).startswith('trq1.'):
-        return _metadata_refusal()
+        return _metadata_refusal(result)
     visible = result.get('content') or ''
     low, high, best = 1, len(visible), None
     while low <= high:
@@ -108,22 +110,16 @@ def _fit_read_result(result, model, token_budget):
             best, low = candidate, mid + 1
         else:
             high = mid - 1
-    return best if best is not None else _metadata_refusal()
+    return best if best is not None else _metadata_refusal(result)
 
 
 def _fit_search_result(result, model, token_budget):
     if _count_tokens(_serialize(result), model) <= token_budget:
         return result
-    matches = result.get('items') or []
-    low, high, best = 0, max((len(str(x.get('text', ''))) for x in matches), default=0), None
-    while low <= high:
-        cap = (low + high) // 2
-        candidate = {**result, 'items': [{**x, 'text': str(x.get('text', ''))[:cap]} for x in matches], 'outputTruncated': True}
-        if _count_tokens(_serialize(candidate), model) <= token_budget:
-            best, low = candidate, cap + 1
-        else:
-            high = cap - 1
-    return best if best is not None else _metadata_refusal()
+    # The cursor has consumed every match in this page. Shortening a quotation
+    # (or dropping a match) would strand evidence behind that cursor, including
+    # the search term itself. Let the caller re-query fewer complete matches.
+    return _metadata_refusal(result)
 
 
 def _fit_one_result(fn_name, result, model, token_budget):
@@ -235,11 +231,11 @@ def _execute_one(fn_name: str, arguments: dict, *, user_id: int,
             # Echo the model's own handle so follow-up ranges keep quoting
             # the alias; nested child refs stay canonical digests.
             result['artifactRef'] = raw_ref
-        # Re-query the same immutable cursor with a smaller bounded source
-        # range so every visible prefix gets its correct signed continuation.
+        # Re-query the same immutable cursor with a smaller range/match count.
+        # The source owns both exact evidence and its signed continuation.
         source_limit = arguments.get('limit', 8192 if fn_name == 'read_tool_artifact' else 8)
         fitted = _fit_one_result(fn_name, result, model, token_budget)
-        while fitted.get('status') != 'ok' and source_limit > 1:
+        if fitted.get('status') != 'ok' and source_limit > 1:
             source_limit = max(1, source_limit // 2)
             return _execute_one(fn_name, {**arguments, 'limit': source_limit},
                                 user_id=user_id, repository=repository,
