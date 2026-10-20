@@ -372,6 +372,13 @@ def test_program_continuation_gets_next_round_without_tool_execution(
     state = _state()
     events = []
     _install_common(monkeypatch, events)
+    # This policy unit observes publication at the event port; its reduced
+    # task fixture does not compose the durable application event repository.
+    def observe_event(owner, event):
+        assert owner is task
+        events.append((event['type'], event['roundNum'], event['reason']))
+
+    monkeypatch.setattr('lib.tasks_pkg.manager.append_event', observe_event)
     _install_script(monkeypatch, state, [
         ({'role': 'assistant', 'content': ''}, 'stop', {'_program_pending': 1}),
         ({'role': 'assistant', 'content': 'final'}, 'stop', {}),
@@ -390,6 +397,9 @@ def test_program_continuation_gets_next_round_without_tool_execution(
     assert not result.outcome.completed and result.last_round_num == 1
     assert [e for e in events if e[0] == 'llm'] == [('llm', 0), ('llm', 1)]
     assert not [e for e in events if e[0] == 'tools']
+    assert [e for e in events if e[0] == 'round_end'] == [
+        ('round_end', 0, 'program_continue')]
+    assert events.index(('round_end', 0, 'program_continue')) < events.index(('llm', 1))
 
 
 def test_post_stream_abort_runs_root_cleanup_before_any_tool(monkeypatch):
