@@ -1,8 +1,15 @@
 /**
- * Terminal unknown-usage recovery: a read-only check followed by explicit human
- * confirmation of one new budget. Entry: render/disposeUsageRecoveryNotice.
+ * Terminal unknown-usage continuation: one explicit human action runs the
+ * read-only check and then confirms the server-proposed finite budget.
+ * Entry: render/disposeUsageRecoveryNotice.
  * Dependencies: generated DTOs, injected renderer ports, shared UI factories.
  * No Turn writes, automatic authorization, old-request replay or Goal resume.
+ *
+ * The reader never types or interprets token/tool/time numbers: the server
+ * proposes every limit, and the click itself is the authorization
+ * (`confirmed: true` plus the exact previewed budget). Exact numbers stay in
+ * a collapsed detail for operators; the visible sentence states the
+ * consequences. Delivery uncertainty still reuses one frozen command.
  */
 import type { ConversationUsageRecovery, RecoverUsageRequest } from '../../../api/conversation-sync.generated';
 import { apiFailure } from '../../../api/errors';
@@ -16,7 +23,7 @@ export interface UsageRecoveryBinding {
   projectionRevision: number;
 }
 
-type Phase = 'idle' | 'checking' | 'ready' | 'blocked' | 'check-failed'
+type Phase = 'idle' | 'checking' | 'blocked' | 'check-failed'
   | 'changed' | 'submitting' | 'unknown' | 'refused' | 'accepted';
 interface RecoveryState {
   binding: UsageRecoveryBinding;
@@ -24,12 +31,12 @@ interface RecoveryState {
   api: UsageRecoveryPorts;
   phase: Phase;
   el: HTMLElement;
-  check: HTMLButtonElement;
-  confirm: HTMLButtonElement;
+  continueButton: HTMLButtonElement;
   cancel: HTMLButtonElement;
+  /** Only the read-only check; a submitted command is never aborted. */
   controller?: AbortController;
   observation?: ConversationUsageRecovery;
-  /** Frozen only on explicit confirmation; uncertain delivery always reuses it. */
+  /** Frozen only on explicit continuation; uncertain delivery always reuses it. */
   command?: RecoverUsageRequest;
 }
 const notices = new WeakMap<HTMLElement, RecoveryState>();
@@ -57,40 +64,33 @@ function paint(state: RecoveryState): void {
   const content: Node[] = [];
   if (phase !== 'idle') {
     const messages: Record<Exclude<Phase, 'idle' | 'blocked'>, [string, string]> = {
-      checking: ['usageRecovery.checking', 'Checking whether a new budget can be authorized…'],
-      ready: ['usageRecovery.review', 'Review the new budget before continuing.'],
-      'check-failed': ['usageRecovery.checkFailed', 'The check could not be completed. No new budget was authorized. Try again.'],
-      changed: ['usageRecovery.changed', 'The conversation changed. Check again before confirming a new budget.'],
-      submitting: ['usageRecovery.submitting', 'Submitting the confirmed budget…'],
-      unknown: ['usageRecovery.unknown', 'The response was not confirmed. The request may already have been accepted. Retrying sends only the same confirmed request, not another authorization.'],
-      refused: ['usageRecovery.refused', 'The request was not accepted. Check the current conditions again before confirming a new budget.'],
-      accepted: ['usageRecovery.accepted', 'Continuation accepted. Follow the new reply in this conversation; this does not confirm completion.'],
+      checking: ['usageRecovery.checking', 'Preparing to continue…'],
+      submitting: ['usageRecovery.submitting', 'Starting the continuation…'],
+      'check-failed': ['usageRecovery.checkFailed', 'The conversation could not be read. Nothing was started. Try again.'],
+      changed: ['usageRecovery.changed', 'The conversation changed. Continue again to use what is saved now.'],
+      unknown: ['usageRecovery.unknown', 'The response was not confirmed. The continuation may already have started; trying again reuses the same confirmed request.'],
+      refused: ['usageRecovery.refused', 'The continuation was not accepted. Try again to use the current state.'],
+      accepted: ['usageRecovery.accepted', 'Continuation started. Follow the new reply in this conversation; this does not confirm completion.'],
     };
     const blockedMessages = {
       not_applicable: ['usageRecovery.notApplicable', 'This record is no longer eligible for a new budget. Follow the latest replies in this conversation.'],
       operation_unconfirmed: ['usageRecovery.operationUnconfirmed', 'An earlier operation has an unconfirmed outcome. A new budget cannot be authorized while that outcome remains unresolved.'],
-      configuration_unavailable: ['usageRecovery.configurationUnavailable', 'The model configuration is unavailable. Check the model connection in Settings, then check again.'],
-      ready: ['usageRecovery.checkFailed', 'The check could not be completed. No new budget was authorized. Try again.'],
+      configuration_unavailable: ['usageRecovery.configurationUnavailable', 'The model configuration is unavailable. Check the model connection in Settings, then continue again.'],
+      ready: ['usageRecovery.checkFailed', 'The conversation could not be read. Nothing was started. Try again.'],
     } as const;
     const [key, fallback] = phase === 'blocked'
       ? blockedMessages[state.observation?.reason ?? 'ready'] : messages[phase];
     const alert = createAlert({
       variant: phase === 'accepted' ? 'info' : 'warning',
-      title: text('usageRecovery.title', 'Continue with a new budget'),
+      title: text('usageRecovery.title', 'Continue generating'),
       body: text(key, fallback),
     });
     content.push(alert.el);
   }
-  const budget = state.command?.budget ?? state.observation?.budget;
-  if (budget && ['ready', 'submitting', 'unknown'].includes(phase)) {
-    const numbers = document.createElement('div');
-    numbers.dataset.usageRecoveryBudget = '';
-    numbers.textContent = textFor(state.ports, 'usageRecovery.budget',
-      'New budget: up to {maxTokens} tokens, {maxToolCalls} tool calls and {durationSeconds} seconds.', budget);
-    content.push(numbers);
+  if (phase !== 'accepted') {
     for (const [key, fallback] of [
       ['usageRecovery.cost', 'Continuing may incur additional model and tool charges.'],
-      ['usageRecovery.preserve', 'The earlier unknown-usage record and existing output will be preserved. This does not fill in or settle the missing usage.'],
+      ['usageRecovery.preserve', 'Everything generated so far and the earlier unconfirmed-usage record stay exactly as they are; nothing is filled in or settled.'],
       ['usageRecovery.scope', 'This starts a new reply in ordinary chat. It does not resend the earlier request or resume the earlier Goal or Flow.'],
     ]) {
       const line = document.createElement('div');
@@ -98,88 +98,57 @@ function paint(state: RecoveryState): void {
       content.push(line);
     }
   }
+  const budget = state.command?.budget ?? state.observation?.budget;
+  if (budget && ['checking', 'submitting', 'unknown'].includes(phase)) {
+    // Exact limits remain inspectable, never a form the reader must judge.
+    const numbers = document.createElement('details');
+    numbers.dataset.usageRecoveryBudget = '';
+    const summary = document.createElement('summary');
+    summary.textContent = text('usageRecovery.budgetDetails', 'Limits chosen automatically');
+    const value = document.createElement('div');
+    value.textContent = textFor(state.ports, 'usageRecovery.budget',
+      'Up to {maxTokens} tokens, {maxToolCalls} tool calls and {durationSeconds} seconds.', budget);
+    numbers.append(summary, value);
+    content.push(numbers);
+  }
   const actions = document.createElement('div');
   actions.className = 'ui-row ui-row--wrap';
-  if (['idle', 'checking', 'blocked', 'check-failed', 'changed', 'refused'].includes(phase)) {
-    state.check.textContent = phase === 'checking'
-      ? text('usageRecovery.checking', 'Checking whether a new budget can be authorized…')
-      : text('usageRecovery.check', 'Check and continue');
-    state.check.setAttribute('aria-disabled', String(phase === 'checking'));
-    actions.append(state.check);
-  }
-  if (['ready', 'submitting', 'unknown', 'accepted'].includes(phase)) {
-    state.confirm.textContent = phase === 'unknown'
-      ? text('usageRecovery.retry', 'Retry the same request')
-      : phase === 'submitting'
-        ? text('usageRecovery.submitting', 'Submitting the confirmed budget…')
-        : phase === 'accepted'
-          ? text('usageRecovery.requestAccepted', 'Continuation accepted')
-          : text('usageRecovery.confirm', 'Confirm and continue');
-    state.confirm.setAttribute('aria-disabled', String(phase === 'submitting' || phase === 'accepted'));
-    actions.append(state.confirm);
-  }
-  if (phase === 'checking' || phase === 'ready') {
+  const busy = phase === 'checking' || phase === 'submitting';
+  /* These two blocks are permanent for this record: re-reading cannot change
+   * them, so offering the action again would be the same dead control the
+   * reader just came from. */
+  const permanentlyBlocked = phase === 'blocked'
+    && ['not_applicable', 'operation_unconfirmed'].includes(
+      state.observation?.reason ?? '');
+  state.continueButton.textContent = phase === 'unknown'
+    ? text('usageRecovery.retry', 'Retry the same request')
+    : phase === 'submitting'
+      ? text('usageRecovery.submitting', 'Starting the continuation…')
+      : phase === 'accepted'
+        ? text('usageRecovery.requestAccepted', 'Continuation started')
+        : text('usageRecovery.check', 'Continue generating');
+  state.continueButton.setAttribute('aria-disabled', String(busy || phase === 'accepted'));
+  if (!permanentlyBlocked) actions.append(state.continueButton);
+  if (phase === 'checking') {
     state.cancel.textContent = text('usageRecovery.cancel', 'Cancel');
     actions.append(state.cancel);
   }
   content.push(actions);
   state.el.replaceChildren(...content);
   if (focused) {
-    const target = focused.isConnected ? focused
-      : actions.contains(state.confirm) ? state.confirm : state.check;
+    const target = focused.isConnected ? focused : state.continueButton;
     target.focus();
   }
 }
 
-async function check(node: HTMLElement, state: RecoveryState): Promise<void> {
-  if (!current(node, state) || state.controller || state.command
-      || ['ready', 'submitting', 'accepted'].includes(state.phase)) return;
-  const controller = new AbortController();
-  state.controller = controller;
-  state.observation = undefined;
-  state.phase = 'checking';
-  paint(state);
+async function deliver(node: HTMLElement, state: RecoveryState): Promise<void> {
+  const command = state.command;
+  if (!command) return;
   const { conversationId, turnId } = state.binding;
-  try {
-    const result = await state.api.inspect(conversationId, turnId, controller.signal);
-    if (!current(node, state) || controller.signal.aborted) return;
-    if (result.ok !== true || result.conversationId !== conversationId || result.sourceTurnId !== turnId) {
-      throw new Error('Recovery check identity mismatch');
-    }
-    if (result.sourceProjectionRevision !== state.binding.projectionRevision) {
-      state.phase = 'changed';
-    } else {
-      state.observation = { ...result, budget: Object.freeze({ ...result.budget }) };
-      state.phase = result.state === 'ready' && result.reason === 'ready' ? 'ready' : 'blocked';
-    }
-  } catch {
-    if (!current(node, state) || controller.signal.aborted) return;
-    state.phase = 'check-failed';
-  } finally {
-    if (current(node, state) && state.controller === controller) {
-      state.controller = undefined;
-      paint(state);
-    }
-  }
-}
-
-async function confirm(node: HTMLElement, state: RecoveryState): Promise<void> {
-  if (!current(node, state) || !['ready', 'unknown'].includes(state.phase)) return;
-  if (!state.command) {
-    const observation = state.observation;
-    if (!observation || observation.sourceProjectionRevision !== state.binding.projectionRevision) return;
-    state.command = Object.freeze({
-      commandId: state.api.createCommandId(),
-      expectedProjectionRevision: observation.sourceProjectionRevision,
-      confirmed: true,
-      budget: Object.freeze({ ...observation.budget }),
-    });
-  }
   state.phase = 'submitting';
   paint(state);
-  const { conversationId, turnId } = state.binding;
   try {
-    const result = await state.api.recover(conversationId, turnId, state.command);
+    const result = await state.api.recover(conversationId, turnId, command);
     if (!current(node, state)) return;
     if (result.ok !== true || result.conversationId !== conversationId) {
       throw new Error('Recovery acknowledgement identity mismatch');
@@ -191,6 +160,8 @@ async function confirm(node: HTMLElement, state: RecoveryState): Promise<void> {
     const refused = status >= 400 && status < 500 && ![408, 429].includes(status);
     state.phase = refused ? 'refused' : 'unknown';
     if (refused) {
+      // A definitive refusal consumed this authorization; the next attempt
+      // must re-read the current source and propose its own budget.
       state.command = undefined;
       state.observation = undefined;
     }
@@ -198,6 +169,56 @@ async function confirm(node: HTMLElement, state: RecoveryState): Promise<void> {
   if (!current(node, state)) return;
   paint(state);
   if (state.phase === 'accepted') state.api.onAccepted?.(conversationId);
+}
+
+/** One explicit gesture: read-only check, then the server's finite budget. */
+async function startContinuation(node: HTMLElement, state: RecoveryState): Promise<void> {
+  if (!current(node, state) || state.controller || state.command
+      || ['checking', 'submitting', 'accepted'].includes(state.phase)) return;
+  const controller = new AbortController();
+  state.controller = controller;
+  state.observation = undefined;
+  state.phase = 'checking';
+  paint(state);
+  const { conversationId, turnId } = state.binding;
+  let result: ConversationUsageRecovery | null = null;
+  try {
+    result = await state.api.inspect(conversationId, turnId, controller.signal);
+  } catch {
+    result = null;
+  }
+  if (!current(node, state) || controller.signal.aborted) return;
+  state.controller = undefined;
+  if (!result || result.ok !== true
+      || result.conversationId !== conversationId || result.sourceTurnId !== turnId) {
+    state.phase = 'check-failed';
+    paint(state);
+    return;
+  }
+  if (result.sourceProjectionRevision !== state.binding.projectionRevision) {
+    state.phase = 'changed';
+    paint(state);
+    return;
+  }
+  state.observation = { ...result, budget: Object.freeze({ ...result.budget }) };
+  if (result.state !== 'ready' || result.reason !== 'ready') {
+    state.phase = 'blocked';
+    paint(state);
+    return;
+  }
+  if (controller.signal.aborted || !current(node, state)) return;
+  state.command = Object.freeze({
+    commandId: state.api.createCommandId(),
+    expectedProjectionRevision: result.sourceProjectionRevision,
+    confirmed: true,
+    budget: Object.freeze({ ...result.budget }),
+  });
+  await deliver(node, state);
+}
+
+async function retryFrozen(node: HTMLElement, state: RecoveryState): Promise<void> {
+  if (!current(node, state) || state.phase !== 'unknown' || !state.command) return;
+  await deliver(node, state);
 }
 
 /** Reuses mounted controls through receipt repaint; revision changes invalidate
@@ -220,24 +241,26 @@ export function renderUsageRecoveryNotice(
     state = undefined;
   }
   if (!state) {
-    const el = node.ownerDocument.createElement('div');
+    const document = node.ownerDocument;
+    const el = document.createElement('div');
     el.className = 'ui-stack ui-stack--tight ui-stack--bounded';
     const next: RecoveryState = {
       binding: { ...binding }, ports, api: ports.usageRecovery, phase: 'idle', el,
-      check: createButton({ label: '', size: 'sm', wrap: true,
-        onClick: () => { void check(node, next); } }, node.ownerDocument),
-      confirm: createButton({ label: '', variant: 'primary', size: 'sm', wrap: true,
-        onClick: () => { void confirm(node, next); } }, node.ownerDocument),
+      continueButton: createButton({ label: '', variant: 'primary', size: 'sm', wrap: true,
+        onClick: () => {
+          if (next.phase === 'unknown') void retryFrozen(node, next);
+          else void startContinuation(node, next);
+        } }, document),
       cancel: createButton({ label: '', variant: 'ghost', size: 'sm', wrap: true,
         onClick: () => {
-          if (!current(node, next) || !['checking', 'ready'].includes(next.phase)) return;
+          if (!current(node, next) || next.phase !== 'checking') return;
           next.controller?.abort();
           next.controller = undefined;
           next.observation = undefined;
           next.phase = 'idle';
           paint(next);
-          next.check.focus();
-        } }, node.ownerDocument),
+          next.continueButton.focus();
+        } }, document),
     };
     state = next;
     notices.set(node, state);

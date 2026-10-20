@@ -3792,6 +3792,10 @@ controller.render(conversation, firstState);
 scheduled.shift()();
 const vm = feature.selectConversationViewModel(firstState);
 const first = document.querySelector('[data-block-id="file-changes"]');
+/* Process rows reserve a leading marker column; the label must follow it so the
+ * row starts on the same text baseline as every sibling process row. */
+const markerBeforeLabel = Boolean(
+  first.querySelector('summary > .fc-summary-icon + .fc-summary-text'));
 first.querySelector('details').open = false;
 const undoAction = first.querySelector('[data-conversation-action="undo-turn-files"]');
 const actionInSummary = undoAction.closest('summary') === first.querySelector('summary');
@@ -3814,7 +3818,7 @@ controller.render(conversation, makeState(truncatedTurn));
 scheduled.shift()();
 const truncatedLabel = document.querySelector('[data-block-id="file-changes"] summary').textContent.includes('512+');
 console.log(JSON.stringify({
-  remoteUndoHidden, truncatedLabel,
+  remoteUndoHidden, truncatedLabel, markerBeforeLabel,
   native:Boolean(vm.mainLane.turns[0]),
   blockKinds:vm.mainLane.turns[0].blocks.map(block => block.kind),
   actionInSummary,
@@ -3831,6 +3835,7 @@ dom.window.close();
     assert result == {
         "native": True,
         "blockKinds": ["text", "file-changes"],
+        "markerBeforeLabel": True,
         "remoteUndoHidden": True,
         "truncatedLabel": True,
         "actionInSummary": True,

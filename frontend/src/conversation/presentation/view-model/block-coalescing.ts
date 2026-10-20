@@ -2,7 +2,7 @@
  * Contiguous thinking and context-note coalescing plus terminal reasoning activity.
  * Explicit scope prevents crossing authored round boundaries.
  * Entry: coalesceAdjacentThinkingBlocks, coalesceAdjacentSystemNoteBlocks,
- * settleThinkingActivity.
+ * coalesceAdjacentRetryActivityBlocks, settleThinkingActivity.
  * Dependencies: conversation-sync.generated, round-outline, context-note-grouping,
  * types. */
 import {
@@ -16,6 +16,7 @@ import {
   sameContextNoteScope,
 } from '../context-note-grouping';
 import {
+  type ActivityEventBlockViewModel,
   type ThinkingBlockViewModel,
   type SystemNoteBlockViewModel,
   type ConversationBlockViewModel,
@@ -131,6 +132,65 @@ export function coalesceAdjacentSystemNoteBlocks(
     coalesced.push({
       blockId: first.blockId,
       kind: 'system-note-group',
+      identitySource: first.identitySource,
+      source: first.source,
+      items: run,
+    });
+  }
+  blocks.splice(0, blocks.length, ...coalesced);
+}
+
+/* Failed model requests and rate-limit/backoff waits are transport noise: one
+ * 429 storm produces a ladder of identical red rows in the transcript. A
+ * maximal ADJACENT run of them collapses into one collapsed disclosure whose
+ * members are unchanged (same summary, facts and durations), so a reader can
+ * still open it. Rows that carry their own meaning never join a run — a
+ * terminal error opens its diagnostic receipt, a compaction receipt is a
+ * durable context boundary, and a model switch explains where service
+ * resumed. A run of one also stays a plain row: a lone failure is not noise. */
+function isRetryEvidenceBlock(
+  block: ConversationBlockViewModel,
+): block is ActivityEventBlockViewModel {
+  if (block.kind !== 'activity-event' || block.terminalError) return false;
+  const entry = block.value;
+  if (entry.reasonCode === 'context_compaction' || entry.reasonCode === 'compacting') {
+    return false;
+  }
+  if (entry.kind === 'model') return entry.status === 'failed';
+  return entry.kind === 'status'
+    && (entry.phase === 'retrying' || (entry.statusCode ?? 0) >= 400);
+}
+
+/**
+ * Merge each maximal run of adjacent retry/failure rows into ONE collapsed
+ * group without changing the member rows or their chronology. The first
+ * row's blockId remains the DOM identity so a live-growing storm re-renders
+ * in place instead of restarting the disclosure.
+ */
+export function coalesceAdjacentRetryActivityBlocks(
+  blocks: ConversationBlockViewModel[],
+): void {
+  const coalesced: ConversationBlockViewModel[] = [];
+  for (let index = 0; index < blocks.length;) {
+    const first = blocks[index];
+    if (!isRetryEvidenceBlock(first)) {
+      coalesced.push(first);
+      index += 1;
+      continue;
+    }
+    const run: ActivityEventBlockViewModel[] = [first];
+    index += 1;
+    while (index < blocks.length && isRetryEvidenceBlock(blocks[index])) {
+      run.push(blocks[index] as ActivityEventBlockViewModel);
+      index += 1;
+    }
+    if (run.length === 1) {
+      coalesced.push(first);
+      continue;
+    }
+    coalesced.push({
+      blockId: first.blockId,
+      kind: 'activity-event-group',
       identitySource: first.identitySource,
       source: first.source,
       items: run,

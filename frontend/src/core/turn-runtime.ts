@@ -354,8 +354,12 @@ export function createConversationTurnRuntime(
   ): PerceptionAttemptIdentity | null => {
     const state = runtimeStores.get(conversationId)?.getState();
     if (!state) return null;
+    /* A queued Turn's attempt is durable before any executor owns it
+     * (`taskId` empty until dispatch). Timing receipts attach to an executor
+     * attempt, so selecting that row made every observation a rejected
+     * receipt; skip rows with no task identity. */
     const attempts = entityRecordValues(state.attemptsById)
-      .filter((attempt) => attempt?.attemptId && attempt.turnId
+      .filter((attempt) => attempt?.attemptId && attempt.turnId && attempt.taskId
         && (attempt.status === 'pending' || attempt.status === 'running'))
       .sort((left, right) => {
         const leftLive = left?.status === 'pending' || left?.status === 'running';

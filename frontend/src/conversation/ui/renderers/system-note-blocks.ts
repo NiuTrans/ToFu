@@ -142,6 +142,18 @@ function systemNoteBodyCard(
   return card;
 }
 
+/* The verbatim wire text alone — the group member card already carries its
+ * own header row, so the repeated "介入记录" card head would be pure noise. */
+function systemNoteItemBody(
+  document: Document,
+  block: SystemNoteBlock,
+): HTMLElement {
+  const pre = document.createElement('pre');
+  pre.className = 'sw-card-raw-pre';
+  pre.textContent = block.text;
+  return pre;
+}
+
 function contextProvenanceBody(
   document: Document, ports: ClassicConversationRendererPorts, value: unknown,
 ): HTMLElement {
@@ -178,16 +190,48 @@ export function renderSystemNoteBlock(
   summary.append(...Array.from(header.childNodes));
   const body = document.createElement('div');
   body.className = 'sw-inbox-row-body';
-  if (block.provenance) body.appendChild(contextProvenanceBody(document, ports, block.provenance));
-  body.appendChild(systemNoteBodyCard(document, ports, block));
+  if (block.provenance) {
+    // Same dedup as grouped members: provenance is the readable summary, the
+    // verbose raw body only repeats it.
+    body.appendChild(contextProvenanceBody(document, ports, block.provenance));
+  } else {
+    body.appendChild(systemNoteBodyCard(document, ports, block));
+  }
   details.append(summary, body);
   node.replaceChildren(details);
 }
 
+/* The card reused to hold one note's content. A single consistent box (the
+ * header row + any provenance meta + the verbatim wire text) so an expanded
+ * group reads as a stack of uniform cards, not two mismatched sub-boxes. */
+const NOTE_ITEM_CARD = 'sw-note-group-item';
+
+function systemNoteItemCard(
+  document: Document,
+  ports: ClassicConversationRendererPorts,
+  item: SystemNoteBlock,
+): HTMLElement {
+  const card = document.createElement('div');
+  card.className = `sw-card sw-stall-card-item ${NOTE_ITEM_CARD}`;
+  card.dataset.noteKind = item.noteKind;
+  if (item.reason) card.dataset.reason = item.reason;
+  if (item.reason === 'active_checklist') card.dataset.checklist = 'true';
+  card.appendChild(systemNoteHeader(document, ports, item));
+  if (item.provenance) {
+    // The provenance summary is the curated form of this note's content; the
+    // raw injected block (e.g. the full <relevant_memories> dump) repeats the
+    // same memory names/descriptions, so omit it to avoid duplicate noise.
+    card.appendChild(contextProvenanceBody(document, ports, item.provenance));
+  } else {
+    card.appendChild(systemNoteItemBody(document, item));
+  }
+  return card;
+}
+
 /* A merged run of adjacent context-injection notes: ONE disclosure whose
  * summary is the shared "context injections" title + count, and whose body
- * lists each member note with its own header (reason / noteKind title +
- * action badge) and verbatim body card. Member positions are unchanged. */
+ * lists each member note as one uniform card (header + provenance meta +
+ * verbatim text). Member positions are unchanged. */
 export function renderSystemNoteGroupBlock(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'system-note-group' }>,
@@ -222,18 +266,7 @@ export function renderSystemNoteGroupBlock(
 
   if (block.provenance) body.appendChild(contextProvenanceBody(document, ports, block.provenance));
   for (const item of block.items) {
-    const itemEl = document.createElement('div');
-    itemEl.className = 'sw-note-group-item';
-    itemEl.dataset.noteKind = item.noteKind;
-    if (item.reason) itemEl.dataset.reason = item.reason;
-    if (item.reason === 'active_checklist') itemEl.dataset.checklist = 'true';
-
-    if (item.provenance) itemEl.appendChild(contextProvenanceBody(document, ports, item.provenance));
-    itemEl.append(
-      systemNoteHeader(document, ports, item),
-      systemNoteBodyCard(document, ports, item),
-    );
-    body.appendChild(itemEl);
+    body.appendChild(systemNoteItemCard(document, ports, item));
   }
   details.append(summary, body);
   node.replaceChildren(details);

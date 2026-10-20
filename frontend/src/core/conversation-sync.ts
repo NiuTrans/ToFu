@@ -86,6 +86,38 @@ function record(value: unknown): JsonRecord {
     ? value as JsonRecord : {};
 }
 
+/* `turnPage` fences the page against the applied replay head and answers 409
+ * (`history_page_stale`) when a write committed past it. That is a routine
+ * race while an attempt streams, not a broken projection: repair the head from
+ * one authoritative snapshot and retry the same cursor. Without this, the
+ * Surface kept retrying a sequence the server had already left behind, so
+ * earlier turns stayed unreachable until the page was reloaded. A wedged
+ * stream (no frames, so no sequence advance) is exactly the case that never
+ * self-healed. Bounded because each repair is a full snapshot read. */
+const HISTORY_HEAD_REPAIR_ATTEMPTS = 3;
+
+function historyPageIsStale(cause: unknown): boolean {
+  return Boolean(cause && typeof cause === 'object'
+    && (cause as { status?: unknown }).status === 409);
+}
+
+async function readWithRepairedHead<T>(
+  read: () => Promise<T>,
+  repair: () => Promise<unknown>,
+  closed: () => boolean,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read();
+    } catch (cause) {
+      if (closed() || !historyPageIsStale(cause)
+          || attempt >= HISTORY_HEAD_REPAIR_ATTEMPTS) throw cause;
+      await repair();
+      if (closed()) throw cause;
+    }
+  }
+}
+
 /**
  * Owns snapshot/cursor/SSE/recovery for exactly one conversation.
  * Push and BroadcastChannel callers may only call `invalidate`; projections
@@ -235,14 +267,32 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       if (this.turnPageFlight.key === key) return this.turnPageFlight.promise;
       throw new Error('A different conversation history page is already loading');
     }
+    const request = readWithRepairedHead(
+      () => this.readTurnPage(normalizedLaneId, beforeOrdinal, limit, mode),
+      () => this.hydrate(false), () => this.closed,
+    ).catch((cause: unknown) => {
+      this.protocolError(cause);
+      throw cause;
+    });
+    const flight = request.finally(() => { this.turnPageFlight = null; });
+    this.turnPageFlight = { key, promise: flight };
+    return flight;
+  }
+
+  private readTurnPage(
+    laneId: string,
+    beforeOrdinal: number | undefined,
+    limit: number,
+    mode: 'continuous' | 'detached',
+  ): Promise<ConversationTurnPage> {
     const expectedSequence = this.sequence;
     const expectedGeneration = this.generation;
     /* Same wedged-flight guard as fetchSnapshot: an unbounded stalled page
      * read kept `turnPageFlight` forever, rejecting every later page with
      * "already loading" until reload. */
-    const request = this.options.api.turnPage(
+    return this.options.api.turnPage(
       this.options.conversationId,
-      normalizedLaneId,
+      laneId,
       expectedSequence,
       beforeOrdinal,
       limit,
@@ -253,7 +303,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       if (this.closed) throw new Error('Conversation sync coordinator is closed');
       const page = materializeSnapshotReferences(wirePage);
       if (page.conversationId !== this.options.conversationId
-          || page.laneId !== normalizedLaneId) {
+          || page.laneId !== laneId) {
         throw new Error('Conversation history page identity mismatch');
       }
       if (page.syncSeq !== expectedSequence || this.sequence !== expectedSequence
@@ -263,13 +313,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       }
       this.options.onTurnPage?.(page, mode);
       return page;
-    }).catch((cause: unknown) => {
-      this.protocolError(cause);
-      throw cause;
     });
-    const flight = request.finally(() => { this.turnPageFlight = null; });
-    this.turnPageFlight = { key, promise: flight };
-    return flight;
   }
 
   async loadRoundDirectory(

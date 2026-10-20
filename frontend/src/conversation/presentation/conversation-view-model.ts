@@ -11,6 +11,7 @@ import {
 } from './background-command-completion';
 import {
   type BranchLaneDescriptor,
+  type ConversationQueueItem,
   type TurnRecord,
 } from '../../api/conversation-sync.generated';
 import {
@@ -123,17 +124,57 @@ const turnVmMemo = new WeakMap<TurnRecord, TurnVmMemoEntry>();
 
 type BackgroundProjection = ReturnType<typeof createBackgroundCommandCompletionProjection>;
 
+/** What a QUEUING Turn can say about its waiting message. A durable queue row
+ * carries the real position and producer markers; the row-less fallback
+ * (`position: 0`) knows only that the Turn's bound output Turn waits. */
+type ConversationQueueExplanation = {
+  queueId: string;
+  position: number;
+  text: string;
+  steerFallback?: boolean;
+  backgroundCommand?: ConversationQueueItem['backgroundCommand'];
+};
+
 function selectJoins(state: TurnState, presentation: ConversationPresentationState,
   backgroundCommands: BackgroundProjection) {
   backgroundCommands.update(state);
   const autopilotNoticesByTurn = selectAutopilotRunNotices(state, presentation);
-  const nativeQueueByInputTurn = new Map(
+  const nativeQueueByInputTurn = new Map<string, ConversationQueueExplanation>(
     state.queueItems.flatMap((item) => (
       item.inputTurnId ? [[item.inputTurnId, item] as const] : []
     )),
   );
-  const queuedOutputTurnIds = new Set(
-    state.queueItems.flatMap((item) => item.outputTurnId ? [item.outputTurnId] : []),
+  /* The bound attempt is the durable proof that an output Turn waits in the
+   * queue; the queue row is a separate read of the same commit. Treating the
+   * row as the only evidence left a pending output Turn with neither a
+   * live-status nor a queue block — a header-only ghost — whenever that read
+   * lagged or came back empty. Both surfaces derive from state we already hold. */
+  const queuedBindingByOutputTurn = new Map<string, string>();
+  for (const attempt of entityRecordValues(state.attemptsById)) {
+    const queueId = attempt?.queueBinding?.queueId;
+    if (attempt?.turnId && queueId) {
+      queuedBindingByOutputTurn.set(attempt.turnId, queueId);
+    }
+  }
+  const queuedOutputTurnIds = new Set<string>(queuedBindingByOutputTurn.keys());
+  for (const item of state.queueItems) {
+    if (item.outputTurnId) queuedOutputTurnIds.add(item.outputTurnId);
+  }
+  /* Row-less explanation for the QUEUING Turn: its own content plus its bound
+   * output Turn's identity, never a fabricated queue position. */
+  const queuedInputFallback = new Map<string, ConversationQueueExplanation>();
+  for (const [outputTurnId, queueId] of queuedBindingByOutputTurn) {
+    const inputTurnId = state.turnsById[outputTurnId]?.parentTurnId;
+    if (!inputTurnId || nativeQueueByInputTurn.has(inputTurnId)) continue;
+    const content = state.turnsById[inputTurnId]?.projection?.content;
+    queuedInputFallback.set(inputTurnId, {
+      queueId,
+      position: 0,
+      text: typeof content === 'string' ? content : '',
+    });
+  }
+  const queueExplanationFor = (turnId: string) => (
+    nativeQueueByInputTurn.get(turnId) ?? queuedInputFallback.get(turnId)
   );
   const latestAttemptByTurn = new Map<string, {
     taskId: string;
@@ -204,8 +245,9 @@ function selectJoins(state: TurnState, presentation: ConversationPresentationSta
     ));
   }
 
-  return { autopilotNoticesByTurn, nativeQueueByInputTurn, queuedOutputTurnIds,
-    latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn };
+  return { autopilotNoticesByTurn, nativeQueueByInputTurn, queueExplanationFor,
+    queuedOutputTurnIds, latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn,
+    laneOwners, childrenByTurn };
 }
 
 interface CompiledSelection {
@@ -281,7 +323,7 @@ function composeSelection(
   previous?: CompiledSelection, dirty: ReadonlySet<string> = new Set(),
 ): CompiledSelection {
   const joins = previous?.joins ?? selectJoins(state, presentation, backgroundCommands);
-  const { autopilotNoticesByTurn, nativeQueueByInputTurn, queuedOutputTurnIds,
+  const { autopilotNoticesByTurn, queueExplanationFor, queuedOutputTurnIds,
     latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn } = joins;
   const lanes = new Map(previous?.lanes);
   const locations = previous?.locations ?? new Map<string, { laneId: string; index: number }>();
@@ -352,7 +394,7 @@ function composeSelection(
         const inspectorEnabled = Boolean(presentation.requestInspectorEnabled);
         const plain = branches.length === 0
           && (autopilotNoticesByTurn.get(turn.turnId)?.length ?? 0) === 0
-          && !nativeQueueByInputTurn.has(turn.turnId)
+          && !queueExplanationFor(turn.turnId)
           && !(presentation.artifactsByTurn?.get(turn.turnId)?.length)
           && turn.turnId !== mainLiveTurnId && !goalProgressByTurn.has(turn.turnId);
         if (plain) {
@@ -374,7 +416,7 @@ function composeSelection(
           turn, diagnostics, preferredTranslationMode, translationActivity,
         );
         const autopilotNotices = autopilotNoticesByTurn.get(turn.turnId) ?? [];
-        const queueItem = nativeQueueByInputTurn.get(turn.turnId);
+        const queueItem = queueExplanationFor(turn.turnId);
         const artifacts = presentation.artifactsByTurn?.get(turn.turnId);
         /* Keep the memoized leaf array as the Turn's `blocks` identity when no
          * additive block applies, so an untouched Turn renders with a stable
@@ -583,19 +625,33 @@ function composeSelection(
   return { joins, lanes, locations, viewModel, cyclic };
 }
 
-/* Transport degradation is a conversation-level fact, not a turn failure:
- * while the sync channel is recovering/degraded/offline the transcript may be
- * stale, and the inline banner says exactly that instead of letting a frozen
- * stream read as a model failure (RENDER_CONTRACT: transport state is never
- * presented as turn error). */
+/* The sync channel can flap for a few hundred ms during routine reconnects.
+ * A notice that appears and vanishes inside that window only distracts; we
+ * require the unhealthy state to persist for ~1 s before we surface it, and
+ * clear it immediately once the channel is healthy again. */
+const TRANSPORT_NOTICE_DEBOUNCE_MS = 1000;
+let transportNoticeDebounce: {
+  state: 'recovering' | 'degraded' | 'offline';
+  shownAt: number;
+} | null = null;
+
 function selectTransportNotice(
   syncHealth: ConversationPresentationState['syncHealth'],
 ): ConversationViewModel['transportNotice'] {
   const healthState = syncHealth?.state;
-  if (healthState === 'recovering'
-      || healthState === 'degraded'
-      || healthState === 'offline') {
-    return healthState;
+  if (healthState !== 'recovering'
+      && healthState !== 'degraded'
+      && healthState !== 'offline') {
+    transportNoticeDebounce = null;
+    return null;
   }
-  return null;
+  const now = Date.now();
+  if (transportNoticeDebounce?.state !== healthState) {
+    transportNoticeDebounce = { state: healthState, shownAt: now + TRANSPORT_NOTICE_DEBOUNCE_MS };
+    return null;
+  }
+  if (now < transportNoticeDebounce.shownAt) return null;
+  return healthState;
 }
+
+

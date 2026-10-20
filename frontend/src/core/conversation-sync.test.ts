@@ -145,6 +145,49 @@ describe('snapshot recovery barrier', () => {
   });
 });
 
+describe('history page head repair', () => {
+  const page = (syncSeq: number, beforeOrdinal: number) => ({
+    conversationId: 'conv', laneId: 'main', syncSeq, turns: [], attempts: [],
+    beforeOrdinal, nextBeforeOrdinal: 1, totalTurns: 900, hasMore: true,
+  } as unknown as import('../api/conversation-sync.generated').ConversationTurnPage);
+
+  it('repairs one stale head from an authoritative snapshot and replays the cursor', async () => {
+    const onTurnPage = vi.fn();
+    const { coordinator, api, onSnapshot } = fixture({ onTurnPage });
+    await coordinator.hydrate(false);
+    api.snapshot.mockResolvedValue(snapshot(9));
+    api.turnPage
+      .mockRejectedValueOnce(Object.assign(new Error('HTTP 409'), { status: 409 }))
+      .mockImplementationOnce(async (_id, lane, syncSeq, before) => page(syncSeq, before));
+
+    const loaded = await coordinator.loadTurnPage('main', 7, 64);
+
+    expect(api.snapshot).toHaveBeenCalledTimes(2);
+    expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ syncSeq: 9 }));
+    expect(api.turnPage).toHaveBeenCalledTimes(2);
+    expect(api.turnPage.mock.calls[1].slice(0, 4)).toEqual(['conv', 'main', 9, 7]);
+    expect(loaded.syncSeq).toBe(9);
+    expect(onTurnPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a non-stale history failure without a snapshot read', async () => {
+    const { coordinator, api, onProtocolError } = fixture();
+    await coordinator.hydrate(false);
+    api.turnPage.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { status: 503 }));
+    await expect(coordinator.loadTurnPage('main', 7, 64)).rejects.toThrow('unavailable');
+    expect(api.snapshot).toHaveBeenCalledTimes(1);
+    expect(onProtocolError).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops after the bounded number of repair attempts', async () => {
+    const { coordinator, api } = fixture();
+    await coordinator.hydrate(false);
+    api.turnPage.mockRejectedValue(Object.assign(new Error('HTTP 409'), { status: 409 }));
+    await expect(coordinator.loadTurnPage('main', 7, 64)).rejects.toThrow('HTTP 409');
+    expect(api.turnPage).toHaveBeenCalledTimes(3);
+    expect(api.snapshot).toHaveBeenCalledTimes(3);
+  });
+});
 describe('transport liveness and observer isolation', () => {
   it('recovers a permanently closed source through a fresh snapshot with backoff', async () => {
     const { coordinator, api, sources, onSnapshot } = fixture();

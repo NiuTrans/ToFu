@@ -90,14 +90,25 @@ describe('terminal failure receipt view-model', () => {
 
 describe('transportNotice', () => {
   it.each(['recovering', 'degraded', 'offline'] as const)(
-    'exposes the %s sync state as an inline conversation notice',
+    'exposes the %s sync state after the debounce window',
     (healthState) => {
-      const viewModel = selectConversationViewModel(
-        stateWith(failedTurn({ kind: 'generic', message: 'x' })),
-        {},
-        { syncHealth: { state: healthState } },
+      const state = stateWith(failedTurn({ kind: 'generic', message: 'x' }));
+      /* First call starts the debounce timer; still null. */
+      let viewModel = selectConversationViewModel(
+        state, {}, { syncHealth: { state: healthState } },
       );
-      expect(viewModel.transportNotice).toBe(healthState);
+      expect(viewModel.transportNotice).toBeNull();
+      /* Fast-forward past the 1 s debounce. */
+      const originalNow = Date.now;
+      Date.now = () => originalNow() + 1100;
+      try {
+        viewModel = selectConversationViewModel(
+          state, {}, { syncHealth: { state: healthState } },
+        );
+        expect(viewModel.transportNotice).toBe(healthState);
+      } finally {
+        Date.now = originalNow;
+      }
     },
   );
 

@@ -10,18 +10,39 @@
 .conversation-turn--empty{display:none}
 
 /* Conversation-level sync-channel degradation banner. Transport state only —
-   never styled like a turn/model failure (no error tone). */
+   never styled like a turn/model failure (no error tone).
+
+   Out-of-flow overlay: the notice must never push the transcript up/down when
+   the sync channel flaps.  It is positioned against the nearest positioned
+   ancestor (.chat-wrapper has position:relative), which is the fixed flex frame
+   around the scrolling #chatContainer, so top:8px is the visible top of the
+   message area and does not ride the scroll.  The view-model layer debounces
+   brief flaps; this CSS only controls appearance once the bar is warranted. */
 .conversation-surface__transport-notice{
-  grid-column:2;
+  position:absolute;
+  top:8px;
+  left:50%;
+  transform:translateX(-50%);
+  z-index:10;
   min-width:0;
   max-width:var(--msg-measure);
-  padding:6px 12px;
+  width:max-content;
+  padding:5px 12px;
   border:1px solid var(--warning-border);
   border-radius:var(--radius-sm);
   background:var(--warning-bg);
   color:var(--text-secondary);
   font-size:12px;
   line-height:1.5;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  box-shadow:0 2px 8px rgba(0,0,0,.12);
+  opacity:0;
+  transition:opacity .15s ease;
+}
+.conversation-surface__transport-notice:not([hidden]){
+  opacity:1;
 }
 .conversation-surface__transport-notice[hidden]{display:none}
 

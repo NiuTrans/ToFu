@@ -37,6 +37,7 @@ import { selectTerminalPresentationSegments } from './terminal-segment-presentat
 import {
   coalesceAdjacentThinkingBlocks,
   coalesceAdjacentSystemNoteBlocks,
+  coalesceAdjacentRetryActivityBlocks,
   settleThinkingActivity,
 } from './block-coalescing';
 
@@ -136,6 +137,7 @@ export function selectTurnBlocks(
   coalesceAdjacentSystemNoteBlocks(blocks);
 
   integrateContextProvenance(blocks);
+  coalesceAdjacentRetryActivityBlocks(blocks);
   settleThinkingActivity(turn, blocks);
   const transient = transientTurnPresentation(turn);
   if (transient) {

@@ -1,7 +1,7 @@
 /**
  * Activity-event DOM projection and chronology-local failure evidence. Labels,
  * glyphs and receipt markup have explicit dependencies.
- * Entry points: renderActivityEventBlock.
+ * Entry points: renderActivityEventBlock, renderActivityEventGroupBlock.
  * Dependencies: conversation-sync.generated, conversation-view-model, ports,
  * compaction-block, icons, localized-copy, failure-receipt, error-presentation.
  */
@@ -20,6 +20,7 @@ import {
   lineSvgIcon,
 } from './icons';
 import { textFor } from './localized-copy';
+import { preserveDetailsOpen } from './stable-dom';
 import { buildFailureReceipt } from './failure-receipt';
 import { createErrorEnvelopePresentation } from '../../../error-presentation';
 import type { Translator } from '../../../i18n';
@@ -331,6 +332,78 @@ function buildActivityEventRow(
     row.append(marker, body);
   }
   return row;
+}
+
+/* One collapsed disclosure over a retry/failure storm. Members keep their
+ * own rows and evidence inside; the summary states how many and against
+ * which model(s), so the reader still sees what happened without a red wall.
+ * Default closed — a settled turn should not spend vertical space on
+ * transport noise; the reader's open state survives re-renders. */
+export function renderActivityEventGroupBlock(
+  node: HTMLElement,
+  block: Extract<ConversationBlockViewModel, { kind: 'activity-event-group' }>,
+  ports: ClassicConversationRendererPorts,
+  turn?: ConversationTurnViewModel,
+): void {
+  const document = node.ownerDocument;
+  const previousSummary = node.querySelector('summary');
+  const summaryHadFocus = previousSummary === document.activeElement;
+  const defaultOpen = preserveDetailsOpen(node, false);
+  node.className = 'conversation-block conversation-block--activity-event '
+    + 'conversation-block--activity-event-group';
+
+  const details = document.createElement('details');
+  details.className = 'activity-event-group';
+  details.open = defaultOpen;
+
+  const summary = document.createElement('summary');
+  summary.className = 'activity-event-group__summary';
+  const marker = document.createElement('span');
+  marker.className = 'activity-event-group__marker';
+  marker.setAttribute('aria-hidden', 'true');
+  marker.appendChild(lineSvgIcon(document, [
+    'M7.1 2.8 2.2 11.7a1 1 0 0 0 .88 1.5h9.84a1 1 0 0 0 .88-1.5L8.9 2.8a1.03 1.03 0 0 0-1.8 0Z',
+    'M8 6v3.1M8 11.35h.01',
+  ]));
+  const label = document.createElement('span');
+  label.className = 'activity-event-group__label';
+  label.textContent = textFor(
+    ports, 'activity.retryGroup.summary',
+    '{count} failed or retried requests', { count: block.items.length },
+  );
+  const chips = document.createElement('span');
+  chips.className = 'activity-event__chips';
+  const models = [...new Set(block.items.flatMap(
+    item => (item.value.model ? [item.value.model] : []),
+  ))];
+  if (models.length) {
+    const modelNode = document.createElement('span');
+    modelNode.className = 'activity-event-group__models';
+    modelNode.textContent = models.join(' · ');
+    chips.appendChild(modelNode);
+  }
+  const totalDuration = block.items.reduce(
+    (total, item) => total + (item.value.durationMs ?? 0), 0,
+  );
+  if (totalDuration > 0) {
+    const durationNode = document.createElement('span');
+    durationNode.className = 'activity-event__duration';
+    durationNode.textContent = activityDuration(totalDuration);
+    chips.appendChild(durationNode);
+  }
+  chips.appendChild(disclosureChevron(document, 'activity-event-group__chevron'));
+  summary.append(marker, label, chips);
+
+  const body = document.createElement('div');
+  body.className = 'activity-event-group__body';
+  for (const item of block.items) {
+    body.appendChild(buildActivityEventRow(
+      document, item.value, ports, undefined, undefined, turn,
+    ));
+  }
+  details.append(summary, body);
+  node.replaceChildren(details);
+  if (summaryHadFocus) summary.focus();
 }
 
 export function renderActivityEventBlock(

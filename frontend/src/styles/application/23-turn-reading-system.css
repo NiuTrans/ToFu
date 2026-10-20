@@ -44,23 +44,12 @@
   overflow: visible;
 }
 
+/* Turn avatars removed (2026-10-19): the role icon box read as clutter and forced
+ * a hanging indent on every agent line. The role label in the header carries the
+ * identity; the gutter is now flush-left. The node stays in the DOM (keyed slot)
+ * but is never shown. */
 .conversation-surface .conversation-turn.message > .conversation-turn-avatar.message-avatar {
-  position: absolute;
-  inset-block-start: var(--space-2);
-  inset-inline-start: var(--space-2);
-  width: var(--space-5);
-  height: var(--space-5);
-  margin-top: 0;
-  opacity: 1;
-  color: var(--accent);
-  border: var(--control-edge-inset) solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
-  border-radius: var(--conversation-process-radius);
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg-primary));
-}
-
-.conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
-  max-width: var(--space-5);
-  max-height: var(--space-5);
+  display: none;
 }
 
 .conversation-surface .conversation-turn-content.message-content {
@@ -76,7 +65,6 @@
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
   min-height: var(--control-h-md);
-  padding-inline-start: var(--conversation-reading-inset);
   margin: 0 0 var(--space-3);
   gap: var(--space-2);
   line-height: 1.25;
@@ -119,16 +107,8 @@
   margin: 0;
 }
 
-/* One hanging icon gutter: role, narration, answer rubric, headings and
- * process labels all share a single reading baseline. */
-.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text {
-  box-sizing: border-box;
-  padding-inline-start: var(--conversation-reading-inset);
-}
-
-.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-actions, .conversation-turn-footer, .conversation-block--live-status) {
-  padding-inline-start: var(--conversation-reading-inset);
-}
+/* Flush-left reading: with the avatar gutter removed, role text, actions and
+ * footer all start at the page margin. */
 
 /* One spacing owner, including the demand-mounted historical process body.
  * Adjacent process rows form a compact run. Prose gets a paragraph's breath
@@ -146,56 +126,52 @@
   margin-bottom: 0;
 }
 
-/* Adjacent process leaves make one continuous work surface. The derived edges
- * describe the mounted order only: narration, deliverables and page boundaries
- * break the surface. No extra wrapper, duplicate content or disclosure state. */
+/* Adjacent process leaves form one quiet run. The derived edges describe the
+ * mounted order only: narration, deliverables and page boundaries break the
+ * run. No extra wrapper, duplicate content or disclosure state.
+ *
+ * 2026-10-19 declutter: the process column no longer hangs in a separate
+ * narrow gutter. Process rows now start at the same reading baseline as the
+ * narration and answer text (`--conversation-process-indent`), so the whole
+ * turn reads as ONE calm left edge instead of a wire holding a stray column
+ * of icons out to the left. The old `data-process-edge` vertical spine and
+ * its boxed side borders are gone — grouping is carried by shared alignment
+ * and rhythm, not a rail. */
 .conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge] {
   position: relative;
-  isolation: isolate;
   margin-block-start: 0;
-  padding-inline: var(--conversation-process-shell-inset);
-  border-inline: var(--control-edge-inset) solid var(--turn-process-line);
-  background: var(--turn-process-panel);
+  /* Align the row's icon to the shared reading baseline. The row pads in by
+   * the full reading inset (the same edge the role label, narration and answer
+   * text use), so the leading icon lands on that one vertical line and the
+   * whole turn reads as a single calm left edge — no stray icon gutter. */
+  padding-inline-start: var(--conversation-reading-inset);
 }
 
 .conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
   margin-block-start: var(--space-4);
-  padding-block-start: var(--space-2);
-  border-block-start: var(--control-edge-inset) solid var(--turn-process-line);
-  border-start-start-radius: var(--conversation-process-radius);
-  border-start-end-radius: var(--conversation-process-radius);
 }
 
-.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="end"], [data-process-edge="single"]) {
-  padding-block-end: var(--space-2);
-  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
-  border-end-start-radius: var(--conversation-process-radius);
-  border-end-end-radius: var(--conversation-process-radius);
-}
-
-.conversation-surface .conversation-block[data-process-edge]::before {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  inset-block: 0;
-  inset-inline-start: calc(var(--conversation-process-shell-inset) + var(--conversation-process-inset) + var(--conversation-process-marker) / 2);
-  width: var(--control-edge-inset);
-  background: var(--turn-spine);
-  pointer-events: none;
-}
-.conversation-surface .conversation-block[data-process-edge="start"]::before {
-  inset-block-start: calc(var(--conversation-process-row-height) / 2 + var(--space-2));
-}
-.conversation-surface .conversation-block[data-process-edge="end"]::before {
-  height: calc(var(--conversation-process-row-height) / 2);
-  inset-block-end: auto;
-}
-.conversation-surface .conversation-block[data-process-edge="single"]::before { display: none; }
+/* No vertical spine. The 2026-07-08 chrome-less card model removed the rail
+ * that welded rounds into one column; the recent `data-process-edge` rail
+ * re-introduced it as a faint wire. Both the owner report and the card-model
+ * invariant (tests/frontend/test_frontend_segment_timeline.py) agree: the
+ * process run groups by shared alignment and spacing, not by a line.
+ *
+ * ONLY the active (still running) step keeps a whisper of tint. A settled
+ * failure gets no wash at all: it previously used the same background as the
+ * running state, so the block read as a stuck running indicator long after
+ * the round had failed (owner report 2026-10-20). The failure verdict pill
+ * and the `conversation-action-state` chip already state the outcome; a
+ * persistent full-row tint is redundant emphasis.
+ *
+ * The tint is clipped to the content box: these rows pad in by the reading
+ * inset, so a padding-box background painted a band 33px wider than the row's
+ * own content — the running command looked like it had flooded the whole
+ * horizontal lane instead of lighting up its own box. */
 .conversation-surface .conversation-block[data-process-edge][data-action-state="active"] {
-  background: color-mix(in srgb, var(--accent) 5%, var(--turn-process-panel));
-}
-.conversation-surface .conversation-block[data-process-edge][data-action-state="attention"] {
-  border-inline-start-color: var(--error-text);
+  background-color: color-mix(in srgb, var(--accent) 5%, transparent);
+  background-clip: content-box;
+  border-radius: var(--radius-sm);
 }
 
 /* Leaves remain direct keyed children so streaming never reparents live cards. */

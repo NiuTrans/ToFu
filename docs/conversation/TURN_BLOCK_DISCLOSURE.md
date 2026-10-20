@@ -53,6 +53,7 @@ the `<details>` lives inside it.
 | `artifacts` | n/a (list) | `sameBlock` |
 | `autopilot-run-notice` | inner report **collapsed** (`:2563`, never sets open) | `sameBlock` |
 | `activity-event` | **OPEN** when it carries a terminal error — `open = previousOpen ?? true` (`:1728`); plain rows are `<div>`s | `previousOpen` read-back (`:1889`) |
+| `activity-event-group` | **collapsed** — `preserveDetailsOpen(node, false)` in `renderActivityEventGroupBlock` (`renderers/activity-block.ts`) | `preserveDetailsOpen` + summary focus restore; the `sameBlock` arm compares every member row |
 | `queue-status` | n/a (row) | default `sameBlock` arm (`conversation-surface.ts:848`) |
 | `live-status` | n/a (status line) | `sameBlock` |
 
@@ -115,6 +116,35 @@ Executable specs:
   policy plus one group row at the first member's wire slot, a `{n}` count
   pill, no leftover context sibling rows, intervention keeps its own row,
   deliverable excluded (≥16 PASS gate).
+
+## 2b. The retry-storm rule
+
+A provider rate-limit storm (HTTP 429 plus backoff waits) emits one
+`activity-event` row per attempt. Those rows are transport evidence, not
+narrative: inline they bury the turn under an identical red ladder.
+
+- A maximal run of **adjacent** `activity-event` blocks accepted by
+  `isRetryEvidenceBlock` (`presentation/view-model/block-coalescing.ts`)
+  merges into ONE `activity-event-group` in
+  `coalesceAdjacentRetryActivityBlocks`, invoked from `selectTurnBlocks`
+  after every block insertion (provenance/action blocks included), so
+  adjacency is final.
+- Accepted members: `kind === 'model'` with `status === 'failed'`, or
+  `kind === 'status'` with `phase === 'retrying'` or `statusCode >= 400`.
+- Excluded, and each one breaks a run: a row carrying `terminalError` (it
+  owns a diagnostic receipt), a compaction receipt (`context_compaction` /
+  `compacting` — a durable context boundary), and every succeeded, switched,
+  skipped or started row.
+- Display-only: members keep their wire rows, summaries, codes and
+  durations. The group is a read-only collapsed summary (count + distinct
+  model(s) + summed wait) over the unchanged member rows, and it takes the
+  **first member's `blockId`** as its DOM identity so a live-growing storm
+  re-renders in place.
+- A run of exactly **one** failure stays a plain `activity-event` row.
+
+Executable specs: `presentation/view-model/block-coalescing.test.ts`
+(merge, break and idempotence rules) and `ui/activity-event-group.test.ts`
+(closed default, member retention, open-state and focus survival).
 
 ## 3. The core invariant and its three mechanisms
 

@@ -27,13 +27,15 @@
   background: transparent;
 }
 
+/* The leading glyph is centered inside the row's line box: a fixed offset
+ * drifts off the words as soon as the meta type or line height changes. */
 .conversation-surface .activity-event__marker {
   position: static;
   display: inline-flex;
   flex-shrink: 0;
   width: var(--space-4);
   height: var(--space-4);
-  margin-block-start: var(--space-1);
+  margin-block-start: calc((var(--conversation-activity-line-height) - var(--space-4)) / 2);
   align-items: center;
   justify-content: center;
   border-radius: 50%;
@@ -64,6 +66,90 @@
 }
 
 /* Diagnostic icons carry meaning inline; there is no out-of-flow gutter. */
+/* A provider retry storm is one fact, not N banners: the run of failed /
+ * retried requests collapses into a single closed disclosure that keeps the
+ * same log-line geometry as an activity row. Members stay inside unchanged. */
+
+.conversation-surface .conversation-block--activity-event-group {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.conversation-surface .activity-event-group {
+  display: block;
+  min-width: 0;
+}
+
+.conversation-surface .activity-event-group__summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  box-sizing: border-box;
+  cursor: pointer;
+  list-style: none;
+}
+
+.conversation-surface .activity-event-group__summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-surface .activity-event-group__summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: calc(var(--space-1) * -1);
+}
+
+.conversation-surface .activity-event-group__marker {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-block-start: calc((var(--conversation-activity-line-height) - var(--space-4)) / 2);
+  align-items: center;
+  justify-content: center;
+  color: var(--warning-text);
+}
+
+.conversation-surface .activity-event-group__marker svg {
+  width: 12px;
+  height: 12px;
+}
+
+.conversation-surface .activity-event-group__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--conversation-activity-line-height);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .activity-event-group__models {
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-surface .activity-event-group__chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  transition: transform var(--motion-fast) ease;
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .activity-event-group[open] .activity-event-group__chevron {
+  transform: rotate(0);
+}
+
+.conversation-surface .activity-event-group__body {
+  min-width: 0;
+  margin-inline-start: var(--space-4);
+  padding-inline-start: var(--space-2);
+  border-inline-start: 1px solid var(--turn-rule);
+}
+
 
 .conversation-surface details.activity-event {
   display: block;
@@ -76,7 +162,7 @@
 
 .conversation-surface .activity-event__summary {
   font-size: var(--conversation-font-size-meta);
-  line-height: 1.45;
+  line-height: var(--conversation-activity-line-height);
 }
 
 .conversation-surface .activity-event__chips {

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** Human authorization and delivery uncertainty on one terminal failure card. */
+/** One-gesture continuation, human consequences and delivery uncertainty. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationUsageRecovery, TurnCommandResponse } from '../../../api/conversation-sync.generated';
 import type { ConversationBlockViewModel, ConversationTurnViewModel } from '../../presentation/conversation-view-model';
@@ -29,8 +29,11 @@ function setup(overrides: Partial<UsageRecoveryPorts> = {}) {
     inspect: vi.fn<UsageRecoveryPorts['inspect']>().mockResolvedValue(ready()),
     recover: vi.fn<UsageRecoveryPorts['recover']>().mockResolvedValue(accepted()),
     createCommandId: vi.fn(() => 'one-confirmed-command'),
-    onAccepted: vi.fn(), ...overrides,
+    onAccepted: vi.fn(),
   };
+  // Assign rather than spread: a spread of the port type would widen these
+  // properties and hide their mock API from the assertions below.
+  Object.assign(api, overrides);
   const ports: ClassicConversationRendererPorts = { usageRecovery: api, renderSafeMarkdownHtml: text => text };
   const render = (next = binding) => renderUsageRecoveryNotice(node, node, next, ports);
   render();
@@ -44,101 +47,108 @@ function button(node: HTMLElement, label: string): HTMLButtonElement {
 const phase = (node: HTMLElement) => node.querySelector<HTMLElement>('[data-usage-recovery]')?.dataset.usageRecovery;
 afterEach(() => { document.body.replaceChildren(); });
 
-describe('explicit budget authorization', () => {
-  it('makes checking read-only and confirms exact numeric budget only on the second explicit action', async () => {
+describe('one-gesture continuation', () => {
+  it('continues generation from a single explicit action without asking for numbers', async () => {
     const pending = deferred<TurnCommandResponse>();
     const recover = vi.fn<UsageRecoveryPorts['recover']>().mockReturnValue(pending.promise);
-    const { node, api, render } = setup({ recover });
+    const { node, api } = setup({ recover });
     expect(api.inspect).not.toHaveBeenCalled();
     expect(recover).not.toHaveBeenCalled();
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    expect(api.inspect).toHaveBeenCalledWith(binding.conversationId, binding.turnId, expect.any(AbortSignal));
-    expect(node.querySelector('[data-usage-recovery-budget]')?.textContent).toContain('12345 tokens, 9 tool calls and 321 seconds');
+    const control = button(node, 'Continue generating');
     expect(node.textContent).toContain('additional model and tool charges');
-    expect(node.textContent).toContain('does not fill in or settle');
-    expect(node.textContent).toContain('does not resend the earlier request or resume the earlier Goal or Flow');
-    expect(recover).not.toHaveBeenCalled();
-    expect(api.createCommandId).not.toHaveBeenCalled();
-    const confirm = button(node, 'Confirm and continue');
-    confirm.focus(); confirm.click(); confirm.click(); render();
-    expect(recover).toHaveBeenCalledTimes(1);
-    expect(confirm.getAttribute('aria-disabled')).toBe('true');
-    expect(document.activeElement).toBe(confirm);
+    expect(node.textContent).toContain('exactly as they are');
+    expect(node.textContent).toContain('does not resend the earlier request');
+    control.focus(); control.click(); control.click();
+    await vi.waitFor(() => expect(api.recover).toHaveBeenCalledTimes(1));
+    expect(api.inspect).toHaveBeenCalledWith(binding.conversationId, binding.turnId, expect.any(AbortSignal));
+    // The click is the authorization; the exact server-proposed budget is
+    // still sent verbatim, and its numbers are never a field to fill in.
     expect(recover).toHaveBeenCalledWith(binding.conversationId, binding.turnId, {
-      commandId: 'one-confirmed-command', expectedProjectionRevision: 7, confirmed: true, budget: ready().budget,
+      commandId: 'one-confirmed-command', expectedProjectionRevision: 7,
+      confirmed: true, budget: ready().budget,
     });
+    const details = node.querySelector<HTMLDetailsElement>('[data-usage-recovery-budget]')!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector('summary')?.textContent).toBe('Limits chosen automatically');
+    expect(details.textContent).toContain('12345 tokens, 9 tool calls and 321 seconds');
+    expect(phase(node)).toBe('submitting');
     pending.resolve(accepted());
     await vi.waitFor(() => expect(phase(node)).toBe('accepted'));
     expect(api.onAccepted).toHaveBeenCalledWith(binding.conversationId);
-    button(node, 'Continuation accepted').click();
+    const done = button(node, 'Continuation started');
+    done.click();
     expect(recover).toHaveBeenCalledTimes(1);
   });
 
-  it('deduplicates a busy read, allows cancellation and fences the cancelled late ready result', async () => {
+  it('deduplicates a busy read, allows cancellation and never submits a cancelled check', async () => {
     const first = deferred<ConversationUsageRecovery>();
     const inspect = vi.fn<UsageRecoveryPorts['inspect']>().mockReturnValueOnce(first.promise).mockResolvedValue(ready());
-    const { node, api, render } = setup({ inspect });
-    const check = button(node, 'Check and continue');
-    check.focus(); check.click(); check.click(); render();
+    const { node, api } = setup({ inspect });
+    const control = button(node, 'Continue generating');
+    control.focus(); control.click(); control.click();
     expect(inspect).toHaveBeenCalledTimes(1);
-    expect(document.activeElement).toBe(check);
+    expect(document.activeElement).toBe(control);
     const signal = inspect.mock.calls[0][2];
     button(node, 'Cancel').click();
     expect(signal.aborted).toBe(true);
-    button(node, 'Check and continue').click();
-    first.resolve({ ...ready(), budget: { maxTokens: 99999, maxToolCalls: 0, durationSeconds: 1 } });
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    expect(node.textContent).not.toContain('99999');
-    button(node, 'Cancel').click();
     expect(phase(node)).toBe('idle');
-    expect(api.recover).not.toHaveBeenCalled();
-    expect(api.createCommandId).not.toHaveBeenCalled();
+    control.click();
+    // The aborted read's late answer must not authorize anything: only the
+    // live read may supply the budget this click confirms.
+    first.resolve({ ...ready(), budget: { maxTokens: 99999, maxToolCalls: 0, durationSeconds: 1 } });
+    await vi.waitFor(() => expect(api.recover).toHaveBeenCalledTimes(1));
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(api.recover.mock.calls[0][2].budget).toEqual(ready().budget);
+    expect(api.createCommandId).toHaveBeenCalledTimes(1);
   });
 
   it.each(['not_applicable', 'operation_unconfirmed', 'configuration_unavailable'] as const)(
-    'never offers authorization when the check is blocked by %s', async reason => {
+    'never starts a continuation when the read is blocked by %s', async reason => {
       const { node, api } = setup({ inspect: vi.fn().mockResolvedValue({ ...ready(), state: 'blocked', reason }) });
-      button(node, 'Check and continue').click();
+      button(node, 'Continue generating').click();
       await vi.waitFor(() => expect(phase(node)).toBe('blocked'));
-      expect(node.textContent).not.toContain('Confirm and continue');
       expect(node.querySelector('[data-usage-recovery-budget]')).toBeNull();
       expect(api.recover).not.toHaveBeenCalled();
+      expect(api.createCommandId).not.toHaveBeenCalled();
+      // Re-reading cannot lift a permanent block, so the control is not
+      // offered again; only a fixable configuration keeps it.
+      expect(node.querySelectorAll('button')).toHaveLength(
+        reason === 'configuration_unavailable' ? 1 : 0);
     });
 
   it.each([
     { conversationId: 'foreign' }, { sourceTurnId: 'foreign' }, { sourceProjectionRevision: 8 },
-  ])('rejects a mismatched check %j rather than authorizing it', async mismatch => {
+  ])('rejects a mismatched read %j rather than authorizing it', async mismatch => {
     const { node, api } = setup({ inspect: vi.fn().mockResolvedValue({ ...ready(), ...mismatch }) });
-    button(node, 'Check and continue').click();
+    button(node, 'Continue generating').click();
     await vi.waitFor(() => expect(['check-failed', 'changed']).toContain(phase(node)));
-    expect(node.textContent).not.toContain('Confirm and continue');
     expect(api.recover).not.toHaveBeenCalled();
   });
 
-  it('invalidates an unconfirmed review when the source revision changes, without new reads or writes', async () => {
-    const { node, api, render } = setup();
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    const oldConfirm = button(node, 'Confirm and continue');
+  it('re-reads the source instead of continuing a projection that already changed', async () => {
+    const inspect = vi.fn<UsageRecoveryPorts['inspect']>()
+      .mockResolvedValueOnce({ ...ready(), sourceProjectionRevision: 8 })
+      .mockResolvedValue({ ...ready(), sourceProjectionRevision: 8 });
+    const { node, api, render } = setup({ inspect });
+    button(node, 'Continue generating').click();
+    await vi.waitFor(() => expect(phase(node)).toBe('changed'));
+    expect(api.recover).not.toHaveBeenCalled();
     render({ ...binding, projectionRevision: 8 });
-    oldConfirm.click();
-    expect(phase(node)).toBe('idle');
-    expect(api.inspect).toHaveBeenCalledTimes(1);
-    expect(api.recover).not.toHaveBeenCalled();
+    button(node, 'Continue generating').click();
+    await vi.waitFor(() => expect(api.recover).toHaveBeenCalledTimes(1));
+    expect(api.recover.mock.calls[0][2].expectedProjectionRevision).toBe(8);
   });
 
-  it('allows explicit rechecking after a failed read without exposing raw server markup', async () => {
+  it('allows trying again after a failed read without exposing raw server markup', async () => {
     const inspect = vi.fn<UsageRecoveryPorts['inspect']>().mockRejectedValueOnce(new Error('<script>private</script>')).mockResolvedValue(ready());
     const { node, api } = setup({ inspect });
-    button(node, 'Check and continue').click();
+    button(node, 'Continue generating').click();
     await vi.waitFor(() => expect(phase(node)).toBe('check-failed'));
     expect(node.textContent).not.toContain('private');
     expect(node.querySelector('script')).toBeNull();
     expect(api.recover).not.toHaveBeenCalled();
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    expect(api.recover).not.toHaveBeenCalled();
+    button(node, 'Continue generating').click();
+    await vi.waitFor(() => expect(api.recover).toHaveBeenCalledTimes(1));
   });
 });
 
@@ -147,9 +157,7 @@ describe('mutation delivery uncertainty and lifecycle', () => {
     const recover = vi.fn<UsageRecoveryPorts['recover']>().mockRejectedValueOnce(new Error('connection lost')).mockResolvedValue(accepted());
     const response = ready();
     const { node, api, render } = setup({ recover, inspect: vi.fn().mockResolvedValue(response) });
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    button(node, 'Confirm and continue').click();
+    button(node, 'Continue generating').click();
     await vi.waitFor(() => expect(phase(node)).toBe('unknown'));
     const sent = recover.mock.calls[0][2];
     expect(Object.isFrozen(sent)).toBe(true);
@@ -167,41 +175,34 @@ describe('mutation delivery uncertainty and lifecycle', () => {
     expect(api.createCommandId).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps keyboard focus through check, review, confirmation and refusal', async () => {
+  it('keeps keyboard focus through the single gesture and a refusal', async () => {
     const pending = deferred<ConversationUsageRecovery>();
     const { node } = setup({ inspect: vi.fn().mockReturnValue(pending.promise),
       recover: vi.fn().mockRejectedValue({ status: 409 }) });
-    const check = button(node, 'Check and continue');
-    check.focus(); check.click();
-    expect(document.activeElement).toBe(check);
+    const control = button(node, 'Continue generating');
+    control.focus(); control.click();
     pending.resolve(ready());
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    const confirm = button(node, 'Confirm and continue');
-    expect(document.activeElement).toBe(confirm);
-    confirm.click();
     await vi.waitFor(() => expect(phase(node)).toBe('refused'));
-    expect(document.activeElement).toBe(button(node, 'Check and continue'));
+    expect(document.activeElement).toBe(button(node, 'Continue generating'));
   });
 
-  it('requires a fresh read and confirmation after a definitive refusal', async () => {
+  it('requires a fresh read after a definitive refusal', async () => {
     const recover = vi.fn<UsageRecoveryPorts['recover']>().mockRejectedValueOnce({ status: 409 }).mockResolvedValue(accepted());
     const { node, api } = setup({ recover });
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    button(node, 'Confirm and continue').click();
+    button(node, 'Continue generating').click();
     await vi.waitFor(() => expect(phase(node)).toBe('refused'));
     expect(node.textContent).not.toContain('Retry the same request');
     expect(api.inspect).toHaveBeenCalledTimes(1);
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    expect(recover).toHaveBeenCalledTimes(1);
+    button(node, 'Continue generating').click();
+    await vi.waitFor(() => expect(api.recover).toHaveBeenCalledTimes(2));
+    expect(api.inspect).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['dispose', 'identity-change'] as const)('aborts GET and ignores its late result after %s', async change => {
+  it.each(['dispose', 'identity-change'] as const)('aborts the read and ignores its late result after %s', async change => {
     const pending = deferred<ConversationUsageRecovery>();
     const inspect = vi.fn<UsageRecoveryPorts['inspect']>().mockReturnValue(pending.promise);
     const { node, api, render } = setup({ inspect });
-    button(node, 'Check and continue').click();
+    button(node, 'Continue generating').click();
     const signal = inspect.mock.calls[0][2];
     if (change === 'dispose') { disposeUsageRecoveryNotice(node); node.textContent = 'Different conversation'; }
     else render({ ...binding, turnId: 'new-turn' });
@@ -218,9 +219,8 @@ describe('mutation delivery uncertainty and lifecycle', () => {
     const pending = deferred<TurnCommandResponse>();
     const recover = vi.fn<UsageRecoveryPorts['recover']>().mockReturnValue(pending.promise);
     const { node, api } = setup({ recover });
-    button(node, 'Check and continue').click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
-    button(node, 'Confirm and continue').click();
+    button(node, 'Continue generating').click();
+    await vi.waitFor(() => expect(phase(node)).toBe('submitting'));
     disposeUsageRecoveryNotice(node); node.textContent = 'Different conversation';
     pending.resolve(accepted());
     await Promise.resolve(); await Promise.resolve();
@@ -244,26 +244,22 @@ function sourceTurn(): ConversationTurnViewModel {
 
 describe('concrete terminal receipt integration', () => {
   it.each([['en', en], ['zh', zh]] as const)('keeps diagnostics and all consent consequences in %s', async (_language, labels) => {
-    const { node, api, ports } = setup();
+    const { node, ports } = setup();
     ports.localizedText = (key, fallback, values) => ((labels as Record<string, string>)[key] ?? fallback)
       .replace(/\{(\w+)\}/g, (token, key: string) => String(values?.[key] ?? token));
     const block = terminalBlock(); const turn = sourceTurn();
     renderActivityEventBlock(node, block, ports, turn);
     expect(node.querySelector('.activity-event__copy-diagnostics')).not.toBeNull();
-    const check = button(node, labels['usageRecovery.check']);
-    check.click();
-    await vi.waitFor(() => expect(phase(node)).toBe('ready'));
+    const control = button(node, labels['usageRecovery.check']);
     for (const key of ['usageRecovery.cost', 'usageRecovery.preserve', 'usageRecovery.scope'] as const) {
       expect(node.textContent).toContain(labels[key]);
     }
-    const confirm = button(node, labels['usageRecovery.confirm']);
-    confirm.focus();
+    control.focus();
     renderActivityEventBlock(node, block, ports, turn);
-    expect(button(node, labels['usageRecovery.confirm'])).toBe(confirm);
-    expect(document.activeElement).toBe(confirm);
-    button(node, labels['usageRecovery.cancel']).click();
-    expect(api.recover).not.toHaveBeenCalled();
+    expect(button(node, labels['usageRecovery.check'])).toBe(control);
+    expect(document.activeElement).toBe(control);
     expect(labels['err.k.execution_token_usage_unknown.hint']).not.toMatch(/maintainer|维护者|核对供应商/);
+    expect(labels['usageRecovery.check']).not.toMatch(/[0-9]/);
   });
 
   it('never advertises recovery on unrelated errors, live turns or receipts without source identity', () => {
@@ -286,7 +282,7 @@ describe('concrete terminal receipt integration', () => {
     const { node, api, ports } = setup({ inspect });
     const renderers = createClassicConversationRenderers(ports);
     renderers.renderBlock!(node, terminalBlock(), { turn: sourceTurn() } as never);
-    button(node, 'Check and continue').click();
+    button(node, 'Continue generating').click();
     renderers.disposeBlock!(node);
     expect(inspect.mock.calls[0][2].aborted).toBe(true);
     pending.resolve(ready());

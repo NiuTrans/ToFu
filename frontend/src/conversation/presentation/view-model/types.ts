@@ -67,6 +67,7 @@ export type ConversationBlockKind =
   | 'artifacts'
   | 'autopilot-run-notice'
   | 'activity-event'
+  | 'activity-event-group'
   | 'queue-status'
   | 'live-status';
 
@@ -286,6 +287,15 @@ export interface ActivityEventBlockViewModel extends ConversationBlockBase {
   terminalError?: ErrorEnvelope;
 }
 
+/* A maximal run of adjacent failed-attempt / retry-wait activity rows merged
+ * into ONE collapsed disclosure (display-only; every member row keeps its own
+ * identity and evidence inside the group). See
+ * coalesceAdjacentRetryActivityBlocks. */
+export interface ActivityEventGroupBlockViewModel extends ConversationBlockBase {
+  kind: 'activity-event-group';
+  items: ReadonlyArray<ActivityEventBlockViewModel>;
+}
+
 export interface LiveStatusBlockViewModel extends ConversationBlockBase {
   kind: 'live-status';
   value: TransientTurnPresentation;
@@ -328,6 +338,7 @@ export type ConversationBlockViewModel =
   | ArtifactsBlockViewModel
   | AutopilotRunNoticeBlockViewModel
   | ActivityEventBlockViewModel
+  | ActivityEventGroupBlockViewModel
   | QueueStatusBlockViewModel
   | LiveStatusBlockViewModel;
 

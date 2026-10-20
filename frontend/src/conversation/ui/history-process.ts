@@ -14,7 +14,7 @@ export interface HistoricalTurnPlan {
 }
 const plans = new WeakMap<Turn, HistoricalTurnPlan | null>();
 const MAX_PROCESS_BLOCKS = 200;
-const PROCESS_KINDS = new Set(['text', 'thinking', 'tool', 'program', 'compaction', 'injections', 'system-note', 'system-note-group', 'activity-event']);
+const PROCESS_KINDS = new Set(['text', 'thinking', 'tool', 'program', 'compaction', 'injections', 'system-note', 'system-note-group', 'activity-event', 'activity-event-group']);
 export function historicalTurnPlan(turn: Turn): HistoricalTurnPlan | null {
   if (plans.has(turn)) return plans.get(turn)!;
   let plan: HistoricalTurnPlan | null = null;

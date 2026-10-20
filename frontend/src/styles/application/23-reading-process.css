@@ -43,8 +43,11 @@
 }
 
 /* Tool identity stays in the leading slot; a single trailing caret is the
- * consistent disclosure affordance. Native summaries still own interaction. */
-.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after {
+ * consistent disclosure affordance. Native summaries still own interaction.
+ * The caret is a pseudo-element of the FLEX ROW, so it is an atomic flex item
+ * that can never wrap onto a line of its own — the failure the edit card had
+ * while its caret was inline text inside the wrapping label. */
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after {
   content: '';
   box-sizing: border-box;
   flex: 0 0 var(--space-2);
@@ -56,7 +59,7 @@
   transform: rotate(-45deg);
   color: var(--text-secondary);
 }
-.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after,
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header, .conversation-tool-card__summary)::after,
 .conversation-surface .ptool-results-header[aria-expanded="true"]::after {
   transform: rotate(45deg);
 }
@@ -70,7 +73,7 @@
   color: var(--text-secondary);
 }
 .conversation-surface .ptool-results-header > .ptool-results-toggle,
-.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header) .ptool-text::after {
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .ptool-batch-done-header) .ptool-text::after {
   display: none;
 }
 .conversation-surface .ptc-head::before,

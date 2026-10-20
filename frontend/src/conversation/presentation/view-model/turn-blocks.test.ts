@@ -78,3 +78,42 @@ describe('answer presentation during live generation and translation', () => {
       expect(selectTurnBlocks({ ...source, status: 'running' })[0]).toMatchObject({ deliverable: false });
     });
 });
+
+
+describe('retry storms in the projection pipeline', () => {
+  const activity = (id: string, changes: Record<string, unknown>) => ({
+    id, spanId: id, seq: 1, occurredAt: 1000, count: 1,
+    kind: 'model', status: 'failed', severity: 'error',
+    model: 'deepseek-v4.1-flash-m17', statusCode: 429, ...changes,
+  });
+  function storm(): TurnRecord {
+    const source = turn('completed');
+    source.projection.activityTimeline = {
+      blockId: 'activity-timeline', version: 1,
+      entries: [
+        activity('fail-1', {}),
+        activity('wait-1', { kind: 'status', status: 'waiting',
+          severity: 'warning', phase: 'retrying', durationMs: 11000 }),
+        activity('fail-2', {}),
+        activity('wait-2', { kind: 'status', status: 'waiting',
+          severity: 'warning', phase: 'retrying', durationMs: 11000 }),
+      ],
+    } as TurnRecord['projection']['activityTimeline'];
+    return source;
+  }
+
+  it('collapses a live retry storm into one group and keeps the answer', () => {
+    const source = storm();
+    const blocks = selectTurnBlocks(source);
+    const kinds = blocks.map(block => block.kind);
+    expect(kinds.filter(kind => kind === 'activity-event')).toHaveLength(0);
+    expect(kinds.filter(kind => kind === 'activity-event-group')).toHaveLength(1);
+    const group = blocks.find(block => block.kind === 'activity-event-group');
+    if (group?.kind !== 'activity-event-group') throw new Error('expected group');
+    expect(group.items.map(item => item.value.id))
+      .toEqual(['fail-1', 'wait-1', 'fail-2', 'wait-2']);
+    // The final answer and its settlement are untouched by display grouping.
+    expect(blocks.some(block => block.kind === 'text' && block.deliverable)).toBe(true);
+    expect(source.projection.activityTimeline?.entries).toHaveLength(4);
+  });
+});

@@ -15,7 +15,7 @@ This directory owns content projection into the Surface-provided node:
 | `answer-navigation.ts` | Retained answer toolbar and bounded navigation over the current Markdown headings |
 | `tool-blocks.ts` | Tool, program and injection projection |
 | `tool-effect-notice.ts` | Shared uncertainty notice from effect metadata and Turn lifecycle; no retry authority |
-| `activity-block.ts` | Chronology-local activity rows |
+| `activity-block.ts` | Chronology-local activity rows and the collapsed retry/failure group |
 | `failure-receipt.ts` | Selectable diagnostics and document-scoped copy lifecycle |
 | `system-note-blocks.ts` | Generated reason taxonomy and context-note groups |
 | `change-receipt-blocks.ts` | File changes, provenance and rollback receipts |

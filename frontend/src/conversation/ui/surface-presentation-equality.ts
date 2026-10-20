@@ -185,6 +185,14 @@ export function sameBlock(
     return samePresentationValue(previous.value, current.value)
       && samePresentationValue(previous.terminalError, current.terminalError);
   }
+  if (previous.kind === 'activity-event-group'
+      && current.kind === 'activity-event-group') {
+    return previous.items.length === current.items.length
+      && previous.items.every((item, index) => {
+        const other = current.items[index];
+        return other !== undefined && sameBlock(item, other);
+      });
+  }
   if (previous.kind === 'autopilot-run-notice'
       && current.kind === 'autopilot-run-notice') {
     return samePresentationValue(previous.value, current.value);

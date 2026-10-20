@@ -38,6 +38,20 @@
   font-size: var(--conversation-process-font-size);
 }
 
+/* The summary is a process row, so it reserves the same leading marker column
+ * its siblings do. Without a glyph in that column the label itself fell into
+ * the icon slot and the row read as an unexplained indent against the tool
+ * rows above it. */
+.conversation-surface .conversation-file-changes .fc-summary > .fc-summary-icon {
+  display: inline-flex;
+  flex: 0 0 var(--conversation-process-marker);
+  align-items: center;
+  justify-content: center;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
+}
+
 .conversation-surface .conversation-file-changes .fc-summary:hover {
   background: var(--turn-process-hover);
 }

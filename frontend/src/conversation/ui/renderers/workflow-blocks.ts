@@ -175,8 +175,13 @@ export function renderQueueStatusBlock(
   icon.innerHTML = QUEUE_ITEM_ICON_SVG;
   const label = node.ownerDocument.createElement('span');
   label.className = 'conversation-queue-status__label';
+  /* position 0 = the bound attempt proved this Turn is queued but its queue
+   * row was not part of this read; say what is known without inventing a
+   * position. */
   label.textContent = block.value.backgroundCommand
     ? textFor(ports, 'bgCommand.queued', 'Background command finished · delivery unconfirmed')
+    : block.value.position < 1
+    ? textFor(ports, 'queue.waitingChip', 'Queued · sends after this reply ends')
     : block.value.steerFallback
     ? textFor(ports, 'queue.steerFallbackChip',
       'Insert window closed · queued #{n}', { n: block.value.position })

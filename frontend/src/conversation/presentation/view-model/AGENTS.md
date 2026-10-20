@@ -16,7 +16,7 @@ directly from `types.ts` and never re-enter the facade.
 | `program-blocks.ts` | Linear program-parent placement with durable chronology |
 | `projection-sidecars.ts` | Attachments, context, receipts, plans and anchored activity |
 | `activity-blocks.ts` | Activity visibility, validation and rejection evidence |
-| `block-coalescing.ts` | Adjacent thinking/notes and settled activity presentation |
+| `block-coalescing.ts` | Adjacent thinking/notes, retry-storm groups and settled activity presentation |
 | `translation-blocks.ts` | Translated plan and execution display projection |
 | `turn-metadata.ts` | Header metadata and authoritative action capabilities |
 | `live-turns.ts` | Live attempt presentation and durable autopilot-run notices |

@@ -9,10 +9,14 @@
   justify-self: end;
   box-sizing: border-box;
   width: fit-content;
-  max-width: 90%;
-  padding: var(--space-4) var(--space-5);
+  /* Cap to a chat-bubble measure, not the assistant reading column: a one-liner
+     must read as a tight note, not a slab that nearly spans the transcript. */
+  max-width: min(72%, 46rem);
+  padding: var(--space-3) var(--space-4);
   border: var(--control-edge-inset) solid var(--turn-rule);
-  border-radius: var(--conversation-process-radius);
+  /* Chat geometry: a slightly flattened top-right corner signals the sender's
+     side; the rest stay rounded so it reads as one calm bubble, not a card. */
+  border-radius: var(--radius) var(--radius) var(--radius-xs) var(--radius);
   background: color-mix(in srgb, var(--user-bubble) 70%, var(--bg-primary));
   box-shadow: none;
 }
@@ -33,6 +37,15 @@
 .conversation-surface .message.user-msg .conversation-block--text > .md-content {
   font-size: var(--conversation-font-size-body);
   line-height: var(--leading-body);
+}
+
+/* When the bubble carries attachments, the fixed-size media tiles (80px thumbs,
+   300px video cards) are far narrower than a full-length text line. fit-content
+   then sizes the bubble to the TEXT, leaving dead space beside the thumbnails.
+   Cap the text to a comfortable reading measure so the bubble hugs its real
+   content and the attachment row and text row stay visually balanced. */
+.conversation-surface .message.user-msg .conversation-turn-blocks:has(.conversation-block--attachments) .conversation-block--text > .md-content {
+  max-width: 34rem;
 }
 
 .conversation-surface .message.user-msg .conversation-turn-actions {
@@ -128,9 +141,9 @@
   }
 
   .conversation-surface .message.user-msg .message-content {
-    max-width: 100%;
+    max-width: 88%;
     padding: var(--space-3) var(--space-4);
-    border-radius: var(--conversation-process-radius);
+    border-radius: var(--radius) var(--radius) var(--radius-xs) var(--radius);
   }
 }
 

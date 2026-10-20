@@ -33,7 +33,10 @@ import {
   renderInjectionBlock,
   disposeToolBody,
 } from './renderers/tool-blocks';
-import { renderActivityEventBlock } from './renderers/activity-block';
+import {
+  renderActivityEventBlock,
+  renderActivityEventGroupBlock,
+} from './renderers/activity-block';
 import {
   renderSystemNoteBlock,
   renderSystemNoteGroupBlock,
@@ -143,6 +146,8 @@ export function createClassicConversationRenderers(
         renderAutopilotRunNoticeBlock(node, block, ports);
       } else if (block.kind === 'activity-event') {
         renderActivityEventBlock(node, block, ports, context.turn);
+      } else if (block.kind === 'activity-event-group') {
+        renderActivityEventGroupBlock(node, block, ports, context.turn);
       } else if (block.kind === 'queue-status') {
         renderQueueStatusBlock(node, block, ports);
       } else if (block.kind === 'live-status') {

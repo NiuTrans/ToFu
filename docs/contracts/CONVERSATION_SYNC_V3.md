@@ -239,9 +239,24 @@ never on click, and an older response cannot resurrect it.
 ### Unconfirmed-usage forward recovery
 
 **Problem:** a closed unknown-usage execution had no nontechnical recovery path.
-**Decision:** `GET .../turns/{turnId}/usage-recovery` inspects one owned settled
-source, its saved configuration and tool receipts without a model call or write.
-Supported uncertain file publications use their existing domain inspector;
+A nontechnical reader has no way to choose a token/tool/time budget, and
+`continue`/`checkpoint_resume`/`answer_guidance` are refused for this failure
+because they restore the settled `usageComplete=false`. Offering those resumes
+handed the user a guaranteed dead end: one click, the same error again.
+**Decision:** settlement offers only `regenerate` for
+`execution_token_usage_unknown` (`lib/turn_lifecycle._settlement`), so no
+continuation control advertises work the fence will refuse. The supported
+continuation is this recovery command, and it is one explicit gesture: the
+single visible action ("Continue generating" / “继续生成”) performs the
+read-only check and then submits the exact budget the server proposed. The
+reader never enters, computes or interprets a limit; the numbers stay in a
+collapsed `data-usage-recovery-budget` detail and the consequences (extra
+charges, preserved output, ordinary chat instead of Goal/Flow resume) stay
+visible as prose. The click is the confirmation (`confirmed: true`) because
+unmetered spend cannot be authorized silently.
+`GET .../turns/{turnId}/usage-recovery` inspects one owned settled source, its
+saved configuration and tool receipts without a model call or write. Supported
+uncertain file publications use their existing domain inspector;
 unknown/background/delegated effects without complete proof refuse. This check
 cannot reconstruct missing provider usage. `POST` requires `confirmed: true`,
 the exact preview budget and source projection revision. It creates an ordinary
@@ -249,11 +264,14 @@ human/assistant pair with finite token/tool/time limits and a `usageRecovery`
 confirmation receipt. Source revision, idle lane, lane tail and pending-human
 fences commit in the existing `turn.create_pair` transaction on both stores.
 The old Turn/Attempt and unknown accounting are unchanged. Only user-facing
-preferences cross into the new config, including write-approval/readonly restrictions
-and the selected browser device; old checkpoint, wallet, Goal and Flow
-authority does not. Command identity owns lost-ACK retries, never another
-execution authorization. The browser aborts disposed checks, fences late replies
-and refreshes the existing snapshot owner after acceptance.
+preferences cross into the new config, including write-approval/readonly
+restrictions and the selected browser device; old checkpoint, wallet, Goal and
+Flow authority does not. Command identity owns lost-ACK retries, never another
+execution authorization. The browser aborts disposed checks, fences late
+replies, refreshes the existing snapshot owner after acceptance, and discards
+the consumed authorization on a definitive refusal so the next click re-reads
+the source. A permanent block (`not_applicable`, `operation_unconfirmed`) hides
+the action instead of repeating it.
 **Alternatives rejected:** resuming the unknown checkpoint bypasses its financial
 fence; ordinary createTurn lacks source-revision/confirmation policy; a second
 recovery queue or ledger duplicates existing ownership. Specs:
@@ -529,7 +547,12 @@ browser, identical requests share one flight, a different overlapping request
 is rejected instead of queued, and identity/reference/sequence validation plus
 the non-authoritative Store merge happen in one synchronous coordinator turn.
 An SSE or reset that advances local sequence before publication rejects the old
-page. The Surface's 80-Turn DOM window prefetches a 64-Turn page only after its
+page. A 409 (`history_page_stale`) is a routine race on a live lane: a write
+committed after the applied head, including while a paused stream delivers no
+frames. The coordinator repairs the head from one authoritative snapshot and
+replays the same cursor, up to three attempts, instead of surfacing a failure
+whose retry would re-send the same superseded `syncSeq`. Any other status is
+published unchanged. The Surface's 80-Turn DOM window prefetches a 64-Turn page only after its
 local prefix is exhausted, anchors on stable `turnId`, and reveals 20 newly
 prepended Turns without replacing the render path; the remaining 44 serve the
 next local window moves without another API round trip.

@@ -22,7 +22,7 @@ type MountedAction = { state: ActionActivityState; initialized?: boolean };
 function isProcessLeaf(block: ConversationBlockViewModel): boolean {
   if (block.kind === 'tool' || block.kind === 'program') return !hasAcceptedWorkUnit(block.round);
   return ['thinking', 'injections', 'system-note', 'system-note-group',
-    'compaction', 'activity-event', 'file-changes'].includes(block.kind);
+    'compaction', 'activity-event', 'activity-event-group', 'file-changes'].includes(block.kind);
 }
 
 type ProcessEdge = 'single' | 'start' | 'middle' | 'end';

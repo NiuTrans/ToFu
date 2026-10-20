@@ -169,6 +169,15 @@ export function renderDefaultBlock(
       || [block.value.kind, block.value.status].filter(Boolean).join(' · ');
     return;
   }
+  if (block.kind === 'activity-event-group') {
+    // No rich renderer here, so the collapsed disclosure is unavailable;
+    // the text-safe path keeps the count and every member's own summary.
+    node.textContent = [`${block.items.length} failed or retried requests`, ...block.items
+      .map(item => item.value.summary
+        || [item.value.kind, item.value.status].filter(Boolean).join(' · '))
+      .filter(Boolean)].join('\n');
+    return;
+  }
   if (block.kind === 'live-status') {
     node.textContent = [block.value.label, block.value.detail]
       .filter(Boolean).join(' · ');

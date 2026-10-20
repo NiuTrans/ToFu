@@ -17,8 +17,14 @@ import {
   resetManagedHtml,
   preserveDetailsOpen,
 } from './stable-dom';
-import { disclosureChevron } from './icons';
+import { disclosureChevron, lineSvgIcon } from './icons';
 import { textFor } from './localized-copy';
+
+/* Document glyph, matching the 16px stroke language of the other process rows. */
+const FILE_GLYPH_PATHS = [
+  'M4 1.5h4.5L11.5 4.5V13a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 13V3A1.5 1.5 0 0 1 4 1.5z',
+  'M8.5 1.5V4.5h3',
+] as const;
 
 export function renderFileChangesBlock(
   node: HTMLElement,
@@ -47,8 +53,15 @@ export function renderFileChangesBlock(
       isUndone ? 'restored' : 'changed'}`,
     { n: count, s: block.count === 1 ? '' : 's' },
   );
+  /* Process rows reserve the leading marker column for their glyph; without
+   * one this summary's label lands in that empty column instead of on the
+   * label baseline every sibling row uses. */
+  const marker = node.ownerDocument.createElement('span');
+  marker.className = 'fc-summary-icon';
+  marker.setAttribute('aria-hidden', 'true');
+  marker.append(lineSvgIcon(node.ownerDocument, FILE_GLYPH_PATHS));
   const chevronIcon = disclosureChevron(node.ownerDocument, 'fc-chevron');
-  summary.append(label, chevronIcon);
+  summary.append(marker, label, chevronIcon);
   const fileList = node.ownerDocument.createElement('div');
   fileList.className = 'fc-details';
   for (const file of block.files) {
