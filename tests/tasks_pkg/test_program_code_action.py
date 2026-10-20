@@ -277,14 +277,48 @@ def test_reused_inputs_preserve_shapes_without_inventing_child_execution(world, 
     assert not settled[-1][4].canonical.children
 
 
-def test_missing_return_hands_back_and_replay_does_not_repeat_completed_tool(world):
+def test_missing_return_is_error_and_replay_does_not_repeat_completed_tool(world):
     task, calls, settled, run = world
     args = {'code':'await tools.read_rows({});'}
     first = run(args)
-    assert first['reason'] == 'missing_program_result'
-    assert first['data']['completedToolCalls'] == 1
+    assert first['error']['code'] == 'missing_program_result'
+    assert first['items'][0]['detail']['executionReceipt']['successfulToolCalls'] == 1
     assert run(args) == first
     assert len(calls) == 1 and len(settled) == 2
     program = task['programRuns'][0]
-    assert program['stats']['outcome'] == 'needs_model'
+    assert program['stats']['outcome'] == 'error'
     assert program['stats']['tool_calls'] == 1
+    assert program['stats']['successful_tool_calls'] == 1
+    # An error after an effect must not become automatic retry/batch recovery.
+    assert task['_toolScriptConsecutiveAuthoringFailures'] == 0
+
+
+@pytest.mark.parametrize('code', [
+    'const value = 3;',
+    'Promise.reject(new Error("unhandled")); return 3;',
+])
+def test_repeated_no_effect_authoring_errors_use_existing_batch_fallback(world, code):
+    task, calls, _, run = world
+    first = run({'code': code})
+    assert first['status'] == 'error'
+    # Replaying the same occurrence returns its receipt without recounting it.
+    assert run({'code': code}) == first
+    assert task['_toolScriptConsecutiveAuthoringFailures'] == 1
+    second = run({'code': code + '\n// distinct occurrence'})
+    assert second['status'] == 'error'
+    assert task['_toolScriptConsecutiveAuthoringFailures'] == 2
+    assert task['_ptc_local']['tier'] == 'batch'
+    assert run({'code': 'return 3;'})['error']['code'] == 'program_disabled'
+    assert not calls
+
+
+def test_canonical_schema_return_example_executes_as_documented(world):
+    _, calls, _, run = world
+    description = execute_program_schema()['function']['description']
+    example = description.split('Example: ', 1)[1].split(' await tools.invoke', 1)[0]
+    assert run({'code': example}) == {'sum': 6}
+    assert 'programInput is metadata, NOT a global' in description
+    assert 'not console.log' in description
+    assert 'with no resume' in description
+    assert 'offset:0,limit:16' in description
+    assert not calls

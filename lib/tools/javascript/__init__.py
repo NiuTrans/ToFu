@@ -27,6 +27,7 @@ from lib.tools.program_contract import (
 ROOT = Path(__file__).parent
 WASM_SHA256 = 'd4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9'
 MAX_SAFE_INTEGER = 2**53 - 1
+MAX_PENDING_REJECTIONS = 1024
 _compiled = None
 _compile_lock = threading.Lock()
 
@@ -143,7 +144,9 @@ class _Program:
         self.result_read_attempts = self.result_reads = 0
         self.input_lister = input_lister
         self.input_queries = 0
+
         self.last_input_lookup = None
+        self.catalog_queries = 0
         self.value_keeper = value_keeper
         self.child_settled = child_settled
         self.value_keeps = self.value_keep_attempts = 0
@@ -152,6 +155,7 @@ class _Program:
         self.pending = []
         self.pending_count = 0
         self.receipts = {}
+        self.unhandled_rejections: dict[int, tuple[int, int]] = {}
         self.next_id = 0
         self.calls = self.stages = self.parallel_stages = 0
         self.successful_calls = 0
@@ -188,6 +192,7 @@ class _Program:
             raise ProgramExecutionError('memory_limit', 'JavaScript initialization failed')
         self.fn('qjs_set_memory_limit', limits.heap_bytes)
         self.fn('qjs_set_interrupt_handler', 1)
+        self.fn('qjs_set_promise_rejection_handler', 1)
         global_value = self.fn('qjs_get_global')
         name = self.alloc('__tofu_rpc')
         host_function = self.fn('qjs_new_host_function', name, len('__tofu_rpc'), 1)
@@ -405,8 +410,27 @@ class _Program:
                 return lambda caller, *args: 0  # UTC; no module loading capability.
             if name == 'host_promise_rejection':
                 def rejection(caller, promise, reason, handled):
-                    self.fn('qjs_free_value', promise, caller=caller)
-                    self.fn('qjs_free_value', reason, caller=caller)
+                    retained = False
+                    try:
+                        # Callback handles are fresh JSValue allocations, not
+                        # promise identities. Retain the object to prevent reuse
+                        # of its underlying pointer until handled or Store close.
+                        identity = self.fn('qjs_get_value_ptr', promise, caller=caller)
+                        previous = self.unhandled_rejections.pop(identity, None)
+                        if previous is not None:
+                            for handle in previous:
+                                self.fn('qjs_free_value', handle, caller=caller)
+                        if not handled:
+                            if len(self.unhandled_rejections) >= MAX_PENDING_REJECTIONS:
+                                raise ProgramExecutionError('promise_rejection_limit',
+                                    'Too many pending JavaScript promise rejections',
+                                    limit=MAX_PENDING_REJECTIONS)
+                            self.unhandled_rejections[identity] = (promise, reason)
+                            retained = True
+                    finally:
+                        if not retained:
+                            self.fn('qjs_free_value', promise, caller=caller)
+                            self.fn('qjs_free_value', reason, caller=caller)
                 return rejection
         if module == 'wasi_snapshot_preview1':
             if name == 'clock_time_get':
@@ -451,7 +475,12 @@ class _Program:
         elif op == 'value':
             value = self.unwrap(args[0])
         elif op == 'search':
-            value = self.search(*catalog_search_arguments(args))
+            arguments = catalog_search_arguments(args)
+            if self.catalog_queries >= MAX_TOOL_CALLS:
+                raise ProgramExecutionError('catalog_query_limit',
+                    'Catalog search query limit exceeded', limit=MAX_TOOL_CALLS)
+            self.catalog_queries += 1
+            value = self.search(*arguments)
         elif op == 'inputs':
             from lib.tools.program_results import validate_program_input_query
             if len(args) != 1:
@@ -462,6 +491,7 @@ class _Program:
             query = validate_program_input_query(args[0])
             value = (self.input_lister(query) if self.input_lister is not None
                      else {'inputs': [], 'total': 0, 'nextOffset': None})
+
             self.last_input_lookup = {
                 'queryIndex': self.input_queries,
                 'returned': len(value['inputs']),
@@ -613,35 +643,65 @@ class _Program:
                     self.resolve(rid, self.unwrap(value) if mode == 'invoke' else value,
                                  False, receipt=mode == 'call')
 
+    def drain_jobs(self):
+        while self.fn('qjs_is_job_pending'):
+            if self.fn('qjs_execute_pending_job') < 0:
+                raise ProgramExecutionError('javascript_error', 'JavaScript promise job failed')
+
+    def check_unhandled_rejections(self):
+        if self.unhandled_rejections:
+            self.phase = 'serializing'
+            _, reason = next(iter(self.unhandled_rejections.values()))
+            try:
+                message = self.string(reason)[:2048]
+            except ProgramExecutionError as exc:
+                # Diagnostic conversion must not hide cancellation, resource
+                # limits, or a terminal signal raised by a host callback.
+                if exc.code != 'javascript_error' or self.halt is not None:
+                    raise
+                message = '(reason cannot be converted to text)'
+            raise ProgramExecutionError('unhandled_promise_rejection',
+                'Unhandled JavaScript promise rejection: ' + message)
+
     def run(self, source):
         outcome = 'completed'
         try:
             promise = self.eval('(async () => {\n' + source + '\n})()')
+            # The host inspects the outer promise itself; only detached
+            # rejections belong in the unhandled tracker.
+            self.fn('qjs_promise_mark_as_handled', promise)
             while True:
                 if self.aborted():
                     raise ProgramExecutionError('cancelled', 'JavaScript program cancelled')
-                while self.fn('qjs_is_job_pending'):
-                    if self.fn('qjs_execute_pending_job') < 0:
-                        raise ProgramExecutionError('javascript_error', 'JavaScript promise job failed')
+                self.drain_jobs()
                 state = self.fn('qjs_promise_state', promise)
+                if state == 2:
+                    self.phase = 'serializing'
+                    value = self.fn('qjs_promise_result', promise)
+                    raise self.javascript_failure(self.string(value)[:2048], syntax=False)
+                # Allow same-turn catches and Promise.all handlers to settle,
+                # but never dispatch another effect wave or claim success with
+                # a detached rejection still outstanding.
+                self.check_unhandled_rejections()
                 if state:
                     if self.pending:
                         raise ProgramExecutionError('unawaited_tools', 'Await every scheduled tool call before returning')
                     value = self.fn('qjs_promise_result', promise)
-                    if state == 2:
-                        raise self.javascript_failure(self.string(value)[:2048], syntax=False)
                     self.phase = 'serializing'
                     packed = self.invoke_guest(self.packer, [value])
                     encoded = json.loads(self.string(packed))
+                    self.drain_jobs()
+                    self.check_unhandled_rejections()
                     if encoded.get('t') == 'u':
-                        self.observe('missing_program_result', {
-                            'message': 'The code is an async function body. Write statements directly '
-                                       'and return data; call any declared function explicitly. '
-                                       'Do not repeat completed tool effects.',
-                            'completedToolCalls': self.successful_calls,
-                            'toolCallAttempts': self.calls,
-                            'retainedReads': self.result_reads,
-                        })
+                        raise ProgramExecutionError('missing_program_result',
+                            'The code is an async function body. Write statements directly '
+                            'and return data; call any declared function explicitly. '
+                            'Do not repeat completed tool effects.',
+                            executionReceipt={
+                                'attemptedToolCalls': self.calls,
+                                'successfulToolCalls': self.successful_calls,
+                                'retainedReads': self.result_reads,
+                            })
                     result = self.decode(encoded)
                     break
                 if not self.pending:
@@ -666,6 +726,7 @@ class _Program:
                         'result_reads': self.result_reads,
                         'result_read_attempts': self.result_read_attempts,
                         'input_queries': self.input_queries,
+                        'catalog_queries': self.catalog_queries,
                         'value_keeps': self.value_keeps,
                         'value_keep_attempts': self.value_keep_attempts,
                         'call_stages': self.stages, 'parallel_stages': self.parallel_stages,
@@ -728,5 +789,7 @@ def execute_javascript_program(source: str, *, search: Callable,
         if program is not None:
             try:
                 program.store.close()
+                # Store closure releases retained promise/reason handles too.
+                program.unhandled_rejections.clear()
             finally:
                 program.clock.release()

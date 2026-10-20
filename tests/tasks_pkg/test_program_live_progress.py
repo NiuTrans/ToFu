@@ -5,9 +5,9 @@ import json
 import pytest
 
 from lib.tasks_pkg.orchestrator import _programmatic as projection
+from tests.tasks_pkg.test_javascript_dependency_chains import local_gateway  # noqa: F401
 
 pytestmark = pytest.mark.unit
-pytest_plugins = ('tests.tasks_pkg.test_javascript_dependency_chains',)
 
 
 def schema(name):

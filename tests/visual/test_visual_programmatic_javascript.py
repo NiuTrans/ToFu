@@ -11,12 +11,10 @@ import pytest
 
 from tests._runtime_sections import native_module_path, runtime_section_path
 from tests.support.frontend_visual import ROOT
+from tests.tasks_pkg.test_javascript_dependency_chains import local_gateway  # noqa: F401
 
 pytestmark = pytest.mark.visual
-pytest_plugins = (
-    "tests.tasks_pkg.test_javascript_dependency_chains",
-    "tests.support.frontend_visual",
-)
+pytest_plugins = ("tests.support.frontend_visual",)
 
 
 @pytest.mark.parametrize('handoff_reason', ['semantic', 'missing_program_result', 'tool_name', 'aggregate'])
@@ -45,7 +43,7 @@ def test_actual_async_program_observation_renders_before_collapsed_code(
         ['read_clauses','must_not_write']], {
         'read_clauses':lambda args:('done',evidence),
         'must_not_write':lambda args:pytest.fail('effect after handoff'),
-    })
+    }, expected_status='error' if handoff_reason == 'missing_program_result' else 'ok')
     assert dispatched == ([] if handoff_reason == 'tool_name' else [('read_clauses',{})])
     assert program['stats']['engine'] == 'quickjs-wasm'
     row = next(x for x in task['toolRounds'] if x.get('_programSynthetic'))
@@ -74,13 +72,25 @@ def test_actual_async_program_observation_renders_before_collapsed_code(
     page.evaluate('row=>{window.programRow=row;document.getElementById("program-fixture").innerHTML=_renderToolSlot(row,[row])}',row)
     card=page.locator('.ptc-card')
     assert card.is_visible()
+
+    if handoff_reason == 'aggregate':
+        # Success is quiet by default; errors and judgment handoffs are open.
+        assert card.evaluate('node=>node.open') is False
+        assert card.locator('.ptc-result').evaluate('node=>node.open') is False
+        card.locator(':scope > summary').click()
+        card.locator('.ptc-result > summary').click()
+    else:
+        assert card.evaluate('node=>node.open') is True
     expected_reason = (messages['ptc.reason.noResult'] if handoff_reason == 'missing_program_result'
                        else messages['ptc.reason.toolName'] if handoff_reason == 'tool_name'
                        else '' if handoff_reason == 'aggregate'
                        else program['result']['reason'])
-    if handoff_reason == 'aggregate':
+    if handoff_reason in {'aggregate', 'missing_program_result'}:
         assert card.locator('.ptc-observation').count() == 0
-        assert json.loads(card.locator('.ptc-result pre').inner_text()) == {'count':2,'total':123}
+        if handoff_reason == 'aggregate':
+            assert json.loads(card.locator('.ptc-result pre').inner_text()) == {'count':2,'total':123}
+        else:
+            assert card.locator('.ptc-status').inner_text() == messages['ptc.status.failed']
     else:
         assert card.locator('.ptc-observation').inner_text() == expected_reason
     assert card.locator('.ptc-result').evaluate('node=>node.open') is True
@@ -90,14 +100,17 @@ def test_actual_async_program_observation_renders_before_collapsed_code(
         assert '<img src=x onerror=alert(1)>' in card.locator('.ptc-result').inner_text()
         assert '9223372036854775807' in card.locator('.ptc-result').inner_text()
     elif handoff_reason == 'missing_program_result':
-        assert program['stats']['outcome'] == 'needs_model'
-        assert program['result']['reason'] == 'missing_program_result'
-        assert json.loads(card.locator('.ptc-result pre').inner_text())['completedToolCalls'] == 1
+        assert program['stats']['outcome'] == 'error'
+        assert program['error']['code'] == 'missing_program_result'
+        displayed = json.loads(card.locator('.ptc-result pre').inner_text())
+        assert displayed['code'] == 'missing_program_result'
+        assert displayed['executionReceipt']['successfulToolCalls'] == 1
     elif handoff_reason == 'tool_name':
         assert program['stats']['successful_tool_calls'] == 0
-    assert card.locator('.ptc-meta').inner_text() == messages['ptc.calls.successful'].replace(
+    card.locator('.ptc-technical > summary').click()
+    assert messages['ptc.calls.successful'].replace(
         '{done}', str(program['stats']['successful_tool_calls'])).replace(
-        '{attempts}', str(program['stats']['tool_calls']))
+        '{attempts}', str(program['stats']['tool_calls'])) in card.locator('.ptc-measurements').inner_text()
     assert card.locator('.ptc-measurements').is_visible()
     assert page.evaluate('''()=>{
       const card=document.querySelector('.ptc-card');
@@ -110,8 +123,8 @@ def test_actual_async_program_observation_renders_before_collapsed_code(
     assert 'await tools.invoke' in card.locator('.ptc-code code').inner_text()
     card.screenshot(path=str(tmp_path/f'program-{width}-{language}.png'))
     page.evaluate('()=>document.getElementById("program-fixture").innerHTML=_renderToolSlot(programRow,[programRow])')
-    if handoff_reason == 'aggregate':
+    if handoff_reason in {'aggregate', 'missing_program_result'}:
         assert card.locator('.ptc-observation').count() == 0
     else:
         assert card.locator('.ptc-observation').inner_text() == expected_reason
-    assert card.locator('.ptc-result').evaluate('node=>node.open') is True
+    assert card.locator('.ptc-result').evaluate('node=>node.open') is (handoff_reason != 'aggregate')

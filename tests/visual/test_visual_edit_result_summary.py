@@ -61,7 +61,8 @@ def _mount_edit_card(page, *, status, failed, theme):
         renderToolBlockHtml: block => results.renderWriteResultHtml(block.round, metadata, header),
       });
       renderers.renderBlock(document.querySelector('#tool'),
-        {kind: 'tool', name: 'edit_file', round}, {turn: {turnId: 'edit-summary'}});
+        {kind: 'tool', name: 'edit_file', round},
+        {turn: {turnId: 'edit-summary', source: {conversationId: 'fixture-conv'}}});
     }''', {'locale': locale, 'status': status, 'failed': failed,
            'reason': FAILURE_REASON, 'hint': RECOVERY_HINT, 'theme': theme})
     # Host-only layout: do not patch any production card/row/list CSS here.
@@ -85,7 +86,31 @@ def test_edit_card_count_evidence_and_compact_list(frontend_visual_page, width, 
     assert badge.inner_text() == expected_count
     assert badge.evaluate('(node, cls) => node.classList.contains(cls)',
                           'ptool-badge-err' if failed else 'ptool-badge-ok')
-    # Compare computed paint to the shipped semantic palette, not just a class.
+
+    # The disclosure caret is a flex item of the summary row, so it can never
+    # wrap onto a line of its own — the row is exactly the label plus padding.
+    # An inline label caret (`content:" ▸"` inside the wrapping label) used to
+    # add a whole caret-only line at narrow widths.
+    caret = header.evaluate('''node => {
+      const label = node.querySelector('.ptool-text');
+      const style = getComputedStyle(node);
+      return {rowContent: getComputedStyle(node, '::after').content,
+        labelContent: getComputedStyle(label, '::after').content,
+        rowHeight: node.getBoundingClientRect().height,
+        labelHeight: label.getBoundingClientRect().height,
+        padTop: parseFloat(style.paddingTop), padBottom: parseFloat(style.paddingBottom)};
+    }''')
+    assert caret['rowContent'] == '""', caret
+    assert caret['labelContent'] == 'none', caret
+    # A wrapped caret costs a FULL extra line; row min-height and the trailing
+    # badge legitimately exceed label + padding by a few pixels.
+    caret_overflow = caret['rowHeight'] - caret['labelHeight'] \
+        - caret['padTop'] - caret['padBottom']
+    assert caret_overflow <= caret['labelHeight'] / 2, caret
+    # Compare computed paint to the shipped palette, not just a class. Exceptional
+    # outcomes stay colored; routine success is deliberately quiet
+    # (`23-reading-process.css`: "Keep exceptional outcomes colored, make routine
+    # metadata readable and quiet").
     assert badge.evaluate('''(node, token) => {
       const probe = document.createElement('span');
       probe.style.color = `var(${token})`;
@@ -94,7 +119,7 @@ def test_edit_card_count_evidence_and_compact_list(frontend_visual_page, width, 
       const expected = getComputedStyle(probe).color;
       probe.remove();
       return actual === expected && actual !== 'rgba(0, 0, 0, 0)';
-    }''', '--chip-err-color' if failed else '--chip-ok-color')
+    }''', '--chip-err-color' if failed else '--text-secondary')
     assert FAILURE_REASON not in header.inner_text()
     assert 'match-not-found' not in header.inner_text()
     assert header.locator('.ptool-batch-fail-reason').count() == 0

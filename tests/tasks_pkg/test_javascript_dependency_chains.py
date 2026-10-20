@@ -429,7 +429,8 @@ def test_standard_javascript_joins_actual_parallel_child_execution(local_gateway
       try { JSON.parse('bad'); } catch ({name}) {
         if (name !== 'SyntaxError') throw new Error('unexpected');
       }
-      return new Summary(scores.reduce((sum, {score}) => sum + score, 0));
+      // Classes are normal guest JavaScript; bridge results are plain JSON data.
+      return {...new Summary(scores.reduce((sum, {score}) => sum + score, 0))};
     ''', [_tool('list_documents'), _tool('score_document',
         {'id': {'type':'string'}}, ['id'])], {
         'list_documents': lambda args: ('done', {'ids':['a','b']}),

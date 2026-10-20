@@ -75,6 +75,164 @@ def test_private_input_queries_remain_separate_from_handoff_execution_receipts()
     assert stats['input_queries'] == 1 and stats['tool_calls'] == stats['result_reads'] == 0
 
 
+@pytest.mark.parametrize('query', ['"read"', '{query:"read",limit:1}'])
+def test_catalog_query_limit_refuses_seventeenth_callback(query):
+    queries = []
+    with pytest.raises(ProgramExecutionError) as error:
+        execute_javascript_program(
+            f'for(let i=0;i<17;i++) catalog.search({query}); return 1;',
+            search=lambda *args: queries.append(args) or [],
+            call=lambda *a:pytest.fail('unexpected effect'), call_many=lambda *a:[])
+    assert error.value.code == 'catalog_query_limit'
+    assert error.value.detail['limit'] == len(queries) == 16
+    stats = error.value.execution_stats
+    assert stats['catalog_queries'] == 16 and stats['input_queries'] == 0
+    assert stats['outcome'] == 'error' and stats['tool_calls'] == 0
+
+
+def test_catalog_and_private_input_query_budgets_are_independent():
+    queries, inputs = [], []
+    value, stats = execute_javascript_program(
+        'for(let i=0;i<16;i++){catalog.search("read");tools.inputs();} return 7;',
+        search=lambda *args:queries.append(args) or [],
+        input_lister=lambda query:inputs.append(query) or {
+            'inputs': [], 'total': 0, 'nextOffset': None},
+        call=lambda *a:pytest.fail('unexpected effect'), call_many=lambda *a:[])
+    assert value == 7 and len(queries) == len(inputs) == 16
+    assert stats['catalog_queries'] == stats['input_queries'] == 16
+    assert stats['tool_calls'] == stats['result_reads'] == 0
+    _, fresh_stats = World().run('return catalog.search("read");')
+    assert fresh_stats['catalog_queries'] == 1 and fresh_stats['input_queries'] == 0
+
+
+def test_invalid_catalog_query_does_not_count_a_callback():
+    with pytest.raises(ProgramExecutionError) as error:
+        World().run('catalog.search({query:""}); return 1;')
+    assert error.value.code == 'invalid_search_arguments'
+    assert error.value.execution_stats['catalog_queries'] == 0
+
+
+@pytest.mark.parametrize('code', [
+    'Promise.reject(new Error("detached failure")); return {ok:true};',
+
+    'Promise.reject("detached failure"); return {ok:true};',
+    'Promise.resolve().then(()=>{throw new Error("detached failure")}); return {ok:true};',
+    'Promise.reject(new Error("detached failure")).then(()=>1); return {ok:true};',
+    'return {get value(){Promise.reject(new Error("detached failure")); return 1;}};',
+    'return {get value(){Promise.resolve().then(()=>{throw new Error("detached failure")}); return 1;}};',
+])
+def test_unhandled_promise_rejection_never_claims_completion(code):
+    world = World()
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run(code)
+    assert error.value.code == 'unhandled_promise_rejection'
+    assert 'detached failure' in str(error.value)
+    assert error.value.execution_stats['outcome'] == 'error'
+    assert world.waves == []
+
+
+@pytest.mark.parametrize('reason', [
+    'Object.create(null)', 'Symbol("reason")',
+    '{toString(){throw new Error("conversion failed")}}',
+])
+def test_non_stringifiable_rejection_preserves_typed_failure(reason):
+    world = World()
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run('Promise.reject(' + reason + '); return 1;')
+    assert error.value.code == 'unhandled_promise_rejection'
+    assert 'reason cannot be converted to text' in str(error.value)
+    assert world.waves == []
+
+
+def test_rejection_diagnostics_do_not_mask_execution_limit():
+    with pytest.raises(ProgramExecutionError) as error:
+        World().run('Promise.reject({toString(){while(true){}}}); return 1;',
+                    limits=JavaScriptLimits(fuel=20_000_000))
+    assert error.value.code == 'execution_limit'
+
+
+@pytest.mark.parametrize('prefix, expected_waves', [
+    ('Promise.reject(new Error("detached failure"));', []),
+    ('const p=tools.invoke("first"); p.then(()=>{throw new Error("detached failure")}); await p;',
+     [(['first'], 'single')]),
+])
+def test_unhandled_rejection_stops_dependent_effects_without_replay(prefix, expected_waves):
+    world = World()
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run(prefix + 'await tools.invoke("later"); return {ok:true};')
+    assert error.value.code == 'unhandled_promise_rejection'
+    assert world.waves == expected_waves
+    stats = error.value.execution_stats
+    assert stats['tool_calls'] == stats['successful_tool_calls'] == len(expected_waves)
+    assert stats['outcome'] == 'error'
+
+
+@pytest.mark.parametrize('code', [
+    'const p=Promise.reject(new Error("caught")); p.catch(()=>{}); return 7;',
+    'const p=Promise.reject(new Error("caught")); await Promise.resolve(); p.catch(()=>{}); return 7;',
+    'try { await Promise.reject(new Error("caught")); } catch (_) {} return 7;',
+    'try { await Promise.all([Promise.reject(new Error("caught")),Promise.resolve(1)]); } catch (_) {} return 7;',
+
+    'await Promise.any([Promise.reject(new Error("caught")),Promise.resolve(1)]); return 7;',
+    'await Promise.race([Promise.resolve(1),Promise.reject(new Error("caught"))]); return 7;',
+    'const p=Promise.reject(new Error("caught")); const q=p.then(()=>1); q.catch(()=>{}); return 7;',
+    'for(let i=0;i<2000;i++) Promise.reject(i).catch(()=>{}); return 7;',
+    'const ps=Array.from({length:32},(_,i)=>Promise.reject(i)); await Promise.allSettled(ps); return 7;',
+    'const p=tools.invoke("first").then(()=>{throw new Error("caught")}); '
+    'await Promise.all([p.catch(()=>{}),tools.invoke("second")]); return 7;',
+])
+def test_handled_rejections_preserve_standard_promise_behavior(code):
+    value, stats = World().run(code)
+    assert value == 7 and stats['outcome'] == 'completed'
+
+
+@pytest.mark.parametrize('code', [
+    'throw new Error("outer reason");',
+    'await Promise.reject(new Error("outer reason"));',
+    'await Promise.all([Promise.reject(new Error("outer reason")),tools.invoke("never")]);',
+    'Promise.reject(new Error("detached")); throw new Error("outer reason");',
+    'tools.invoke("never"); throw new Error("outer reason");',
+])
+def test_outer_promise_rejection_preserves_original_error_and_prevents_effects(code):
+    world = World()
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run(code)
+    assert error.value.code == 'javascript_error'
+    assert str(error.value) == 'Error: outer reason'
+    assert world.waves == []
+
+
+def test_pending_promise_rejections_are_bounded_and_do_not_leak_between_runs():
+    world = World()
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run('for(let i=0;i<100000;i++) Promise.reject(i); return 1;')
+    assert error.value.code == 'promise_rejection_limit'
+    assert error.value.detail['limit'] == 1024
+    assert error.value.execution_stats['outcome'] == 'error'
+    value, stats = world.run('return 7;')
+    assert value == 7 and stats['outcome'] == 'completed' and world.waves == []
+
+
+def test_concurrent_rejections_keep_task_local_reason():
+    barrier = threading.Barrier(4)
+    def run(index):
+        def search(*args):
+            barrier.wait(timeout=10)
+            return index
+        try:
+            return execute_javascript_program(
+                'const i=catalog.search("read"); '
+                'Promise.reject(new Error("task-"+i)); return 7;',
+                search=search, call=lambda *a:pytest.fail('effect'),call_many=lambda *a:[])
+        except ProgramExecutionError as error:
+            return error.code, str(error)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(run, range(4)))
+    assert [code for code,_ in results] == ['unhandled_promise_rejection'] * 4
+    assert [message for _,message in results] == [
+        'Unhandled JavaScript promise rejection: Error: task-' + str(i) for i in range(4)]
+
+
 def test_standard_syntax_and_builtins():
     result, stats = World().run('''
       class Record { constructor({value}) { this.value = value; } }
@@ -247,7 +405,8 @@ def test_each_program_has_fresh_globals_and_receipts():
 
 
 @pytest.mark.parametrize('code', ['return 1;', 'throw new Error("failure")',
-                                  'tools.observe("judge",{});', 'while(true){}'])
+                                  'tools.observe("judge",{});', 'while(true){}',
+                                  'Promise.reject(new Error("detached")); return 1;'])
 def test_closed_store_releases_callback_and_program_references(monkeypatch, code):
     import lib.tools.javascript as runtime
     instances = []
@@ -401,27 +560,36 @@ def test_named_namespace_has_no_prototype_or_accidental_thenable_effects():
 
 @pytest.mark.parametrize('code', [
     'const unused = 1;',
-    'async function main() { return 3; }',
-    'async () => { return 3; };',
+    'async function main() { await tools.invoke("never"); return 3; }',
+    'async () => { await tools.invoke("never"); return 3; };',
     'return undefined;',
 ])
-def test_missing_result_hands_back_without_invoking_defined_functions(code):
+def test_missing_result_fails_without_invoking_defined_functions(code):
     world = World()
-    result, stats = world.run(code)
-    assert result['kind'] == 'observation'
-    assert result['reason'] == 'missing_program_result'
-    assert 'call any declared function explicitly' in result['data']['message']
-    assert stats['outcome'] == 'needs_model'
-    assert stats['tool_calls'] == 0
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run(code)
+    assert error.value.code == 'missing_program_result'
+    assert 'Write statements directly and return data' in str(error.value)
+    assert 'call any declared function explicitly' in str(error.value)
+    assert 'Do not repeat completed tool effects' in str(error.value)
+    assert error.value.detail['executionReceipt'] == {
+        'attemptedToolCalls':0, 'successfulToolCalls':0, 'retainedReads':0}
+    assert error.value.execution_stats['outcome'] == 'error'
+    assert error.value.execution_stats['tool_calls'] == 0
     assert world.waves == []
 
 
 def test_missing_result_preserves_completed_effects_and_measured_calls():
     world = World()
-    result, stats = world.run("await tools.invoke('write', {value:3});")
-    assert result['reason'] == 'missing_program_result'
-    assert result['data']['completedToolCalls'] == stats['tool_calls'] == 1
-    assert stats['call_stages'] == 1
+    with pytest.raises(ProgramExecutionError) as error:
+        world.run("await tools.invoke('write', {value:3}); tools.result('retained',{});",
+                  result_reader=lambda *a:receipt([7]))
+    assert error.value.code == 'missing_program_result'
+    assert error.value.detail['executionReceipt'] == {
+        'attemptedToolCalls':1, 'successfulToolCalls':1, 'retainedReads':1}
+    stats = error.value.execution_stats
+    assert stats['tool_calls'] == stats['successful_tool_calls'] == stats['result_reads'] == 1
+    assert stats['call_stages'] == 1 and stats['outcome'] == 'error'
     assert world.waves == [(['write'], 'single')]
 
 
@@ -464,12 +632,15 @@ def test_success_count_is_not_increased_by_repeated_receipt_decoding():
 
 
 def test_missing_return_does_not_describe_rejection_as_a_completed_tool():
-    result, stats = execute_javascript_program("await tools.call('unavailable',{});",
-        search=lambda *a:[],call=lambda *a:{'status':'error','error':{'code':'tool_not_enabled'},'output_truncated':False},
-        call_many=lambda *a:pytest.fail('unexpected batch'))
-    assert result['reason'] == 'missing_program_result'
-    assert result['data']['completedToolCalls'] == stats['successful_tool_calls'] == 0
-    assert result['data']['toolCallAttempts'] == stats['tool_calls'] == 1
+    with pytest.raises(ProgramExecutionError) as error:
+        execute_javascript_program("await tools.call('unavailable',{});",
+            search=lambda *a:[],call=lambda *a:{'status':'error','error':{'code':'tool_not_enabled'},'output_truncated':False},
+            call_many=lambda *a:pytest.fail('unexpected batch'))
+    assert error.value.code == 'missing_program_result'
+    assert error.value.detail['executionReceipt'] == {
+        'attemptedToolCalls':1, 'successfulToolCalls':0, 'retainedReads':0}
+    assert error.value.execution_stats['successful_tool_calls'] == 0
+    assert error.value.execution_stats['tool_calls'] == 1
 
 
 def test_handoff_progress_does_not_turn_retained_reads_into_tool_execution():
