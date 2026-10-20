@@ -151,6 +151,19 @@ excluding its current assistant carrier and current round. Settled content
 belongs to one pipeline invocation and leaves scope after its aggregate-budget
 barrier, including across nested gateway dispatch.
 
+**Handler receipt admission.** Problem: a handler could return another call's
+ID or a malformed result, allowing sibling output to be overwritten or a
+returned effect to be acknowledged without a usable receipt. Decision: the
+common executor validates the three-field result, exact dispatched ID and
+boolean search flag before acknowledging return or exposing content to cache
+and settlement. Invalid receipts fail the owned occurrence, withhold their
+payload and retain the existing effect-recovery policy. Non-replayable writes
+remain unknown and require reconciliation; other invalid receipts report
+`tool_result_invalid` with adapter-repair guidance. A valid empty content value
+remains success. Alternatives rejected: rewriting a foreign ID invents
+provenance; gateway-only checks miss direct executor consumers; retrying the
+handler can repeat effects. Ordinary approval and cancellation still apply.
+
 Every ordered position inside one provider response executes and settles
 independently, including exact twins, after provider-response admission. Duplicate IDs are reminted rather than used to collapse siblings. The narrow routing-repair exception applies when
 the same response has an `execute_tools` carrier: post-authority direct calls

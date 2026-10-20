@@ -16,6 +16,138 @@ from lib.tools.contracts import ToolContractV2
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
+@pytest.mark.parametrize('name', ['fetch_url', 'write_file'])
+@pytest.mark.parametrize('fault', ['missing', 'short', 'foreign_id', 'search_flag'])
+def test_invalid_handler_receipt_fails_the_owned_occurrence(
+        mode, name, fault, observations):
+    from lib.tools.result_envelope import tool_result_error
+    entered = []
+
+    def handler(task, tc, tool, call_id, arguments, number, row, *rest):
+        entered.append(call_id)
+        _finalize_tool_round(task, number, row, [{'content': 'provisional output'}])
+        return {
+            'missing': None,
+            'short': (call_id, 'UNRELATED-RESPONSE-599'),
+            'foreign_id': ('another-call', 'UNRELATED-RESPONSE-599', False),
+            'search_flag': (call_id, 'UNRELATED-RESPONSE-599', 'false'),
+        }[fault]
+
+    task = task_for(handler, mode, name=name,
+                    permission='write' if name == 'write_file' else 'read')
+    row, messages, settled = dispatch(task, name=name)
+    assert entered == ['occurrence-1']
+    assert row['status'] == 'error'
+    assert row['_runtimeState'] == 'error'
+    assert row['executionEffect']['state'] == 'unknown'
+    assert [message['tool_call_id'] for message in messages] == ['occurrence-1']
+    assert 'UNRELATED-RESPONSE-599' not in str(messages)
+    assert 'Unknown tool' not in str(messages)
+    error = tool_result_error(messages[0]['content'])
+    assert error is not None
+    assert error.code == (
+        'tool_effect_unknown' if name == 'write_file' else 'tool_result_invalid')
+    if name == 'write_file':
+        assert error.retryable is False and 'Do not repeat' in error.next_action
+    assert row['_cacheableResult'] is False
+    assert len(settled) == 1 and settled[0].execution_status == 'error'
+    assert len(observations[1]) == 1 and observations[1][0]['outcome'] == 'error'
+    complete = [event for event in observations[0] if event['type'] == 'tool_complete']
+    assert len(complete) == 1 and complete[0]['status'] == 'error'
+
+
+@pytest.mark.parametrize('programmatic', [False, True])
+def test_foreign_handler_id_cannot_overwrite_a_gateway_sibling(
+        programmatic, observations):
+    from lib.tasks_pkg.handlers.tool_gateway import _execute_call_batch
+    from lib.tools.programmatic import ProgrammaticResultBudget
+    entered = []
+    sibling_returned = threading.Event()
+
+    def handler(task, tc, name, call_id, arguments, number, row, *rest):
+        entered.append(call_id)
+        if call_id == 'first':
+            assert sibling_returned.wait(5), 'independent sibling did not run'
+            return 'second', 'foreign receipt must be withheld', False
+        sibling_returned.set()
+        return call_id, 'owned sibling output', False
+
+    task = task_for(handler)
+    task['toolRounds'] = []
+    task['_executable_tool_catalog'] = [{
+        'type': 'function', 'function': {'name': 'fetch_url',
+        'parameters': {'type': 'object',
+                       'properties': {'url': {'type': 'string'}}}}}]
+    calls = [{'id': call_id, 'type': 'function', 'function': {
+        'name': 'fetch_url',
+        'arguments': json.dumps({'url': f'https://example.test/{call_id}'})}}
+        for call_id in ('first', 'second')]
+    receipts = _execute_call_batch(
+        task, calls, cfg={'autoApply': True}, project_path=None,
+        project_enabled=False, model='test-model', llm_round=1,
+        program_result_budget=ProgrammaticResultBudget() if programmatic else None)
+    assert sorted(entered) == ['first', 'second']
+    assert [receipt['call_id'] for receipt in receipts] == ['first', 'second']
+    assert [receipt['status'] for receipt in receipts] == ['error', 'done']
+    assert [receipt.canonical.execution_status for receipt in receipts] == ['error', 'ok']
+    assert 'owned sibling output' in receipts[1]['output']
+    assert 'foreign receipt must be withheld' not in str(receipts)
+    assert sorted(event['outcome'] for event in observations[1]) == ['error', 'ok']
+
+
+@pytest.mark.parametrize('name', ['fetch_url', 'write_file'])
+def test_direct_executor_rejects_a_foreign_receipt(name, observations):
+    from lib.tasks_pkg.executor import _execute_tool_one
+    from lib.tools.result_envelope import tool_result_error
+
+    task = task_for(
+        lambda *args: ('foreign', 'UNRELATED-RESPONSE-599', False),
+        name=name, permission='write' if name == 'write_file' else 'read')
+    _, row, _ = _build_tool_round_entry(name, {}, 'direct', '{}', 1, False)
+    call_id, content, is_search = _execute_tool_one(
+        task, {}, name, 'direct', {}, 1, row, {}, None, False)
+    assert call_id == 'direct' and is_search is False
+    assert tool_result_error(content) is not None
+    assert 'UNRELATED-RESPONSE-599' not in content
+    assert row['status'] == row['_runtimeState'] == 'error'
+    assert row['executionEffect']['state'] == 'unknown'
+    assert [event['outcome'] for event in observations[1]] == ['error']
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
+def test_invalid_read_receipt_does_not_block_a_repaired_authorized_call(
+        mode, observations):
+    entered = []
+
+    def handler(task, tc, name, call_id, *rest):
+        entered.append(call_id)
+        return ('foreign' if len(entered) == 1 else call_id), 'fresh read', False
+
+    task = task_for(handler, mode)
+    first, _, _ = dispatch(task)
+    second, messages, _ = dispatch(task, call_id='occurrence-2', round_num=1)
+    third, cached, _ = dispatch(task, call_id='occurrence-3', round_num=2)
+    assert entered == ['occurrence-1', 'occurrence-2']
+    assert [row['status'] for row in (first, second, third)] == ['error', 'done', 'done']
+    assert 'fresh read' in messages[0]['content']
+    assert 'fresh read' in cached[0]['content']
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
+@pytest.mark.parametrize('container', [tuple, list])
+def test_empty_handler_content_is_a_valid_receipt(mode, container, observations):
+    def handler(task, tc, name, call_id, *rest):
+        return container((call_id, '', False))
+
+    row, messages, settled = dispatch(task_for(handler, mode))
+    assert row['status'] == row['_runtimeState'] == 'done'
+    assert row['executionEffect']['state'] == 'returned'
+    assert settled[0].execution_status == 'ok'
+    assert [message['tool_call_id'] for message in messages] == ['occurrence-1']
+    assert [event['outcome'] for event in observations[1]] == ['ok']
+
+
 @pytest.fixture
 def observations(monkeypatch):
     events, audits = [], []
