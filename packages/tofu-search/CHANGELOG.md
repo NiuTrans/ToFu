@@ -11,6 +11,15 @@
 
 ## Unreleased
 
+- Rank using query-focused evidence from the complete fetched body instead of
+  an 8k prefix; sort small candidate pools and ignore query constraints and
+  link inventories as positive evidence.
+- Share Unicode tokenization across relevance admission, ranking and excerpts.
+  Preserve original source spans, pack complementary facts before repeated
+  aspects, and reserve relevance-filter space for both page identity and facts.
+- Add independently labeled offline ranking/excerpt measurements with source
+  hashes, fact recall, graded ranking metrics and raw timings. These regression
+  probes do not claim live search or agent-task superiority.
 
 - Separate weak generic-word matches from substantive lexical evidence; search
   operators and link inventories cannot prove subject relevance. Keep uncertain

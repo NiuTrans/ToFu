@@ -1,4 +1,4 @@
-"""lib/search/rerank.py — BM25-based reranking for search results.
+"""BM25 reranking over query-focused body evidence and SERP fields.
 
 Operates on LLM-cleaned full page content (``full_content``) when available,
 falling back to ``title — snippet`` for results that were not fetched.
@@ -13,7 +13,10 @@ import re
 import time
 from urllib.parse import urlparse
 
+from tofu_search.lexical import query_subject
+from tofu_search.lexical import tokenize as _tokenize
 from tofu_search.log import get_logger
+from tofu_search.passages import select_relevant_passages
 from tofu_search.search.authority import (
     AUTHORITY_BOOST,
     brand_tokens,
@@ -32,8 +35,8 @@ __all__ = ['rerank_by_bm25']
 BM25_K1 = 1.5
 BM25_B = 0.75
 
-# Truncate documents to this many chars before tokenizing.
-# Keeps reranking fast even for very long pages.
+# Bound the rankable representation, not the source coverage. Passage selection
+# scans the whole extracted body so late evidence has equal opportunity.
 _MAX_RERANK_CHARS = 8_000
 
 # Search-engine rank/consensus and successful extraction are useful weak
@@ -41,79 +44,23 @@ _MAX_RERANK_CHARS = 8_000
 RRF_WEIGHT = 8.0
 CONTENT_AVAILABLE_BOOST = 0.25
 
-# Common English stop words
-_STOP_WORDS = frozenset({
-    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'do', 'for',
-    'from', 'has', 'have', 'he', 'in', 'is', 'it', 'its', 'of', 'on',
-    'or', 'she', 'so', 'the', 'to', 'was', 'we', 'will', 'with', 'you',
-    'that', 'this', 'not', 'but', 'they', 'what', 'all', 'if', 'can',
-    'had', 'her', 'his', 'how', 'may', 'no', 'our', 'out', 'too',
-    'use', 'when', 'who', 'new', 'get', 'set', 'one', 'two', 'any',
-    'www', 'http', 'https', 'com', 'org', 'html',
-})
-
-# Regex: split on non-alphanumeric (handles CJK via bigrams separately)
-_TOKENIZE_RE = re.compile(r'[^a-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+')
-
-# CJK unicode ranges for bigram extraction
-_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]')
-
-
-# ═══════════════════════════════════════════════════════
-#  Tokenizer (handles CJK bigrams + Latin words)
-# ═══════════════════════════════════════════════════════
-
-def _tokenize(text: str) -> list[str]:
-    """Tokenize text into lowercase tokens for BM25 scoring.
-
-    Latin text is split on whitespace/punctuation with stop words removed.
-    CJK text is split into character bigrams for better matching.
-    """
-    lowered = text.lower()
-    lowered = lowered.replace('-', ' ').replace('_', ' ')
-    raw_tokens = _TOKENIZE_RE.split(lowered)
-
-    tokens = []
-    for t in raw_tokens:
-        if not t:
-            continue
-        # Check if token contains CJK characters
-        cjk_chars = _CJK_RE.findall(t)
-        if cjk_chars:
-            # Extract CJK bigrams
-            cjk_str = ''.join(cjk_chars)
-            for i in range(len(cjk_str) - 1):
-                tokens.append(cjk_str[i:i+2])
-            # Also keep single CJK chars for short queries
-            if len(cjk_str) <= 2:
-                for c in cjk_str:
-                    tokens.append(c)
-            # Extract any Latin parts too
-            latin_part = _CJK_RE.sub(' ', t)
-            for lt in latin_part.split():
-                if lt and lt not in _STOP_WORDS and len(lt) > 1:
-                    tokens.append(lt)
-        elif t not in _STOP_WORDS and len(t) > 1:
-            tokens.append(t)
-
-    return tokens
-
-
 # ═══════════════════════════════════════════════════════
 #  BM25 Reranker
 # ═══════════════════════════════════════════════════════
 
-def _build_doc_text(r: dict) -> str:
+def _build_doc_text(r: dict, query: str) -> str:
     """Build rankable text from a search result dict."""
     full = (r.get('full_content') or '').strip()
     title = (r.get('title') or '').strip()
     snippet = (r.get('snippet') or '').strip()
 
     if full:
-        # SERP titles/snippets are compact relevance judgments from the search
-        # engines. Repeat them so they are not drowned by an 8k article body.
-        text = f'{title}\n{title}\n{title}\n{snippet}\n{snippet}\n{full}'
-        return text[:_MAX_RERANK_CHARS]
+        # Preserve title/snippet signals while reserving most of the ranking
+        # representation for actual body evidence, wherever it occurs.
+        metadata = f'{title}\n{title}\n{title}\n{snippet}\n{snippet}'[:2_000]
+        evidence = select_relevant_passages(
+            full, query, _MAX_RERANK_CHARS - len(metadata) - 1)
+        return f'{metadata}\n{evidence}'
     else:
         return f'{title} {snippet}' if title else snippet
 
@@ -243,14 +190,13 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
     Returns:
         Top-K results sorted by descending BM25 relevance.
     """
-    if not results:
+    if not results or top_k <= 0:
         return []
-    if len(results) <= top_k:
-        return results
 
     t0 = time.time()
 
-    query_tokens = _tokenize(query)
+    subject = query_subject(query)
+    query_tokens = _tokenize(subject)
     if not query_tokens:
         logger.debug('[Rerank] No query tokens after tokenization, returning original order')
         return results[:top_k]
@@ -258,7 +204,7 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
     query_terms = set(query_tokens)
 
     # Tokenize all documents
-    doc_texts = [_build_doc_text(r) for r in results]
+    doc_texts = [_build_doc_text(r, query) for r in results]
     docs = [_tokenize(t) for t in doc_texts]
     doc_lens = [len(d) for d in docs]
     n = len(docs)
@@ -294,7 +240,7 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
         # Primary-source authority: a modest additive nudge so the vendor's own
         # domain / official docs outrank SEO aggregators when relevance is
         # comparable (never large enough to beat a much stronger lexical match).
-        tier = classify_authority(result.get('url') or '', query)
+        tier = classify_authority(result.get('url') or '', subject)
         score += AUTHORITY_BOOST.get(tier, 0.0)
 
         # Reciprocal-rank fusion is accumulated by the orchestrator when the
@@ -311,7 +257,7 @@ def rerank_by_bm25(query: str, results: list[dict], top_k: int) -> list[dict]:
     # Sort by score descending, break ties by original position
     scored.sort(key=lambda x: (-x[0], x[1]))
 
-    diversified = _diversify_by_entity(query, scored, top_k)
+    diversified = _diversify_by_entity(subject, scored, top_k)
     if diversified is not None:
         selected = diversified
     else:
