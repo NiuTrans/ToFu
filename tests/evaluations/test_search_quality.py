@@ -21,6 +21,60 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize('project_version', ['9.8.7', None])
+def test_worker_identity_describes_loaded_source_not_stale_distribution_metadata(
+    tmp_path, monkeypatch, project_version,
+):
+    from evaluations.search_quality import worker
+
+    package = tmp_path / 'tofu_search'
+    package.mkdir()
+    entry = package / '__init__.py'
+    entry.write_text('# synthetic package source\n')
+    if project_version is not None:
+        (tmp_path / 'pyproject.toml').write_text(
+            '[project]\nname = "tofu-search"\nversion = "9.8.7"\n')
+    monkeypatch.setitem(sys.modules, 'tofu_search', SimpleNamespace(__file__=str(entry)))
+    monkeypatch.setattr(worker.metadata, 'version', lambda name: '1.2.3')
+
+    report = worker.identity('tofu')
+
+    assert report['tofu-search'] == (project_version or '1.2.3')
+    assert report['requests'] == '1.2.3'
+    assert report['tofu_source_sha256'] == worker.python_tree_digest(package)
+
+
+def test_worker_identity_rejects_a_source_project_without_a_version(tmp_path, monkeypatch):
+    from evaluations.search_quality import worker
+
+    package = tmp_path / 'tofu_search'
+    package.mkdir()
+    entry = package / '__init__.py'
+    entry.write_text('# synthetic package source\n')
+    (tmp_path / 'pyproject.toml').write_text('[project]\nname = "tofu-search"\n')
+    monkeypatch.setitem(sys.modules, 'tofu_search', SimpleNamespace(__file__=str(entry)))
+    monkeypatch.setattr(worker.metadata, 'version', lambda name: '1.2.3')
+
+    with pytest.raises(ValueError, match='source.*version'):
+        worker.identity('tofu')
+
+
+def test_source_fingerprint_includes_the_declared_package_version(monkeypatch):
+    from evaluations.search_quality.runner import source_fingerprint
+
+    before = source_fingerprint(ROOT)
+    declaration = ROOT / 'packages/tofu-search/pyproject.toml'
+    original = Path.read_bytes
+
+    def changed_version(path):
+        if path == declaration:
+            return b'[project]\nname = "tofu-search"\nversion = "99.99.99"\n'
+        return original(path)
+
+    monkeypatch.setattr(Path, 'read_bytes', changed_version)
+    assert source_fingerprint(ROOT) != before
+
+
 def evidence():
     task = tasks()[1]
     url = task['reference_url']

@@ -14,6 +14,7 @@ from pathlib import Path
 import random
 import sys
 import time
+import tomllib
 
 from .contracts import DDGS_VERSION, PAGE_CHARS, RESULTS, SNIPPET_CHARS, python_tree_digest
 
@@ -38,6 +39,17 @@ def identity(arm):
             versions[name] = metadata.version(name)
         except metadata.PackageNotFoundError:
             versions[name] = 'source-checkout' if name == 'tofu-search' else 'not_installed'
+    if arm == 'tofu':
+        # Workers deliberately load the current checkout. Its ignored egg-info
+        # can lag the source or shadow metadata from the selected interpreter.
+        declaration = Path(module.__file__).resolve().parent.parent / 'pyproject.toml'
+        if declaration.is_file():
+            project = tomllib.loads(declaration.read_text(encoding='utf-8')).get('project', {})
+            if project.get('name') == 'tofu-search':
+                version = project.get('version')
+                if not isinstance(version, str) or not version.strip():
+                    raise ValueError('Loaded tofu-search source has no declared version')
+                versions['tofu-search'] = version
     if arm == 'ddgs':
         if versions['ddgs'] != DDGS_VERSION:
             raise ValueError('Unexpected DDGS version')

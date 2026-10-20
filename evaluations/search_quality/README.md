@@ -93,6 +93,14 @@ field aliases and reconstructed quotations. Worker preflight verifies the
 imported Tofu source tree, and the closing receipt checks that measured source
 files did not change during the cohort.
 
+Problem: a checkout's ignored `egg-info` can report an old distribution version
+even while the worker imports current source. Decision: use that source's
+matching `pyproject.toml` declaration for the Tofu version and include it in the
+cohort fingerprint. Installed dependencies still use distribution metadata;
+source hashes remain the code-identity check. Alternatives rejected: trusting
+the stale label, silently repairing shared installation metadata, or relabeling
+previous cohort manifests and grades.
+
 Contract v3 gives each native client handoff the total task waiting budget,
 while each actual search/fetch operation retains its 45-second limit.
 Problem: a handoff can already be waiting on the server while the sequential
