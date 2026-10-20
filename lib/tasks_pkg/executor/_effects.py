@@ -1,6 +1,6 @@
 """Tool occurrence effect evidence at the common handler boundary.
 
-Entry: begin_tool_effect, finish_tool_effect, uncertain_effect_error.
+Entry: begin_tool_effect, finish_tool_effect, uncertain_effect_error, tool_timeout_result.
 Policy: docs/contracts/TOOL_EFFECT_RECOVERY.md.
 Conversation attempts use their event commit barrier; registered children use
 their existing task-result checkpoint. Storage-free calls keep process scope.
@@ -157,6 +157,11 @@ def uncertain_effect_error(round_entry, message):
     effect = round_entry.get('executionEffect') or {}
     if effect.get('state') != 'unknown' or effect.get('recovery') != 'reconcile':
         return message
+    return _unknown_effect_error(effect, message)
+
+
+def _unknown_effect_error(effect, message):
+    """Keep the producer occurrence and its inspection path in the error."""
     from lib.tools.result_envelope import typed_tool_error
     return typed_tool_error(
         'tool_effect_unknown', retryable=False,
@@ -164,6 +169,41 @@ def uncertain_effect_error(round_entry, message):
                      'Do not repeat this operation automatically. Query the owning service or '
                      'inspect its durable result, then reconcile the effect before another write.'),
         message=f"Operation {effect['operationId']} may have taken effect. {message}",
+    ).to_envelope_text()
+
+
+def tool_timeout_result(task, tool_name, round_entry, *, content=None, message=None):
+    """Classify a deadline using host evidence, without retrying or settling work.
+
+    A deadline does not erase a captured classified failure. A worker can still
+    be running, or have returned a background handle; neither proves no effect.
+    """
+    from lib.tools.result_envelope import tool_result_error, typed_tool_error
+    from lib.tools.result_value import TrustedResultText
+
+    if (isinstance(content, TrustedResultText) and content.envelope
+            and tool_result_error(content) is not None):
+        return content
+    policy = effect_recovery_policy(task.get('_toolContractDocumentsByName'), tool_name)
+    effect = (round_entry or {}).get('executionEffect')
+    retryable = policy in {'read_only', 'idempotent'} and (
+        effect is None or isinstance(effect, dict) and effect.get('recovery') == policy)
+    message = message or f'Tool execution timed out: {tool_name}'
+    if (not retryable and isinstance(effect, dict) and effect.get('operationId')
+            and effect.get('state') in {'entered', 'unknown', 'returned'}):
+        return _unknown_effect_error(effect, message)
+    next_action = (
+        'The declared recovery policy permits retry through the normal tool gateway '
+        'and authorization checks. Earlier work may still be running; continue '
+        'independent authorized work if timeouts persist.'
+        if retryable else
+        'Do not repeat this operation automatically. Earlier work may still be '
+        'running; inspect the owning service or durable result to reconcile its '
+        'outcome. Continue independent authorized work.'
+    )
+    return typed_tool_error(
+        'tool_execution_timeout', retryable=retryable,
+        next_action=next_action, message=message,
     ).to_envelope_text()
 
 

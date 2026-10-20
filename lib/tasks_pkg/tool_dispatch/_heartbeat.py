@@ -31,8 +31,8 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     one exists. On expiry the call's runtime context is asked to cancel
     cooperatively, and — ONLY when our own timer fired, never on an outer
     abort or the pool ceiling — the late result is replaced with the
-    canonical timeout sentinel, so the model reads a timeout verdict instead
-    of a stale result. The pool ceiling (``TOOL_PARALLEL_TIMEOUT``) remains
+    typed timeout result, retaining any captured classified failure and its
+    recovery instructions. The pool ceiling (``TOOL_PARALLEL_TIMEOUT``) remains
     the outer bound for non-cooperative handlers; the ``_SERIAL_BLOCKING``
     human-wait exemptions never arm a declared timeout.
     """
@@ -85,7 +85,9 @@ def _execute_tool_one_in_pool(task, tc, fn_name, tc_id, fn_args, rn,
     if isinstance(round_entry, dict):
         round_entry['_declaredTimeoutMs'] = timeout_ms
         round_entry['status'] = 'error'
-    return tc_id, f'Tool execution timed out: {fn_name}', False
+    from lib.tasks_pkg.executor._effects import tool_timeout_result
+    return tc_id, tool_timeout_result(
+        task, fn_name, round_entry, content=result[1]), False
 
 
 # ── Serial-dispatch config for long-blocking tools ──────────────────────

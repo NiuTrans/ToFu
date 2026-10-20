@@ -7,7 +7,7 @@ Pins the two halves of the declared-timeout seam:
   ``declared_tool_timeout_ms`` resolves through the registry facade;
 * execution: ``_execute_tool_one_in_pool`` arms ONLY a declared timeout, and
   only its OWN timer's expiry replaces the late result with the canonical
-  timeout sentinel + error status + ``_declaredTimeoutMs`` attribution. An
+   typed timeout result + error status + ``_declaredTimeoutMs`` attribution. An
   outer abort keeps its own semantics; a fast handler is untouched; a
   ratified human-wait exemption never arms.
 """
@@ -118,10 +118,15 @@ class TestDeclaredTimeoutExecution:
             round_entry, {}, None, False), task, round_entry
 
     def test_own_timer_replaces_late_result(self, monkeypatch):
+        from lib.tools.result_envelope import tool_result_error
+
         (tc_id, content, is_search), _task, round_entry = self._execute(
             monkeypatch, timeout_ms=100, delay=0.4)
         assert tc_id == 'tc-1'
-        assert content == 'Tool execution timed out: slow_tool'
+        error = tool_result_error(content)
+        assert error.code == 'tool_execution_timeout'
+        assert error.message == 'Tool execution timed out: slow_tool'
+        assert error.retryable is False, 'undeclared recovery must not permit replay'
         assert is_search is False
         assert round_entry['status'] == 'error'
         assert round_entry['_declaredTimeoutMs'] == 100

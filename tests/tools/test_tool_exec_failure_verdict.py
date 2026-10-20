@@ -187,11 +187,15 @@ def test_timeout_lane_stamps_and_ships_error(rec, scripted_tools, monkeypatch):
         'the failure reason must reach the card verbatim; got %r'
         % (ev.get('toolContent'),))
 
-    # The model receives the failure string (never a fabricated success).
+    # The model receives classified failure and recovery instructions.
     tool_msgs = [m for m in messages if m.get('role') == 'tool']
     slow_msg = [m for m in tool_msgs if m.get('tool_call_id') == 'tc-slow']
-    assert slow_msg and slow_msg[0]['content'].startswith(
-        'Tool execution timed out:'), slow_msg
+    assert slow_msg
+    from lib.tools.result_envelope import tool_result_error
+    error = tool_result_error(slow_msg[0]['content'])
+    assert error.code == 'tool_execution_timeout'
+    assert error.message.startswith('Tool execution timed out:')
+    assert error.retryable is False, 'this fixture declares no replay policy'
 
     # The FAST sibling is untouched: settles done, and its wire frame stays
     # SILENT (no status key at all — the hot path carries zero verdict noise).

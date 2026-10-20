@@ -30,6 +30,18 @@ presentation. Current operation IDs identify occurrences; they are not yet provi
 cross-attempt replay receipts. This boundary adds no automatic retry or exactly-once promise. The tracked
 local file adapter below supplies outcome inspection. Every subsequent execution still uses ordinary approval.
 
+Problem: declared deadlines and pool collection timeouts replaced recovery evidence with unclassified prose.
+Decision: handler `TimeoutError`, declared deadlines and pool deadlines use the same effect-aware error
+projection. A captured host-classified failure retains its code and recovery instructions, including file
+inspection references. Otherwise, `tool_execution_timeout` permits retry only when the current authoritative
+read-only/idempotent contract agrees with any captured effect policy. An uncertain non-repeatable occurrence
+keeps `tool_effect_unknown` and its operation ID. When synthesizing timeout feedback, missing or contradictory
+declarations never grant replay; application JSON cannot supply host failure authority. Timeout settlement
+neither retries the operation nor claims that its worker stopped, and does not change effect state or resource
+ownership.
+Alternatives rejected: discarding a known failure loses actionable recovery; treating all timeouts as transient
+can duplicate effects; classifying exception text grants authority to untrusted payloads.
+
 Cost measurement (64 synthetic occurrences per disposable store, 60 warm): intent commit p95 was 1.87 ms on
 SQLite and 2.58 ms on native TofuDB; the marker was 109 JSON bytes and the complete carried event 533 bytes
 (median). These are local fixture measurements, not a throughput claim. One event is added per non-read-only

@@ -2993,12 +2993,14 @@ def execute_tool_pipeline(
                 for fut, (fut_tc_id, fut_fn_name, _generation) in _futures.items():
                     if fut_tc_id not in tool_results:
                         fut.cancel()
-                        tool_results[fut_tc_id] = (f'Tool execution timed out: {fut_fn_name}', False)
+                        from lib.tasks_pkg.executor._effects import tool_timeout_result
+                        pending_row = _parallel_by_id[fut_tc_id][5]
+                        tool_results[fut_tc_id] = (
+                            tool_timeout_result(task, fut_fn_name, pending_row), False)
                         tool_verdicts[fut_tc_id] = 'error'
                         # 'error', not 'aborted': the user did not stop this
-                        # tool — the pool ceiling did. The content sentinel
-                        # carries the 'timed out' wording onto the rendered
-                        # row's reason span.
+                        # tool — the pool ceiling did. Effect evidence remains
+                        # independent: an entered worker may still be running.
         finally:
             # Stop the heartbeat ticker first so it can't emit after the round
             # settles (it checks round status, but stop the loop deterministically).
