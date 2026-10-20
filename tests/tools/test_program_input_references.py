@@ -42,7 +42,10 @@ def test_directory_reference_reuses_original_capture_without_argument_roundtrip(
     value, stats = run('const x=tools.inputs().inputs[0]; return tools.result({ref:x.ref}).reduce((a,b)=>a+b,0);')
     assert value == 10 and stats['input_queries'] == stats['result_reads'] == 1
     assert stats['tool_calls'] == 0 and not effects
-    assert 'input_' not in json.dumps(task) and 'PRIVATE_ARGUMENT' not in json.dumps(task)
+    # Runtime state includes synchronization primitives. Inspect for leaked
+    # reference/argument text without pretending this is a persistence payload.
+    retained_state = repr(task)
+    assert 'input_' not in retained_state and 'PRIVATE_ARGUMENT' not in retained_state
 
 
 @pytest.mark.parametrize('same_result', [False, True])
