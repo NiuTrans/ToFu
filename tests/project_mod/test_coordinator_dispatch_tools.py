@@ -19,7 +19,7 @@ def runtime(context, monkeypatch):
     c = context
     from lib.conversations import project_coordination, project_messages, repository as conversations
     from lib.project_dispatch import repository, service
-    import lib.storage
+    from lib.storage import service as storage_service
     monkeypatch.setattr(project_coordination, 'ProjectCoordinationRepository', lambda owner: c.binding)
     monkeypatch.setattr(repository, 'ProjectDispatchRepository', lambda owner, path: c.repository(owner, path))
     monkeypatch.setattr(conversations, 'ConversationRepository', lambda: c.conversations)
@@ -35,7 +35,10 @@ def runtime(context, monkeypatch):
             c.conversations.rows[payload['conv_id']] = {
                 'user_id': 7, 'title': payload['title'], 'settings': deepcopy(payload['settings'])}
             state.created.append(deepcopy(payload))
-    monkeypatch.setattr(lib.storage, 'get_storage_client', lambda **kw: Storage())
+    # Keep the public factory stable: consumers imported during this fixture
+    # must follow the restored runtime after teardown, not retain a fake factory.
+    monkeypatch.setattr(storage_service, '_runtime', SimpleNamespace(
+        client=lambda **kwargs: Storage()))
 
     class Commands:
         def create_turn(self, conv, owner, request, **kwargs):
@@ -66,6 +69,17 @@ def create_worker(r):
     result = r.call('create_conversation', title='Independent worker', idempotency_key='work-one')
     assert result['created_only'] and result['execution_started'] is False
     return result['conversation_id']
+
+
+def test_late_storage_consumer_follows_runtime_restoration(runtime, monkeypatch):
+    """A consumer imported during this fixture must not retain its fake client."""
+    from lib.storage import get_storage_client
+    from lib.storage import service as storage_service
+
+    restored_client = object()
+    monkeypatch.setattr(storage_service, '_runtime', SimpleNamespace(
+        client=lambda **kwargs: restored_client))
+    assert get_storage_client() is restored_client
 
 
 @pytest.mark.parametrize('files', [False, True])
