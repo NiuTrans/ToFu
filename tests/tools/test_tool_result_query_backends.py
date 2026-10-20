@@ -214,8 +214,14 @@ def test_private_key_operations_and_invalid_manifest_are_denied(repo, storage):
 
 
 def test_search_graph_larger_than_scan_budget_reaches_each_child(repo):
-    children = [{'name': 'large', 'callId': str(i), 'artifactRef': put(repo, 'x' * (1024 * 1024) + f' needle-{i}')} for i in range(18)]
-    root = manifest(repo, children=children)
+    # Real expiry maintenance continues between pages. Keep this positive
+    # traversal fixture live beyond the test timeout, including debug engines;
+    # signed-cursor expiry is exercised separately with explicit timestamps.
+    lifetime_ms = 600_000
+    children = [{'name': 'large', 'callId': str(i), 'artifactRef': put(
+        repo, 'x' * (1024 * 1024) + f' needle-{i}', ttl=lifetime_ms)}
+        for i in range(18)]
+    root = manifest(repo, children=children, ttl=lifetime_ms)
     cursor, seen, found = 0, set(), []
     for _ in range(100):
         page = repo.search(user_id=1, artifact_ref=root, query='needle-', cursor=cursor, limit=20, now_ms=repo.query_test_now_ms + 1)
