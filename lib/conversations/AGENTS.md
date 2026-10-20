@@ -27,6 +27,10 @@ in `lib/integration_control.py`. Read
 
 ## Coordination message owners
 
+`compaction_policy.py` reads owned coordinator/source protections for the default
+ConversationStore's manual admission and commit recheck. The reusable engine
+uses that store port; policy and verification live in `docs/CONTEXT_COMPACTION.md`.
+
 `project_coordination.py` owns explicit coordinator metadata binding and the
 ordinary root role guidance; it starts no execution.
 `project_messages.py` owns passive same-project originals and consideration

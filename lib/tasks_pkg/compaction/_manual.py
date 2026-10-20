@@ -616,7 +616,7 @@ def compact_conversation_now(
     raw_messages, updated_at, _load_rev = loaded
 
     rejection = manual_compaction_rejection(
-        conv_id, user_id=user_id, messages=raw_messages)
+        conv_id, store=store, user_id=user_id, messages=raw_messages)
     if rejection:
         return {'ok': False, 'error': rejection}
     turn_native = bool(raw_messages) and all(

@@ -63,6 +63,10 @@ class _FakeStore:
                 'human' if message.get('role') == 'user' else 'assistant')
         return (list(self.messages), self.updated_at, self.rev)
 
+    def manual_compaction_rejection(self, conv_id, *, user_id, messages=()):
+        """This store contains ordinary, never-coordinated conversations."""
+        return None
+
     def archive_transcript(
             self, conv_id, messages, *, user_id, summary='', trigger='force',
             task_id='', round_num=0, model='', tokens_before=0,
@@ -128,9 +132,6 @@ def _install(monkeypatch, store, summary='COMPRESSED SUMMARY'):
     import lib.tasks_pkg.compaction._manual as man
     monkeypatch.setattr(man, 'get_conversation_store', lambda: store)
 
-    # This planner fake represents an ordinary, never-coordinated conversation.
-    # Real owned admission/storage coverage lives in test_coordinator_context_lifecycle.
-    monkeypatch.setattr(man, 'manual_compaction_rejection', lambda *a, **kw: None)
     # _archive_transcript imported into _manual — redirect it at the store so
     # we don't touch the DB, but STILL exercise _manual's own ordering.
     def _fake_archive(conv_id, messages, summary='', *, user_id,
@@ -982,3 +983,100 @@ def test_new_coordinator_protection_at_commit_retains_source_and_settles_archive
     assert result['receipt']['status'] == 'aborted'
     assert result['receipt']['outcomeReason'] == result['error']
     assert store.saved is None and store.messages == original
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('rejection', [None, 'host_policy_refused', 'not_found'])
+def test_manual_admission_uses_selected_store_and_owned_snapshot(monkeypatch, rejection):
+    from copy import deepcopy
+    from lib import storage
+    from lib.agent_core import store as store_access
+    from lib.tasks_pkg.compaction._archive import _archive_transcript
+
+    store = _FakeStore(_long_conv())
+    man = _install(monkeypatch, store)
+    monkeypatch.setattr(man, '_archive_transcript', _archive_transcript)
+    monkeypatch.setattr(store_access, 'get_conversation_store', lambda: store)
+    original = deepcopy(store.messages)
+    admissions = []
+    resolutions = []
+
+    def resolve():
+        resolutions.append(store)
+        assert len(resolutions) == 1, 'One manual operation captures its store once'
+        return store
+
+    def admit(conv_id, *, user_id, messages=()):
+        admissions.append((conv_id, user_id, deepcopy(messages)))
+        return rejection
+
+    monkeypatch.setattr(man, 'get_conversation_store', resolve)
+    monkeypatch.setattr(store, 'manual_compaction_rejection', admit)
+    monkeypatch.setattr(storage, 'get_storage_client',
+                        lambda **kw: pytest.fail('Embedded store reached application storage'))
+    if rejection:
+        monkeypatch.setattr(man, '_generate_query_aware_summary',
+                            lambda *a, **kw: pytest.fail('Rejected admission purchased summary'))
+    result = man.compact_conversation_now('embedded', user_id=7, config={})
+
+    assert admissions == [('embedded', 7, original)]
+    if rejection:
+        assert result == {'ok': False, 'error': rejection}
+        assert store.archives == [] and store.saved is None
+        assert store.messages == original
+    else:
+        assert result['ok'] is True
+        assert store.saved is not None and store.notified
+        assert store.archives == [('manual', original)]
+        assert store.archive_receipts[result['archiveId']]['status'] == 'completed'
+
+
+@pytest.mark.unit
+def test_missing_manual_admission_port_does_not_fall_back_to_application_storage(monkeypatch):
+    from lib import storage
+
+    store = _FakeStore(_long_conv())
+    man = _install(monkeypatch, store)
+    monkeypatch.delattr(_FakeStore, 'manual_compaction_rejection')
+    monkeypatch.setattr(storage, 'get_storage_client',
+                        lambda **kw: pytest.fail('Missing port reached application storage'))
+    result = man.compact_conversation_now('embedded', user_id=7, config={})
+
+    assert result == {'ok': False, 'error': 'turn_protocol_unsupported'}
+    assert store.archives == [] and store.saved is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('decision', [False, 0, '', [], {}])
+def test_malformed_manual_admission_decision_never_authorizes_summary(monkeypatch, decision):
+    from lib import storage
+
+    store = _FakeStore(_long_conv())
+    man = _install(monkeypatch, store)
+    monkeypatch.setattr(store, 'manual_compaction_rejection', lambda *a, **kw: decision)
+    monkeypatch.setattr(storage, 'get_storage_client',
+                        lambda **kw: pytest.fail('Embedded store reached application storage'))
+    with pytest.raises(TypeError, match='manual_compaction_rejection'):
+        man.compact_conversation_now('embedded', user_id=7, config={})
+    assert store.archives == [] and store.saved is None
+
+
+@pytest.mark.unit
+def test_manual_admission_read_failure_propagates_without_summary_or_archive(monkeypatch):
+    from lib import storage
+    from lib.agent_core.storage_errors import StorageError
+
+    store = _FakeStore(_long_conv())
+    man = _install(monkeypatch, store)
+    failure = StorageError('database_timeout', 'Unknown admission state', retryable=True)
+
+    def unavailable(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(store, 'manual_compaction_rejection', unavailable)
+    monkeypatch.setattr(storage, 'get_storage_client',
+                        lambda **kw: pytest.fail('Embedded store reached application storage'))
+    with pytest.raises(StorageError) as raised:
+        man.compact_conversation_now('embedded', user_id=7, config={})
+    assert raised.value is failure
+    assert store.archives == [] and store.saved is None

@@ -11,8 +11,9 @@ import pytest
 
 from lib.tasks_pkg.compaction._context_lifecycle import (
     COORDINATOR_COMPACTION_UNSUPPORTED, PROJECT_COMPACTION_UNSUPPORTED,
-    ManualCompactionRefused, manual_compaction_rejection,
+    ManualCompactionRefused,
 )
+from lib.conversations.compaction_policy import manual_compaction_rejection
 
 pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api
@@ -82,7 +83,7 @@ def snapshot(r):
         'grant': r.repo.read(r.grant['id']), 'report': r.reports.read()})
 
 
-@pytest.mark.parametrize('semantic_authority', ['sqlite'], indirect=True)
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
 @pytest.mark.parametrize('entry', ['engine', 'adapter'])
 def test_rejection_keeps_canonical_source_attempt_report_grant_binding_and_budgets(coordinator, entry):
     r = coordinator
@@ -102,7 +103,7 @@ def test_rejection_keeps_canonical_source_attempt_report_grant_binding_and_budge
     assert before['report']['latest']['turnId'] == r.published['turnId']
 
 
-@pytest.mark.parametrize('semantic_authority', ['sqlite'], indirect=True)
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
 def test_unbound_moved_creation_identity_remains_protected(coordinator):
     r = coordinator
     from lib.conversations.settings_store import set_conversation_settings
@@ -110,28 +111,42 @@ def test_unbound_moved_creation_identity_remains_protected(coordinator):
     r.bindings.bind(r.project, '', expected_revision=current['revision'], command_id='clear')
     set_conversation_settings(r.conv, {'projectPath': '/another-project'}, user_id=r.owner, notify=False)
     before = snapshot(r)
-    assert manual_compaction_rejection(r.conv, user_id=r.owner) == COORDINATOR_COMPACTION_UNSUPPORTED
+    assert r.store.manual_compaction_rejection(r.conv, user_id=r.owner) == COORDINATOR_COMPACTION_UNSUPPORTED
     assert snapshot(r) == before
 
 
-@pytest.mark.parametrize('semantic_authority', ['sqlite'], indirect=True)
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
 def test_legacy_binding_and_former_project_identity_fail_closed(coordinator):
     r = coordinator
     from tests._seed import seed_conversation, seed_coordinator_binding
     seed_conversation('legacy-coordinator', user_id=r.owner, settings={'projectPath': '/legacy-project'})
     binding = seed_coordinator_binding('/legacy-project', 'legacy-coordinator', user_id=r.owner)
-    assert manual_compaction_rejection('legacy-coordinator', user_id=r.owner) == COORDINATOR_COMPACTION_UNSUPPORTED
+    assert r.store.manual_compaction_rejection('legacy-coordinator', user_id=r.owner) == COORDINATOR_COMPACTION_UNSUPPORTED
     r.bindings.bind('/legacy-project', '', expected_revision=binding['revision'], command_id='clear-legacy')
-    assert manual_compaction_rejection('legacy-coordinator', user_id=r.owner) == PROJECT_COMPACTION_UNSUPPORTED
+    assert r.store.manual_compaction_rejection('legacy-coordinator', user_id=r.owner) == PROJECT_COMPACTION_UNSUPPORTED
     # Bound-project workers also conservatively retain any canonical source refs.
-    assert manual_compaction_rejection('independent-worker', user_id=r.owner) == PROJECT_COMPACTION_UNSUPPORTED
+    assert r.store.manual_compaction_rejection('independent-worker', user_id=r.owner) == PROJECT_COMPACTION_UNSUPPORTED
 
 
-@pytest.mark.parametrize('semantic_authority', ['sqlite'], indirect=True)
-def test_foreign_owner_never_learns_or_modifies_coordinator_state(coordinator):
+@pytest.mark.parametrize(
+    ('semantic_authority', 'expected_error'),
+    [('sqlite', None), ('native', 'database_forbidden')],
+    indirect=['semantic_authority'],
+)
+def test_foreign_owner_never_learns_or_modifies_coordinator_state(
+        coordinator, expected_error):
+    from lib.agent_core.storage_errors import StorageError
+
     r = coordinator
     before = snapshot(r)
-    assert manual_compaction_rejection(r.conv, user_id=r.owner + 1) == 'not_found'
+    if expected_error:
+        # Native authenticates an owner before querying; SQL filters the row.
+        with pytest.raises(StorageError) as raised:
+            r.store.manual_compaction_rejection(r.conv, user_id=r.owner + 1)
+        assert raised.value.code == expected_error
+        assert raised.value.retryable is False
+    else:
+        assert r.store.manual_compaction_rejection(r.conv, user_id=r.owner + 1) == 'not_found'
     assert snapshot(r) == before
 
 
@@ -163,3 +178,37 @@ def test_binding_read_failure_is_not_compaction_permission():
     with pytest.raises(StorageError):
         manual_compaction_rejection('legacy', user_id=7, conversations=conversations,
                                     bindings=SimpleNamespace(read=broken))
+
+
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+def test_adapter_rechecks_new_project_binding_on_its_selected_authority(
+        semantic_authority, monkeypatch):
+    from lib import storage
+    from lib.conversations.project_coordination import ProjectCoordinationRepository
+    from lib.tasks_pkg import persistence_store
+    from tests._seed import seed_conversation
+
+    factory, owner, _ = semantic_authority
+    monkeypatch.setattr(storage, 'get_storage_client', factory)
+    seed_conversation('ordinary', user_id=owner,
+                      settings={'projectPath': '/newly-coordinated'},
+                      messages=[{'role': 'user', 'content': 'Keep original request'},
+                                {'role': 'assistant', 'content': 'Original evidence'}])
+    monkeypatch.setattr(persistence_store, '_storage_client', factory)
+    # The adapter supplied a client: repository reads must not resolve another.
+    monkeypatch.setattr(storage, 'get_storage_client',
+                        lambda **kw: pytest.fail('Admission escaped selected authority'))
+    store = persistence_store.DefaultConversationStore()
+    before = store.load_transcript('ordinary', user_id=owner)
+    messages, _, revision = before
+    assert store.manual_compaction_rejection(
+        'ordinary', user_id=owner, messages=messages) is None
+
+    bindings = ProjectCoordinationRepository(owner, client=factory)
+    bindings.create('/newly-coordinated', folder_id='test',
+                    expected_revision=0, command_id='bind-during-preparation')
+    with pytest.raises(ManualCompactionRefused, match=PROJECT_COMPACTION_UNSUPPORTED):
+        store.compact_turn_transcript(
+            'ordinary', messages, messages[-1:], revision,
+            command_id='prepared-before-binding', user_id=owner)
+    assert store.load_transcript('ordinary', user_id=owner) == before

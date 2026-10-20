@@ -44,7 +44,7 @@ They are NOT intended to be instantiated directly.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from lib.llm.stream_result import ProviderStreamResult
@@ -311,11 +311,26 @@ class ConversationStore(Protocol):
         """Return ``(derived_messages, updated_at_ms, revision)`` or ``None``."""
         ...
 
+    def manual_compaction_rejection(
+        self, conv_id: str, *, user_id: Any,
+        messages: Sequence[Mapping[str, Any]] = (),
+    ) -> str | None:
+        """Return an owned rejection reason, or None to allow preparation.
+
+        Read this store's authority; unknown reads propagate as errors. The
+        supplied messages are its loaded projection, not request metadata.
+        Missing support refuses manual compaction as turn_protocol_unsupported.
+        """
+        ...
+
     def compact_turn_transcript(
         self, conv_id: str, current_messages: list, compacted_messages: list,
         expected_revision: int, *, command_id: str, user_id: Any,
     ) -> int:
-        """Apply one atomic semantic compaction; return 1 or 0 on CAS loss."""
+        """Recheck admission, then compact atomically; return 1 or 0 on CAS loss.
+
+        Raise ManualCompactionRefused when policy changed during preparation.
+        """
         ...
 
     def archive_transcript(

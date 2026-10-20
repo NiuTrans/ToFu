@@ -5,6 +5,27 @@ Automatic compaction bounds the request view without rewriting durable Turns. Wo
 Manual compaction writes a persistent summary boundary through the conversation command service, guarded against intervening Turns. Both share summarization and token-budget primitives, never persistence semantics.
 
 
+### Manual admission ownership
+
+**Problem:** a host repository lookup inside the reusable compaction engine can
+check a different authority from the selected transcript store, breaking embedded
+hosts and applying another store's policy to a destructive operation.
+
+**Decision:** `ConversationStore.manual_compaction_rejection` reads owned policy.
+The manual engine passes its captured store, explicit owner and loaded projection
+before archive or model work. Only `None` admits preparation; a nonempty reason
+refuses it, missing support returns `turn_protocol_unsupported`, and malformed
+decisions or failed reads stop without rewriting history. The default adapter
+uses `lib/conversations/compaction_policy.py` with its own client and rechecks
+before `turn.compact`. A successful preflight never authorizes a later commit by
+itself. Alternative stores implement this port and their own commit-time policy.
+
+**Alternatives rejected:** importing application repositories into core,
+silently falling back to host storage when the port is absent, or granting from
+an earlier admission result. These break authority selection or lose intervening
+protection. Executable specifications are the manual engine, core boundary and
+coordinator lifecycle tests.
+
 ### Coordinator context lifecycle
 
 **Problem:** manual `turn.compact` deletes old canonical Turns and folds their
