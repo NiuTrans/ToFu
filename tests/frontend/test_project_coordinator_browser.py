@@ -201,11 +201,25 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     page.wait_for_function('(id) => window.activeConvId === id', arg=worker)
     page.locator('#presenceStrip').get_by_role('button', name='Return to Coordinator', exact=True).click()
     page.wait_for_function('(id) => window.activeConvId === id', arg=leader)
-    page.locator(f'.folder-tab[data-folder-id="{folder_ids[1]}"]').click()
+    # Browsing Beta must not rewrite the active Alpha conversation's ownership.
+    # A folder click must paint the entry inside its own handler: the list may
+    # not sit empty (or jump) until the project binding read lands.
+    unbound_row = page.evaluate('''(id) => {
+        document.querySelector(`.folder-tab[data-folder-id="${id}"]`).click();
+        const row = document.querySelector('#projectCoordinatorEntry .coordination-leader');
+        return row ? { busy: row.getAttribute('aria-busy'), coordinator: row.dataset.coordinatorId } : null;
+    }''', folder_ids[1])
+    assert unbound_row == {'busy': 'true', 'coordinator': ''}
     entry.get_by_role('button', name='Create project Coordinator', exact=True).wait_for(state='visible')
     # Browsing Beta must not rewrite the active Alpha conversation's ownership.
-    page.locator(f'.folder-tab[data-folder-id="{folder_ids[0]}"]').click()
+    bound_row = page.evaluate('''(id) => {
+        document.querySelector(`.folder-tab[data-folder-id="${id}"]`).click();
+        const row = document.querySelector('#projectCoordinatorEntry .coordination-leader');
+        return row ? { busy: row.getAttribute('aria-busy'), coordinator: row.dataset.coordinatorId } : null;
+    }''', folder_ids[0])
+    assert bound_row == {'busy': 'true', 'coordinator': leader}
     entry.locator('.coordination-leader').wait_for(state='visible')
+    page.wait_for_function('(leader) => document.querySelector("#projectCoordinatorEntry .coordination-leader")?.dataset.coordinatorId === leader', arg=leader)
     assert entry.locator('.coordination-leader').get_attribute('data-coordinator-id') == leader
     page.locator(f'.conv-item[data-conv-id="{ordinary}"] .conv-title').click(position={'x': 4, 'y': 4})
     page.wait_for_function('(id) => window.activeConvId === id', arg=ordinary)

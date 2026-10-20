@@ -267,6 +267,19 @@ An unbound card offers **Create project Coordinator** explicitly; it calls the
 create/bind facade only on click, disables duplicate clicks, shows errors
 for retry and requires a selected project folder. Opening an ordinary chat never
 promotes it. Historical same-project chats cannot be selected as Coordinator.
+
+Problem: a folder click cleared the sidebar container and painted the card only
+after the binding read resolved, so the conversation list jumped up and back
+down while the entry popped in late. Decision: every project/folder switch paints
+the card shell synchronously (`aria-busy`, localized loading line) before the
+read starts, and the surface retains the last resolved Coordinator per project so
+a return visit paints the real identity — and the list filters that conversation
+— on the first frame. A failed read converts the pre-painted shell into the
+error state instead of collapsing the container. A taller skeleton, a fixed
+spacer, or hiding the entry outside a bound Coordinator were rejected: the first
+two still shift the list, and the third removes the only route into an unbound
+project.
+
 The bound chat shows a compact work list, eight rows per visible page. The
 recorded dependency graph is collapsed and mounted only on disclosure, preserving
 space for conversation and composer. The user's fold state survives live

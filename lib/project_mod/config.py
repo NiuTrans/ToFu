@@ -812,7 +812,7 @@ def get_state():
         return s
 
 
-def get_state_for_conv(conv_id):
+def get_state_for_conv(conv_id, held_roots=()):
     """Return project state scoped to *conv_id*'s OWN root registry.
 
     ``get_state()`` builds ``extraRoots`` from the PROCESS-GLOBAL ``_roots``,
@@ -829,16 +829,45 @@ def get_state_for_conv(conv_id):
     path, or a conv the UI never wired a project to) it degrades to the global
     :func:`get_state` — byte-identical to today.
 
-    Non-root fields (modificationsCount, crossDC) mirror ``get_state()``.
+    ``held_roots`` is the caller's own durable root list for this conversation
+    (``projectPath`` first, then ``projectPaths``). The scoped registry is an
+    EPHEMERAL cache — it is cold until a turn registers roots — so a freshly
+    opened conversation falls back to the roots its caller already holds
+    instead of the process-global ``_state``. That keeps the fields the browser
+    reads (notably ``gitBranch``/``gitBranches``, which are probed from the
+    roots themselves) available before any turn has run. Without it a reloaded
+    conversation showed no branch at all.
+
+    Non-root fields (modificationsCount, crossDC, git branches) are still
+    measured here: file counts and scan state are cache-only and read as zero.
     """
     if not conv_id:
         return get_state()
+    held = []
+    for path in (held_roots or ()):
+        if not isinstance(path, str) or not path.strip():
+            continue
+        absolute = os.path.abspath(os.path.expanduser(path))
+        if absolute not in held:
+            held.append(absolute)
     with _lock:
         conv_map = _conv_roots.get(conv_id)
         if not conv_map:
-            # No scoped registry — fall through to the legacy global view.
-            return get_state()
-        primary = _conv_primary.get(conv_id)
+            if not held:
+                # No scoped registry and no held root — legacy global view.
+                return get_state()
+            s = dict(_state)
+            s['path'] = held[0]
+            # Same payload contract as get_state(): undo pre-images never ship.
+            s['modificationsCount'] = len(_state.get('modifications', []))
+            s.pop('modifications', None)
+            s['extraRoots'] = [
+                {'path': path, 'name': os.path.basename(path) or 'root',
+                 'fileCount': 0, 'scanning': False, 'readOnly': False}
+                for path in held[1:]
+            ]
+            return _attach_git_branches(s, held[0])
+        primary = _conv_primary.get(conv_id) or (held[0] if held else '')
         s = dict(_state)
         # The conv's own primary is authoritative for its bar — NOT the
         # global _state['path'] (which may be another conv's project).

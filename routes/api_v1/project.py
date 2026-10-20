@@ -252,10 +252,40 @@ def project_status():
     if conv_id:
         from lib.project_mod import get_state_for_conv
 
-        return api_ok(get_state_for_conv(conv_id))
+        return api_ok(get_state_for_conv(
+            conv_id, _conversation_saved_roots(conv_id, _request_user_id())))
     from lib.project_mod import get_state
 
     return api_ok(get_state())
+
+
+def _conversation_saved_roots(conv_id, user_id):
+    """The conversation's own durable workspace roots, primary first.
+
+    The per-conversation root registry in ``lib.project_mod.config`` is an
+    EPHEMERAL execution cache: it stays cold until a turn registers roots, so
+    a conversation reopened after a restart has no registry at all. Its saved
+    settings are then the only authority for which root the bar describes, and
+    every enrichment the bar renders (notably the git branch) is probed from
+    that root — never from the process-global registry, which may hold another
+    conversation's project.
+    """
+    from lib.conversations.repository import ConversationRepository
+
+    snapshot = ConversationRepository().get(
+        conv_id, user_id=user_id, include_messages=False)
+    settings = snapshot.metadata.get('settings') if snapshot else None
+    if not isinstance(settings, dict):
+        return ()
+    paths = settings.get('projectPaths')
+    ordered = [settings.get('projectPath')]
+    if isinstance(paths, list):
+        ordered.extend(paths)
+    roots = []
+    for path in ordered:
+        if isinstance(path, str) and path.strip() and path not in roots:
+            roots.append(path)
+    return tuple(roots)
 
 
 @api_v1_project_bp.route("/api/v1/project", methods=["DELETE"])

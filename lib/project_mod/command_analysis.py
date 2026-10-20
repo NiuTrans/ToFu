@@ -503,13 +503,31 @@ def _literal_sed_substitution(program):
     return len(parts) == 4 and re.fullmatch(r'[gpIMim0-9]*', parts[3]) is not None
 
 
-def literal_sed_effects(arguments):
-    """Return (inplace, input paths) only for complete bounded substitutions.
+def _literal_sed_read_program(program):
+    """Prove a `p`/`d`-only program prints or discards, never writes.
 
-    This is the shared evidence for filters, target discovery and FILE leases.
-    Options precede operands; -e/--expression may supply multiple individually
-    proven programs. Suffix backups, script files, unknown flags, escapes and
-    option permutation remain unresolved. Resolution still verifies each leaf.
+    Literal line numbers, ``$`` and ``/regex/`` addresses are data; the only
+    command is one ``p`` or ``d``. Compound programs, escapes and every other
+    command (including ``w``/``e``/``r``) stay unresolved, so this proof never
+    borrows write evidence for an unparsed script.
+    """
+    if not 1 <= len(program) <= 4096:
+        return False
+    if any(char in program for char in '\\;\r\n\0&'):
+        return False
+    address = r'(?:\d+|\$|/[^/]*/)'
+    return re.fullmatch(r'(?:' + address + r'(?:,' + address + r')?)?[pd]', program) is not None
+
+
+def literal_sed_effects(arguments):
+    """Return (inplace, input paths) only for proven bounded sed programs.
+
+    A program either substitutes under the maintained substitution grammar or
+    only prints/discards under the read grammar. This is the shared evidence
+    for filters, target discovery and FILE leases. Options precede operands;
+    -e/--expression may supply multiple individually proven programs. Suffix
+    backups, script files, unknown flags, escapes and option permutation remain
+    unresolved. Resolution still verifies each leaf.
     """
     programs, operands = [], []
     inplace, options = False, True
@@ -567,7 +585,8 @@ def literal_sed_effects(arguments):
         if not operands:
             return None
         programs.append(operands.pop(0))
-    if not all(_literal_sed_substitution(program) for program in programs):
+    if not all(_literal_sed_substitution(program) or _literal_sed_read_program(program)
+               for program in programs):
         return None
     if inplace and not operands:
         return None
@@ -727,6 +746,13 @@ def _lease_free_git_segment(command):
         return shlex.join([words[0], '--no-pager', '--no-optional-locks',
                            '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false',
                            '-c', 'format.pretty=medium', *directory_args, verb, *args])
+    if verb == 'grep':
+        # git grep has no pager/diff-helper hardening flags; its own grammar is
+        # the complete proof, including bundled short flags and attached values.
+        if _classify_git_grep(args) != 'readonly':
+            return None
+        return shlex.join([words[0], '--no-pager', '--no-optional-locks',
+                           *directory_args, verb, *args])
     flags = {
         'status': {'-s', '--short', '-b', '--branch', '-z', '--null', '--porcelain',
                    '--porcelain=1', '--porcelain=2', '--porcelain=v1', '--porcelain=v2',
@@ -758,6 +784,8 @@ def _lease_free_git_segment(command):
         'name-rev': {'--name-only', '--tags', '--all', '--no-undefined', '--always'},
         'blame': {'--no-textconv', '-n', '-s', '-p', '--porcelain', '--line-porcelain'},
         'shortlog': {'-n', '-s', '-e', '--numbered', '--summary', '--email', '--all'},
+        # git grep has no mutable output; its pager option is refused above.
+        'grep': _GIT_GREP_FLAGS,
     }
     diff_flags = {'--stat', '--numstat', '--shortstat', '--name-only', '--name-status',
                   '--check', '--raw', '--summary', '--patch', '-p', '--no-patch', '-s',
@@ -900,6 +928,16 @@ def harden_git_inspections(command):
     replacements = []
     for start, end in _split_pipeline_spans(command):
         hardened = _lease_free_git_segment(command[start:end].strip())
+        if hardened is None:
+            # A trailing ``2>/dev/null`` is not shell write syntax; harden the
+            # residual inspection and keep the original redirect bytes.
+            split = command_segment_discardable_redirect_split(
+                command[start:end].strip())
+            if split is not None:
+                core, suffix = split
+                core_hardened = _lease_free_git_segment(core)
+                hardened = (None if core_hardened is None
+                            else core_hardened + ' ' + suffix)
         if hardened is not None:
             replacements.append((start, end, hardened))
     for start, end, hardened in reversed(replacements):
@@ -2839,6 +2877,74 @@ def _classify_git_invocation(args, *, require_known_options=False):
     return native
 
 
+# Output flags are refused: ``-O``/``--open-files-in-pager`` spawn an arbitrary
+# configured pager, which can write. Everything else in this grammar only reads
+# the worktree, the index, or a literal pattern file.
+_GIT_GREP_FLAGS = frozenset({
+    '-n', '--line-number', '-i', '--ignore-case', '-I', '-w', '--word-regexp',
+    '-v', '--invert-match', '-c', '--count', '-l', '--files-with-matches',
+    '-L', '--files-without-match', '-o', '--only-matching', '-h', '--no-filename',
+    '-z', '--null', '-E', '--extended-regexp', '-G', '--basic-regexp',
+    '-F', '--fixed-strings', '-P', '--perl-regexp', '-p', '--show-function',
+    '--full-name', '--column', '--heading', '--break', '--no-color',
+    '--all-match', '--and', '--or', '--not', '--cached', '--untracked',
+    '--no-index', '--recurse-submodules', '--no-exclude-standard',
+    '--exclude-standard', '-a', '--text', '--no-textconv', '--no-ext-diff',
+})
+_GIT_GREP_VALUES = frozenset({
+    '-e', '--regexp', '-f', '--file', '-A', '--after-context',
+    '-B', '--before-context', '-C', '--context', '-m', '--max-count',
+    '--max-depth', '--threads',
+})
+# Short-flag letters Git itself accepts: booleans, and options whose value may
+# be attached (``-A3``, ``-ePATTERN``). ``O`` is deliberately absent.
+_GIT_GREP_SHORT_FLAGS = frozenset('niIwvclLohzEGFPrWa')
+_GIT_GREP_SHORT_VALUES = frozenset('efABCm')
+_GIT_GREP_REFUSED = ('-O', '--open-files-in-pager', '--ext-diff', '--textconv')
+
+
+def _classify_git_grep(rest):
+    """Prove a ``git grep`` argv cannot write or spawn an output program.
+
+    Pattern and path arguments are data. Unknown flags and short-flag bundles
+    stay unresolved so admission keeps the writer lease.
+    """
+    if any(token.startswith(_GIT_GREP_REFUSED) for token in rest):
+        return None
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        index += 1
+        if token == '--':
+            break
+        if token in _GIT_GREP_VALUES:
+            if index == len(rest):
+                return None
+            index += 1
+            continue
+        if token.split('=', 1)[0] in _GIT_GREP_VALUES and '=' in token:
+            continue
+        if token.startswith('--color=') or token.startswith('--threads='):
+            continue
+        if token in _GIT_GREP_FLAGS or not token.startswith('-'):
+            continue
+        if not token.startswith('--') and _git_grep_short_argv(token[1:]):
+            continue
+        return None
+    return 'readonly'
+
+
+def _git_grep_short_argv(letters):
+    """Prove a bundled short-flag group without expanding Git's own parsing."""
+    for position, letter in enumerate(letters):
+        if letter in _GIT_GREP_SHORT_FLAGS:
+            continue
+        if letter in _GIT_GREP_SHORT_VALUES:
+            return True  # Attached remainder (or the next token) is its value.
+        return False
+    return bool(letters)
+
+
 def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
     """Classify one ``git ...`` argv (words AFTER the ``git`` word).
 
@@ -2863,6 +2969,8 @@ def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
         return _classify_git_clean(rest)
     if sub == 'apply':
         return _classify_git_apply(rest, require_known_options=require_known_options)
+    if sub == 'grep':
+        return _classify_git_grep(rest)
     if sub == 'stash':
         if any(tok.startswith(('--output', '--ext-diff', '--textconv')) for tok in rest):
             return None

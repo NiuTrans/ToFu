@@ -120,7 +120,12 @@ it('fences a previous project response and refreshes the new scope once', async 
   const f = fixture(); let resolve!: (value: null) => void;
   vi.mocked(f.ports.board).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
   const flight = f.surface.refresh(); f.path('/other'); void f.surface.refresh();
-  expect(f.sidebar.childElementCount).toBe(0); resolve(null); await flight;
+  /* The stale identity is gone, but the row itself stays: only its identity
+   * is withdrawn until the new scope's binding read settles. */
+  expect(f.sidebar.childElementCount).toBe(1);
+  expect(f.sidebar.querySelector('[data-coordinator-id="leader"]')).toBeNull();
+  expect(f.sidebar.querySelector('.coordination-leader')?.getAttribute('aria-busy')).toBe('true');
+  resolve(null); await flight;
   await vi.waitFor(() => expect(f.ports.binding).toHaveBeenCalledTimes(2));
   expect(f.ports.binding).toHaveBeenLastCalledWith('/other'); f.surface.destroy();
 });
@@ -193,6 +198,74 @@ it('keeps folder navigation separate from the active conversation canvas', async
   expect(unusedCanvas.childElementCount).toBe(0);
   expect(f.canvas.querySelector('details')).not.toBeNull();
   other.destroy(); f.surface.destroy();
+});
+
+it('paints the coordinator row synchronously on a folder switch and reuses the cached binding', async () => {
+  const f = fixture(); await f.surface.refresh();
+  expect(f.sidebar.querySelector('[data-coordinator-id="leader"]')).not.toBeNull();
+  /* A folder switch used to clear the container and wait for the binding
+   * read, so the row appeared late and pushed the list down. The shell must
+   * be in the DOM on the first frame of the new scope. */
+  f.path('/other');
+  const pending = f.surface.refresh();
+  const row = f.sidebar.querySelector<HTMLElement>('.coordination-leader')!;
+  expect(row).not.toBeNull();
+  expect(row.getAttribute('aria-busy')).toBe('true');
+  expect(row.dataset.coordinatorId).toBe('');
+  await pending;
+  expect(f.sidebar.querySelector('[data-coordinator-id]')).not.toBeNull();
+  expect(f.sidebar.querySelector('.coordination-leader')?.getAttribute('aria-busy')).toBeNull();
+  f.path('/project');
+  vi.mocked(f.ports.binding).mockImplementationOnce(() => new Promise(() => {}));
+  void f.surface.refresh();
+  /* Returning to a known project restores the identity before the read lands,
+   * so the conversation list filters the same chat on the first render. */
+  expect(f.sidebar.querySelector('[data-coordinator-id="leader"]')?.getAttribute('aria-busy')).toBe('true');
+  f.surface.destroy();
+});
+
+it('keeps the pre-painted row and reports the read failure instead of collapsing the sidebar', async () => {
+  const sidebar = document.createElement('div'), canvas = document.createElement('div');
+  let path = '/project';
+  const surface = createProjectCoordinationSurface({ sidebar, canvas, mode: 'sidebar',
+    scope: () => ({ path, currentConversationId: '', currentPath: () => path, currentConversation: () => '',
+      binding: vi.fn(async () => { throw new Error('offline'); }), board: vi.fn(async () => null),
+      bind: vi.fn(), navigate: vi.fn(), openEvidence: vi.fn() }),
+    sidebarPath: () => path, details: vi.fn(), create: vi.fn() });
+  await surface.refresh();
+  const row = sidebar.querySelector<HTMLElement>('.coordination-leader')!;
+  expect(row.getAttribute('aria-busy')).toBeNull();
+  expect(row.dataset.coordinatorId).toBe('');
+  expect(row.textContent).toContain('projectCoordination.error');
+  expect(sidebar.querySelector('.coordination-read-error')).not.toBeNull();
+  surface.destroy();
+});
+it('keeps the pre-painted row and reports the read failure instead of collapsing the sidebar', async () => {
+  const sidebar = document.createElement('div'), canvas = document.createElement('div');
+  let path = '/project';
+  const binding = vi.fn(async () => { throw new Error('offline'); }), changed = vi.fn();
+  let surface!: ReturnType<typeof createProjectCoordinationSurface>;
+  surface = createProjectCoordinationSurface({ sidebar, canvas, mode: 'sidebar',
+    scope: () => ({ path, currentConversationId: '', currentPath: () => path, currentConversation: () => '',
+      binding, board: vi.fn(async () => null),
+      bind: vi.fn(), navigate: vi.fn(), openEvidence: vi.fn() }),
+    sidebarPath: () => path, details: vi.fn(), create: vi.fn(),
+    /* Production wiring: re-rendering the conversation list refreshes this very
+     * surface through presenceRefresh. */
+    changed: () => { changed(); void surface.refresh(); } });
+  await surface.refresh();
+  const row = sidebar.querySelector<HTMLElement>('.coordination-leader')!;
+  expect(row.getAttribute('aria-busy')).toBeNull();
+  expect(row.dataset.coordinatorId).toBe('');
+  expect(row.textContent).toContain('projectCoordination.error');
+  expect(sidebar.querySelector('.coordination-read-error')).not.toBeNull();
+  await Promise.resolve();
+  /* Dropping the cached identity must re-render the conversation list, but the
+   * re-render may not queue another read: a persistent failure would then
+   * retry forever. */
+  expect(changed).toHaveBeenCalledTimes(1);
+  expect(binding).toHaveBeenCalledTimes(1);
+  surface.destroy();
 });
 
 it('creates only on explicit action, coalesces clicks, and exposes failure for retry', async () => {

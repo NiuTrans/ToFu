@@ -67,6 +67,25 @@ export function createProjectCoordinationSurface(ports: {
   let unsubscribe: (() => void) | undefined;
   let subscribedPath = '';
   const norm = (path: string) => path.replace(/[/\\]+$/, '');
+  /* Last resolved Coordinator per project. A folder switch can paint its row
+   * from this cache before the binding read lands, so the conversation list
+   * filters the same chat on the first frame and the row never pops in late. */
+  const coordinatorByPath = new Map<string, string>();
+  function paintSidebarPending(path: string) {
+    const row = document.createElement('section');
+    row.className = 'coordination-leader';
+    row.dataset.coordinatorId = coordinatorByPath.get(norm(path)) || '';
+    row.setAttribute('aria-busy', 'true');
+    const mark = document.createElement('span'); mark.className = 'coordination-leader-mark';
+    mark.setAttribute('aria-hidden', 'true'); mark.append(coordinationMark());
+    const body = document.createElement('span'); body.className = 'coordination-leader-body';
+    const label = document.createElement('span'); label.className = 'coordination-leader-label';
+    label.textContent = t('projectCoordination.coordinator'); body.append(label);
+    const meta = document.createElement('span'); meta.className = 'coordination-leader-meta';
+    meta.textContent = t('common.loading'); body.append(meta);
+    row.append(mark, body);
+    ports.sidebar.replaceChildren(row);
+  }
   function invalidate() { pending = true; void refresh(true); }
   async function refresh(force = false) {
     if (!alive) return;
@@ -83,7 +102,12 @@ export function createProjectCoordinationSurface(ports: {
       projectSignature = projectKey;
       signature = key; generation++;
       if (projectChanged) {
-        ports.sidebar.replaceChildren(); ports.canvas.replaceChildren(); expanded = true; rendered = '';
+        /* Paint the row shell synchronously on a folder switch. Clearing the
+         * container here left the sidebar empty until the binding read
+         * resolved, then the row pushed the conversation list down. */
+        if (ports.mode !== 'canvas' && scope && norm(ports.sidebarPath()) === norm(scope.path)) paintSidebarPending(scope.path);
+        else ports.sidebar.replaceChildren();
+        ports.canvas.replaceChildren(); expanded = true; rendered = '';
         delete graphState.selectedId; delete graphState.showHistory; delete graphState.zoom;
         lastReport = undefined; reportExpanded = false;
 
@@ -116,6 +140,18 @@ export function createProjectCoordinationSurface(ports: {
       ]);
       if (!valid()) return;
       if (bindingRead.status === 'rejected' && (ports.canvas.childElementCount || ports.mode === 'sidebar' && ports.sidebar.childElementCount)) {
+        const pendingRow = ports.mode === 'sidebar'
+          ? ports.sidebar.querySelector<HTMLElement>('.coordination-leader[aria-busy="true"]') : null;
+        if (pendingRow) {
+          pendingRow.removeAttribute('aria-busy');
+          pendingRow.dataset.coordinatorId = '';
+          const meta = pendingRow.querySelector('.coordination-leader-meta');
+          if (meta) meta.textContent = t('projectCoordination.error');
+          /* The cached identity no longer applies, so the list must stop hiding
+           * the conversation it claimed. The re-render's own refresh returns at
+           * the unchanged signature; it does not queue another read. */
+          ports.changed?.();
+        }
         const host = ports.mode === 'sidebar' ? ports.sidebar : ports.canvas;
         host.querySelector('.coordination-read-error')?.remove();
         const warning = document.createElement('div'); warning.className = 'coordination-read-error'; warning.setAttribute('role', 'status');
@@ -175,6 +211,8 @@ export function createProjectCoordinationSurface(ports: {
       ports.sidebar.replaceChildren(); ports.canvas.replaceChildren();
       if (ports.mode !== 'canvas' && norm(ports.sidebarPath()) === norm(scope.path)) {
         const available = binding?.availability === 'available';
+        if (available) coordinatorByPath.set(norm(scope.path), binding!.conversationId);
+        else coordinatorByPath.delete(norm(scope.path));
         const row = document.createElement('section'); row.className = 'coordination-leader';
         row.dataset.coordinatorId = available ? binding!.conversationId : '';
         if (available) {

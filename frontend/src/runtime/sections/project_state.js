@@ -123,7 +123,34 @@ const _conversationProjectController = createConversationProjectController({
   apply: data => { projectState = data; _updateProjectUI(); },
 });
 function _restoreConvProject(conv, eligible) {
-  return _conversationProjectController.restore(conv, eligible);
+  const restored = _conversationProjectController.restore(conv, eligible);
+  _enrichConvProjectContext(conv, eligible);
+  return restored;
+}
+
+/* Conversations restored from SAVED settings carry no server-measured context:
+ * the scoped root registry is an ephemeral cache that stays cold until a turn
+ * registers roots. Everything the turn rail shows beyond the saved paths —
+ * the checked-out git branch above all — is measured from the root itself, so
+ * read it once per restore. This is ENRICHMENT ONLY: the result never selects
+ * or appends a root (`applyProjectGitState` writes branch fields and nothing
+ * else), and a response that lands after the user switched away is dropped. */
+function _enrichConvProjectContext(conv, eligible) {
+  const id = conv && conv.id;
+  if (!id || (eligible && !eligible())) return;
+  const stillCurrent = () => activeConvId === id
+    && conversations.some(x => x && x.id === id)
+    && (!eligible || eligible());
+  Promise.resolve(Api.project.status(id))
+    .then((data) => {
+      if (!data || !stillCurrent()) return;
+      if (typeof runtimeScope.applyProjectGitState === 'function'
+          && (Object.prototype.hasOwnProperty.call(data, 'gitBranch')
+              || Object.prototype.hasOwnProperty.call(data, 'gitBranches'))) {
+        runtimeScope.applyProjectGitState(data);
+      }
+    })
+    .catch(() => { /* branch context is optional enrichment */ });
 }
 
 

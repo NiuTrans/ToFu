@@ -436,7 +436,10 @@ PROJECT_TOOL_EDIT_FILE = {
                         "properties": {
                             "path": {
                                 "type": "string", "minLength": 1,
-                                "description": "Project-relative or allowed absolute path."
+                                "description": (
+                                    "File for THIS edit; repeat it on every "
+                                    "edit (a batch may span files). Never "
+                                    "empty."),
                             },
                             "operation": {
                                 "type": "string",
