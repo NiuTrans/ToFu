@@ -12,7 +12,7 @@ import re
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
-CONTRACT = 'tofu.search-agent-diagnostic/v6'
+CONTRACT = 'tofu.search-agent-diagnostic/v7'
 ARMS = ('tofu', 'ddgs')
 DDGS_VERSION = '9.16.0'
 MAX_CALLS = 8

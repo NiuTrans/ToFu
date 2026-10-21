@@ -155,12 +155,15 @@ def operation(request):
                     getattr(rows, '_engine_breakdown', None) or {'returned': rows})
             return observation
         if request['operation'] == 'fetch':
+            from tofu_search.fetch.diagnostics import fetch_failure_observation
             diag = {}
             with bind_call_config(cfg):
                 body = fetch_page_content(request['url'], max_chars=PAGE_CHARS, timeout=10,
                                           diag=diag, query=request.get('query'))
             if not body:
-                return {'error': 'fetch_unavailable', 'worker_fetch_reason': diag.get('reason')}
+                failure = fetch_failure_observation(diag)
+                return {'error': 'fetch_unavailable', 'fetch_failure': failure,
+                        'worker_fetch_reason': failure.get('reason')}
             return {'url': request['url'], 'text': str(body)[:PAGE_CHARS],
                     'truncated': len(str(body)) > PAGE_CHARS or bool(diag.get('truncated'))}
         raise ValueError('Unsupported operation')

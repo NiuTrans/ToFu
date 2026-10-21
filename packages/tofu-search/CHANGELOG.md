@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.18
+
+- Share safe fetch-failure observations between MCP and native agent evaluation
+  adapters. Known causes and HTTP statuses reach the agent without exposing
+  exception details or headers; unknown causes remain generic. No retry,
+  request, source limit or failure-admission policy is changed.
+
 ## 0.12.17
 
 - Add optional query-focused reads to `fetch_page_content`, `fetch_url` and

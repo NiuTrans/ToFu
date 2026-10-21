@@ -33,6 +33,8 @@ verify `tests/test_query_fetch.py` and host `test_fetch_url_full_source.py`.
 Quality contracts and the offline measurement command live in
 `docs/relevance-quality.md`; regression fixtures do not prove live superiority.
 Free source admission and metasearch recovery are owned by `docs/free-search.md`.
+`fetch/diagnostics.py` owns safe failure facts for delivery adapters; raw fetch
+diagnostics and private details must not be forwarded directly to models.
 
 Run `uv run --package tofu-search pytest packages/tofu-search/tests`, then the
 root search bridge/runtime and monorepo contract tests for integration changes.

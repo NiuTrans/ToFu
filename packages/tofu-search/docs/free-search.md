@@ -254,6 +254,14 @@ headers out of the model-facing message. Unknown categories retain a generic
 failure; successful extraction or browser recovery returns the original text.
 Tool discovery states the optional browser/PDF requirements and access limits.
 
+`fetch/diagnostics.py` owns this safe projection for all delivery adapters.
+The native agent diagnostic also sends it in `fetch_failure`, instead of
+discarding the cause with worker timing metadata. Otherwise a model receives
+the same generic failure for an HTTP refusal and a transient timeout, which
+can waste its fixed call budget retrying an unchanged refused source. Known
+reason tokens determine any HTTP status; inconsistent raw fields and unknown
+causes cannot override that evidence. Internal details and headers stay out.
+
 Alternatives rejected: another network probe to explain a failed request,
 automatic retries based on a response header, raw provider-error forwarding,
 or an unconditional browser-success promise. The change adds no requests,
@@ -261,3 +269,7 @@ workers, cache entries or capabilities. The output remains text under the
 existing MCP schema. Real MCP calls in `tests/test_mcp_tool_calls.py` verify
 failure propagation, private-detail exclusion and successful recovery;
 `tests/test_mcp_server_smoke.py` checks both supported protocol surfaces.
+`tests/test_fetch_failure_observation.py` verifies the common public boundary;
+the host's native callback tests verify actual tool-result delivery and secret
+exclusion. No new network call, retry policy, dependency or resident state is
+introduced.
