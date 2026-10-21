@@ -6,7 +6,7 @@
 //  Cloudflare Workers, Vercel Edge, Deno, Bun.  No external deps.
 // ════════════════════════════════════════════════════════════════
 
-export const VERSION = '0.18.2';
+export const VERSION = '0.18.3';
 export * from './api-v4.generated.js';
 import { SDK_SSE_OVERFLOW_STATUS, SDK_SSE_OVERFLOW_CODE } from './api-v4.generated.js';
 import { SSELineFramer, SSELimitError } from './sse-framer.js';
