@@ -4,12 +4,14 @@ Canonical/decoded results remain exact. Unknown fields, all source references,
 coverage/scope, error boundaries, media descriptors and next-page cursors survive.
 The signed replay cursor stays in canonical evidence; clipped or unknown model
 views retain it inline. Page pagination is independent of model-view clipping.
+Read bodies may use the shared exact text framing when it reduces encoded size.
 """
 from __future__ import annotations
 from lib.tools.result_projection_json import (
     JSONNumber, dump_projection_json, load_projection_json,
 )
 from lib.tools.result_surfaces_generated import CONTRACT
+from lib.tools.result_projection_text import compact_text_field
 
 _NAMES = {'read_tool_artifact', 'search_tool_artifact'}
 _COVERAGES = {'complete', 'incomplete', 'unavailable'}
@@ -96,6 +98,29 @@ def _compact_page(name, value):
     return result
 
 
+def _smaller_text(candidate, original):
+    return candidate if len(candidate.encode('utf-8')) < len(original.encode('utf-8')) else original
+
+
+def _read_page_text(value, original=None):
+    if value.get('status') != 'ok':
+        return original if original is not None else dump_projection_json(value)
+    policy = CONTRACT['artifactProjectionReadText']
+    return compact_text_field(value, policy['bodyField'], original=original)
+
+
+def _render(name, value, *, batch=False):
+    original = dump_projection_json(value)
+    if name != 'read_tool_artifact':
+        return original
+    if not batch:
+        return _read_page_text(value, original)
+    lines = [dump_projection_json({key: item for key, item in value.items() if key != 'items'})]
+    for index, page in enumerate(value['items']):
+        lines.extend((f'\n## items[{index}]', _read_page_text(page)))
+    return _smaller_text('\n'.join(lines), original)
+
+
 def project_artifact_result(tool_name: str, text: str) -> str | None:
     """Recognize a native page/indexed batch; retain unsupported/error-only text."""
     if tool_name not in _NAMES or not isinstance(text, str):
@@ -103,7 +128,7 @@ def project_artifact_result(tool_name: str, text: str) -> str | None:
     try:
         value = load_projection_json(text)
         if _page(tool_name, value):
-            return dump_projection_json(_compact_page(tool_name, value))
+            return _render(tool_name, _compact_page(tool_name, value))
         if (not isinstance(value, dict) or value.get('status') not in {'ok', 'partial_failure'}
                 or 'contractVersion' in value or not isinstance(value.get('items'), list)):
             return None
@@ -115,6 +140,6 @@ def project_artifact_result(tool_name: str, text: str) -> str | None:
         # retained child, even when its parent and adjacent request share a ref.
         projected = {**value, 'items': [_compact_page(tool_name, page) if _page(tool_name, page) else page
                                       for page in pages]}
-        return dump_projection_json(projected)
+        return _render(tool_name, projected, batch=True)
     except (ValueError, TypeError, RecursionError, OverflowError):
         return None
