@@ -12,7 +12,7 @@ import re
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
-CONTRACT = 'tofu.search-agent-diagnostic/v4'
+CONTRACT = 'tofu.search-agent-diagnostic/v5'
 ARMS = ('tofu', 'ddgs')
 DDGS_VERSION = '9.16.0'
 MAX_CALLS = 8
@@ -143,8 +143,16 @@ def agent_config():
                                 'deadline': None}}
 
 
+def _citation_policy(task):
+    policy = task.get('citation_policy', 'reference_hosts')
+    if policy not in ('reference_hosts', 'observed_pages'):
+        raise ValueError('Unsupported citation policy; use reference_hosts or observed_pages')
+    return policy
+
+
 def task_prompt(task):
     # The user request is self-contained; no answers or reference URLs enter it.
+    _citation_policy(task)
     shape = {key: {'value': '', 'url': '', 'quote': ''} for key in task['facts']}
     return (task['question'] + '\nReturn the following exact keys and structure, filled '
             'only from fetched evidence. Copy quotes exactly, including any Markdown '
@@ -178,6 +186,7 @@ def retrieved_coverage(task, calls):
 
 def score(task, content, calls):
     """Fail closed on missing/ambiguous facts, invented quotes and unfetched URLs."""
+    citation_policy = _citation_policy(task)
     representation = 'json'
     raw = content.strip() if isinstance(content, str) else ''
     fence = re.fullmatch(r'```(?:json)?[ \t]*\n([\s\S]*)\n```', raw)
@@ -211,12 +220,18 @@ def score(task, content, calls):
         facts[key] = {
             'answer_matches': bool(valid and re.fullmatch(rule['answer'], normalized(row['value']), re.I)),
             'primary_host': host in task['hosts'],
+            'citation_host_allowed': bool(url) and (
+                citation_policy == 'observed_pages' or host in task['hosts']),
             'quote_length_valid': 8 <= len(quote) <= 350,
             'quote_observed': bool(quote and any(quote in page for page in pages.get(url, []))),
             'quote_reference_matches': bool(quote and all(
                 re.search(pattern, quote, re.I) for pattern in rule['quote']))}
-        facts[key]['passed'] = all(facts[key].values())
+        # Reference-host membership remains diagnostic. The explicit citation
+        # policy decides whether that membership is required for this cohort.
+        facts[key]['passed'] = all(value for name, value in facts[key].items()
+                                  if name != 'primary_host')
     return {'format_valid': shape and representation == 'json',
+            'citation_policy': citation_policy,
             'representation': representation if shape else 'invalid',
             'facts': facts, 'retrieval': retrieved_coverage(task, calls),
             'passed': shape and all(fact['passed'] for fact in facts.values())}
