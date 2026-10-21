@@ -82,11 +82,54 @@ def test_transient_header_timeout_recovers_once_on_the_same_route():
         assert calls == ['/page', '/page']
 
 
-def test_repeated_header_timeouts_have_one_recovery_not_a_retry_loop():
+def test_unaffordable_backoff_stops_after_two_header_timeouts():
     with origin(lambda h, n: time.sleep(0.2)) as (url, calls):
         with pytest.raises(requests.RequestException):
             fetch_http.do_request(url, 0.06, deadline_ts=time.time() + 1)
         assert calls == ['/page', '/page']
+
+
+def test_two_header_timeouts_can_use_the_remaining_total_retry(monkeypatch):
+    monkeypatch.setattr(urllib3.util.retry.Retry, 'get_backoff_time', lambda self: 0)
+
+    def respond(handler, count):
+        if count != 3:
+            time.sleep(0.3)
+            return
+        reply(handler)
+
+    with origin(respond) as (url, calls):
+        response, body = fetch_http.do_request(url, 0.08, deadline_ts=time.time() + 1)
+        assert response.status_code == 200 and body == b'content'
+        assert calls == ['/page'] * 3
+        # Recovery clones are call-owned: direct session users still have no
+        # read retries, even after the owned request used its full allowance.
+        with pytest.raises(requests.RequestException):
+            fetch_http._session.get(url, timeout=0.03)
+        assert calls == ['/page'] * 4
+
+
+def test_read_failures_cannot_exceed_the_existing_total_retry_count(monkeypatch):
+    monkeypatch.setattr(urllib3.util.retry.Retry, 'get_backoff_time', lambda self: 0)
+    with origin(lambda h, n: time.sleep(0.4)) as (url, calls):
+        with pytest.raises(requests.RequestException):
+            fetch_http.do_request(url, 0.1, deadline_ts=time.time() + 1)
+        assert calls == ['/page'] * 3
+
+
+def test_read_and_status_failures_share_the_same_total_retry_count(monkeypatch):
+    monkeypatch.setattr(urllib3.util.retry.Retry, 'get_backoff_time', lambda self: 0)
+
+    def respond(handler, count):
+        if count == 2:
+            reply(handler, 503)
+        else:
+            time.sleep(0.4)
+
+    with origin(respond) as (url, calls):
+        with pytest.raises(requests.RequestException):
+            fetch_http.do_request(url, 0.1, deadline_ts=time.time() + 1)
+        assert calls == ['/page'] * 3
 
 
 def test_deadline_stops_retry_even_when_phase_timeout_has_time_left():
