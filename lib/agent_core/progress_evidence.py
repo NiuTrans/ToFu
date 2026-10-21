@@ -70,7 +70,9 @@ def nonretryable_failure_signature(call: dict, result) -> str | None:
             payload = (result.to_dict() if isinstance(result, ToolResultEnvelopeV2)
                        else json.loads(result) if isinstance(result, str) else result)
         except (TypeError, ValueError):
-            return None
+            from lib.tools.result_projection_text import load_text_field
+            from lib.tools.result_surfaces_generated import CONTRACT
+            payload = load_text_field(result, CONTRACT['errorProjectionText']['bodyField'])
         items = payload.get('items') if isinstance(payload, dict) else None
         if (not isinstance(items, list) or not items or not isinstance(items[0], dict)
                 or set(items[0]) != {'failureCodes'}):

@@ -21,6 +21,17 @@ from tests.tasks_pkg.test_tool_outcome_finality import observations as observati
 pytestmark = pytest.mark.unit
 
 
+def projected_error(text):
+    from lib.tools.result_projection_text import load_text_field
+    from lib.tools.result_surfaces_generated import CONTRACT
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        value = load_text_field(text, CONTRACT['errorProjectionText']['bodyField'])
+        assert value is not None
+        return value
+
+
 def run_batch(outcomes, mode="v2", *, url_prefix="https://example.test",
               error_prefix="source", through_pipeline=False):
     executed = []
@@ -195,7 +206,7 @@ def test_changed_child_error_cause_starts_a_new_recovery_attempt(observations):
 ])
 def test_incomplete_failure_identity_cannot_claim_an_unchanged_batch(items, observations):
     _, call, text, _, executed = run_batch(["permanent", "permanent"])
-    result = json.loads(text)
+    result = projected_error(text)
     result["items"] = items
     assert tool_result_error(result).retryable is False
     assert nonretryable_failure_signature(call, result) is None
@@ -223,7 +234,7 @@ def test_root_breaker_stops_unchanged_batches_but_allows_correction(
             lambda *a, **kw: "")
     first = batch_result(["permanent", "permanent"])
     if aggregate_pressure:
-        assert json.loads(first[2])["truncated"] is True
+        assert projected_error(first[2])["truncated"] is True
         assert nonretryable_failure_signature(first[1], first[2])
     task = first[0]
     request = SimpleNamespace(
@@ -280,7 +291,7 @@ def test_delivery_budget_preserves_typed_failure_when_child_details_spill(observ
     delivery = split_tool_result_delivery(delivered)
     assert delivery.evidence["truncated"]
     assert tool_result_error(delivery.model_text).retryable is False
-    retained_items = json.loads(delivery.model_text).get("items", [])
+    retained_items = projected_error(delivery.model_text).get("items", [])
     if retained_items:
         assert nonretryable_failure_signature(call, delivery.model_text) == nonretryable_failure_signature(call, content)
     else:

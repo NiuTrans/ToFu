@@ -365,6 +365,37 @@ and existing compaction pairing/cancellation/model-replay suites.
 
 ### Round result evidence
 
+**Final delivery accounting.** Single-result and aggregate fitting render known
+host facts before measuring each candidate: canonical execution status, typed
+failure advice, existing producer recovery, program-input references and bounded
+retention notices. Generic and per-file previews use the same finalization port.
+The tool pipeline issues eligible program-input metadata before the first fit;
+reprojection preserves it inside the same budget. Each pipeline occurrence
+revalidates the advertised handle and withdraws inaccessible cached references.
+Plain diagnostics use the available final-view allowance without an intermediate
+fixed summary cap. Evidence byte counts follow the delivered artifact alias;
+canonical recovery references remain unchanged. Canonical retention occurs
+outside the fitting search, at most once per single-result projection, and
+does not become a model retry. Failed executions never acquire generic source
+recovery merely because their diagnostics overflow. Successful source reads
+keep their declared recovery policy.
+
+**Problem.** Adding verdicts or recovery metadata after measuring a preview can
+exceed the advertised limit; late unclassified failure stamping can also leave
+success-only retry advice in the model text. **Decision.** Measure the final
+semantic projection while retaining the original canonical capture, with pure
+candidate finalization and explicit persistence outcomes. **Alternatives
+rejected.** A fixed safety reserve wastes useful context and cannot bound
+variable recovery records. A second truncation pass risks losing original
+evidence and repeating storage writes. Irreducible required metadata remains
+subject to complete-prompt admission rather than being silently discarded.
+
+Verify `tests/tools/test_final_result_budget_facts.py` and
+`tests/tools/test_final_result_budget_backends.py`: exact token boundaries,
+failed file identities, original recovery/program references, persistence
+failure, real pipeline delivery and original-source readback after SQLite and
+TofuDB restart.
+
 **Problem.** A second reduction under aggregate pressure can erase a typed
 failure or its compact cause identifiers after single-result budgeting retained
 them. Generic overflow advice can also recommend repeating a completed operation,
@@ -377,8 +408,8 @@ producer recovery. It never synthesizes a source retry for a failed execution;
 unclassified host failures retain their error status without an invented code.
 Missing retained bytes call for inspecting the prior outcome; declared source
 recovery for successful observations keeps its existing narrowing rules.
-Only a strictly smaller final model projection is adopted, after program metadata
-and execution/retention fields are restored. Irreducible facts remain subject to
+Only a strictly smaller final model projection is adopted, with program metadata
+and execution/retention fields included during fitting. Irreducible facts remain subject to
 complete-prompt admission. Mandatory retention still refuses lossy replacement.
 
 **Alternatives rejected.** Raising the round limit hides the loss without
