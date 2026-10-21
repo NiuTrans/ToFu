@@ -55,9 +55,18 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
   let version = ''; let generation = 0; let disposed = false; let busy = false;
   let total: number | null = null; let activeId = ''; let activeRound: number | null = null;
   let page = 0; let entries: ConversationRoundEntry[] = [];
-  /* Only `readPage` advances this; `busy` is shared with `navigate`, and a
-   * queued page must never be drained by a jump that was never a read. */
-  let reading = false; let queued: number | null = null;
+  // Publication generation fences results; slot identity owns cleanup even
+  // when that generation changes. Refresh demand is coalesced for both reads
+  // and jumps, and only the operation holding the slot may drain it.
+  let slot: object | null = null; let queued: number | null = null;
+  function release(owned: object): void {
+    if (slot !== owned) return;
+    slot = null; busy = false;
+    if (disposed) return;
+    const next = queued; queued = null;
+    paint();
+    if (next !== null) void readPage(next);
+  }
   const ranks = new Map<string, number>();
   const current = (id: string, token: number): boolean => !disposed && id === conversationId && token === generation;
 
@@ -124,11 +133,10 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     /* One read in flight per view. A head advance arrives with every streamed
      * turn, so a newer request replaces any queued one instead of stacking
      * reads, and the page index survives the refresh. */
-    if (reading) { queued = wantedPage; return; }
-    // A jump owns the bar; the next head advance refreshes the directory.
-    if (busy) return;
+    if (busy) { queued = wantedPage; return; }
     const id = conversationId; const token = generation;
-    reading = true; busy = true; errorNote.textContent = ''; paint();
+    const owned = {}; slot = owned;
+    busy = true; errorNote.textContent = ''; paint();
     let refreshAnchor = false;
     try {
       const result = await readFenced(id, () =>
@@ -144,17 +152,14 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
       else if (activeId && activeRound !== null) ranks.set(activeId, activeRound);
     } catch { if (current(id, token)) errorNote.textContent = t('conversationBar.historyFailed'); }
     finally {
-      if (disposed) return;
-      const next = queued; queued = null;
-      reading = false; busy = false;
-      if (current(id, token)) paint();
-      if (next !== null) void readPage(next);
-      else if (current(id, token) && refreshAnchor && activeRound === null && activeId) void readPage(page, activeId);
+      if (current(id, token) && refreshAnchor && activeRound === null && activeId && queued === null) queued = page;
+      release(owned);
     }
   }
   async function navigate(round: number): Promise<void> {
     if (busy || total === null || !Number.isSafeInteger(round) || round < 1 || round > total) return;
     const id = conversationId; const token = generation;
+    const owned = {}; slot = owned;
     busy = true; errorNote.textContent = ''; paint();
     try {
       // Revalidate the rank under the current head even if its body was loaded.
@@ -167,7 +172,7 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
       total = result.totalRounds; activeId = entry.turnId; activeRound = round;
       ranks.set(activeId, round); disclosure.close(true); ports.scrollToTurn(activeId);
     } catch { if (current(id, token)) errorNote.textContent = t('conversationBar.historyFailed'); }
-    finally { if (current(id, token)) { busy = false; paint(); } }
+    finally { release(owned); }
   }
   const onPrevious = (): void => { if (activeRound !== null) void navigate(activeRound - 1); };
   const onNext = (): void => { if (activeRound !== null) void navigate(activeRound + 1); };

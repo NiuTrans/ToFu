@@ -274,3 +274,34 @@ test('directory responses and hydrate completions cannot publish after A-B-A or 
   assert.equal(host.querySelector('.turn-nav-readout').textContent, '11 / 11');
   assert.deepEqual(scrolls, []); exact.destroy(); dom.window.close();
 });
+
+for (const phase of ['read', 'hydrate']) for (const change of ['head', 'switch']) {
+  test(`exact jump releases busy and refreshes after ${change} during ${phase}`, async () => {
+    const { dom, host, nav } = setup(); nav.destroy();
+    let head = 1; let release; let block = false; const scrolls = []; const reads = [];
+    const pause = () => new Promise(resolve => { release = resolve; });
+    const result = (id, offset, limit) => ({ conversationId: id, totalRounds: head === 1 ? 4 : 5,
+      activeRound: head === 1 ? 4 : 5, entries: Array.from({length: Math.min(limit, 4 - offset)}, (_, i) => ({
+        turnId: `${id}-${offset + i + 1}`, actor: 'human', ordinal: offset + i, roundNumber: offset + i + 1 })) });
+    const exact = createTurnNavigation({ host, translate: key => key, scrollToTurn: id => scrolls.push(id),
+      directoryKey: () => String(head), directory: async (id, offset, limit) => {
+        reads.push({id, limit}); if (block && limit === 1 && phase === 'read') await pause();
+        return result(id, offset, limit);
+      }, hydrateRound: async () => { if (block && phase === 'hydrate') await pause(); } });
+    const state = { laneOrder: {main: ['a-4']}, turnsById: {'a-4': {actor: 'human', projection: {}}} };
+    const settle = () => new Promise(resolve => setImmediate(resolve));
+    exact.update('a', state); await settle();
+    block = true; host.querySelector('[data-direction=previous]').click(); await settle();
+    assert.equal(host.getAttribute('aria-busy'), 'true');
+    head++; exact.update(change === 'head' ? 'a' : 'b', state);
+    release(); await settle(); await settle();
+    assert.equal(host.getAttribute('aria-busy'), 'false');
+    assert.equal(host.querySelector('.turn-nav-readout').textContent, '5 / 5');
+    assert.equal(reads.at(-1).id, change === 'head' ? 'a' : 'b');
+    assert.equal(reads.at(-1).limit, 50);
+    assert.deepEqual(scrolls, []);
+    block = false; host.querySelector('[data-direction=previous]').click(); await settle();
+    assert.equal(scrolls.length, 1);
+    exact.destroy(); dom.window.close();
+  });
+}
