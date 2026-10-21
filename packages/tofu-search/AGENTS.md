@@ -36,6 +36,11 @@ visibility boundary; verify `tests/test_html_streaming.py` and its runtime fixtu
 owns bounded browser readiness/projection through the same extractor. Verify
 `test_html_rendering_admission.py`, `test_rendered_page_source.py`, then opt-in
 `TOFU_SEARCH_TEST_BROWSER=1 pytest .../test_rendered_dom_browser.py` with Playwright.
+`search/proxy_mode.py::fetch_attempt_plan` owns the HTTP/browser route identity;
+`fetch/browser_proxy.py` projects the selected anonymous route into a context.
+`fetch/document_response.py` scopes main-document status observations for reads.
+Verify `test_browser_proxy.py`, rendered-source tests, then the opt-in
+`test_browser_proxy_integration.py` with an owned loopback proxy.
 Quality contracts and the offline measurement command live in
 `docs/relevance-quality.md`; regression fixtures do not prove live superiority.
 Free source admission and metasearch recovery are owned by `docs/free-search.md`.

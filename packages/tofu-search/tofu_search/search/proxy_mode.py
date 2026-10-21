@@ -42,6 +42,7 @@ The ``proxies_kwarg`` values are passed straight to ``requests``:
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 
 from tofu_search.log import get_logger
 
@@ -158,6 +159,11 @@ class ProxyModeManager:
                     attempts.insert(0, attempts.pop(j))
                     break
         return attempts
+
+    def fetch_attempt_plan(self, url, config=None):
+        """One host identity/order shared by HTTP and anonymous browser reads."""
+        host_key = 'fetch:' + (urlsplit(url).hostname or '')[:60]
+        return host_key, self.attempt_plan(host_key, config)
 
     # ── learning ──────────────────────────────────────────────────
 

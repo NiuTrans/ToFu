@@ -23,6 +23,7 @@ from tofu_search.fetch._async_browser_runtime import (
     open_browser_context,
     run_browser_blocking,
 )
+from tofu_search.fetch.document_response import DocumentResponse
 from tofu_search.fetch.utils import HAS_PLAYWRIGHT
 from tofu_search.log import get_logger
 
@@ -330,7 +331,7 @@ class PlaywrightPool:
         if locale:
             ctx_kwargs['locale'] = locale
         if proxy:
-            ctx_kwargs['proxy'] = {'server': proxy}
+            ctx_kwargs['proxy'] = dict(proxy) if isinstance(proxy, dict) else {'server': proxy}
         context = await open_browser_context(browser, **ctx_kwargs)
         try:
             if cookies:
@@ -495,48 +496,49 @@ class PlaywrightPool:
             await _await_result(page.route('**/*.{png,jpg,jpeg,gif,svg,webp,ico,woff,woff2,ttf,otf,mp4,mp3,webm}',
                        lambda route: route.abort()))
 
-            t0 = time.monotonic()
-            await _await_result(page.goto(url, timeout=timeout * 1000, wait_until='domcontentloaded'))
+            with DocumentResponse(page) as document:
+                t0 = time.monotonic()
+                await _await_result(page.goto(url, timeout=timeout * 1000, wait_until='domcontentloaded'))
 
-            # ── Render wait for an AUTHENTICATED load ──
-            # "innerText > 200 chars" is NOT a usable readiness signal here: an
-            # SSO login wall is itself a full page (~1.9k chars), so the
-            # condition is satisfied INSTANTLY and we return the wall while the
-            # session redirect is still in flight — the whole point of replaying
-            # cookies is then lost. Readiness for an authenticated fetch means
-            # "we are no longer on an auth host AND the text has stopped
-            # growing", so wait for both.
-            _max_render_wait = min(timeout, 12)
-            _AUTH_HOST_HINT = ('/sson/login', '/login?', 'ssosv.', 'passport.',
-                               'account.', '/oauth', '/sso/')
+                # ── Render wait for an AUTHENTICATED load ──
+                # "innerText > 200 chars" is NOT a usable readiness signal here: an
+                # SSO login wall is itself a full page (~1.9k chars), so the
+                # condition is satisfied INSTANTLY and we return the wall while the
+                # session redirect is still in flight — the whole point of replaying
+                # cookies is then lost. Readiness for an authenticated fetch means
+                # "we are no longer on an auth host AND the text has stopped
+                # growing", so wait for both.
+                _max_render_wait = min(timeout, 12)
+                _AUTH_HOST_HINT = ('/sson/login', '/login?', 'ssosv.', 'passport.',
+                                   'account.', '/oauth', '/sso/')
 
-            def _on_auth_wall():
-                u = (page.url or '').lower()
-                return any(h in u for h in _AUTH_HOST_HINT)
+                def _on_auth_wall():
+                    u = (page.url or '').lower()
+                    return any(h in u for h in _AUTH_HOST_HINT)
 
-            # 1) If we landed on a login wall, the cookies may still be being
-            #    exchanged for a session — give the redirect a chance to leave.
-            if _on_auth_wall():
-                _wall_deadline = min(t0 + timeout, time.monotonic() + _max_render_wait)
-                while time.monotonic() < _wall_deadline and _on_auth_wall():
-                    await _await_result(page.wait_for_timeout(
-                        min(500, max(0, (_wall_deadline - time.monotonic()) * 1000))))
+                # 1) If we landed on a login wall, the cookies may still be being
+                #    exchanged for a session — give the redirect a chance to leave.
                 if _on_auth_wall():
-                    logger.info('[Pool:auth] still on an auth wall after %.1fs — '
-                                'stored session likely expired/insufficient: %s',
-                                time.monotonic() - t0, page.url[:100])
-                else:
-                    logger.debug('[Pool:auth] left the auth wall in %.1fs — now %s',
-                                 time.monotonic() - t0, page.url[:90])
+                    _wall_deadline = min(t0 + timeout, time.monotonic() + _max_render_wait)
+                    while time.monotonic() < _wall_deadline and _on_auth_wall():
+                        await _await_result(page.wait_for_timeout(
+                            min(500, max(0, (_wall_deadline - time.monotonic()) * 1000))))
+                    if _on_auth_wall():
+                        logger.info('[Pool:auth] still on an auth wall after %.1fs — '
+                                    'stored session likely expired/insufficient: %s',
+                                    time.monotonic() - t0, page.url[:100])
+                    else:
+                        logger.debug('[Pool:auth] left the auth wall in %.1fs — now %s',
+                                     time.monotonic() - t0, page.url[:90])
 
-            await wait_for_rendered_source(page, deadline=t0 + timeout)
-            elapsed = time.monotonic() - t0
+                await wait_for_rendered_source(page, deadline=t0 + timeout)
+                elapsed = time.monotonic() - t0
 
-            text = await extract_rendered_source(page, max_chars, url)
-            if text:
-                logger.info('[Pool:auth] Rendered source: %d chars in %.1fs — %s',
-                            len(text), elapsed, url[:80])
-            return text
+                text = await extract_rendered_source(page, max_chars, url, document=document)
+                if text:
+                    logger.info('[Pool:auth] Rendered source: %d chars in %.1fs — %s',
+                                len(text), elapsed, url[:80])
+                return text
 
         except Exception as e:
             logger.warning('[Pool:auth] error (%s) — %s: %s',
@@ -552,6 +554,7 @@ class PlaywrightPool:
     async def _do_fetch(self, browser, url, timeout, max_chars):
         """在专用线程内执行：打开页面 → 渲染 → 提取文本。"""
         # Import here to avoid circular imports — html_extract is a sibling module
+        from tofu_search.fetch.browser_proxy import anonymous_browser_proxy
         from tofu_search.fetch.rendered_source import (
             extract_rendered_source,
             wait_for_rendered_source,
@@ -559,7 +562,7 @@ class PlaywrightPool:
 
         context = None
         try:
-            context = await _await_result(self._new_context(browser))
+            context = await _await_result(self._new_context(browser, proxy=anonymous_browser_proxy(url)))
             page = await _await_result(context.new_page())
             # 屏蔽不必要的资源加载 (图片/字体/媒体) 加速渲染
             await _await_result(page.route('**/*.{png,jpg,jpeg,gif,svg,webp,ico,woff,woff2,ttf,otf,mp4,mp3,webm}',
@@ -567,17 +570,18 @@ class PlaywrightPool:
             await _await_result(page.route('**/analytics*', lambda route: route.abort()))
             await _await_result(page.route('**/tracking*', lambda route: route.abort()))
 
-            t0 = time.monotonic()
-            await _await_result(page.goto(url, timeout=timeout * 1000, wait_until='domcontentloaded'))
+            with DocumentResponse(page) as document:
+                t0 = time.monotonic()
+                await _await_result(page.goto(url, timeout=timeout * 1000, wait_until='domcontentloaded'))
 
-            await wait_for_rendered_source(page, deadline=t0 + timeout)
-            elapsed = time.monotonic() - t0
+                await wait_for_rendered_source(page, deadline=t0 + timeout)
+                elapsed = time.monotonic() - t0
 
-            text = await extract_rendered_source(page, max_chars, url)
-            if text:
-                logger.debug('[Pool] Rendered source: %d chars in %.1fs — %s',
-                             len(text), elapsed, url[:80])
-            return text
+                text = await extract_rendered_source(page, max_chars, url, document=document)
+                if text:
+                    logger.debug('[Pool] Rendered source: %d chars in %.1fs — %s',
+                                 len(text), elapsed, url[:80])
+                return text
 
         except Exception as e:
             # Self-recovering fallback: caller treats None as "Playwright failed"

@@ -118,8 +118,7 @@ def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
     # answered HTTP status never does. Without this, the whole fetch layer
     # silently went direct even when a proxy was configured — on a host
     # without direct egress every page fetch failed (2026-08-21 incident).
-    host_key = 'fetch:' + (urlparse(url).hostname or '')[:60]
-    plan = proxy_mode_manager.attempt_plan(host_key, cfg)
+    host_key, plan = proxy_mode_manager.fetch_attempt_plan(url, cfg)
 
     def _open(proxies_kwarg, extra_headers=None):
         kw = {'timeout': request_timeout(timeout), 'stream': True,

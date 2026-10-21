@@ -130,19 +130,26 @@ def _extract_snapshot(html, max_chars, url):
     return text
 
 
-async def extract_rendered_source(page, max_chars, url):
+async def extract_rendered_source(page, max_chars, url, *, document=None):
     """Extract the visible source snapshot without falling back to raw DOM text.
 
     Snapshot limits derive from the existing response budget. Partial snapshots
     retain a truncation marker; an unavailable projection is not evidence.
     Exceptions propagate to the pool's existing fallback/retirement boundary.
     """
+    if document is not None and not document.allows_source:
+        return None
+    generation = document.generation if document is not None else None
     snapshot = await page.evaluate(_RENDERED_HTML, {
         'maxSourceChars': max(1, int(get_config().fetch_max_bytes)),
     })
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get('html'), str):
         return None
     text = await run_browser_blocking(_extract_snapshot, snapshot['html'], max_chars, url)
+    if document is not None and (not document.allows_source or document.generation != generation):
+        # Navigation overlapped DOM projection/extraction. Do not return an
+        # older snapshot after another document request or response arrived.
+        return None
     if text and snapshot.get('truncated') and not text.endswith('\n[…truncated]'):
         text += '\n[…truncated]'
     return text or None

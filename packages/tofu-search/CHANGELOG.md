@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.21
+
+- Reuse the configured anonymous HTTP route for browser reads, including
+  request-local overrides, environment proxy bypass and learned working paths.
+  Support HTTP proxy credentials through browser authentication fields; keep
+  identity-bearing routes separate and add no browser retry or paid service.
+- Admit rendered source only after a successful main-document response.
+  Preserve recovery through later successful navigation and ignore subresource
+  failures. Discard snapshots that overlap another document response.
+
 ## 0.12.20
 
 - Share browser source extraction between anonymous and authenticated reads.

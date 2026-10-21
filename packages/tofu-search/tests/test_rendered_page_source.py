@@ -1,6 +1,7 @@
 """Browser recovery uses the common source extractor, never raw DOM text."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,12 @@ def page_harness(monkeypatch):
 
     class Page:
         url = 'https://example.test/archive/page'
+        main_frame = object()
+        response_status = 200
+        later_status = None
+        during_snapshot_status = None
+        during_snapshot_navigation = False
+        pending_with_late_response = False
         snapshot = HTML
         snapshot_error = False
         snapshot_truncated = False
@@ -36,20 +43,55 @@ def page_harness(monkeypatch):
         async def route(self, *_args):
             pass
 
+        def __init__(self):
+            self.listeners = {'request': [], 'response': []}
+
+        def on(self, event, callback):
+            self.listeners[event].append(callback)
+
+        def remove_listener(self, event, callback):
+            self.listeners[event].remove(callback)
+
+        def request(self, *, main=True, navigation=True):
+            request = SimpleNamespace(frame=self.main_frame if main else object(),
+                is_navigation_request=lambda: navigation)
+            for listener in self.listeners['request']:
+                listener(request)
+            return request
+
+        def respond(self, status, *, main=True, navigation=True):
+            request = self.request(main=main, navigation=navigation)
+            response = SimpleNamespace(status=status, frame=request.frame, request=request)
+            for listener in self.listeners['response']:
+                listener(response)
+            return response
+
         async def goto(self, *_args, **_kwargs):
-            pass
+            if self.response_status is not None:
+                self.initial_response = self.respond(self.response_status)
 
         async def wait_for_function(self, *_args, **_kwargs):
-            pass
+            if self.pending_with_late_response:
+                self.request()
+                for listener in self.listeners['response']:
+                    listener(self.initial_response)
 
         async def wait_for_timeout(self, *_args):
-            pass
+            if self.later_status is not None:
+                self.respond(self.later_status)
+                self.later_status = None
+            self.respond(503, main=False)
+            self.respond(404, navigation=False)
 
         def locator(self, *_args):
             return Locator()
 
         async def evaluate(self, expression, *_args):
             if 'outerHTML' in expression:
+                if self.during_snapshot_navigation:
+                    self.request()
+                if self.during_snapshot_status is not None:
+                    self.respond(self.during_snapshot_status)
                 if self.snapshot_error:
                     raise ValueError('Snapshot unavailable')
                 return {'html': self.snapshot, 'truncated': self.snapshot_truncated}
@@ -82,6 +124,7 @@ def page_harness(monkeypatch):
     monkeypatch.setattr(rendered_source, 'run_browser_blocking', blocking)
     yield pool, page
     assert contexts and all(c.closed for c in contexts)
+    assert not any(page.listeners.values())
 
 
 def fetch(harness, lane, max_chars=0):
@@ -126,6 +169,45 @@ def test_failed_rendered_snapshot_does_not_fall_back_to_script_or_hidden_text(pa
 def test_short_readable_rendered_source_is_retained(page_harness, lane):
     page_harness[1].snapshot = '<main><p>The archive opens at nine each morning.</p></main>'
     assert 'opens at nine' in fetch(page_harness, lane)
+
+
+@pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])
+@pytest.mark.parametrize('status', [None, 302, 401, 403, 404, 429, 503])
+def test_main_document_without_success_is_not_source_even_with_plausible_body(page_harness, lane, status):
+    page_harness[1].response_status = status
+    assert fetch(page_harness, lane) is None
+
+
+@pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])
+def test_successful_later_document_can_recover_during_existing_render_wait(page_harness, lane):
+    page_harness[1].response_status = 403
+    page_harness[1].later_status = 200
+    assert FACT in fetch(page_harness, lane)
+
+
+@pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])
+def test_later_error_document_does_not_inherit_initial_success(page_harness, lane):
+    page_harness[1].later_status = 503
+    assert fetch(page_harness, lane) is None
+
+
+@pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])
+@pytest.mark.parametrize('status', [200, 403])
+def test_navigation_during_snapshot_invalidates_source_receipt(page_harness, lane, status):
+    page_harness[1].during_snapshot_status = status
+    assert fetch(page_harness, lane) is None
+
+
+@pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])
+def test_new_document_request_invalidates_snapshot_before_any_response(page_harness, lane):
+    page_harness[1].during_snapshot_navigation = True
+    assert fetch(page_harness, lane) is None
+
+
+@pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])
+def test_old_response_cannot_authorize_a_new_pending_navigation(page_harness, lane):
+    page_harness[1].pending_with_late_response = True
+    assert fetch(page_harness, lane) is None
 
 
 @pytest.mark.parametrize('lane', ['anonymous', 'authenticated'])

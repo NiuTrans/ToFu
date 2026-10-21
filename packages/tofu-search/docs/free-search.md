@@ -183,6 +183,57 @@ status preservation/closure, expired redirects, truncated bodies and concurrent
 deadlines. Alternating live probes must retain every failure and phase timing;
 successful recovery on one route does not establish overall search superiority.
 
+## Anonymous browser route and response admission
+
+**Problem:** anonymous Playwright contexts ignored the configured search proxy,
+so HTTP could load a client-rendered shell through a working route while its
+browser recovery used a different route. The pool also extracted answered HTTP
+error pages. The upper fetch wrapper already rejects recognized short challenge
+text, including an observed Access Denied response; longer or unfamiliar error
+bodies cannot rely on that vocabulary guard alone.
+
+**Decision:** the common `ProxyModeManager.fetch_attempt_plan` owns the HTTP and
+browser host identity and ordering. `fetch/browser_proxy.py` uses that plan's
+first route, including its learned preference and request-bound config, for one
+anonymous browser context. Requests resolves environment proxy/scheme/NO_PROXY
+for the initial URL. Explicit and learned direct routes preserve their existing
+meaning. Redirects/subresources then share the context route: this is not a
+per-resource implementation of Requests environment matching. No route race,
+retry, browser process, persistent state or timeout is added. Authenticated
+fetch/search retain their source-specific proxy; PDF rendering remains separate.
+
+The [Playwright proxy API](https://playwright.dev/python/docs/network#http-proxy)
+requires HTTP(S) credentials in separate fields. URL userinfo is decoded there,
+never retained in the server address. Invalid/unsupported configurations fail
+before context creation with a credential-free error. Unauthenticated SOCKS5
+and SOCKS5h map to Chromium SOCKS5; authenticated SOCKS5 fails closed because
+[Chromium does not implement it](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md#SOCKSv5-proxy-scheme).
+
+`fetch/document_response.py` observes only navigation for the main frame during
+each read. A new request invalidates the previous receipt immediately, including
+when no response arrives; a late response for an older request cannot restore it.
+Source projection requires the current request's response to be successful and
+to remain the same generation through extraction. A later
+successful navigation within the original wait can recover an earlier error;
+iframe and resource errors do not change admission. Listener retirement precedes
+context closure on success, failure and cancellation. This does not replace
+challenge/login/readiness checks or prove semantic relevance.
+
+**Alternatives considered:** browser-global proxy options would mix concurrent
+callers and authenticated contexts. A new failover loop would duplicate HTTP
+route ownership and cost. Text-only error matching misses arbitrary HTTP error
+bodies; checking only the first response would reject legitimate later recovery
+and accept later failures. Additional waiting or retries would mask the existing
+deadline rather than fix route propagation or response admission.
+
+Verification: `test_browser_proxy.py`, `test_fetch_proxy.py`,
+`test_rendered_page_source.py`, and opt-in `test_browser_proxy_integration.py`.
+The real-browser fixture serves a reserved destination through an owned local
+proxy, with/without authentication, and checks error/recovery/subresource cases.
+Public availability remains separately measured: propagating a proxy did not
+recover the observed public biography page, which answered 403 or timed out.
+No general search-quality or site-access improvement is inferred from that run.
+
 ## SearXNG response and recovery contract
 
 Problem: accepting the first nonempty response let generic listings prevent

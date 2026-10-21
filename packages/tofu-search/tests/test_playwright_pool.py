@@ -248,11 +248,19 @@ def test_async_page_calls_overlap_and_retire_every_context(fake_playwright_modul
     class Locator:
         async def text_content(self, **kwargs): return 'readable page body '*20
     class Page:
+        main_frame = object()
+        def __init__(self): self.listeners = {'request': [], 'response': []}
+        def on(self, event, callback): self.listeners[event].append(callback)
+        def remove_listener(self, event, callback): self.listeners[event].remove(callback)
         async def route(self, *args): pass
         async def goto(self, url, **kwargs):
             if not url.endswith('/healthy'):
                 if len(contexts)==32: entered.set()
                 while not release.is_set(): await asyncio.sleep(.01)
+            request = types.SimpleNamespace(frame=self.main_frame, is_navigation_request=lambda: True)
+            for listener in self.listeners['request']: listener(request)
+            for listener in self.listeners['response']:
+                listener(types.SimpleNamespace(status=200, frame=self.main_frame, request=request))
         async def wait_for_function(self, *args, **kwargs): pass
         async def wait_for_timeout(self, *args): pass
         def locator(self, *args): return Locator()

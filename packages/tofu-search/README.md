@@ -285,6 +285,20 @@ cancels active calls, drains physical helpers, then closes the shared browser,
 driver and loop. Unused pools create no browser or owner thread. Browser launch
 failure remains an unavailable capability with its existing retry cooldown.
 
+Anonymous browser reads reuse the first route in the HTTP fetch plan, including
+its learned preference and the effective per-call search configuration.
+Environment proxy selection and `NO_PROXY` apply to the initial URL; all
+redirects and subresources then share that browser context's route. HTTP(S)
+proxy userinfo is passed through Playwright's authentication fields. This adds
+no browser retry. Authenticated fetch/search continue to use only their source's
+proxy, and self-contained PDF rendering does not consult the search proxy.
+
+Rendered source requires a successful main-document response. A later successful
+navigation during the existing wait may recover an initial error; subframe,
+image and fetch/XHR errors cannot reject an otherwise successful document.
+Navigation overlapping extraction invalidates that snapshot. The remaining
+text/challenge guards still apply; an HTTP 200 alone does not prove useful content.
+
 ## Host integration (provider seams)
 
 The standalone library never imports a host application. To unlock the two
