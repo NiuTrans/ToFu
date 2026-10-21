@@ -25,6 +25,8 @@ tool:
 
 from __future__ import annotations
 
+import re
+
 from mcp.server import MCPServer
 
 from tofu_search import __version__
@@ -53,6 +55,40 @@ _READ_ONLY_OPEN_WORLD = {
     'idempotentHint': True,
     'openWorldHint': True,
 }
+
+_FETCH_FAILURE_NOTES = {
+    'bad_scheme': 'Only HTTP(S) URLs can be read.',
+    'bad_url': 'The URL has no valid host.',
+    'ssrf_blocked': 'The URL was refused by the network-address policy.',
+    'skip_domain': 'This domain is excluded by the configured fetch policy.',
+    'binary_media': 'The URL points to binary media rather than readable text.',
+    'circuit_open': 'The source is temporarily paused after repeated failures.',
+    'guard_error': 'The URL could not be admitted by the fetch guard.',
+    'refused': 'The URL was refused before a request was made.',
+    'auth_replay_rejected': 'The available authenticated access did not return readable content.',
+    'timeout': 'The page request timed out.',
+    'connection_error': 'A connection to the source could not be established.',
+    'pdf_extraction_error': 'PDF text extraction was unavailable or failed.',
+    'bot_wall': 'The source returned an access challenge or sign-in page.',
+    'spa_shell': 'The page returned only an application shell.',
+    'empty_extract': 'No readable text could be extracted.',
+    'deadline': 'The fetch time budget was exhausted.',
+}
+
+
+def _fetch_failure_note(url: str, diagnostics: dict) -> str:
+    """Project stable fetch categories, never private exception/header details."""
+    cause = diagnostics.get('reason')
+    note = _FETCH_FAILURE_NOTES.get(cause) if isinstance(cause, str) else None
+    if isinstance(cause, str) and re.fullmatch(r'http_[1-5][0-9]{2}', cause):
+        note = f'The source returned HTTP {cause[5:]}.'
+    if note:
+        note = f'{note} (reason: {cause})'
+    else:
+        note = 'The fetch failed or the page had no extractable text.'
+    return (f'Could not read {url}. {note} This says nothing about whether the '
+            'information exists; try web_search, or another URL.')
+
 
 SERVER_INSTRUCTIONS = """\
 Web research tools: multi-engine search with page content already fetched,
@@ -195,12 +231,12 @@ def build_server() -> MCPServer:
             'Unresolved anchors and plain-text readers may return the whole '
             'page; omit the fragment to request the whole document.\n\n'
             'Use it when the user gives you a URL, or to read in depth a page '
-            '`web_search` surfaced. The fetcher transparently handles '
-            'JavaScript-rendered pages and bot-protected sites by falling back '
-            'to a real browser, so a page that looks empty to a naive fetcher '
-            'usually still comes back with content here.\n\n'
+            '`web_search` surfaced. Browser rendering is optional: it requires '
+            'an available browser integration or installed Playwright browser. '
+            'Access challenges may still prevent reading. PDF extraction also '
+            'requires its optional dependencies.\n\n'
             'Returns the extracted text, truncated at `max_chars`. Returns an '
-            'explicit failure note (not an exception) when the page cannot be '
+            'explicit failure note, including the cause when known, when the page cannot be '
             'read — treat that as "this page is unavailable", not as "this '
             'page is empty".'
         ),
@@ -211,11 +247,11 @@ def build_server() -> MCPServer:
         if reason:
             logger.info('[MCP] fetch_page %s (reason=%s)', url[:100], reason[:80])
         max_chars = max(1_000, min(int(max_chars), 500_000))
-        content = await run_blocking(fetch_page_content, url, max_chars=max_chars)
+        diagnostics = {}
+        content = await run_blocking(fetch_page_content, url, max_chars=max_chars,
+                                     diag=diagnostics)
         if not content:
-            return (f'Could not read {url} — the fetch failed or the page had no '
-                    'extractable text. This says nothing about whether the '
-                    'information exists; try web_search, or another URL.')
+            return _fetch_failure_note(url, diagnostics)
         return content
 
     @mcp.tool(name='search_vertical', description=_vertical_description(),
