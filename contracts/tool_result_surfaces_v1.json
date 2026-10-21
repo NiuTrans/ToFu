@@ -1,5 +1,10 @@
 {
   "contractVersion": "tofu.tool-result-surfaces/v1",
+  "batchFailureArguments": {
+    "execute_tools": "calls",
+    "read_tool_artifact": "reads",
+    "search_tool_artifact": "searches"
+  },
   "sources": {
     "modelText": [
       "toolContent",

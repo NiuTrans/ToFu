@@ -614,11 +614,26 @@ def nonretryable_tool_error_code(value: Any) -> str | None:
     return error.code if error is not None and not error.retryable else None
 
 
+def nonretryable_batch_error(errors) -> ToolResultEnvelopeV2 | None:
+    """Combine already-owned child failures; absent/success/retryable breaks proof."""
+    errors = tuple(errors)
+    if not errors or any(not isinstance(error, ToolResultErrorV2) or error.retryable
+                         for error in errors):
+        return None
+    failure = typed_tool_error(
+        'tool_batch_failed', retryable=False,
+        message='Every child in this batch failed and cannot be retried unchanged.',
+        next_action=(
+            'Inspect each child error and use corrected arguments or another authorized tool. '
+            'Do not replay the unchanged batch or uncertain effects; independent work may continue.'))
+    return replace(failure, items=({'failureCodes': [error.code for error in errors]},))
+
+
 __all__ = [
     "TOOL_RESULT_CONTRACT_VERSION", "TOOL_RESULT_EVIDENCE_CONTRACT_VERSION",
     "ToolResultDelivery", "ToolResultEnvelopeV2", "ToolResultErrorV2",
     "ToolResultRecoveryV2", "model_text_from_tool_result",
-    "nonretryable_tool_error_code", "sparse_result_items",
+    "nonretryable_tool_error_code", "nonretryable_batch_error", "sparse_result_items",
     "split_tool_result_delivery",
     "tool_error_next_action", "tool_result_error", "tool_result_observation", "typed_tool_error",
 ]

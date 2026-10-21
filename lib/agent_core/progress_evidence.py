@@ -78,8 +78,10 @@ def nonretryable_failure_signature(
     except ValueError:
         pass
     failure_codes = None
-    if code == 'tool_batch_failed' and function.get('name') == 'execute_tools':
-        if not isinstance(arguments, dict) or not isinstance(arguments.get('calls'), list):
+    from lib.tools.result_surfaces_generated import CONTRACT
+    batch_field = CONTRACT['batchFailureArguments'].get(function.get('name'))
+    if code == 'tool_batch_failed' and batch_field:
+        if not isinstance(arguments, dict) or not isinstance(arguments.get(batch_field), list):
             return None
         try:
             payload = (result.to_dict() if isinstance(result, ToolResultEnvelopeV2)
@@ -94,16 +96,17 @@ def nonretryable_failure_signature(
             return None
         failure_codes = items[0]['failureCodes']
         if (not isinstance(failure_codes, list) or not failure_codes
-                or len(failure_codes) != len(arguments['calls'])
+                or len(failure_codes) != len(arguments[batch_field])
                 or not all(isinstance(value, str) and value.strip() == value
                            and 0 < len(value) <= 96 for value in failure_codes)):
             return None
         # Only this declared receipt-correlation field is transport metadata.
         # Keep child order and every business argument, including call_id
         # inside arguments. Never mutate the provider's original call.
-        arguments = {**arguments, 'calls': [
-            {key: value for key, value in child.items() if key != 'call_id'}
-            if isinstance(child, dict) else child for child in arguments['calls']]}
+        if function.get('name') == 'execute_tools':
+            arguments = {**arguments, 'calls': [
+                {key: value for key, value in child.items() if key != 'call_id'}
+                if isinstance(child, dict) else child for child in arguments['calls']]}
     identity = [function.get('name'), arguments]
     if failure_codes is not None:
         identity.append(failure_codes)

@@ -1,4 +1,9 @@
-"""Canonical v2 contracts for bounded continuation of large tool results."""
+"""Native artifact query contracts and producer-owned typed failure projection.
+
+The handler retains native query JSON for canonical/program evidence. This
+adapter uses the common error envelope for model recovery, without interpreting
+application documents or changing the decoded result schema.
+"""
 
 from __future__ import annotations
 
@@ -198,8 +203,43 @@ def build_tool_result_artifact_tools() -> list[dict]:
             for contract in TOOL_RESULT_ARTIFACT_CONTRACTS]
 
 
+def _artifact_error(value):
+    from lib.tools.result_envelope import typed_tool_error
+    error = value.get('error')
+    if (value.get('status') != 'error' or not isinstance(error, dict)
+            or type(error.get('retryable')) is not bool
+            or not isinstance(error.get('code'), str) or not error['code'].strip()):
+        return None
+    return typed_tool_error(error['code'], retryable=error['retryable'],
+        message=error.get('message', ''),
+        next_action=error.get('nextAction') or error.get('next_action') or '').error
+
+
+def artifact_failure_envelope(tool_name: str, value: dict, source: str):
+    """Project only this producer's explicit single/all-terminal failure facts."""
+    from dataclasses import replace
+    from lib.tools.result_envelope import ToolResultEnvelopeV2, nonretryable_batch_error
+    error = _artifact_error(value)
+    if error is not None:
+        metadata = {key: item for key, item in value.items() if key not in {'status', 'error'}}
+        extra = {key: item for key, item in value['error'].items()
+                 if key not in {'code', 'retryable', 'nextAction', 'next_action', 'message'}}
+        if extra:
+            metadata['error'] = extra
+        return ToolResultEnvelopeV2(status='error', error=error,
+            summary=error.message or error.code,
+            items=(metadata,) if metadata else ()).with_visible_bytes()
+    if value.get('status') == 'partial_failure' and isinstance(value.get('items'), list):
+        failure = nonretryable_batch_error(_artifact_error(item) for item in value['items'])
+        if failure is not None:
+            from lib.tools.result_surfaces import project_model_source
+            return replace(failure, summary=project_model_source(tool_name, source)).with_visible_bytes()
+    return None
+
+
 __all__ = [
     "READ_TOOL_ARTIFACT", "SEARCH_TOOL_ARTIFACT",
     "TOOL_RESULT_ARTIFACT_CONTRACTS", "TOOL_RESULT_ARTIFACT_NAMES",
     "build_tool_result_artifact_tools",
+    "artifact_failure_envelope",
 ]

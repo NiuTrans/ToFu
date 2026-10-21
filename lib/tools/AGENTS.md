@@ -9,6 +9,9 @@ Read `docs/modules/tools_execution.md`.
 
 `result_projection_text.py` owns shared exact text framing for model views.
 Verify error reconstruction and artifact/gateway delivery with canonical retention.
+`nonretryable_batch_error` in result_envelope.py shares all-terminal classification;
+artifact query adapters preserve native canonical JSON behind typed model errors.
+Verify artifact failure policy/recovery, decoded results, and model budgets.
 
 ## Editing rules
 

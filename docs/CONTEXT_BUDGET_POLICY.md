@@ -439,3 +439,22 @@ Verify `tests/tools/test_aggregate_result_recovery.py`, the single-result typed
 error budgets, and `tests/tasks_pkg/test_gateway_failure_recovery.py`. The latter
 drives the real outer tool pipeline and shared root loop under aggregate pressure,
 including changed arguments, successful correction and unchanged-failure stopping.
+
+**Native artifact failure projection.** Problem: nested native query errors lost
+their explicit retry policy when the shared delivery path wrapped them as generic
+structured results. Decision: the artifact producer uses the existing typed error
+envelope for single failures and the shared all-nonretryable batch classifier,
+while the same canonical capture retains exact native query JSON and media for
+program decoding and storage. Mixed-success or retryable batches retain their
+per-item outcomes without claiming all-terminal failure. The delivery owner
+projects owned envelopes in both legacy and v2 wrapping modes; source documents
+that merely resemble envelopes remain ordinary data. Hiding internal transport
+fields is not source compaction. Native artifact budget fitting counts
+the final error projection, including cause identifiers. The declared batch
+argument fields in `tool_result_surfaces_v1.json` bind those causes to complete
+requests; changed causes or arguments rearm recovery. A whole-batch metadata
+refusal has no success-item list and remains a classified error during media
+projection. Alternatives rejected: interpreting arbitrary nested JSON as authority
+misclassifies successful documents; replacing decoded query JSON with a display
+wrapper breaks program callers. Verify artifact-failure-policy/recovery, decoded
+results, model budgets, and gateway failure recovery.
