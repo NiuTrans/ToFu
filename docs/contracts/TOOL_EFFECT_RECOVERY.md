@@ -75,16 +75,46 @@ captured effect-policy agreement; cancellation and uncertain writes keep precede
 TLS failures inside a connection error require repair. Cause inspection is bounded
 and cycle-safe; an uninspected graph cannot claim transient recovery. An explicitly
 typed read timeout remains a timeout when TLS merely needs more bytes.
-HTTP status, request configuration, local protocol and content-decoding errors retain
-their existing classification. Exception names, text and an arbitrary application
+Request configuration, local protocol and content-decoding errors retain
+their existing classification. HTTP response status recovery is defined below.
+Exception names, text and an arbitrary application
 wrapper around an HTTP error cannot grant retry. Alternatives rejected: treating all
 HTTP exceptions as transient conflates caller errors with interrupted requests;
 reusing provider-specific retry heuristics changes tool recovery authority. Verify
 `test_tool_http_exception_recovery.py`, real loopback disconnect/timeout recovery in
 `test_tool_http_recovery_integration.py`, and installed native parallel continuation.
-Local warm projection measurements (7 samples of 10,000 calls) were 41–42 → 48 μs
-for HTTP connection failures and 41–42 → 43–44 μs for HTTP timeouts. Existing built-in
-connection/runtime errors retained byte-identical output. This measures failure
+
+Problem: a typed HTTP 429/503 response from a repeatable tool previously directed
+runtime repair and discarded the server's wait hint. Decision: the same common
+projection accepts actual HTTPX `HTTPStatusError`/Requests `HTTPError` response
+objects. Status 429 maps to `tool_http_rate_limited`; 408, 500, 502, 503 and 504 map
+to `tool_http_unavailable`. These statuses permit recovery advice, not a guarantee
+of eventual success. `retryable` still requires current/captured effect-policy
+agreement. Unknown writes retain their operation and inspection evidence before
+status classification; cancellation cannot gain replay from an HTTP response.
+Other statuses, missing responses and application wrappers retain their existing
+classification. No response body is read or new envelope field introduced.
+
+`Retry-After` informs the existing bounded `nextAction`: unsigned decimal seconds
+(at most 20 digits) or an HTTP date become a wait instruction; dates are normalized
+to UTC, including the HTTP 50-year interpretation for obsolete two-digit years.
+Parsing accepts at most 64 header characters and never copies raw header text into
+instructions. Malformed, duplicate or oversized hints instead direct service
+readiness inspection. The formats follow [RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3)
+and the rate-limit meaning follows [RFC 6585 §4](https://www.rfc-editor.org/rfc/rfc6585.html#section-4).
+The projection schedules no sleep or retry; a subsequent invocation reenters the
+normal gateway and authorization checks. Independent authorized work can continue.
+Alternatives rejected: retrying every 4xx/5xx conflates caller and service faults;
+replaying from status alone can duplicate writes; a new HTTP retry loop would
+split cancellation, budget and settlement ownership. Verify
+`test_tool_http_status_recovery.py`, real loopback HTTP recovery, and installed
+native parallel recovery with a genuine failing HTTP read, preserved siblings and
+a subsequent provider round. These tests assert one failed request and one error
+settlement, without automatic replay inside error projection.
+Local paired warm measurements (7 samples of 2,000 calls per case) put status
+projection at 43 → 51 μs for a seconds hint and 44 → 63 μs for a date hint.
+Built-in connection/runtime and HTTP connection/timeout cases retained
+byte-identical output, with median changes under 1 μs. This measures pure failure
 projection only, not production throughput; no resident state or retry loop is added.
 
 Cost measurement (64 synthetic occurrences per disposable store, 60 warm): intent commit p95 was 1.87 ms on

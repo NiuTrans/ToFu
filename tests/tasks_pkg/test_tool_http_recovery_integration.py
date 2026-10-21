@@ -16,7 +16,7 @@ pytestmark = pytest.mark.api
 
 
 @pytest.mark.parametrize('client_kind', ['httpx', 'requests'])
-@pytest.mark.parametrize('failure_kind', ['disconnect', 'timeout'])
+@pytest.mark.parametrize('failure_kind', ['disconnect', 'timeout', '429', '503'])
 @pytest.mark.parametrize('mode', ['legacy', 'v2'])
 def test_real_http_failure_preserves_progress_and_allows_next_read(
         client_kind, failure_kind, mode, observations, record_property):
@@ -40,6 +40,11 @@ def test_real_http_failure_preserves_progress_and_allows_next_read(
                 try:
                     if failure_kind == 'timeout':
                         release.wait(5)
+                    elif failure_kind in {'429', '503'}:
+                        self.send_response(int(failure_kind))
+                        self.send_header('Retry-After', '0')
+                        self.send_header('Content-Length', '0')
+                        self.end_headers()
                     self.close_connection = True
                 finally:
                     failed_request_finished.set()
@@ -53,10 +58,10 @@ def test_real_http_failure_preserves_progress_and_allows_next_read(
     def handler(task, tc, name, call_id, arguments, number, row, *rest):
         try:
             response = client.get(url, timeout=.15 if failure_kind == 'timeout' else 2)
-        except (httpx.RequestError, requests.exceptions.RequestException) as failure:
+            response.raise_for_status()
+        except (httpx.HTTPError, requests.exceptions.RequestException) as failure:
             failures.append(type(failure).__module__ + '.' + type(failure).__name__)
             raise
-        response.raise_for_status()
         result = response.text
         _finalize_tool_round(task, number, row, [{'content': result}])
         return call_id, result, False
@@ -77,8 +82,14 @@ def test_real_http_failure_preserves_progress_and_allows_next_read(
         cleanup.callback(release.set)
         failed_row, failed_messages, failed_settled = dispatch(task)
         failure = tool_result_error(failed_messages[0]['content'])
-        expected = 'tool_execution_timeout' if failure_kind == 'timeout' else 'tool_connection_failed'
+        expected = {
+            'timeout': 'tool_execution_timeout', 'disconnect': 'tool_connection_failed',
+            '429': 'tool_http_rate_limited', '503': 'tool_http_unavailable',
+        }[failure_kind]
         assert failure.code == expected and failure.retryable
+        if failure_kind in {'429', '503'}:
+            assert 'Retry-After' in failure.next_action and '0 seconds' in failure.next_action
+            assert 'normal' in failure.next_action and 'authorization' in failure.next_action
         assert failed_settled[0].execution_status == 'error'
         assert received == ['/source'], 'failure projection repeated an HTTP request'
         release.set()
