@@ -52,6 +52,7 @@ export function normalizeTokenUsage(usage: unknown, cost?: unknown) {
     cacheReadTokens: count(c.cacheReadTokens) ?? read,
     cacheWriteTokens: count(c.cacheWriteTokens) ?? write,
     thinkingTokens: alias(u.reasoning_tokens, u.thinking_tokens,
-      record(u.completion_tokens_details).reasoning_tokens),
+      record(u.completion_tokens_details).reasoning_tokens,
+      record(u.output_tokens_details).reasoning_tokens),
   };
 }

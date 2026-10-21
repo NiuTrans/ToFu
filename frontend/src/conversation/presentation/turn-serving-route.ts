@@ -40,25 +40,84 @@ function dispatchFromUsage(value: unknown): UnknownRecord | undefined {
 }
 
 
+export type RecordedReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'off' | 'enabled';
+export interface ReasoningReceiptScope { attemptId?: string | null; taskId?: string; requireExplicit?: boolean; }
+const own = (value: UnknownRecord, key: string): unknown => Object.hasOwn(value, key) ? value[key] : undefined;
+const controlText = (value: unknown): string => typeof value === 'string' && value.length <= 64
+  ? value.trim().toLowerCase() : '';
+
+/** A finite native vocabulary, never an arbitrary provider diagnostic string. */
+export function normalizeRecordedReasoningEffort(value: unknown): RecordedReasoningEffort | null {
+  const receipt = record(value) ?? {};
+  const mode = controlText(own(receipt, 'actualMode'));
+  if (mode === 'off' || mode === 'enabled') return mode;
+  if (mode !== 'exact') return null;
+  const actual = controlText(own(receipt, 'actualValue'));
+  switch (actual) {
+    case 'minimal': case 'low': case 'medium': case 'high': case 'xhigh': case 'max': return actual;
+    default: return null;
+  }
+}
+
+/** Explicit foreign invocation identity cannot lend reasoning evidence. */
+export function reasoningReceiptMatchesScope(value: unknown, expected: ReasoningReceiptScope): boolean {
+  const receipt = record(value) ?? {};
+  const attemptId = text(own(receipt, 'attemptId')) || text(own(receipt, '_attemptId'));
+  const taskId = text(own(receipt, 'taskId')) || text(own(receipt, '_taskId'));
+  return !(attemptId && expected.attemptId && attemptId !== expected.attemptId)
+    && !(taskId && expected.taskId && taskId !== expected.taskId)
+    && (!expected.requireExplicit || Boolean(
+      (expected.attemptId && attemptId === expected.attemptId)
+      || (expected.taskId && taskId === expected.taskId)));
+}
+
+function roundNumber(value: unknown): number | null {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d{1,16}$/.test(value))) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+function staleReasoningReceipt(last: UnknownRecord, latest: UnknownRecord): boolean {
+  const before = roundNumber(own(last, 'round')), after = roundNumber(own(latest, 'round'));
+  if (before !== null && after !== null && after > before) return true;
+  if (before !== after) return false;
+  return ['tag', 'model'].some(key => {
+    const previous = text(own(last, key)), current = text(own(latest, key));
+    return Boolean(previous && current && previous !== current);
+  });
+}
+
+/** Canonical snapshot presence blocks older receipt fallback, including malformed snapshots. */
+export function turnReasoningResolution(value: unknown, expected: ReasoningReceiptScope = {}): UnknownRecord | undefined {
+  const turn = record(value) ?? {};
+  const latest = latestAgentApiRound(own(turn, 'apiRounds')) ?? {};
+  const hasLast = Object.hasOwn(turn, 'lastRoundUsage');
+  const last = record(own(turn, 'lastRoundUsage'));
+  const owner = hasLast ? last : latest;
+  const compatibleScope = { ...expected, requireExplicit: false };
+  if (!owner || !isAgentApiRound(owner) || !reasoningReceiptMatchesScope(owner, compatibleScope)
+      || (hasLast && staleReasoningReceipt(owner, latest))) return undefined;
+  const resolution = record(hasLast ? own(owner, 'reasoningResolution')
+    : own(record(own(owner, 'usage')) ?? {}, '_reasoning_resolution'));
+  if (!resolution || !reasoningReceiptMatchesScope(resolution, compatibleScope)) return undefined;
+  return !expected.requireExplicit || reasoningReceiptMatchesScope(owner, expected)
+    || reasoningReceiptMatchesScope(resolution, expected) ? resolution : undefined;
+}
+
 /** Never infer a runtime rung from current model metadata or requested depth. */
 export function presentTurnReasoningMapping(value: unknown): string {
   const turn = record(value) ?? {};
-  const last = record(turn.lastRoundUsage);
-  // An explicit authoring snapshot without evidence must not borrow an older row.
-  const resolution = last
-    ? record(last.reasoningResolution)
-    : record(latestAgentApiRoundUsage(turn.apiRounds)?._reasoning_resolution);
-  const requested = text(resolution?.requestedValue)
-    || text(resolution?.requested) || text(turn.thinkingDepth);
+  const resolution = turnReasoningResolution(turn);
+  const requestedControl = (value: unknown): string => {
+    const normalized = controlText(value);
+    return /^(minimal|low|medium|high|xhigh|max|off|default|enabled|lowest|preset|exact)$/.test(normalized)
+      ? normalized : '';
+  };
+  const requested = requestedControl(resolution?.requestedValue)
+    || requestedControl(resolution?.requested) || requestedControl(turn.thinkingDepth);
   const label = (depth: string) => depth ? depth[0].toUpperCase() + depth.slice(1) : '';
-  const actual = text(resolution?.actualValue);
-  if (actual && text(resolution?.actualMode) === 'exact') {
-    return requested && requested !== actual
-      ? `${label(requested)} → ${label(actual)}` : label(actual);
-  }
-  if (text(resolution?.actualMode) === 'off') {
-    return requested && requested !== 'off' ? `${label(requested)} → Off` : 'Off';
-  }
+  const actual = normalizeRecordedReasoningEffort(resolution);
+  if (actual) return requested && requested !== actual
+    ? `${label(requested)} → ${label(actual)}` : label(actual);
   return requested ? `${label(requested)} (requested)` : '';
 }
 /** True only for a response-authoring agent row, including legacy untyped rows. */

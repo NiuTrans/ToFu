@@ -268,6 +268,7 @@ export function sameTurnHeader(
     )
     && samePresentationValue(previous.metadata.origin, current.metadata.origin)
     && samePresentationValue(previous.metadata.taskTimePresentations, current.metadata.taskTimePresentations)
+    && samePresentationValue(previous.metadata.reasoning, current.metadata.reasoning)
     && sameFinish(previous.finish, current.finish));
 }
 
