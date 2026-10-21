@@ -65,6 +65,28 @@ safe replay; terminating useful work on every tool error loses completed sibling
 Verify `test_tool_exception_recovery.py`, timeout/effect finality, collection gaps,
 and installed native parallel recovery across a subsequent provider round.
 
+Problem: the shared HTTP clients preserve HTTPX/Requests exceptions, which do not
+inherit Python's built-in `ConnectionError` or `TimeoutError`. Decision: this same
+tool projection recognizes typed HTTPX network, remote-protocol and proxy failures,
+and Requests connection/proxy and interrupted-chunk failures. Their timeout types,
+including pool/write timeouts and a Requests connection wrapper around an urllib3
+read timeout, use `tool_execution_timeout`. Recovery still requires current and
+captured effect-policy agreement; cancellation and uncertain writes keep precedence.
+TLS failures inside a connection error require repair. Cause inspection is bounded
+and cycle-safe; an uninspected graph cannot claim transient recovery. An explicitly
+typed read timeout remains a timeout when TLS merely needs more bytes.
+HTTP status, request configuration, local protocol and content-decoding errors retain
+their existing classification. Exception names, text and an arbitrary application
+wrapper around an HTTP error cannot grant retry. Alternatives rejected: treating all
+HTTP exceptions as transient conflates caller errors with interrupted requests;
+reusing provider-specific retry heuristics changes tool recovery authority. Verify
+`test_tool_http_exception_recovery.py`, real loopback disconnect/timeout recovery in
+`test_tool_http_recovery_integration.py`, and installed native parallel continuation.
+Local warm projection measurements (7 samples of 10,000 calls) were 41–42 → 48 μs
+for HTTP connection failures and 41–42 → 43–44 μs for HTTP timeouts. Existing built-in
+connection/runtime errors retained byte-identical output. This measures failure
+projection only, not production throughput; no resident state or retry loop is added.
+
 Cost measurement (64 synthetic occurrences per disposable store, 60 warm): intent commit p95 was 1.87 ms on
 SQLite and 2.58 ms on native TofuDB; the marker was 109 JSON bytes and the complete carried event 533 bytes
 (median). These are local fixture measurements, not a throughput claim. One event is added per non-read-only

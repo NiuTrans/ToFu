@@ -27,6 +27,8 @@ pytestmark = pytest.mark.api
 @pytest.mark.parametrize('count,mode', [(2, 'legacy'), (8, 'v2'), (8, 'failure'), (8, 'cancel'),
     (8, 'startup_recovery'),
     (8, 'tool_recovery_legacy'), (8, 'tool_recovery_v2'),
+    (8, 'tool_recovery_httpx_legacy'), (8, 'tool_recovery_httpx_v2'),
+    (8, 'tool_recovery_requests_legacy'), (8, 'tool_recovery_requests_v2'),
     (2, 'measure_ordered'), (2, 'measure_parallel'), (8, 'measure_ordered'), (8, 'measure_parallel')])
 def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property, monkeypatch):
     source = os.environ.get('TOFU_NATIVE_WORKER_TEST_ARCHIVE')
@@ -82,6 +84,12 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             if mode.startswith('measure_'): time.sleep(.04)
             row['_cacheableResult'] = False  # Both lanes perform identical live work.
             if recover_tool and call_id == 'original-0':
+                if '_httpx_' in mode:
+                    import httpx
+                    raise httpx.RemoteProtocolError('source disconnected during read')
+                if '_requests_' in mode:
+                    import requests
+                    raise requests.exceptions.ConnectionError('source disconnected during read')
                 raise ConnectionResetError('source disconnected during read')
             result = 'evidence:' + call_id
             _finalize_tool_round(task, rn, row, [{'content': result, 'badge': 'done'}])
