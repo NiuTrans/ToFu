@@ -81,7 +81,6 @@ for line in __import__('sys').stdin:
     env = {'HOME': str(home), 'SHELL': '/bin/bash', 'PATH': '/usr/bin:/bin'}
     command.clear_command_context()
     monkeypatch.setattr(command, '_DEADLINE_SECONDS', 5.0)
-    from types import SimpleNamespace
     original = command.subprocess
     processes = []
     def launch(*args, **kwargs):

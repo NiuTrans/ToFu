@@ -26,6 +26,13 @@ they are deliberately few and high value.
 
 ## Iteration ladder
 
+Problem: pytest consumes imported fixtures through discovery, without ordinary
+Python reads of those names. Decision: fixtures reused from another test module use
+an explicit local export (`from ... import fixture as fixture`), visible to both
+pytest and lint. Alternatives rejected: removing the import loses the fixture;
+blanket unused/redefinition suppressions also hide accidental duplicate imports.
+Verify fixture providers and collected test identities when changing these exports.
+
 Focused tool fixtures retain real admission before the handler under test.
 Fixtures with a conversation and project path supply an owner-checked project
 binding through the repository read port; an ordinary conversation can declare

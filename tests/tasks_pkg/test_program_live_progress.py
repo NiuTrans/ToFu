@@ -5,7 +5,7 @@ import json
 import pytest
 
 from lib.tasks_pkg.orchestrator import _programmatic as projection
-from tests.tasks_pkg.test_javascript_dependency_chains import local_gateway  # noqa: F401
+from tests.tasks_pkg.test_javascript_dependency_chains import local_gateway as local_gateway
 
 pytestmark = pytest.mark.unit
 

@@ -3,10 +3,10 @@ from copy import deepcopy
 
 import pytest
 
-from tests.project_mod.test_coordinator_workers import runtime, base_runtime, context
+from tests.project_mod.test_coordinator_workers import runtime as runtime, base_runtime, context
 from tests.project_mod.test_coordinator_request_budget import bind
-from tests.project_mod.test_coordinator_continuation import run, ready, activate
-from tests.tasks_pkg.test_live_summary_budget import summary_env, result
+from tests.project_mod.test_coordinator_continuation import run as run, ready, activate
+from tests.tasks_pkg.test_live_summary_budget import summary_env as summary_env, result
 from lib.tasks_pkg.compaction._layer2 import _summary as summary
 from lib.llm.llm_errors import AbortedError
 

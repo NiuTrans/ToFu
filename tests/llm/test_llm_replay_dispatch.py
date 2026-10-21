@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from tests.llm.test_inference_local_dispatch_errors import dispatch_fixture
+from tests.llm.test_inference_local_dispatch_errors import dispatch_fixture as dispatch_fixture
 from tests.support.llm_replay import ReplaySession, ScenarioDriftError
 
 pytestmark = pytest.mark.unit

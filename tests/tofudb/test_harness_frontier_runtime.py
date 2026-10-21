@@ -23,7 +23,7 @@ from tests.tofudb.test_context_semantic_revision import (
     _settle,
     _turn,
     _update,
-    tofudb_binary,  # noqa: F401 -- explicit no-build native fixture
+    tofudb_binary as tofudb_binary,  # Explicit no-build native fixture.
 )
 from tests.tofudb.test_tofudb_differential import (
     LegacyDriver,
