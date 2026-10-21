@@ -43,7 +43,36 @@ def _page(name, value):
                     and type(match.get('artifactRef')) is str for match in value['items']))
 
 
-def _compact_page(value):
+def _compact_matches(matches):
+    """Group consecutive equal quotations without merging source identities.
+
+    Only the declared native fields participate. An unknown field, including
+    one using the grouped-offset name, keeps its original per-hit shape.
+    Offsets retain order, multiplicity and their exact numeric spelling.
+    """
+    policy = CONTRACT['artifactProjectionMatchGroups']
+    offsets_field = policy['offsetsField']
+    allowed = {'offset', *policy['sharedFields']}
+    result = []
+    previous = None
+    for match in matches:
+        path = match.get('path', [])
+        known = (set(match) <= allowed and isinstance(path, list)
+                 and all(type(part) is str for part in path))
+        shared = {key: item for key, item in match.items() if key != 'offset'} if known else None
+        if shared is not None and shared == previous:
+            last = result[-1]
+            if offsets_field not in last:
+                last = {**shared, offsets_field: [last['offset']]}
+                result[-1] = last
+            last[offsets_field].append(match['offset'])
+        else:
+            result.append(match)
+        previous = shared
+    return result
+
+
+def _compact_page(name, value):
     defaults = CONTRACT['artifactProjectionDefaults']
     replay = CONTRACT['artifactProjectionReplayCursor']
     clipped = value.get(replay['viewTruncatedField'], False)
@@ -62,7 +91,8 @@ def _compact_page(value):
             # truncation. Preserve all explicit gaps/continuations on partials.
             if not partial:
                 continue
-        result[key] = item
+        result[key] = (_compact_matches(item)
+                       if name == 'search_tool_artifact' and key == 'items' else item)
     return result
 
 
@@ -73,7 +103,7 @@ def project_artifact_result(tool_name: str, text: str) -> str | None:
     try:
         value = load_projection_json(text)
         if _page(tool_name, value):
-            return dump_projection_json(_compact_page(value))
+            return dump_projection_json(_compact_page(tool_name, value))
         if (not isinstance(value, dict) or value.get('status') not in {'ok', 'partial_failure'}
                 or 'contractVersion' in value or not isinstance(value.get('items'), list)):
             return None
@@ -83,7 +113,7 @@ def project_artifact_result(tool_name: str, text: str) -> str | None:
             return None
         # No recursive filtering or ref hoisting: a match can identify another
         # retained child, even when its parent and adjacent request share a ref.
-        projected = {**value, 'items': [_compact_page(page) if _page(tool_name, page) else page
+        projected = {**value, 'items': [_compact_page(tool_name, page) if _page(tool_name, page) else page
                                       for page in pages]}
         return dump_projection_json(projected)
     except (ValueError, TypeError, RecursionError, OverflowError):

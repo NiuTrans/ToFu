@@ -129,6 +129,14 @@ export const TOOL_RESULT_SURFACES = {
     ],
     "viewTruncatedField": "outputTruncated"
   },
+  "artifactProjectionMatchGroups": {
+    "offsetsField": "offsets",
+    "sharedFields": [
+      "text",
+      "artifactRef",
+      "path"
+    ]
+  },
   "reportFields": [
     "final_answer",
     "result",
