@@ -9,6 +9,8 @@ tests that need their own lifetime opt into a focused Sidecar plugin fixture.
 from __future__ import annotations
 
 import atexit
+from importlib.abc import MetaPathFinder
+from importlib.machinery import PathFinder
 import json
 import logging
 import os
@@ -280,6 +282,87 @@ os.environ['LLM_API_KEY'] = 'test-key-placeholder'
 os.environ['LLM_API_KEYS'] = 'test-key-placeholder'
 os.environ.setdefault('TOFU_AUTH_MODE', 'open')
 
+
+# Exported/source-checkout tests exercise these shipped members even when the
+# SDK/plugin is not installed. An editable finder can precede PathFinder, so
+# sys.path precedence alone cannot prove which first-party sources we tested.
+_FIRST_PARTY_TEST_MEMBERS = {
+    'tofu_search': ('packages', 'tofu-search'),
+    'tofu_trading': ('plugins', 'tofu-trading'),
+    'tofu_environments': ('packages', 'tofu-environments'),
+}
+
+
+class _FirstPartyTestSourceFinder(MetaPathFinder):
+    """Resolve only declared local member trees; never borrow an editable child."""
+
+    def __init__(self, checkout: Path):
+        self.roots: dict[str, Path] = {}
+        checkout = checkout.resolve()
+        for name, parts in _FIRST_PARTY_TEST_MEMBERS.items():
+            member = checkout.joinpath(*parts)
+            package = member / name
+            try:
+                root = package.resolve(strict=True)
+                initializer = (package / '__init__.py').resolve(strict=True)
+                if (not member.is_dir() or not package.is_dir()
+                        or not initializer.is_file()):
+                    raise ValueError('requires a member directory and package __init__.py')
+                if (not member.resolve().is_relative_to(checkout)
+                        or not root.is_relative_to(member.resolve())
+                        or not initializer.is_relative_to(root)):
+                    raise ValueError('declared member/package must remain inside this checkout')
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise pytest.UsageError(
+                    f'First-party test source {name} at {member} refused: {exc}') from exc
+            self.roots[name] = root
+
+        # Replacing cached modules would leave existing references attached to
+        # private code. Refuse that state instead of silently making a mixed tree.
+        for fullname, module in tuple(sys.modules.items()):
+            name = fullname.partition('.')[0]
+            if name not in self.roots:
+                continue
+            origin = getattr(module, '__file__', None)
+            locations = getattr(module, '__path__', ())
+            if (not self._owns(name, origin)
+                    or any(not self._owns(name, path) for path in locations)):
+                raise pytest.UsageError(
+                    f'First-party test source {fullname} already imported from {origin!r}; '
+                    f'expected {self.roots[name]}')
+
+    def _owns(self, name: str, origin: str | None) -> bool:
+        if not origin:
+            return False
+        try:
+            return Path(origin).resolve(strict=True).is_relative_to(self.roots[name])
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    def find_spec(self, fullname, path=None, target=None):
+        parts = fullname.split('.')
+        root = self.roots.get(parts[0])
+        if root is None:
+            return None
+        parent = root.parent if len(parts) == 1 else root.joinpath(*parts[1:-1])
+        spec = PathFinder.find_spec(fullname, [str(parent)])
+        if spec is None:
+            raise ModuleNotFoundError(
+                f'First-party test source {fullname} not found in {root}; '
+                'installed/editable fallback is disabled', name=fullname)
+        locations = spec.submodule_search_locations or ()
+        if ((spec.origin is not None and not self._owns(parts[0], spec.origin))
+                or any(not self._owns(parts[0], item) for item in locations)):
+            raise pytest.UsageError(
+                f'First-party test source {fullname} at {root} refused: '
+                f'import origin escapes the declared package ({spec.origin!r})')
+        return spec
+
+
+_FIRST_PARTY_TEST_SOURCES = _FirstPartyTestSourceFinder(Path(__file__).resolve().parents[1])
+sys.meta_path.insert(0, _FIRST_PARTY_TEST_SOURCES)
+
+
 def _configure_explicit_test_engine(environment) -> None:
     """Opt in to an exact source-matched artifact; never prepare during pytest."""
     raw = environment.get('TOFU_TEST_TOFUDB_BIN')
@@ -311,17 +394,6 @@ try:
     install_pymupdf_classic_policy()
 except Exception:
     pass
-
-# The monorepo's workspace tofu_search (packages/tofu-search, 0.10.4+) must
-# win over any older site/editable install on this host — symbols under test
-# (e.g. SiteSearchTerminalError) only exist in the workspace version, and CI
-# resolves the same member through the uv workspace.
-_WORKSPACE_TOFU_SEARCH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'packages', 'tofu-search')
-if (os.path.isdir(os.path.join(_WORKSPACE_TOFU_SEARCH, 'tofu_search'))
-        and _WORKSPACE_TOFU_SEARCH not in sys.path):
-    sys.path.insert(0, _WORKSPACE_TOFU_SEARCH)
 
 import tofu_search.config as _config
 

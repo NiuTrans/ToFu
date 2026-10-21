@@ -247,6 +247,32 @@ Detached lifecycle fixtures declare the pytest worker as their explicit
 Supervisor owner, so an interrupted worker cannot strand a self-healing
 watchdog or test server under PID 1.
 
+### First-party test source authority
+
+**Problem:** checkout-only `PYTHONPATH` does not isolate first-party imports:
+editable-install finders can still load a private checkout, while a shipped but
+uninstalled SDK leaves mandatory test modules uncollectable.
+
+**Decision:** after isolating writable state and before project imports,
+`tests/conftest.py` binds exactly `tofu_search` to `packages/tofu-search`,
+`tofu_trading` to `plugins/tofu-trading`, and `tofu_environments` to
+`packages/tofu-environments` in the current checkout. This narrow test-only
+finder precedes editable finders and confines each package and its children to
+its declared source tree. Missing/malformed member directories or initializers,
+escaping import origins, and already-imported foreign modules fail explicitly;
+a missing local child cannot be supplied by an installed copy. It adds no
+canonical/sibling path, scans no additional members, and leaves third-party
+imports, production discovery, dependencies and plugin enablement unchanged.
+
+**Alternatives rejected:** adding member paths alone cannot override every
+editable finder; skipping mandatory imports hides release defects; changing
+production/package dependencies would widen optional capability contracts.
+`tests/meta/test_first_party_test_sources.py` runs the real bootstrap against
+synthetic checkouts and a poisoned editable finder. Qualify mandatory collection
+and first-party import origins from the exported checkout with `PYTHONPATH`
+restricted to that checkout; source-tree results do not certify sanitized exports
+or the host's native-library/toolchain compatibility.
+
 ## Parallel execution policy
 
 `pyproject.toml` is the single owner of pytest's `worksteal` distribution
