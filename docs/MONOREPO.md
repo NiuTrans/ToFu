@@ -280,6 +280,46 @@ rejected: preserving the package for colleagues also distributes personal
 markers; public-only exclusion leaves the internal sharing boundary unsafe.
 
 
+Public commit history — Problem: snapshot-only publication hides the separate
+changes and rationale that reviewers need in Open pull requests. Decision:
+`export_pkg/_history.py` rebuilds the incremental source commit DAG inside an
+independent public-only Git repository. Each retained tree follows the current
+public path policy; every blob and contributor/message field is sanitized and
+checked, including archived members and ancestors removed from the final tree.
+Public changes retain separate subjects, bodies, authors, dates and merge
+parents. Internal-only single-parent commits fold away; original object IDs,
+private refs, tags, signatures and notes never enter newly rebuilt objects.
+An existing public anchor is accepted only after every configured target already
+acknowledges that exact tip; otherwise its complete metadata, paths and blobs
+must pass inspection. Previously published ancestors are not rewritten, and
+this acknowledgement does not certify them against today's stricter policy.
+All newly reachable source objects and reconciled outputs are scanned without
+Git replacement objects or archive filters, regardless of extension.
+A first run requires an explicit `--history-base`; sanitized baseline bridges
+make cutoff/out-of-range parent trees explicit without asserting that an older
+snapshot title proves equivalence. Later runs resume an integrity-checked private
+`.git/tofu-export-history.json` cursor, not an untrusted source-message trailer.
+The final reconcile commit equals the verified export index tree; ref CAS and a
+pending cursor settle retries without duplicate history. Foreign public/source
+advances or policy changes require review.
+
+Symbolic object directories, replacement objects, grafts and alternates are
+refused. One batch shares limits of 8 GiB imported data, 16 GiB source reads,
+8 GiB archive expansion, 10 million visited members and 64 MiB metadata,
+in addition to the 50 MiB file and 500 MiB tree gates. A batch has a 30-minute
+deadline; nonblocking Git batch reads/writes also have a 120-second IO deadline.
+Exceeding a limit leaves the branch and cursor unadvanced; choose a reviewed
+smaller incremental range rather than bypassing verification.
+ Alternatives rejected: raw history
+push leaks private ancestors; one summary commit loses independent review units;
+linearizing full branch snapshots silently reverts unrelated branch changes.
+
+Release publication prepares and commits all version metadata first. Use
+`export.py --release` for the prepared version, never a late `--bump` after a
+source SHA or candidate gate was frozen. `scripts/release_open.sh` publishes the
+same gated candidate, and push/tag failures remain failures; immutable published
+tags are not moved to repair metadata drift.
+
 Public build/test closure — the restored helper set is explicit and includes
 transitive generator and receipt-assessment imports required by shipped tests.
 Each added helper passes the public secret scan.
