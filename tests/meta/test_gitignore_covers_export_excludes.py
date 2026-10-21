@@ -69,6 +69,11 @@ _EXTRA_KEEPERS = {
     'scripts/inspect_native_crash.py',
     'scripts/tofudb_profile_report.py',
     'scripts/trace_experiment_reads.py',
+
+    # Installed share-export skill helper, not a shipped runtime/build input.
+    # Retain it privately; adding it to public keep-files would expand the
+    # publication surface without an application consumer.
+    'scripts/fetch_chatgpt_share.py',
     'export.py',                                 # export infra (sanitization patterns)
     'CLAUDE.md',                                 # agent-rules doc (stripped from public)
     'JOURNAL.md',                                # internal evolution journal (public history ships via CHANGELOG.md)

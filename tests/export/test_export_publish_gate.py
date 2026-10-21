@@ -290,33 +290,46 @@ def test_staged_snapshot_blocks_symlink(tmp_path):
         _verify_staged_publish_snapshot(tmp_path)
 
 
-def test_gate_is_wired_after_export_transforms_and_before_push():
-    import inspect
+@pytest.mark.parametrize('unsafe', [False, True])
+def test_gate_is_wired_after_export_transforms_and_before_push(tmp_path, monkeypatch, unsafe):
+    from export_pkg import _orchestrate as orchestrate, _state
+    from export_pkg._publish import ExportPublishSafetyError
 
-    import export
+    events = []
+    dest = tmp_path / 'public'
+    monkeypatch.setattr(orchestrate, '_read_version', lambda: '1.0.0')
 
-    source = inspect.getsource(export.export_project)
-    anchor = source.index('# Post-export tasks: lint (opensource only), verify, push.')
-    start = source.index("        if mode == 'opensource':", anchor)
-    end = source.index('        return', start)
-    window = source[start:end]
+    def export(*args, **kwargs):
+        dest.mkdir()
+        _state._EXPORT_SOURCE_SHA = 'a' * 40
+        events.append('export')
+        return {}
 
-    assert window.index('_restore_opensource_kept_files(dest)') < window.index(
-        '_verify_publish_tree(dest)')
-    assert window.index('_verify_opensource(dest)') < window.index(
-        '_verify_publish_tree(dest)')
-    assert window.index('_verify_publish_tree(dest)') < window.index(
-        '_git_push(dest, mode')
+    monkeypatch.setattr(orchestrate, '_export_via_tar_with_sanitize', export)
+    monkeypatch.setattr(orchestrate, '_create_skeleton', lambda *a: None)
+    monkeypatch.setattr(orchestrate, '_print_export_summary', lambda *a: None)
+    for name in ('_restore_opensource_kept_files', '_regenerate_exported_runtime',
+                 '_run_ruff_autofix', '_verify_opensource', '_verify_exported_test_surface',
+                 '_verify_exported_js_syntax', '_verify_exported_py_syntax',
+                 '_verify_exported_py_integrity'):
+        monkeypatch.setattr(orchestrate, name, lambda *a, event=name: events.append(event))
 
-    push_window = inspect.getsource(export._git_push)
-    assert push_window.index("_run(['git', 'add', '-A'])") < push_window.index(
-        '_verify_staged_publish_snapshot(dest)')
-    assert push_window.index('_verify_staged_publish_snapshot(dest)') < push_window.index(
-        "_run(['git', 'commit', '-m', commit_msg])")
-    assert push_window.index("_run(['git', 'commit', '-m', commit_msg])") < push_window.index(
-        "_run(['git', 'rev-parse', 'HEAD^{tree}'])")
-    assert push_window.index("_run(['git', 'rev-parse', 'HEAD^{tree}'])") < push_window.index(
-        '_push_branch(_run, target, branch')
+    def gate(*args):
+        events.append('publish-gate')
+        if unsafe:
+            raise ExportPublishSafetyError('synthetic unsafe candidate')
+
+    monkeypatch.setattr(orchestrate, '_verify_publish_tree', gate)
+    monkeypatch.setattr(orchestrate, '_git_push', lambda *a, **k: events.append('push'))
+    if unsafe:
+        with pytest.raises(ExportPublishSafetyError, match='unsafe'):
+            orchestrate.export_project('opensource', dest, push=True)
+        assert 'push' not in events
+    else:
+        orchestrate.export_project('opensource', dest, push=True)
+        assert events.index('publish-gate') < events.index('push')
+    assert events.index('_restore_opensource_kept_files') < events.index('publish-gate')
+    assert events.index('_verify_opensource') < events.index('publish-gate')
 
 
 def test_secret_verification_allows_task_artifact_names(tmp_path):
