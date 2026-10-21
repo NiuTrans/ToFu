@@ -29,6 +29,8 @@ pytestmark = pytest.mark.api
     (8, 'tool_recovery_legacy'), (8, 'tool_recovery_v2'),
     (8, 'tool_recovery_httpx_legacy'), (8, 'tool_recovery_httpx_v2'),
     (8, 'tool_recovery_requests_legacy'), (8, 'tool_recovery_requests_v2'),
+    (8, 'tool_recovery_status_httpx_legacy'), (8, 'tool_recovery_status_httpx_v2'),
+    (8, 'tool_recovery_status_requests_legacy'), (8, 'tool_recovery_status_requests_v2'),
     (2, 'measure_ordered'), (2, 'measure_parallel'), (8, 'measure_ordered'), (8, 'measure_parallel')])
 def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property, monkeypatch):
     source = os.environ.get('TOFU_NATIVE_WORKER_TEST_ARCHIVE')
@@ -48,6 +50,9 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     monkeypatch.setattr(threading.Thread, 'start', start)
     owner = task()
     recover_tool = mode.startswith('tool_recovery_')
+    recover_status = '_status_' in mode
+    status_requests = []
+    status_code = 429 if '_requests_' in mode else 503
     expected_count = count + int(recover_tool)
     owner['config']['tools']['resultEnvelope'] = 'v2' if mode == 'v2' or mode.endswith('_v2') else 'legacy'
     definitions = [{'type': 'function', 'function': {'name': 'fetch_url', 'parameters': {'type': 'object'}}}]
@@ -83,6 +88,17 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             assert releases[index].wait(10), 'test did not release its owned read'
             if mode.startswith('measure_'): time.sleep(.04)
             row['_cacheableResult'] = False  # Both lanes perform identical live work.
+            source_result = None
+            if recover_status and call_id in {'original-0', 'recovered-0'}:
+                import httpx
+                import requests
+                client = httpx.Client(trust_env=False) if '_httpx_' in mode else requests.Session()
+                with client:
+                    if '_requests_' in mode:
+                        client.trust_env = False
+                    response = client.get(f'http://127.0.0.1:{server.server_port}/source', timeout=2)
+                    response.raise_for_status()
+                    source_result = response.text
             if recover_tool and call_id == 'original-0':
                 if '_httpx_' in mode:
                     import httpx
@@ -91,7 +107,7 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
                     import requests
                     raise requests.exceptions.ConnectionError('source disconnected during read')
                 raise ConnectionResetError('source disconnected during read')
-            result = 'evidence:' + call_id
+            result = source_result if source_result is not None else 'evidence:' + call_id
             _finalize_tool_round(task, rn, row, [{'content': result, 'badge': 'done'}])
             return call_id, result, False
         finally:
@@ -103,6 +119,16 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     seen = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args): pass
+        def do_GET(self):
+            status_requests.append(self.path)
+            first = len(status_requests) == 1
+            body = b'' if first else b'evidence:recovered-0'
+            self.send_response(status_code if first else 200)
+            if first:
+                self.send_header('Retry-After', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             seen.append(body)
@@ -115,6 +141,7 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             self.end_headers()
             self.wfile.write(wire)
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server.daemon_threads = False  # server_close joins provider and source handlers.
     thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01})
     thread.start()
     async def run(executor):
@@ -196,8 +223,12 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
                     if recover_tool and row['tool_call_id'] == 'original-0':
                         from lib.tools.result_envelope import tool_result_error
                         error = tool_result_error(row['content'])
-                        assert error.code == 'tool_connection_failed' and error.retryable
+                        expected_code = ('tool_http_rate_limited' if status_code == 429 else
+                            'tool_http_unavailable') if recover_status else 'tool_connection_failed'
+                        assert error.code == expected_code and error.retryable
                         assert 'gateway' in error.next_action and 'independent' in error.next_action
+                        if recover_status:
+                            assert 'Retry-After' in error.next_action and '0 seconds' in error.next_action
                     else:
                         assert 'evidence:' + row['tool_call_id'] in row['content']
                 if recover_tool:
@@ -226,3 +257,4 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     record_property('active_tools_after_join', len(entered) - len(exited))
     assert not owner.get('_activeToolContexts') and '_pending_tool_result_envelopes' not in owner
     assert len(startup_faults) == int(mode == 'startup_recovery')
+    assert status_requests == (['/source', '/source'] if recover_status else [])

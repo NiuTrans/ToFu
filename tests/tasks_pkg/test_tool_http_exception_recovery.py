@@ -87,7 +87,7 @@ def classified(failure):
     httpx.UnsupportedProtocol('wrong scheme'), httpx.InvalidURL('invalid url'),
     httpx.TooManyRedirects('redirect loop'), httpx.DecodingError('invalid payload'),
     httpx.HTTPStatusError('503 timeout', request=httpx.Request('GET', 'https://example.test'),
-                          response=httpx.Response(503)),
+                          response=httpx.Response(403)),
     requests.exceptions.InvalidURL('invalid url'),
     requests.exceptions.TooManyRedirects('redirect loop'),
     requests.exceptions.ContentDecodingError('invalid payload'),

@@ -182,6 +182,67 @@ def _repeatable_effect(task, tool_name, round_entry):
     return repeatable, effect
 
 
+def _http_status_failure(exception):
+    """Read typed response metadata only; status never proves replay authority."""
+    import httpx
+    import requests
+
+    if isinstance(exception, httpx.HTTPStatusError):
+        response = exception.response
+        response_type = httpx.Response
+    elif isinstance(exception, requests.exceptions.HTTPError):
+        response = exception.response
+        response_type = requests.Response
+    else:
+        return None
+    # Requests error responses are falsey; their presence is not a truth test.
+    if not isinstance(response, response_type):
+        return None
+    status = response.status_code
+    if type(status) is not int or status not in {408, 429, 500, 502, 503, 504}:
+        return None
+    return status, response.headers.get('Retry-After')
+
+
+def _http_retry_wait(value):
+    """Normalize bounded Retry-After data into advice, without sleeping or IO."""
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    import re
+
+    fallback = 'Check service readiness before retrying.'
+    if not isinstance(value, str) or len(value) > 64:
+        return fallback
+    value = value.strip(' \t')
+    if re.fullmatch(r'[0-9]{1,20}', value):
+        return f'Wait at least {int(value)} seconds after the response (Retry-After).'
+    # The email parser accepts free-form trailing text. Admit HTTP date shapes
+    # first, then emit only a normalized UTC instant, never the raw header.
+    short_day = r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)'
+    long_day = r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)'
+    month = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+    clock = r'[0-9]{2}:[0-9]{2}:[0-9]{2}'
+    shapes = (
+        rf'{short_day}, [0-9]{{2}} {month} [0-9]{{4}} {clock} GMT',
+        rf'{long_day}, [0-9]{{2}}-{month}-[0-9]{{2}} {clock} GMT',
+        rf'{short_day} {month} (?:[0-9]{{2}}| [0-9]) {clock} [0-9]{{4}}',
+    )
+    if not any(re.fullmatch(shape, value) for shape in shapes):
+        return fallback
+    try:
+        instant = parsedate_to_datetime(value).replace(tzinfo=timezone.utc)
+        if re.fullmatch(shapes[1], value):
+            # HTTP's rolling 50-year window differs from email's fixed cutoff.
+            now = datetime.now(timezone.utc)
+            latest_year = now.year + 50
+            instant = instant.replace(year=latest_year - (latest_year - instant.year) % 100)
+            if instant.timetuple()[:6] > (latest_year, *now.timetuple()[1:6]):
+                instant = instant.replace(year=instant.year - 100)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    return f'Wait until {instant.isoformat()} (Retry-After).'
+
+
 def _http_exception_kind(exception):
     """Recognize client transport facts; effect policy alone permits replay.
 
@@ -240,10 +301,12 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
             and effect.get('state') in {'entered', 'unknown', 'returned'}):
         return _unknown_effect_error(effect, message)
 
-    http_kind = None
+    http_kind = http_status = None
     if not isinstance(exception, (AbortedError, CancelledError, PermissionError,
             FileNotFoundError, NotADirectoryError, ConnectionError)):
         http_kind = _http_exception_kind(exception)
+        if http_kind is None:
+            http_status = _http_status_failure(exception)
     if http_kind == 'timeout':
         return tool_timeout_result(task, tool_name, round_entry, message=message)
     retryable = False
@@ -266,12 +329,21 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
                   if repeatable else
                   'Check connectivity and reconcile the prior outcome before another attempt; '
                   'do not repeat this operation automatically.')
+    elif http_status is not None:
+        status, retry_after = http_status
+        code = 'tool_http_rate_limited' if status == 429 else 'tool_http_unavailable'
+        retryable = repeatable
+        action = (f'HTTP {status}. {_http_retry_wait(retry_after)} Retry through the normal '
+                  'tool gateway and authorization checks.' if repeatable else
+                  f'HTTP {status}. Check service readiness and reconcile the prior outcome; '
+                  'do not repeat this operation automatically.')
     else:
         code = 'tool_execution_failed'
         action = ('Inspect and repair the reported runtime or environment failure, '
                   'or use another available tool; do not blindly repeat the same call.')
     if not isinstance(exception, (AbortedError, CancelledError)):
-        if not repeatable and code != 'tool_connection_failed':
+        if not repeatable and code not in {
+                'tool_connection_failed', 'tool_http_rate_limited', 'tool_http_unavailable'}:
             action += ' Verify the prior outcome before repeating the operation.'
         action += ' Continue independent authorized work.'
     return typed_tool_error(code, retryable=retryable, next_action=action,
