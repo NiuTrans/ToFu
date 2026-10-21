@@ -55,7 +55,32 @@ Explicit serial-tool requirements and strict function schemas survive both adapt
 
 `lib/llm/route_features.py` binds selected `_route_inference_profile.features` to installed wire extensions; missing declarations do not enable features on generic/keyed Responses routes, and explicit unknown/unsupported always narrows support. `_inference_profile` is a rollout alias; `responses.feature_profile` names a dialect, not permission for all extensions. Model-family inference applies only without a selected route profile.
 
-Codex subscription is an installed Responses dialect: its stateless `store=false` tool loop requires encrypted-reasoning replay and supports prompt-cache affinity even if the catalog profile declares only reasoning/sampling. Problem: treating partial catalog metadata as a complete feature denial succeeds for one round, then fails local request preparation on opaque reasoning. Decision: bind only these two Codex capabilities at the dialect boundary; explicit denial still wins. Dropping mandatory items would corrupt continuation, while enabling replay for all Responses providers would send unsupported wire items upstream.
+Codex subscription is an installed Responses dialect: its stateless `store=false` tool loop requires encrypted-reasoning replay and supports prompt-cache affinity even if the catalog profile declares only reasoning/sampling. Problem: treating partial catalog metadata as a complete feature denial succeeds for one round, then fails local request preparation on opaque reasoning. Decision: bind these stateless Codex capabilities at the dialect boundary; explicit denial still wins. Dropping mandatory items would corrupt continuation, while enabling replay for all Responses providers would send unsupported wire items upstream.
+
+### Readable reasoning summaries
+
+**Problem:** reasoning effort, billed reasoning tokens and encrypted replay were
+mistaken for readable thinking; generic Responses requests did not opt in even
+when the route explicitly supported summaries. **Decision:** the installed
+`responses_reasoning_summary` feature independently requests
+`reasoning.summary="auto"` for a declared reasoning model whose effective effort
+is not off. A Connection capability never activates unknown/nonreasoning Models. Codex supplies that installed binding; the official OpenAI Connection recipe
+declares it on its endpoint, never as a global Model capability. Explicit
+unknown/unsupported declarations suppress the automatic default. Generic routes
+without a declaration keep omission. An explicit native `summary` value,
+including null to opt out, wins over the automatic request. The same converter
+owns streaming and nonstreaming requests; private route metadata never enters
+provider JSON. **Alternatives rejected:** enabling summaries on every compatible
+endpoint can send unsupported parameters; inferring summary availability from
+reasoning effort or encrypted replay conflates independent capabilities.
+
+A summary request is not a delivery guarantee. A provider may report positive
+reasoning-token usage and return opaque encrypted items with empty summary
+arrays even when it accepts and echoes `auto`/`detailed`. The frontend must not
+decode ciphertext or fabricate reasoning text. The direct-chat HTTP control
+allowlist remains unchanged; explicit native summary requests use the existing
+Python dispatch `generation_options`/canonical-body boundary. Specs:
+`tests/llm/test_responses_summary_request.py` and the Responses adapter suite.
 
 ### Preserve function strictness across protocols
 
@@ -103,6 +128,33 @@ The v2 Connection protocol `openai_responses` becomes the execution protocol `re
 A translator preserves text/reasoning/tool work, finish/truncation meaning, cache/reasoning usage, ordered tool-call occurrences, and typed errors without leaking credentials. Streaming tool assembly continues an index-less active slot only while ID/name evidence remains compatible. A different ID opens a new slot even when its name arrives later; same-name/no-ID ambiguity or an invalid index makes the stream malformed instead of merging executable calls. Exact complete-frame retransmission at the same stable slot is ignored, but equal payloads at different positions remain distinct.
 
 Responses adapters use `output_index` as the primary occurrence identity and use an item ID only while it is unambiguous. Recycled item IDs at distinct positions remain separate; a later delta carrying only an ambiguous ID fails closed. A terminal `response.output` array is the ordered authority and replaces provisional opaque items position-for-position, preserving even byte-identical entries. Complete visible text snapshots append only a missing suffix after matching the emitted prefix with a constant-space length/hash proof; conflicting text fails, while omitted/null text metadata adds no text authority. Hidden agent messages stay hidden. The WebSocket incremental-input ledger counts occurrences rather than set membership, and advances state only after a verified terminal response; malformed or interrupted streams retire the socket. Unknown provider payloads fail explicitly: do not add `.get()` chains that turn a malformed response into an empty successful answer. Recognizable foreign model envelopes on a Chat stream fail fast with `protocol_mismatch`, using bounded protocol names, not provider text. An SSE event label or generic ping alone is not protocol proof; valid Chat payloads and structured provider errors retain their existing semantics.
+
+### Readable Responses snapshot reconciliation
+
+**Problem:** some providers send readable reasoning only in text/part `.done`,
+item snapshots or the terminal response; consuming deltas alone discarded that
+text. **Decision:** `responses_outbound/_reasoning.py` owns readable item/channel/
+part prefix reconciliation. Verified snapshots emit only unseen suffixes; equal
+text at distinct positions stays distinct. Paragraphs begin with nonempty text,
+not empty or encrypted-only markers. Repeated lifecycle snapshots are idempotent.
+Known output positions retain relative emitted order even while other positions
+are unknown; conflicting prefixes or late earlier-paragraph insertion/reordering
+fail typed validation before a successful terminal is emitted. Missing/null/empty
+arrays remain metadata rather than evidence of erased text. Opaque replay stays
+with `_sse.py`, independent of readable summaries and usage.
+
+Each item/part keeps a length/hash proof, not the whole emitted text. State has at
+most 4,096 item occurrences and a separate shared total of 4,096 parts; blocked
+text shares the framing owner's 1 MiB event-byte bound. In-order reasoning retains
+no queued text. Parser-only `tracemalloc` samples retained 933 bytes after 64 KiB
+and 869 bytes after 8 MiB of one live part; a blocked 1 MiB sample retained
+1,452,325 Python bytes and refused the next byte without exceeding its text bound.
+These measure reconciler state, not accumulator, network or application memory.
+**Alternatives rejected:** ignoring final snapshots loses actual provider text;
+text-based deduplication merges distinct occurrences; retaining complete prefixes
+adds memory proportional to already-delivered reasoning; speculative reordering
+cannot repair bytes already shown to a reader. Specs:
+`tests/llm/test_responses_outbound_reasoning.py` and the shared SSE parity suites.
 
 ## SSE framing and stream-activity watchdog
 Sync/async HTTP error responses retain at most a 256 KiB diagnostic prefix through `lib/llm/provider_error_body.py`; HTTP status and UTF-8-first decoding remain authoritative, and clipped raw archives are incomplete. Sync and async diagnostic reads stop after five seconds or caller cancellation, including while waiting for bytes; expiration preserves the prefix and HTTP status. Sync reads reuse the attempt’s single transport watchdog, arming it even when rolling idle timeout is disabled; diagnostic capture creates no extra reader or timer thread. Incoming bytes cannot renew this diagnostic deadline. Caller Stop wins races with error-body EOF, read failure and byte-limit truncation. Iterator cleanup errors are type-only diagnostics and never replace status/Stop; async iterator closure has a separate 100 ms budget. Response closure remains the transport owner’s responsibility. Specs: `test_provider_error_body_bounds.py`, `test_provider_error_body_deadline.py`. Sync HTTP uses decompressed urllib3 `read1` (legacy one-byte fallback), preserving requests errors; short SSE frames must arrive before EOF for close/length/chunked bodies, plain or gzip. Async and relay readers already yield available chunks. Watchdog interruption shuts down the active read socket before reader-owned response closure; closing a buffered response from the watchdog would wait on its read lock. The legacy urllib3 path remains inside the transport adapter. Specs: `test_sse_http_delivery.py`, `test_sync_stream_socket_cancel.py`. Chat `reasoning` is a string alias; whitespace-only stop is empty; SSE `message` without `delta` is malformed, never silently discarded. `[DONE]` without finish is not completion; finish without DONE may be valid. `LLM_DEBUG_RAW_SSE=1`/model substring enables redacted capture (64 Ki chars/line, 400 lines/256 KiB ring, per-write file rotation via log policy); default anomaly logs keep original decoded character counts and bounded framing categories, not bodies. `RawSSEDumper.payload` alone owns redaction and length measurement, avoiding double-redacted placeholder counts. JSON is redacted structurally; tool input/argument fragments, malformed/oversized payloads and over-depth values are omitted even in debug. Truncated/redacted capture is not byte-exact replay. All byte-stream transports use `lib/llm/_sse_framer.py`, driven by the shared `SSEByteStream` lifecycle. It incrementally decodes strict UTF-8 and frames SSE events across arbitrary byte boundaries, including CR/LF/CRLF, comments, a leading BOM, repeated `data:` fields, multiple events in one read and a split `[DONE]`. One event is capped at 1 MiB; lazy event delivery uses at most a 64 KiB decode slice without copying an entire bytes-like input or retaining a chunk-sized list of events. Dense invalid-byte runs are counted without repeatedly decoding/copying their suffix. Invalid UTF-8, invalid JSON, an oversized event, or unterminated data at actual EOF closes as `malformed_stream` with bounded, credential-free diagnostics. Data-free comments/id/event/retry tails are discarded; retry hints require bounded ASCII integers.

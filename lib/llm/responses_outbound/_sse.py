@@ -25,6 +25,9 @@ Extracted from ``lib/oauth/codex.py:CodexSSETranslator`` (2026-07-31, epic
   5. **opaque state** — completed ``reasoning`` / ``compaction`` output items
      are retained for stateless replay on the next Responses request.
 
+  6. **final readable reasoning** — text/part/item done snapshots and terminal
+     output append only verified unseen summary/content suffixes, independently
+     of encrypted replay and reasoning-token usage.
 Terminal events (``response.completed`` / ``response.incomplete``) emit
 the finish chunk + the ``'[DONE]'`` sentinel — a Responses stream has no
 ``[DONE]`` frame of its own, so the sentinel is synthesised here.
@@ -38,6 +41,10 @@ import json
 import time
 
 from lib.llm.responses_outbound._message_phase import capture_phase_messages
+from lib.llm.responses_outbound._reasoning import (
+    ReasoningSummaryError,
+    ReasoningSummaryReconciler,
+)
 from lib.log import get_logger
 from lib.llm.responses_outbound._to_responses import (
     _REPLAY_RESPONSE_ITEM_TYPES,
@@ -52,8 +59,6 @@ _KNOWN_IGNORED_EVENTS = frozenset({
     'response.created', 'response.in_progress', 'response.queued',
     'response.content_part.added', 'response.content_part.done',
     'response.output_text.done', 'response.refusal.done',
-    'response.reasoning_summary_part.done',
-    'response.reasoning_summary_text.done', 'response.reasoning_text.done',
     'response.function_call_arguments.done',
 })
 _KNOWN_PROGRESS_PREFIXES = (
@@ -184,14 +189,11 @@ class ResponsesSSETranslator:
         self.response_output: list[dict] = []
         self.unknown_event_types: set[str] = set()
         self.unknown_item_types: set[str] = set()
-        # Reasoning-summary paragraph tracking: OpenAI emits a summary as N
-        # parts, each a markdown headline ('**…**'), and the text deltas
-        # carry NO separator — concatenating parts fuses adjacent headlines
-        # into '**A****B**'. Part/item boundaries re-insert the '\n\n'.
-        # ``_reasoning_open`` = unseparated reasoning text since the last
-        # boundary, so an item boundary followed by its first part boundary
-        # emits ONE separator, not two.
-        self._reasoning_open = False
+        # Readable reasoning has independent item/channel/part prefix proofs;
+        # opaque replay above must never stand in for unavailable text.
+        self._reasoning = ReasoningSummaryReconciler(
+            max_output_index=_MAX_RESPONSE_OUTPUT_INDEX,
+            max_item_id_chars=_MAX_RESPONSE_ITEM_ID_CHARS)
 
     @staticmethod
     def _protocol_error(message: str) -> list[dict]:
@@ -306,6 +308,9 @@ class ResponsesSSETranslator:
         if usage:
             chunk['usage'] = usage
         return chunk
+
+    def _reasoning_chunks(self, texts: list[str]) -> list[dict]:
+        return [self._chunk(delta={'reasoning_content': text}) for text in texts]
 
     def _reconcile_terminal_text(self, output: list) -> tuple[list, str | None]:
         """Append only a proven missing suffix of authoritative visible text."""
@@ -528,25 +533,17 @@ class ResponsesSSETranslator:
                     'refusal.delta delta must be text or null')
             out.append(self._chunk(delta={'content': delta}))
 
-        elif etype in ('response.reasoning_summary_text.delta',
-                       'response.reasoning_text.delta'):
-            delta = event.get('delta', '')
-            if delta is None:
-                delta = ''
-            if not isinstance(delta, str):
-                return self._protocol_error(
-                    f'{etype} delta must be text or null')
-            out.append(self._chunk(
-                delta={'reasoning_content': delta}))
-            self._reasoning_open = True
-
-        elif etype == 'response.reasoning_summary_part.added':
-            # A new summary paragraph begins — separate it from the previous
-            # one (no-op for the very first part).
-            if self._reasoning_open:
-                self._reasoning_open = False
-                out.append(self._chunk(
-                    delta={'reasoning_content': '\n\n'}))
+        elif etype in (
+                'response.reasoning_summary_text.delta',
+                'response.reasoning_text.delta',
+                'response.reasoning_summary_text.done',
+                'response.reasoning_text.done',
+                'response.reasoning_summary_part.added',
+                'response.reasoning_summary_part.done'):
+            try:
+                out.extend(self._reasoning_chunks(self._reasoning.event(event)))
+            except ReasoningSummaryError as error:
+                return self._protocol_error(str(error))
 
         elif etype == 'response.output_item.added':
             item = event.get('item')
@@ -572,12 +569,12 @@ class ResponsesSSETranslator:
                     and isinstance(output_index, int)
                     and not _multi_agent_message_is_user_visible(item)):
                 self._hidden_text_output_indices.add(output_index)
-            if (item.get('type') == 'reasoning'
-                    and self._reasoning_open):
-                # A second reasoning block in one response — same boundary.
-                self._reasoning_open = False
-                out.append(self._chunk(
-                    delta={'reasoning_content': '\n\n'}))
+            if item.get('type') == 'reasoning':
+                try:
+                    out.extend(self._reasoning_chunks(self._reasoning.item(
+                        item, output_index, added=True)))
+                except ReasoningSummaryError as error:
+                    return self._protocol_error(str(error))
             if item.get('type') == 'function_call':
                 raw_item_id = item.get('id')
                 item_id = '' if raw_item_id is None else raw_item_id
@@ -741,6 +738,12 @@ class ResponsesSSETranslator:
                 if complete_error:
                     return self._protocol_error(complete_error)
                 out.extend(completed)
+            if item.get('type') == 'reasoning':
+                try:
+                    out.extend(self._reasoning_chunks(self._reasoning.item(
+                        item, event.get('output_index'))))
+                except ReasoningSummaryError as error:
+                    return self._protocol_error(str(error))
             self._capture_response_items(
                 [item], output_indices=[event.get('output_index')])
 
@@ -764,6 +767,11 @@ class ResponsesSSETranslator:
             if text_error:
                 return self._protocol_error(text_error)
             out.extend(text_chunks)
+            try:
+                out.extend(self._reasoning_chunks(
+                    self._reasoning.terminal(response_output)))
+            except ReasoningSummaryError as error:
+                return self._protocol_error(str(error))
             usage = _usage_to_openai(resp.get('usage') or {})
             if _program_needs_followup(response_output):
                 # OpenAI may deliver the final assistant message in the next
@@ -808,6 +816,11 @@ class ResponsesSSETranslator:
                 if text_error:
                     return self._protocol_error(text_error)
                 out.extend(text_chunks)
+                try:
+                    out.extend(self._reasoning_chunks(
+                        self._reasoning.terminal(response_output)))
+                except ReasoningSummaryError as error:
+                    return self._protocol_error(str(error))
                 usage = _usage_to_openai(resp.get('usage') or {})
                 if _program_needs_followup(response_output):
                     usage['_program_pending'] = True
@@ -842,7 +855,6 @@ class ResponsesSSETranslator:
                                'stream remains active', etype)
 
         # Everything else — response.created / in_progress / queued,
-        # content_part.*, output_text.done, reasoning_summary_part.done,
-        # function_call_arguments.done, reasoning_summary_text.done,
-        # web_search_call.*, … — carries no delta we need.
+        # content_part.*, output_text.done, web_search_call.*, … — carries
+        # no canonical delta we need.
         return out

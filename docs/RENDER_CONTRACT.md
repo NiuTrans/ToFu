@@ -28,6 +28,45 @@ edit; silently enabling connections overrides an owner decision. Specs:
 `tests/request_name_edit_outcomes.test.cjs` and
 `tests/providers/test_provider_request_names_browser.py`.
 
+## Reasoning without a readable summary
+
+**Problem:** a provider can report substantial internal reasoning-token usage
+while returning no readable reasoning text; an absent thinking disclosure made
+that look like reasoning was disabled. **Decision:** the common assistant header
+shows a compact, text-only receipt row, outside historical Process and Thinking
+folds, when readable reasoning is absent but recorded reasoning evidence exists.
+It distinguishes the last returned effort from provider-reported token usage.
+Effort comes only from validated selected-slot resolution receipts, never the
+composer, model catalog or encrypted replay. Turn-level token counts are not
+attributed to one effort setting; explicitly incomplete usage is labelled as a
+lower bound, and legacy last-round fallback counts name that scope.
+
+Completed replies with positive reported reasoning tokens say that the reasoning
+summary is unavailable. Active replies say no readable summary has been received
+yet; failed/interrupted replies never claim successful provider completion.
+Unknown/unreported counts and efforts stay absent rather than becoming zero or
+a default. Malformed, discarded, auxiliary, foreign and provably stale receipts
+cannot supply effort. Unscoped historical receipts are labelled as last recorded,
+not as the currently running request. During a live resumed/regenerated attempt,
+inherited unscoped effort and aggregate usage remain absent until an existing
+receipt explicitly matches the current attempt/task. The resume acknowledgement
+and later unrelated projection revisions are not evidence of a new request.
+Late fields retain the same effort → token count → availability reading order as
+cold reload, without replacing unchanged status spans or answer nodes.
+If readable reasoning arrives, its existing
+safe Markdown, translation and disclosure path remains authoritative and replaces
+the no-summary row. Empty or encrypted reasoning never creates an expandable
+Thinking card. Chinese/English copy and small-screen wrapping share the same
+projection/renderer owners; no reads, timers or durable browser state are added.
+
+**Alternatives rejected:** synthesizing a reasoning explanation fabricates model
+output; treating `thinking=0chars` as zero reasoning conflates text and usage;
+showing the current composer effort misattributes old turns and retries; hiding
+the receipt inside Process keeps the observed-work distinction inaccessible.
+Specs: `tests/visual/test_visual_reasoning_summary.py`, the real app/storage/reload
+journey `tests/e2e/test_e2e_reasoning_receipts.py`, and focused reasoning
+presentation/header tests under `frontend/src/conversation/`.
+
 ## Repaired tool arguments
 
 Problem: a repair badge alone hid which argument correction was applied. Decision: the shared tool-result presenter shows unique repair categories beside the existing badge, with three visible chips and remaining categories in one counted disclosure tooltip. Unknown categories retain their escaped machine name. A failed tool keeps the warning style and never claims a successful fix. Alternatives rejected: duplicating labels across retained renderers or treating argument repair as proof of tool success.

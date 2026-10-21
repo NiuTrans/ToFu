@@ -27,8 +27,9 @@ Profile knobs (``RESPONSES_PROFILES``):
 
   * ``default`` — generic providers (DeepSeek …): keeps ``temperature`` /
     ``top_p``, maps ``max_tokens`` → ``max_output_tokens``, omits
-    ``instructions`` / ``include``, reasoning effort without a summary
-    channel (DeepSeek has reasoning but no summary).
+    ``instructions`` / ``include`` unless a declared extension requires them.
+    Readable summaries opt in only on a selected summary-capable route; native
+    caller summary settings, including null, remain authoritative.
   * ``codex``   — chatgpt.com/backend-api/codex: ``instructions: ''``,
     drops sampling params, ``include: ['reasoning.encrypted_content']``,
     ``reasoning.summary: 'auto'``.
@@ -414,6 +415,9 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
         return legacy if declared is None else declared
 
     replay_enabled = supports('responses_reasoning_replay', legacy_stateful)
+
+    summary_enabled = supports(
+        'responses_reasoning_summary', profile == 'codex' or legacy_public)
     cache_enabled = supports('responses_prompt_cache', legacy_stateful)
     compaction_enabled = supports('responses_compaction')
     breakpoint_mode = str(
@@ -492,9 +496,9 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
     if text_config:
         out['text'] = text_config
 
-    # Reasoning effort. ``summary`` only where the upstream has that
-    # channel (Codex); DeepSeek has reasoning but no summary. Codex is
-    # always a reasoning model — its profile defaults effort to 'medium'.
+    # Effort, readable summary and opaque replay are separate capabilities.
+    # Only a declared/installed summary binding opts in automatically; generic
+    # compatible routes keep omission, while explicit native settings win.
     if body.get('output_config'):
         raise ProtocolConversionError('output_config_unrepresentable')
     native_reasoning = body.get('reasoning', {})
@@ -541,12 +545,21 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
             effort = 'none'
         elif effort in ('max', 'ultra'):
             effort = 'max' if is_gpt_56 else 'xhigh'
-    if effort or native_reasoning or prof['reasoning_summary'] is not None or replay_enabled:
+    if selected is not None:
+        declared_reasoning = selected.get('reasoning') or {}
+        summary_enabled = (
+            summary_enabled
+            and declared_reasoning.get('support') == 'supported'
+            and effort not in ('none', declared_reasoning.get('disabled_effort', 'none'))
+        )
+    elif effort == 'none':
+        summary_enabled = False
+    if effort or native_reasoning or summary_enabled or replay_enabled:
         reasoning: dict = dict(native_reasoning)
         if effort:
             reasoning['effort'] = effort
-        if prof['reasoning_summary'] is not None:
-            reasoning.setdefault('summary', prof['reasoning_summary'])
+        if summary_enabled:
+            reasoning.setdefault('summary', prof['reasoning_summary'] or 'auto')
         if replay_enabled and (selected is not None or is_gpt_56):
             # We resend encrypted reasoning items in stateless mode below, so
             # GPT-5.6 can retain reasoning across the full agent loop.

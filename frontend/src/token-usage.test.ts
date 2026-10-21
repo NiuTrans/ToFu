@@ -75,3 +75,19 @@ describe('nullable token presentation (billing authority: lib/cost.py)', () => {
       expect(normalizeTokenUsage(usage, { inputTokens: invalid }).inputTokens).toBe(60);
     });
 });
+
+describe('provider reasoning-token aliases', () => {
+  it('accepts raw Responses details and canonical zero placeholders without double counting', () => {
+    expect(normalizeTokenUsage({ reasoning_tokens: 0, output_tokens_details: { reasoning_tokens: '2843' } })
+      .thinkingTokens).toBe(2843);
+    expect(normalizeTokenUsage({ reasoning_tokens: 50, thinking_tokens: 50,
+      completion_tokens_details: { reasoning_tokens: 50 }, output_tokens_details: { reasoning_tokens: 50 } })
+      .thinkingTokens).toBe(50);
+  });
+  it.each([undefined, null, '', ' ', false, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1,
+    '<img src=x>', {}, []])('rejects invalid reasoning count %j independently of other usage', invalid => {
+      expect(normalizeTokenUsage({ reasoning_tokens: invalid,
+        completion_tokens_details: { reasoning_tokens: invalid },
+        output_tokens_details: { reasoning_tokens: invalid } }).thinkingTokens).toBeNull();
+    });
+});

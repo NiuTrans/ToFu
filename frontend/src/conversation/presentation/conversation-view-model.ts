@@ -110,6 +110,7 @@ interface LaneOwner {
  * a cross-Turn or live input is deliberately left uncached. */
 interface TurnVmMemoEntry {
   taskTimePresentations: ReadonlyArray<AutomationManagementPresentation> | undefined;
+  reasoningAttempt: object | undefined;
   laneId: string;
   taskId: string;
   commandPending: string;
@@ -378,6 +379,8 @@ function composeSelection(
           .map((childLaneId) => selectLane(childLaneId, nextStack));
         const role = roleFor(turn);
         const taskId = latestAttemptByTurn.get(turn.turnId)?.taskId;
+        const reasoningAttempt = turn.currentAttemptId
+          ? state.attemptsById[turn.currentAttemptId] : undefined;
         const taskTimePresentations = turn.currentAttemptId
           ? presentation.taskTimePresentationsByAttempt?.get(turn.currentAttemptId) : undefined;
         const commandPending = state.commandPending[turn.turnId] ?? null;
@@ -406,6 +409,7 @@ function composeSelection(
               && cached.translationMode === preferredTranslationMode
               && cached.costSignature === (costSignatureForMetadata || '')
               && cached.taskTimePresentations === taskTimePresentations
+              && cached.reasoningAttempt === reasoningAttempt
               && cached.inspector === inspectorEnabled
               && cached.translationActivity === translationActivity) {
             return [cached.vm];
@@ -504,7 +508,7 @@ function composeSelection(
            * projectionRevision footer compare; only the client-side batch
            * fill (historical turns without a stamped cost) needs the
            * presentation-state signature. */
-          costSignatureForMetadata,
+          costSignatureForMetadata, turn, reasoningAttempt,
         );
         if (taskTimePresentations?.length) metadata.taskTimePresentations = taskTimePresentations;
         const turnVm: ConversationTurnViewModel = {
@@ -541,6 +545,7 @@ function composeSelection(
             translationMode: preferredTranslationMode,
             costSignature: costSignatureForMetadata || '',
             taskTimePresentations,
+            reasoningAttempt,
             inspector: inspectorEnabled,
             translationActivity,
             vm: turnVm,
