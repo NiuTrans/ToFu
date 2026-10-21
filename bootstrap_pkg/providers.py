@@ -61,7 +61,7 @@ def _load_provider_templates() -> list:
     seen = {t['key']: i for i, t in enumerate(out)}
     # Same three repo tiers as lib/provider_template_recipes.load_provider_templates:
     # package catalog ← deployment overrides ← release-tiered bundles
-    # (docs/SITE_PACKS.md §4; meituan.json lives under bundles/meituan/).
+    # (docs/SITE_PACKS.md §4; yourprovider.json lives under bundles/yourprovider/).
     template_dirs = [
         os.path.join(BASE_DIR, 'lib', 'model_info', 'data'),
         os.path.join(BASE_DIR, 'static', 'provider_templates'),

@@ -2,7 +2,7 @@
 /* ═══════════════════════════════════════════════════════════════════
    settings/access matrix — per-(credential × wire id) capability grid.
 
-   Some gateways (e.g. Meituan AIGC) give each credential a *different*
+   Some gateways (e.g. YourProvider AIGC) give each credential a *different*
    quota and a *different* set of accessible models. The flat model list
    can't express that: the v2 authority stores the grant as
    ``credential.authorization.models`` (an allow-list of ModelRefs), which
@@ -21,7 +21,7 @@
    keys from the owner-scoped secret store — the browser never sees them —
    and sends a tiny request to EVERY (credential × wire id) pair, granted
    or not: discovering reachable pairs the allow-list does not grant yet
-   is the matrix's whole point on gateways like Meituan. Progress is
+   is the matrix's whole point on gateways like YourProvider. Progress is
    persisted server-side under data/config/probe_cache/, so closing
    Settings (or restarting the server) never loses it — the UI re-attaches
    by provider id and keeps polling. Only "Retest" (force) discards the

@@ -3,7 +3,7 @@ import XCTest
 
 final class ServerUrlTests: XCTestCase {
 
-    private let proxy = "https://5665bc99-279b-4edf-8553-c7b7804c6e02-vscode-zw05.mlp.sankuai.com/proxy/15000/"
+    private let proxy = "https://5665bc99-279b-4edf-8553-c7b7804c6e02-vscode-zw05.mlp.internal.example.com/proxy/15000/"
 
     func test_parse_accepts_absolute_http_urls() {
         XCTAssertNotNil(ServerUrl.parse(proxy))
@@ -15,7 +15,7 @@ final class ServerUrlTests: XCTestCase {
 
     func test_host_origin_loginUrl() {
         let url = ServerUrl.parse(proxy)!
-        XCTAssertEqual(url.host, "5665bc99-279b-4edf-8553-c7b7804c6e02-vscode-zw05.mlp.sankuai.com")
+        XCTAssertEqual(url.host, "5665bc99-279b-4edf-8553-c7b7804c6e02-vscode-zw05.mlp.internal.example.com")
         XCTAssertEqual(url.origin, "https://\(url.host)")
         // The login lives at the code-server ROOT, not under /proxy/15000/.
         XCTAssertEqual(url.loginUrl, "https://\(url.host)/login")

@@ -1,6 +1,6 @@
 """Canned-greeting upstream-artifact detector (pure decision logic).
 
-2026-07-28 06:25→ incident: the sankuai gateway's only Opus 5 request-id
+2026-07-28 06:25→ incident: the example-corp gateway's only Opus 5 request-id
 (``yuju-claude-opus-5-evaDaily``, a daily eval build) began intermittently
 answering ANY request — including mid-tool-work continuations with 90–380k
 cached tokens of context — with the identical 29-char greeting

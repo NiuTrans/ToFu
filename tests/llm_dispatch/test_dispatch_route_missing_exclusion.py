@@ -1,6 +1,6 @@
 """Route-missing HTTP 400 = model-level dispatch exclusion (mtgrjqtuhzi4i9).
 
-The sankuai AIGC gateway answers an unserved model with HTTP 400
+The example-corp AIGC gateway answers an unserved model with HTTP 400
 "不支持的模型类型(model=…)". Before this fix the dispatch layer filed it as
 a generic deterministic 400: pair-exclusion burnt every remaining key of the
 dead model, and — arriving LAST — it masked the preferred model's actionable
@@ -71,16 +71,16 @@ class TestRouteMissingRuntimeSuppression:
 
         first = Slot(
             key_name='k0', api_key='fake-k0', model='moonshotai/kimi-k3',
-            provider_id='sankuai', capabilities={'text'})
+            provider_id='default', capabilities={'text'})
         second = Slot(
             key_name='k1', api_key='fake-k1', model='moonshotai/kimi-k3',
-            provider_id='sankuai', capabilities={'text'})
+            provider_id='default', capabilities={'text'})
         dispatcher = LLMDispatcher()
         dispatcher.slots = [first, second]
         dispatcher._initialized = True
 
         changed = dispatcher.mark_model_route_missing(
-            provider_id='sankuai', model='moonshotai/kimi-k3',
+            provider_id='default', model='moonshotai/kimi-k3',
             error='不支持的模型类型')
 
         assert changed == 2

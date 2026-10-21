@@ -26,14 +26,14 @@ class ProviderPinTest(unittest.TestCase):
         self.d = get_dispatcher()
         self.d.initialize()
         # Inject a fake OPERATOR slot for a popular alias model with a great
-        # (low) score — this is the Meituan-keyed slot that the leak routes
+        # (low) score — this is the YourProvider-keyed slot that the leak routes
         # onto. We give it tiny latency + zero inflight so it ALWAYS wins a
         # naive min(score) race.
         self._operator = Slot(
             key_name='operator_key', api_key='sk-operator',
             model='deepseek-v4-pro', capabilities={'text', 'cheap'},
             base_url='https://gateway.internal/v1',
-            provider_id='sankuai', latency_ema=10.0,
+            provider_id='default', latency_ema=10.0,
         )
         with self.d._lock:
             self.d.slots.append(self._operator)
@@ -68,7 +68,7 @@ class ProviderPinTest(unittest.TestCase):
         self.assertIsNotNone(chosen)
         # The faster operator slot should win the naive race — this is
         # exactly the leak the pin closes.
-        self.assertEqual(chosen.provider_id, 'sankuai')
+        self.assertEqual(chosen.provider_id, 'example-corp')
 
     def test_pinned_only_picks_its_own_provider(self):
         from lib.llm_dispatch.provider_pin import provider_pin

@@ -18,10 +18,10 @@ describe('historical LLM canvas evidence', () => {
     }
   });
   it.each([true, 0, -1, 1.2, Number.MAX_SAFE_INTEGER + 1, '0', 'name', '１２３', '123 error',
-    'javascript:123', 'http://model.sankuai.com/user/modelManage/experimentalTaskDetail/123',
+    'javascript:123', 'http://model.internal.example.com/user/modelManage/experimentalTaskDetail/123',
     base + '123?x=1', base + '123#x', base + '123" onclick="x',
-    base.replace('model.sankuai.com', 'evil.test') + '123',
-    'https://model.sankuai.com@evil.test/123',
+    base.replace('model.internal.example.com', 'evil.test') + '123',
+    'https://model.internal.example.com@evil.test/123',
     policy.origin + '/a/../user/modelManage/experimentalTaskDetail/123',
     policy.origin + '/explore/experimental/task/detail' + '?experimentId=123&x=1',
     policy.origin + '/explore/experimental/task/detail' + '?experimentId=123&experimentId=124',

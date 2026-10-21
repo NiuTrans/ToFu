@@ -312,12 +312,12 @@ def get_preferred_key(conv_id: str, *, route_key: str = '') -> str | None:
         entry = _conv_keys.get(map_key)
         # Deliberately NO fallback to the legacy unscoped ``conv_id`` alias:
         # ``key_name`` is already provider-specific (a CatPaw key is a distinct
-        # key from any sankuai key), but an unscoped alias records only "the
+        # key from any example-corp key), but an unscoped alias records only "the
         # last key that served this conv on ANY provider". Honouring it here
         # let a conversation that once landed on provider X re-pick X's key on
         # a later turn whose preset preferred provider Y — the scoped pick then
         # re-seeded ``(conv, model)`` to X, so the wrong provider became sticky
-        # (conv mtxxaf2l, CatPaw re-picked over preferred sankuai). Affinity is
+        # (conv mtxxaf2l, CatPaw re-picked over preferred example-corp). Affinity is
         # exact-or-absent; a missing scoped entry falls through to score-based
         # selection, which honours the preset's provider rank.
         if not entry:

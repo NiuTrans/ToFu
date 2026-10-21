@@ -15,7 +15,7 @@ CREATOR_PROVIDERS: dict[str, tuple[str, ...]] = {
     'zhipu': ('zai', 'zhipuai'),
     'minimax': ('minimax', 'minimax-cn'),
     'bytedance': ('volcengine',),
-    'meituan': ('longcat',),
+    'yourprovider': ('longcat',),
     'tencent': ('hunyuan', 'tencent'),
     'alibaba': ('alibaba', 'alibaba-cn'),
     'meta': ('meta', 'llama'),
@@ -41,7 +41,7 @@ FAMILY_BRAND_KEYS: dict[str, tuple[str, ...]] = {
     'zhipu': ('zhipu', 'glm', 'zai'),
     'minimax': ('minimax', 'abab', 'hailuo'),
     'bytedance': ('bytedance', 'doubao', 'dola', 'seed'),
-    'meituan': ('meituan', 'longcat'),
+    'yourprovider': ('yourprovider', 'longcat'),
     'tencent': ('tencent', 'hunyuan'),
     'alibaba': ('alibaba', 'qwen', 'tongyi', 'qwq'),
     'meta': ('meta', 'llama'),
@@ -70,7 +70,7 @@ FAMILY_ID_PREFIXES: dict[str, tuple[str, ...]] = {
     'zhipu': ('glm', 'chatglm', 'cog'),
     'minimax': ('minimax', 'abab', 'hailuo'),
     'bytedance': ('doubao', 'seed-', 'dola', 'skylark'),
-    'meituan': ('longcat', 'meituan'),
+    'yourprovider': ('longcat', 'yourprovider'),
     # 'hy' covers the Hunyuan API spellings (hy3, hy4-preview, hy-mt2-7b);
     # no other creator family publishes an id starting with it.
     'tencent': ('hunyuan', 'hy'),

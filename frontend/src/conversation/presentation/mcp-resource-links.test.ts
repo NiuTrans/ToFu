@@ -5,7 +5,7 @@ import original from '../../../../tests/fixtures/llm_canvas_original_fork.json';
 import { escapeHtmlText } from '../../html-safety';
 import { renderMcpResourceLinks } from './mcp-resource-links';
 import { buildToolFallbackCard } from './tool-fallback-presentation';
-const canvas='https://model.sankuai.com/user/modelManage/experimentalTaskDetail/381153';
+const canvas='https://model.internal.example.com/user/modelManage/experimentalTaskDetail/381153';
 
 it('links a backend-projected canvas label once without changing the route',()=>{
   const row={_mcpLinks:{'381153':canvas}};

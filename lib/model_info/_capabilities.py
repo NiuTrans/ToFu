@@ -144,7 +144,7 @@ def gpt_reasoning_effort(effort, thinking_enabled: bool = True,
 # K3 always thinks (thinking cannot be disabled) and takes the TOP-LEVEL
 # ``reasoning_effort`` string: low / high / max (default max) — per the
 # official quickstart (platform.kimi.ai/docs/guide/kimi-k3-quickstart) and
-# verified live against the sankuai gateway 2026-07-24. Sending any
+# verified live against the example-corp gateway 2026-07-24. Sending any
 # temperature other than 1.0 earns an HTTP 400
 # (``invalid temperature: only 1 is allowed for this model``), so K3 bodies
 # must omit temperature entirely.
