@@ -80,13 +80,13 @@ def test_corrupt_newer_payload_blocks_older_undo_on_same_path(project):
     assert _ops.tool_write_file(str(project), 'file', 'middle', task_id='task')['ok']
     assert _ops.tool_write_file(str(project), 'file', 'new', task_id='task')['ok']
     session = Path(mods._get_session_dir(str(project)))
-    rows = json.loads((session / 'modifications.json').read_text())['modifications']
+    rows = mods._load_from_disk(str(session))
     ref = rows[-1]['originalContent']
     (session / 'undo-payloads-v1' / (ref['pack'] + '.pack')).write_text('"corrupted"')
     result = mods.undo_task_modifications(str(project), 'task')
     assert result['undone'] == 0 and result['failed'] == 2
     assert (project / 'file').read_text() == 'new'
-    assert len(json.loads((session / 'modifications.json').read_text())['modifications']) == 2
+    assert len(mods._load_from_disk(str(session))) == 2
 
 
 def test_index_failure_keeps_old_history_and_recovery_retry_is_idempotent(project, monkeypatch):

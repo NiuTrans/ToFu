@@ -1301,7 +1301,7 @@ def _scoped_publish(scope, path, data, original, fingerprint, conv_id, task_id):
             raise IntentError('Nested scoped journal write is not allowed')
         if store.read():
             raise IntentError('Pending write recovery requires the trusted recovery owner; no scoped write ran')
-        state['preparedJournal'] = list(mods._cache_get(session))
+        state['preparedJournal'] = mods._assert_journal_ready(session)
         state['writing'] = True
         record = None
         published = False
