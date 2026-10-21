@@ -12,13 +12,15 @@ import re
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
-CONTRACT = 'tofu.search-agent-diagnostic/v5'
+CONTRACT = 'tofu.search-agent-diagnostic/v6'
 ARMS = ('tofu', 'ddgs')
 DDGS_VERSION = '9.16.0'
 MAX_CALLS = 8
 RESULTS = 6
 SNIPPET_CHARS = 1800
 PAGE_CHARS = 20000
+QUERY_CHARS = 500
+URL_CHARS = 4000
 TOOL_SECONDS = 45
 TASK_SECONDS = 180
 ARTIFACT_BYTES = 16 * 1024 * 1024
@@ -118,10 +120,12 @@ def tasks():
 
 
 def tool_schemas(task_timeout_s=TASK_SECONDS):
-    return [
+    schemas = [
         {'type': 'function', 'function': {
             'name': name, 'description': description,
-            'parameters': {'type': 'object', 'properties': {arg: {'type': 'string'}},
+            'parameters': {'type': 'object', 'properties': {arg: {
+                'type': 'string', 'minLength': 1,
+                'maxLength': QUERY_CHARS if arg == 'query' else URL_CHARS}},
                            'required': [arg], 'additionalProperties': False}},
          # A callback can wait behind another queued operation. The controller
          # bounds actual worker time separately and aborts at the task deadline.
@@ -129,8 +133,15 @@ def tool_schemas(task_timeout_s=TASK_SECONDS):
          'idempotent': True}
         for name, arg, description in (
             ('custom__search', 'query', 'Search public web pages; returns title, URL and snippet.'),
-            ('custom__fetch', 'url', 'Read a URL previously returned by search in this task.'))
+            ('custom__fetch', 'url', 'Read a URL previously returned by search in this task. '
+             'Optionally provide query to select original passages relevant to a question '
+             'from a long source. Gaps mark omitted text; selection does not prove absence. '
+             'Omit query for ordinary page reading.'))
     ]
+    schemas[1]['function']['parameters']['properties']['query'] = {
+        'type': 'string', 'maxLength': QUERY_CHARS,
+        'description': 'Optional question for local source-preserving passage selection.'}
+    return schemas
 
 
 def agent_config():

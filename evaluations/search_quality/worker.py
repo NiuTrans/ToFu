@@ -157,7 +157,8 @@ def operation(request):
         if request['operation'] == 'fetch':
             diag = {}
             with bind_call_config(cfg):
-                body = fetch_page_content(request['url'], max_chars=PAGE_CHARS, timeout=10, diag=diag)
+                body = fetch_page_content(request['url'], max_chars=PAGE_CHARS, timeout=10,
+                                          diag=diag, query=request.get('query'))
             if not body:
                 return {'error': 'fetch_unavailable', 'worker_fetch_reason': diag.get('reason')}
             return {'url': request['url'], 'text': str(body)[:PAGE_CHARS],

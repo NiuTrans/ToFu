@@ -24,6 +24,21 @@ retrieval within that constrained workflow, not the products' full extraction,
 browser, cache or agent capabilities. Each operation starts a fresh process;
 cold startup and owned process cleanup are included in tool wall time.
 
+Contract v6 exposes the package's optional `query` on the common fetch tool.
+Both arms select exact passages through the same tofu-search implementation;
+empty or omitted queries retain ordinary reads. The existing 20,000-character
+output, source limits and deadline remain. Queries are bounded to 500 characters,
+including focused reads; only previously discovered URLs are admitted.
+
+Problem: a URL-only evaluation adapter could not exercise focused reading
+available to production callers. Decision: expose the capability symmetrically
+through the existing worker, preserving gap/truncation observations and all
+quote predicates. Alternatives rejected: selecting query terms inside an
+evaluation-only reader, giving one arm a different fetcher, or changing older
+cohort grades. Schema and worker behavior are covered by
+`tests/evaluations/test_search_focused_reads.py`. New cohorts measure adaptive
+retrieval with a common focused reader, not a causal comparison against v5.
+
 The default command prints a manifest and makes no network/model calls:
 
 ```bash

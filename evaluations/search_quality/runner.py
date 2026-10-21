@@ -21,9 +21,9 @@ from evaluations.application_api import JsonAPI
 from evaluations.programmatic_pilot.native_api import HTTPRuntime
 from lib.project_mod.process_group import ProcessGroupRetirementError, retire_process_group
 from .contracts import (
-    ARMS, ARTIFACT_BYTES, CONTRACT, DDGS_VERSION, MAX_CALLS, PAGE_CHARS, RESULTS,
+    ARMS, ARTIFACT_BYTES, CONTRACT, DDGS_VERSION, MAX_CALLS, PAGE_CHARS, QUERY_CHARS, RESULTS,
     SNIPPET_CHARS, SYSTEM, TASK_SECONDS, TOOL_SECONDS, agent_config, canonical, digest, score,
-    python_tree_digest, task_prompt, tasks, tool_schemas, url_key,
+    URL_CHARS, python_tree_digest, task_prompt, tasks, tool_schemas, url_key,
 )
 
 
@@ -57,13 +57,15 @@ def manifest(root, model, provider, trials, timeout, *, task_pack=None):
             'timeout_seconds': timeout, 'infrastructure_retries': 0,
             'limits': {'tool_calls': MAX_CALLS, 'tool_seconds': TOOL_SECONDS,
                        'results': RESULTS, 'snippet_chars': SNIPPET_CHARS,
-                       'page_chars': PAGE_CHARS, 'artifact_bytes_per_task': ARTIFACT_BYTES},
+                       'page_chars': PAGE_CHARS, 'query_chars': QUERY_CHARS,
+                       'url_chars': URL_CHARS, 'artifact_bytes_per_task': ARTIFACT_BYTES},
             'arms': {'tofu': {'engines': 'default free web', 'fetch_pages': False,
                              'filter_pages': False, 'rerank': True},
                      'ddgs': {'version': DDGS_VERSION, 'backend': 'auto',
                               'request_timeout': 10, 'region': 'task language',
                               'safesearch': 'moderate'}},
-            'common_fetch': 'current tofu-search, search-discovered URLs only',
+            'common_fetch': 'current tofu-search, search-discovered URLs only; optional query '
+                            'uses the same local passage selector in both arms',
             'network': 'one explicit proxy; TLS verified; no direct-path racing',
             'order': 'alternate arm order by task and repetition; sequential fresh workers',
             'seed': 20261021,
@@ -152,9 +154,14 @@ def execute_tool(workers, arm, task, name, arguments, calls, remaining):
     if name not in {'custom__search', 'custom__fetch'}:
         raise ValueError('Tool not admitted')
     field = 'query' if name == 'custom__search' else 'url'
-    if (not isinstance(arguments, dict) or set(arguments) != {field}
+    allowed = {field, 'query'}
+    if (not isinstance(arguments, dict) or field not in arguments
+            or not set(arguments) <= allowed
             or not isinstance(arguments[field], str)
-            or not 1 <= len(arguments[field]) <= (500 if field == 'query' else 4000)):
+            or not 1 <= len(arguments[field]) <= (QUERY_CHARS if field == 'query' else URL_CHARS)):
+        return {'error': 'invalid_arguments'}
+    if field == 'url' and 'query' in arguments and (
+            not isinstance(arguments['query'], str) or len(arguments['query']) > QUERY_CHARS):
         return {'error': 'invalid_arguments'}
     if field == 'url':
         discovered = {url_key(r.get('url', '')) for call in calls
