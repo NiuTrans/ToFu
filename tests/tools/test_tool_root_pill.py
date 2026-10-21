@@ -12,6 +12,8 @@ import pytest
 from lib.project_mod import config
 from lib.tasks_pkg.tool_display import _resolve_tool_root_name
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def two_roots(tmp_path):
@@ -90,6 +92,42 @@ def test_absolute_path_outside_all_roots_falls_back_to_primary(two_roots):
                                    {'reads': [{'path': '/tmp/somewhere/else.py'}]},
                                    conv_id=conv_id)
     assert name == os.path.basename(primary)  # primary fallback unchanged
+
+
+@pytest.mark.parametrize('absolute', [False, True])
+@pytest.mark.parametrize('batch_root,item_root', [
+    ('FDP', None), ('FDP', ''), ('FDP', 'chatui'), ('chatui', 'FDP'),
+])
+def test_edit_batch_announces_inherited_and_overridden_roots(
+        two_roots, absolute, batch_root, item_root):
+    """Raw declarations render before execution fills any inherited paths."""
+    import json
+    from lib.tasks_pkg.tool_display import _build_tool_round_entry
+
+    conv_id, primary, fdp = two_roots
+    roots = {'chatui': primary, 'FDP': fdp}
+
+    def path(root):
+        return (os.path.join(roots[root], 'a.py') if absolute
+                else f'{root}:a.py')
+
+    edit = {'operation': 'replace', 'anchor': 'A', 'content': 'B'}
+    if item_root is not None:
+        edit['path'] = path(item_root) if item_root else ''
+    args = {'path': path(batch_root), 'description': 'update the source',
+            'edits': [edit]}
+    declared = json.dumps(args)
+    number, entry, event = _build_tool_round_entry(
+        'edit_file', args, 'batch-edit', declared, 0, True, conv_id=conv_id)
+
+    assert number == 1
+    assert entry['_toolRoot'] == (item_root or batch_root)
+    assert event['_toolRoot'] == entry['_toolRoot']
+    assert entry['toolName'] == event['toolName'] == 'edit_file'
+    assert entry['query'] != 'edit_file'
+    assert event['query'] == entry['query']
+    assert json.dumps(args) == declared
+    assert entry['toolArgs'] == event['toolArgs'] == declared
 
 
 def test_non_fs_tool_no_pill(two_roots):

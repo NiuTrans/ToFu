@@ -86,3 +86,38 @@ def test_exact_round_keyboard_numeric_first_last_and_bounded_page(
     assert position.evaluate('(node)=>document.activeElement===node')
     page.evaluate('nav.destroy()')
     assert page.locator('#turnNav button').count() == 0
+
+
+@pytest.mark.parametrize('phase', ['read', 'hydrate'])
+@pytest.mark.parametrize('change', ['head', 'switch'])
+def test_jump_invalidation_releases_busy_and_refreshes_current_view(
+        frontend_visual_page, navigation_browser_bundle, tmp_path, phase, change):
+    page = frontend_visual_page
+    page.evaluate("document.body.innerHTML='<main><div id=turnNav></div></main>'")
+    page.add_script_tag(path=str(navigation_browser_bundle))
+    page.evaluate("""({phase,change})=>{
+      window.head=1;window.block=false;window.scrolls=[];window.reads=[];
+      window.state={laneOrder:{main:['loaded']},turnsById:{loaded:{actor:'human',projection:{}}}};
+      const pause=()=>new Promise(resolve=>window.releaseJump=resolve);
+      window.nav=Navigation.createTurnNavigation({host:document.getElementById('turnNav'),
+        translate:key=>key,directoryKey:()=>String(head),scrollToTurn:id=>scrolls.push(id),
+        directory:async(id,offset,limit)=>{
+          reads.push({id,limit});if(block&&limit===1&&phase==='read')await pause();
+          return {conversationId:id,totalRounds:head===1?4:5,activeRound:head===1?4:5,
+            entries:[{turnId:id+'-'+(offset+1),ordinal:offset,actor:'human',roundNumber:offset+1}]};
+        },hydrateRound:async()=>{if(block&&phase==='hydrate')await pause();}});
+      nav.update('a',state);
+    }""", {'phase': phase, 'change': change})
+    page.wait_for_function("document.getElementById('turnNav').getAttribute('aria-busy')==='false'")
+    page.evaluate('block=true')
+    page.locator('[data-direction=previous]').click()
+    page.wait_for_function("typeof releaseJump==='function'")
+    page.evaluate("change=>{head++;nav.update(change==='head'?'a':'b',state);releaseJump();}", change)
+    page.wait_for_function("document.getElementById('turnNav').getAttribute('aria-busy')==='false' && document.querySelector('.turn-nav-readout').textContent==='5 / 5'")
+    assert page.evaluate('scrolls') == []
+    assert page.evaluate('reads.at(-1)') == {'id': 'a' if change == 'head' else 'b', 'limit': 50}
+    page.evaluate('block=false')
+    page.locator('[data-direction=previous]').click()
+    page.wait_for_function('scrolls.length===1')
+    page.screenshot(path=str(tmp_path / f'jump-refresh-{change}-{phase}.png'))
+    page.evaluate('nav.destroy()')

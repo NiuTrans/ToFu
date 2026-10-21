@@ -4723,6 +4723,9 @@
   "settings.requestNameInheritedHintShared": "Rows marked “From connection” come from the shared Connection — {count} other request names use it. Editing overrides for this name only; removing affects them too.",
   "settings.requestNameInheritedShared": "That Connection is shared with {count} other request names, so {names} cannot be removed for this name alone; override the value instead, or change the Connection's headers.",
   "settings.requestNameInheritedOrphan": "The Connection no longer has {names}; reopen Settings and retry.",
+
+  "settings.requestNameSelectorRequired": "This template route requires {names}. Keep the selector, or choose a different request name or Connection.",
+  "settings.requestNameConnectionDisabled": "Connection {name} is disabled. Enable it explicitly in Connections before adding or routing this request name.",
   "settings.requestNamePanelHeadersHint": "Routing headers that select a serving provider, e.g. x-context-provider: kunlun. They override same-named headers on the Connection. Credential headers (Authorization / *key* / *token*) belong on the credential.",
   "settings.requestNameHeaderAdd": "Add header",
   "settings.requestNameHeaderRemove": "Remove this header",

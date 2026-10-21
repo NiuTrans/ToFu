@@ -7,7 +7,8 @@ import pytest
 pytestmark = pytest.mark.visual
 
 
-def test_model_header_wire_edit_delete_and_template_add(browser, live_server, tmp_path):
+@pytest.mark.parametrize('scenario', ['normal', 'required-selector', 'disabled-face'])
+def test_model_header_wire_edit_delete_and_template_add(browser, live_server, tmp_path, scenario):
     from playwright.sync_api import expect
     from tests.model_routing.test_model_routing_contract import _full_document
     from tests.support.model_registration import complete_registration
@@ -19,6 +20,13 @@ def test_model_header_wire_edit_delete_and_template_add(browser, live_server, tm
     document['deployments'] = [row for row in document['deployments'] if row['offering_id'] == 'alpha-a'][:1]
     document['deployments'][0]['wire_model_id'] = 'alpha'
     document = normalize_document(document)
+
+    face_url = 'https://fixture.example/face'
+    if scenario == 'required-selector':
+        document['connections'][0]['extra_headers'] = {'x-selector': 'required'}
+    if scenario == 'disabled-face':
+        document['connections'].append({**document['connections'][0], 'connection_id': 'disabled-face',
+            'base_url': face_url, 'gateway_namespace': 'fixture', 'enabled': False})
     state = {'document': document, 'revision': document['revision'], 'writes': []}
     context = browser.new_context(viewport={'width': 1280, 'height': 1000}, service_workers='block')
     context.add_init_script('localStorage.setItem("claude_client_config", ' + json.dumps(json.dumps({
@@ -40,7 +48,11 @@ def test_model_header_wire_edit_delete_and_template_add(browser, live_server, tm
         if url.path == '/api/v4/providers/templates':
             return route.fulfill(json={'ok': True, 'items': [{'key': 'test-template', 'name': 'Provider A', 'category': 'relay',
                 'base_url': document['connections'][0]['base_url'],
-                'offering_recipes': [{'model_id': 'beta', 'request_ids': ['beta-provider-wire']}]}]})
+                'faces': {'fixture': {'base_url': face_url if scenario == 'disabled-face' else document['connections'][0]['base_url'],
+                    'protocol': 'openai', 'extra_headers': {'x-selector': 'required'}}},
+                'offering_recipes': [{'model_id': 'alpha', 'request_ids': ['alpha', 'face-alias'],
+                    'request_faces': {'alpha': 'fixture', 'face-alias': 'fixture'}},
+                    {'model_id': 'beta', 'request_ids': ['beta-provider-wire']}]}]})
         if url.path == '/api/v4/model-intelligence/aa':
             return route.fulfill(json={'ok': True, 'aa': {'status': 'ok', 'scores': {}}})
         if url.path == '/api/v4/update/check': return route.fulfill(json={'update_available': False})
@@ -61,6 +73,26 @@ def test_model_header_wire_edit_delete_and_template_add(browser, live_server, tm
         if not provider.evaluate('(el) => el.open'): provider.locator('> summary').click()
         expect(provider.locator('.stg-mx-row[data-id="alpha"]')).to_have_count(2)
         wire = provider.locator('.is-alias[data-id="alpha"]')
+
+        if scenario != 'normal':
+            if scenario == 'required-selector':
+                wire.get_by_role('button', name='alpha', exact=True).click()
+                page.locator('.stg-rnp-header-row button').click()
+                page.locator('.stg-rnp-input').first.press('Enter')
+                expect(page.locator('.app-dialog-overlay')).to_be_visible()
+                expect(page.locator('.app-dialog-overlay')).to_contain_text('x-selector')
+                expect(provider.locator('.is-alias[data-id="alpha"] .selector')).to_have_count(1)
+            else:
+                provider.locator('[data-tofu-action*="_addV2Alias"]').first.click()
+                page.locator('.stg-rnp-input').first.fill('face-alias')
+                page.locator('.stg-rnp-input').first.press('Enter')
+                expect(page.locator('.app-dialog-overlay')).to_be_visible()
+                expect(page.locator('.app-dialog-overlay')).to_contain_text('disabled-face')
+                expect(provider.locator('.is-alias[data-id="face-alias"]')).to_have_count(0)
+            page.screenshot(path=str(tmp_path / f'provider-{scenario}.png'))
+            assert not state['writes']
+            assert not errors
+            return
         wire.get_by_role('button', name='alpha', exact=True).click()
         page.locator('.stg-rnp-input').first.fill('provider-alpha')
         page.locator('.stg-rnp-input').first.press('Enter')

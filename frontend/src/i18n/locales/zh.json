@@ -4723,6 +4723,9 @@
   "settings.requestNameInheritedHintShared": "带「继承连接」的请求头来自所在连接，共有 {count} 个其他请求名共用该连接；直接修改可覆盖，删除会影响它们。",
   "settings.requestNameInheritedShared": "该连接还被 {count} 个其他请求名共用，无法只为此请求名删除 {names}；请直接改值，或先调整连接的请求头。",
   "settings.requestNameInheritedOrphan": "连接上已不存在 {names}，请重新打开设置页后再试。",
+
+  "settings.requestNameSelectorRequired": "此模板路由必须携带 {names}。请保留该请求头，或选择其他请求名或连接。",
+  "settings.requestNameConnectionDisabled": "连接 {name} 已停用。请先在连接设置中明确启用，再添加或路由此请求名。",
   "settings.requestNamePanelHeadersHint": "用于选择服务方的路由头，例如 x-context-provider: kunlun。会覆盖同一连接上的同名头；凭证类头（Authorization / *key* / *token*）必须放在凭证里。",
   "settings.requestNameHeaderAdd": "添加请求头",
   "settings.requestNameHeaderRemove": "删除该请求头",
