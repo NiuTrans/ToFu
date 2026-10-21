@@ -52,6 +52,7 @@ CONTRACT = {'contractVersion': 'tofu.tool-result-surfaces/v1',
                                               'failure/continuation '
                                               'semantics.'},
                   'read_tool_artifact': {'modelFormat': 'artifact_query',
+                                         'budgetFormat': 'canonical',
                                          'frontendFormat': 'verbatim',
                                          'reason': 'Compact declared defaults '
                                                    'and render read bodies as '
@@ -61,6 +62,7 @@ CONTRACT = {'contractVersion': 'tofu.tool-result-surfaces/v1',
                                                    'gaps, media and signed '
                                                    'cursors.'},
                   'search_tool_artifact': {'modelFormat': 'artifact_query',
+                                           'budgetFormat': 'canonical',
                                            'frontendFormat': 'verbatim',
                                            'reason': 'Compact declared search '
                                                      'query defaults and '
@@ -139,6 +141,29 @@ CONTRACT = {'contractVersion': 'tofu.tool-result-surfaces/v1',
                                    'sharedFields': ['text',
                                                     'artifactRef',
                                                     'path']},
+ 'artifactProjectionInheritedReferences': {'field': 'artifactRef',
+                                           'containers': {'read_tool_artifact': {'provenance': ['artifactRef',
+                                                                                                'path',
+                                                                                                'segment',
+                                                                                                'start',
+                                                                                                'end']},
+                                                          'search_tool_artifact': {'items': ['artifactRef',
+                                                                                             'path',
+                                                                                             'offset',
+                                                                                             'offsets',
+                                                                                             'text']}},
+                                           'modelHelp': 'Omitted row '
+                                                        'artifactRef inherits '
+                                                        "its page's reference.",
+                                           'help': 'In model views, an omitted '
+                                                   'artifactRef in a '
+                                                   'provenance row or search '
+                                                   "hit inherits that page's "
+                                                   'artifactRef. Different '
+                                                   'sources keep explicit '
+                                                   'references; decoded '
+                                                   'program results keep every '
+                                                   'reference.'},
  'artifactProjectionReadText': {'bodyField': 'content'},
  'errorProjectionText': {'bodyField': 'summary'},
  'textProjection': {'sectionFormat': 'length_labelled_unicode_text',

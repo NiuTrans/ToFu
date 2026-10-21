@@ -1,7 +1,8 @@
 """Model-only native artifact pages: declared omission, never domain filtering.
 
-Canonical/decoded results remain exact. Unknown fields, all source references,
+Canonical/decoded results remain exact. Unknown fields, all source identities,
 coverage/scope, error boundaries, media descriptors and next-page cursors survive.
+Known rows inherit a reference only when it exactly equals their page reference.
 The signed replay cursor stays in canonical evidence; clipped or unknown model
 views retain it inline. Page pagination is independent of model-view clipping.
 Read bodies may use the shared exact text framing when it reduces encoded size.
@@ -38,7 +39,11 @@ def _page(name, value):
             or (value.get('nextCursor') is not None and type(value.get('nextCursor')) is not str)):
         return False
     if name == 'read_tool_artifact':
-        return type(value.get('content')) is str and _integer(value.get('offset'))
+        provenance = value.get('provenance', [])
+        return (type(value.get('content')) is str and _integer(value.get('offset'))
+                and isinstance(provenance, list)
+                and all(isinstance(row, dict) and type(row.get('artifactRef')) is str
+                        for row in provenance))
     return (type(value.get('query')) is str and isinstance(value.get('items'), list)
             and all(isinstance(match, dict) and _integer(match.get('offset'))
                     and type(match.get('text')) is str
@@ -74,6 +79,36 @@ def _compact_matches(matches):
     return result
 
 
+def _compact_references(name, key, rows, parent_ref):
+    """Omit only an equality-proven page reference from declared native rows."""
+    policy = CONTRACT['artifactProjectionInheritedReferences']
+    allowed = policy['containers'].get(name, {}).get(key)
+    if not allowed or not isinstance(rows, list) or not parent_ref:
+        return rows
+    allowed = set(allowed)
+    field = policy['field']
+    result = []
+    for row in rows:
+        known = (isinstance(row, dict) and row.get(field) == parent_ref
+                 and set(row) <= allowed)
+        if known and key == 'provenance':
+            known = (isinstance(row.get('path'), list)
+                     and isinstance(row.get('segment'), list)
+                     and all(_integer(part) for part in row['segment'])
+                     and _integer(row.get('start')) and _integer(row.get('end')))
+        elif known:
+            path = row.get('path', [])
+            known = (type(row.get('text')) is str and isinstance(path, list)
+                     and all(type(part) is str for part in path)
+                     and ((_integer(row.get('offset')) and 'offsets' not in row)
+                          or ('offset' not in row and isinstance(row.get('offsets'), list)
+                              and bool(row['offsets'])
+                              and all(_integer(offset) for offset in row['offsets']))))
+        result.append({key: value for key, value in row.items() if key != field}
+                      if known else row)
+    return result
+
+
 def _compact_page(name, value):
     defaults = CONTRACT['artifactProjectionDefaults']
     replay = CONTRACT['artifactProjectionReplayCursor']
@@ -93,8 +128,9 @@ def _compact_page(name, value):
             # truncation. Preserve all explicit gaps/continuations on partials.
             if not partial:
                 continue
-        result[key] = (_compact_matches(item)
-                       if name == 'search_tool_artifact' and key == 'items' else item)
+        projected = (_compact_matches(item)
+                     if name == 'search_tool_artifact' and key == 'items' else item)
+        result[key] = _compact_references(name, key, projected, value['artifactRef'])
     return result
 
 
@@ -136,8 +172,8 @@ def project_artifact_result(tool_name: str, text: str) -> str | None:
         if not pages or not all(isinstance(page, dict) and _integer(page.get('index'))
                                 and (_page(tool_name, page) or _error(page)) for page in pages):
             return None
-        # No recursive filtering or ref hoisting: a match can identify another
-        # retained child, even when its parent and adjacent request share a ref.
+        # Each page proves inheritance against its own reference. Another
+        # retained child always keeps its explicit identity; no recursive walk.
         projected = {**value, 'items': [_compact_page(tool_name, page) if _page(tool_name, page) else page
                                       for page in pages]}
         return _render(tool_name, projected, batch=True)

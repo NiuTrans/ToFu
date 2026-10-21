@@ -45,14 +45,9 @@ def test_owned_read_body_reaches_dispatch_and_remains_recoverable(
         internal_result_sink=SimpleNamespace(capture=lambda _id, value: captured.append(value)))
 
     text = messages[0]['content']
-    if mode == 'v2':
-        assert BODY in text
-        view = tool_result_observation(text, row['toolResultEvidence'])['summary'] if batch else text
-        result = decode_read_view(view)
-    else:
-        # Legacy mode explicitly retains its original producer JSON contract.
-        result = json.loads(text)
-        assert json.loads(captured[0].text()) == result
+    assert BODY in text
+    view = tool_result_observation(text, row['toolResultEvidence'])['summary'] if batch else text
+    result = decode_read_view(view)
     page = result['items'][0] if batch else result
     assert page['content'] == BODY and page['artifactRef'] == reference
     assert row['status'] == ('error' if batch else 'done')
@@ -63,17 +58,13 @@ def test_owned_read_body_reaches_dispatch_and_remains_recoverable(
         assert result['items'][1]['error']['code'] == 'artifact_unavailable'
 
     evidence = row.get('toolResultEvidence')
-    if mode == 'v2':
-        assert evidence['viewCoverage'] == 'complete' and evidence['retentionCoverage'] == 'complete'
+    assert evidence['viewCoverage'] == 'complete' and evidence['retentionCoverage'] == 'complete'
     storage.stop()
     storage.start()
-    recovery_ref = evidence['artifactRef'] if mode == 'v2' else reference
-    if mode == 'v2':
-        retained = repo.read_range(user_id=1, artifact_ref=recovery_ref, limit=65536)
-        original = json.loads(retained['content'])
-        retained_page = original['items'][0] if batch else original
-    else:
-        retained_page = page
+    recovery_ref = evidence['artifactRef']
+    retained = repo.read_range(user_id=1, artifact_ref=recovery_ref, limit=65536)
+    original = json.loads(retained['content'])
+    retained_page = original['items'][0] if batch else original
     assert retained_page['content'] == BODY and retained_page['resumeCursor'].startswith('trq3.')
     replay = repo.read_range(user_id=1, artifact_ref=reference, offset=retained_page['resumeCursor'], limit=65536)
     assert replay['content'] == BODY

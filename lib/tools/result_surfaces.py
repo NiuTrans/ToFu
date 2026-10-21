@@ -22,6 +22,11 @@ def result_policy(tool_name):
     return dict(CONTRACT['toolPolicies'].get(tool_name, CONTRACT['defaultPolicy']))
 
 
+def requires_canonical_budget(tool_name):
+    """Some model projections require canonical retention in every wrapper mode."""
+    return result_policy(tool_name).get('budgetFormat') == 'canonical'
+
+
 def _text(value):
     if isinstance(value, str):
         return value

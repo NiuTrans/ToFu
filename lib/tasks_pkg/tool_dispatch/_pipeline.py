@@ -46,6 +46,7 @@ from lib.tools.result_projection import (
     TOOL_RESULT_PRODUCER_METADATA_KEY,
     TOOL_RESULT_PROJECTION_ITEMS_KEY,
 )
+from lib.tools.result_surfaces import requires_canonical_budget
 
 from lib.tasks_pkg.tool_dispatch._approval import _handle_approval
 from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch, has_prefetch, remap_prefetch
@@ -797,7 +798,8 @@ def _settle_tool_result(
 
     # Layer 0: Budget tool results before they enter context. V2 applies one
     # bounded envelope contract to every tool; legacy mode retains its older
-    # per-tool exemptions. Oversized batched read_files results use the
+    # per-tool exemptions. Declared canonical projections retain their sources
+    # and use the shared V2 budget in either mode. Batched read_files results use the
     # producer sidecar above so each requested file remains represented.
     # Layer 1 (micro_compact) will further compress these once
     # they fall outside the hot tail.
@@ -807,7 +809,7 @@ def _settle_tool_result(
         from lib.context_experiment_flags import normalize_context_experiment_flags
         _result_contract = normalize_context_experiment_flags(
             (task or {}).get('config') or {})['tools']['resultEnvelope']
-        if _result_contract == 'v2':
+        if _result_contract == 'v2' or requires_canonical_budget(fn_name):
             _uses_v2_result_contract = True
             from lib.tasks_pkg.manager import task_user_id
             tool_content = budget_tool_result_v2(
@@ -1196,6 +1198,10 @@ def _apply_round_aggregate_budget(
     from lib.context_experiment_flags import normalize_context_experiment_flags
     result_contract = normalize_context_experiment_flags(
         (task or {}).get('config') or {})['tools']['resultEnvelope']
+    # A declared lossless model view needs the same retained originals during
+    # round pressure as during single-call fitting, including mixed rounds.
+    if any(requires_canonical_budget(name) for _, _, name in round_results):
+        result_contract = 'v2'
     aggregate_results = {
         tool_call_id: (
             pending_envelopes.get(tool_call_id, content)
