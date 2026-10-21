@@ -355,21 +355,35 @@ def _source_recovery(
     )
 
 
-def _render_budget_envelope(envelope, finalize_view=None):
-    """Apply already-known host facts before counting any model projection.
+def _canonical_view_facts(value, canonical):
+    """Project final host facts; existing display metadata cannot override them."""
+    if canonical.execution_status != 'ok':
+        value['status'] = 'error'
+        value.pop('programInput', None)
+    value.update(resultId=canonical.result_id, executionStatus=canonical.execution_status,
+                 sourceCoverage=canonical.source_coverage,
+                 retentionCoverage=value.get('retentionCoverage',
+                     'unavailable' if value.get('truncated') and not value.get('artifactRef')
+                     else canonical.retention_coverage),
+                 viewCoverage='partial' if value.get('truncated') else 'complete')
+    return value
 
-    The finalizer is pure: retention happens outside the fitting search. It
-    carries canonical outcomes without interpreting application JSON as policy.
-    """
+
+def _render_budget_value(value, canonical=None):
+    """Serialize and measure one finalized view without storage or other effects."""
     from lib.tools.result_envelope import _model_projection
     from lib.tools.result_value import TrustedResultText, capture_result
-    value = envelope.to_dict()
-    if finalize_view is not None:
-        value = finalize_view(value)
     value['visibleBytes'] = len(_model_projection(value)[0].encode('utf-8'))
     text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-    canonical = capture_result(text, execution_status='error') if value.get('status') == 'error' else None
+    if canonical is None and value.get('status') == 'error':
+        canonical = capture_result(text, execution_status='error')
     return TrustedResultText(text, canonical=canonical, envelope=True)
+
+
+def _render_budget_envelope(envelope, finalize_view=None):
+    """Apply pure host finalization before counting any model projection."""
+    value = envelope.to_dict()
+    return _render_budget_value(finalize_view(value) if finalize_view is not None else value)
 
 
 def _materialize_envelope(*, status: str, summary: str, items: list[Any],
@@ -651,6 +665,46 @@ def _replay_ref_note(sources, *, limit: int = 4) -> str:
     return f'\n[Image retained — view again with inspect_image({quoted})]'
 
 
+def _reconcile_existing_result(content, *, user_id, source_coverage=None):
+    """Bind an earlier trusted view to final host facts before every fast path.
+
+    A verdict/coverage override invalidates the old canonical manifest. Publish
+    its replacement once; a failed publication clears the stale advertised ref
+    while retaining the original source in the runtime capture. The returned
+    attempt flag prevents a second write during this projection's fitting pass.
+    """
+    from lib.tools.result_value import CapturedToolResult, capture_result, TrustedResultText
+    if not isinstance(content.canonical, CapturedToolResult) and source_coverage is None:
+        return content, False
+    canonical = capture_result(content, source_coverage=source_coverage)
+    old = json.loads(content)
+    prior_execution = old.get('executionStatus', 'error' if old.get('status') == 'error' else 'ok')
+    retained_facts_changed = (
+        prior_execution != canonical.execution_status
+        or old.get('resultId', canonical.result_id) != canonical.result_id
+        or old.get('sourceCoverage', canonical.source_coverage) != canonical.source_coverage)
+    failed_view_changed = canonical.execution_status != 'ok' and (
+        old.get('status') != 'error' or 'programInput' in old)
+    attempted = bool((old.get('artifactRef') and retained_facts_changed)
+                     or (not old.get('artifactRef') and canonical.requires_reference()
+                         and (retained_facts_changed or old.get('retentionCoverage') != 'unavailable')))
+    if not (retained_facts_changed or failed_view_changed or attempted
+            or canonical is not content.canonical):
+        return content, False
+    value = _canonical_view_facts(dict(old), canonical)
+    if attempted:
+        carrier = TrustedResultText(content, canonical=canonical, envelope=True)
+        reference = _store_tool_result_artifact(carrier, user_id=user_id,
+            observed_at_ms=int((old.get('freshness') or {}).get('observedAtMs') or 0))
+        value.update(artifactRef=reference, cursor='0' if reference else '',
+                     retentionCoverage=canonical.retention_coverage if reference else 'unavailable')
+        if not reference:
+            value['summary'] = '[Canonical retention unavailable.]\n' + str(value.get('summary') or '')
+    if value == old and canonical is content.canonical:
+        return content, attempted
+    return _render_budget_value(value, canonical), attempted
+
+
 def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
     from lib.tools.result_value import capture_result, TrustedResultText, persist_result
     from lib.tools.result_envelope import ToolResultProgramInputV2, with_program_input
@@ -661,6 +715,10 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
             # The pipeline revalidates publication on each occurrence; an
             # absent current handle must withdraw a cached advertisement.
             content = with_program_input(content, program_input)
+        metadata = kwargs.get('producer_metadata') or {}
+        content, retention_attempted = _reconcile_existing_result(
+            content, user_id=user_id,
+            source_coverage='partial' if metadata.get('truncated') else metadata.get('sourceCoverage'))
         policy = _normalized_recovery_policy(kwargs.get('recovery_policy', 'artifact'))
         limit = SOURCE_TOOL_RESULT_V2_MAX_TOKENS if policy == 'source' else TOOL_RESULT_V2_MAX_TOKENS
         if _model_result_tokens(content, kwargs.get('model', '')) <= limit:
@@ -673,13 +731,14 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
         if not artifact_ref:
             # The old view may have been complete inline. First loss at a
             # smaller budget must publish its source, never just clip a view.
-            if policy == 'artifact':
+            if policy == 'artifact' and not retention_attempted:
                 artifact_ref = _store_tool_result_artifact(
                     content, user_id=user_id,
                     observed_at_ms=int(old.get('observedAtMs') or 0))
             if not artifact_ref:
                 retention = 'unavailable'
-                summary = '[Canonical retention unavailable.]\n' + summary
+                if not retention_attempted:
+                    summary = '[Canonical retention unavailable.]\n' + summary
         from lib.tools.result_envelope import tool_result_error
         retained_error = tool_result_error(content)
         failed_execution = canonical.execution_status != 'ok' or old.get('status') == 'error'
@@ -688,15 +747,13 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
             if failed_execution:
                 value['status'] = 'error'
                 value['error'] = old.get('error')
-            for key in ('freshness', 'recovery', 'programInput', 'resultId',
-                        'executionStatus', 'sourceCoverage'):
+            for key in ('freshness', 'recovery', 'programInput'):
                 if key in old:
                     value[key] = old[key]
-            value['viewCoverage'] = 'partial'
             value['retentionCoverage'] = retention
             if artifact_ref:
                 value['cursor'] = '0'
-            return value
+            return _canonical_view_facts(value, canonical)
 
         view = _materialize_envelope(
             status=('partial' if old.get('status') == 'error' and retained_error is None
@@ -761,13 +818,7 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
             value['status'] = 'error'
         elif isinstance(program_input, ToolResultProgramInputV2):
             value['programInput'] = program_input.to_dict()
-        value.update(resultId=canonical.result_id, executionStatus=canonical.execution_status,
-                     sourceCoverage=canonical.source_coverage,
-                     retentionCoverage=value.get('retentionCoverage',
-                         'unavailable' if value.get('truncated') and not value.get('artifactRef')
-                         else canonical.retention_coverage),
-                     viewCoverage='partial' if value.get('truncated') else 'complete')
-        return value
+        return _canonical_view_facts(value, canonical)
 
     view = _budget_tool_result_view_v2(
         tool_name, source, user_id=user_id, error=error,
@@ -1043,6 +1094,14 @@ def enforce_round_aggregate_budget_v2(
     """
     limit = (ROUND_TOOL_RESULT_V2_MAX_TOKENS if token_budget is None
              else max(1, int(token_budget)))
+    from lib.tools.result_value import CapturedToolResult, TrustedResultText
+    retention_attempted = set()
+    for tc_id, (content, tool_name, tool_use_id) in tool_results.items():
+        if isinstance(content, TrustedResultText) and content.envelope:
+            content, attempted = _reconcile_existing_result(content, user_id=user_id)
+            tool_results[tc_id] = (content, tool_name, tool_use_id)
+            if attempted:
+                retention_attempted.add(tc_id)
     total = sum(_model_result_tokens(content, model)
                 for content, _, _ in tool_results.values()
                 if isinstance(content, str))
@@ -1065,10 +1124,12 @@ def enforce_round_aggregate_budget_v2(
         if not (isinstance(content, TrustedResultText) and content.envelope):
             value = {}  # Application JSON has no recovery/identity authority.
         from lib.tools.result_envelope import tool_result_error
-        retained_error = tool_result_error(value)
-        failed_execution = isinstance(value, dict) and (
+        canonical = getattr(content, 'canonical', None)
+        canonical = canonical if isinstance(canonical, CapturedToolResult) else None
+        failed_execution = (canonical is not None and canonical.execution_status != 'ok') or (
             value.get("status") == "error"
             or value.get("executionStatus") not in (None, "ok", "success"))
+        retained_error = tool_result_error(content) if failed_execution else tool_result_error(value)
         declared = ((recovery_by_call_id or {}).get(tc_id) or {})
         existing_recovery = (value.get("recovery")
                              if isinstance(value, dict) else None)
@@ -1095,7 +1156,7 @@ def enforce_round_aggregate_budget_v2(
         artifact_ref = (
             str(value.get("artifactRef") or "")
             if isinstance(value, dict) and recovery_policy == "artifact" else "")
-        if not artifact_ref and recovery_policy == "artifact":
+        if not artifact_ref and recovery_policy == "artifact" and tc_id not in retention_attempted:
             artifact_ref = _store_tool_result_artifact(
                 content, user_id=user_id, observed_at_ms=observed_at_ms)
         if require_retention and not artifact_ref:
@@ -1185,7 +1246,8 @@ def enforce_round_aggregate_budget_v2(
                 reduced_value['retentionCoverage'] = 'unavailable'
             if failed_execution:
                 reduced_value['status'] = 'error'
-            return reduced_value
+            return (_canonical_view_facts(reduced_value, canonical)
+                    if canonical is not None else reduced_value)
 
         if is_file_read_projection(source_items):
             reduced = _materialize_file_read_envelope(

@@ -396,6 +396,24 @@ failed file identities, original recovery/program references, persistence
 failure, real pipeline delivery and original-source readback after SQLite and
 TofuDB restart.
 
+**Canonical verdict handoff.** Problem: an already-budgeted envelope could
+return its earlier success view after host settlement had rejected, cancelled
+or failed the occurrence. Its old artifact could still describe success, and
+round reduction could miss a failure carried by an unwrapped canonical result.
+Decision: reconcile final canonical facts before single-result and round fast
+paths, then fit the corrected view. Preserve producer error classification and
+explicit recovery; withdraw program-input advertisements from failed results.
+A changed verdict or source coverage republishes an existing canonical reference
+once. Publication failure clears the stale advertisement and reports unavailable
+retention while the original capture and historical artifact remain intact.
+An unchanged envelope keeps its bytes and identity without storage acquisition.
+Alternatives rejected: patching only the model message leaves replay evidence
+inconsistent; mutating the original manifest rewrites history; synthesizing an
+error code or source retry invents recovery policy. Verify
+`tests/tools/test_canonical_envelope_verdict.py` and
+`tests/tools/test_canonical_envelope_verdict_backends.py`, including failed
+publication, actual dispatch/cache recovery and both storage authorities.
+
 **Problem.** A second reduction under aggregate pressure can erase a typed
 failure or its compact cause identifiers after single-result budgeting retained
 them. Generic overflow advice can also recommend repeating a completed operation,
