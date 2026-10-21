@@ -91,9 +91,43 @@ def _mk_deadline_playwright(budget_blown):
     return _wrapped
 
 
-@with_bound_optional_providers
 def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
-                       deadline_secs=None, diag=None):
+                       deadline_secs=None, diag=None, *, query=None):
+    """Read a source, optionally selecting exact passages for a question.
+
+    A nonempty ``query`` selects from the complete received source within
+    ``max_chars`` using the shared lexical passage owner. The raw fetch keeps
+    its byte, extraction, PDF, deadline and access policies. It bypasses the
+    preview cache so an old prefix cannot masquerade as complete evidence;
+    selected passages never replace raw cache entries. Gaps are explicit and
+    omitted material is not evidence of absence. ``diag['truncated']`` also
+    indicates selection loss. No model call or second fetch is added.
+
+    Empty queries retain ordinary fetching. ``max_chars=0`` always requests
+    the whole received source, including when a query is supplied. See
+    ``_fetch_page_content`` for raw extraction and failure diagnostics.
+    """
+    if query is not None and not isinstance(query, str):
+        raise TypeError('query must be a string or None')
+    if not query or not query.strip() or max_chars == 0:
+        return _fetch_page_content(url, max_chars, pdf_max_chars, timeout,
+                                   deadline_secs, diag)
+    limit = get_config().fetch_max_chars_search if max_chars is None else max_chars
+    if limit < 0:
+        raise ValueError('max_chars must be nonnegative for a focused read')
+    source = _fetch_page_content(url, 0, pdf_max_chars, timeout, deadline_secs, diag)
+    if not source or limit == 0:
+        return source
+    from tofu_search.passages import select_relevant_passages
+    excerpt = select_relevant_passages(source, query, limit)
+    if diag is not None and len(excerpt) < len(source):
+        diag['truncated'] = True
+    return excerpt
+
+
+@with_bound_optional_providers
+def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
+                        deadline_secs=None, diag=None):
     """Fetch ``url`` and return extracted text, or ``None`` on failure.
 
     ``max_chars=0`` requests the entire extracted source within the existing

@@ -185,13 +185,15 @@ def search(query: str, *, max_results: int | None = None,
 
 
 def fetch_url(url: str, *, max_chars: int | None = None,
-              timeout: int | None = None) -> str | None:
+              timeout: int | None = None, query: str | None = None) -> str | None:
     """Fetch and extract text content from a single URL.
 
     Args:
         url: URL to fetch.
         max_chars: Max characters of extracted text. Default: 200,000.
         timeout: Request timeout in seconds. Default: 15.
+        query: Optional question for source-preserving passage selection.
+               Empty keeps ordinary reading; max_chars=0 keeps the full source.
 
     Returns:
         Extracted text content string, or None if fetch failed.
@@ -205,7 +207,7 @@ def fetch_url(url: str, *, max_chars: int | None = None,
     cfg = get_config()
     if max_chars is None:
         max_chars = cfg.fetch_max_chars_direct
-    return fetch_page_content(url, max_chars=max_chars, timeout=timeout)
+    return fetch_page_content(url, max_chars=max_chars, timeout=timeout, query=query)
 
 
 def get_playwright_pool():

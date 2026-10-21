@@ -4,12 +4,12 @@ bounded model pass, so a huge page does not have to enter the conversation.
 
 Fail-soft by contract: the caller owns the raw page and falls back to it —
 this module raises, the handler degrades, the fetched content is never lost.
+Passage matching is owned by tofu-search; see its docs/relevance-quality.md.
 """
 
 from __future__ import annotations
 
 import json
-import re
 
 from lib.log import get_logger
 from lib.search.search_extract_contract import EXTRACTION_SCHEMA, project_extraction
@@ -24,54 +24,23 @@ _EXTRACT_MAX_TOKENS = 1500
 #: windows enter the one model pass. The raw source remains artifact-readable.
 _MAX_PAGE_EXCERPT_CHARS = 48_000
 _EXTRACT_WINDOW_CHARS = 6_000
-_EXTRACT_MAX_WINDOWS = 7
-_STOP_WORDS = frozenset({'the', 'and', 'for', 'from', 'with', 'this', 'that',
-                         'return', 'list', 'model', 'also', 'need', 'what',
-                         'object', 'raw', 'json', 'field', 'fields'})
 
 
 def _evidence_excerpt(question: str, content: str) -> tuple[str, bool]:
     """Select evidence across the entire received source without model calls.
 
-    This is lexical retrieval, not proof of absence. Always retain the start
-    for context; allocate remaining bounded windows to matching positions,
-    then the end when no match was found. Give the model offsets and an
-    explicit non-exhaustive warning so it cannot claim to have read it all.
+    The package passage owner supplies the same multilingual and technical
+    matching as ranking and focused reads. Retain source identity; on a
+    lexical miss keep both edges. The caller warns that selected windows are
+    non-exhaustive; original content remains available for quote validation.
     """
     if len(content) <= _MAX_PAGE_EXCERPT_CHARS:
         return content, True
-    terms = [term.lower() for term in re.findall(r'[\w.-]{4,80}', question)
-             if term.lower() not in _STOP_WORDS
-             and (len(term) >= 5 or any(char.isdigit() for char in term))]
-    terms = list(dict.fromkeys(terms[:32]))
-    needle = content.lower()
-    positions = []
-    for term in terms:
-        start = 0
-        for _ in range(64):
-            hit = needle.find(term, start)
-            if hit < 0: break
-            positions.append(hit)
-            start = hit + len(term)
-    # Prefer windows supported by multiple distinct query words, not merely
-    # the same word repeated in boilerplate. For long API JSON arrays, this
-    # reaches entries well past the first 48k chars.
-    starts = {0}
-    for position in sorted(positions, key=lambda pos: -sum(
-            term in needle[max(0, pos - 300):pos + _EXTRACT_WINDOW_CHARS]
-            for term in terms)):
-        candidate = max(0, position - 400)
-        if all(abs(candidate - prior) >= _EXTRACT_WINDOW_CHARS // 2
-               for prior in starts):
-            starts.add(candidate)
-        if len(starts) >= _EXTRACT_MAX_WINDOWS: break
-    if len(starts) == 1:
-        starts.add(max(0, len(content) - _EXTRACT_WINDOW_CHARS))
-    chunks = [f'[source chars {start}-{min(start + _EXTRACT_WINDOW_CHARS, len(content))}]\n'
-              + content[start:start + _EXTRACT_WINDOW_CHARS]
-              for start in sorted(starts)]
-    excerpt = '\n\n'.join(chunks)
-    return excerpt[:_MAX_PAGE_EXCERPT_CHARS], False
+    from tofu_search.passages import select_relevant_passages
+    return select_relevant_passages(
+        content, question, _MAX_PAGE_EXCERPT_CHARS,
+        chunk_chars=_EXTRACT_WINDOW_CHARS, include_lead=True,
+        fallback_edges=True), False
 
 
 def dispatch_stream(*args, **kwargs):

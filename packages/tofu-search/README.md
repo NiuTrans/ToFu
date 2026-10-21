@@ -87,6 +87,14 @@ stays dependency-free when used standalone.
   raw response data capped at 64 characters, not an instruction or replay
   permission. The fetch-owned fields are cleared at the next call. Consumers
   can explain an unavailable source without downloading it again as a file.
+- **Focused page reads**: pass `query` to `fetch_url`, `fetch_page_content`, or
+  MCP `fetch_page` to select original passages from a long source within
+  `max_chars`. This is local lexical selection, with explicit gaps and no
+  model call. Empty queries keep ordinary reading; Python `max_chars=0`
+  retains the whole received source. Focused reads bypass the preview cache,
+  which may hold only a prefix, so they can incur a new bounded fetch even
+  when an ordinary read would hit that cache. Omitted text does not prove
+  absence. See [evidence selection](docs/relevance-quality.md#focused-page-reads).
 - **Citation verification**: check a bibliography for hallucinated references
   against CrossRef / arXiv / Semantic Scholar, with zero LLM calls.
 - **Site readers**: pluggable per-domain handlers that read a site through its

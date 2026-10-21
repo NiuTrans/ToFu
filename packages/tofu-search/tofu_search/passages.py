@@ -74,6 +74,13 @@ def _render(spans: list[tuple[int, int]], text: str) -> str:
     return _GAP.join(text[start:end] for start, end in _merge_spans(spans, text))
 
 
+def _fallback_excerpt(text: str, max_chars: int, chunk_chars: int, edges: bool) -> str:
+    if not edges or max_chars < len(_GAP) + 2:
+        return text[:max_chars].rstrip()
+    edge_chars = min(max(80, chunk_chars), (max_chars - len(_GAP)) // 2)
+    return _render([(0, edge_chars), (len(text) - edge_chars, len(text))], text).rstrip()
+
+
 def select_relevant_passages(
     text: str,
     query: str,
@@ -81,6 +88,7 @@ def select_relevant_passages(
     *,
     chunk_chars: int = 1_200,
     include_lead: bool = False,
+    fallback_edges: bool = False,
 ) -> str:
     """Pack diverse query evidence into a hard character budget, in source order.
 
@@ -89,7 +97,9 @@ def select_relevant_passages(
     budget. Chosen spans retain original text and explicit gap markers.
     ``include_lead`` reserves at most one third for page identity (login/error
     detection), leaving room for relevant evidence. With no lexical evidence,
-    return the lead: a lexical miss is not proof of irrelevance.
+    return the lead: a lexical miss is not proof of irrelevance. Callers that
+    need source identity and trailing context can set ``fallback_edges`` to
+    retain up to one chunk from each edge instead, within the same budget.
     """
     if not text or max_chars <= 0:
         return ''
@@ -99,7 +109,7 @@ def select_relevant_passages(
     query_tokens = tokenize(query_subject(query))
     query_terms = set(query_tokens)
     if not query_terms:
-        return body[:max_chars].rstrip()
+        return _fallback_excerpt(body, max_chars, chunk_chars, fallback_edges)
 
     # Leave space for a second aspect even when the output budget is smaller
     # than the normal scoring window.
@@ -128,7 +138,7 @@ def select_relevant_passages(
         score = coverage * 8 + density * 12 + phrase_match * 2 + heading_hits * 0.25
         candidates.append((score, idx, hits, set(counts)))
     if not candidates:
-        return body[:max_chars].rstrip()
+        return _fallback_excerpt(body, max_chars, chunk_chars, fallback_edges)
 
     chosen: list[tuple[int, int]] = []
     covered: set[str] = set()

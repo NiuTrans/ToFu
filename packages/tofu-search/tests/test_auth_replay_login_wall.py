@@ -28,6 +28,8 @@ value is not the value the page transmits (its JS re-assembles the ticket), so
 the browser extension (or the site's API) is the only viable path.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from tofu_search.fetch.utils import _looks_like_login_wall
@@ -86,58 +88,60 @@ def test_empty_is_not_a_wall():
 
 # ── The seam: the wall must not be returned as success ──
 
-def test_core_checks_the_wall_before_returning_auth_text():
-    """Source-level: the auth-replay result is content-judged, not truth-tested.
+@pytest.fixture
+def auth_path(monkeypatch):
+    """Exercise the public pipeline with only external identities stubbed."""
+    from tofu_search.fetch import core, utils
 
-    Guarding at source level because driving the whole authenticated path
-    offline would require faking Playwright; what must not regress is the
-    ORDER — the wall check has to sit between the replay and its `return`.
-    """
-    import inspect
+    calls = []
+    source = {'domain': 'example.com', 'cookies': [{'name': 'session', 'value': 'test'}]}
+    responses = {'browser': None, 'replay': REAL_WALL}
 
-    from tofu_search.fetch import core
-    src = inspect.getsource(core.fetch_page_content)
+    def browser(*_args, **kwargs):
+        calls.append(('browser', kwargs['reason']))
+        return responses['browser']
 
-    replay = src.find('_try_authenticated_fetch(')
-    assert replay > 0, 'the authenticated replay call vanished'
-    wall_check = src.find('_looks_like_login_wall', replay)
-    assert wall_check > replay, (
-        'the replay result must be checked for a login wall')
-    clean_return = src.find('return text', wall_check)
-    assert clean_return > wall_check, (
-        'the wall check must PRECEDE the clean-text return inside the _replay '
-        'closure, otherwise the wall is returned as content and the browser '
-        'escalation is unreachable')
-    consumed = src.find('_replay()', clean_return)
-    assert consumed > clean_return, (
-        'the success path must consume the wall-judging _replay() closure, '
-        'never the raw replay call')
+    def replay(*_args, **_kwargs):
+        calls.append(('replay', None))
+        return responses['replay']
 
+    def anonymous(*_args, **_kwargs):
+        calls.append(('anonymous', None))
+        raise AssertionError('An unrescued login wall must stop anonymous fetching')
 
-def test_browser_is_tried_before_the_cookie_replay():
-    """0.7.0: the live browser session is the FIRST identity for auth-source
-    domains (native signing, same IP/fingerprint); the stored-cookie replay —
-    the classic account risk-control trigger — is only the fallback. Pin the
-    ORDER at source level."""
-    import inspect
-
-    from tofu_search.fetch import core
-    src = inspect.getsource(core.fetch_page_content)
-    browser_pos = src.find('auth_source_browser_first')
-    replay_pos = src.find('_try_authenticated_fetch(')
-    assert browser_pos > 0, 'the browser-first escalation for auth domains vanished'
-    assert replay_pos > 0, 'the authenticated replay call vanished'
-    assert browser_pos < replay_pos, (
-        'the live browser session must be tried BEFORE the stored-cookie replay')
+    monkeypatch.setattr(core, '_fetch_cache', utils._FetchCache())
+    monkeypatch.setattr(core, '_get_reader', lambda _url: None)
+    monkeypatch.setattr(core, 'get_auth_source_provider', lambda: SimpleNamespace(
+        match_source=lambda _url: source))
+    monkeypatch.setattr(core, '_try_browser_fetch', browser)
+    monkeypatch.setattr(core, '_try_authenticated_fetch', replay)
+    monkeypatch.setattr(core, '_do_request', anonymous)
+    return core.fetch_page_content, source, responses, calls
 
 
-def test_unrescued_wall_returns_a_typed_diagnosis():
-    """When the browser cannot take over, report WHY — never the wall itself."""
-    import inspect
+@pytest.mark.parametrize('query', [None, 'quasar throughput'])
+def test_core_checks_the_wall_before_returning_auth_text(auth_path, query):
+    fetch, source, responses, calls = auth_path
+    source['access_strategy'] = 'cookies_replay'
+    responses['browser'] = 'Quasar throughput is 9137 records per second.'
+    assert fetch('https://example.com/manual', max_chars=500, query=query) == responses['browser']
+    assert calls == [('replay', None), ('browser', 'auth_source_browser_fallback')]
 
-    from tofu_search.fetch import core
-    src = inspect.getsource(core.fetch_page_content)
-    assert 'auth_replay_rejected' in src
-    # The diagnosis must name the actionable cause, not just "failed".
-    assert 'extension' in src.lower(), (
-        'the diagnosis should point at the browser extension / API path')
+
+@pytest.mark.parametrize('query', [None, 'quasar throughput'])
+def test_browser_is_tried_before_the_cookie_replay(auth_path, query):
+    fetch, _source, responses, calls = auth_path
+    responses['browser'] = 'Quasar throughput is 9137 records per second.'
+    assert fetch('https://example.com/manual', max_chars=500, query=query) == responses['browser']
+    assert calls == [('browser', 'auth_source_browser_first')]
+
+
+@pytest.mark.parametrize('query', [None, 'quasar throughput'])
+def test_unrescued_wall_returns_a_typed_diagnosis(auth_path, query):
+    fetch, _source, _responses, calls = auth_path
+    diagnostics = {}
+    assert fetch('https://example.com/manual', max_chars=500,
+                 query=query, diag=diagnostics) is None
+    assert diagnostics['reason'] == 'auth_replay_rejected'
+    assert 'extension' in diagnostics['detail'].lower()
+    assert calls == [('browser', 'auth_source_browser_first'), ('replay', None)]
