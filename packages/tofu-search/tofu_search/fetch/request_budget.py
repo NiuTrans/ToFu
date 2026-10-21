@@ -14,6 +14,9 @@ from contextvars import ContextVar
 from urllib3.exceptions import MaxRetryError, ResponseError
 from urllib3.util import Retry, Timeout
 
+# One shared limit covers connect, response-header and status failures.
+FETCH_RETRY_LIMIT = 2
+
 _REQUEST_DEADLINE = ContextVar('tofu_fetch_request_deadline', default=None)
 
 
@@ -80,12 +83,14 @@ def _retry_delay(retry, response):
 
 
 class FetchRetry(Retry):
-    """Keep normal retry counts; admit one pre-body read recovery in scope.
+    """Let scoped pre-body failures use the existing total retry allowance.
 
     urllib3 classifies a timed-out proxy CONNECT reply as a read error even
     though the origin GET has not been sent. Both that case and a transient
-    response-header timeout can recover once, within the original total retry
-    count. Direct users of the shared session retain its configured read=0.
+    response-header timeout can use the original total retry count. A separate
+    read=1 ceiling otherwise leaves one retry unused after two such failures.
+    The deadline still rejects unaffordable waits and later attempts. Direct
+    users of the shared session retain its configured read=0.
     """
 
     def increment(self, method=None, url=None, response=None, error=None,
@@ -104,7 +109,7 @@ class FetchRetry(Retry):
         remaining = _remaining()
         current = self
         if remaining is not None and not self.history and self.read == 0:
-            current = self.new(read=1)
+            current = self.new(read=FETCH_RETRY_LIMIT)
         following = Retry.increment(current, method, url, response, error,
                                     pool, stacktrace)
         if remaining is not None and response is not None:

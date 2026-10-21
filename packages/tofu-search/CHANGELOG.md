@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.9
+
+- Let scoped anonymous fetches use their existing total retry allowance for
+  pre-body read failures, including timeouts awaiting a proxy CONNECT reply.
+  Preserve the adapter's two-retry total, shared deadline, backoff and response ownership;
+  successful calls add no attempt. Persistent failures can spend more of the
+  existing budget. Direct session users retain their original read policy.
+
 ## 0.12.8
 
 - Recover one transient worker startup refusal before a fetch/filter/MCP

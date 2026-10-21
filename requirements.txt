@@ -147,7 +147,9 @@ jsonschema>=4.18
 # SOFT floor for startup; upstream consensus needs lexical evidence to promote.
 # >=0.12.8: recover one unpublished worker startup without repeating tool work.
 # SOFT floor for startup; persistent refusal preserves successful siblings.
-tofu-search>=0.12.8
+# >=0.12.9: scoped pre-body read failures share the existing total retry allowance.
+# SOFT floor for startup; retry counts, deadlines and unscoped sessions keep their owners.
+tofu-search>=0.12.9
 trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches
