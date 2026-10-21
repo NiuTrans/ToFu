@@ -30,6 +30,8 @@ for search context, query-focused reads and the host's extraction windows.
 verify `tests/test_query_fetch.py` and host `test_fetch_url_full_source.py`.
 `fetch/html_fragments.py` selects literal anchors from the sanitized DOM;
 `fetch/html_extract.py` owns all text extraction and fidelity rules.
+`fetch/html_streaming.py` restores declared received completions before that
+visibility boundary; verify `tests/test_html_streaming.py` and its runtime fixture.
 Quality contracts and the offline measurement command live in
 `docs/relevance-quality.md`; regression fixtures do not prove live superiority.
 Free source admission and metasearch recovery are owned by `docs/free-search.md`.

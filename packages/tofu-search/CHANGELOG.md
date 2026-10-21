@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.19
+
+- Restore recognized React/Fizz HTML completion segments at their declared
+  boundary before article extraction and fragment selection. Preserve source
+  order, links, code, and ordinary hidden-content exclusions. Unknown,
+  ambiguous, incomplete or client-only content retains existing extraction.
+  No page JavaScript, browser, model call or additional request is required.
+
 ## 0.12.18
 
 - Share safe fetch-failure observations between MCP and native agent evaluation
