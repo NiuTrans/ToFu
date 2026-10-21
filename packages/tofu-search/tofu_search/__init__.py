@@ -1,8 +1,8 @@
 """tofu-search — Standalone multi-engine web search with LLM content filtering.
 
-Provides a 7-step search pipeline: multi-engine search, URL dedup,
-content dedup, concurrent page fetch, optional LLM content filter,
-BM25 reranking, and result formatting.
+Provides multi-engine search, URL dedup, snippet grouping, concurrent page
+fetch and body dedup, optional LLM content filtering, BM25 reranking, and
+result formatting.
 
 Usage::
 
@@ -137,9 +137,9 @@ def search(query: str, *, max_results: int | None = None,
            user_question: str = '', **kwargs) -> list[dict]:
     """Search the web and return processed results.
 
-    This is the primary public API. Runs the full 7-step pipeline:
-    multi-engine search → URL dedup → content dedup → page fetch →
-    LLM content filter (if configured) → BM25 rerank → format.
+    This is the primary public API. Runs multi-engine search → URL dedup →
+    snippet grouping → page fetch and body dedup → optional LLM content filter
+    → BM25 rerank. Use format_results() for the model-facing text projection.
 
     Args:
         query: Search query string.
@@ -156,6 +156,12 @@ def search(query: str, *, max_results: int | None = None,
         - snippet (str): Search result snippet
         - source (str): Search engine name
         - full_content (str, optional): Fetched and cleaned page content
+        - similar_snippets (list[dict], optional): Observed discovery listings
+          with similar snippets, not verified duplicates or corroboration.
+          At most max_results are shared across results and the diagnostic
+          preview; exact URLs remain available for follow-up fetching.
+        - similar_snippets_omitted (int, optional): Further similar listings
+          excluded by that shared identity allowance.
 
     Example::
 

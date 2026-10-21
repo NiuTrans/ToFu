@@ -7,7 +7,8 @@ from tofu_search.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['canonical_url_key', 'dedup_by_content', 'dedup_by_full_content']
+__all__ = ['canonical_url_key', 'group_by_content', 'attach_similar_snippets',
+           'dedup_by_content', 'dedup_by_full_content']
 
 _CJK_RE = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af\u3040-\u30ff]')
 _PERCENT_ESCAPE_RE = re.compile(r'%([0-9a-fA-F]{2})')
@@ -102,49 +103,91 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
-def dedup_by_content(results: list[dict], threshold: float = 0.45) -> list[dict]:
-    """Remove near-duplicate results based on title+snippet word overlap.
+def group_by_content(results: list[dict], threshold: float = 0.45) -> list[list[dict]]:
+    """Group title/snippet overlap, preserving every original candidate.
 
-    Uses Jaccard similarity on word sets. When two results are similar,
-    keeps the one that appeared first (earlier engine = higher priority).
-    O(n²) but n ≤ ~40, so < 1ms in practice.
-
-    Args:
-        results: URL-deduplicated search results.
-        threshold: Jaccard similarity above which two results are duplicates.
-
-    Returns:
-        Deduplicated results list (order preserved).
+    The first listing represents a group for snippet-only ranking. Similarity
+    is a presentation hint, not page equivalence or independent corroboration.
+    Rows remain request-owned references so completed fetch evidence survives.
     """
-    if len(results) <= 1:
-        return results
-
-    # Pre-compute shingle sets for each result (supports CJK + Latin)
     shingle_sets = []
     for r in results:
         title = (r.get('title') or '').strip()
         snippet = (r.get('snippet') or '').strip()
         shingle_sets.append(_text_to_shingles(f'{title} {snippet}'))
 
-    keep = []
+    groups = []
     keep_indices = []
-    removed = 0
     for i, r in enumerate(results):
-        is_dup = False
-        for ki in keep_indices:
+        for group, ki in zip(groups, keep_indices, strict=True):
             sim = _jaccard(shingle_sets[i], shingle_sets[ki])
             if sim >= threshold:
-                is_dup = True
-                removed += 1
+                group.append(r)
                 break
-        if not is_dup:
-            keep.append(r)
+        else:
+            groups.append([r])
             keep_indices.append(i)
+    return groups
 
+
+def dedup_by_content(results: list[dict], threshold: float = 0.45) -> list[dict]:
+    """Keep each snippet group's first listing (legacy lossy helper).
+
+    The search pipeline uses the groups directly to retain discovery URLs and
+    fetched evidence. This explicit helper preserves its existing ordering and
+    return shape for callers choosing to discard similar listings.
+    """
+    if len(results) <= 1:
+        return results
+    keep = [group[0] for group in group_by_content(results, threshold)]
+    removed = len(results) - len(keep)
     if removed:
         logger.info('[ContentDedup] %d->%d results (removed %d near-duplicates, threshold=%.2f)',
                     len(results), len(keep), removed, threshold)
     return keep
+
+
+def attach_similar_snippets(results: list[dict], groups: list[list[dict]],
+                            max_candidates: int, excluded_urls=()) -> None:
+    """Attach observed discovery listings within one shared identity allowance.
+
+    Use one candidate per visible group per round, preserving provider arrival
+    order within groups. Do not merge rank votes or call these page duplicates.
+    Only pipeline-observed rows may supply these fields, never provider-supplied
+    nested metadata. Existing primary/mirror identities are not repeated.
+    """
+    by_url = {row['url']: group for group in groups for row in group}
+    seen = {row['url'] for row in results} | set(excluded_urls)
+    for result in results:
+        result.pop('similar_snippets', None)
+        result.pop('similar_snippets_omitted', None)
+        seen.update(result.get('duplicate_urls') or [])
+    pending, claimed = [], set()
+    for result in results:
+        group = by_url.get(result['url'])
+        if group is None or id(group) in claimed:
+            continue
+        claimed.add(id(group))
+        pending.append((result, [row for row in group if row['url'] not in seen]))
+    remaining = max(0, max_candidates)
+    for index in range(max((len(rows) for _, rows in pending), default=0)):
+        if not remaining:
+            break
+        for result, rows in pending:
+            if index >= len(rows) or rows[index]['url'] in seen:
+                continue
+            row = rows[index]
+            related = {key: row[key] for key in
+                       ('url', 'title', 'snippet', 'source', 'source_rank', 'relevance') if key in row}
+            result.setdefault('similar_snippets', []).append(related)
+            seen.add(row['url'])
+            remaining -= 1
+            if not remaining:
+                break
+    for result, rows in pending:
+        omitted = sum(row['url'] not in seen for row in rows)
+        if omitted:
+            result['similar_snippets_omitted'] = omitted
 
 
 def _full_text_shingles(text: str) -> set[str]:

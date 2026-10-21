@@ -80,6 +80,60 @@ exposed. Installing native PDF dependencies for every web search would add
 startup and deployment costs. The extractor owns typed failure; fetch owns its
 existing failure/diagnostic projection.
 
+## Snippet groups and fetched evidence
+
+**Problem:** similar titles and search snippets need not describe identical
+pages. Discarding a listing before examining an already received body loses
+evidence and hides discovered source URLs. Removing snippet grouping entirely
+also changes the representative ranking, so it requires separate quality
+evidence rather than assuming that more flat results are better.
+
+**Decision:** retain the existing first representative and Jaccard grouping for
+snippet-only ranking. Keep the other observed listings in request-owned groups.
+Already completed alternative fetches enter the existing body deduplication,
+relevance and ranking stages; an early stop consumes settled receipts once
+without waiting on running work. Fetch admission, worker ownership and deadlines
+remain with their existing owners. Optional model filtering can consequently
+process more distinct received bodies within its existing budget.
+
+Returned rows may contain `similar_snippets` with exact URLs, titles, snippets
+and available listing provenance. One allowance of `max_results` identities is
+shared across primary rows and the existing three-entry uncertainty preview,
+allocated one per group per round. `similar_snippets_omitted` reports additional
+listings left out by that allowance. Provider-injected nested candidates,
+site-excluded pages, model-rejected bodies and their known copies cannot enter
+this projection. Existing visible primary and body-copy URLs are not repeated.
+The groups imply neither verified page equivalence nor independent corroboration;
+they do not merge engine votes or create fetch authority for unseen URLs.
+
+The common library/host/MCP formatter gives primary evidence its existing
+allocation first. Optional related snippets use only the remaining shared
+content budget. Exact source identities remain visible when that budget is
+exhausted, and the host's canonical capture retains the original records.
+This adds no service, request, resident pool, cache or durable state. Temporary
+groups refer to already collected rows; returned metadata is bounded by the
+shared identity allowance rather than multiplying per primary result.
+
+**Measurement:** a development replay of 149 previously inspected free-search
+pools retained identical primary projections and primary excerpts. It exposed
+324 additional observed identities in 109 cases, at a median 852 additional
+formatted characters (maximum 4,282) with an 18,000-character payload budget.
+Sequential local pipeline medians were 17.98 ms before and 17.66 ms after;
+these include worker setup and establish no network-latency advantage. Seven
+small pools were reconstructed from complete ranking/uncertainty snapshots.
+These are compatibility and output-cost measurements, not fresh holdout,
+equal-identity-budget retrieval gains, or answer-accuracy scores.
+
+**Alternatives considered:** lossy snippet removal hides sources; unconditional
+flat expansion can displace better representatives; treating snippet overlap
+as body duplication invents equivalence. The representative-plus-members
+pattern is also used by [Elastic result collapsing and inner hits](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/collapse-search-results),
+but this implementation groups lexical overlap and exposes already observed
+rows without expansion queries or an Elastic dependency. Behavioral specs live
+in `tests/test_similar_snippet_candidates.py`, actual MCP calls in
+`tests/test_mcp_tool_calls.py`, and the host capture contract in
+`tests/search/test_search_similar_candidates.py` at the repository root.
+
 ## Ranking and excerpts
 
 **Problem:** a collection description can repeat every word of a question while
