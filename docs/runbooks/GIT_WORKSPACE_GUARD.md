@@ -574,6 +574,24 @@ observed median **0.017 ms**, maximum **0.027 ms**; not a network-volume guarant
   than borrowing a guessed managed-child lifetime. Command-owned or inherited
   `CDPATH` with a relative bare `cd` is refused before spawn; absolute or
   `./`-prefixed targets keep an inspectable cwd identity.
+
+  A **literal `for` loop** is the one repetition shape the view unrolls. Problem:
+  the common probe `for p in a b; do "$p" -v; done` names its executable through
+  a loop variable, so it was refused whenever the iterable was already known
+  (measured 2026-10-21, three-candidate node version probe). Decision: admission
+  unrolls `for V in <plain words>; do <simple commands>; done` into
+  `V=value; <commands>;` per value, capped at 8 values and 64 unrolled commands,
+  one level deep. Each value must be a plain word (no whitespace, glob, quote or
+  expansion) so quoted and bare references bind identically; body command words
+  may not include a control keyword, a trailing chain left open, or an unmanaged
+  `&`. Separators are reproduced verbatim, so a body pipeline/redirect keeps its
+  structure and each command is classified exactly as if typed once per value.
+  Anything outside that shape returns the original source, where the body's real
+  command word is now checked after a leading `do`. Alternatives rejected:
+  allow unresolvable dynamic heads generally (loses the detach proof); treat
+  `for` as always opaque (keeps refusing known-literal probes); expand the loop
+  by executing it (admission is pure). The unrolled text is admission-only and
+  never replaces the executed or approved source.
 - **Recorded background execution** binds the exact server-generated wrapper
   to its original command through an internal typed admission scope, not model
   arguments. Record-file redirects do not make an opaque test a source writer.

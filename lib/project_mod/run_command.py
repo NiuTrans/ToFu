@@ -1155,13 +1155,20 @@ def command_background_refusal(command):
             while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
                 words = words[1:]
             words = _unwrap_command_parts(words)
+            # `do` opens a loop body, it is not the command word. Without this
+            # the loop body's real (possibly variable) head escaped the check
+            # that a literal for-loop unrolling now makes answerable.
+            while words and words[0] == 'do':
+                words = words[1:]
             # An unparsed heredoc's body is not a sequence of shell command
             # heads. Keep its conservative writer claim, not a payload-based
             # dynamic-executable refusal. Proven literal bodies were masked.
             if '<<' not in source and words and any(character in words[0] for character in '$`'):
                 return ('Error [workspace-lease-background-unsupported]: unresolved dynamic '
-                        'executable cannot retain a verified managed child lifetime. '
-                        'Use a literal executable or understood static setup; command was not started.')
+                        'executable cannot retain a verified managed child lifetime. Use a '
+                        'literal executable, a `NAME=value` binding followed by `"$NAME"`, '
+                        'a `for NAME in <plain words>` loop, or a script file; '
+                        'command was not started.')
             if words and os.path.basename(words[0]) in {'nohup', 'disown', 'setsid'}:
                 detached = True
                 break

@@ -67,6 +67,48 @@ def test_unproven_or_real_writes_keep_admission(repo, command):
     assert commands.command_write_lease_claims(str(repo), command)
 
 
+@pytest.mark.parametrize('command', [
+    'for p in /a/node /b/node; do echo "== $p"; "$p" -v 2>&1 | head -2; done',
+    'for p in a b; do "${p}" -v; done',
+    'for p in a b\ndo "$p" -v\ndone',
+    'for p in a b; do "$p" -v; done && ls',
+])
+def test_literal_loop_binds_each_plain_word_and_claims_nothing(repo, command):
+    """A bounded literal loop is unrolled in admission only, never executed."""
+    assert command_setup_view(command) != command
+    assert commands.command_background_refusal(command) is None
+    assert commands.command_write_lease_claims(str(repo), command) == ()
+
+
+def test_loop_body_keeps_per_command_classification(repo):
+    assert 'background-unsupported' in commands.command_background_refusal(
+        'for p in a b; do setsid -v; done')
+    assert commands.command_write_lease_claims(
+        str(repo), 'for p in a b; do touch x; done') == (('file', str(repo / 'x')),)
+
+
+@pytest.mark.parametrize('command', [
+    'for p in $(ls); do "$p" -v; done',
+    'for p in *.py; do "$p" -v; done',
+    'for p in "a b"; do "$p" -v; done',
+    'for p in a b; do "$UNKNOWN" -v; done',
+    'for p in a b; do for q in c; do "$q"; done; done',
+    'for p in a b c d e f g h i; do "$p" -v; done',
+    'for p in a b; do sleep 1 & done',
+    'for p in a b; do "$p" -v',
+])
+def test_unprovable_body_head_keeps_the_conservative_refusal(repo, command):
+    assert command_setup_view(command) == command
+    assert 'command was not started' in commands.command_background_refusal(command).lower()
+
+
+def test_literal_head_loop_with_unprovable_iterable_stays_admitted(repo):
+    command = 'for f in *.py; do wc -l "$f"; done'
+    assert command_setup_view(command) == command
+    assert commands.command_background_refusal(command) is None
+    assert commands.command_write_lease_claims(str(repo), command) == (('tree', str(repo)),)
+
+
 def test_static_mutator_is_not_an_opaque_runtime(repo):
     claim = commands.command_write_lease_claims(str(repo), 'COPY=cp; "$COPY" source.py copied.py')
     assert claim == (('file', str(repo / 'copied.py')),)
