@@ -703,10 +703,12 @@ def _exec_edit_file(fn_args, base_path, conv_id, task_id, kwargs):
     if not edits or not isinstance(edits, list):
         return _edits_not_array_msg(
             'edit_file', edits, '{path, operation, anchor, content}')
+    batch_path = fn_args.get('path')
     return tool_edit_file(
         base_path, edits, conv_id=conv_id, task_id=task_id,
         allow_outside=bool(fn_args.get('allow_outside_workspace')),
-        atomic=fn_args.get('atomic', True))
+        atomic=fn_args.get('atomic', True),
+        batch_path=batch_path if isinstance(batch_path, str) else None)
 
 
 def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
@@ -1791,8 +1793,10 @@ def project_tool_display(fn_name, fn_args):
     elif fn_name == 'edit_file':
         edits = fn_args.get('edits')
         if edits and isinstance(edits, list):
+            batch_path = fn_args.get('path')
             paths = list(dict.fromkeys(
-                e.get('path', '?') for e in edits if isinstance(e, dict)))
+                (e.get('path') or batch_path or '?')
+                for e in edits if isinstance(e, dict)))
             # Headline the author's pre-edit intent (schema-capped at 120
             # chars); the per-operation list ("replace, replace, …") carried
             # no information — every batch rendered the same words.
