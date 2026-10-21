@@ -648,3 +648,53 @@ def test_batch_total_deadline_is_enforced_before_git_or_ref_change(repositories,
     with pytest.raises(ExportPublishSafetyError, match='deadline'):
         sync(source, public, tip, tree, base=base)
     assert git(public, 'rev-parse', 'HEAD') == original
+
+
+@pytest.mark.parametrize('explicit_url', [False, True])
+@pytest.mark.parametrize('scope', ['local', 'included', 'environment', 'pushurl'])
+def test_history_rejects_distinct_actual_push_endpoints_before_builder(
+        repositories, tmp_path, monkeypatch, explicit_url, scope):
+    from export_pkg import _publish as publish
+    source, public, base, _ = repositories
+    acknowledged = bare(tmp_path / 'acknowledged')
+    unacknowledged = bare(tmp_path / 'unacknowledged')
+    anchor = commit(public, 'Prior public snapshot', {'legacy.ts': 'https://GIT.internal.example.com/old\n'})
+    git(public, 'push', str(acknowledged), 'main')
+    tip = commit(source, 'safe source change', {'safe.py': 'SAFE = 1\n'})
+    (public / 'legacy.ts').unlink()
+    candidate(public, {'safe.py': 'SAFE = 1\n'})
+    config_key = 'url.' + str(unacknowledged) + '.pushInsteadOf'
+    if scope == 'local':
+        git(public, 'config', config_key, str(acknowledged))
+    elif scope == 'included':
+        included = tmp_path / 'included.gitconfig'
+        subprocess.run(['git', 'config', '--file', str(included), config_key,
+                        str(acknowledged)], check=True)
+        git(public, 'config', 'include.path', str(included))
+    elif scope == 'environment':
+        monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
+        monkeypatch.setenv('GIT_CONFIG_KEY_0', config_key)
+        monkeypatch.setenv('GIT_CONFIG_VALUE_0', str(acknowledged))
+    else:
+        git(public, 'remote', 'add', 'origin', str(acknowledged))
+        git(public, 'config', 'remote.origin.pushurl', str(unacknowledged))
+    monkeypatch.setitem(publish._GIT_REPOS, 'opensource', {
+        'branch': 'main', 'remotes': [{'name': 'origin', 'url': str(acknowledged)}]})
+    if explicit_url:
+        monkeypatch.setattr(publish, '_resolve_authenticated_remotes', lambda remotes: [
+            {**row, 'auth_url': str(acknowledged)} for row in remotes])
+    built = []
+
+    def builder(destination, tree, message, *, published_tip=None):
+        from export_pkg._history import synchronize_public_history
+        built.append(published_tip)
+        return synchronize_public_history(source, destination, tip, tree, message,
+                                          history_base=base, published_tip=published_tip).public_tip
+
+    with pytest.raises(publish.ExportPublishSafetyError, match='endpoint|push.*URL|rewrite'):
+        publish._git_push(public, 'opensource', history_builder=builder)
+    assert not built
+    assert git(public, 'rev-parse', 'HEAD') == anchor
+    assert git(acknowledged, 'rev-parse', 'refs/heads/main') == anchor
+    assert subprocess.run(['git', 'rev-parse', '--verify', 'refs/heads/main'],
+                          cwd=unacknowledged, capture_output=True).returncode != 0

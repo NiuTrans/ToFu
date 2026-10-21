@@ -293,6 +293,10 @@ An existing public anchor is accepted only after every configured target already
 acknowledges that exact tip; otherwise its complete metadata, paths and blobs
 must pass inspection. Previously published ancestors are not rewritten, and
 this acknowledgement does not certify them against today's stricter policy.
+
+History publication refuses effective push-only URL rewrites and separate push
+URLs before trusting that anchor or publishing, so probe and receiving endpoints
+cannot silently diverge. Explicit identical endpoints retain normal proxy support.
 All newly reachable source objects and reconciled outputs are scanned without
 Git replacement objects or archive filters, regardless of extension.
 A first run requires an explicit `--history-base`; sanitized baseline bridges
