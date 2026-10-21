@@ -5,6 +5,23 @@ from tofu_search.search.authority import authority_label
 
 __all__ = ['format_search_for_tool_response']
 
+_SIMILAR_HEADING = ('Similar search candidates for follow-up '
+                    '(not verified duplicates or independent corroboration):')
+
+
+def _similar_identity(candidate):
+    text = f"  Candidate URL: {candidate['url']}"
+    if candidate.get('title'):
+        text += f"\n    Title: {candidate['title']}"
+    if candidate.get('relevance'):
+        text += f"\n    Listing relevance: {candidate['relevance']} (not a factual verification)."
+    return text
+
+
+def _similar_omission(result):
+    count = result.get('similar_snippets_omitted') or 0
+    return f'  {count} further similar listings omitted by the candidate budget.' if count else ''
+
 
 def format_search_for_tool_response(
     results,
@@ -63,6 +80,12 @@ def format_search_for_tool_response(
                 quality_lines.append(f"  Candidate for follow-up: {candidate['url']}")
                 if candidate.get('title'):
                     quality_lines.append(f"    Title: {candidate['title']}")
+                related = candidate.get('similar_snippets') or []
+                if related:
+                    quality_lines.append(_SIMILAR_HEADING)
+                    quality_lines.extend(_similar_identity(row) for row in related)
+                if _similar_omission(candidate):
+                    quality_lines.append(_similar_omission(candidate))
         if search_diag.get('reason_detail'):
             quality_lines.append(f"Search diagnostic: {search_diag['reason_detail']}")
     quality = ('\n'.join(quality_lines) + '\n\n') if quality_lines else ''
@@ -162,6 +185,34 @@ def format_search_for_tool_response(
                       ' with the URL above to read this page.)')
 
         parts.append(entry)
+
+    # Primary evidence receives its existing allocation first. Related snippet
+    # payloads share only the remaining budget; exact discovery identities stay
+    # visible even when their optional excerpts do not fit.
+    related_left = sum(bool(row.get('snippet')) for result in results
+                       for row in result.get('similar_snippets') or [])
+    for index, result in enumerate(results):
+        related = result.get('similar_snippets') or []
+        lines = [_SIMILAR_HEADING] if related else []
+        for row in related:
+            lines.append(_similar_identity(row))
+            raw = row.get('snippet') or ''
+            budget = len(raw)
+            if remaining is not None:
+                budget = min(budget, max(0, remaining // max(1, related_left)))
+            if max_chars_per_result is not None:
+                budget = min(budget, max(0, max_chars_per_result))
+            shown = select_relevant_passages(raw, query, budget) if bounded else raw
+            if shown:
+                lines.append(f'    Search snippet: {shown}')
+            if remaining is not None:
+                remaining = max(0, remaining - len(shown))
+            if raw:
+                related_left -= 1
+        if _similar_omission(result):
+            lines.append(_similar_omission(result))
+        if lines:
+            parts[index] += '\n\n' + '\n'.join(lines)
 
     if getattr(results, '_deadline_hit', False):
         header = ("Search results (PARTIAL: the wall-clock deadline expired; "

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.12
+
+- Preserve observed URLs from similar search snippets as bounded follow-up
+  candidates, without changing snippet-only representative ranking or treating
+  them as verified duplicates or independent corroboration. Primary evidence
+  retains its excerpt budget; related snippets share only the remainder.
+- Retain already received alternative page bodies for the existing body dedup,
+  relevance and ranking stages, including settled fetches at early return.
+  Keep existing fetch admission and deadlines; optional model filters can
+  process more distinct received bodies within their existing budgets.
+
 ## 0.12.11
 
 - Keep PDF capability and extraction failures out of source evidence and the

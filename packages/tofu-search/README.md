@@ -352,12 +352,15 @@ pin its comma-separated engine list with `TOFU_SEARCH_SEARXNG_ENGINES`. See the
    learns which one works (see the adaptive-proxy feature above).
 2. **URL aggregation**: canonicalize scheme/default ports/fragments/tracking
    parameters, merge engine evidence, and accumulate reciprocal-rank consensus.
-3. **Content dedup**: Jaccard similarity on title+snippet shingles.
+3. **Snippet groups**: retain the first representative for snippet-only
+   ranking and preserve similar discovered URLs as bounded follow-up candidates.
+   Jaccard overlap does not establish page equivalence or corroboration.
 4. **Page fetch**: rank a bounded candidate set, reserve streaming capacity
    across engines, then concurrent race-to-N with SSL retry, circuit breaker,
    and Playwright fallback for SPA/bot-protection pages.
    - **4a. Full-content dedup**: remove mirrors/syndicated copies before any
-     optional LLM call.
+     optional LLM call. Already received alternative bodies participate even
+     when their search snippets were grouped together.
    - **4b. Deepen** *(opt-in)*: one hop along the best query-relevant links.
 5. **LLM content filter** *(optional)*: bounded relevance verdict by default;
    opt-in rewrite mode can regenerate cleaned text.
@@ -366,6 +369,12 @@ pin its comma-separated engine list with `TOFU_SEARCH_SEARXNG_ENGINES`. See the
    the best query-focused passages under a shared context budget.
 
 Step 5 is automatically skipped when no LLM is configured.
+
+Optional `similar_snippets` metadata shares one `max_results` identity allowance
+across primary results and the uncertainty preview. It exposes exact observed
+URLs for follow-up fetching; `similar_snippets_omitted` reports further listings
+outside the allowance. Related snippet text uses only the content budget left
+after primary evidence. See the [evidence contract](docs/relevance-quality.md#snippet-groups-and-fetched-evidence).
 
 ## Optional Dependencies
 

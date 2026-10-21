@@ -252,6 +252,29 @@ def test_web_search_applies_shared_context_budget(server, monkeypatch):
     assert 'Query-Focused Excerpts' in text
 
 
+def test_web_search_preserves_related_discovery_urls_under_content_budget(server, monkeypatch):
+    from tofu_search.mcp_server import server as server_mod
+    from tofu_search.search.orchestrator import SearchResultList
+
+    candidate_url = 'https://origin.example/资料?q=1977%2F1976&lang=zh'
+    rows = SearchResultList([{
+        'title': 'Quasar report', 'url': 'https://first.example/report',
+        'source': 'Bing', 'snippet': 'quasar calibration',
+        'full_content': 'quasar calibration observation ' * 500,
+        'similar_snippets': [{'url': candidate_url, 'title': 'Another listing',
+                              'snippet': 'RELATED_SNIPPET ' * 1_000}],
+    }])
+    monkeypatch.setattr(server_mod, 'perform_web_search', lambda *a, **kw: rows)
+    text, _ = _sync_call(server, 'web_search', {
+        'query': 'quasar calibration', 'content_budget_chars': 4_000})
+
+    assert candidate_url in text
+    assert 'not verified duplicates or independent corroboration' in text
+    assert text.count('quasar calibration observation') > 100
+    assert text.count('RELATED_SNIPPET') < 10
+    assert len(text) < 5_500
+
+
 def test_fetch_page_failure_is_explained_not_silent(server, monkeypatch):
     """An unreadable page must not look like an empty page."""
     from tofu_search.mcp_server import server as server_mod

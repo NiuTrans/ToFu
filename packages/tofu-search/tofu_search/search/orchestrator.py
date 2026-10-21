@@ -9,7 +9,9 @@ Pipeline order (cheap → expensive):
   2. URL dedup — runs incrementally as each engine batch arrives.
   2b. Pre-fetch gate — drop the FETCH of results with zero query-term overlap
       (off-topic SERP junk), fail-open, no LLM. See search/prefetch_gate.py.
-  3. Content dedup (Jaccard on title+snippet shingles) — once after engines.
+  3. Snippet grouping (Jaccard on title+snippet shingles) — once after engines.
+      Retain discovered alternatives and independently received page bodies;
+      actual body dedup follows fetch completion.
   5. Optional LLM filter — cheap relevance verdict by default; rewrite mode
       can also regenerate cleaned text.
   6. BM25 rerank — on cleaned full text → top-N (pure Python, no API call).
@@ -34,9 +36,10 @@ from tofu_search.providers import (
 )
 from tofu_search.search.browser_fallback import search_via_browser
 from tofu_search.search.dedup import (
+    attach_similar_snippets,
     canonical_url_key,
-    dedup_by_content,
     dedup_by_full_content,
+    group_by_content,
 )
 from tofu_search.search.deepen import deepen_results, is_deepen_enabled
 from tofu_search.search.engines.bing import search_bing
@@ -315,6 +318,8 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                 # Providers may reuse cached dictionaries across callers. Our
                 # evidence annotations and content belong to this invocation.
                 r = dict(r)
+                r.pop('similar_snippets', None)
+                r.pop('similar_snippets_omitted', None)
                 if not matches_site_constraints(r.get('url') or '', constraint_scopes):
                     constraint_rejected += 1
                     continue
@@ -533,10 +538,11 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     url_dedup_count = len(unique_results)
     step_timings['step2_url_dedup'] = 0.0
 
-    # ── Step 3: Content dedup on the unique results ──
+    # ── Step 3: Group similar snippets without discarding page evidence ──
     step3_t0 = time.time()
-    if len(unique_results) > max_results:
-        unique_results = dedup_by_content(unique_results)
+    snippet_groups = (group_by_content(unique_results) if len(unique_results) > max_results
+                      else [[result] for result in unique_results])
+    unique_results = [group[0] for group in snippet_groups]
     content_dedup_count = len(unique_results)
     step_timings['step3_content_dedup'] = time.time() - step3_t0
 
@@ -569,11 +575,32 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         logger.info('[Fetch] Waiting for %d in-flight fetches (started %.1fs ago), target_ok=%d',
                     len(pending_futs), time.time() - (first_fetch_submitted_at or pipeline_t0),
                     target_ok)
-        # Count of KEPT (post-content-dedup) pages that came back with content.
+        # Count of snippet representatives that came back with content.
         # Maintained incrementally as each future completes — the previous
         # implementation re-scanned all of unique_results on every completion
         # (O(n²)) which both wasted work and was easy to get wrong.
         kept_ok = 0
+        observed_futures = set()
+        def record_completed_fetch(future):
+            nonlocal kept_ok
+            if future in observed_futures or future.cancelled():
+                return
+            observed_futures.add(future)
+            try:
+                result_dict, content, fetch_elapsed = future.result()
+                url = result_dict['url']
+                ok = bool(content and len(content) > 50)
+                chars = len(content) if content else 0
+                url_timings.append((url, fetch_elapsed, ok, chars))
+                if ok:
+                    result_dict['full_content'] = content
+                    if url in kept_urls:
+                        kept_ok += 1
+                if fetch_elapsed > 5:
+                    logger.info('[Fetch] SLOW url=%.80s  %.1fs  ok=%s chars=%d',
+                                url, fetch_elapsed, ok, chars)
+            except Exception as e:
+                logger.warning('[Fetch] fetch thread error: %s', e, exc_info=True)
         # The wait ceiling is the SMALLER of the legacy 90s fetch cap and the
         # remaining wall-clock budget — so the deadline bounds this loop even
         # when Race-to-N can never exit (kept_ok < target_ok on a niche query).
@@ -581,21 +608,7 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         _wait_ceiling = 90.0 if _left is None else max(0.0, min(90.0, _left))
         try:
             for fut in as_completed(pending_futs, timeout=_wait_ceiling):
-                try:
-                    result_dict, content, fetch_elapsed = fut.result()
-                    url = result_dict['url']
-                    ok = bool(content and len(content) > 50)
-                    chars = len(content) if content else 0
-                    url_timings.append((url, fetch_elapsed, ok, chars))
-                    if ok:
-                        result_dict['full_content'] = content
-                        if url in kept_urls:
-                            kept_ok += 1
-                    if fetch_elapsed > 5:
-                        logger.info('[Fetch] SLOW url=%.80s  %.1fs  ok=%s chars=%d',
-                                    url, fetch_elapsed, ok, chars)
-                except Exception as e:
-                    logger.warning('[Fetch] fetch thread error: %s', e, exc_info=True)
+                record_completed_fetch(fut)
 
                 # ── Deadline check: force-return partial results ──
                 if _budget_left() is not None and _budget_left() <= 0:
@@ -636,6 +649,19 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     # shutdown(wait=True) would erase the latency benefit of the early return.
     fetch_pool.shutdown(wait=not (_deadline_hit or _race_to_n_hit), cancel_futures=True)
 
+    if pending_futs and (_deadline_hit or _race_to_n_hit):
+        # Consume already settled receipts once; never join a running loser or
+        # start more work after the stop decision. Completion order must not
+        # silently erase an alternative that was fetched within this call.
+        for future in pending_futs:
+            if future.done():
+                record_completed_fetch(future)
+
+    # Snippet similarity cannot invalidate independently received page bodies.
+    # Keep the existing representative ordering for snippet-only candidates;
+    # let actual content dedup/relevance/ranking assess fetched alternatives.
+    unique_results.extend(row for group in snippet_groups for row in group[1:]
+                          if row.get('full_content'))
     fetched_raw_count = sum(1 for r in unique_results if r.get('full_content'))
     step_timings['step4_page_fetch'] = time.time() - step4_t0
 
@@ -672,6 +698,8 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
             deeper = []
         for dr in deeper:
 
+            dr.pop('similar_snippets', None)
+            dr.pop('similar_snippets_omitted', None)
             if not matches_site_constraints(dr.get('url') or '', constraint_scopes):
                 constraint_rejected += 1
                 continue
@@ -802,6 +830,14 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                        pipeline_total, timing_str, query[:60])
 
     final_results = SearchResultList(relevant[:max_results])
+    # Match the existing diagnostic preview. Related identities share one
+    # max_results allowance across primary entries and this uncertainty view.
+    unverified_preview = unverified[:3]
+    excluded_related_urls = irrelevant_urls | {
+        url for row in unique_results if row['url'] in irrelevant_urls
+        for url in row.get('duplicate_urls') or []}
+    attach_similar_snippets(list(final_results) + unverified_preview, snippet_groups,
+                            max_results, excluded_urls=excluded_related_urls)
     final_results._unverified_candidates = unverified
     final_results._engine_breakdown = engine_breakdown
     final_results._deadline_hit = _deadline_hit
@@ -866,8 +902,9 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         'weak_match_count': sum(r.get('relevance') == 'weak_match' for r in unverified),
         'unverified_count': len(unverified),
         'unverified_candidates': [
-            {'url': r['url'], 'title': str(r.get('title') or '')[:160]}
-            for r in unverified[:3]],
+            {'url': r['url'], 'title': str(r.get('title') or '')[:160],
+             **{key: r[key] for key in ('similar_snippets', 'similar_snippets_omitted') if key in r}}
+            for r in unverified_preview],
         'usable_count': len(final_results),
         'source_coverage': 'unknown',
     })
