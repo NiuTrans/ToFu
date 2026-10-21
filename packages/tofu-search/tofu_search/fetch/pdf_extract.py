@@ -10,7 +10,7 @@ from tofu_search.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['extract_pdf_text']
+__all__ = ['PDFExtractionError', 'extract_pdf_text']
 
 MAX_PDF_BYTES = 100 * 1024 * 1024  # 100 MB
 
@@ -18,6 +18,10 @@ _pymupdf = None
 _pymupdf4llm = None
 _dependencies_loaded = False
 _dependency_lock = threading.Lock()
+
+
+class PDFExtractionError(RuntimeError):
+    """PDF capability or extraction failure, never extracted source text."""
 
 
 def _load_pdf_dependencies():
@@ -135,13 +139,16 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str
 
     Strategy 1: pymupdf4llm -> Markdown with table/header preservation
     Strategy 2: pymupdf raw -> plain-text page-by-page fallback
+
+    Raises PDFExtractionError when extraction is unavailable or produces no
+    source text. Callers must keep diagnostics outside the evidence channel.
     """
     _load_pdf_dependencies()
     if _pymupdf is None:
-        return '[PDF extraction unavailable: pymupdf not installed]'
+        raise PDFExtractionError('PDF extraction unavailable: pymupdf not installed; install tofu-search[pdf].')
 
     if len(pdf_bytes) > MAX_PDF_BYTES:
-        return f'[PDF too large: {len(pdf_bytes) // (1024*1024)} MB]'
+        raise PDFExtractionError(f'PDF exceeds the extraction size limit ({MAX_PDF_BYTES:,} bytes).')
 
     limit = max_chars if max_chars > 0 else 999_999_999
 
@@ -172,6 +179,8 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str
                 parts.append(page_md)
                 total += plen
 
+            if not any(part.strip() for part in parts):
+                raise PDFExtractionError('Rich PDF extraction returned no text.')
             text = '\n\n---\n\n'.join(parts)
             logger.debug('pymupdf4llm OK: %d pages, %s chars — %s', n, f'{total:,}', url[:60])
             return text
@@ -194,11 +203,13 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '') -> str
                     break
         finally:
             doc.close()
-        if not parts:
+        if not any(part.strip() for part in parts):
             logger.info('[PDF] no extractable text (%d pages) — %s', n, url[:80] if url else '?')
-            return '[PDF: no extractable text]'
+            raise PDFExtractionError('PDF contains no extractable text.')
         full = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts))
         return full
+    except PDFExtractionError:
+        raise
     except Exception as e:
         logger.warning('[PDF] extraction failed for %s: %s', url[:80] if url else '?', e, exc_info=True)
-        return f'[PDF extraction failed: {e}]'
+        raise PDFExtractionError('PDF extraction failed: the document could not be parsed.') from e

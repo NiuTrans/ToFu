@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.11
+
+- Keep PDF capability and extraction failures out of source evidence and the
+  body cache. The extractor raises `PDFExtractionError`; fetch returns `None`
+  with `pdf_extraction_error` diagnostics. Empty rich extraction can still
+  recover through raw text. Optional PDF dependencies remain lazy.
+
 ## 0.12.10
 
 - Preserve Bing result destinations encoded with URL-safe Base64, including

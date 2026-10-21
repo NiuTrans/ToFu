@@ -44,13 +44,20 @@ class MissingPdf(importlib.abc.MetaPathFinder):
             attempts.append(fullname)
             raise ModuleNotFoundError(fullname)
 sys.meta_path.insert(0,MissingPdf())
-from tofu_search.fetch.pdf_extract import extract_pdf_text
+from tofu_search.fetch.pdf_extract import PDFExtractionError, extract_pdf_text
 import tofu_search.fetch.pdf_extract as pdf
 assert not attempts
-assert extract_pdf_text(b'synthetic')=='[PDF extraction unavailable: pymupdf not installed]'
+def unavailable():
+    try:
+        extract_pdf_text(b'synthetic')
+    except PDFExtractionError as exc:
+        assert 'pymupdf not installed' in str(exc)
+    else:
+        raise AssertionError('Missing dependency was returned as source evidence')
+unavailable()
 initial=list(attempts)
 assert pdf.HAS_PYMUPDF is False
-assert extract_pdf_text(b'synthetic')=='[PDF extraction unavailable: pymupdf not installed]'
+unavailable()
 assert attempts==initial
 ''')
 

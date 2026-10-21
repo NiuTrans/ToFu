@@ -25,6 +25,7 @@ from tofu_search.fetch.http import do_request as _do_request
 from tofu_search.fetch.http import try_authenticated_fetch as _try_authenticated_fetch
 from tofu_search.fetch.http import try_browser_fetch as _try_browser_fetch
 from tofu_search.fetch.http import try_playwright_fallback as _try_playwright_fallback
+from tofu_search.fetch.pdf_extract import PDFExtractionError
 from tofu_search.fetch.pdf_extract import extract_pdf_text as _extract_pdf_text
 from tofu_search.fetch.readers import get_reader as _get_reader
 from tofu_search.fetch.utils import (
@@ -464,6 +465,9 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
             html_for_spa_check = html
             _html_head_cache.put(url, html[:20480])
             result = _extract_html_text(html, extraction_limit, url=url)
+    except PDFExtractionError as e:
+        logger.info('[Fetch] PDF extraction unavailable — %s: %s', url[:80], e)
+        return _diag('pdf_extraction_error', str(e))
     except Exception as e:
         logger.error('Parse error — %s: %s', url[:80], e, exc_info=True)
         return None
