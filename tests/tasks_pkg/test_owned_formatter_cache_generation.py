@@ -309,7 +309,11 @@ def test_cancel_before_admission_does_not_advance(project):
     owner = task()
     owner['aborted'] = True
     before = freshness.project_read_cache_generation()
-    assert 'cancelled' in format_project(owner, project).lower()
+    spawned = []
+    result = tools.execute_tool('run_command', {'command': 'ruff format a.py'},
+        str(project), task=owner, on_spawn=lambda *args: spawned.append(args))
+    assert '[exit code: -1]' in result
+    assert spawned == []
     assert freshness.project_read_cache_generation() is before
     assert (project / 'a.py').read_text() == 'x=1\n'
 

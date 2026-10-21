@@ -315,10 +315,13 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
 @tool_registry.handler('fetch_url', category='search',
                        description='Fetch and extract content from a URL')
 def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    from lib.tasks_pkg.tool_dispatch._prefetch import consume_prefetch
+    prefetched_items = consume_prefetch(task, fn_name, tc_id, fn_args, round_entry, project_path)
     # Batch mode: if 'urls' array is present, fetch all concurrently
     urls = fn_args.get('urls')
     if urls and isinstance(urls, list):
-        return _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls, rn, round_entry, cfg, project_path, project_enabled, all_tools)
+        return _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls, rn, round_entry, cfg, project_path, project_enabled, all_tools,
+                                      prefetched_items=prefetched_items)
 
     target_url = (fn_args.get('url') or '').strip()
     user_question = task.get('lastUserQuery', '')
@@ -373,8 +376,8 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
             client_id=cfg.get('browserClientId') or ''):
-        item = search_core._fetch_url_one(
-            target_url, user_question, fetch_reason=fetch_reason)
+        item = (prefetched_items[0] if prefetched_items is not None else
+                search_core._fetch_url_one(target_url, user_question, fetch_reason=fetch_reason))
 
     from lib.tasks_pkg.tool_display import _short_url
     dr = _format_fetch_display(item, _short_url)
@@ -613,7 +616,7 @@ def _handle_browser_download_url_to_server(
     return tc_id, tool_content, True
 
 
-def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, round_entry, cfg, project_path, project_enabled, all_tools=None, *, prefetched_items=None):
     """Handle batch fetch_url: fetch multiple URLs concurrently.
 
     Concatenates results for all URLs into one tool response, with
@@ -624,10 +627,9 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
 
     handler_t0 = _time.time()
     user_question = task.get('lastUserQuery', '')
-    MAX_BATCH = 10
 
     url_list = []
-    for spec in urls_specs[:MAX_BATCH]:
+    for spec in urls_specs:
         if isinstance(spec, dict) and spec.get('url'):
             url_list.append(spec['url'])
         elif isinstance(spec, str) and spec.strip():
@@ -648,11 +650,13 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
             return search_core._fetch_url_one(
                 target_url, user_question, fetch_reason='')
 
-    ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch',
-                                   abort=lambda: bool(task.get('aborted')),
-                                   on_item=_batch_progress_reporter(
-                                       task, rn, round_entry, n,
-                                       lambda idx, _u: url_list[idx]))
+    ordered = prefetched_items
+    if ordered is None:
+        ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch',
+                                      abort=lambda: bool(task.get('aborted')),
+                                      on_item=_batch_progress_reporter(
+                                          task, rn, round_entry, n,
+                                          lambda idx, _u: url_list[idx]))
 
     from lib.tasks_pkg.tool_display import _short_url
     all_display_results = []

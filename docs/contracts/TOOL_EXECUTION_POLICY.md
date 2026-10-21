@@ -99,6 +99,7 @@ translation could grant an entire write-capable group unexpectedly; text-only
 fallback changes the requested task. Neither is used for explicit policy errors.
 
 A tool call is settled exactly once, including cancellation and failure. The
+owner's explicit abort also vetoes reusable-cache delivery before execution. The
 runtime distinguishes transport failure, invalid arguments, unavailable tool,
 permission denial, handler failure, and user abort. Repair is limited to
 syntax/shape problems and cannot silently change the requested capability.
@@ -117,6 +118,63 @@ persisted state; retrying automatically could duplicate an uncertain write.
 Each subsequent call still passes normal authority and recovery admission.
 Verify `tests/tasks_pkg/test_tool_outcome_finality.py` for legacy/V2 delivery,
 late exceptions, unknown writes, timeout attribution and successful read retry.
+
+**Completed speculative occurrences.** Problem: excluding a failed fetch from
+reusable cache discarded an already completed read, so formal dispatch issued
+the same request again, including after a server wait hint. Decision:
+`tool_dispatch/_prefetch.py` carries the domain source result in the existing
+bounded task cache under a separate occurrence key. It binds the physical task
+and announced row, principal, conversation/Turn/attempt/world, call ID, arguments,
+caller, user question, execution configuration and tool contract before IO.
+Project sources also retain the read-start generation. The normal identity-repair owner may remint a
+recycled correlation ID only after verifying this same occurrence. Equal arguments
+or a copied row never authorize consumption by another call.
+
+The ordinary parser, decision gates, hooks, budgets and executor still run. A
+matching occurrence takes priority over reusable observations; the admitted
+domain handler consumes its source result once and uses its existing formatting
+and effect-recovery owner. This preserves unknown-effect operation evidence and
+all successful members of a partially failed batch. A newer concurrent success
+is retained: publication invalidates only the reusable receipt observed at read
+start. Rejected/aborted settlement, provider restart and orphan retirement drop
+unused receipts. Normal stream-worker shutdown preserves completed handoffs for
+the following dispatch. Consumption checks cancellation and closed result
+collection even when the receipt was already withdrawn; settlement never grants
+permission for another source request. Capacity eviction or invalid identity falls through to
+normal dispatch. These transient receipts never survive restore or become retry
+authority; later calls can observe service recovery.
+
+Alternatives rejected: admitting failures to argument-addressed cache masks
+later recovery and conflates distinct calls; formatting a final failure before
+executor entry loses its admitted operation evidence; a second unbounded result
+registry would add retention and synchronization owners. Verify
+`test_prefetch_occurrence_handoff.py`, streaming/source-binding, call-ID repair,
+cache-generation, outcome/cancellation and installed native execution neighbors.
+The controlled root-loop fixture delivers a failed read to the next model round
+before a distinct successful retry. A local 503 with `Retry-After: 3600` now uses
+one request across prefetch and formal dispatch, instead of two.
+
+Resource measurement: the existing probed cache capacity and lock remain the
+only retention owner; no worker or persistent state is added. In a local fixture
+with an explicit 16-entry capacity, 1,000 publications of about 32 KiB retained
+524,208 payload bytes, 535,956 traced bytes in total, and 360 traced bytes after
+clearing the cache. Median lookup time was 0.6 μs with no pending occurrence and
+14.1 μs with matching identity. These are synthetic local retention/lookup
+measurements, not production throughput claims.
+
+**Admitted fetch batch completeness.** Problem: the ordinary fetch handler silently
+truncated `urls` to ten entries although the canonical schema declares no such
+limit; streaming and Paper already retained the full batch. Decision: the handler
+preserves every admitted source through the existing demand executor, including
+partial failures. The executor's existing resource
+policy owns worker reuse and demand; the handler adds no independent count gate.
+Alternatives rejected: clipping prefetched records discards already obtained
+source evidence; adding a schema limit would restrict the advertised capability.
+Verify `test_fetch_batch_completeness.py`. The
+controlled 13-URL fixture now makes 13 requests and retains 13 source records,
+instead of silently issuing ten. Both legacy and V2 runs reached 13 active source
+entries on the fixture host through the existing executor. This measures admitted
+work and demand response, not production throughput.
 
 **Settled result publication.** Problem: a worker returning after the parallel
 deadline could overwrite result cards and emit new handler frames after the

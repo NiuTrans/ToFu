@@ -41,6 +41,9 @@ context composition, compaction, event folding, and settlement. Read
 Parallel tools and streaming prefetch use the shared demand executor in
 `lib/observability.py`. Worker knobs size idle reuse only; prefetch preserves
 qualified occurrences and never restores a local count gate.
+`tool_dispatch/_prefetch.py` binds completed non-cacheable source results to one
+announced occurrence in the existing bounded cache. The admitted domain handler
+consumes them; verify prefetch handoff, identity repair and outcome/cancellation.
 
 NativeGateway qualifies parallel reads through tool_dispatch.api and binds
 original model declarations before execution. tool_dispatch owns invocation-local
