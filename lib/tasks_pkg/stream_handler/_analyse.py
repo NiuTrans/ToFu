@@ -808,7 +808,7 @@ def analyse_stream_result(
         # meaningful token came through.  No work was done, no tokens
         # were spent — retrying is essentially free, so we admit this
         # case on EVERY round including round 0.  This is the recurring
-        # ``aws.claude-opus-4.7`` via sankuai gateway pattern documented
+        # ``aws.claude-opus-4.7`` via example-corp gateway pattern documented
         # in the ``stream-retry-cap-split-by-signature`` memory.
         #
         # Detection: prefer the real ``_chunks_received`` from the LLM
@@ -1063,7 +1063,7 @@ def analyse_stream_result(
             )
             return result
 
-        # ── Tool-calls finish WITHOUT payload (2026-08-06 kimi-k3/sankuai
+        # ── Tool-calls finish WITHOUT payload (2026-08-06 kimi-k3/example-corp
         #    incident, conv msh3qeplzneph5 R3) ──
         # The wire reported finish_reason=tool_calls yet zero tool calls
         # were assembled: the gateway lost the model's tool-call deltas

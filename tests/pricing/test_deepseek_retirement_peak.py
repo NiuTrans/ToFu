@@ -228,7 +228,7 @@ def test_shipped_deepseek_rows_carry_live_peak_block():
     items during 01:00-04:00 + 06:00-10:00 UTC on weekdays (REPLACES the
     retired 2026-08-16 Beijing-time schedule). Off-peak lookups return the
     V4.1 bases ($0.15), peak-window lookups double them and stamp peakMul.
-    The Meituan-gateway mirror (-huawei) must NOT carry it — the 2x policy is
+    The YourProvider-gateway mirror (-huawei) must NOT carry it — the 2x policy is
     DeepSeek-direct only. deepseek-v4-pro lost its peak block on 2026-09-10:
     it routes to V4.1 Flash from 2026-09-14 and keeps the old V4 Pro price
     card until then."""
@@ -264,7 +264,7 @@ def test_v41_flash_pricing_rows():
     from lib.pricing import MODEL_PRICING
     for mid in ('deepseek-flash', 'deepseek-v4-flash',
                 'deepseek-v4-flash-huawei', 'deepseek-v4-flash-tencent',
-                'deepseek-v4-flash-meituan', 'deepseek-v4-flash-vision-exp'):
+                'deepseek-v4-flash-yourprovider', 'deepseek-v4-flash-vision-exp'):
         row = MODEL_PRICING[mid]
         assert row['input'] == 0.15 and row['output'] == 0.60, mid
         assert row['cacheReadMul'] == 0.02, mid

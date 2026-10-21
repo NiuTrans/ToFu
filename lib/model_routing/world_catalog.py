@@ -17,7 +17,7 @@ the freshly compiled catalogue no longer supplies that identity.
 Retirement is global: ``tests/model_routing/test_world_catalog_sync.py`` pins that no
 shipped template authors an offering whose identity any template retires
 (deepseek-chat flipped in and out of the registry while deepseek.json
-retired it and meituan.json still authored it — the UI's retired chip
+retired it and yourprovider.json still authored it — the UI's retired chip
 advised removal, a full-document PUT wiped the row, and the next boot sync
 re-inserted it).  The catalogue guard below remains as defence for
 deployment-local override templates the shipped-template invariant cannot

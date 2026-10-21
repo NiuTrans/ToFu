@@ -41,9 +41,9 @@ function harness({cold = false, text = '', attachment = false, staleCleanup = fa
     persistConversationSettings: conv => writes.push({...conv}),
     reconcileConversationCatalogMetadata: id => reconciliations.push(id),
     config: {model: 'gpt-6-astra'}, activeConvId: null,
-    conversations: [{id: 'apk', title: 'APK', model: 'kimi-k3', projectPath: '/ruanjunhao04/apk',
+    conversations: [{id: 'apk', title: 'APK', model: 'kimi-k3', projectPath: '/your-username/apk',
       _turnSnapshotRequired: cold}],
-    projectState: {active: true, path: '/ruanjunhao04/tofu'},
+    projectState: {active: true, path: '/your-username/tofu'},
     pendingImages: attachment ? [{}] : [], pendingPdfTexts: [], pendingVideos: [],
     _pendingLogClean: staleCleanup ? {originalText: 'old pasted logs'} : null,
     document: {getElementById: id => id === 'userInput' ? input : {textContent: ''},
@@ -109,14 +109,14 @@ for (const cold of [false, true]) {
     const h = harness({cold, staleCleanup: true});
     h.open(); h.release(); await settle();
     assert.equal(h.ctx.config.model, 'kimi-k3');
-    assert.equal(h.ctx.projectState.path, '/ruanjunhao04/apk');
+    assert.equal(h.ctx.projectState.path, '/your-username/apk');
   });
   for (const draft of [{text: 'unsent'}, {attachment: true}]) {
     test(`real sidebar preserves actual draft ${JSON.stringify(draft)} (cold=${cold})`, async () => {
       const h = harness({cold, ...draft});
       h.open(); h.release(); await settle();
       assert.equal(h.ctx.config.model, 'gpt-6-astra');
-      assert.equal(h.ctx.projectState.path, '/ruanjunhao04/tofu');
+      assert.equal(h.ctx.projectState.path, '/your-username/tofu');
     });
   }
 }
@@ -143,7 +143,7 @@ for (const cold of [false, true]) {
     assert.deepEqual(h.reconciliations, []);
     assert.equal(h.ctx.activeConvId, 'apk');
     assert.equal(h.ctx.config.model, 'gpt-6-astra');
-    assert.equal(h.ctx.projectState.path, '/ruanjunhao04/tofu');
+    assert.equal(h.ctx.projectState.path, '/your-username/tofu');
   });
   test(`changed outgoing tools persist only after switch without activity bump (cold=${cold})`, async () => {
     const h = harness({cold, outgoing: {fetchEnabled: true}, attachment: true});

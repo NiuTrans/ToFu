@@ -376,7 +376,7 @@ def test_transcription_not_in_personal_scope():
 class _ChatSlot:
     """A slot that transcribes via the inline chat-audio path (audio_chat)."""
 
-    def __init__(self, model='gemini-3-flash-preview', provider_id='meituan'):
+    def __init__(self, model='gemini-3-flash-preview', provider_id='yourprovider'):
         self.model = model
         self.provider_id = provider_id
         self.key_name = 'key_0'

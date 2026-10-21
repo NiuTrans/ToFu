@@ -43,7 +43,7 @@ ALLOWED_USERS = set(filter(None, _allowed_raw.split(',')))
 
 DEFAULT_PROJECT_PATH = os.getenv(
     'FEISHU_DEFAULT_PROJECT',
-    os.path.expanduser('~/Projects/tofu'),
+    os.path.expanduser('~/tofu'),
 )
 WORKSPACE_ROOT = os.getenv(
     'FEISHU_WORKSPACE_ROOT',

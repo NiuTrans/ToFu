@@ -1,7 +1,7 @@
 """Registry env_specs for the internal hope/llm MCP servers.
 
 Pins the install-time credential/config surface the catalog advertises for the
-Meituan-internal launchers. The actual server behaviour (tool profiles, login
+YourProvider-internal launchers. The actual server behaviour (tool profiles, login
 timeouts, subprocess budgets) is owned by the sibling hope-mcp/llm-mcp repos;
 ChatUI only needs to pass the env keys through ``env_specs`` so the install
 modal can edit them and ``build_server_config`` forwards them into the launched

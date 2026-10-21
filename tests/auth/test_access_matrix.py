@@ -121,7 +121,7 @@ console.log(JSON.stringify(out));
 
 @pytest.mark.skipif(not NODE, reason='node not installed')
 def test_toggle_one_wire_does_not_touch_sibling_wire(tmp_path):
-    """glm-5.3 and glm-53-meituan share one ModelRef; disabling one wire must
+    """glm-5.3 and glm-53-yourprovider share one ModelRef; disabling one wire must
     leave the other reachable (the user's actual bug)."""
     provider = tmp_path / 'provider-render.js'
     provider.write_text(runtime_section('settings/provider_render.js'), encoding='utf-8')
@@ -165,7 +165,7 @@ global._stgModelRouting = {
     {deployment_id: 'd1', offering_id: 'off-0', connection_id: 'pc',
       wire_model_id: 'glm-5.3', enabled: true, identity_confidence: 'high', probe_status: 'passed'},
     {deployment_id: 'd2', offering_id: 'off-0', connection_id: 'pc',
-      wire_model_id: 'glm-53-meituan', enabled: true, identity_confidence: 'high', probe_status: 'passed'},
+      wire_model_id: 'glm-53-yourprovider', enabled: true, identity_confidence: 'high', probe_status: 'passed'},
   ],
 };
 eval(fs.readFileSync(process.argv[2], 'utf8'));
@@ -176,18 +176,18 @@ const cellOn = wire => {
   return g && (g.excluded_wire_model_ids || []).indexOf(wire) < 0;
 };
 const out = {};
-out.before = [cellOn('glm-5.3'), cellOn('glm-53-meituan')];
+out.before = [cellOn('glm-5.3'), cellOn('glm-53-yourprovider')];
 // Disable only glm-5.3.
 _toggleMatrixAccess('p', 0, 0, 'glm-5.3');
-out.afterDisableOne = [cellOn('glm-5.3'), cellOn('glm-53-meituan'),
+out.afterDisableOne = [cellOn('glm-5.3'), cellOn('glm-53-yourprovider'),
   JSON.stringify(grant().excluded_wire_model_ids || [])];
 // Re-enable it.
 _toggleMatrixAccess('p', 0, 0, 'glm-5.3');
-out.afterReenable = [cellOn('glm-5.3'), cellOn('glm-53-meituan'),
+out.afterReenable = [cellOn('glm-5.3'), cellOn('glm-53-yourprovider'),
   'excluded_wire_model_ids' in grant()];
 // Disable both → whole grant drops.
 _toggleMatrixAccess('p', 0, 0, 'glm-5.3');
-_toggleMatrixAccess('p', 0, 0, 'glm-53-meituan');
+_toggleMatrixAccess('p', 0, 0, 'glm-53-yourprovider');
 out.afterDisableBoth = _stgModelRouting.credentials[0].authorization.models.length;
 console.log(JSON.stringify(out));
 ''', encoding='utf-8')
