@@ -482,7 +482,12 @@ Surface derives contiguous completion runs from the existing flat queue. One
 localized status/count heading precedes compact, continuous result rows; ordinary
 queued messages break a run and keep their own position/source presentation.
 Each row remains a direct, keyed `queueId` child with its own output disclosure
-and **Cancel delivery** action. Grouping never deduplicates equal command IDs,
+and **Cancel delivery** action. Queue rank, summary and cancellation share a
+first text baseline despite their different type scales and control padding;
+opening output or wrapping a long identifier never centers the action against
+the entire evidence block. Top-edge alignment leaves the padded action's text
+lower than the summary; whole-block centering moves it when output expands.
+Grouping never deduplicates equal command IDs,
 changes queue order or acknowledges delivery. Group-count/position changes patch
 retained evidence and controls in place, preserving reader folds, focus and
 unchanged selected output. **Alternatives rejected:** a synthetic queue item or
