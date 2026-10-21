@@ -772,6 +772,9 @@ class StreamIdleWatchdog:
         self._read_deadline = None
         self._on_read_deadline = None
         self._read_deadline_expired = False
+        self._attempt_deadline = None
+        self._on_attempt_deadline = None
+        self._attempt_deadline_expired = False
         self._aborted = False
         self._idle_timed_out = False
         self._actionable_timed_out = False
@@ -800,6 +803,31 @@ class StreamIdleWatchdog:
     def read_deadline_expired(self):
         return self._read_deadline_expired
 
+    @property
+    def attempt_deadline_expired(self):
+        return self._attempt_deadline_expired
+
+    def arm_attempt_deadline(self, seconds, on_timeout):
+        """Bound one PHYSICAL attempt independently of upstream traffic.
+
+        The idle window bounds silence; it cannot bound an attempt that keeps
+        trickling keep-alives while producing no output. A caller that must
+        still afford a retry (translation) therefore gets no bound at all
+        unless one is armed here. Expiry only latches evidence and interrupts
+        the read — it is NOT a user abort, so the attempt stays a retryable
+        transport failure for slot rotation.
+        """
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(seconds) or seconds <= 0:
+            return
+        self._on_attempt_deadline = on_timeout
+        self._attempt_deadline = time.monotonic() + seconds
+        self._wake.set()
+        self.start()
+
     def arm_read_deadline(self, seconds, on_timeout):
         """Bound diagnostics/terminal cleanup using the attempt's single watcher.
 
@@ -816,7 +844,8 @@ class StreamIdleWatchdog:
             if self._thread is not None or self._done.is_set():
                 return
             if (not self._beats_on() and self._abort_check is None
-                    and self._idle_timeout <= 0 and self._read_deadline is None):
+                    and self._idle_timeout <= 0 and self._read_deadline is None
+                    and self._attempt_deadline is None):
                 return
             self._thread = threading.Thread(
                 target=self._run, name='stream-idle-watchdog', daemon=True)
@@ -866,6 +895,17 @@ class StreamIdleWatchdog:
                 except Exception as e:
                     logger.debug('[Watchdog] abort_check raised: %s', e)
             now = time.monotonic()
+            if (self._attempt_deadline is not None
+                    and now >= self._attempt_deadline):
+                self._attempt_deadline_expired = True
+                if self._on_attempt_deadline is not None:
+                    try:
+                        self._on_attempt_deadline()
+                    except Exception as error:
+                        logger.debug(
+                            '[Watchdog] attempt-deadline interrupt failed: %s',
+                            type(error).__name__)
+                return
             if self._read_deadline is not None and now >= self._read_deadline:
                 self._read_deadline_expired = True
                 try:
@@ -965,14 +1005,21 @@ async def async_abortable_sleep(seconds: float, abort_check=None, interval: floa
         await asyncio.sleep(min(interval, max(0, remaining)))
 
 
-def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None):
+def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None,
+                           first_byte_deadline=None, timeout_seconds=None):
     """Run a blocking stream-open ``post_fn`` on a daemon thread while polling
     ``is_aborted``, so a Stop pressed during the response-header wait lands
     within one poll interval instead of whenever the upstream first speaks.
 
     ``post_fn`` blocks until response headers arrive; before that point no
     response handle exists, so the idle watchdog's ``resp.close()`` cannot
-    reach the socket (the read sits inside ``session.post``). On abort the
+    reach the socket (the read sits inside ``session.post``) and the rolling
+    idle window is never renewed — a provider that accepts the socket and then
+    says nothing is invisible to every other transport bound. ``first_byte_deadline``
+    (an absolute ``time.monotonic()`` value) converts that silence into a
+    retryable ``ResponseReadTimeoutError`` so the caller can rotate to another
+    slot inside its own budget instead of spending the whole budget on one
+    silent attempt. On abort the
     in-flight request cannot be cancelled through the requests API either:
     the orphaned thread keeps the socket until the upstream answers or its
     own timeout fires, then closes it. The abandon is deliberate — user Stop
@@ -1006,7 +1053,18 @@ def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None):
         target=_run_post, name='llm-post-headers', daemon=True)
     worker.start()
     while True:
-        worker.join(poll_interval or ABORT_POLL_INTERVAL)
+        wait = poll_interval or ABORT_POLL_INTERVAL
+        if first_byte_deadline is not None:
+            remaining = first_byte_deadline - time.monotonic()
+            if remaining <= 0:
+                abandoned.set()
+                from lib.llm.llm_errors import ResponseReadTimeoutError
+
+                raise ResponseReadTimeoutError(
+                    timeout_seconds=timeout_seconds,
+                    cause_type='response_headers')
+            wait = min(wait, remaining)
+        worker.join(wait)
         if not worker.is_alive():
             break
         if is_aborted is not None and is_aborted():

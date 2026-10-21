@@ -144,8 +144,16 @@ def _dispatch_translation_candidate(
         excluded_models, progress_cb, deadline_exceeded,
         remaining_deadline_seconds, prefer_model=None, strict_model=False,
         stream=False, capability='cheap', temperature=1,
-        max_429_attempts=None, defer_on_shared_contention=False, model_budget_admit=None):
-    """Run one translation attempt and normalize stream/non-stream results."""
+        max_429_attempts=None, defer_on_shared_contention=False, model_budget_admit=None,
+        attempt_timeout=None, first_byte_timeout=None):
+    """Run one translation attempt and normalize stream/non-stream results.
+
+    ``attempt_timeout`` / ``first_byte_timeout`` are hard bounds on THIS
+    attempt, enforced by the transport watchdog. They exist because a
+    translation task owns a fixed total budget: without them one silent slot
+    consumes the entire budget and the retry that would have succeeded is
+    never dispatched.
+    """
     from lib.llm_dispatch import dispatch_chat, dispatch_stream, smart_chat
     from lib.llm_dispatch.conv_affinity import conv_affinity_cleared
     from lib.key_stats import strict_billing_stop_admission
@@ -219,6 +227,8 @@ def _dispatch_translation_candidate(
                     abort_check=deadline_exceeded,
                     max_429_attempts=max_429_attempts,
                     defer_on_shared_contention=defer_on_shared_contention,
+                    attempt_timeout=attempt_timeout,
+                    first_byte_timeout=first_byte_timeout,
                     **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}),
                 ), context='streaming translation candidate')
     stream_message = stream_result.message
@@ -397,33 +407,76 @@ def _translation_chunk_attempt_limits(clen):
     return _mt, _timeout, _retries
 
 
-# A whole-document translation is ONE provider call, so its total budget must
-# cover that call's own per-attempt timeout. A caller-supplied budget below the
-# dispatch timeout aborts the only attempt it authorized: the stream is killed
-# mid-generation and the already-produced output is discarded, so the caller
-# reports a failure for work that was about to succeed. Derive the total budget
-# from the same size table instead of a flat number.
+# A whole-document translation is ONE provider call. Three independent bounds
+# are required, because they answer different questions:
+#   * ``translation_first_byte_timeout_seconds`` — how long to wait for response
+#     headers. This is the cheap liveness proof and the one that actually made
+#     the difference.
+#   * ``translation_attempt_timeout_seconds`` — how long ONE physical attempt
+#     may run once headers arrived. The idle window measures silence only, so
+#     an attempt that keeps the socket warm while producing nothing is
+#     otherwise unbounded.
+#   * ``translation_total_deadline_seconds`` — how long the whole task may run.
+#
+# A per-attempt bound that consumes the whole task budget is the failure this
+# replaces: on 2026-10-21 (conv mvhiznrwv669ue, turn f85740dd) a provider sent
+# no response headers at all, the single attempt sat for 90.7s until the total
+# budget expired, and the retry that would have delivered the 2783-char answer
+# was never dispatched.
+#
+# The attempt window therefore stays exactly the size table's long-standing
+# dispatch timeout (60/120/180s): a healthy but slow model must not be cut off
+# mid-generation, and shortening it would trade this bug for truncated output.
+# Speed comes from the first-byte bound plus pair rotation, and from the total
+# budget always affording a second full attempt.
+#
+# Headers are the cheapest liveness signal: real first-byte latency is
+# single-digit seconds even for long prompts, so waiting minutes for them
+# proves the slot is dead, never that the answer is nearly done.
+_ATTEMPT_FIRST_BYTE_SECONDS = 20.0
+# Room for at least two full attempts: the first may be a silent slot, and the
+# retry on a different model is what actually delivers the result.
 _TRANSLATION_TOTAL_DEADLINE_FLOOR_SECONDS = 90.0
+_TRANSLATION_TOTAL_DEADLINE_ATTEMPT_ALLOWANCE = 2.0
 # Content-shape failures (empty / truncated / no-op / wrong-language) and
 # transport failures share this retry budget: a different model or slot usually
 # fixes both, and past it the input itself is the likelier cause.
 _MAX_CONTENT_RETRIES = 5
-_TRANSLATION_TOTAL_DEADLINE_RETRY_ALLOWANCE = 1.5
+
+
+def translation_attempt_timeout_seconds(chars):
+    """Return the wall bound for ONE translation attempt on ``chars``.
+
+    This is the size table's own dispatch timeout, finally enforced on the
+    STREAMING transport too. It was always documented as the per-attempt
+    window; only the non-streaming read clock ever honored it, so a streaming
+    translation had no attempt bound at all.
+    """
+    _mt, dispatch_timeout, _retries = _translation_chunk_attempt_limits(chars)
+    return float(dispatch_timeout)
+
+
+def translation_first_byte_timeout_seconds(chars):
+    """Return the response-header bound for one attempt (never above it)."""
+    return min(
+        _ATTEMPT_FIRST_BYTE_SECONDS,
+        translation_attempt_timeout_seconds(chars),
+    )
 
 
 def translation_total_deadline_seconds(chars):
     """Return the wall budget for translating ``chars`` in one call.
 
-    ``1.5x`` the size-appropriate attempt timeout leaves room for exactly one
-    retry after a fast failure (429 rotation, empty reply, stalled slot) while
-    never expiring inside a legitimately-running first attempt. The floor keeps
-    short texts at the historical 90s; the engine's own 600s default remains the
-    ceiling for the largest documents.
+    Two attempts' worth of the per-attempt bound (see
+    :func:`translation_attempt_timeout_seconds`) plus the historical 90s floor,
+    so the unavoidable first failure — a silent slot, a 429 rotation, an empty
+    reply — still leaves a full retry inside the same budget. The engine's own
+    600s default remains the ceiling for the largest documents.
     """
-    _mt, attempt_timeout, _retries = _translation_chunk_attempt_limits(chars)
+    attempt_timeout = translation_attempt_timeout_seconds(chars)
     return max(
         _TRANSLATION_TOTAL_DEADLINE_FLOOR_SECONDS,
-        float(attempt_timeout) * _TRANSLATION_TOTAL_DEADLINE_RETRY_ALLOWANCE,
+        attempt_timeout * _TRANSLATION_TOTAL_DEADLINE_ATTEMPT_ALLOWANCE,
     )
 
 
@@ -482,6 +535,12 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     _target_is_chinese = ((target or '').lower().startswith('chinese')
                           or 'zh' in (target or '').lower())
     _mt, _timeout, _retries = _translation_chunk_attempt_limits(clen)
+    # Bounds on ONE physical attempt. The dispatch timeout above only reaches
+    # the non-streaming transport's read clock; the streaming transport had no
+    # per-attempt bound at all, which is how one silent provider consumed the
+    # whole task budget. Both bounds are always forwarded.
+    _attempt_timeout = translation_attempt_timeout_seconds(clen)
+    _first_byte_timeout = translation_first_byte_timeout_seconds(clen)
 
     # ── Aggressive retry policy ──
     # Rationale: auto-translate is a background task.  A user waiting for
@@ -573,6 +632,12 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                 temperature=temperature,
                 max_429_attempts=max_429_attempts,
                 defer_on_shared_contention=defer_on_shared_contention,
+                # Never let ONE attempt outlive the remaining task budget:
+                # dispatch would otherwise hold the slot past the deadline and
+                # report the deadline as the failure instead of retrying.
+                attempt_timeout=min(_attempt_timeout,
+                                    max(1.0, _remaining_deadline_seconds())),
+                first_byte_timeout=_first_byte_timeout,
                 **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}),
             )
         except ModelBudgetAdmissionDenied:
