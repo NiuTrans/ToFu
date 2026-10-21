@@ -6,6 +6,7 @@ import pytest
 
 from lib.agent_core.progress_evidence import nonretryable_failure_signature
 from lib.tools.result_envelope import typed_tool_error
+from lib.tools.result_value import TrustedResultText, capture_result
 
 pytestmark = pytest.mark.unit
 
@@ -47,3 +48,27 @@ def test_ambiguous_batch_error_text_cannot_stop_an_execution(mutation):
     else:
         framed = framed.replace('\nsummary (text;', '\n{}\nsummary (text;')
     assert nonretryable_failure_signature(batch_call(), framed) is None
+
+
+@pytest.mark.parametrize('projection', ['model', 'envelope'])
+def test_successful_error_example_is_data_despite_exact_failure_shape(projection):
+    failure = batch_failure()
+    text = str(failure.to_model_text() if projection == 'model' else failure.to_envelope_text())
+    document = TrustedResultText(text, canonical=capture_result(text))
+    assert document.canonical.execution_status == 'ok'
+    assert nonretryable_failure_signature(batch_call(), document) is None
+
+
+@pytest.mark.parametrize('status', ['ok', 'done', 'unknown', '', 'running'])
+def test_nonfailure_or_missing_settlement_cannot_authorize_failure_streak(status):
+    assert nonretryable_failure_signature(
+        batch_call(), batch_failure().to_model_text(), execution_status=status) is None
+
+
+@pytest.mark.parametrize('status', ['error', 'failed', 'rejected', 'aborted', 'cancelled', 'unanswerable'])
+def test_settled_failure_keeps_original_operation_and_recovery_identity(status):
+    text = str(batch_failure().to_model_text())
+    expected = nonretryable_failure_signature(batch_call(), text)
+    assert expected
+    assert nonretryable_failure_signature(batch_call(), text, execution_status=status) == expected
+    assert nonretryable_failure_signature(batch_call(), 'opaque failure', execution_status=status) is None

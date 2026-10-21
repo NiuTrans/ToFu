@@ -62,6 +62,7 @@ def run_tool_dispatch(
     project_enabled: bool,
     tool_list: list[dict[str, Any]],
     announced_tc_map: dict[str, Any],
+    internal_result_sink: Any = None,
 ) -> bool:
     """Parse, sanitize, emit, and execute this round's tool calls.
 
@@ -91,6 +92,8 @@ def run_tool_dispatch(
     announced_tc_map : dict[str, Any]
         Streaming accumulator's announced-tc map — tool_start events
         already sent during streaming are not re-emitted.
+    internal_result_sink : optional
+        Borrowed receiver for canonical outcomes before model compaction.
 
     Returns
     -------
@@ -137,6 +140,7 @@ def run_tool_dispatch(
         task, parsed_tcs, cfg, project_path, project_enabled,
         _execution_catalog, messages, all_search_results_text, round_num,
         rs.model,
+        internal_result_sink=internal_result_sink,
     )
 
     # Clean up live messages ref after tool execution

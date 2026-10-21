@@ -18,6 +18,7 @@ their schedulers supply input policy and never construct another set of hooks.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from lib.agent_loop.agent_loop import (
@@ -543,6 +544,13 @@ class _RootLoopHooks:
         # The same barrier precedes every agent's external effects.
         checkpoint_invocation(self.task, self.messages, round_num, phase='tools_in_flight')
         stream_accumulator = self.round_context['stream_accumulator']
+        execution_statuses = {}
+
+        def capture_outcome(call_id, canonical):
+            # Borrow only the verdict; raw sources may be arbitrarily large.
+            execution_statuses[call_id] = canonical.execution_status
+
+        result_start = len(self.messages)
         tool_timed_out = run_tool_dispatch(
             self.task, self.state, self.messages,
             self.request.all_search_results_text,
@@ -551,11 +559,13 @@ class _RootLoopHooks:
             project_enabled=self.request.project_enabled,
             tool_list=self.request.tool_list,
             announced_tc_map=stream_accumulator.announced_tc_map,
+            internal_result_sink=SimpleNamespace(capture=capture_outcome),
         )
         from lib.agent_core.progress_evidence import nonretryable_failure_signature
         pending = {call.get('id') for call in _tool_calls}
         results = {}
-        for message in reversed(self.messages):
+        for index in range(len(self.messages) - 1, result_start - 1, -1):
+            message = self.messages[index]
             call_id = message.get('tool_call_id')
             if message.get('role') == 'tool' and call_id in pending:
                 results[call_id] = message.get('content')
@@ -565,7 +575,10 @@ class _RootLoopHooks:
         signatures = []
         last_failing_call: dict | None = None
         for call in _tool_calls:
-            signature = nonretryable_failure_signature(call, results.get(call.get('id')))
+            call_id = call.get('id')
+            signature = nonretryable_failure_signature(
+                call, results.get(call_id),
+                execution_status=execution_statuses.get(call_id, 'unknown'))
             if signature is None:
                 signatures = []
                 last_failing_call = None

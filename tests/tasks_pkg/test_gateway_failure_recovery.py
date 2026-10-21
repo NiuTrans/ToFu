@@ -246,22 +246,24 @@ def test_root_breaker_stops_unchanged_batches_but_allows_correction(
     executed = []
 
     def dispatch(round_num, tools):
+        assert round_num <= 4, 'the finite provider script cannot emit another tool round'
         if corrected and round_num == 4:
             return {"role": "assistant", "content": "completed"}, "stop", {}
         outcomes = ["success", "success"] if corrected and round_num == 3 else ["permanent", "permanent"]
         prefix = "https://alternative.test" if corrected and round_num >= 2 else "https://example.test"
         batch = first if round_num == 0 else batch_result(outcomes, url_prefix=prefix)
-        _, call, text, _, entered = batch
+        _, call, text, content, entered = batch
         executed.extend(entered)
         call = deepcopy(call)
         call["id"] = f"response-{round_num}"
-        receipts[round_num] = (call, text)
+        receipts[round_num] = (call, text, content.canonical)
         message = {"role": "assistant", "content": "", "tool_calls": [call]}
         request.messages.append(message)
         return message, "tool_calls", {}
 
     def publish(owner, state, messages, searches, *, round_num, **kwargs):
-        call, text = receipts[round_num]
+        call, text, canonical = receipts[round_num]
+        kwargs['internal_result_sink'].capture(call['id'], canonical)
         messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
         return False
 

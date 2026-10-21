@@ -15,6 +15,7 @@ import json
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
 from lib.agent_core.native_process import ApprovalRequest, ApprovalPolicy, ToolRequest
 from lib.identity import PrincipalContext
@@ -532,9 +533,17 @@ class NativeGateway:
                     raise RuntimeError('application approval receipt could not bind')
                 self.task['_tool_approval_receipts'][parsed_id]['minted_at'] = approved.issued_at
         messages = [assistant]
+        execution_status = 'unknown'
+
+        def capture_outcome(call_id, canonical):
+            nonlocal execution_status
+            if call_id == parsed_id:
+                execution_status = canonical.execution_status
+
         execute_tool_pipeline(self.task, parsed, json.loads(self.configuration),
             self.project_path, self.project_enabled, json.loads(self.tool_list),
-            messages, self.search_results, round_num, self.model, publish_direct_gateway_siblings=False)
+            messages, self.search_results, round_num, self.model, publish_direct_gateway_siblings=False,
+            internal_result_sink=SimpleNamespace(capture=capture_outcome) if self._progress is not None else None)
         results = [item for item in messages if item.get('role') == 'tool']
         if len(results) != 1 or results[0].get('tool_call_id') != parsed_id:
             raise RuntimeError('canonical gateway did not settle one exact tool result')
@@ -545,5 +554,5 @@ class NativeGateway:
             from lib.agent_core.native_process import validate_model_content
             validate_model_content(content)
         if self._progress is not None:
-            self._progress.record(round_num, call, content)
+            self._progress.record(round_num, call, content, execution_status=execution_status)
         return content
