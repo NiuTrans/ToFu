@@ -435,6 +435,64 @@ def test_insert_before_anchor_echo_stripped(tmp_path):
 
 
 @pytest.mark.unit
+def test_insert_partial_anchor_echo_is_stripped(tmp_path):
+    # Only the first line of a two-line anchor repeated: it is still a copy of
+    # text the insert already keeps, and the duplicate parses, so no guard
+    # would have fired.
+    target = tmp_path / 'sample.txt'
+    target.write_text('A\nB\nnew_tail\n', encoding='utf-8')
+
+    result = tool_edit_file(str(tmp_path), [{
+        'path': 'sample.txt', 'operation': 'insert_after',
+        'anchor': 'A\nB', 'content': 'A\nextra\n',
+    }])
+
+    assert result.startswith('Applied 1/1 edits')
+    assert 'auto-repaired: stripped the anchor copy' in result
+    assert target.read_text(encoding='utf-8') == 'A\nB\nextra\nnew_tail\n'
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(('operation', 'content', 'other'), [
+    ('insert_after', 'extra\nA\nB', 'insert_before'),
+    ('insert_before', 'A\nB\nextra', 'insert_after'),
+])
+def test_far_side_anchor_echo_is_refused(tmp_path, operation, content, other):
+    # A copy of the anchor on the side away from the insertion either
+    # duplicates it or moves the anchor's own body into the inserted block;
+    # both still parse, so the edit must fail visibly instead of guessing.
+    target = tmp_path / 'sample.txt'
+    target.write_text('A\nB\nbody\n', encoding='utf-8')
+
+    result = tool_edit_file(str(tmp_path), [{
+        'path': 'sample.txt', 'operation': operation,
+        'anchor': 'A\nB', 'content': content,
+    }])
+
+    assert result.startswith('Applied 0/1 edits (1 failed)')
+    assert 'echo-content' in result
+    assert other in result
+    assert target.read_text(encoding='utf-8') == 'A\nB\nbody\n'
+
+
+@pytest.mark.unit
+def test_anchor_middle_line_repeat_is_not_an_echo(tmp_path):
+    # A run taken from the middle of a longer anchor can be intended
+    # repetition; only head/tail alignment is provably the anchor again.
+    target = tmp_path / 'sample.txt'
+    target.write_text('A\nB\nC\ntail\n', encoding='utf-8')
+
+    result = tool_edit_file(str(tmp_path), [{
+        'path': 'sample.txt', 'operation': 'insert_after',
+        'anchor': 'A\nB\nC', 'content': 'B\nextra\n',
+    }])
+
+    assert result.startswith('Applied 1/1 edits')
+    assert 'auto-repaired' not in result
+    assert target.read_text(encoding='utf-8') == 'A\nB\nC\nB\nextra\ntail\n'
+
+
+@pytest.mark.unit
 def test_anchor_echo_only_edit_fails_without_touching_file(tmp_path):
     target = tmp_path / 'sample.txt'
     target.write_text('A\nB\n', encoding='utf-8')

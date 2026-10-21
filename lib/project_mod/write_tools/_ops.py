@@ -1572,6 +1572,25 @@ def _line_window_before(file_content, anchor_idx):
     return file_content[:anchor_idx - 1].split('\n')
 
 
+def _anchor_echo_lines(anchor, content, *, from_end):
+    """Whole lines at one content boundary that repeat the anchor's head/tail.
+
+    ``insert_*`` keeps the anchor, so re-emitting its leading or trailing lines
+    duplicates text that is already in the file. A run taken from the middle of
+    a longer anchor stays: that can be intended repetition, and the escape
+    hatch for deliberate duplication is ``operation=replace``.
+    """
+    anchor_lines = anchor.split('\n')
+    body = content[:-1] if content.endswith('\n') else content
+    content_lines = body.split('\n') if body else []
+    best = 0
+    for k in range(1, min(len(anchor_lines), len(content_lines)) + 1):
+        run = content_lines[-k:] if from_end else content_lines[:k]
+        if run == anchor_lines[:k] or run == anchor_lines[-k:]:
+            best = k
+    return best
+
+
 def _strict_echo_run(content_lines, neighbour, position):
     """Exact boundary match count, no blank skipping."""
     if position == 'after':
@@ -1617,32 +1636,53 @@ def _neighbour_echo_run(content_lines, neighbour, position):
 
 
 def _strip_anchor_echo(file_content, anchor_idx, anchor, content, position):
-    """Strip a verbatim anchor copy at content's anchor-facing boundary.
-    Whole-line anchors only — a mid-line overlap is ambiguous."""
-    if not content or len(content) < len(anchor):
-        return content, 0
+    """Repair one insert's whole-line anchor echo.
+
+    Returns ``(content, stripped_chars, error)``. The anchor always stays, so a
+    re-typed run of its lines at the insertion edge is duplication; it is
+    stripped (a partial run of a multi-line anchor included — that geometry
+    used to leave the anchor twice, and a duplicated ``def`` or assignment still
+    parses, so no guard fired).
+
+    An echo on the FAR side is refused instead: content then says both "insert
+    this next to the anchor" and "and here is the anchor again", which either
+    means the block belongs on the other side (``insert_before``) or that a
+    deliberate copy was intended (``operation=replace``). Picking one silently
+    either duplicates the anchor or moves the anchor's own body into the
+    inserted block, and both results parse.
+
+    Whole-line anchors only — a mid-line overlap stays ambiguous and untouched.
+    """
+    if not content or not anchor:
+        return content, 0, None
     after_idx = anchor_idx + len(anchor)
     at_ls = anchor_idx == 0 or file_content[anchor_idx - 1] == '\n'
     at_le = after_idx == len(file_content) or file_content[after_idx] == '\n'
     if not (at_ls and at_le):
-        return content, 0
-    if position == 'after':
-        if not content.startswith(anchor):
-            return content, 0
-        rest = content[len(anchor):]
-        if rest.startswith('\n'):
-            rest = rest[1:]
-        elif rest:
-            return content, 0
-        return rest, len(content) - len(rest)
-    if not content.endswith(anchor):
-        return content, 0
-    rest = content[:-len(anchor)]
-    if rest.endswith('\n'):
-        rest = rest[:-1]
-    elif rest:
-        return content, 0
-    return rest, len(content) - len(rest)
+        return content, 0, None
+    trailing_newline = content.endswith('\n')
+    body = content[:-1] if trailing_newline else content
+    lines = body.split('\n') if body else []
+    start = _anchor_echo_lines(anchor, content, from_end=False)
+    end = _anchor_echo_lines(anchor, content, from_end=True)
+    near, far = (start, end) if position == 'after' else (end, start)
+    if not near and not far:
+        return content, 0, None
+    if near + far >= len(lines):
+        return '', len(content), None
+    if far:
+        other = 'insert_before' if position == 'after' else 'insert_after'
+        side = 'end' if position == 'after' else 'start'
+        return content, 0, (
+            f'content repeats the anchor at its {side}, the side away from '
+            f'insert_{position}. The anchor stays where the operation puts it, '
+            f'so that copy would either duplicate it or move the anchor\'s own '
+            'body into the inserted block. Put the new text on the other side '
+            f'({other}, content = new text only), or use operation=replace if a '
+            'deliberate copy is intended.')
+    kept = lines[start:len(lines) - end]
+    rest = '\n'.join(kept) + ('\n' if trailing_newline else '')
+    return rest, len(content) - len(rest), None
 
 
 def _whole_echo_error(k, position):
@@ -1752,8 +1792,11 @@ def _finalize_insertion(file_content, anchor_idx, anchor, content,
     """
     notes = []
     if os.environ.get('TOFU_EDIT_ECHO_REPAIR', '1') != '0':
-        stripped, n_chars = _strip_anchor_echo(
+        stripped, n_chars, echo_error = _strip_anchor_echo(
             file_content, anchor_idx, anchor, content, position)
+        if echo_error:
+            return {'ok': False, 'error': echo_error,
+                    'errorKind': EK_ECHO_CONTENT}
         if n_chars:
             if not stripped.strip():
                 return {'ok': False, 'error': (
