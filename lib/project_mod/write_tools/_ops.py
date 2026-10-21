@@ -1578,7 +1578,9 @@ def _anchor_echo_lines(anchor, content, *, from_end):
     ``insert_*`` keeps the anchor, so re-emitting its leading or trailing lines
     duplicates text that is already in the file. A run taken from the middle of
     a longer anchor stays: that can be intended repetition, and the escape
-    hatch for deliberate duplication is ``operation=replace``.
+    hatch for deliberate duplication is ``operation=replace``. Whitespace and
+    punctuation alone cannot identify copied context: separate code blocks
+    routinely share braces, brackets and blank lines. Preserve those bytes.
     """
     anchor_lines = anchor.split('\n')
     body = content[:-1] if content.endswith('\n') else content
@@ -1586,7 +1588,9 @@ def _anchor_echo_lines(anchor, content, *, from_end):
     best = 0
     for k in range(1, min(len(anchor_lines), len(content_lines)) + 1):
         run = content_lines[-k:] if from_end else content_lines[:k]
-        if run == anchor_lines[:k] or run == anchor_lines[-k:]:
+        if ((run == anchor_lines[:k] or run == anchor_lines[-k:])
+                and any(char.isalnum() or char == '_'
+                        for line in run for char in line)):
             best = k
     return best
 

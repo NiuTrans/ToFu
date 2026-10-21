@@ -103,6 +103,22 @@ Bounded `tool_wire_projection` evidence records ordered final names, tokens, and
 Eligible single-destination Git HTTPS/SSH and curl/wget commands race lightweight direct/configured-global-proxy probes before spawn, project only the winner into the child, and execute the original command exactly once. Git HTTPS cold races prefer a real smart-HTTP response over a faster SSO redirect and stop as soon as that stronger evidence arrives. Health keys include protocol, host, and port. Explicit proxy/SSH routing, multiple targets, recursive submodules, and unparseable shell shapes retain original semantics; protocols are never rewritten and side-effecting work is never replayed. HTTP(S) uses a child-only proxy/no-proxy overlay; SSH requires a bounded unauthenticated CONNECT probe and the internal ProxyCommand bridge. Credentialed pool rows remain vault-scoped; shell routing uses its existing environment/config proxy plus credential-free global rows. Proxy credentials stay out of command text, argv, metadata, and logs. Exhausted routes return not-run, while result markers distinguish route, auth/client, network, and pipeline-masked failures. `NO_PROXY` is the normal HTTP default; command auto-routing may challenge it with a configured global proxy, except loopback/link-local. `TOFU_RUN_NETWORK_RESPECT_NO_PROXY=1` makes it strict; `TOFU_RUN_NETWORK_ROUTE=auto|inherit|direct|proxy` selects the master mode. Connect/read/race defaults are 2/3/5.5 seconds, with eight lazy workers, four proxy candidates, and 64 cached protocol origins.
 
 Normal tools remain model-synchronous: one result; bounded progress is presentation-only. `ToolExecutionContext` wraps task abort, scoped cleanup, deadlines, progress, and output. HTTP/push Stop share one owner-checked manager path; commands use TERM/grace/KILL/reap. Detached lifecycles stay unchanged. See [`../EVENTS.md`](../contracts/EVENTS.md). High-level `produce_video`, `produce_report`, `produce_slides`, and `produce_research` are explicit detached producers. A successful handler stamps one accepted-task receipt; after the whole tool batch settles, root chat uses the established clean-finish path (`finishReason=stop`) and emits a deterministic acknowledgement. The background task runtime—not another model round—owns polling, progress, completion, error, and artifact-quality truth.
+## Anchored edit content preservation
+
+**Problem:** treating every shared boundary line as a copied anchor rejects
+independent code blocks ending in `}` or `});`; on the insertion edge it can
+silently remove the new block's closing syntax. **Decision:** the shared insert
+finalizer only treats a boundary run as anchor context when it includes a
+letter, number or identifier underscore. Punctuation and whitespace alone stay
+literal, including multi-line runs. Qualifying head/tail copies at the insertion
+edge retain existing repair; copies on the far side fail before writing. Middle
+anchor runs stay literal, and `replace` always uses the complete replacement.
+**Alternatives rejected:** disabling every echo guard permits duplicate
+definitions; reversing insertion direction guesses the model's intent; a syntax
+parser cannot prove intent and is unavailable for many file types. Verify
+`tests/project_mod/test_insert_structural_overlap.py` and the unified-edit,
+atomic-preflight and error-kind suites.
+
 ## Visibility and authority
 Tool availability is per request. Installed does not mean visible. Multi-user deployments default to an explicit allow-list; a dedicated operator may expose more tools through declared configuration. Plugins, MCP servers, request-level custom tools, and built-ins all cross the same name/visibility gate.
 

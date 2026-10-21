@@ -76,14 +76,10 @@ isolation and accepts `atomic=true`. Both group one undo transition per physical
 file; neither promises cross-file rollback after later I/O failures. Read
 `docs/PROJECT_FILE_UNDO.md` for the preflight and applied-failure contract.
 
-Insert echo repair (`_finalize_insertion`) compares whole lines against the
-anchor's head and tail on BOTH sides of content, because a duplicated definition
-or assignment still parses and therefore reaches no other guard. A copy at the
-insertion edge is stripped (partial runs of a multi-line anchor included); a
-copy on the far side is refused with the other operation named — silently
-keeping it re-inserts the anchor, and stripping it moves the anchor's own body
-into the inserted block. A run from the middle of a longer anchor is not an echo.
-Deliberate duplication stays available through `operation=replace`.
+`_finalize_insertion` owns insert echo checks shared by local and desktop
+writers. See `docs/modules/tools_execution.md` for the content-preservation
+boundary; verify `test_insert_structural_overlap.py` with the unified-edit,
+atomic-preflight and error-kind tests before changing it.
 
 `git_command_scope.py` is the single Git target resolver for approval and writer
 admission, including shell cwd control, prospective worktrees and Git metadata
