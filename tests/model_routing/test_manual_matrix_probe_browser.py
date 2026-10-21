@@ -121,13 +121,13 @@ def test_manual_detection_preserves_disabled_and_unsaved_settings(browser, live_
 
         wire = provider.locator('.is-alias[data-id="alpha-wire-a"]')
         wire.get_by_role('button', name='alpha-wire-a', exact=True).click()
-        page.locator('.app-dialog-input').fill('renamed-wire')
-        page.locator('.app-dialog-input').press('Enter')
+        page.locator('.stg-rnp-input').first.fill('renamed-wire')
+        page.locator('.stg-rnp-input').first.press('Enter')
         detect('renamed-wire', enabled=True, expected_wires=['renamed-wire', 'beta-wire-a'])
 
         root.locator('.stg-mx-act.add').click()
-        page.locator('.app-dialog-input').fill('new-wire')
-        page.locator('.app-dialog-input').press('Enter')
+        page.locator('.stg-rnp-input').first.fill('new-wire')
+        page.locator('.stg-rnp-input').first.press('Enter')
         detect('new-wire', enabled=True, expected_wires=['renamed-wire', 'new-wire', 'beta-wire-a'])
         expect(provider.locator('.is-alias[data-id="renamed-wire"]')).to_be_visible()
         expect(provider.locator('.is-alias[data-id="new-wire"]')).to_be_visible()

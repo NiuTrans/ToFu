@@ -10,7 +10,8 @@ import { modelPricePresentation } from './settings/model-price-localization';
 import { manualMatrixProbe } from './settings/manual-matrix-probe';
 import { jumpToSetting } from './settings/setting-jump';
 
-import { mountRequestNameEditors, suggestedRequestNames } from './settings/provider-request-names';
+import { mountRequestNameEditors, planRequestNameFaces, suggestedRequestNames } from './settings/provider-request-names';
+import { openRequestNamePanel, requestNameDraftFrom } from './settings/provider-request-name-panel';
 import { createProviderTemplatePicker } from './settings/provider-template-picker';
 import { mountProviderReasoningEditors } from './settings/reasoning-editor';
 import { brandIconHtml } from '../core/model-brand-icons';
@@ -43,10 +44,23 @@ setRuntimeService('manualMatrixProbe', manualMatrixProbe);
 setRuntimeService('jumpToSetting', jumpToSetting);
 setRuntimeService('mountProviderReasoningEditors', mountProviderReasoningEditors);
 setRuntimeService('mountRequestNameEditors', mountRequestNameEditors);
+// Request-name panel: edits the wire id AND the headers that select its
+// route. A plain prompt cannot express a per-request-name selector header,
+// which is what a gateway needing x-context-provider requires.
+setRuntimeService('openRequestNamePanel', openRequestNamePanel);
+setRuntimeService('requestNameDraftFrom', requestNameDraftFrom);
 setRuntimeService('planProviderRequestNames', async (models: Array<{model_id: string}>, urls: string[]) => {
   const response = await providerTemplateApi().templates();
   const templates = (Array.isArray(response) ? response : (response as {items?: unknown})?.items) as import('./settings/provider-template-picker').ProviderTemplate[] | undefined;
   return Object.fromEntries(models.map(model => [model.model_id, suggestedRequestNames(model.model_id, urls, templates ?? [])]));
+});
+// Which Connection each request name must be sent over. A wire id pinned by a
+// template face (aigc kunlun) answers only on that face, so this is what keeps
+// a newly added request name routable instead of merely present in the matrix.
+setRuntimeService('planProviderRequestNameFaces', async (names: string[], urls: string[]) => {
+  const response = await providerTemplateApi().templates();
+  const templates = (Array.isArray(response) ? response : (response as {items?: unknown})?.items) as import('./settings/provider-template-picker').ProviderTemplate[] | undefined;
+  return planRequestNameFaces(names, urls, templates ?? []);
 });
 
 let selectProviderTemplate: (key: string) => void = () => undefined;

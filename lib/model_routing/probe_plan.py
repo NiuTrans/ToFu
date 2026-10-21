@@ -172,7 +172,13 @@ def matrix_probe_plan(
             request_contexts[wire_id] = {
                 "base_url": connection["base_url"],
                 "protocol": connection.get("protocol") or "openai",
-                "extra_headers": dict(connection.get("extra_headers") or {}),
+                # The request name's own selectors win over the Connection's,
+                # exactly as dispatch merges them; otherwise the matrix would
+                # probe a cell with headers the real request never sends.
+                "extra_headers": {
+                    **dict(connection.get("extra_headers") or {}),
+                    **dict(deployment.get("extra_headers") or {}),
+                },
                 "adapter": dict(connection.get("adapter") or {}),
             }
         rows = wires_by_offering.setdefault(deployment["offering_id"], [])

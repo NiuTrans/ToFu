@@ -353,7 +353,9 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
     if fn_name in {'write_file', 'apply_diff', 'edit_file'}:
         from lib.project_mod.receipts import FileReceiptError, decode_write_receipts
         from lib.tasks_pkg.commit_round._derive import note_remote_file_changes
-        paths = ([edit.get('path') for edit in fn_args.get('edits', []) if isinstance(edit, dict)]
+        batch_path = fn_args.get('path')
+        paths = ([(edit.get('path') or batch_path)
+                  for edit in fn_args.get('edits', []) if isinstance(edit, dict)]
                  if fn_name == 'edit_file' else [fn_args.get('path')])
         try:
             entries = decode_write_receipts(result, paths)

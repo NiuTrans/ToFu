@@ -961,13 +961,15 @@ def _evaluate_gate_commands(root: Path, old: str, target: str,
             )
             if cp.returncode != 0:
                 return False, (cp.stderr or cp.stdout).strip()[:3000]
-        if js_files and shutil.which('node'):
+        from lib.tools.process_environment import node_executable
+        node_bin = node_executable() if js_files else None
+        if js_files and node_bin:
             for name in js_files:
                 input_type = (
                     'commonjs' if name.lower().endswith('.cjs') else 'module'
                 )
                 cp = subprocess.run(
-                    ['node', f'--input-type={input_type}', '--check'],
+                    [node_bin, f'--input-type={input_type}', '--check'],
                     cwd=str(temp_path), text=True,
                     input=(temp_path / name).read_text(encoding='utf-8'),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,

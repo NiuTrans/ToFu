@@ -305,12 +305,57 @@ def resolve_tool_name(name: str, known: set[str] | None = None) -> tuple[str, st
 # and the UI can style it distinctly.
 
 
+_SQUASH_MIN_LEN = 4
+
+
+def _squash_with_starts(name: str) -> tuple[str, set[int]]:
+    """Strip separators from ``name``; also return each segment's start offset."""
+    out: list[str] = []
+    starts: set[int] = set()
+    at_boundary = True
+    for ch in name:
+        if ch.isalnum():
+            if at_boundary:
+                starts.add(len(out))
+            out.append(ch)
+            at_boundary = False
+        else:
+            at_boundary = True
+    return ''.join(out), starts
+
+
+def _squashed_segment_match(a: str, b: str) -> float:
+    """0.85 when one name contains the other as a whole separator-stripped segment.
+
+    A model that fuses its intent into the tool name glues words together
+    (``repomap_placeholder_none`` meaning ``repo_map`` with no filters), so the
+    separators differ and plain containment misses it. Requiring the match to
+    begin at a segment boundary of the containing name keeps ordinary words
+    from matching mid-token.
+    """
+    a_sq, a_starts = _squash_with_starts(a)
+    b_sq, b_starts = _squash_with_starts(b)
+    for containing, contained, starts in ((a_sq, b_sq, a_starts),
+                                          (b_sq, a_sq, b_starts)):
+        if len(contained) < _SQUASH_MIN_LEN or len(contained) >= len(containing):
+            continue
+        idx = containing.find(contained)
+        while idx != -1:
+            if idx in starts:
+                return 0.85
+            idx = containing.find(contained, idx + 1)
+    return 0.0
+
+
 def _name_similarity(a: str, b: str) -> float:
     """Cheap similarity in [0, 1] between two tool names (no deps).
 
     Combines a substring-containment boost with difflib's ratio so that
     ``search_web`` scores highly against ``web_search`` (shared tokens) and
-    ``read`` against ``read_files`` (prefix). Pure-stdlib, total, never raises.
+    ``read`` against ``read_files`` (prefix). A name that contains a whole real
+    tool name once separators are stripped also scores highly, so a fused
+    intent such as ``repomap_placeholder_none`` still points at ``repo_map``.
+    Pure-stdlib, total, never raises.
     """
     a_l, b_l = a.lower(), b.lower()
     if not a_l or not b_l:
@@ -325,6 +370,7 @@ def _name_similarity(a: str, b: str) -> float:
         ratio = max(ratio, 0.5 * ratio + 0.5 * overlap)
     if a_l in b_l or b_l in a_l:
         ratio = max(ratio, 0.85)
+    ratio = max(ratio, _squashed_segment_match(a_l, b_l))
     return ratio
 
 

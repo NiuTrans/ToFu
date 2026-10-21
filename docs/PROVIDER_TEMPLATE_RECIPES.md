@@ -297,6 +297,25 @@ repository boundary; it is never included in the public template or bundle.
    It rides the same shared monitor; `TOFU_TEMPLATE_SUPPLY_SYNC=0` opts
    out.
 
+   Two narrower entry points share that owner instead of waiting for the
+   cadence (`TOFU_TEMPLATE_SUPPLY_SYNC_INTERVAL`, 6h default, 240s boot
+   delay):
+
+   * `sync_template_supply(provider_access_ids=[...], backfill_only=True)`
+     converges ONE card with deterministic additions only — no probe, no
+     verdicts consumed — and never touches another provider. This is what
+     makes "the template gained an alias" reach an installed card
+     immediately;
+   * `POST /api/v1/providers/<id>/probe-cells/start` runs exactly that
+     scoped backfill before it plans the matrix. A wire id added to a
+     recipe after this card was installed therefore HAS a cell to probe;
+     otherwise the matrix would show only the pre-existing cells and a row
+     whose public id is rate-limited would read as "this model does not
+     work" while the working wire was invisible. The convergence is a
+     bounded template-derived write (Connections/Deployments only), and a
+     card that gained a wire skips the cached-snapshot shortcut so the new
+     cell is actually probed.
+
 ## CatPaw Credit-Hub gateway (catpaw.json)
 
 `catpaw.json` onboards the CatPaw CLI's `mcli.internal.example.com` gateway, which

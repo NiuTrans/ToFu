@@ -592,6 +592,61 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                                                    'model grants.',
                                                                     'type': 'boolean',
                                                                     'writeOnly': True},
+                                                        'extra_headers': {'additionalProperties': {'maxLength': 2048,
+                                                                                                   'type': 'string'},
+                                                                          'description': 'Per-request-name '
+                                                                                         'routing '
+                                                                                         'headers, '
+                                                                                         'merged '
+                                                                                         'OVER the '
+                                                                                         'owning '
+                                                                                         "Connection's. "
+                                                                                         'A '
+                                                                                         'gateway '
+                                                                                         'can '
+                                                                                         'serve '
+                                                                                         'one wire '
+                                                                                         'spelling '
+                                                                                         'only '
+                                                                                         'when a '
+                                                                                         'selector '
+                                                                                         'header '
+                                                                                         'names '
+                                                                                         'its '
+                                                                                         'serving '
+                                                                                         'provider '
+                                                                                         '(aigc '
+                                                                                         'x-context-provider), '
+                                                                                         'while '
+                                                                                         'another '
+                                                                                         'spelling '
+                                                                                         'of the '
+                                                                                         'SAME '
+                                                                                         'Offering '
+                                                                                         'needs '
+                                                                                         'none: '
+                                                                                         'the '
+                                                                                         'selector '
+                                                                                         'belongs '
+                                                                                         'to the '
+                                                                                         'request '
+                                                                                         'name, '
+                                                                                         'not the '
+                                                                                         'account '
+                                                                                         'or the '
+                                                                                         'Connection. '
+                                                                                         'Credential-named '
+                                                                                         'and '
+                                                                                         'transport-reserved '
+                                                                                         'headers '
+                                                                                         'are '
+                                                                                         'rejected '
+                                                                                         'and stay '
+                                                                                         'on the '
+                                                                                         'encrypted '
+                                                                                         'Credential.',
+                                                                          'maxProperties': 16,
+                                                                          'type': 'object'},
                                                         'identity_confidence': {'enum': ['high',
                                                                                          'medium',
                                                                                          'low',
@@ -1145,6 +1200,25 @@ EXTERNAL_DEFS = {'__document': {'$defs': {'capabilities': {'items': {'$ref': '#/
                                                           'model grants.',
                                            'type': 'boolean',
                                            'writeOnly': True},
+                               'extra_headers': {'additionalProperties': {'maxLength': 2048,
+                                                                          'type': 'string'},
+                                                 'description': 'Per-request-name routing headers, '
+                                                                'merged OVER the owning '
+                                                                "Connection's. A gateway can serve "
+                                                                'one wire spelling only when a '
+                                                                'selector header names its serving '
+                                                                'provider (aigc '
+                                                                'x-context-provider), while '
+                                                                'another spelling of the SAME '
+                                                                'Offering needs none: the selector '
+                                                                'belongs to the request name, not '
+                                                                'the account or the Connection. '
+                                                                'Credential-named and '
+                                                                'transport-reserved headers are '
+                                                                'rejected and stay on the '
+                                                                'encrypted Credential.',
+                                                 'maxProperties': 16,
+                                                 'type': 'object'},
                                'identity_confidence': {'enum': ['high',
                                                                 'medium',
                                                                 'low',

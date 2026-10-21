@@ -37,6 +37,42 @@ def tool_cache_defaults(cache_root: str) -> dict[str, str]:
     }
 
 
+def bundled_toolchain_bins() -> list[str]:
+    """Project-bundled toolchain bins that outrank the home directories.
+
+    A launcher can exist at ``~/.local/bin/node`` and still be unrunnable:
+    official Node builds need glibc >= 2.28, and a host on 2.17 answers every
+    spawn with ``GLIBCXX_3.4.21 not found``. A toolchain the project itself
+    ships under ``<repo>/.tofu/node-toolchain/bin`` is the one artifact whose
+    ABI was verified against this host, so it must win the PATH race — placed
+    after ``~/.local/bin`` it would never be reached, and ``npx``-launched MCP
+    servers would die in the handshake on every boot. Absent on deployments
+    that do not need it (the tree is gitignored, never exported).
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    bins = [os.path.join(repo_root, '.tofu', 'node-toolchain', 'bin')]
+    return [path for path in bins if os.path.isdir(path)]
+
+
+def node_executable() -> str | None:
+    """Absolute path of a Node binary that can actually RUN on this host.
+
+    ``shutil.which('node')`` only proves a file is on PATH. On a glibc 2.17
+    host it happily returns an official Node build that dies with
+    ``GLIBCXX_3.4.21 not found`` — so a caller that spawns Node by name gets a
+    usable-looking failure deep inside its own pipeline (frontend test bundler,
+    ``node --check``). The repo-bundled toolchain was verified against this
+    host, so it wins; otherwise fall back to PATH for hosts that carry a
+    working system Node.
+    """
+    for directory in bundled_toolchain_bins():
+        candidate = os.path.join(directory, 'node')
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which('node')
+
+
 def apply_tool_paths(environment: dict[str, str], *, interpreter_first=False,
                      cache_root: str | None = None) -> None:
     """Discover installed tools again on every spawn, including after installers.
@@ -50,7 +86,7 @@ def apply_tool_paths(environment: dict[str, str], *, interpreter_first=False,
         for key, value in tool_cache_defaults(cache_root).items():
             environment.setdefault(key, value)
     home = environment.get('HOME') or environment.get('USERPROFILE')
-    bins = []
+    bins = bundled_toolchain_bins()
     if interpreter_first and sys.executable:
         bins.append(os.path.dirname(os.path.abspath(sys.executable)))
         bins.append(os.path.join(sys.base_prefix, 'Scripts' if os.name == 'nt' else 'bin'))

@@ -26,7 +26,11 @@ from lib.tool_input_repair._rejection import (
     report_hallucinated,
     report_tool_name_aliased,
 )
-from lib.tool_input_repair._repair import schema_hint, validate_then_repair
+from lib.tool_input_repair._repair import (
+    edit_batch_path_gap,
+    schema_hint,
+    validate_then_repair,
+)
 from lib.tool_input_repair._schema import RepairLog, _schemas
 from lib.tools.contracts import (
     ToolContractError,
@@ -427,9 +431,15 @@ def ingest_tool_call(
             # shape (conv mtdqz4bkuyitzj retried blindly); the hint names
             # the expected keys so the recovery round can self-correct.
             _hint = schema_hint(fn_name)
+            # A blank per-edit path is reported by the contract as a LENGTH
+            # violation on one index. That names the symptom and hides the
+            # rule: every edit needs its own path. Name the cause and the
+            # offending indices so the recovery round does not retry blind.
+            _gap = edit_batch_path_gap(fn_name, fn_args)
             parse_error = (
                 f'ERROR: Tool call `{fn_name}` was NOT executed. '
                 f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}'
+                + (f' {_gap}' if _gap else '')
                 + (f' {_hint}' if _hint else ''))
             logger.warning(
                 '[ToolContract] rejected tool=%s code=%s path=%s model=%s '
@@ -439,6 +449,39 @@ def ingest_tool_call(
                     'tool_contract_rejected', tool=fn_name, code=exc.code,
                     path=exc.path, retryable=exc.retryable, model=model,
                     conv_id=conv_id)
+
+    # ── Stage 5c: file coverage for a batch edit ──
+    # `edit_file` accepts two ways to name the file — once for the batch, or
+    # per edit — so neither level can declare `path` as required. Coverage is
+    # a cross-level rule, and it is enforced HERE rather than with a root
+    # schema combinator, because providers reject root combinators outright
+    # (see the write_file root-oneOf projection incident). A batch that names
+    # no file is refused before execution: repairing it would mean guessing
+    # which file to write.
+    if contract_error is None and parse_error is None:
+        _gap = edit_batch_path_gap(fn_name, fn_args)
+        if _gap:
+            contract_error = {
+                'code': 'missing_required_arguments',
+                'message': 'No file is named for this edit batch.',
+                'path': '$',
+                'retryable': True,
+                'nextAction': 'Name the file once in the top-level `path` '
+                              'and retry.',
+            }
+            _hint = schema_hint(fn_name)
+            parse_error = (
+                f'ERROR: Tool call `{fn_name}` was NOT executed. '
+                f'[missing_required_arguments] {_gap}'
+                + (f' {_hint}' if _hint else ''))
+            logger.warning(
+                '[ToolContract] rejected tool=%s code=missing_required_arguments '
+                'path=$ model=%s conv=%s', fn_name, model, conv_id)
+            if emit_audit:
+                audit_log(
+                    'tool_contract_rejected', tool=fn_name,
+                    code='missing_required_arguments', path='$',
+                    retryable=True, model=model, conv_id=conv_id)
 
     return IngestedToolCall(
         raw_name=raw_name, fn_name=fn_name, fn_args=fn_args,

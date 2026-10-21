@@ -68,6 +68,14 @@ def _pending_supply_models(document, *, provider_id=None):
 
 
 def _search(query, *, seconds):
+    # The host bridge installs the proxy, the LLM filter and the fetch
+    # providers into tofu-search's global config. Importing the library
+    # directly left it on library defaults with NO proxy, so on a host with no
+    # direct egress every engine died on DNS (observed 2026-10-21: "0 final
+    # results ... via direct: Name or service not known" while the proxy pool
+    # served the rest of the app). Same seam the search tool uses.
+    from lib.search.search_runtime import ensure_search_runtime
+    ensure_search_runtime()
     from tofu_search import search
     return search(query, max_results=MAX_PAGES, search_deadline_secs=seconds,
                   fetch_timeout=min(5, seconds), fetch_url_deadline_secs=min(8, seconds),

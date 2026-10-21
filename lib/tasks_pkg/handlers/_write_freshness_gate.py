@@ -117,11 +117,16 @@ def partition_stale_edits(task: dict, fn_args: dict,
         return [], []
     skip_indices: list[int] = []
     stale_raw: list[str] = []
+    # An edit takes its file from the call-level `path` unless it overrides
+    # it; without this, a batch-path edit batch would never be checked for a
+    # concurrent overwrite.
+    batch_path = fn_args.get('path')
+    batch_path = batch_path.strip() if isinstance(batch_path, str) else ''
     seen: set[str] = set()
     for idx, e in enumerate(edits):
         if not isinstance(e, dict):
             continue
-        rp = (e.get('path') or '').strip()
+        rp = (e.get('path') or batch_path or '').strip()
         if not rp:
             continue
         ap = _resolve_abs(project_path, _conv_key(task), rp)

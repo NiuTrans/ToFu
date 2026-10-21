@@ -2203,6 +2203,18 @@ def sync_visible_run_turns(task: dict[str, Any], messages: list[dict[str, Any]],
     return None
 
 
+# ``light`` is the list/scan read shape: transcript-bearing keys stay because
+# callers render and classify from them; heavy sidecars and translation BODIES
+# are dropped. The small translation verdict must stay — a light reader that
+# loses it cannot tell a translated turn from an untranslated one, and the
+# open-path recovery sweep then re-spawned whole-turn translations for turns
+# that were already translated (logs/app.log 2026-10-21: "sweep respawned 16
+# translation(s)" recurring for the same conversation).
+_LIGHT_PROJECTION_KEYS = (
+    'content', 'thinking', 'segments', 'model', 'usage',
+    'translation', '_translateDone', '_translateSkippedReason',
+)
+
 def list_turns(conversation_id: str, *, user_id: Any,
                lane_id: str | None = None, after_ordinal: int | None = None,
                limit: int = 500, light: bool = False,
@@ -2248,8 +2260,7 @@ def list_turns(conversation_id: str, *, user_id: Any,
                     for row in rows:
                         row['projection'] = {
                             key: row['projection'][key]
-                            for key in ('content', 'thinking', 'segments',
-                                        'model', 'usage')
+                            for key in _LIGHT_PROJECTION_KEYS
                             if key in row.get('projection', {})}
                 revision = client.query(
                     'turn.revision', {'conversation_id': conversation_id,
@@ -2289,7 +2300,7 @@ def list_turns(conversation_id: str, *, user_id: Any,
         for row in turns:
             row['projection'] = {
                 key: row['projection'][key]
-                for key in ('content', 'thinking', 'segments', 'model', 'usage')
+                for key in _LIGHT_PROJECTION_KEYS
                 if key in row.get('projection', {})}
     revision = client.query(
         'turn.revision', {'conversation_id': conversation_id, 'user_id': user_id})

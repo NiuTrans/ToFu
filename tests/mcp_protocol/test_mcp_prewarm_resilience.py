@@ -155,6 +155,72 @@ def test_negative_cache_disabled_when_zero(tmp_path, monkeypatch):
     assert vendor._prewarm_unreachable_reason() == ''
 
 
+def test_negative_cache_discards_when_egress_changed(tmp_path, monkeypatch):
+    """Unreachability belongs to the EGRESS PATH, not to this host.
+
+    2026-10-21: a marker written at 10:46 while no proxy was configured kept
+    every vendored pre-warm disabled through the 13:52 boot, hours after the
+    proxy pool was serving traffic. A marker stamped with a different egress
+    identity must be ignored rather than trusted for the rest of its window.
+    """
+    _reset_cache_root(tmp_path, monkeypatch)
+    monkeypatch.setenv('TOFU_MCP_PREWARM_NEGATIVE_CACHE_HOURS', '6')
+
+    monkeypatch.setattr(vendor, '_egress_identity', lambda: 'direct')
+    vendor._prewarm_note_unreachable('package index unreachable: dns error')
+    assert vendor._prewarm_unreachable_reason() != ''
+
+    monkeypatch.setattr(vendor, '_egress_identity',
+                        lambda: 'http://10.213.87.132:8080:')
+    assert vendor._prewarm_unreachable_reason() == ''
+
+
+def test_negative_cache_survives_when_egress_is_unchanged(tmp_path, monkeypatch):
+    _reset_cache_root(tmp_path, monkeypatch)
+    monkeypatch.setenv('TOFU_MCP_PREWARM_NEGATIVE_CACHE_HOURS', '6')
+
+    monkeypatch.setattr(vendor, '_egress_identity', lambda: 'http://gw:8080:')
+    vendor._prewarm_note_unreachable('package index unreachable: dns error')
+    assert vendor._prewarm_unreachable_reason().startswith(
+        'package index unreachable')
+
+
+def test_legacy_marker_without_egress_is_discarded(tmp_path, monkeypatch):
+    """A pre-upgrade marker carries no attribution; it must not survive.
+
+    The marker that suppressed every vendored pre-warm through the 2026-10-21
+    boot was written by code that did not record egress. Treating "unknown" as
+    "matches" would have preserved that suppression forever.
+    """
+    _reset_cache_root(tmp_path, monkeypatch)
+    monkeypatch.setenv('TOFU_MCP_PREWARM_NEGATIVE_CACHE_HOURS', '6')
+    monkeypatch.setattr(vendor, '_egress_identity', lambda: 'http://gw:8080:')
+    path = vendor._prewarm_unreachable_marker_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'ts': time.time(), 'reason': 'legacy'}, f)
+    assert vendor._prewarm_unreachable_reason() == ''
+
+
+def test_egress_identity_never_contains_the_credential(monkeypatch):
+    """The marker is a persisted file; it may not carry proxy credentials."""
+    _clear_proxy_env(monkeypatch)
+    import lib.proxy as lib_proxy
+    monkeypatch.setattr(
+        lib_proxy, 'first_global_proxy_url',
+        lambda: 'http://alice:s3cr3t-token@gw.internal:8080')
+    identity = vendor._egress_identity()
+    assert 's3cr3t-token' not in identity
+    assert 'gw.internal' in identity and '8080' in identity
+
+
+def test_egress_identity_is_direct_without_a_proxy(monkeypatch):
+    _clear_proxy_env(monkeypatch)
+    import lib.proxy as lib_proxy
+    monkeypatch.setattr(lib_proxy, 'first_global_proxy_url', lambda: '')
+    assert vendor._egress_identity() == 'direct'
+
+
 def test_is_index_unreachable_matches_dns_only():
     assert vendor._is_index_unreachable(
         'Failed to fetch https://pypi.org/simple/mcp/ dns error: '

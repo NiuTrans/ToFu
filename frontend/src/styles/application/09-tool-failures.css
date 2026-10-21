@@ -2,8 +2,8 @@
 /* ── Interrupted tool round — task aborted (Stop) while this round was
       in-flight; the backend dangling-round sweep marks status='aborted'. ── */
 .ptool-interrupted {
-  background: rgba(148, 163, 184, 0.04);
-  border-color: rgba(148, 163, 184, 0.12);
+  background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
+  border-color: color-mix(in srgb, var(--text-secondary) 22%, transparent);
   opacity: 0.75;
 }
 .ptool-badge-interrupted {
@@ -17,8 +17,8 @@
       status='error'. Warm red tint (vs. the amber 'interrupted') so a failure
       reads differently from a user Stop at a glance. ── */
 .ptool-error {
-  background: rgba(220, 38, 38, 0.05);
-  border-color: rgba(220, 38, 38, 0.18);
+  background: var(--error-bg);
+  border-color: var(--error-border);
 }
 /* The reason can be a long unbroken string (URL, JSON payload). As a nowrap
  * flex sibling it out-shrinks .ptool-text (whose flex-basis is 0), squeezing
@@ -27,13 +27,13 @@
 .ptool-line.ptool-error,
 .ptool-line.ptool-rejected {
   flex-wrap: wrap;
-  row-gap: 2px;
+  row-gap: calc(var(--space-1) / 2);
 }
 .ptool-error-reason {
   flex: 1 1 100%;
   /* Align with .ptool-text: 16px icon + 8px gap. */
   margin-left: var(--space-6);
-  color: var(--error-text, #f87171);
+  color: var(--error-text);
   font-size: var(--font-size-xs);
   line-height: 1.5;
   opacity: 0.85;
@@ -53,4 +53,55 @@
   display: block;
   overflow: visible;
   -webkit-line-clamp: unset;
+}
+
+/* ── Rejected-call request parameters ──
+ * A rejected call never ran, so the arguments the model actually sent are
+ * the only evidence of what went wrong; the reason names the rule it broke,
+ * not the payload that broke it. Short payloads open in place, large ones
+ * (whole file bodies) stay collapsed with their size on the summary line. */
+.ptool-line.ptool-rejected .ptool-rejected-params {
+  flex: 1 1 100%;
+  /* Align with .ptool-text: 16px icon + 8px gap. */
+  margin-left: var(--space-6);
+  border: var(--control-edge-inset) solid var(--error-border);
+  border-radius: 6px;
+  background: var(--error-bg);
+  font-size: var(--font-size-xs);
+}
+.ptool-line.ptool-rejected .ptool-rejected-params > summary {
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-secondary);
+  list-style: none;
+  user-select: none;
+}
+.ptool-line.ptool-rejected .ptool-rejected-params > summary::-webkit-details-marker,
+.ptool-line.ptool-rejected .ptool-rejected-params > summary::marker {
+  display: none;
+  content: "";
+}
+.ptool-rejected-params-size {
+  margin-left: var(--space-1);
+  opacity: 0.6;
+}
+.ptool-reject-args {
+  margin: 0;
+  padding: var(--space-2);
+  border-top: var(--control-edge-inset) solid
+    color-mix(in srgb, var(--error-border) 65%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+.ptool-reject-args-more {
+  display: block;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  opacity: 0.65;
 }

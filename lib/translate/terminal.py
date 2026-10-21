@@ -428,8 +428,15 @@ def sweep_conversation_translations(
                 content = str(projection.get("content") or "").strip()
                 if not content:
                     continue
-                if projection.get("translatedContent") or \
-                        projection.get("_translateDone") is True:
+                # Read the normalized verdict, not the translated body: the
+                # light read deliberately omits bodies, and a settled turn
+                # already carries ``status`` completed/skipped from
+                # ``normalize_projection_document``.
+                verdict = projection.get("translation") or {}
+                if not isinstance(verdict, dict):
+                    verdict = {}
+                if (verdict.get("status") in {"completed", "skipped"}
+                        or projection.get("_translateDone") is True):
                     continue
                 turn_id = str(row.get("turnId") or row.get("id") or "")
                 if not turn_id:

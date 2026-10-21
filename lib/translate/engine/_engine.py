@@ -598,6 +598,13 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             quality_phase = None
         _attempt += 1
         _elapsed = time.monotonic() - _start_mono
+        if _abort_requested():
+            # Owner cancellation, never a translation failure. ``_deadline
+            # .exceeded()`` folds both into one True, so checking it first
+            # reported a cancelled job as "deadline exhausted" at ERROR.
+            _notify('aborted', _attempt, _elapsed,
+                    'translation cancelled by owner')
+            raise AbortedError('Translation aborted before dispatch')
         if _deadline_exceeded():
             if _last_err is None:
                 # The caller's shared deadline was already spent before (or
@@ -606,10 +613,15 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                 # cause so downstream diagnostics (and the segment-enrichment
                 # 'skipping N segments' wrapper) keep it.
                 _last_err = 'overall deadline exhausted before dispatch'
-            logger.error('[Translate%s] Giving up after %.0fs (attempts=%d, '
-                         'content_fails=%d, dispatch_fails=%d, last_err=%s)',
-                         chunk_label, _elapsed, _attempt - 1,
-                         _content_fail_count, _dispatch_fail_count, _last_err)
+            # With no failed dispatch the caller's shared budget was spent
+            # before ours began: nothing here failed, so this is not an
+            # incident. Boot sweep used to emit ~125 of these at ERROR.
+            _report = logger.error if (
+                _content_fail_count or _dispatch_fail_count) else logger.warning
+            _report('[Translate%s] Giving up after %.0fs (attempts=%d, '
+                    'content_fails=%d, dispatch_fails=%d, last_err=%s)',
+                    chunk_label, _elapsed, _attempt - 1,
+                    _content_fail_count, _dispatch_fail_count, _last_err)
             break
 
         try:

@@ -1467,8 +1467,15 @@ def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capt
         mods._cache_get(session)
         strings = {}
         plans = []
-        for path in paths:
-            ops = [(i, edit) for i, edit in enumerate(fn_args['edits'], 1) if edit['path'] == path]
+        # Every edit was already resolved to an explicit file when the profile
+        # fence ran (batch path or its own); group by that resolution. `paths`
+        # above is deduped for leases, `scope.paths` keeps the per-edit order.
+        edit_paths = list(scope.paths)
+        for path in dict.fromkeys(edit_paths):
+            ops = [(index, edit)
+                   for (index, edit), edit_path
+                   in zip(enumerate(fn_args['edits'], 1), edit_paths)
+                   if edit_path == path]
             try:
                 original, fingerprint = scope.read(path, write=True)
                 _scoped_freshness(scope, path, original, conv_id, require_read=True)

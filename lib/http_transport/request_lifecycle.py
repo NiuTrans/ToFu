@@ -26,6 +26,15 @@ QUIET_PREFIXES = ('/api/browser/', '/api/desktop/', '/static/', '/api/task/')
 SEMANTICALLY_REPORTED_CLIENT_ERRORS = frozenset({
     ('POST', '/api/browser/poll', 426),
 })
+# Expected-unavailable 503s: these are the readiness CONTRACT, not failures.
+# ``/api/ready`` answers 503 until the boot is complete and the frontend polls
+# it BY DESIGN; a boot-gated request is likewise a truthful "not yet". Logging
+# them at ERROR put 41 non-incidents into a 4-minute boot window (2026-10-21)
+# and diluted the lines that did mean something. The access log still records
+# every one.
+_EXPECTED_UNAVAILABLE_PATHS = frozenset({
+    '/api/ready', '/health/ready', '/health/startup',
+})
 SLOW_THRESHOLD_S = 2.0
 HEAVY_RESPONSE_BYTES = 1_048_576
 logger = get_logger('server.lifecycle')
@@ -298,7 +307,10 @@ async def log_response(response: Any) -> Any:
     except Exception as metrics_error:
         logger.debug('[Metrics] HTTP observation skipped: %s', metrics_error)
 
-    if status >= 500:
+    if status == 503 and request.path in _EXPECTED_UNAVAILABLE_PATHS:
+        logger.debug('[%s] ← %s %s %d %s (expected: not ready)',
+                     rid, request.method, path, status, timing)
+    elif status >= 500:
         logger.error('[%s] ← %s %s %d %s',
                      rid, request.method, path, status, timing)
     elif status >= 400:

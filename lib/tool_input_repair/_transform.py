@@ -306,6 +306,13 @@ def _distribute_shared_edit_path(
     meant is not repair, it is a wrong-file write. The read gate, write
     freshness and unique-anchor match still decide whether the filled path is
     actually writable.
+
+    The envelope path is a DECLARED batch property now (``edit_file.path``), so
+    the model can state the intent instead of leaving a hole: naming the file
+    once and listing the edits is the shape every other harness teaches. The
+    envelope key itself is dropped after distribution — every edit carries the
+    resolved file, and duplicating it at both levels would make "an item path
+    overrides the batch path" read as a contradiction.
     """
     declared = [edit.get('path') for edit in edits if isinstance(edit, dict)]
     if isinstance(shared_path, str) and shared_path.strip():

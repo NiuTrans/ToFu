@@ -1849,3 +1849,154 @@ def test_gateway_repair_does_not_interpret_nested_user_strings():
     args, log = validate_then_repair('execute_tools', {'calls': json.dumps(calls)})
     assert args['calls'][0]['arguments']['content'] == '[1,2]'
     assert log == [('calls', 'stringified_json')]
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Batch ``queries`` envelope → single ``query`` (conv mvhis94j51l8jc)
+# ═════════════════════════════════════════════════════════════════════
+# The model called ``search_tools`` with ``web_search``'s query-LIST shape and
+# was rejected on ``missing_required_arguments: query`` — the capability
+# strings were present, just under a key the tool does not declare.
+
+def test_batch_queries_env_folded_into_single_query():
+    out, log = validate_then_repair('search_tools', {'queries': [
+        {'query': 'browser execute javascript'},
+        {'query': 'browser devtools console network'}]})
+    assert out == {'query': ('browser execute javascript '
+                            'browser devtools console network')}
+    assert log == [('query', 'batch_queries_joined')]
+
+
+def test_batch_queries_single_term_uses_unambiguous_pattern():
+    out, log = validate_then_repair(
+        'search_tools', {'queries': [{'query': 'browser execute javascript'}]})
+    assert out == {'query': 'browser execute javascript'}
+    assert log == [('query', 'batch_queries_to_query')]
+
+
+def test_batch_queries_bare_strings_are_joined_without_duplicates():
+    out, log = validate_then_repair(
+        'search_tools', {'queries': ['xuecheng document', 'xuecheng document',
+                                     'read doc']})
+    assert out == {'query': 'xuecheng document read doc'}
+    assert log == [('query', 'batch_queries_joined')]
+
+
+def test_batch_queries_stringified_list_is_decoded():
+    out, log = validate_then_repair(
+        'search_tools', {'queries': '[{"query": "artifact search"}]'})
+    assert out == {'query': 'artifact search'}
+    assert log == [('query', 'batch_queries_to_query')]
+
+
+def test_batch_queries_dropped_when_valid_query_already_present():
+    """``search_tools`` declares additionalProperties:false, so a leftover
+    ``queries`` can only fail the call. The declared query already carries the
+    intent; drop the unusable key and say so in the log."""
+    out, log = validate_then_repair(
+        'search_tools', {'query': 'kept', 'queries': [{'query': 'drop'}]})
+    assert out == {'query': 'kept'}
+    assert log == [('query', 'redundant_batch_queries_dropped')]
+
+
+def test_batch_queries_never_rewrites_a_batch_shaped_search_tool():
+    """``web_search`` declares ``queries`` itself: the pass must be a strict
+    no-op there, or it would collapse a real multi-query call."""
+    args = {'queries': [{'query': 'a'}, {'query': 'b'}]}
+    out, log = validate_then_repair('web_search', args)
+    assert out == args
+    assert log == []
+
+
+def test_batch_queries_never_overwrites_a_nonblank_query():
+    """A tool that accepts extra keys keeps both: no silent information loss."""
+    args = {'query': 'kept', 'queries': [{'query': 'extra'}]}
+    out, log = validate_then_repair('todo_write', args)
+    assert out == args
+    assert log == []
+
+
+def test_search_tools_queries_ingest_survives_contract_validation():
+    """End-to-end through the ingest seam: the incident call must execute."""
+    import json as _json
+    from lib.tool_input_repair import ingest_tool_call
+    result = ingest_tool_call(
+        {'id': 'tc-queries', 'function': {
+            'name': 'search_tools', 'arguments': _json.dumps({'queries': [
+                {'query': 'browser execute javascript'},
+                {'query': 'browser devtools console network'}]})}},
+        emit_audit=False)
+    assert result.parse_error is None
+    assert result.fn_args == {'query': ('browser execute javascript '
+                                       'browser devtools console network')}
+
+
+@pytest.mark.parametrize('terms', [
+    ['a' * 512, 'late retrieval term'],
+    ['a' * 513],
+    ['short', 'b' * 512, 'final retrieval term'],
+])
+@pytest.mark.parametrize('stringified', [False, True])
+def test_batch_queries_over_limit_rejects_without_losing_request(terms, stringified):
+    """A repair must not turn an over-limit retrieval into a different search."""
+    import copy
+    import json
+    from lib.tool_input_repair import ingest_tool_call
+    from lib.tools.contracts import compile_execution_contract_documents
+    from lib.tools.gateway import search_tools_schema
+
+    queries = [{'query': term} for term in terms]
+    args = {'queries': json.dumps(queries) if stringified else queries}
+    original = copy.deepcopy(args)
+    out, log = validate_then_repair('search_tools', args)
+    assert out == original
+    assert args == original
+    assert log == []
+
+    call = ingest_tool_call(
+        {'id': 'over-limit', 'function': {
+            'name': 'search_tools', 'arguments': json.dumps(args)}},
+        contract_documents_by_name=compile_execution_contract_documents(
+            [search_tools_schema()]),
+        emit_audit=False)
+    assert call.contract_error is not None
+    assert call.parse_error is not None
+    assert call.fn_args == original
+    assert call.repair_log == []
+
+
+def test_batch_queries_exact_limit_preserves_every_term():
+    args = {'queries': ['a' * 500, 'b' * 11]}
+    out, log = validate_then_repair('search_tools', args)
+    assert out == {'query': 'a' * 500 + ' ' + 'b' * 11}
+    assert log == [('query', 'batch_queries_joined')]
+
+
+@pytest.mark.parametrize('overrides', [[], ['other.py', 'third.py']])
+def test_edit_file_stringified_edits_honor_batch_path(overrides):
+    """Type repair runs after structural repair; coverage must use the envelope."""
+    import json
+
+    edits = [{'operation': 'replace', 'anchor': 'A', 'content': 'B'}]
+    edits.extend({'path': path, 'operation': 'replace',
+                  'anchor': 'C', 'content': 'D'} for path in overrides)
+    result = _ingest_edit_file({
+        'description': 'decoded batch', 'path': 'batch.py',
+        'edits': json.dumps(edits)})
+    assert result.contract_error is None
+    assert result.parse_error is None
+    assert result.fn_args['path'] == 'batch.py'
+    assert result.fn_args['edits'] == edits
+    assert ('edits', 'stringified_json') in result.repair_log
+
+
+@pytest.mark.parametrize('batch_path', [None, '', '   '])
+def test_edit_file_stringified_edits_without_batch_file_stays_rejected(batch_path):
+    import json
+
+    result = _ingest_edit_file({
+        'description': 'decoded nameless batch', 'path': batch_path,
+        'edits': json.dumps([
+            {'operation': 'replace', 'anchor': 'A', 'content': 'B'}])})
+    assert result.contract_error is not None
+    assert result.parse_error is not None

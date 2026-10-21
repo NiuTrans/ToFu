@@ -38,6 +38,9 @@ __pycache__/
 /venv/
 /.texlive/
 /.pytest_cache/
+
+# Per-test generated jsdom bundles are scratch, not retained source.
+/tests/frontend/tofu-segment-timeline-jsdom-*/
 /.hypothesis/
 
 # ── Agent/session plumbing and local scratch (never source) ──

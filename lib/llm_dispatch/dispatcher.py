@@ -258,8 +258,14 @@ class LLMDispatcher:
                     max_output_tokens=int(
                         candidate.deployment.get('max_output_tokens') or 0),
                     route_snapshot=snapshot.finalize(candidate),
+                    # Deployment (request-name) selectors WIN over the
+                    # Connection's: a gateway may expose one wire spelling
+                    # only under a serving-provider header while the
+                    # Connection is shared with spellings that reject it.
+                    # Credential headers still win over both.
                     extra_headers={
                         **(candidate.connection.get('extra_headers') or {}),
+                        **(candidate.deployment.get('extra_headers') or {}),
                         **secret_headers,
                     },
                     **candidate_inference_metadata(candidate),

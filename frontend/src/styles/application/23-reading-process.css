@@ -91,6 +91,10 @@
 .conversation-surface .conversation-block[data-process-edge] .ptc-head::before {
   position: relative;
   z-index: 1;
+}
+/* SVG tool slots stay transparent; only non-SVG process markers keep paint. */
+.conversation-surface .conversation-block[data-process-edge] .thinking-state-dot,
+.conversation-surface .conversation-block[data-process-edge] .ptc-head::before {
   background-color: var(--turn-process-panel);
   box-shadow: 0 0 0 var(--space-1) var(--turn-process-panel);
 }

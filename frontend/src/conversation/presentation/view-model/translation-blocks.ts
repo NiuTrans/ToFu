@@ -83,9 +83,13 @@ export function translatedPlanPreview(
     ? translatedProposedPlanBody(activity?.partial, true)
       ?? (planOnly ? untaggedPlanTranslation(activity?.partial) : undefined)
     : undefined;
+  // A finished translation outranks an in-flight preview, matching every other
+  // block kind (`visibleTranslation ?? visiblePreview`). Preferring the partial
+  // made a re-run task swallow prose the reader already had and stream it back
+  // from the first chunk.
   return {
-    markdown: partial ?? completed,
+    markdown: completed ?? partial,
     pending,
-    streaming: Boolean(partial),
+    streaming: Boolean(partial) && completed === undefined,
   };
 }

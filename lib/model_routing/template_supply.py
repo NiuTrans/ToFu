@@ -243,9 +243,14 @@ def _live_prober(*, base_url: str, protocol: str, faces: dict,
     by_root: dict[str, str] = {}
 
     def _run(item):
-        _idx, key, root, wire, _caps, url, proto = item
+        _idx, key, root, wire, _caps, url, proto = item[:7]
+        # A face may select its serving provider with a header (aigc kunlun).
+        # Dropping it here probed the alias on the wrong selector and the
+        # verdict was a false failure for a model that works.
+        cell_headers = item[7].get('extra_headers') if len(item) > 7 else None
         return root, probe_one_cell(
-            url, key, wire, extra_headers, _PROBE_TIMEOUT, protocol=proto)
+            url, key, wire, cell_headers or extra_headers, _PROBE_TIMEOUT,
+            protocol=proto)
 
     from lib.observability import InstrumentedThreadPoolExecutor
     with InstrumentedThreadPoolExecutor(max_workers=_PROBE_WORKERS,
@@ -390,7 +395,7 @@ def _supersede_renamed_supply(working: dict, access: dict, template: dict,
 
 def _backfill_request_faces(working: dict, access: dict, template: dict,
                             stats: dict) -> bool:
-    """Add a recipe's face-pinned wire ids an installed card never received.
+    """Converge a card's wire wiring onto the faces its template declares.
 
     Templates seed NEW installs only (insert-only), so a card built before a
     recipe gained a ``request_faces`` alias keeps the logical model but never
@@ -398,66 +403,99 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
     template fingerprint, so an old card that lacks that face Connection stops
     matching the template entirely and the whole supply sync skips it.
 
-    This converges the gap: for each confirmed Offering whose recipe declares
-    a face-pinned wire id the access does not yet deploy, ensure the face
-    Connection exists (create it deterministically when missing) and append
-    the alias Deployment onto the SAME Offering. Owner edits are never
-    touched: existing connections/deployments are matched by id/URL/wire and
-    left as-is, and a wire the owner excluded on every credential is left
-    unadded (the exclusion is the explicit owner decision).
+    Adding a request name through the Settings matrix had a second defect: it
+    bound the new wire to "the first enabled Connection". A face-pinned wire
+    (aigc's ``kunlunbedrock.*`` on ``/v1``) then sat on a face the gateway does
+    not serve it from and answered 400 ``配置不存在`` forever, which is why the
+    same name could be added repeatedly and never work.
+
+    Both are the same gap, so this converges them together:
+
+    * a wire the recipe authors but the access never deployed is appended onto
+      the SAME Offering, creating its face Connection deterministically;
+    * a wire sitting on the WRONG DECLARED face is retargeted and its stale
+      probe evidence discarded (a 400 from the wrong endpoint is not evidence
+      about the model);
+    * every face Connection is granted to the access's credentials, without
+      which dispatch refuses the wire.
+
+    The face per wire comes from ``resolve_face``, the shared resolver the
+    provider probe already uses and the template compiler encodes (notably the
+    dual-face rule that keeps Claude models on the Anthropic wire) — so this
+    pass cannot invent an assignment the catalog does not claim. Only a
+    Connection the template itself namespaced is ever retargeted: a generic
+    (namespace-less) Connection is an owner endpoint no face claims, and
+    duplicate spellings of one wire are left for the owner to disambiguate.
     """
+    from lib.llm_dispatch.provider_face import DEFAULT_FACE, resolve_face
     from lib.model_routing.migration import _protocol, _stable_id
 
     access_id = access['provider_access_id']
     faces = template.get('faces') or {}
     if not isinstance(faces, dict):
         return False
+    provider = {
+        'id': str(template.get('key') or ''),
+        'base_url': template.get('base_url'),
+        'protocol': template.get('protocol'),
+        'faces': faces,
+    }
 
     connections = _access_connections(working, access_id)
     by_url = {_norm_url(row.get('base_url')): row for row in connections}
+    by_id = {row.get('connection_id'): row for row in connections}
     connection_ids = {row.get('connection_id') for row in connections}
     credentials = [row for row in working.get('credentials') or []
                    if isinstance(row, dict)
                    and row.get('provider_access_id') == access_id]
 
-    def _face_connection(face_name: str) -> tuple[str | None, dict | None]:
-        """(connection_id, new-connection-row-or-None) for a face."""
-        face = faces.get(face_name)
-        if not isinstance(face, dict):
-            return None, None
-        url = _norm_url(face.get('base_url'))
+    changed = False
+
+    def _face_connection(face_name: str, resolution) -> str | None:
+        """Connection id for a declared face, created or converged in place."""
+        nonlocal changed
+        url = _norm_url(resolution.base_url)
+        spec = faces.get(face_name) or {}
         existing = by_url.get(url)
         if existing is not None:
-            return existing['connection_id'], None
+            if _converge_declared_face(existing, face_name, spec):
+                stats['repaired_connections'] += 1
+                changed = True
+            return existing['connection_id']
         # Deterministic id matching migration._stable_id so a re-seeded fresh
         # install and this backfill land on the same row (idempotent).
         connection_id = _stable_id('conn', access_id, face_name, url)
         if connection_id in connection_ids:
-            return connection_id, None
+            return connection_id
         row = {
             'connection_id': connection_id,
             'provider_access_id': access_id,
             'base_url': url,
-            'protocol': _protocol(face.get('protocol'), url),
+            'protocol': _protocol(resolution.protocol, url),
             'enabled': True,
             'priority': 100,
-            'extra_headers': dict(face.get('extra_headers') or {}),
-            **({'responses_profile': face['responses_profile']}
-               if face.get('responses_profile') else {}),
-            **({'inference_profile': face['inference_profile']}
-               if face.get('inference_profile') else {}),
+            'extra_headers': dict(spec.get('extra_headers') or {}),
+            **({'responses_profile': spec['responses_profile']}
+               if spec.get('responses_profile') else {}),
+            **({'inference_profile': spec['inference_profile']}
+               if spec.get('inference_profile') else {}),
             'gateway_namespace': face_name,
         }
-        return connection_id, row
+        working['connections'].append(row)
+        connection_ids.add(connection_id)
+        by_url[url] = row
+        by_id[connection_id] = row
+        stats['added_connections'] += 1
+        return connection_id
 
-    changed = False
     for recipe in template.get('offering_recipes') or []:
-        request_faces = recipe.get('request_faces')
-        if not isinstance(request_faces, dict) or not request_faces:
-            continue
         model_id = str(recipe.get('model_id') or '').strip()
         if not model_id:
             continue
+        request_faces = recipe.get('request_faces')
+        if not isinstance(request_faces, dict):
+            request_faces = {}
+        pinned = {str(wire or '').strip() for wire in request_faces} - {''}
         offering = next(
             (row for row in working.get('offerings') or []
              if isinstance(row, dict)
@@ -467,33 +505,59 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
             None)
         if offering is None:
             continue  # not installed here; the insert-only path owns new adds
-        deployed = {
-            str(row.get('wire_model_id') or '').strip()
-            for row in working.get('deployments') or []
-            if isinstance(row, dict)
-            and row.get('offering_id') == offering['offering_id']
-        }
-        for wire, face_name in request_faces.items():
-            wire = str(wire or '').strip()
-            face_name = str(face_name or '').strip()
-            if not wire or not face_name or wire in deployed:
+        rows_by_wire: dict[str, list[dict]] = {}
+        for row in working.get('deployments') or []:
+            if not isinstance(row, dict):
                 continue
-            connection_id, new_connection = _face_connection(face_name)
+            if row.get('offering_id') != offering['offering_id']:
+                continue
+            wire = str(row.get('wire_model_id') or '').strip()
+            if wire:
+                rows_by_wire.setdefault(wire, []).append(row)
+        wires = {str(wire or '').strip()
+                 for wire in (recipe.get('request_ids') or [model_id])}
+        wires |= pinned
+        for wire in sorted(value for value in wires if value):
+            resolution = resolve_face(provider, recipe, wire_id=wire)
+            if not resolution.ok or not resolution.base_url:
+                continue  # unresolved face — leave for migration to flag
+            is_default_face = resolution.face_name == DEFAULT_FACE
+            if is_default_face:
+                connection_id = (by_url.get(_norm_url(resolution.base_url))
+                                 or {}).get('connection_id')
+            else:
+                connection_id = _face_connection(
+                    resolution.face_name, resolution)
             if connection_id is None:
-                continue  # undeclared face — leave for migration to flag
-            if new_connection is not None:
-                working['connections'].append(new_connection)
-                connection_ids.add(connection_id)
-                by_url[_norm_url(new_connection['base_url'])] = new_connection
-                # Grant every credential of this access the new Connection so
-                # dispatch can route through it (mirrors fresh-install shape).
-                for credential in credentials:
-                    ids = credential.setdefault('authorization', {}).setdefault(
-                        'connection_ids', [])
-                    if connection_id not in ids:
-                        ids.append(connection_id)
-                stats['added_connections'] += 1
+                continue
+            if not is_default_face:
+                # Grants are per credential, so a row that already converges
+                # can still be unroutable after a credential was added later.
+                changed = _grant_face_connection(
+                    credentials, connection_id) or changed
+            rows = rows_by_wire.get(wire) or []
+            if any(row.get('connection_id') == connection_id for row in rows):
+                continue  # already converges on its face
+            if rows:
+                if len(rows) > 1:
+                    continue  # duplicate spellings — owner territory
+                current = by_id.get(rows[0].get('connection_id')) or {}
+                if not str(current.get('gateway_namespace') or '').strip():
+                    # A generic Connection: no template face claims that
+                    # endpoint, so this is an owner endpoint we must not move.
+                    continue
+                # Wired to the wrong DECLARED face — added before the face
+                # existed, or through the picker that bound every new wire to
+                # "the first enabled Connection". Retarget, and drop evidence
+                # measured against the endpoint that could never serve it.
+                rows[0]['connection_id'] = connection_id
+                rows[0]['probe_status'] = 'unprobed'
+                _grant_face_connection(credentials, connection_id)
+                stats['repaired_deployments'] += 1
                 changed = True
+                continue
+            if wire not in pinned:
+                continue  # only a template-pinned alias is ever appended
             deployment_id = _stable_id('dep', access_id, connection_id, wire)
             if any(row.get('deployment_id') == deployment_id
                    for row in working.get('deployments') or []):
@@ -507,10 +571,95 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
                 'probe_status': 'unprobed',
                 'priority': 110,
             })
-            deployed.add(wire)
+            _grant_face_connection(credentials, connection_id)
             stats['added_deployments'] += 1
             stats['accesses'].setdefault(access_id, []).append(
                 f'{model_id}+{wire}')
+            changed = True
+    return changed
+
+
+def _converge_declared_face(row: dict, face_name: str, spec: dict) -> bool:
+    """Apply a recipe's declared wire fields to its OWN face Connection.
+
+    ``gateway_namespace`` marks a Connection the template created, so the
+    template stays its owner: when a recipe later tightens what the endpoint
+    is known to do — Kunlun streams opaque ``reasoning.encrypted_content``
+    and therefore needs ``features.responses_reasoning_replay`` — a card
+    installed before that fact was measured must follow, otherwise every
+    tool round after the first opaque reasoning item dies in request-prepare
+    as ``mandatory_continuity_unrepresentable`` (2026-10-21, live).
+
+    Only keys the template declares are written, per-section for the
+    inference profile; a namespace-less Connection is an owner endpoint and
+    undeclared owner fields are never touched. Idempotent.
+    """
+    if str(row.get('gateway_namespace') or '') != face_name:
+        return False
+    changed = False
+    declared_headers = spec.get('extra_headers')
+    if isinstance(declared_headers, dict) and declared_headers:
+        headers = row.get('extra_headers')
+        headers = dict(headers) if isinstance(headers, dict) else {}
+        if any(headers.get(key) != value
+               for key, value in declared_headers.items()):
+            row['extra_headers'] = {**headers, **declared_headers}
+            changed = True
+    declared_profile_name = spec.get('responses_profile')
+    if (declared_profile_name
+            and row.get('responses_profile') != declared_profile_name):
+        row['responses_profile'] = declared_profile_name
+        changed = True
+    declared_profile = spec.get('inference_profile')
+    if isinstance(declared_profile, dict) and declared_profile:
+        current = row.get('inference_profile')
+        current = dict(current) if isinstance(current, dict) else {}
+        if _declares_only(current, declared_profile):
+            return changed
+        from lib.model_routing.inference import resolve_inference_profile
+        merged = resolve_inference_profile(
+            connection={'inference_profile': current},
+            deployment={'inference_profile': declared_profile})
+        # The resolver replaces a non-section value wholesale, but a feature
+        # map is per-key evidence: an owner-declared feature the template does
+        # not mention must survive the convergence.
+        features = {**(current.get('features') or {}),
+                    **(declared_profile.get('features') or {})}
+        if features:
+            merged['features'] = features
+        if merged != current:
+            row['inference_profile'] = merged
+            changed = True
+    return changed
+
+
+def _declares_only(current, declared) -> bool:
+    """True when every declared key already holds in the installed profile.
+
+    Convergence runs per recipe and wire on a periodic pass; the resolver
+    validates and deep-copies, so steady state must not pay for it.
+    """
+    if isinstance(declared, dict):
+        return isinstance(current, dict) and all(
+            _declares_only(current.get(key), value)
+            for key, value in declared.items())
+    return current == declared
+
+def _grant_face_connection(credentials: list[dict], connection_id: str) -> bool:
+    """Authorize the face Connection for every credential of this access.
+
+    A wire that routes through a Connection its credential cannot use is
+    rejected at dispatch, so creating OR retargeting the face both need the
+    same grant (mirrors the fresh-install shape). Returns whether anything
+    changed, so a grant-only convergence is persisted rather than discarded
+    as a no-op. Idempotent.
+    """
+    changed = False
+    for credential in credentials:
+        ids = credential.setdefault('authorization', {}).setdefault(
+            'connection_ids', [])
+        if connection_id not in ids:
+            ids.append(connection_id)
             changed = True
     return changed
 
@@ -658,8 +807,19 @@ def _transplant(working: dict, access: dict, bundle: dict,
 
 
 def sync_template_supply(*, boundary=None, repository=None,
-                         prober=None, templates=None) -> dict:
-    """One convergence pass over every template-matched installed access."""
+                         prober=None, templates=None,
+                         provider_access_ids=None,
+                         backfill_only=False) -> dict:
+    """One convergence pass over every template-matched installed access.
+
+    ``provider_access_ids`` narrows the pass to specific installed cards —
+    the Settings matrix syncs ONE row without re-probing every other card.
+    ``backfill_only`` skips the missing-recipe probe sweep and runs only the
+    deterministic additions (renamed supply, face-pinned wire ids). That is
+    the cheap incremental step: no network, no probe verdicts consumed, and
+    an installed card gains a template's new face/alias immediately instead
+    of waiting for the next six-hour cadence.
+    """
     if boundary is None or repository is None:
         from lib.llm_dispatch.autodiscover_local import _runtime_context
         context = _runtime_context()
@@ -683,20 +843,29 @@ def sync_template_supply(*, boundary=None, repository=None,
     stats: dict[str, Any] = {
         'added_offerings': 0,
         'added_deployments': 0,
+        'repaired_deployments': 0,
         'added_connections': 0,
+        'repaired_connections': 0,
         'superseded_offerings': 0,
         'superseded': [],
         'accesses': {},
     }
     plans: list[tuple[dict, dict, dict]] = []
     matched: list[tuple[dict, dict]] = []
+    only_access_ids = ({str(value).strip() for value in provider_access_ids}
+                       - {''} if provider_access_ids is not None else None)
     for access in document.get('provider_accesses') or []:
         if not isinstance(access, dict):
+            continue
+        if (only_access_ids is not None
+                and access.get('provider_access_id') not in only_access_ids):
             continue
         template = _find_template(document, access, templates)
         if template is None:
             continue
         matched.append((access, template))
+        if backfill_only:
+            continue
         known = _known_keys(document, access['provider_access_id'])
         wires = _known_wires(document, access['provider_access_id'])
         missing = [
@@ -753,7 +922,8 @@ def sync_template_supply(*, boundary=None, repository=None,
     if not plans:
         preview = copy.deepcopy(document)
         probe_stats = {'superseded': [], 'added_connections': 0,
-                       'added_deployments': 0, 'accesses': {}}
+                       'added_deployments': 0, 'repaired_deployments': 0,
+                       'repaired_connections': 0, 'accesses': {}}
         changed = False
         for access, template in matched:
             changed = (_supersede_renamed_supply(preview, access, template,
@@ -796,7 +966,9 @@ def sync_template_supply(*, boundary=None, repository=None,
                         for key, value in stats['accesses'].items()},
               added_offerings=stats['added_offerings'],
               added_deployments=stats['added_deployments'],
+              repaired_deployments=stats['repaired_deployments'],
               added_connections=stats['added_connections'],
+              repaired_connections=stats['repaired_connections'],
               superseded_offerings=stats['superseded_offerings'],
               owner_user_id=boundary.owner_user_id,
               model_routing_revision=authority.revision)

@@ -831,6 +831,23 @@ def normalize_document(
                 )
         deployment["priority"] = _non_negative_int(
             deployment.get("priority", 100), f"deployments[{index}].priority")
+        # Per-request-name routing headers. A gateway may expose one wire
+        # spelling only under a serving-provider selector while another
+        # spelling of the SAME Offering needs none, so the selector cannot
+        # live on the shared Connection. Same sanitizer as Connection headers:
+        # credential-named and transport-reserved names belong on the
+        # encrypted Credential, never in an inspectable document field.
+        deployment_headers, deployment_header_error = sanitise_extra_headers(
+            deployment.get("extra_headers"))
+        if deployment_header_error:
+            raise ModelRoutingError(
+                deployment_header_error,
+                field=f"deployments[{index}].extra_headers",
+            )
+        if deployment_headers:
+            deployment["extra_headers"] = deployment_headers
+        else:
+            deployment.pop("extra_headers", None)
         # Legacy input only: neither value changes visible controls or grants.
         if "enabled" in deployment:
             if not isinstance(deployment["enabled"], bool):

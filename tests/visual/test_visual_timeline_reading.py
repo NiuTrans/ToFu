@@ -329,3 +329,52 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     expect(page.locator(':popover-open')).to_have_count(1)
     page.evaluate('surface.dispose()')
     expect(page.locator(':popover-open')).to_have_count(0)
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark', 'tofu'])
+@pytest.mark.parametrize('width', [1180, 390, 320])
+def test_tool_svg_slots_are_transparent(frontend_visual_page, reading_tools, timeline_bundle, theme, width):
+    """Live and historical tool identities have no opaque tile or shadow halo."""
+    from playwright.sync_api import expect
+
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.set_content(f'<html data-theme="{theme}"><head><link rel="stylesheet" href="/static/styles.css">'
+                     '</head><body class="cv-off"><main id="surface"></main></body></html>')
+    page.add_style_tag(path=str(ROOT / 'frontend/src/conversation/ui/conversation-surface.css'))
+    page.add_script_tag(path=timeline_bundle)
+    page.evaluate("""tools=>{
+      const scope={taskId:'icon-task',attemptId:'icon-attempt',llmRound:0};
+      const tool=(blockId,name)=>({type:'tool_use',blockId,id:blockId,name,...scope,
+        _round:{toolName:name,toolCallId:blockId,status:'done',...scope}});
+      const turn={turnId:'turn',conversationId:'icon-reading',actor:'assistant',role:'assistant',
+        laneId:'main',ordinal:0,status:'running',projectionRevision:1,projection:{segments:[
+          tool('read','read_files'),tool('command','run_command'),
+          {type:'text',blockId:'answer',text:'Verified.',deliverable:true,terminal:true}]}};
+      window.iconState={...createTurnState('icon-reading'),turnsById:{turn},laneOrder:{main:['turn']}};
+      window.iconSurface=createConversationSurface(document.getElementById('surface'),
+        createClassicConversationRenderers({
+          renderSafeMarkdownHtml:text=>{const p=document.createElement('p');p.textContent=text;return p.outerHTML;},
+          renderToolBlockHtml:block=>tools[block.blockId]||''}));
+      window.renderIcons=()=>iconSurface.render(selectConversationViewModel(iconState));renderIcons();
+    }""", reading_tools)
+
+    def assert_unpainted():
+        for selector in ['[data-block-id="read"] .ptool-icon',
+                         '[data-block-id="command"] .ptool-cmd-icon']:
+            icon = page.locator(selector).first
+            expect(icon).to_be_visible()
+            expect(icon.locator('svg')).to_have_count(1)
+            expect(icon).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
+            expect(icon).to_have_css('background-image', 'none')
+            expect(icon).to_have_css('box-shadow', 'none')
+
+    expect(page.locator('[data-block-id="read"]')).to_have_attribute('data-process-edge', 'start')
+    expect(page.locator('[data-block-id="command"]')).to_have_attribute('data-process-edge', 'end')
+    assert_unpainted()
+    page.evaluate("""()=>{const turn=iconState.turnsById.turn;
+      iconState={...iconState,turnsById:{turn:{...turn,status:'completed',projectionRevision:2}}};renderIcons();}""")
+    page.locator('.conversation-history-process > summary').click()
+    expect(page.locator('.conversation-history-process__body:popover-open')).to_be_visible()
+    assert_unpainted()
+    page.evaluate('iconSurface.dispose()')

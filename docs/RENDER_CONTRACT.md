@@ -6,6 +6,9 @@ This document defines the current browser rendering invariants. The storage and 
 
 Problem: a repair badge alone hid which argument correction was applied. Decision: the shared tool-result presenter shows unique repair categories beside the existing badge, with three visible chips and remaining categories in one counted disclosure tooltip. Unknown categories retain their escaped machine name. A failed tool keeps the warning style and never claims a successful fix. Alternatives rejected: duplicating labels across retained renderers or treating argument repair as proof of tool success.
 
+## Rejected tool calls
+
+Problem: a pre-execution rejection showed only the violated rule (“Invalid length at $.edits[0].path”), so the request the model actually sent — a blank per-edit `path`, a foreign harness shape, a missing key — was invisible in the UI and had to be recovered from logs or the persisted wire. Decision: the rejected-call row renders the call's own `toolArgs` beneath its reason: short payloads open in place, payloads over 600 characters stay collapsed with their size on the summary line and disclose the first 4,000 characters, with the reason stating that the wire retains the rest. The block is always escaped text in a `<pre>`, never parsed affordances, and is omitted for a rejected call with no arguments. Alternatives rejected: parsing arguments into per-tool field hints (duplicates each tool schema in the renderer) and relying on the reason string alone (cannot distinguish a model omission from a harness-side drop). Specs: `tests/frontend/test_frontend_tool_rounds_render.py` and the wire-parity battery lock the shown/hidden and escaping behaviour.
 ## Selected text actions
 
 Problem: startup-only translations leaked message keys; reading the selection again on click lost its text, and a created branch did not enter its composer. Decision: `selection-popup.ts` captures a passage from one rendered Turn, refreshes localized controls on opening/language changes, and uses the shared UI factories. Quote adds exact text once to existing composer quotes, preserves the draft and focuses input; previews disclose the whole passage and support removal. Existing send acknowledgement/rollback remains the quote-state authority. Branch uses the existing lane command and enters that acknowledged lane only in the originating conversation. Running Turns permit quotes but defer branching until settlement. Selection supports pointer, touch selection changes and keyboard Tab/arrow access; Escape, outside clicks, scrolling and disposal dismiss the bounded floating UI. Viewport clamping includes narrow layouts; no polling or startup reads are added. Alternatives rejected: raw key fallbacks, re-reading selection at click time, a separate branch transport and automatically sending a generated question. Verification: `tests/visual/test_visual_selection_popup.py` and the authoritative composer/Turn runtime contracts protect layout, focus, retry and ownership.
@@ -95,6 +98,16 @@ other failures remain scoped. Reader folds, focus, original text and escaped mod
 names survive replay/navigation/disposal. No attribution request or idle timer is added.
 **Rejected:** picker-based guessing, duplicated badges and lingering composer receipts.
 
+**Problem:** a re-run translation task can make an already translated body vanish and
+stream back from its first chunk, because a plan preview ranked the lifecycle-local
+partial above the completed body while every other block kind returns
+`completed ?? partial` (`segment-blocks.ts`). **Decision:** a finished translation
+outranks an in-flight preview in every block kind; `streaming` describes the painted
+body, so it is false while the completed text is shown. The pending chip still reports
+the running task. **Rejected:** hiding the chip (loses task state) and preferring the
+partial behind a growth check (a retry is a re-translation, not a text prefix).
+Spec: `presentation/view-model/translation-blocks.test.ts`.
+
 **Problem:** inserting or queueing an instruction during generation created a
 temporary assistant with a translating/connecting status, then removed it at
 acknowledgement. **Decision:** the existing composer receipt retains the original
@@ -179,6 +192,11 @@ Executable specs: `tests/frontend/test_frontend_history_process.py`,
 `tests/frontend/test_frontend_round_outline.py`, Surface contracts,
 `tests/visual/test_visual_historical_process.py` and
 `tests/visual/test_visual_round_outline.py`.
+
+Tool SVG icon slots are transparent, without background tiles or shadow halos,
+including live process groups and reopened historical inspectors. Marker geometry,
+row hover/focus feedback and thinking-state indicators retain their own styling.
+Browser specification: `tests/visual/test_visual_timeline_reading.py`.
 
 Checklist headers keep their title, progress and count on one readable row;
 rationale lives in the body, complete on both desktop and phone. The raw tool

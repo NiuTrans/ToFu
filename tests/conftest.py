@@ -733,6 +733,39 @@ def host_tmp_path():
         shutil.rmtree(path, ignore_errors=True)
 
 
+# ─── Verified Node toolchain for every spawned node process ──────────
+_NODE_TOOLCHAIN_ORIGINAL_PATH = None
+
+
+def _prefer_verified_node_toolchain() -> None:
+    """Put the repo's ABI-verified Node ahead of an unrunnable PATH node.
+
+    Tests spawn ``node`` by bare name (the frontend test bundler, ``node
+    --check``, visual lanes). ``shutil.which('node')`` proves existence, not
+    runnability: on a glibc 2.17 host it returns an official build that dies
+    with ``GLIBCXX_3.4.21 not found`` and collection fails with a bundler
+    AssertionError that reads like a source defect. Adopting the same
+    precedence the runtime uses keeps the ladder honest about what the product
+    will actually execute.
+    """
+    global _NODE_TOOLCHAIN_ORIGINAL_PATH
+    try:
+        from lib.tools.process_environment import bundled_toolchain_bins
+        bins = bundled_toolchain_bins()
+    except Exception as exc:  # pragma: no cover — import-time safety only
+        _conftest_logger.debug('bundled toolchain probe failed: %s', exc)
+        return
+    if not bins:
+        return
+    if _NODE_TOOLCHAIN_ORIGINAL_PATH is None:
+        _NODE_TOOLCHAIN_ORIGINAL_PATH = os.environ.get('PATH', '')
+    entries = os.environ.get('PATH', '').split(os.pathsep)
+    if entries[:1] == [bins[0]]:
+        return
+    os.environ['PATH'] = os.pathsep.join(
+        [*bins, *[entry for entry in entries if entry not in bins]])
+
+
 # ─── Session-level isolated application authority ────────────────────
 @pytest.fixture(scope="session", autouse=True)
 def _configure_test_env():
@@ -781,6 +814,7 @@ def pytest_configure(config):
     warn_on_nc_source_poison_at_session_start()
     if not _nc_source_snapshots:
         _snapshot_nc_sources()
+    _prefer_verified_node_toolchain()
     config.addinivalue_line(
         'markers',
         'auth_mode(mode): override TOFU_AUTH_MODE for this test '

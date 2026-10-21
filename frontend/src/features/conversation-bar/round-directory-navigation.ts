@@ -5,6 +5,11 @@ import type { TurnState } from '../../conversation/domain/turn-store';
 import { createAnchoredDisclosure } from './disclosure';
 
 const PAGE_SIZE = 50;
+/* A streamed turn advances the replica head that every directory read is
+ * fenced against; a page rejected by a head that moved under it is retried a
+ * bounded number of times instead of surfacing a failure the reader cannot act
+ * on. */
+const ROUND_DIRECTORY_HEAD_RETRIES = 3;
 export interface ExactNavigationPorts {
   host: HTMLElement;
   translate(key: string, params?: Record<string, string | number>): string;
@@ -50,6 +55,9 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
   let version = ''; let generation = 0; let disposed = false; let busy = false;
   let total: number | null = null; let activeId = ''; let activeRound: number | null = null;
   let page = 0; let entries: ConversationRoundEntry[] = [];
+  /* Only `readPage` advances this; `busy` is shared with `navigate`, and a
+   * queued page must never be drained by a jump that was never a read. */
+  let reading = false; let queued: number | null = null;
   const ranks = new Map<string, number>();
   const current = (id: string, token: number): boolean => !disposed && id === conversationId && token === generation;
 
@@ -96,13 +104,35 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     await Promise.resolve();
     return ports.directory(id, offset, limit, anchor);
   }
+  /* Every directory read is fenced against the replica head it started under,
+   * and a streamed turn advances that head continuously. A fence that moved
+   * under the read is not a failure the reader can act on: read once more
+   * under the head observed now. Bounded, because a racing head converges
+   * while a broken projection never will. */
+  async function readFenced<T>(id: string, read: () => Promise<T>): Promise<T> {
+    for (let retries = 0; ;) {
+      const head = ports.directoryKey?.(id);
+      try { return await read(); }
+      catch (error) {
+        if (ports.directoryKey?.(id) === head
+            || ++retries > ROUND_DIRECTORY_HEAD_RETRIES) throw error;
+      }
+    }
+  }
   async function readPage(wantedPage: number, anchor = activeId): Promise<void> {
-    if (busy || !conversationId) return;
+    if (!conversationId) return;
+    /* One read in flight per view. A head advance arrives with every streamed
+     * turn, so a newer request replaces any queued one instead of stacking
+     * reads, and the page index survives the refresh. */
+    if (reading) { queued = wantedPage; return; }
+    // A jump owns the bar; the next head advance refreshes the directory.
+    if (busy) return;
     const id = conversationId; const token = generation;
-    busy = true; errorNote.textContent = ''; paint();
+    reading = true; busy = true; errorNote.textContent = ''; paint();
     let refreshAnchor = false;
     try {
-      const result = await directory(id, wantedPage * PAGE_SIZE, PAGE_SIZE, anchor || undefined);
+      const result = await readFenced(id, () =>
+        directory(id, wantedPage * PAGE_SIZE, PAGE_SIZE, anchor || undefined));
       if (!current(id, token)) return;
       total = result.totalRounds;
       refreshAnchor = anchor !== activeId;
@@ -114,10 +144,12 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
       else if (activeId && activeRound !== null) ranks.set(activeId, activeRound);
     } catch { if (current(id, token)) errorNote.textContent = t('conversationBar.historyFailed'); }
     finally {
-      if (current(id, token)) {
-        busy = false; paint();
-        if (refreshAnchor && activeRound === null && activeId) void readPage(page, activeId);
-      }
+      if (disposed) return;
+      const next = queued; queued = null;
+      reading = false; busy = false;
+      if (current(id, token)) paint();
+      if (next !== null) void readPage(next);
+      else if (current(id, token) && refreshAnchor && activeRound === null && activeId) void readPage(page, activeId);
     }
   }
   async function navigate(round: number): Promise<void> {
@@ -126,7 +158,7 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
     busy = true; errorNote.textContent = ''; paint();
     try {
       // Revalidate the rank under the current head even if its body was loaded.
-      const result = await directory(id, round - 1, 1);
+      const result = await readFenced(id, () => directory(id, round - 1, 1));
       if (!current(id, token)) return;
       const entry = result.entries[0];
       if (!entry || entry.roundNumber !== round) throw new Error('Round was deleted');
@@ -163,15 +195,24 @@ export function createExactTurnNavigation(ports: ExactNavigationPorts): {
       const nextVersion = `${id}:${ports.directoryKey?.(id) ?? nextState?.conversationRevision ?? ''}`;
       state = nextState;
       if (switched || nextVersion !== version) {
-        generation++; busy = false; entries = []; ranks.clear(); total = null; activeRound = null;
-        errorNote.textContent = ''; version = nextVersion;
-        if (switched) { disclosure.close(false); activeId = ''; page = 0; }
+        /* A replica head advance is not a new directory. Streaming commits one
+         * per tool round; blanking the readout and page here made an open
+         * directory empty itself on every call. Keep the last good page and
+         * refresh the *shown* page in place. Only a conversation switch drops
+         * the projection, since those ranks belong to another thread.
+         * `busy` stays as it is: a read may still be in flight and hands its
+         * slot to the queued refresh when it settles. */
+        generation++; errorNote.textContent = ''; version = nextVersion;
+        if (switched) {
+          entries = []; ranks.clear(); total = null; activeRound = null;
+          disclosure.close(false); activeId = ''; page = 0;
+        }
         conversationId = id;
         if (!activeId || !state?.turnsById[activeId]) {
           activeId = [...(state?.laneOrder.main ?? [])].reverse().find(turnId =>
             ['human', 'critic', 'virtual_user'].includes(state?.turnsById[turnId]?.actor ?? '')) ?? '';
         }
-        if (id) void readPage(0);
+        if (id) void readPage(switched ? 0 : page);
       }
       paint();
     },

@@ -258,6 +258,81 @@ def _omit_get_conversation_zero_cursor(
     return True
 
 
+
+def _collapse_batch_query_envelope(
+    tool_name: str, args: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """Fold a batch ``queries`` envelope into a tool's single ``query``.
+
+    Models trained on a harness whose search tool takes a query LIST emit
+    ``{"queries": [{"query": "a"}, {"query": "b"}]}`` — the shape
+    ``web_search`` declares — against a tool that declares one ``query``
+    string (conv mvhis94j51l8jc: ``search_tools`` failed closed on
+    ``missing_required_arguments: query`` although both capability strings
+    were right there). The list is a retrieval intent, not a command, so
+    joining its distinct terms into the declared single query preserves every
+    term the model asked for; taking only the first would drop half the
+    request.
+
+    Strictly gated: only when the indexed schema declares ``query`` as a
+    string, does NOT declare ``queries`` (so a genuinely batch-shaped tool is
+    never rewritten), and the caller supplied no nonblank ``query``. Returns
+    ``(args, pattern_name)``; ``pattern_name`` is None when nothing fired.
+    """
+    if 'queries' not in args:
+        return args, None
+    parameters = _schemas().get(tool_name) or {}
+    properties = parameters.get('properties') or {}
+    query_rule = properties.get('query')
+    if not isinstance(query_rule, dict) or query_rule.get('type') != 'string':
+        return args, None
+    if 'queries' in properties:
+        return args, None
+    existing = args.get('query')
+    if isinstance(existing, str) and existing.strip():
+        # The declared key is already satisfied and the schema rejects the
+        # batch key outright — keeping it would fail an otherwise valid call
+        # on an unknown argument, so drop it (the log records the loss).
+        if parameters.get('additionalProperties') is not False:
+            return args, None
+        return ({key: value for key, value in args.items() if key != 'queries'},
+                'redundant_batch_queries_dropped')
+
+    queries = args['queries']
+    if isinstance(queries, str):
+        ok, parsed = _try_parse_json(queries)
+        if ok:
+            queries = parsed
+    if not isinstance(queries, list):
+        return args, None
+
+    terms: list[str] = []
+    for item in queries:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            value = item.get('query')
+            text = value.strip() if isinstance(value, str) else ''
+        else:
+            text = ''
+        if text and text not in terms:
+            terms.append(text)
+    if not terms:
+        return args, None
+
+    limit = query_rule.get('maxLength')
+    joined = ' '.join(terms)
+    if isinstance(limit, int) and len(joined) > limit:
+        # Repair only when every requested term fits. Keep the complete
+        # envelope (including stringified input) for authoritative rejection;
+        # neither a prefix of the list nor a sliced term is the same search.
+        return args, None
+
+    out = {key: value for key, value in args.items() if key != 'queries'}
+    out['query'] = joined
+    return out, ('batch_queries_to_query' if len(terms) == 1
+                 else 'batch_queries_joined')
+
 # ══════════════════════════════════════════
 #  Public orchestrator
 # ══════════════════════════════════════════
@@ -314,6 +389,14 @@ def validate_then_repair(
     if expected:
         required = _required_keys(tool_name)
 
+        # ── Batch-envelope collapse (foreign harness's query LIST) ──
+        # Runs BEFORE the alias/type passes so the single-query tool sees
+        # its own declared key, and so ``queries`` never reaches an
+        # ``additionalProperties: false`` contract as an unknown argument.
+        repaired, _queries_pattern = _collapse_batch_query_envelope(
+            tool_name, repaired)
+        if _queries_pattern:
+            log.append(('query', _queries_pattern))
         # ── Parameter-KEY alias rename (wrong-harness arg names) ──
         # Must run BEFORE the type-walk so a renamed key is type-checked too.
         repaired, _alias_log = _apply_param_aliases(tool_name, repaired, expected)
@@ -457,6 +540,69 @@ def parse_and_repair_tool_args(
         logger.warning('[ToolRepair] repair pass failed for %s (passing through): %s',
                        tool_name, e)
         return fn_args, []
+
+
+def edit_batch_path_gap(tool_name: str, fn_args: Any) -> str:
+    """Name the real cause when an edit does not resolve to a file.
+
+    ``edit_file`` takes the file from the batch-level ``path`` or from the
+    edit's own (an item path overrides the batch file). Neither level can be
+    ``required`` in the schema, so a call that names no file at all passes
+    JSON-Schema shape checks and is refused here instead. A blank item path
+    inside a batch that names two files is the other ambiguous shape:
+    :func:`_distribute_shared_edit_path` fills from the batch path, and leaves
+    a multi-file gap for this diagnosis rather than guessing which file was
+    meant.
+
+    Returns ``''`` when every edit already resolves to a file (or this is not
+    an ``edit_file`` call).
+    """
+    if tool_name != 'edit_file' or not isinstance(fn_args, dict):
+        return ''
+    edits = fn_args.get('edits')
+    if not isinstance(edits, list) or not edits:
+        return ''
+    missing: list[int] = []
+    declared: list[str] = []
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            continue
+        value = edit.get('path')
+        if isinstance(value, str) and value.strip():
+            declared.append(value.strip())
+        elif value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(index)
+    if not missing:
+        return ''
+    candidates = list(dict.fromkeys(declared))
+    batch_path = fn_args.get('path')
+    has_batch_path = isinstance(batch_path, str) and bool(batch_path.strip())
+
+    if has_batch_path:
+        # Type repair can decode `edits` after the structural pass has run,
+        # leaving item paths omitted and the declared batch path intact.
+        # Each such edit resolves independently to that explicit fallback,
+        # even when other edits override it with several different files.
+        return ''
+    if len(candidates) == 1 and not has_batch_path:
+        remedy = (f'this batch already names one file ({candidates[0]!r}) — '
+                  f'repeat that exact path on every edit')
+    elif len(candidates) > 1:
+        shown = ', '.join(repr(item) for item in candidates[:4])
+        remedy = (f'this batch spans several files ({shown}), so a blank path '
+                  f'is ambiguous — name the file on that edit')
+    else:
+        remedy = ('no edit or batch `path` names a file, so the target cannot '
+                  'be inferred — put the file once in the top-level `path`')
+    return (f'edits[{_index_list(missing)}] has no file. An edit takes its '
+            f'file from the top-level `path`, or from its own `path` when it '
+            f'targets a different file; a per-edit `path` is never inherited '
+            f'from the previous edit. {remedy}.')
+
+
+
+def _index_list(indices: list[int]) -> str:
+    return ','.join(str(index) for index in indices)
 
 
 def schema_hint(tool_name: str) -> str:

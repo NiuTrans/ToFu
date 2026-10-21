@@ -110,6 +110,43 @@ def _hot_reload_dispatcher_slots() -> None:
             exc_info=True)
 
 
+def _sync_one_card_from_template(boundary, repository, provider_id: str) -> dict | None:
+    """Converge ONE installed card with its provider template, incrementally.
+
+    A template seeds NEW installs only, so a card created before a recipe
+    gained a face-pinned wire id never grows that alias on its own — and the
+    matrix is exactly where the gap becomes visible (the row has no cell for
+    the working wire id, so every visible cell is the broken one). Converge
+    it here with deterministic additions only: no probe, no network, no
+    verdicts consumed. A template that does not match this card is a no-op.
+
+    Returns the sync stats, or None when the card has no template. Failures
+    are diagnostics: the probe must still run against the current document.
+    """
+    from lib.model_routing.template_supply import sync_template_supply
+
+    document = repository.get(boundary).document
+    access_ids = [str(row.get('provider_access_id') or '')
+                  for row in document.get('provider_accesses') or []
+                  if isinstance(row, dict)
+                  and row.get('provider_id') == provider_id]
+    access_ids = [value for value in access_ids if value]
+    if not access_ids:
+        return None
+    try:
+        stats = sync_template_supply(
+            boundary=boundary, repository=repository,
+            provider_access_ids=access_ids, backfill_only=True)
+    except Exception as exc:
+        logger.warning(
+            'template supply: incremental sync failed for %s: %s',
+            provider_id, exc, exc_info=True)
+        return None
+    if (stats.get('added_connections') or stats.get('added_deployments')
+            or stats.get('repaired_connections')):
+        _hot_reload_dispatcher_slots()
+    return stats
+
 def _expected_revision(body: Mapping[str, Any]) -> int:
     value = body.get("expected_revision")
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -567,6 +604,15 @@ def probe_provider_cells_start(provider_id: str):
     ``only`` restricts the run to rows/columns/cells and MERGES the fresh
     verdicts into the persisted snapshot. Manual diagnostics include disabled
     Offerings/Connections and ungranted cells without changing routing state.
+
+    One bounded exception, and it is a WRITE: the card is first converged with
+    its provider template (``sync_template_supply(backfill_only=True)`` scoped
+    to this access), so a wire id the template gained after this card was
+    installed actually has a cell to probe. That step adds template-derived
+    Connections/Deployments only — it never probes, never edits owner values,
+    and never touches another provider. Without it the matrix shows only the
+    pre-existing cells, so a row whose public id is rate-limited reads as
+    "this model does not work" even when a working wire exists.
     Optional temporary request names use saved owner-scoped transport/identity
     references; no draft is saved and completion cannot mint grants.
     """
@@ -614,6 +660,20 @@ def probe_provider_cells_start(provider_id: str):
             raise ModelRoutingError(
                 "The credential columns have changed. Refresh Settings before detecting so the intended key is tested.",
                 kind="provider_probe_stale_selection", field="credential_ids")
+        # Converge THIS card with its template before planning, so the matrix
+        # actually contains a cell for a wire id the template gained after the
+        # card was installed. Without this the user sees only the pre-existing
+        # (broken) cells and concludes the new request name does not work.
+        # Deterministic additions only: no probe, no verdicts consumed.
+        synced = _sync_one_card_from_template(boundary, repository, provider_id)
+        card_changed = bool(synced and (synced.get("added_connections")
+                                        or synced.get("added_deployments")
+                                        or synced.get("repaired_connections")))
+        if card_changed:
+            authority = repository.get(boundary)
+            bundle = _provider_bundle(authority.public_document(), provider_id)
+            if bundle is None or bundle.get("provider_access") is None:
+                return api_not_found("provider not found")
         if explicit_targets:
             bundle = manual_probe_bundle(bundle, body["targets"])
         credential_ids = [str(row["credential_id"]) for row in bundle["credentials"]]
@@ -625,10 +685,13 @@ def probe_provider_cells_start(provider_id: str):
                     cache_key,
                 )
                 return api_ok(public_probe_snapshot(existing))
-            if existing and not force and not scoped and not explicit_targets:
+            if (existing and not force and not scoped and not explicit_targets
+                    and not card_changed):
                 return api_ok(public_probe_snapshot(existing))
 
-        if not force and not scoped and not explicit_targets:
+        # A card that just gained a wire id has cells the snapshot cannot
+        # describe; resuming it would render the new row permanently unprobed.
+        if not force and not scoped and not explicit_targets and not card_changed:
             cached = _read_persisted_probe_snapshot(cache_key, credential_ids)
             if isinstance(cached, dict) and cached.get("cells"):
                 logger.info(

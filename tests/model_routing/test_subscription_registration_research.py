@@ -14,6 +14,40 @@ from tests.model_routing.test_model_routing_contract import _full_document
 pytestmark = pytest.mark.unit
 
 
+def test_search_activates_the_host_bridge_before_importing_tofu_search(monkeypatch):
+    """Registration research must not import tofu-search raw.
+
+    2026-10-21 boot: the research worker imported ``tofu_search`` directly, so
+    the library kept its own defaults with NO proxy. On a host whose only
+    egress is the configured pool every engine died on DNS
+    (``0 final results ... via direct: Name or service not known``) while the
+    rest of the app searched fine. The bridge install is what injects the
+    proxy, the LLM filter and the fetch providers.
+    """
+    calls = []
+    from lib.search import search_runtime
+    from lib.model_catalog import registration_research as research
+
+    monkeypatch.setattr(search_runtime, 'ensure_search_runtime',
+                        lambda: calls.append('ensure'))
+
+    captured = {}
+
+    def fake_search(query, **kwargs):
+        captured['query'] = query
+        captured['kwargs'] = kwargs
+        return [{'url': 'https://official.example/x', 'full_content': 'body'}]
+
+    import tofu_search
+    monkeypatch.setattr(tofu_search, 'search', fake_search)
+
+    results = research._search('gpt-future-test official', seconds=12)
+
+    assert calls == ['ensure'], 'the host bridge was not activated first'
+    assert results and captured['query'] == 'gpt-future-test official'
+    assert captured['kwargs']['search_deadline_secs'] <= 12
+
+
 def pending_supply(monkeypatch):
     doc = _full_document()
     doc['models'] = []

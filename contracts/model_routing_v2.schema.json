@@ -499,6 +499,12 @@
           "minimum": 1,
           "maximum": 1000000
         },
+        "extra_headers": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": {"type": "string", "maxLength": 2048},
+          "description": "Per-request-name routing headers, merged OVER the owning Connection's. A gateway can serve one wire spelling only when a selector header names its serving provider (aigc x-context-provider), while another spelling of the SAME Offering needs none: the selector belongs to the request name, not the account or the Connection. Credential-named and transport-reserved headers are rejected and stay on the encrypted Credential."
+        },
         "enabled": {
           "type": "boolean",
           "deprecated": true,

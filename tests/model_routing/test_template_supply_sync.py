@@ -27,7 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pytest
 
+from lib.llm.responses_outbound import openai_body_to_responses_checked
 from lib.model_routing import OwnerBoundary, empty_document
+from lib.model_routing.inference import (
+    profile_from_metadata,
+    resolve_inference_profile,
+)
 from lib.model_routing.repository import InMemoryModelRoutingRepository
 from lib.model_routing.template_supply import sync_template_supply
 from lib.provider.provider_template_recipes import (
@@ -320,6 +325,100 @@ def test_face_pinned_alias_is_backfilled_onto_existing_offering():
         'kunlunbedrock.gpt-6.1-sol-m17') == 1
     assert again['added_deployments'] == 0
 
+
+def test_declared_face_capability_converges_onto_installed_face_connection():
+    """A face the recipe later declares MORE capable must reach the card.
+
+    Mirrors 2026-10-21: a card installed from the previous template already
+    rides the kunlun face Connection, but that Connection carries only
+    ``sampling.temperature='omit'``. The recipe now also declares
+    ``features.responses_reasoning_replay='supported'`` because the endpoint
+    streams opaque ``reasoning.encrypted_content``. Insert-only seeding never
+    revisits the row, so without convergence every tool round after the first
+    opaque reasoning item dies in request-prepare as
+    ``protocol_conversion:mandatory_continuity_unrepresentable``.
+    """
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    bundle = _seed_mini_card(repository, boundary, selected=['gpt-6.1-sol'])
+    access_id = bundle['provider_access']['provider_access_id']
+    document = repository.get(boundary).document
+    kunlun = next(row for row in document['connections']
+                  if row.get('gateway_namespace') == 'kunlun')
+    # Reproduce the card measured before the replay fact was known.
+    kunlun['inference_profile'] = {'sampling': {'temperature': 'omit'}}
+    kunlun['inference_profile']['features'] = {
+        'an_owner_declared_feature': 'supported'}
+    repository.compare_and_swap(
+        boundary, document, expected_revision=repository.get(boundary).revision)
+
+    stats = sync_template_supply(
+        boundary=boundary, repository=repository, backfill_only=True)
+
+    document = repository.get(boundary).document
+    kunlun = next(row for row in document['connections']
+                  if row.get('gateway_namespace') == 'kunlun')
+    profile = kunlun['inference_profile']
+    assert profile['features']['responses_reasoning_replay'] == 'supported'
+    # Only the declared keys converge; sampling and owner features survive.
+    assert profile['sampling'] == {'temperature': 'omit'}
+    assert profile['features']['an_owner_declared_feature'] == 'supported'
+    assert kunlun['extra_headers'] == {'x-context-provider': 'kunlun'}
+    assert kunlun['responses_profile'] == 'compatible'
+    assert stats['repaired_connections'] == 1
+
+    # The acceptance check: the exact history that failed must now compile.
+    deployment = next(row for row in document['deployments']
+                      if row['connection_id'] == kunlun['connection_id']
+                      and row['wire_model_id']
+                      == 'kunlunbedrock.gpt-6.1-sol-m17')
+    resolved = resolve_inference_profile(
+        connection={'protocol': 'openai_responses',
+                    'inference_profile': profile_from_metadata(kunlun)},
+        deployment={'inference_profile': profile_from_metadata(deployment)})
+    result = openai_body_to_responses_checked({
+        'model': 'kunlunbedrock.gpt-6.1-sol-m17',
+        '_responses_feature_profile': 'compatible',
+        '_route_inference_profile': resolved,
+        'messages': [
+            {'role': 'user', 'content': 'trace the header'},
+            {'role': 'assistant', 'content': 'working',
+             'tool_calls': [{'id': 'call_1', 'type': 'function', 'function': {
+                 'name': 'repo_map', 'arguments': '{}'}}],
+             '_responses_items': [{'type': 'reasoning',
+                                   'encrypted_content': 'gAAAA-opaque'}]},
+            {'role': 'tool', 'tool_call_id': 'call_1', 'content': 'ok'}]})
+    assert not result.validation_issues, result.validation_issues
+    payload = result.require_payload()
+    assert 'reasoning.encrypted_content' in payload['include']
+    assert any(item.get('type') == 'reasoning' for item in payload['input'])
+    # Idempotent: a second pass rewrites nothing.
+    again = sync_template_supply(
+        boundary=boundary, repository=repository, backfill_only=True)
+    assert again['repaired_connections'] == 0
+
+
+def test_declared_face_convergence_never_touches_an_owner_connection():
+    """A namespace-less Connection is the owner's endpoint, not the template's."""
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    bundle = _seed_mini_card(repository, boundary, selected=['gpt-6.1-sol'])
+    document = repository.get(boundary).document
+    kunlun = next(row for row in document['connections']
+                  if row.get('gateway_namespace') == 'kunlun')
+    del kunlun['gateway_namespace']
+    kunlun['inference_profile'] = {'sampling': {'temperature': 'omit'}}
+    repository.compare_and_swap(
+        boundary, document, expected_revision=repository.get(boundary).revision)
+
+    sync_template_supply(
+        boundary=boundary, repository=repository, backfill_only=True)
+
+    document = repository.get(boundary).document
+    kunlun = next(row for row in document['connections']
+                  if row['base_url'].endswith('/v1')
+                  and row['base_url'].count('/') <= 4)
+    assert 'features' not in (kunlun.get('inference_profile') or {})
 
 def _install_deepseek_pair(repository, boundary):
     """Scaffold plus the pre-rename DeepSeek supply: V4.1 live, V4 leftover.

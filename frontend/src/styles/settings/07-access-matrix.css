@@ -258,6 +258,67 @@
 }
 .stg-mx-chip.pending { color: #b45309; background: rgba(245,159,0,0.16); }
 .stg-mx-chip.retired { color: #b42318; background: rgba(239,68,68,0.12); }
+/* A request name that carries its own routing headers. Without the marker a
+   selector-gated wire looks identical to one that needs no selector, and its
+   failure reads as a quota wall instead of a missing header. */
+.stg-mx-chip.selector { color: #1d4ed8; background: rgba(37,99,235,0.13); }
+
+/* ── Request-name panel: the wire id plus the headers that select its route ──
+   Self-contained sub-overlay. It must NOT borrow `.app-dialog-*`: that
+   stylesheet is demand-loaded with the dialog controller, so this panel would
+   otherwise render as an unstyled form appended at the end of <body>. */
+.stg-rnp-overlay {
+  position: fixed; inset: 0; z-index: 12020;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--space-5);
+  background: rgba(10,12,14,.42); backdrop-filter: blur(2px);
+}
+.stg-rnp-card {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  width: min(560px, 92vw); max-height: calc(100dvh - 2 * var(--space-5));
+  overflow: auto;
+  padding: 22px var(--space-6) 18px;
+  background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border-light); border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.55);
+  animation: stg-rnp-in 0.16s cubic-bezier(0.2,1,0.3,1);
+}
+@keyframes stg-rnp-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+@media (prefers-reduced-motion: reduce) { .stg-rnp-card { animation: none; } }
+.stg-rnp-title { font-size: 15px; font-weight: 700; letter-spacing: 0.01em; }
+.stg-rnp-body { display: flex; flex-direction: column; gap: var(--space-2); }
+.stg-rnp-label { display: flex; flex-direction: column; gap: 4px; font-size: var(--font-size-sm); font-weight: 700; }
+.stg-rnp-hint { color: var(--text-tertiary, #777); font-size: var(--font-size-xs); line-height: 1.5; }
+.stg-rnp-input {
+  width: 100%; min-width: 0; padding: 9px var(--space-3);
+  background: var(--bg-primary); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius-xs);
+  font: inherit; font-size: var(--font-size-lg); outline: none;
+  transition: border-color var(--transition);
+}
+.stg-rnp-input:focus { border-color: var(--accent); }
+.stg-rnp-headers { display: flex; flex-direction: column; gap: 6px; }
+.stg-rnp-header-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 6px; align-items: center; }
+/* An inherited row carries a provenance chip beside its inputs, so it needs a
+   track of its own; otherwise the chip pushes the remove button out of the
+   grid and the row wraps. */
+.stg-rnp-header-row.is-inherited { grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto auto; }
+.stg-rnp-inherited {
+  padding: 2px 6px; border-radius: var(--radius-xs); white-space: nowrap;
+  background: var(--bg-secondary, #efe9dd); color: var(--text-secondary, #555);
+  font-size: var(--font-size-xs);
+}
+.stg-rnp-header-name, .stg-rnp-header-value { min-width: 0; }
+.stg-rnp-error { min-height: 1.2em; color: var(--error-text, #b42318); font-size: var(--font-size-xs); }
+.stg-rnp-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+[data-theme="tofu"] .stg-rnp-card { background: #faf8f3; border: 3px solid #1a1814; }
+@media (max-width: 600px) {
+  .stg-rnp-overlay { padding: 10px; }
+  .stg-rnp-card { max-height: calc(100dvh - 20px); padding: var(--space-4); }
+  .stg-rnp-header-row { grid-template-columns: minmax(0,1fr) auto; }
+  .stg-rnp-header-row.is-inherited { grid-template-columns: minmax(0,1fr) auto auto; }
+  .stg-rnp-header-value { grid-column: 1 / -1; }
+}
 
 /* ── Root-row meta line: capability chips + context / release / pricing,
    on its own line under the id, aligned past the toggle + brand icon ── */

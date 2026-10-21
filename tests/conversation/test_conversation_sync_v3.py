@@ -1823,6 +1823,17 @@ def test_round_directory_route_validates_explicit_lane_and_head(flask_client, co
     response = flask_client.get(path + "?laneId=main&syncSeq=0&limit=1")
     assert response.status_code == 200
     assert response.get_json()["totalRounds"] == 0
+def test_round_directory_route_validates_explicit_lane_and_head(flask_client, conversation_sync_db):
+    from lib.conversation_sync.validation import decode
+    path = "/api/v4/conversations/conv-sync-a/turns/rounds"
+    response = flask_client.get(path + "?laneId=main&syncSeq=0&limit=1")
+    assert response.status_code == 200
+    # The browser validates this operation with the same generated schema, so
+    # the shared `{ok: true}` envelope must be part of the declared shape.
+    # Without it every read was a contract violation and the turn directory
+    # reported "history failed" for a 200 response.
+    assert decode("ConversationRoundDirectory", response.get_json())["totalRounds"] == 0
+    assert response.get_json()["totalRounds"] == 0
     for query in ("", "?laneId=main", "?laneId=main&syncSeq=-1", "?syncSeq=0",
                   "?laneId=main&syncSeq=0&limit=101", "?laneId=main&syncSeq=0&offset=-1"):
         assert flask_client.get(path + query).status_code == 400

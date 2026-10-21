@@ -332,6 +332,26 @@ def test_batch_partition_skips_only_stale_edit(workspace):
 
 
 @pytest.mark.unit
+def test_batch_path_edit_is_freshness_gated_on_its_resolved_file(workspace):
+    """Pathless edits still have a target: the call-level `path`."""
+    from lib.tasks_pkg.handlers._write_freshness_gate import partition_stale_edits
+    from lib import write_freshness
+
+    write_freshness.record('convA', workspace['target_abs'])
+    _external_change(workspace['target_abs'])
+
+    skip, raw = partition_stale_edits(
+        _make_task(),
+        {'path': workspace['target_rel'],
+         'edits': [{'operation': 'replace', 'anchor': 'return 1',
+                    'content': 'return 9'}]},
+        workspace['project_path'])
+
+    assert skip == [0]
+    assert raw == [workspace['target_rel']]
+
+
+@pytest.mark.unit
 def test_gate_disabled_via_env(workspace, monkeypatch):
     from lib.tasks_pkg.handlers._write_freshness_gate import check_write_freshness
     from lib import write_freshness

@@ -221,6 +221,32 @@ def test_batch_partition_skips_only_uncovered_edit(workspace):
 
 
 # ── has_token unit ─────────────────────────────────────────────────────
+    assert skip == [1]
+    assert unread == ['b.py']
+
+
+@pytest.mark.unit
+def test_batch_path_edit_is_gated_on_the_file_it_resolves_to(workspace):
+    """A pathless edit still targets a file: the call-level `path`.
+
+    Otherwise `edit_file: {path: X, edits: [{operation, anchor, content}]}`
+    would present no per-item path and slip past the read gate entirely.
+    """
+    from lib.tasks_pkg.handlers._read_gate import partition_batch_edits
+
+    skip, unread = partition_batch_edits(
+        _make_task(), 'edit_file',
+        {'path': workspace['target_rel'], 'edits': [
+            {'operation': 'replace', 'anchor': 'return 1',
+             'content': 'return 9'},
+        ]},
+        workspace['project_path'])
+
+    assert skip == [0]
+    assert unread == [workspace['target_rel']]
+
+
+# ── has_token unit ─────────────────────────────────────────────────────
 
 @pytest.mark.unit
 def test_has_token_lifecycle(workspace):

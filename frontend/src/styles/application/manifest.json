@@ -362,8 +362,7 @@
     },
     {
       "path": "09-tool-failures.css",
-      "responsibility": "Interrupted, failed and rejected tool receipts",
-      "legacyTokenSha256": "53b6ab20da61f586f8fa12cfdd7586d99ca97623dbc02c40be43c12f5a3d5148"
+      "responsibility": "Interrupted, failed and rejected tool receipts"
     },
     {
       "path": "09-turn-activity.css",

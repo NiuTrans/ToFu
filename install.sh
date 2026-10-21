@@ -1642,6 +1642,11 @@ CONDA_PKGS=(
     "quart>=0.19"
     "hypercorn>=0.17"
     "cryptography>=42"
+    # cffi — cryptography's C ABI bridge and the one the generated native
+    # bindings import directly. Declared in requirements.txt, so it is listed
+    # here the same way jinja2/urllib3/pyyaml are: transitive today, but a
+    # clean env must not depend on the resolver keeping it transitive.
+    "cffi>=2.0"
     "requests>=2.31"
     # jinja2 / urllib3 / pyyaml — transitive deps (jinja2←quart,
     # urllib3←requests, pyyaml used directly by routes/api_docs.py for the
@@ -1753,7 +1758,10 @@ PIP_ONLY_PKGS=(
     # touch lxml/icu, so --no-deps is safe. Hard dep — the svg parameter on
     # the generate_image tool is always advertised, so it must always work.
     "vtracer>=0.6.11"
-    "trafilatura>=1.6"
+    # Floor follows requirements.txt (>=2.3.1). It is NOT cosmetic: that release
+    # is what imposes the lxml>=6.1.3 floor the search stack needs, so an older
+    # trafilatura here would resolve an lxml the rest of the env cannot use.
+    "trafilatura>=2.3.1"
     "htmldate>=1.9.4"
     # trafilatura's pure-Python deps (from its pyproject.toml).
     # certifi/urllib3 are already pulled in by requests via conda.
@@ -1797,6 +1805,10 @@ PIP_ONLY_PKGS=(
     "networkx>=3.0"
     "pathspec>=0.12"
     "tree-sitter-language-pack>=0.10"
+    # paramiko — SSH/SFTP for the codelab-ssh-connect skill's bundled scripts.
+    # Pure Python on top of cryptography/cffi, both already required, so it
+    # touches neither lxml nor icu and cannot reintroduce that deadlock.
+    "paramiko>=3.4"
 )
 
 # ── Drift guard: every dep declared in requirements.txt must be covered by
@@ -2973,6 +2985,117 @@ PYEOF
     ok "Storage Sidecar verified (${_SMOKE_BACKEND}): semantic write/read/delete passed"
 else
     fail "Selected ${_SMOKE_BACKEND} backend failed its post-install smoke test — check project disk space/write permissions. Full log: ${TOFU_INSTALL_LOG}"
+fi
+
+# ── Carried user state: installed skills + portable MCP registrations ──
+# An internal export carries the operator's installed skill packages
+# (export_pkg/_internal._copy_installed_skills) and a host-portable
+# mcp_servers.json (_stage_portable_mcp_config). Neither is "reinstalled"
+# here: the runtime scans those same relative paths, and personal-mode boot
+# migrates the legacy MCP file into the owner store on first start. What this
+# step adds is OBSERVABILITY — a package whose launcher cannot resolve would
+# otherwise fail silently at first use, which is the opposite of "everything
+# came along". Warnings only: optional capability state must never abort an
+# otherwise verified installation.
+step "Verifying carried skills and MCP registrations"
+_carried_skill_count() {
+    local root="$1" n=0 f
+    # <root>/<id>/SKILL.md — project-runtime installs (mtskills / Settings UI).
+    for f in "$root"/*/SKILL.md; do [[ -f "$f" ]] && n=$((n + 1)); done
+    # <root>/users/<owner>/<id>/SKILL.md — owner-scoped global store.
+    for f in "$root"/users/*/*/SKILL.md; do [[ -f "$f" ]] && n=$((n + 1)); done
+    printf '%s' "$n"
+}
+_CARRIED_SKILLS=0
+for _skills_root in "${INSTALL_DIR}/.tofu/skills" "${INSTALL_DIR}/data/skills"; do
+    [[ -d "$_skills_root" ]] || continue
+    _n="$(_carried_skill_count "$_skills_root")"
+    _CARRIED_SKILLS=$((_CARRIED_SKILLS + _n))
+done
+if [[ "$_CARRIED_SKILLS" -eq 0 ]]; then
+    info "No carried skill packages (opensource export or fresh clone) — skipping"
+else
+    ok "${_CARRIED_SKILLS} skill package(s) carried and discoverable in place"
+fi
+
+_CARRIED_MCP_RC=0
+"$ENV_PYTHON" - "$INSTALL_DIR" <<'PYEOF' || _CARRIED_MCP_RC=1
+import json
+import os
+import shutil
+import sys
+
+root = sys.argv[1]
+config_path = os.path.join(root, 'data', 'config', 'mcp_servers.json')
+owner_dir = os.path.join(root, 'data', 'config', 'mcp_servers')
+if not os.path.isfile(config_path):
+    print('  no carried MCP registrations (opensource export or fresh clone)')
+    raise SystemExit(0)
+try:
+    with open(config_path, encoding='utf-8') as handle:
+        config = json.load(handle)
+except (OSError, ValueError) as error:
+    print('  carried MCP config is unreadable: %s' % error)
+    raise SystemExit(1)
+if not isinstance(config, dict):
+    print('  carried MCP config is not a JSON object')
+    raise SystemExit(1)
+
+
+def launcher_reason(command):
+    """Return '' when the server can launch here, else why it cannot."""
+    if not command:
+        return 'entry has no command'
+    if os.sep in command:
+        return '' if os.access(command, os.X_OK) else 'path is not executable'
+    if os.path.basename(command) in ('npx', 'npx.cmd'):
+        # Public npx packages need Node; the release installer deliberately
+        # installs only the prebuilt frontend and no Node runtime.
+        if shutil.which('npx') or shutil.which('npx.cmd'):
+            return ''
+        return 'needs npx/Node, which this installer does not provide'
+    # Vendored servers launch isolated from source (uv run --with-editable);
+    # candidate order mirrors lib/mcp/vendored.VENDORED_LAUNCHERS.
+    for base in ('vendor', 'packages', 'tools'):
+        if os.path.isfile(os.path.join(root, base, command, 'pyproject.toml')):
+            return ''
+    sibling = os.path.join(os.path.dirname(root.rstrip(os.sep)), command)
+    if os.path.isfile(os.path.join(sibling, 'pyproject.toml')):
+        return ''
+    if shutil.which(command):
+        return ''
+    return 'launcher not found (no vendored source, not on PATH)'
+
+
+ready, blocked = [], []
+for name, entry in sorted(config.items()):
+    if not isinstance(entry, dict) or not entry.get('enabled', True):
+        continue
+    reason = launcher_reason(entry.get('command'))
+    (blocked if reason else ready).append((name, reason))
+
+if ready:
+    print('  ready: %s' % ', '.join(name for name, _ in ready))
+for name, reason in blocked:
+    print('  not launchable here: %s — %s' % (name, reason))
+try:
+    existing = sorted(
+        name for name in os.listdir(owner_dir)
+        if name.endswith('.json') and not name.endswith('.lock'))
+except OSError:
+    existing = []
+if existing:
+    # Legacy migration never overwrites an owner store, so a carried
+    # registration only appears if that owner has no entry of the same name.
+    print('  owner store already present (%s): carried entries only fill gaps'
+          % ', '.join(existing))
+raise SystemExit(1 if blocked else 0)
+PYEOF
+if [[ "$_CARRIED_MCP_RC" -eq 0 ]]; then
+    ok "Carried MCP registrations verified"
+else
+    warn "Some carried MCP registrations cannot launch on this host (see above)."
+    warn "They are kept in the config; install the missing launcher or disable them in Settings → MCP."
 fi
 
 step "Committing verified installation"

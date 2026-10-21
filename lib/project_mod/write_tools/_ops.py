@@ -58,7 +58,11 @@ def _with_workspace_writer(function):
         bound = signature.bind(*args, **kwargs).arguments
         base = bound.get('base', bound.get('base_path'))
         edits = bound.get('edits')
-        paths = ([edit.get('path') for edit in edits if isinstance(edit, dict)]
+        # An edit may take its file from the call-level `path`; the lease must
+        # claim the file this call will actually write.
+        batch_path = bound.get('batch_path')
+        paths = ([(edit.get('path') or batch_path)
+                  for edit in edits if isinstance(edit, dict)]
                  if isinstance(edits, list) else [bound.get('rel_path')])
         targets = set()
         lexical_targets = {}

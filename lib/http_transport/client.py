@@ -402,6 +402,21 @@ def http_request(method: str, url: str, *,
             headers=_build_headers(headers),
             **extra,
         )
+    except requests.exceptions.ReadTimeout:
+        # The request REACHED the peer; only the body was slow. That is
+        # evidence about the upstream, never about this egress path — and the
+        # path owns a consecutive-failure budget that takes it out of service
+        # for a cooldown. On a pool with ONE entry, convicting it here turned
+        # one slow upstream into a total external blackout: the entry cooled
+        # down, `proxies_for` then offered no proxy, and every other host fell
+        # back to a direct path that resolves nothing on this class of host
+        # (observed 2026-10-21: an 8s Artificial Analysis read timeout by
+        # proxy, then DNS failures from the self-update and AA refreshers).
+        # The streaming LLM transports already convict connect-phase failures
+        # only; this is the same rule for the sync transport.
+        logger.debug('[HTTP] %s read timeout — not charged to the egress path',
+                     url)
+        raise
     except Exception:
         _report_outcome(url, False)
         raise

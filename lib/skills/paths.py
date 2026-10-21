@@ -29,7 +29,11 @@ OWNER_GLOBAL_SKILLS_SUBPATH = os.path.join('skills', 'users')
 #: same skill id (see ``docs/modules/skills.md``).
 PROJECT_SKILL_ROOTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # Runtime project packages: what ``mtskills i`` and the Settings UI write.
-    # Gitignored; a per-machine install artifact, so it never exports.
+    # Gitignored, so the bulk export tree never carries it. The internal-mode
+    # exporter restores this directory (and the owner-global store under
+    # ``data/skills``) as a separate step after the bulk copy, which is why
+    # ``exported_in`` stays empty here: this row describes the TREE, not the
+    # export's user-state restore pass.
     (PROJECT_SKILLS_SUBDIR, 'project-runtime', ()),
     # Repository development guides. Git-tracked and public-safe by
     # construction, so they ship in every mode including opensource.

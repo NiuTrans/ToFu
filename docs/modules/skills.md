@@ -30,6 +30,28 @@ eligible installed skills — identifiers and compact descriptions, never full
 instructions — frozen for the task so prompt-cache prefixes stay stable.
 
 Project discovery reads `.tofu/skills`, `.agents/skills`, and `.codex/skills` in order.
+Owner-global packages live outside any project, under the server data root's
+`skills/users/<owner>` store.
+
+Internal exports carry installed packages. An internal `export.py` run restores
+both install stores — `.tofu/skills` and `data/skills` — after its bulk copy,
+which strips them along with every other `*` `.tofu` artifact and the root
+`data/` tree. The restore merges one package directory at a time: a package
+directory holding `SKILL.md` is replaced whole, other directories are descended
+into, and destination-only packages survive. Before replacing any package,
+the restore validates all carried roots and refuses source symlinks (including
+broken links) and destination symlink components. Copy-time checks repeat this
+boundary: links are neither preserved as escaping packages nor dereferenced
+into unrelated host files. This follows ZIP installation's link prohibition;
+silently skipping linked resources would ship incomplete packages.
+`tests/export/test_installed_skill_copy_safety.py` checks refusal without
+replacing existing packages or writing outside the destination.
+Opensource and personal exports
+carry no skill catalogue. `PROJECT_SKILL_ROOTS` therefore keeps
+`exported_in=()` for the runtime root (it describes the tree, not the restore
+pass); `tests/skills/test_skill_roots_contract.py` locks the pass to roots the
+scanner actually reads. `export.py --handoff` reaches the same state through
+`tofu_state.tar.gz`, which lists both stores in its carried state dirs.
 Index, selection and tools extract `path` from records or legacy strings;
 invalid entries are ignored and project access off excludes all project roots.
 Escaping roots are rejected; host-home paths are not inferred. Packages enter

@@ -18,6 +18,12 @@ urllib3>=1.26.19
 # across 3.1.3–3.1.6.
 Jinja2>=3.1.6
 psutil>=5.9
+# paramiko — SSH/SFTP client used by a shipped skill's bundled scripts
+# (``.tofu/skills/codelab-ssh-connect/scripts/*.py``). The skill is carried into
+# internal exports, so the runtime interpreter must import it or the skill fails
+# with ModuleNotFoundError on the destination. Pure Python; its crypto backend
+# (cryptography/cffi) is already a hard dependency above.
+paramiko>=3.4
 pypdf>=6.17,<7
 jsonschema>=4.18
 # sqlite3 is built into Python — no external package needed

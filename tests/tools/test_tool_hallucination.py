@@ -90,6 +90,21 @@ class TestClassifier(unittest.TestCase):
         self.assertEqual(suggest_tool_names('totally_unrelated_xyz', _KNOWN), [])
         self.assertIn('read_files', suggest_tool_names('read_file', _KNOWN))
 
+    def test_fused_name_matches_the_squashed_real_tool(self):
+        """Live repro (conv mvhq694eghjd9e): deepseek-v4.1-flash emitted
+        ``repomap_placeholder_none`` while intending ``repo_map`` — the call
+        carried ``{}`` and both ``repo_map`` params are optional. difflib
+        scored it 0.438, a hair under the 0.45 gate, so the rejection told
+        the model NO similar tool existed and left it to guess. One segment
+        that squashes to a whole real tool name is an exact intent match.
+        """
+        known = _KNOWN | {'repo_map'}
+        d = classify_tool_call('repomap_placeholder_none', known)
+        self.assertEqual(d['suggestions'], ['repo_map'])
+        self.assertIn('read_files', suggest_tool_names('readfiles', _KNOWN))
+        # …while genuine noise still gets no fabricated direction.
+        self.assertEqual(suggest_tool_names('zqxwhatever_nope', known), [])
+
     def test_message_mentions_suggestions_and_not_executed(self):
         msg = build_rejection_message(classify_tool_call('search_web', _KNOWN))
         self.assertIn('not a real tool', msg)

@@ -2771,6 +2771,11 @@ components:
       additionalProperties: false
       required: [ownerId, conversationId, laneId, syncSeq, stale, totalRounds, offset, entries]
       properties:
+        # The route passes the storage DTO through the shared `{ok: true}`
+        # envelope after validation, so every browser read sees this field.
+        # Declared but not required: the envelope is a transport concern, and
+        # the authority read must stay decodable before it is added.
+        ok: {const: true}
         ownerId: {type: integer, minimum: 1}
         conversationId: {type: string}
         laneId: {type: string}

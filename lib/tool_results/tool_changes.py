@@ -180,13 +180,18 @@ def extract_file_changes(tool_rounds: Iterable[dict]) -> List[FileChange]:
                 args = _coerce_args(round_.get('toolArgs'))
                 if args:
                     paths: List[str] = []
+                    batch_path = args.get('path')
                     edits = args.get('edits')
                     if isinstance(edits, list):
                         for e in edits:
-                            if isinstance(e, dict) and e.get('path'):
-                                paths.append(e['path'])
-                    elif args.get('path'):
-                        paths.append(args['path'])
+                            if isinstance(e, dict):
+                                # An edit inherits the call's declared file;
+                                # its own path only overrides that file.
+                                p = e.get('path') or batch_path
+                                if p:
+                                    paths.append(p)
+                    elif batch_path:
+                        paths.append(batch_path)
                     for p in paths:
                         root, path = _split_root(p)
                         key = f'{root}|{path}'
@@ -211,18 +216,23 @@ def extract_file_changes(tool_rounds: Iterable[dict]) -> List[FileChange]:
             args = _coerce_args(round_.get('toolArgs'))
             if args:
                 edits = args.get('edits')
+                batch_path = args.get('path')
                 if isinstance(edits, list):
                     handled = False
                     for e in edits:
-                        if isinstance(e, dict) and e.get('path'):
-                            if tn in _UNIFIED_EDIT_TOOLS:
-                                action = ('inserted' if str(e.get('operation', '')).startswith('insert_')
-                                          else 'patched')
-                            else:
-                                action = ('inserted' if tn in _INSERT_TOOLS
-                                          else 'patched')
-                            _set(e['path'], action=action, ok=ok)
-                            handled = True
+                        if not isinstance(e, dict):
+                            continue
+                        edit_path = e.get('path') or batch_path
+                        if not edit_path:
+                            continue
+                        if tn in _UNIFIED_EDIT_TOOLS:
+                            action = ('inserted' if str(e.get('operation', '')).startswith('insert_')
+                                      else 'patched')
+                        else:
+                            action = ('inserted' if tn in _INSERT_TOOLS
+                                      else 'patched')
+                        _set(edit_path, action=action, ok=ok)
+                        handled = True
                     if handled:
                         continue
                 if args.get('path'):

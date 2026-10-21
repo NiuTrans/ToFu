@@ -668,6 +668,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "minimum": 0,
         "type": "integer"
       },
+      "ok": {
+        "const": true
+      },
       "ownerId": {
         "minimum": 1,
         "type": "integer"
@@ -7312,6 +7315,7 @@ export type ConversationRoundEntry = {
 };
 
 export type ConversationRoundDirectory = {
+  "ok"?: true;
   "ownerId": number;
   "conversationId": string;
   "laneId": string;

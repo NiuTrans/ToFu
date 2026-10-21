@@ -30,9 +30,14 @@ def test_unified_schema_is_the_default_model_surface(monkeypatch):
         tool for tool in PROJECT_TOOLS if tool['function']['name'] == 'edit_file')
     parameters = edit_schema['function']['parameters']
     properties = parameters['properties']
-    assert list(properties)[:2] == ['description', 'edits']
+    assert list(properties)[:3] == ['description', 'path', 'edits']
     assert properties['description']['maxLength'] == 120
     assert parameters['required'] == ['description', 'edits']
+    # One file per batch is named ONCE: the item carries `path` only to leave
+    # that file, so it is not in the item's required list.
+    assert 'path' not in properties['edits']['items']['required']
+    assert properties['edits']['items']['required'] == [
+        'operation', 'anchor', 'content']
 
     assert properties['atomic']['type'] == 'boolean'
     assert properties['atomic']['default'] is True
@@ -46,6 +51,52 @@ def test_legacy_schema_has_an_emergency_rollback(monkeypatch):
         PROJECT_TOOLS_LEGACY)
     assert 'edit_file' not in _tool_names(project_tools_for_runtime())
     assert 'list_dir' not in _tool_names(project_tools_for_runtime())
+
+
+@pytest.mark.unit
+def test_batch_path_supplies_the_file_for_edits_that_omit_their_own(tmp_path):
+    """The model names the file once; each edit carries only its hunk."""
+    (tmp_path / 'sample.txt').write_text('A\nC\n', encoding='utf-8')
+
+    result = tool_edit_file(
+        str(tmp_path),
+        [{'operation': 'insert_after', 'anchor': 'A', 'content': 'B'},
+         {'operation': 'insert_after', 'anchor': 'C', 'content': 'D'}],
+        batch_path='sample.txt')
+
+    assert 'Applied 2/2' in result, result
+    assert (tmp_path / 'sample.txt').read_text(encoding='utf-8') == \
+        'A\nB\nC\nD\n'
+
+
+@pytest.mark.unit
+def test_per_edit_path_overrides_the_batch_path(tmp_path):
+    """A multi-file batch names its file on the edits that leave the first."""
+    (tmp_path / 'a.txt').write_text('A\n', encoding='utf-8')
+    (tmp_path / 'b.txt').write_text('C\n', encoding='utf-8')
+
+    result = tool_edit_file(
+        str(tmp_path),
+        [{'operation': 'insert_after', 'anchor': 'A', 'content': 'B'},
+         {'path': 'b.txt', 'operation': 'insert_after', 'anchor': 'C',
+          'content': 'D'}],
+        batch_path='a.txt')
+
+    assert 'Applied 2/2' in result, result
+    assert (tmp_path / 'a.txt').read_text(encoding='utf-8') == 'A\nB\n'
+    assert (tmp_path / 'b.txt').read_text(encoding='utf-8') == 'C\nD\n'
+
+
+@pytest.mark.unit
+def test_an_edit_with_neither_batch_nor_own_path_fails_the_batch(tmp_path):
+    (tmp_path / 'a.txt').write_text('A\n', encoding='utf-8')
+
+    result = tool_edit_file(
+        str(tmp_path), [{'operation': 'insert_after', 'anchor': 'A',
+                         'content': 'B'}])
+
+    assert '[1] FAIL' in result, result
+    assert (tmp_path / 'a.txt').read_text(encoding='utf-8') == 'A\n'
 
 
 @pytest.mark.unit
@@ -273,6 +324,28 @@ def test_edit_file_meta_and_file_changes_keep_operations():
     }])
     assert [(c.path, c.action) for c in changes] == [
         ('a.py', 'inserted'), ('b.py', 'patched')]
+
+
+@pytest.mark.unit
+def test_batch_path_batch_meta_and_file_changes_name_the_resolved_file():
+    """Pathless edits still have a target: the call-level `path`."""
+    args = {'path': 'a.py', 'edits': [
+        {'operation': 'insert_after', 'anchor': 'A', 'content': 'B'},
+        {'operation': 'insert_after', 'anchor': 'B', 'content': 'C'},
+    ]}
+    content = ('Applied 2/2 edits\n'
+               '[1] OK a.py [insert_after]\n'
+               '[2] OK a.py [insert_after]')
+    meta = build_project_tool_meta('edit_file', args, content)
+    assert [row['path'] for row in meta['editSummaries']] == ['a.py', 'a.py']
+    assert meta['snippet'].startswith('1 file, 2/2 edits')
+
+    changes = extract_file_changes([{
+        'toolName': 'edit_file', 'toolArgs': json.dumps(args),
+        'results': [{'writeOk': True}],
+    }])
+    assert [(c.path, c.action, c.count) for c in changes] == [
+        ('a.py', 'inserted', 2)]
 
 
 @pytest.mark.unit

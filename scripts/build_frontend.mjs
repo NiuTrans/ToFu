@@ -188,6 +188,15 @@ async function runBundleBudget(manifest, artifactDir) {
   }
 }
 
+/** An explicit Playwright Node, or this process's binary when it really is
+ *  Node. Empty means "let Playwright resolve its own driver", the correct
+ *  fallback when ``process.execPath`` is a loader wrapper instead of Node. */
+function playwrightNodePath() {
+  const configured = process.env.PLAYWRIGHT_NODEJS_PATH;
+  if (configured) return configured;
+  return /(^|[\\/])node(\.exe)?$/.test(process.execPath) ? process.execPath : '';
+}
+
 async function runBundleCanary(artifactDir) {
   const python = process.env.TOFU_PYTHON || process.env.PYTHON || 'python3';
   const script = join(root, 'scripts', 'frontend_bundle_canary.py');
@@ -199,8 +208,14 @@ async function runBundleCanary(artifactDir) {
         env: {
           ...process.env,
           // Reuse the Node already running this build: Playwright's bundled
-          // driver may require a newer glibc than the host provides.
-          PLAYWRIGHT_NODEJS_PATH: process.env.PLAYWRIGHT_NODEJS_PATH || process.execPath,
+          // driver may require a newer glibc than the host provides. Only when
+          // execPath IS a node binary — under an APK-style toolchain it is the
+          // musl loader (``…/ld-musl-x86_64.so.1``), and pointing the driver at
+          // a loader kills it at startup with "Connection.init: Connection
+          // closed while reading from the driver", failing EVERY build even
+          // though the canary passes standalone.
+          ...(playwrightNodePath()
+            ? { PLAYWRIGHT_NODEJS_PATH: playwrightNodePath() } : {}),
         },
         stdio: 'inherit',
       },

@@ -242,7 +242,36 @@ artifact is available, a local Rust toolchain can build it within 900 seconds.
 an existing storage backend; an unavailable accelerant never authorizes a switch.
 Maintainers produce archives with `scripts/build_tofudb_prebuilt.py`.
 
-Problem: per-user compilation requires toolchains and delays installation.
+### Carried skills and MCP registrations (internal exports)
+
+An internal export ships its operator's installed skill packages and a
+host-portable `mcp_servers.json`. `install.sh` does not reinstall them — the
+runtime scans the same relative paths, and personal-mode boot migrates the
+legacy MCP file into the owner store — but it verifies both and reports the
+result, before the installation commit:
+
+```
+▸  Verifying carried skills and MCP registrations
+   ✓  14 skill package(s) carried and discoverable in place
+   ready: hope, llm, xuecheng
+   not launchable here: 12306-train — needs npx/Node, which this installer does not provide
+   ⚠  Some carried MCP registrations cannot launch on this host (see above).
+```
+
+A missing launcher is a warning, not a failure: it names what will not work
+instead of leaving the user to discover it at first use. Public `npx` entries
+report as unavailable because release installs deliberately carry no Node
+runtime. Opensource installs have neither path and skip the step.
+
+Problem: a carried skill or MCP server can be present but unusable — an
+unresolved Python import, an absent launcher — and the old installer reported a
+clean success that only failed at first use. Decision: verify the carried roots
+and launcher resolvability, warn, never abort. Alternatives: (a) reinstall the
+packages during install, which would duplicate the runtime scanner and invent a
+second install authority; (b) fail the install, which blocks a healthy
+installation over optional capability state.
+
+## Listener and TLS guardrails
 Decision: verified prebuilt artifacts precede bounded source fallback.
 Alternatives: first-launch compilation delays boot; automatic rustup installation
 adds a larger download; a Python wheel would duplicate the engine deployment

@@ -873,3 +873,65 @@ def test_manual_alias_has_explicit_identity_but_no_probe_or_switch(tmp_path):
     assert out['deployment']['identity_confidence'] == 'high'
     assert out['deployment']['probe_status'] == 'unprobed'
     assert 'enabled' not in out['deployment']
+def test_manual_alias_has_explicit_identity_but_no_probe_or_switch(tmp_path):
+    """A manually added request name is a plain identity, not a state change.
+
+    Driven through the request-name PANEL (the wire id plus the headers that
+    select its route) rather than a string prompt, because a request name can
+    need its own serving-provider selector.
+    """
+    out = _run_harness(tmp_path, r"""
+  global.openRequestNamePanel = async () => ({
+    wireModelId: 'esm-manual',
+    headers: [{ name: 'x-context-provider', value: 'kunlun' }],
+  });
+  await _addV2Alias('p1', 'off-esm');
+  out.deployment = JSON.parse(JSON.stringify(global._stgModelRouting.deployments.at(-1)));
+""")
+    assert out['deployment']['wire_model_id'] == 'esm-manual'
+    assert out['deployment']['identity_confidence'] == 'high'
+    assert out['deployment']['probe_status'] == 'unprobed'
+    # The panel's headers land on THIS request name, not the Connection.
+    assert out['deployment']['extra_headers'] == {'x-context-provider': 'kunlun'}
+    assert 'enabled' not in out['deployment']
+
+
+def test_manual_alias_with_a_template_face_gets_its_own_connection(tmp_path):
+    """A face-pinned request name must not ride the card's default Connection.
+
+    aigc answers 200 for ``kunlunbedrock.*`` only on ``/v1`` behind
+    ``x-context-provider: kunlun``; the card's default ``/openai/native``
+    Connection answers 400 ``配置不存在``. Binding the new row to "the first
+    enabled Connection" therefore produced a request name that was present but
+    could never answer — the reported "added it several times, still fails".
+    """
+    out = _run_harness(tmp_path, r"""
+  global.planProviderRequestNameFaces = async () => ({
+    'esm-east': {
+      base_url: 'https://gw.example/v1/east', protocol: 'openai_responses',
+      face: 'east', extra_headers: { 'x-context-provider': 'east' },
+    },
+  });
+  global.openRequestNamePanel = async () => ({ wireModelId: 'esm-east', headers: [] });
+  await _addV2Alias('p1', 'off-esm');
+  const connection = global._stgModelRouting.connections.at(-1);
+  out.connection = JSON.parse(JSON.stringify(connection));
+  out.deployment = JSON.parse(JSON.stringify(global._stgModelRouting.deployments.at(-1)));
+  out.granted = global._stgModelRouting.credentials[0].authorization.connection_ids;
+""")
+    assert out['connection']['base_url'] == 'https://gw.example/v1/east'
+    assert out['connection']['protocol'] == 'openai_responses'
+    assert out['connection']['gateway_namespace'] == 'east'
+    assert out['connection']['extra_headers'] == {'x-context-provider': 'east'}
+    assert out['deployment']['connection_id'] == out['connection']['connection_id']
+    assert out['connection']['connection_id'] in out['granted']
+
+
+def test_cancelling_the_panel_adds_nothing(tmp_path):
+    out = _run_harness(tmp_path, r"""
+  const before = JSON.stringify(global._stgModelRouting.deployments);
+  global.openRequestNamePanel = async () => null;
+  await _addV2Alias('p1', 'off-esm');
+  out.unchanged = before === JSON.stringify(global._stgModelRouting.deployments);
+""")
+    assert out['unchanged'], 'a cancelled panel must not stage a half-made alias'

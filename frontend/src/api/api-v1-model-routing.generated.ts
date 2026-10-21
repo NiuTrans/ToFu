@@ -195,6 +195,9 @@ export type ModelRoutingDeployment = {
   "connection_id": ModelRoutingIdentifier;
   "wire_model_id": ModelRoutingIdentifier;
   "max_output_tokens"?: number;
+  "extra_headers"?: {
+  [key: string]: string;
+};
   "enabled"?: boolean;
   "identity_confidence": "high" | "medium" | "low" | "pending";
   "probe_status": "passed" | "failed" | "unprobed" | "stale";

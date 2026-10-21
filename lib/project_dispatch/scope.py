@@ -104,12 +104,16 @@ def _paths(name, args):
                 or 'append' in args and type(args['append']) is not bool):
             raise ValueError('Scoped writes require literal text and a boolean append flag')
         return [args.get('path')]
-    _exact_fields(args, {'description', 'edits', 'atomic'})
+    _exact_fields(args, {'description', 'path', 'edits', 'atomic'})
     if 'atomic' in args and type(args['atomic']) is not bool:
         raise ValueError('Scoped edits require a boolean atomic flag')
+    batch_path = args.get('path')
+    if 'path' in args and (not isinstance(batch_path, str) or not batch_path.strip()):
+        raise ValueError('A scoped batch path must be a nonempty string')
     edits = args.get('edits')
     if not isinstance(edits, list) or not edits:
         raise ValueError('Scoped edits require a nonempty explicit edit list')
+    targets = []
     for edit in edits:
         _exact_fields(edit, {'path', 'operation', 'anchor', 'content', 'replace_all', 'description'})
         if (edit.get('operation') not in {'replace', 'insert_before', 'insert_after'}
@@ -117,7 +121,13 @@ def _paths(name, args):
                 or not isinstance(edit.get('content'), str)
                 or 'replace_all' in edit and type(edit['replace_all']) is not bool):
             raise ValueError('Scoped edits require an explicit text operation')
-    return [edit.get('path') for edit in edits]
+        # An edit takes the batch path unless it overrides it; every edit must
+        # still resolve to an explicit file so the fence sees each target.
+        target = edit.get('path') or batch_path
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError('Scoped edits require an explicit file per edit')
+        targets.append(target)
+    return targets
 
 
 @dataclass(frozen=True)

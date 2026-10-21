@@ -548,13 +548,18 @@ def partition_batch_edits(task: dict, fn_name: str, fn_args: dict,
     satisfied = _collect_satisfied_paths_from_rounds(task, project_path)
     satisfied |= _cached_satisfied_paths_from_messages(task, project_path)
 
+    # An edit takes its file from the call-level `path` unless it overrides
+    # that file itself; a batch-path call must not slip past this gate just
+    # because its items are pathless.
+    batch_path = fn_args.get('path')
+    batch_path = batch_path.strip() if isinstance(batch_path, str) else ''
     skip_indices: list[int] = []
     unread_raw: list[str] = []
     seen_raw: set[str] = set()
     for idx, e in enumerate(edits):
         if not isinstance(e, dict):
             continue
-        rp = (e.get('path') or '').strip()
+        rp = (e.get('path') or batch_path or '').strip()
         if not rp:
             continue
         ap = _resolve_abs(project_path, conv_id, rp)

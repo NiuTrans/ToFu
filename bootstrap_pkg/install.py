@@ -39,7 +39,10 @@ _CONDA_PYTHON_DEPS = [
     'psycopg-pool>=3.2',
     'requests>=2.31',
     'psutil>=5.9',
-    'trafilatura>=1.6',
+    # Must match requirements.txt exactly: this list is the repair path that
+    # force-reinstalls boot-critical imports, so a lower floor here would
+    # silently downgrade a healthy env below what the app requires.
+    'trafilatura>=2.3.1',
     'playwright>=1.40',
     'pillow>=10.0',
     'python-pptx>=0.6.21',

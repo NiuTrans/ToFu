@@ -1012,7 +1012,10 @@ owned root identity. Explicit ranges beyond EOF fail before any batch observatio
 is published; an unranged read of an empty file remains valid. A failed later
 read or source binding does not certify earlier, undisplayed batch items.
 
-Scoped `edit_file` shares ordinary edits' compute-only matcher and defaults to
+Scoped `edit_file` shares ordinary edits' compute-only matcher and accepts the
+same batch-level `path` as the unscoped tool: an edit takes the batch file
+unless it names its own, and every edit must still resolve to a file inside the
+granted prefix or the call is refused before any I/O. It defaults to
 whole-batch `atomic: true` preflight: all file reads, operations, freshness checks
 and common journal admission complete before the first requested publication.
 An invalid plan returns failed/skipped receipts in original request order,

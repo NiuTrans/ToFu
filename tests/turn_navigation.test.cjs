@@ -110,6 +110,71 @@ test('write evidence remains associated with preceding main input', () => {
   nav.destroy();
 });
 
+test('transcript scroll keeps an open directory; only document scroll dismisses it', () => {
+  const { nav, host, doc } = setup();
+  host.querySelector('.turn-nav-position').click();
+  const panel = doc.querySelector('.turn-jump-panel');
+  assert.ok(panel);
+  // Streaming commits a tool row and the Surface keeps the transcript pinned
+  // to the latest turn: an element scroll cannot move the fixed composer
+  // anchor, so it must not dismiss the panel.
+  doc.getElementById('chat').dispatchEvent(new doc.defaultView.Event('scroll', { bubbles: false }));
+  assert.ok(doc.querySelector('.turn-jump-panel'));
+  doc.dispatchEvent(new doc.defaultView.Event('scroll'));
+  assert.equal(doc.querySelector('.turn-jump-panel'), null);
+  nav.destroy();
+});
+
+test('a streaming head advance keeps the open directory page instead of blanking it', async () => {
+  const { nav, host, doc } = setup(2);
+  let head = 'one';
+  nav.destroy();
+  const exact = createTurnNavigation({ host, translate: key => key, scrollToTurn: () => {}, directoryKey: () => head,
+    directory: async (id, offset) => ({ conversationId: id, laneId: 'main', syncSeq: 1, stale: false,
+      offset, totalRounds: 2, activeRound: 2, entries: [
+        { turnId: 'a', ordinal: 0, actor: 'human', roundNumber: 1 },
+        { turnId: 'b', ordinal: 1, actor: 'human', roundNumber: 2 }] }) });
+  const state = { laneOrder: { main: ['a', 'b'] }, turnsById: {
+    a: { actor: 'human', projection: { content: 'first' } },
+    b: { actor: 'human', projection: { content: 'second' } } } };
+  exact.update('conv', state);
+  await new Promise(resolve => setImmediate(resolve));
+  exact.update('conv', state);
+  host.querySelector('.turn-nav-position').click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(doc.querySelectorAll('.turn-jump-entry').length, 2);
+  head = 'two';
+  exact.update('conv', state);
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '2 / 2');
+  assert.equal(doc.querySelectorAll('.turn-jump-entry').length, 2);
+  exact.destroy();
+});
+
+test('a read fenced by a head that advanced underneath it is retried, not reported', async () => {
+  const { dom, host, nav } = setup(); nav.destroy();
+  const { createTurnNavigation } = load('turn-navigation');
+  let head = 'h1'; let reads = 0;
+  const exact = createTurnNavigation({ host, translate: key => key, scrollToTurn: () => {},
+    directoryKey: () => head,
+    directory: async (id, offset) => {
+      reads++;
+      // The producer of a streamed turn commits a new head while this read is
+      // in flight, which is exactly the routine race reported as a failure.
+      if (reads === 1) { head = 'h2'; throw new Error('Round directory is stale or mismatched'); }
+      return { conversationId: id, laneId: 'main', syncSeq: 2, stale: false, offset,
+        totalRounds: 4, activeRound: 4, entries: [
+          { turnId: 'a', ordinal: 0, actor: 'human', roundNumber: 1 }] };
+    } });
+  const state = { laneOrder: { main: ['a'] },
+    turnsById: { a: { actor: 'human', projection: { content: 'first' } } } };
+  exact.update('conv', state);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2);
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '4 / 4');
+  assert.equal(dom.window.document.querySelector('.turn-jump-error'), null);
+  exact.destroy(); dom.window.close();
+});
+
 test('older history remains reachable with no input loaded, and A-B-A rejects stale completion', async () => {
   const pending = [];
   const { nav, host, doc, state } = setup(0, { loadEarlier: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) });
@@ -183,18 +248,29 @@ test('directory responses and hydrate completions cannot publish after A-B-A or 
     directoryKey: () => String(version), directory: (id, offset) => new Promise(resolve => pending.push({id, offset, resolve})),
     hydrateRound: async () => {},
   });
-  exact.update('a', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
-  exact.update('b', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
-  exact.update('a', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
+  const state = {laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}};
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  exact.update('a', state); await Promise.resolve();
+  exact.update('b', state); await Promise.resolve();
+  exact.update('a', state); await Promise.resolve();
   const result = (request, total) => ({conversationId: request.id, laneId: 'main', syncSeq: 1,
     stale: false, totalRounds: total, offset: request.offset, entries: [], activeRound: total});
-  pending[0].resolve(result(pending[0], 900)); await new Promise(resolve => setImmediate(resolve));
+  // A-B-A: only one read is in flight, and its completion belongs to a head
+  // the view has already left, so it never publishes.
+  assert.equal(pending.length, 1);
+  pending[0].resolve(result(pending[0], 900)); await settle();
   assert.equal(host.querySelector('.turn-nav-readout').textContent, '— / —');
-  pending[2].resolve(result(pending[2], 12)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 2);
+  pending[1].resolve(result(pending[1], 12)); await settle();
   assert.equal(host.querySelector('.turn-nav-readout').textContent, '12 / 12');
-  version++; exact.update('a', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
-  assert.equal(host.querySelector('.turn-nav-readout').textContent, '— / —');
-  pending[3].resolve(result(pending[3], 11)); await new Promise(resolve => setImmediate(resolve));
+  // A head advance refreshes the shown directory in place: the last good page
+  // stays readable while a streamed turn is rendering, and the refresh result
+  // replaces it once it lands.
+  version++;
+  exact.update('a', state); await settle();
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '12 / 12');
+  assert.equal(pending.length, 3);
+  pending[2].resolve(result(pending[2], 11)); await settle();
   assert.equal(host.querySelector('.turn-nav-readout').textContent, '11 / 11');
   assert.deepEqual(scrolls, []); exact.destroy(); dom.window.close();
 });

@@ -80,12 +80,13 @@ def _extract_first_path_arg(fn_name, fn_args):
     if fn_name in ('apply_diff', 'insert_content', 'inspect_image'):
         return fn_args.get('path') or ''
     if fn_name in ('edit_file', 'apply_diffs', 'insert_contents'):
+        batch_path = fn_args.get('path')
         edits = fn_args.get('edits')
         if isinstance(edits, list):
             for e in edits:
-                if isinstance(e, dict) and e.get('path'):
-                    return e['path']
-        return ''
+                if isinstance(e, dict) and (e.get('path') or batch_path):
+                    return e['path'] or batch_path
+        return batch_path or ''
     if fn_name == 'grep_search' or fn_name == 'find_files':
         searches = fn_args.get('searches')
         if isinstance(searches, list):

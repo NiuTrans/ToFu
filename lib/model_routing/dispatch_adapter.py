@@ -233,6 +233,7 @@ def mint_routed_slot_group(
                     owner=owner_tag or f"owner:{boundary.owner_user_id}",
                     extra_headers={
                         **(candidate.connection.get("extra_headers") or {}),
+                        **(candidate.deployment.get("extra_headers") or {}),
                         **secret_headers,
                     },
                     capabilities=set(candidate.offering["capabilities"]),

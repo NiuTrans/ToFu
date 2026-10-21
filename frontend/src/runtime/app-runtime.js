@@ -8002,6 +8002,51 @@ function _toolRejectionDescriptor(round) {
     || meta.rejection || meta.rejected || meta._rejected || {};
 }
 
+/* A rejected call never ran, so its ARGUMENTS are the only record of what the
+ * model actually sent — the reason names the rule it broke, not the payload
+ * that broke it (a blank `edits[0].path` reads identically whether the model
+ * omitted the file or the harness dropped it). Show the attempt under the
+ * reason: inline when it is short enough to read at a glance, one click (with
+ * its size) when it carries whole file bodies. */
+const REJECTED_ARGS_INLINE_CHARS = 600;
+const REJECTED_ARGS_VIEW_CHARS = 4000;
+
+function _rejectedCallArgsHtml(round, tr) {
+  const raw = round ? round.toolArgs : null;
+  let text = "";
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== "object") return "";
+      if (!Array.isArray(parsed) && !Object.keys(parsed).length) return "";
+      text = JSON.stringify(parsed, null, 2);
+    } catch (_) { text = trimmed; }
+  } else if (raw && typeof raw === "object" && !Array.isArray(raw)
+             && Object.keys(raw).length) {
+    try { text = JSON.stringify(raw, null, 2); } catch (_) { return ""; }
+  }
+  if (!text) return "";
+  const clipped = text.length > REJECTED_ARGS_VIEW_CHARS;
+  if (clipped) text = text.slice(0, REJECTED_ARGS_VIEW_CHARS);
+  const label = escapeHtml(tr("tool.requestParams", "request parameters"));
+  const open = text.length <= REJECTED_ARGS_INLINE_CHARS ? " open" : "";
+  const size = Math.ceil(text.length / 1024);
+  const more = clipped
+    ? `<span class="ptool-reject-args-more">${escapeHtml(tr(
+        "tool.requestParamsTruncated",
+        "… truncated to %d KB; the wire keeps the full arguments"
+      ).replace("%d", String(Math.round(REJECTED_ARGS_VIEW_CHARS / 1024))))}</span>`
+    : "";
+  const count = open
+    ? ""
+    : `<span class="ptool-rejected-params-size">${size} KB</span>`;
+  return `<details class="ptool-rejected-params"${open}>
+       <summary>${label}${count}</summary>
+       <pre class="ptool-reject-args">${escapeHtml(text)}</pre>${more}
+     </details>`;
+}
 /* Typed cause separates a missing tool from a valid pre-execution block. */
 function _renderRejectedToolLine(round, svg) {
   const meta = (round.results || [])[0] || {};
@@ -8038,12 +8083,13 @@ function _renderRejectedToolLine(round, svg) {
   }
   /* SVG glyph (§3.4 — no emoji): a circle-slash "forbidden" mark. */
   const banSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>`;
+  const argsHtml = _rejectedCallArgsHtml(round, _t);
   return `<div class="ptool-line ptool-rejected" title="${tip}">
        <span class="ptool-icon">${svg}</span>
        <span class="ptool-text${isHallucinated ? " ptool-reject-name" : ""}">${escapeHtml(attempted)}</span>
        <span class="ptool-badge ptool-badge-reject">${banSvg} ${badgeLabel}</span>
        ${suggHtml}
-       ${reasonHtml ? `<span class="ptool-error-reason">${reasonHtml}</span>` : ""}
+       ${reasonHtml ? `<span class="ptool-error-reason">${reasonHtml}</span>` : ""}${argsHtml ? `\n       ${argsHtml}` : ""}
      </div>`;
 }
 

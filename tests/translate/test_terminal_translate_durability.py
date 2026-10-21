@@ -214,9 +214,15 @@ def test_sweep_respawns_only_untranslated_settled_turns(monkeypatch):
                 # untranslated settled turn -> respawn
                 {'turnId': 't1', 'status': 'completed',
                  'projection': {'content': 'hello world'}},
-                # already translated -> skip
+                # already translated -> skip (light reads carry the canonical
+                # verdict, not the translated body)
                 {'turnId': 't2', 'status': 'completed',
-                 'projection': {'content': 'x', 'translatedContent': 'y'}},
+                 'projection': {'content': 'x',
+                                'translation': {'status': 'completed'}}},
+                # skipped as already in the target language -> skip
+                {'turnId': 't7', 'status': 'completed',
+                 'projection': {'content': 'x',
+                                'translation': {'status': 'skipped'}}},
                 # explicitly done -> skip
                 {'turnId': 't3', 'status': 'completed',
                  'projection': {'content': 'x', '_translateDone': True}},

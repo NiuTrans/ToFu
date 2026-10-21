@@ -52,13 +52,21 @@ survives validation and only the canonical key is reported missing — a retry
 loop the model cannot break, since it believes it already sent the value.
 
 The ``edit_file`` structural transform closes the other half of that batch
-shape: a call that names its file ONCE — in an envelope ``path``/``file_path``
-or in the batch's only non-blank item path — and leaves the remaining items
-with an empty or omitted ``path``. Each such item inherits that single
-declared file (:func:`_distribute_shared_edit_path`) instead of failing
-``minLength: 1`` and forcing a full re-emission of the batch. A batch naming
-TWO files keeps the blank item failing closed: picking one would write a file
-the model may not have meant.
+shape: a call that names its file ONCE — in the batch-level ``path``, a foreign
+harness's ``file_path``, or the batch's only non-blank item path — and leaves
+the remaining items with an empty or omitted ``path``. Each such item inherits
+that single declared file (:func:`_distribute_shared_edit_path`) instead of
+failing and forcing a full re-emission of the batch. A batch naming TWO files
+keeps the blank item failing closed: picking one would write a file the model
+may not have meant.
+
+Naming the file once is the DECLARED contract now, not only a repaired shape:
+``edit_file`` accepts a batch-level ``path`` that supplies every edit omitting
+its own, and an item ``path`` overrides it. Neither level is ``required``,
+because the two accepted forms are mutually exclusive and a root schema
+combinator hard-400s several providers; the coverage rule ("some file is named
+somewhere") is enforced by the ingest seam, which refuses an all-pathless
+batch before execution.
 
 After key aliasing but before the per-value type-walk, one constrained-value
 repair handles ``zero_cursor_omission``: the optional, exclusive, 1-based

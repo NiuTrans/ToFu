@@ -103,7 +103,8 @@ PROJECT_TOOL_REPO_MAP = {
             "Filters: `path` scopes the map to one subdirectory (e.g. "
             "\"lib/storage\"); `focus` keeps only files whose path contains "
             "the given text. Returns all definitions in the selected scope; "
-            "shared L0 handles long results without producer truncation."
+            "shared L0 handles long results without producer truncation.\n\n"
+            "Both filters are optional: call with `{}` to map the whole project."
         ),
         "parameters": {
             "type": "object",
@@ -122,7 +123,8 @@ PROJECT_TOOL_REPO_MAP = {
                         "\"storage\" or \"_test.py\"). Optional."
                     )
                 }
-            }
+            },
+            "required": [],
         }
     }
 }
@@ -411,6 +413,8 @@ PROJECT_TOOL_EDIT_FILE = {
             'before A: `{"operation":"replace","anchor":"A","content":"B\\nA"}`. '
             "For insert_after/insert_before, content is only new text; the anchor "
             "stays automatically. Append at end-of-file with write_file(append=true). "
+            "Name the batch's file once in `path` and leave each edit's own "
+            "`path` out; set an edit's `path` only to target a different file. "
             "Anchors match exactly once; "
             "replace_all permits multiple matches only for replace. Later edits see "
             "earlier changes. Atomic preflight defaults true: any validation failure "
@@ -428,6 +432,14 @@ PROJECT_TOOL_EDIT_FILE = {
                         "Short pre-edit intent shown before execution "
                         "(max 120 chars)."),
                 },
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "File this batch edits. Write it once here for a "
+                        "single-file batch instead of repeating it on every "
+                        "edit; an edit's own `path` overrides it."),
+                },
                 "edits": {
                     "type": "array",
                     "minItems": 1,
@@ -438,9 +450,10 @@ PROJECT_TOOL_EDIT_FILE = {
                             "path": {
                                 "type": "string", "minLength": 1,
                                 "description": (
-                                    "File for THIS edit; repeat it on every "
-                                    "edit (a batch may span files). Never "
-                                    "empty."),
+                                    "File for this edit, when it differs from "
+                                    "the batch `path`. Never inherited from "
+                                    "the previous edit; omit it rather than "
+                                    "sending an empty string."),
                             },
                             "operation": {
                                 "type": "string",
@@ -465,7 +478,7 @@ PROJECT_TOOL_EDIT_FILE = {
                                 "description": "Replace every match; ignored by inserts.",
                             },
                         },
-                        "required": ["path", "operation", "anchor", "content"],
+                        "required": ["operation", "anchor", "content"],
                     },
                 },
                 "atomic": {
@@ -484,6 +497,13 @@ PROJECT_TOOL_EDIT_FILE = {
                 },
             },
             "required": ["description", "edits"],
+            # `path` is deliberately NOT required at either level: the two
+            # accepted forms are "batch path, no item paths" and "item paths",
+            # and a root combinator cannot express that choice without
+            # hard-400ing providers that reject root schemas. Coverage is
+            # enforced instead by lib/tool_input_repair/_ingest.py, which
+            # rejects a batch that names no file anywhere (filling it would
+            # mean guessing which file to write) with the same retry hint.
             "additionalProperties": False,
         },
     },

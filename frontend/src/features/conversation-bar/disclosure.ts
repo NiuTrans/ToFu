@@ -101,8 +101,18 @@ export function createAnchoredDisclosure(ports: {
         key.preventDefault(); close(false); focus(next);
       }
     });
+    /* Every conversation-bar panel is anchored to the fixed composer band.
+     * The transcript and side lists scroll on their own while a Turn streams,
+     * and those scrolls cannot move the anchor: only the document's own
+     * scroll can. Dismissing on element scroll tied a static panel to
+     * unrelated rendering (a new tool-call row auto-scrolling the transcript
+     * closed the turn directory). */
     listen(doc, 'scroll', event => {
-      if (event.target instanceof win.Node && panel.contains(event.target as Node)) return;
+      const target = event.target as Node | null;
+      if (target && panel.contains(target)) return;
+      // A window scroll reports the document as its target, so these two
+      // comparisons cover every anchor-moving scroll.
+      if (target !== doc && target !== doc.scrollingElement) return;
       close(panel.contains(doc.activeElement));
     }, true);
     listen(win, 'resize', () => close(panel.contains(doc.activeElement)));

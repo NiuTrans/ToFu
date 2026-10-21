@@ -188,7 +188,12 @@ def compile_native_route(
         valid = False
     if not valid:
         raise NativeRouteError("native_route_endpoint")
-    headers, error = sanitise_extra_headers(chosen.connection.get("extra_headers"))
+    # Request-name selectors layer over the shared Connection's so one
+    # Deployment can pick a serving provider without a second Connection.
+    headers, error = sanitise_extra_headers({
+        **(chosen.connection.get("extra_headers") or {}),
+        **(chosen.deployment.get("extra_headers") or {}),
+    })
     if error:
         raise NativeRouteError("native_route_headers")
     api_key = ""

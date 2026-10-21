@@ -377,6 +377,54 @@ and appends the alias Deployment onto the existing Offering. Existing wires,
 connections and credential exclusions are never modified; the pass is
 idempotent. Specification:
 `tests/model_routing/test_template_supply_sync.py::test_face_pinned_alias_is_backfilled_onto_existing_offering`.
+**Declared face capabilities converge too (2026-10-21).** Insert-only
+convergence left another gap: a card that already rode the kunlun face kept
+the profile that face had when it was created. That endpoint streams opaque
+`reasoning` items whose only payload is `reasoning.encrypted_content`, and a
+stateless Responses route that does NOT declare
+`features.responses_reasoning_replay` may not drop such an item — checked
+conversion fails closed as `protocol_conversion:mandatory_continuity_unrepresentable`,
+which is `request-prepare`, so no provider is reached and the retry cannot
+succeed (two live conversations died at tool rounds 4–5). `_converge_declared_face`
+now applies the face's declared `extra_headers`, `responses_profile` and
+`inference_profile` onto the Connection the template itself created
+(`gateway_namespace` non-empty), per section for the profile and per key for
+`features`, so owner-declared features survive. It never touches a
+namespace-less (owner) Connection, never writes a key the recipe does not
+declare, and is idempotent; `repaired_connections` reports it. Declaring the
+feature is the right direction rather than dropping the item: undeclared
+replay is the closed-world default, and this face both emits the item and
+serves the wire id that produces it. Specifications:
+`tests/model_routing/test_template_supply_sync.py::test_declared_face_capability_converges_onto_installed_face_connection`
+and `::test_declared_face_convergence_never_touches_an_owner_connection`.
+**Adding a request name by hand had the same defect from the other side.**
+The Add-request-name action bound the new Deployment to "the first enabled
+Connection", so `kunlunbedrock.gpt-6.1-sol-m17` landed on the card's
+`/v1/anthropic` face and answered 400 `配置不存在` — the name existed in the
+matrix and could never work, which reads as "the model is broken". Two
+invariants now hold:
+
+* **Wiring is per wire, not per card.** `planRequestNameFaces` (browser)
+  resolves each new request name to its template face and stages/extends that
+  face Connection (base URL, protocol, selector headers, responses profile)
+  with the credential grant dispatch requires. It deliberately asks the
+  template, because the panel cannot know that one id needs
+  `x-context-provider` and another must not carry it.
+* **The face per wire comes from the shared resolver.** Server-side
+  convergence calls `llm_dispatch.provider_face.resolve_face` — the resolver
+  the provider probe already uses and the template compiler encodes — instead
+  of re-deriving "default vs pinned" in the supply pass. That keeps Claude
+  models on the Anthropic wire while retargeting a mis-wired alias. Only a
+  Connection the template namespaced is retargeted; a wire on a generic
+  (namespace-less) Connection is left alone, because no template face claims
+  that endpoint.
+
+Corrections discard the row's probe evidence (a 400 from the wrong endpoint is
+not evidence about the model) and are idempotent. Specifications:
+`tests/model_routing/test_template_supply_incremental.py`,
+`tests/frontend/test_request_name_faces.py`, and
+`tests/providers/test_provider_model_add.py`.
+
 Specifications:
 `tests/model_routing/test_subscription_registration_research.py`,
 `tests/oauth/test_codex_catalog.py`, and
@@ -899,6 +947,29 @@ catalog Model uses an exact endpoint-matched template's declared `request_ids`,
 or an explicit, editable default equal to the Model ID when no recipe exists.
 The YourProvider recipe binds V4.1 Flash identity to its declared V4 Flash wire names.
 `tests/providers/test_provider_request_names_browser.py` covers the real Settings flow.
+
+### Where a request-name header actually lives
+
+Outbound headers have two layers: Connection `extra_headers` (the face, e.g.
+the `kunlun` template face's `x-context-provider`) and Deployment
+`extra_headers` (that one request name). Dispatch merges them Connection-under-
+Deployment, so the effective set is `connection ∪ deployment` and the
+Deployment wins a shared name. A Deployment can therefore add or override a
+header but never subtract one.
+
+The editor shows the EFFECTIVE set: rows inherited from the request name's
+Connection appear prefilled and marked `继承连接`, and the matrix badge counts
+them too. Otherwise a face-pinned alias — whose selector is intentionally on
+the face, so no sibling face can receive it — opened an empty form and looked
+like the header had been lost.
+
+Submitting an inherited value unchanged stores NOTHING on the Deployment (no
+second owner for one value). Editing it writes a Deployment override, reusing
+the Connection's spelling so the merge cannot emit two spellings of one header.
+Deleting it means "stop sending it from the Connection": allowed only when no
+other request name rides that Connection, refused with an actionable message
+otherwise. `tests/frontend/test_request_name_panel.py` pins the layer split and
+`tests/frontend/test_request_name_panel_jsdom.py` the widget.
 
 
 The browser projects the v2 authority along the same semantic boundary as the

@@ -179,6 +179,73 @@ def test_sweep_never_respawns_a_turn_that_is_already_translating(monkeypatch):
     assert count == 1
 
 
+def test_light_turn_read_keeps_the_translation_verdict(monkeypatch):
+    """A translated turn must stay translated to a light reader.
+
+    The recovery sweep reads turns with ``light=True`` to decide whether a turn
+    still needs translating. A light projection that drops the whole
+    translation verdict makes every sweep treat translated turns as
+    untranslated and re-spawn them, which the reader sees as finished prose
+    swallowed and re-streamed. The shape stays small: the verdict rides along,
+    the translated body does not.
+    """
+    import lib.turn_lifecycle as lifecycle
+    import lib.translate.skip_policy as skip_policy
+    import lib.translate.terminal as terminal
+
+    monkeypatch.setattr(
+        skip_policy, 'should_skip_automatic_translation',
+        lambda *a, **k: False)
+
+    # The real light read runs: monkeypatch only the semantic-storage client,
+    # so the projection trimming under test is the shipped code path.
+    class _Client:
+        def query(self, operation, payload):
+            if operation == 'turn.list':
+                return [{
+                    'turnId': 'done', 'conversationId': 'conv',
+                    'laneId': 'main', 'ordinal': 0, 'actor': 'assistant',
+                    'kind': 'reply', 'status': 'completed',
+                    'projection': {
+                        'content': 'hello world',
+                        'translatedContent': '\u4f60\u597d\u4e16\u754c',
+                        'translation': {'status': 'completed'},
+                        '_translateDone': True,
+                        # Heavy sidecars the light shape must still drop.
+                        'toolRounds': [{'huge': True}],
+                    },
+                    'projectionRevision': 2, 'settlement': {},
+                    'createdAt': 1, 'updatedAt': 2,
+                }]
+            if operation == 'turn.revision':
+                return 3
+            if operation == 'conversation.get':
+                return {}
+            raise AssertionError(f'unexpected operation {operation}')
+
+    monkeypatch.setattr(
+        lifecycle, '_turn_client', lambda write=False: _Client())
+    monkeypatch.setattr(
+        terminal, '_active_whole_turn_keys', lambda: set())
+    monkeypatch.setattr(
+        terminal, '_spawn_whole_turn_translation',
+        lambda **kw: pytest.fail(
+            f"already translated turn was re-spawned: {kw['turn_id']}"))
+
+    light = lifecycle.list_turns('conv', user_id=1, light=True)['turns'][0]
+    # Normalization folds the legacy ``_translateDone`` alias into the verdict.
+    assert light['projection']['translation'] == {'status': 'completed'}
+    # The body stays out of the light shape; only the verdict rides along.
+    assert 'translatedContent' not in light['projection']
+    assert 'toolRounds' not in light['projection']
+
+    count = terminal.sweep_conversation_translations(
+        'conv', user_id=1,
+        config={'autoTranslate': True, 'uiLang': 'zh'})
+
+    assert count == 0
+
+
 def test_spawn_refuses_a_duplicate_live_translation(monkeypatch):
     import lib.translate.terminal as terminal
 

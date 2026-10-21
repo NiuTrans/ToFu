@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TurnProjection, TurnRecord } from '../../../api/conversation-sync.generated';
 import { selectTurnBlocks } from './turn-blocks';
+import { translatedPlanPreview } from './translation-blocks';
 
 function turn(actor: TurnRecord['actor'], projection: TurnProjection): TurnRecord {
   return { turnId: 'translated', conversationId: 'c1', laneId: 'main', actor,
@@ -50,6 +51,28 @@ describe('recorded message translation attribution', () => {
       .toMatchObject({ inputTranslationCompleted: true });
   });
 
+  const planOf = (text: string) => ({ blockId: 'proposed-plan', planId: 'p1',
+    revision: 1, format: 'markdown', text }) as const;
+  const tagged = (body: string) => `<proposed_plan>\n${body}\n</proposed_plan>`;
+
+  it('shows the finished plan translation instead of an in-flight preview', () => {
+    const proposedPlan = planOf('Do the thing.');
+    const projection = { content: tagged('Do the thing.'),
+      translatedContent: tagged('\u505a\u8fd9\u4ef6\u4e8b\u3002'), proposedPlan };
+    const preview = translatedPlanPreview(projection, proposedPlan, {
+      status: 'pending', partial: tagged('\u505a'), partialByRound: {},
+    });
+    expect(preview).toEqual({ markdown: '\u505a\u8fd9\u4ef6\u4e8b\u3002',
+      pending: true, streaming: false });
+  });
+
+  it('streams the preview only while no translation is finished yet', () => {
+    const proposedPlan = planOf('Do the thing.');
+    const preview = translatedPlanPreview(
+      { content: tagged('Do the thing.'), proposedPlan }, proposedPlan,
+      { status: 'pending', partial: tagged('\u505a'), partialByRound: {} });
+    expect(preview).toEqual({ markdown: '\u505a', pending: true, streaming: true });
+  });
   it('refreshes the attribution with a new authoritative projection', () => {
     const record = turn('assistant', { content: 'Answer', translatedContent: '译文', translation });
     expect(selectTurnBlocks(record)[0]).toMatchObject({ translationModel: 'gpt-6-luna' });

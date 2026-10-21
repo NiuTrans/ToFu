@@ -1279,10 +1279,23 @@ compact lane heads in bounded pages, retaining only the requested entries.
 Neither implementation reads projections to obtain a total. There is no new
 persistent counter or write-path-dependent count maintenance.
 
+The route returns the storage DTO through the shared `{ok: true}` envelope, so
+`ok` is a declared `ConversationRoundDirectory` field. Generated browser and
+Python validators reject undeclared fields, and a body the server accepts but
+the browser schema does not turns every successful read into a contract error;
+the envelope is therefore part of the schema authority, not a transport detail
+the client may ignore.
+
 The browser directory is instance/owner/lane scoped and read against the one
 coordinator's committed head. Snapshot resets, input upserts, and deletions
 invalidate rank selection; pure projection patches do not change actor ranks.
-Rank targets are revalidated under the current head before jumping. Bodies use
+Rank targets are revalidated under the current head before jumping. A streaming
+attempt advances that head on every committed turn, which is why a directory
+view keeps its last good page and refreshes the shown window in place instead of
+discarding the projection: only a conversation switch drops it. One read is in
+flight per view and a newer request replaces the queued one. A page fenced by a
+head that moved under it is re-read against the head observed now, bounded,
+because a racing head converges while a broken projection does not. Bodies use
 the same coordinator/TurnStore path, with at most two detached pages (eight
 nearby Turns plus a one-Turn fallback). Detached ingestion never advances the
 continuous tail history cursor, and never counts historical hydration as a new

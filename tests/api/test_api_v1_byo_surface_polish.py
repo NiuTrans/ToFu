@@ -322,9 +322,12 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
                 await compiled.get_data(as_text=True))
             bundle = (await compiled.get_json())['provider_bundle']
             self.assertEqual(bundle['provider']['brand'], 'yourprovider')
+            # Every DECLARED face compiles into a Connection. These two models
+            # deploy on the OpenAI and Anthropic wires; the third (kunlun's
+            # selector-pinned Responses face) may exist without a deployment.
             self.assertEqual(
                 {row['protocol'] for row in bundle['connections']},
-                {'openai', 'anthropic'},
+                {'openai', 'anthropic', 'openai_responses'},
             )
             connection_protocol = {
                 row['connection_id']: row['protocol']

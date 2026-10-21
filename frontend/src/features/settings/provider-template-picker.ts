@@ -8,7 +8,21 @@ export interface ProviderTemplate {
   base_url?: string;
   catalog_mode?: string;
   catalog_source?: { url?: string; checked_at?: string };
-  offering_recipes?: { model_id?: string; request_ids?: string[] }[];
+  protocol?: string;
+  /** Named serving endpoints of one gateway. A request name pinned in
+   *  ``request_faces`` is reachable ONLY through its face's URL/headers. */
+  faces?: Record<string, {
+    base_url?: string;
+    protocol?: string;
+    extra_headers?: Record<string, string>;
+    responses_profile?: string;
+    inference_profile?: unknown;
+  }>;
+  offering_recipes?: {
+    model_id?: string;
+    request_ids?: string[];
+    request_faces?: Record<string, string>;
+  }[];
 }
 type Category = 'official' | 'relay' | 'local' | 'other';
 const categories: Category[] = ['official', 'relay', 'local', 'other'];

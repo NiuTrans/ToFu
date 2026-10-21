@@ -305,6 +305,12 @@ def test_mcp_install_job_recognizes_existing_tool_without_warming_again(tmp_path
 
 
 def test_mcp_preserves_installed_runtime_before_interpreter_siblings(tmp_path, monkeypatch):
+    # PATH has three tiers: the repo-bundled node toolchain, the user's
+    # ~/.local/bin, then interpreter siblings. This test owns the SECOND
+    # ordering only; the bundle tier has its own suite
+    # (tests/tools/test_bundled_toolchain_path_precedence.py).
+    monkeypatch.setattr('lib.tools.process_environment.bundled_toolchain_bins',
+                        lambda: [])
     local_bin = tmp_path / 'home/.local/bin'
     interpreter_bin = tmp_path / 'python/bin'
     local_node = executable(local_bin / 'node')

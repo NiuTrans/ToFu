@@ -324,13 +324,19 @@ def cmd_project_edit_file(params):
                     raise ProjectError('anchor must be a non-empty string')
                 if not isinstance(content, str):
                     raise ProjectError('content must be a string')
-                root_real, target = _resolve(
-                    p.get('root', ''), edit.get('path', ''))
-                receipt_path = relative_path(edit.get('path')) if wants_receipts(p) else None
+                # The call may name its file once for the whole batch; an
+                # edit's own path overrides that for a multi-file batch.
+                batch_path = p.get('path') if isinstance(p.get('path'), str) else ''
+                edit_path = edit.get('path') or batch_path
+                if not edit_path:
+                    raise ProjectError(
+                        'no file named — set the batch `path` or this edit\'s `path`')
+                root_real, target = _resolve(p.get('root', ''), edit_path)
+                receipt_path = relative_path(edit_path) if wants_receipts(p) else None
                 if not os.path.isfile(target):
                     raise ProjectError(
                         f'edit_file edits an existing file — not found: '
-                        f'{edit.get("path")!r}')
+                        f'{edit_path!r}')
                 _check_write_allowed(target)
                 with open(target, 'r', encoding='utf-8', errors='replace',
                           newline='' if operation == 'replace' else None) as f:
@@ -378,10 +384,10 @@ def cmd_project_edit_file(params):
                     committed.append(committed_file(receipt_path, 'patched' if operation == 'replace' else 'inserted'))
                 ok_count += 1
                 lines.append(
-                    f'[{i}] OK {edit.get("path")} [{operation}]{extra}')
-                if syntax_enabled and edit.get('path', '').endswith('.py'):
+                    f'[{i}] OK {edit_path} [{operation}]{extra}')
+                if syntax_enabled and edit_path.endswith('.py'):
                     state = syntax_states.setdefault(target, {
-                        'path': edit['path'],
+                        'path': edit_path,
                         'before': text if len(text) <= _ECHO_REPAIR_MAX_CHARS else None,
                     })
                     state['after'] = (new_text if len(new_text) <= _ECHO_REPAIR_MAX_CHARS
@@ -389,7 +395,8 @@ def cmd_project_edit_file(params):
                     state['line'] = len(lines) - 1
             except (ProjectError, FileReceiptError, OSError, UnicodeError) as exc:
                 fail_count += 1
-                path = edit.get('path', '?') if isinstance(edit, dict) else '?'
+                path = ((edit.get('path') or p.get('path') or '?')
+                        if isinstance(edit, dict) else '?')
                 lines.append(f'[{i}] FAIL {path}: {exc}')
 
         for state in syntax_states.values():

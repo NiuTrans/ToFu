@@ -115,6 +115,20 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
         from lib.identity import require_user_id
         owner_scope = str(require_user_id(
             owner_user_id, context='provider probe owner'))
+    from lib.http_transport.client import http_post
+    # Model-routing v2 stores the Responses wire as ``openai_responses``
+    # (``contracts/model_routing_v2.schema.json``). Only ``lib/llm_dispatch/
+    # slot.py`` normalized that spelling — the probe did not, so a Responses
+    # Connection was probed on ``/chat/completions`` and answered 400
+    # ``配置不存在``: a false not-found for a model the dispatcher serves.
+    # Normalize here, the one choke point every probe surface shares.
+    if protocol == 'openai_responses':
+        protocol = 'responses'
+    owner_scope = ''
+    if owner_user_id is not None:
+        from lib.identity import require_user_id
+        owner_scope = str(require_user_id(
+            owner_user_id, context='provider probe owner'))
 
     # ── Subscription-ADAPTER providers (E4) ─────────────────────────────
     # The provider IS a CLIProxyAPI sidecar on the user's desktop agent;

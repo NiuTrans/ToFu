@@ -332,7 +332,37 @@ function _renderModelRoutingProvidersTab(list) {
   runtimeScope.mountProviderReasoningEditors?.(list, () => _stgModelRouting);
   runtimeScope.mountRequestNameEditors?.(list, {
     document: () => _stgModelRouting,
-    prompt: (name) => showPrompt(t('settings.requestNameEdit'), { defaultValue: name }),
+    // The panel (name + per-request-name headers), not a prompt: a request
+    // name may need its own selector header to reach its serving provider.
+    // `document` is the staged routing draft in this render function; the
+    // panel needs the real DOM host.
+    // `context` carries the Connection's headers: they reach this request
+    // name too, so the panel must show them as its effective route (and let
+    // them be edited) instead of opening an empty form.
+    edit: (initial, context) => runtimeScope.openRequestNamePanel({
+      host: window.document.body,
+      title: t('settings.requestNameEditHeaders'),
+      initial: initial,
+      inherited: (context && context.inherited) || {},
+      sharedWith: (context && context.sharedWith) || 0,
+    }),
+    route: async function(deployment, wireId) {
+      var offering = (_stgModelRouting.offerings || []).find(function(row) {
+        return row.offering_id === deployment.offering_id;
+      });
+      var access = offering && (_stgModelRouting.provider_accesses || []).find(function(row) {
+        return row.provider_access_id === offering.provider_access_id;
+      });
+      if (!access) return;
+      var providerContext = _modelRoutingProviderContext(access.provider_id);
+      if (!providerContext) return;
+      var plans = await _planV2RequestNameFaces([wireId], providerContext);
+      var connectionId = _ensureV2FaceConnection(providerContext, plans[wireId]);
+      if (connectionId && deployment.connection_id !== connectionId) {
+        deployment.connection_id = connectionId;
+        deployment.probe_status = 'unprobed';
+      }
+    },
     alert: (message) => showAlert(message), render: () => _renderProvidersTab(),
   });
   /* Enhance the footer 思维参数格式 select into the unified tofu dropdown so
@@ -971,6 +1001,77 @@ function _removeV2Alias(deploymentIndex) {
   _renderProvidersTab();
 }
 
+/* Reuse or stage the Connection that actually serves a request name.
+ *
+ * A wire id pinned by the template's ``request_faces`` (aigc's kunlun alias)
+ * only answers on THAT face: ``/v1`` as a Responses endpoint, with
+ * ``x-context-provider: kunlun``. Binding a new request name to "the first
+ * enabled Connection" produced a row that could never answer — the reported
+ * "added it several times, still fails". The face is a Connection property,
+ * so every request name pointing at it shares one. */
+function _ensureV2FaceConnection(context, plan) {
+  if (!plan || !plan.base_url) return null;
+  var accessId = context.access.provider_access_id;
+  var url = String(plan.base_url).replace(/\/$/, '');
+  var existing = (_stgModelRouting.connections || []).find(function(row) {
+    if (row.provider_access_id !== accessId) return false;
+    if (String(row.base_url || '').replace(/\/$/, '') !== url) return false;
+    if (!plan.face) return true;
+    return !row.gateway_namespace || row.gateway_namespace === plan.face;
+  });
+  var connectionId;
+  if (existing) {
+    connectionId = existing.connection_id;
+    // Fill only what the face declares and the row lacks: an owner-edited
+    // protocol/profile is a deliberate override, not a gap.
+    if (!existing.protocol && plan.protocol) existing.protocol = plan.protocol;
+    if (plan.face && !existing.gateway_namespace) existing.gateway_namespace = plan.face;
+    if (plan.responses_profile && !existing.responses_profile) {
+      existing.responses_profile = plan.responses_profile;
+    }
+    if (plan.inference_profile && !existing.inference_profile) {
+      existing.inference_profile = plan.inference_profile;
+    }
+    var headers = existing.extra_headers || {};
+    Object.keys(plan.extra_headers || {}).forEach(function(key) {
+      if (!(key in headers)) headers[key] = plan.extra_headers[key];
+    });
+    existing.extra_headers = headers;
+  } else {
+    connectionId = _newV2StagedId('conn');
+    var row = {
+      connection_id: connectionId,
+      provider_access_id: accessId,
+      base_url: url,
+      protocol: plan.protocol || 'openai',
+      enabled: true,
+      priority: 100,
+      extra_headers: Object.assign({}, plan.extra_headers || {}),
+    };
+    if (plan.face) row.gateway_namespace = plan.face;
+    if (plan.responses_profile) row.responses_profile = plan.responses_profile;
+    if (plan.inference_profile) row.inference_profile = plan.inference_profile;
+    _stgModelRouting.connections.push(row);
+  }
+  // Dispatch refuses a wire whose credential cannot use its Connection.
+  (context.credentials || []).forEach(function(item) {
+    var credential = item.row;
+    if (!credential.authorization) {
+      credential.authorization = { connection_ids: [], models: [] };
+    }
+    var ids = credential.authorization.connection_ids ||
+      (credential.authorization.connection_ids = []);
+    if (ids.indexOf(connectionId) < 0) ids.push(connectionId);
+  });
+  return connectionId;
+}
+
+async function _planV2RequestNameFaces(names, context) {
+  if (typeof runtimeScope.planProviderRequestNameFaces !== 'function') return {};
+  return await runtimeScope.planProviderRequestNameFaces(
+    names, context.connections.map(function(item) { return item.row.base_url; }));
+}
+
 async function _addV2Alias(providerId, offeringId) {
   var context = _modelRoutingProviderContext(providerId);
   if (!context) return;
@@ -978,36 +1079,67 @@ async function _addV2Alias(providerId, offeringId) {
     return item.row.offering_id === offeringId;
   });
   if (!offering) return;
-  var alias = await showPrompt(
-    t('settings.matrixAddAliasPrompt'),
-    { title: '添加请求名', placeholder: 'deepseek-v4-flash-tencent' });
-  alias = String(alias || '').trim();
-  if (!alias) return;
-  var accessOfferingIds = new Set(context.offerings.map(function(item) {
-    return item.row.offering_id;
-  }));
-  var duplicate = (_stgModelRouting.deployments || []).some(function(row) {
-    return accessOfferingIds.has(row.offering_id) && row.wire_model_id === alias;
-  });
-  if (duplicate) {
-    showAlert('该请求名已存在于本服务商。');
-    return;
-  }
   var connection = context.connections.find(function(item) {
     return item.row.enabled !== false;
   }) || context.connections[0];
   if (!connection) return;
-  _stgModelRouting.deployments.push({
-    deployment_id: 'deployment-' + String(Date.now()).toString(36) + '-' +
+  // Panel, not prompt: a request name may need its own selector header
+  // (aigc serves kunlunbedrock.* only under x-context-provider), and a
+  // string prompt cannot express one. The panel validates against the same
+  // header rules the server enforces, so a rejected save cannot happen after
+  // a long form.
+  if (typeof runtimeScope.openRequestNamePanel !== 'function') {
+    showAlert(t('settings.requestNamePanelUnavailable'));
+    return;
+  }
+  var accessOfferingIds = new Set(context.offerings.map(function(item) {
+    return item.row.offering_id;
+  }));
+  var draft = await runtimeScope.openRequestNamePanel({
+    host: document.body,
+    title: t('settings.matrixAddRequestNameTitle'),
+    // Duplicate names are refused INSIDE the panel so the operator can fix
+    // the field instead of losing the whole form to an alert.
+    apply: function(candidate) {
+      var name = String(candidate.wireModelId || '').trim();
+      var duplicate = (_stgModelRouting.deployments || []).some(function(row) {
+        return accessOfferingIds.has(row.offering_id) && row.wire_model_id === name;
+      });
+      return duplicate ? t('settings.requestNameDuplicate') : '';
+    },
+  });
+  if (!draft) return;
+  var wireModelId = String(draft.wireModelId || '').trim();
+  var faces = await _planV2RequestNameFaces([wireModelId], context);
+  var faceConnectionId = _ensureV2FaceConnection(context, faces[wireModelId]);
+  if (faceConnectionId) connection = { row: { connection_id: faceConnectionId } };
+  var targetConnection = (_stgModelRouting.connections || []).find(function(row) {
+    return row.connection_id === connection.row.connection_id;
+  });
+  // Only what this request name adds on top of its Connection: the face
+  // already contributes its own selectors, so repeating them here would
+  // create a second owner for the same value.
+  var headers = {};
+  (draft.headers || []).forEach(function(row) {
+    var key = String(row.name || '').trim();
+    if (!key) return;
+    var value = String(row.value || '');
+    if (targetConnection && (targetConnection.extra_headers || {})[key] === value) return;
+    headers[key] = value;
+  });
+  var row = {
+    deployment_id: 'deployment-' + String(Date.now()).toString(36) +
       Math.random().toString(36).slice(2, 8),
     offering_id: offeringId,
     connection_id: connection.row.connection_id,
-    wire_model_id: alias,
+    wire_model_id: wireModelId,
     priority: 100,
     identity_confidence: offering.row.identity_state === 'confirmed' && offering.row.model
       ? 'high' : 'pending',
     probe_status: 'unprobed',
-  });
+  };
+  if (Object.keys(headers).length) row.extra_headers = headers;
+  _stgModelRouting.deployments.push(row);
   _renderProvidersTab();
   showToast(t('settings.matrixAliasAdded'));
 }
@@ -1097,11 +1229,30 @@ async function _stageV2AddModels(providerId, catalogModels, customWireIds) {
   var wireIds = _providerWireModelIds(context);
   var granted = new Set();
   var added = 0;
+  // Every request name the picker is about to add, so one template lookup
+  // resolves the face each one must travel over.
+  var pendingWireIds = [];
+  (catalogModels || []).forEach(function(model) {
+    (requestNames[model.model_id] || [String(model.model_id || '')])
+      .forEach(function(id) { if (id && !wireIds.has(id)) pendingWireIds.push(id); });
+  });
+  (customWireIds || []).forEach(function(rawId) {
+    var wireId = String(rawId || '').trim();
+    if (wireId && !wireIds.has(wireId)) pendingWireIds.push(wireId);
+  });
+  var facePlans = await _planV2RequestNameFaces(pendingWireIds, context);
+  if (_stgModelRouting !== stagedDocument) return 0;
+  // A face-pinned request name (aigc kunlun) must not inherit the card's
+  // default Connection: that endpoint rejects the id outright.
+  var connectionForWire = function(wireId) {
+    return _ensureV2FaceConnection(context, facePlans[wireId])
+      || connection.row.connection_id;
+  };
   var pushDeployment = function(offeringId, wireId, confidence) {
     _stgModelRouting.deployments.push({
       deployment_id: _newV2StagedId('deployment'),
       offering_id: offeringId,
-      connection_id: connection.row.connection_id,
+      connection_id: connectionForWire(wireId),
       wire_model_id: wireId,
       identity_confidence: confidence,
       probe_status: 'unprobed',

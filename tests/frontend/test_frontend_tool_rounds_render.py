@@ -95,7 +95,8 @@ const header = Object.freeze({
 
 check('immutable_narrow_public_port',
   Object.isFrozen(presentation)
-  && Object.keys(presentation).length === 3
+  && Object.keys(presentation).length === 4
+  && typeof presentation.renderRepairKindsHtml === 'function'
   && typeof presentation.renderCompactionLabelHtml === 'function'
   && typeof presentation.renderWriteResultHtml === 'function'
   && typeof presentation.renderGenericResultHtml === 'function');
@@ -633,6 +634,64 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   check('rejected_badge', !!d.querySelector('.ptool-badge-reject'));
   check('rejected_suggestion_chip', !!d.querySelector('.ptool-reject-sugg')
     && html.includes('web_search'));
+}
+
+// ── 3b. rejected contract call → the ARGUMENTS are inspectable in place ──
+// A rejected call never ran; the reason names the rule, not the payload that
+// broke it. A user asking "why is this still rejected" needs the exact bytes
+// the model sent (a blank `path`, a foreign harness shape) without logs.
+{
+  const payload = JSON.stringify({
+    description: 'Rewrite invariant tests',
+    edits: [{ path: '', operation: 'insert_after', anchor: 'A', content: 'B' }],
+  });
+  const html = renderToolRoundsHTML([
+    { roundNum: 2, toolName: 'edit_file', status: 'rejected', toolArgs: payload,
+      rejection: { kind: 'tool_contract_invalid', tool: 'edit_file',
+        code: 'invalid_argument_length', path: '$.edits[0].path',
+        reason: 'ERROR: Tool call `edit_file` was NOT executed.' },
+      results: [] },
+  ], false);
+  const d = frag(html);
+  const block = d.querySelector('.ptool-rejected-params');
+  check('rejected_args_block_rendered', !!block);
+  check('rejected_args_open_when_short', !!block && block.hasAttribute('open'));
+  const pre = block && block.querySelector('.ptool-reject-args');
+  check('rejected_args_show_the_blank_path',
+    !!pre && pre.textContent.includes('"path": ""'));
+  check('rejected_args_survive_escaping',
+    !!pre && pre.textContent.includes('insert_after'));
+}
+
+// ── 3c. a large payload starts collapsed and states its size ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 3, toolName: 'edit_file', status: 'rejected',
+      toolArgs: JSON.stringify({ edits: [{ path: '', operation: 'replace',
+        anchor: 'A', content: 'y'.repeat(3000) }] }),
+      rejection: { kind: 'tool_contract_invalid', tool: 'edit_file',
+        code: 'invalid_argument_length', path: '$.edits[0].path',
+        reason: 'ERROR: large payload' },
+      results: [] },
+  ], false);
+  const d = frag(html);
+  const block = d.querySelector('.ptool-rejected-params');
+  check('rejected_args_collapsed_when_large',
+    !!block && !block.hasAttribute('open'));
+  check('rejected_args_state_their_size',
+    !!d.querySelector('.ptool-rejected-params-size'));
+}
+
+// ── 3d. a rejected call with no arguments adds no empty block ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 4, toolName: 'read_fiels', status: 'rejected',
+      _rejected: { kind: 'hallucinated', attempted: 'read_fiels',
+        suggestions: ['read_files'] },
+      results: [] },
+  ], false);
+  check('rejected_without_args_has_no_params_block',
+    !frag(html).querySelector('.ptool-rejected-params'));
 }
 
 // ── 4. ask_human skipped (task ended unanswered) → .hg-skipped-line ──
@@ -1231,6 +1290,6 @@ def test_tool_result_owner_and_retained_round_adapter():
             os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),
             os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'),
         ],
-        expect_pass=119,
+        expect_pass=126,
         label='tool_rounds render',
     )

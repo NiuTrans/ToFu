@@ -218,6 +218,38 @@ def test_real_read_write_append_edit_and_exact_durable_undo(granted):
         assert store.read() == []
 
 
+def test_scoped_batch_path_edit_stays_inside_the_grant(granted):
+    """A scoped call may name the file once for the batch."""
+    granted.call('read_files', {'path': 'src/a.txt'})
+    result = granted.call('edit_file', {
+        'path': 'src/a.txt',
+        'edits': [
+            {'operation': 'replace', 'anchor': 'alpha', 'content': 'gamma'},
+            {'operation': 'insert_after', 'anchor': 'gamma\n',
+             'content': 'inserted\n'}]})
+    assert 'Applied 2/2' in result
+    assert (granted.root / 'src/a.txt').read_text() == 'gamma\n\ninserted\nbeta\n'
+
+
+def test_scoped_batch_path_cannot_escape_the_granted_prefix(granted):
+    outside = granted.outside / 'secret.txt'
+    with pytest.raises(ValueError):
+        granted.call('edit_file', {
+            'path': '../outside/secret.txt',
+            'edits': [{'operation': 'replace', 'anchor': 'ungranted',
+                       'content': 'owned'}]})
+    assert outside.read_text() == 'ungranted secret\n'
+
+
+@pytest.mark.unit
+def test_scoped_batch_path_requires_a_file_for_each_edit(granted):
+    with pytest.raises(ValueError, match='explicit file per edit'):
+        granted.call('edit_file', {
+            'edits': [{'operation': 'replace', 'anchor': 'alpha',
+                       'content': 'gamma'}]})
+    assert (granted.root / 'src/a.txt').read_text() == 'alpha\nbeta\n'
+
+
 def test_read_before_edit_and_stale_tokens_use_confined_preimage(granted):
     edit = {'edits': [{'path': 'src/a.txt', 'operation': 'replace', 'anchor': 'alpha', 'content': 'new'}]}
     assert 'Read this scoped file' in granted.call('edit_file', edit)

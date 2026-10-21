@@ -202,7 +202,13 @@ def _build_write_file(meta, fn_name, fn_args, tool_content, path):
 def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
     edits = fn_args.get('edits')
     if edits and isinstance(edits, list):
-        paths = list(dict.fromkeys(e.get('path', '?') for e in edits if isinstance(e, dict)))
+        # ``edit_file`` may name its file once on the call instead of on every
+        # edit, so a display path resolves through that batch path first.
+        batch_path = (fn_args.get('path')
+                      if fn_name == 'edit_file' else None)
+        paths = list(dict.fromkeys(
+            (e.get('path') or batch_path or '?')
+            for e in edits if isinstance(e, dict)))
         m = re.search(r'(?:Applied|Completed) (\d+)/(\d+)', tool_content[:200])
         ok_n = m.group(1) if m else '?'
         total_n = m.group(2) if m else str(len(edits))
@@ -248,7 +254,7 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
                 outside = kind == 'FAIL' and _OUTSIDE_WORKSPACE_MARKER in detail
                 skipped = kind == 'SKIP'
             summary = {
-                'path': edit.get('path', '?'),
+                'path': edit.get('path') or batch_path or '?',
                 'description': edit.get('description', ''),
                 'status': status,
                 'detail': detail[:400],
