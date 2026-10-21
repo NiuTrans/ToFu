@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh" data-theme="tofu">
+<head>
+<meta charset="utf-8">
+<title>Swarm panel: 现状 / 方案A / 方案B</title>
+<style>
+/* ── tofu theme tokens (11-tofu-theme-foundation.css) ── */
+[data-theme="tofu"]{
+  --bg-primary:#FBF7EE;
+  --bg-secondary:#F3EDE0;
+  --bg-tertiary:#EDE4D2;
+  --bg-hover:#EDE5D4;
+  --bg-active:#E7DBC6;
+  --border:#E0D6C3;
+  --border-light:#EBE2D2;
+  --text-primary:#3D352B;
+  --text-secondary:#6B5F4E;
+  --text-tertiary:#9A8F79;
+  --accent:#8F5126;
+  --accent-hover:#7A441F;
+  --accent-subtle:rgba(143,81,38,0.10);
+  --success-text:#3F6B34;
+  --success-bg:rgba(106,138,94,0.10);
+  --success-border:rgba(106,138,94,0.30);
+  --error-text:#B23B2E;
+  --error-bg:rgba(192,57,43,0.10);
+  --error-border:rgba(192,57,43,0.30);
+  --radius:14px;
+  --radius-sm:10px;
+  --radius-xs:8px;
+  --clay-sm:0 1px 2px rgba(92,72,44,0.06);
+  --clay-md:0 2px 10px rgba(92,72,44,0.08);
+  --clay-lg:0 12px 30px rgba(92,72,44,0.12);
+  --sans-body:'Sora','Inter','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+  --conversation-process-row-height:28px;
+  --conversation-process-inset:8px;
+  --conversation-process-gap:8px;
+  --conversation-process-marker:16px;
+  --conversation-process-font-size:13px;
+  --conversation-font-size-meta:11.5px;
+  --conversation-font-size-caption:11.5px;
+  --leading-title:1.45;
+  --turn-process-hover:rgba(143,81,38,0.05);
+  --turn-rule:#E4DACA;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-8:32px;
+  --font-size-xs:11.5px;--font-size-sm:12.5px;--font-size-md:13.5px;
+  --weight-medium:500;--weight-semibold:600;
+  --motion-fast:.18s;
+  --control-edge-inset:1px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg-primary);
+  color:var(--text-primary);
+  font-family:var(--sans-body);
+  font-size:14px;
+  padding:28px 0 60px;
+}
+.demo{width:min(820px,94vw);margin:0 auto 56px}
+.demo-tag{
+  display:inline-flex;align-items:center;gap:8px;
+  margin:0 0 4px 2px;
+  font:600 11px/1 var(--font-mono);
+  letter-spacing:.14em;text-transform:uppercase;
+  color:var(--text-tertiary);
+}
+.demo-tag b{color:var(--accent)}
+.demo-title{margin:0 0 2px;font-size:22px;font-weight:700;color:var(--text-primary);letter-spacing:-.01em}
+.demo-note{margin:0 0 18px;font-size:13px;line-height:1.6;color:var(--text-secondary);max-width:56ch}
+.demo-note code{font:600 11.5px/1.4 var(--font-mono);background:var(--bg-tertiary);padding:1px 5px;border-radius:5px;color:var(--accent-hover)}
+
+/* assistant surface — the open card the conversation content sits on */
+.conversation-surface{
+  background:var(--bg-primary);
+}
+.conversation-block{
+  margin-bottom:var(--space-2);
+}
+
+/* ── swarm panel (08-swarm-shell.css base, then tofu overrides) ── */
+.sw-panel{margin:var(--space-2) 0;border:1px solid var(--border);border-left:3px solid #eab308;border-radius:var(--radius-sm,8px);background:var(--bg-secondary);box-shadow:0 1px 3px rgba(0,0,0,0.08);overflow:hidden;transition:border-color .25s,box-shadow .25s}
+.sw-panel.sw-active{border-color:rgba(143,81,38,0.4);animation:swarmBorderPulse 2.5s ease-in-out infinite}
+.sw-panel.sw-collapsed .sw-agent-grid{display:none}
+.sw-panel.sw-collapsed .sw-chevron{transform:rotate(-90deg)}
+.sw-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 14px;cursor:pointer;user-select:none;transition:background .15s}
+.sw-header:hover{background:rgba(143,81,38,0.05)}
+.sw-header-left{display:flex;align-items:center;gap:10px;min-width:0}
+.sw-header-icon{display:inline-flex;align-items:center;justify-content:center;color:#B8884A;flex-shrink:0}
+.sw-header-icon svg{display:block}
+.sw-header-info{display:flex;flex-direction:column;gap:1px;min-width:0}
+.sw-header-title{font-size:var(--font-size-md);font-weight:600;color:#A67B52;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sw-header-subtitle{font-size:var(--font-size-xs);color:var(--text-tertiary);font-family:var(--font-mono);display:flex;gap:10px;flex-wrap:wrap}
+.sw-header-subtitle .sw-cnt-running{color:#2b6cb0}
+.sw-header-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.sw-header-timer{font-size:var(--font-size-sm);color:var(--text-tertiary);font-family:var(--font-mono)}
+.sw-chevron{font-size:var(--font-size-sm);color:var(--text-tertiary);transition:transform .2s;display:inline-flex}
+.sw-chevron svg{display:block}
+.sw-status-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:10px;font-size:var(--font-size-xs);font-weight:600;font-family:var(--font-mono);letter-spacing:0.02em}
+.sw-status-pill.sw-pill-running{color:#2b6cb0;background:rgba(43,108,176,0.10)}
+.sw-spinner{width:10px;height:10px;border:1.5px solid rgba(43,108,176,0.35);border-top-color:#2b6cb0;border-radius:50%;animation:swspin 0.9s linear infinite}
+@keyframes swspin{to{transform:rotate(360deg)}}
+@keyframes swarmBorderPulse{0%,100%{box-shadow:0 0 0 0 rgba(143,81,38,0)}50%{box-shadow:0 0 0 1px rgba(143,81,38,0.10)}}
+
+/* tofu: un-box the swarm panel inside its ptool-turn (13-tofu-theme-composer-tools.css) */
+[data-theme="tofu"] .sw-panel{background:transparent;border:none;box-shadow:none}
+[data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:2px 0}
+[data-theme="tofu"] .sw-panel.sw-active{border:none;box-shadow:none;animation:none}
+[data-theme="tofu"] .sw-header:hover{background:rgba(196,149,106,0.07)}
+
+/* ── generic tool row (23-reading-process.css) ── */
+.conversation-surface :is(.ptool-line){
+  display:flex;align-items:center;
+  min-height:var(--conversation-process-row-height);
+  padding:var(--space-2) var(--conversation-process-inset);
+  gap:var(--conversation-process-gap);
+  border:0;border-radius:var(--radius-sm);
+  background:transparent;color:var(--text-secondary);
+  font-family:var(--sans-body);font-size:var(--conversation-process-font-size);line-height:var(--leading-title);
+}
+.conversation-surface .ptool-line:hover{background:var(--turn-process-hover)}
+.ptool-icon{flex:0 0 var(--conversation-process-marker);width:var(--conversation-process-marker);height:var(--conversation-process-marker);display:inline-flex;align-items:center;justify-content:center;color:var(--text-secondary)}
+.ptool-icon svg{display:block;width:14px;height:14px}
+.ptool-text{min-width:0;flex:1 1 auto;color:var(--text-secondary);font-weight:var(--weight-medium);overflow-wrap:anywhere}
+.ptool-tok{flex-shrink:0;font-family:var(--font-mono);font-size:10.5px;color:var(--text-tertiary);letter-spacing:.02em}
+.ptool-line-status{flex-shrink:0;margin-left:6px;padding:0 6px;border:1px solid var(--border-light);border-radius:999px;font-size:10px;font-weight:600;color:var(--text-tertiary)}
+.ptool-line-status--ok{color:var(--success-text);background:var(--success-bg);border-color:var(--success-border)}
+
+/* ── ri debug anchor (02-inspector-tool-anchors.css) ── */
+.ri-tool-anchor{display:inline-flex;align-items:center;gap:2px;padding:0 4px;border-radius:3px;font-family:var(--font-mono);font-size:9.5px;line-height:1.7;background:transparent;border:none;color:var(--text-tertiary);cursor:pointer;transition:color .15s,background .15s}
+.ri-tool-anchor:hover{color:var(--text-primary);background:var(--bg-hover)}
+.ri-tool-anchor .ri-anchor-glyph{opacity:.5;font-size:8.5px}
+.ri-tool-anchor-row{display:flex;justify-content:flex-end;margin:2px 10px var(--space-1)}
+.ptool-row-ctl{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;margin-left:auto}
+
+/* ── swarm agent cards (visual filler so the panel body isn't empty) ── */
+.sw-agent-grid{padding:0 10px 10px;display:grid;gap:6px}
+.sw-agent{border:1px solid var(--border-light);border-radius:8px;background:rgba(255,253,248,0.6);overflow:hidden}
+.sw-a-header{display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;cursor:pointer}
+.sw-a-status-icon{display:inline-flex;flex-shrink:0}
+.sw-a-num{color:#6a6258;font-family:var(--font-mono);font-size:10.5px}
+.sw-a-role-tag{padding:1px 7px;border-radius:999px;border:1px solid rgba(184,136,74,0.40);background:rgba(184,136,74,0.14);color:#8a6d1f;font-size:10px;font-weight:600}
+.sw-a-running .sw-a-role-tag{color:#2b6cb0;background:rgba(43,108,176,0.12);border-color:rgba(43,108,176,0.38)}
+.sw-a-phase-pill{margin-left:auto;padding:1px 8px;border-radius:999px;background:rgba(43,108,176,0.10);color:#2b6cb0;font-size:10px;font-weight:600}
+.sw-a-timer{font-family:var(--font-mono);font-size:10.5px;color:var(--text-tertiary)}
+.sw-a-chevron{color:var(--text-tertiary);display:inline-flex}
+
+/* ══════════════════════════════════════════════════════════
+   方案 A — quiet chrome:
+   · R3 moves into .sw-header-right (no solo row)
+   · .ri-tool-anchor radius 3px → var(--radius-xs) 8px
+   · swarm panel keeps its un-boxed look, just a hairline under the header
+   ══════════════════════════════════════════════════════════ */
+[data-variant="a"] .ri-tool-anchor{border-radius:var(--radius-xs);padding:1px 7px}
+[data-variant="a"] .sw-header{border-bottom:1px solid rgba(196,149,106,0.14)}
+[data-variant="a"] .sw-panel.sw-active{border-radius:var(--radius-sm)}
+
+/* ══════════════════════════════════════════════════════════
+   方案 B — real card:
+   · swarm panel gets back a tofu paper card (hairline + soft shadow + radius)
+   · R3 moves into .sw-header-right
+   · .ri-tool-anchor radius 3px → var(--radius-xs) 8px
+   ══════════════════════════════════════════════════════════ */
+[data-variant="b"] .ri-tool-anchor{border-radius:var(--radius-xs);padding:1px 7px}
+[data-variant="b"] .sw-panel{
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);
+  overflow:hidden;
+}
+[data-variant="b"] .sw-panel.sw-active{animation:none;border-color:#E2D5BB;box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05)}
+[data-variant="b"] .sw-header{border-bottom:1px solid rgba(196,149,106,0.16)}
+
+/* current: hide the variant-A/B header anchor, keep the solo row */
+[data-variant="cur"] .sw-anchor-inline{display:none}
+[data-variant="a"] .sw-anchor-solo,[data-variant="b"] .sw-anchor-solo{display:none}
+
+/* ruler comparing the three */
+.compare{display:grid;grid-template-columns:1fr;gap:0}
+</style>
+</head>
+<body>
+
+<!-- ─────────────── 现状 ─────────────── -->
+<section class="demo" data-variant="cur">
+  <div class="demo-tag"><b>CURRENT</b> · 现状</div>
+  <h2 class="demo-title">现在的样子</h2>
+  <p class="demo-note">
+    swarm 面板无框、铺满宽度（四个直角）；调试按钮 <code>&lt;&gt;R3</code> 在面板下方独占一行（<code>.ri-tool-anchor-row</code>）。
+  </p>
+  <div class="conversation-surface">
+    <div class="conversation-block conversation-block--tool">
+      <div data-prn="3" data-prn-kind="swarm">
+        <div class="sw-panel sw-active">
+          <div class="sw-header">
+            <div class="sw-header-left">
+              <span class="sw-header-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="5" r="2.4"/><circle cx="19" cy="12" r="2.4"/><circle cx="12" cy="19" r="2.4"/><path d="M7 6.8 9.9 10M14.1 10 17 6.8M14.1 14 17 17.2M7 17.2 9.9 14"/></svg></span>
+              <div class="sw-header-info">
+                <span class="sw-header-title">Parallel Execution</span>
+                <span class="sw-header-subtitle"><span class="sw-cnt-running">2 运行中</span></span>
+              </div>
+            </div>
+            <div class="sw-header-right">
+              <span class="sw-status-pill sw-pill-running"><span class="sw-spinner"></span>工作中…</span>
+              <span class="sw-header-timer">4m13s</span>
+              <span class="sw-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span>
+            </div>
+          </div>
+          <div class="sw-agent-grid">
+            <div class="sw-agent sw-a-running">
+              <div class="sw-a-header">
+                <span class="sw-a-status-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2b6cb0" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                <span class="sw-a-num">#1</span>
+                <span class="sw-a-role-tag">researcher</span>
+                <span class="sw-a-phase-pill">searching</span>
+                <span class="sw-a-timer">1m02s</span>
+              </div>
+            </div>
+            <div class="sw-agent sw-a-running">
+              <div class="sw-a-header">
+                <span class="sw-a-status-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2b6cb0" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                <span class="sw-a-num">#2</span>
+                <span class="sw-a-role-tag">coder</span>
+                <span class="sw-a-phase-pill">tool_use</span>
+                <span class="sw-a-timer">3m47s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="ri-tool-anchor-row sw-anchor-solo"><button type="button" class="ri-tool-anchor" data-ri-state="task:1"><span class="ri-anchor-glyph">&lt;&gt;</span> R3</button></div>
+      </div>
+      <div data-prn="4">
+        <div class="ptool-line">
+          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+          <span class="ptool-text">Read 3 files: tool-search-presentation.ts L290–565; _handlers.py L1–275; tools_execution.md L1–175</span>
+          <span class="ptool-tok">22k tok</span>
+          <span class="ptool-row-ctl"><button type="button" class="ri-tool-anchor"><span class="ri-anchor-glyph">&lt;&gt;</span> R4</button></span>
+        </div>
+      </div>
+      <div data-prn="5">
+        <div class="ptool-line">
+          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg></span>
+          <span class="ptool-text">grep 3 patterns: /summary auto default; /reasoning summaries; /prefetch/</span>
+          <span class="ptool-tok">996 tok</span>
+          <span class="ptool-row-ctl"><button type="button" class="ri-tool-anchor"><span class="ri-anchor-glyph">&lt;&gt;</span> R5</button></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────── 方案 A ─────────────── -->
+<section class="demo" data-variant="a">
+  <div class="demo-tag"><b>A</b> · QUIET CHROME</div>
+  <h2 class="demo-title">方案 A：轻量收尾</h2>
+  <p class="demo-note">
+    <code>&lt;&gt;R3</code> 收进 header 右侧（计时器旁），不再独占一行；调试按钮圆角 3px → 8px；header 下加一条极浅 hairline 让面板收边，整体仍保持无框。
+  </p>
+  <div class="conversation-surface">
+    <div class="conversation-block conversation-block--tool">
+      <div data-prn="3" data-prn-kind="swarm">
+        <div class="sw-panel sw-active">
+          <div class="sw-header">
+            <div class="sw-header-left">
+              <span class="sw-header-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="5" r="2.4"/><circle cx="19" cy="12" r="2.4"/><circle cx="12" cy="19" r="2.4"/><path d="M7 6.8 9.9 10M14.1 10 17 6.8M14.1 14 17 17.2M7 17.2 9.9 14"/></svg></span>
+              <div class="sw-header-info">
+                <span class="sw-header-title">Parallel Execution</span>
+                <span class="sw-header-subtitle"><span class="sw-cnt-running">2 运行中</span></span>
+              </div>
+            </div>
+            <div class="sw-header-right">
+              <span class="sw-status-pill sw-pill-running"><span class="sw-spinner"></span>工作中…</span>
+              <span class="sw-header-timer">4m13s</span>
+              <button type="button" class="ri-tool-anchor sw-anchor-inline" data-ri-state="task:1"><span class="ri-anchor-glyph">&lt;&gt;</span> R3</button>
+              <span class="sw-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span>
+            </div>
+          </div>
+          <div class="sw-agent-grid">
+            <div class="sw-agent sw-a-running">
+              <div class="sw-a-header">
+                <span class="sw-a-status-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2b6cb0" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                <span class="sw-a-num">#1</span>
+                <span class="sw-a-role-tag">researcher</span>
+                <span class="sw-a-phase-pill">searching</span>
+                <span class="sw-a-timer">1m02s</span>
+              </div>
+            </div>
+            <div class="sw-agent sw-a-running">
+              <div class="sw-a-header">
+                <span class="sw-a-status-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2b6cb0" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                <span class="sw-a-num">#2</span>
+                <span class="sw-a-role-tag">coder</span>
+                <span class="sw-a-phase-pill">tool_use</span>
+                <span class="sw-a-timer">3m47s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="ri-tool-anchor-row sw-anchor-solo"><button type="button" class="ri-tool-anchor" data-ri-state="task:1"><span class="ri-anchor-glyph">&lt;&gt;</span> R3</button></div>
+      </div>
+      <div data-prn="4">
+        <div class="ptool-line">
+          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+          <span class="ptool-text">Read 3 files: tool-search-presentation.ts L290–565; _handlers.py L1–275; tools_execution.md L1–175</span>
+          <span class="ptool-tok">22k tok</span>
+          <span class="ptool-row-ctl"><button type="button" class="ri-tool-anchor"><span class="ri-anchor-glyph">&lt;&gt;</span> R4</button></span>
+        </div>
+      </div>
+      <div data-prn="5">
+        <div class="ptool-line">
+          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg></span>
+          <span class="ptool-text">grep 3 patterns: /summary auto default; /reasoning summaries; /prefetch/</span>
+          <span class="ptool-tok">996 tok</span>
+          <span class="ptool-row-ctl"><button type="button" class="ri-tool-anchor"><span class="ri-anchor-glyph">&lt;&gt;</span> R5</button></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────── 方案 B ─────────────── -->
+<section class="demo" data-variant="b">
+  <div class="demo-tag"><b>B</b> · PAPER CARD</div>
+  <h2 class="demo-title">方案 B：完整圆角卡</h2>
+  <p class="demo-note">
+    swarm 面板恢复成一张 tofu 纸卡（hairline 描边 + 柔影 + <code>radius-sm 10px</code> 圆角），有清晰的边界；<code>&lt;&gt;R3</code> 同样收进 header。
+  </p>
+  <div class="conversation-surface">
+    <div class="conversation-block conversation-block--tool">
+      <div data-prn="3" data-prn-kind="swarm">
+        <div class="sw-panel sw-active">
+          <div class="sw-header">
+            <div class="sw-header-left">
+              <span class="sw-header-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="12" cy="5" r="2.4"/><circle cx="19" cy="12" r="2.4"/><circle cx="12" cy="19" r="2.4"/><path d="M7 6.8 9.9 10M14.1 10 17 6.8M14.1 14 17 17.2M7 17.2 9.9 14"/></svg></span>
+              <div class="sw-header-info">
+                <span class="sw-header-title">Parallel Execution</span>
+                <span class="sw-header-subtitle"><span class="sw-cnt-running">2 运行中</span></span>
+              </div>
+            </div>
+            <div class="sw-header-right">
+              <span class="sw-status-pill sw-pill-running"><span class="sw-spinner"></span>工作中…</span>
+              <span class="sw-header-timer">4m13s</span>
+              <button type="button" class="ri-tool-anchor sw-anchor-inline" data-ri-state="task:1"><span class="ri-anchor-glyph">&lt;&gt;</span> R3</button>
+              <span class="sw-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span>
+            </div>
+          </div>
+          <div class="sw-agent-grid">
+            <div class="sw-agent sw-a-running">
+              <div class="sw-a-header">
+                <span class="sw-a-status-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2b6cb0" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                <span class="sw-a-num">#1</span>
+                <span class="sw-a-role-tag">researcher</span>
+                <span class="sw-a-phase-pill">searching</span>
+                <span class="sw-a-timer">1m02s</span>
+              </div>
+            </div>
+            <div class="sw-agent sw-a-running">
+              <div class="sw-a-header">
+                <span class="sw-a-status-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2b6cb0" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>
+                <span class="sw-a-num">#2</span>
+                <span class="sw-a-role-tag">coder</span>
+                <span class="sw-a-phase-pill">tool_use</span>
+                <span class="sw-a-timer">3m47s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="ri-tool-anchor-row sw-anchor-solo"><button type="button" class="ri-tool-anchor" data-ri-state="task:1"><span class="ri-anchor-glyph">&lt;&gt;</span> R3</button></div>
+      </div>
+      <div data-prn="4">
+        <div class="ptool-line">
+          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+          <span class="ptool-text">Read 3 files: tool-search-presentation.ts L290–565; _handlers.py L1–275; tools_execution.md L1–175</span>
+          <span class="ptool-tok">22k tok</span>
+          <span class="ptool-row-ctl"><button type="button" class="ri-tool-anchor"><span class="ri-anchor-glyph">&lt;&gt;</span> R4</button></span>
+        </div>
+      </div>
+      <div data-prn="5">
+        <div class="ptool-line">
+          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg></span>
+          <span class="ptool-text">grep 3 patterns: /summary auto default; /reasoning summaries; /prefetch/</span>
+          <span class="ptool-tok">996 tok</span>
+          <span class="ptool-row-ctl"><button type="button" class="ri-tool-anchor"><span class="ri-anchor-glyph">&lt;&gt;</span> R5</button></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

@@ -837,7 +837,7 @@ function _renderModelRoutingProvidersTab(list) {
       inherited: (context && context.inherited) || {},
       sharedWith: (context && context.sharedWith) || 0,
     }),
-    route: async function(deployment, wireId) {
+    route: async function(deployment, wireId, removedHeaders) {
       var offering = (_stgModelRouting.offerings || []).find(function(row) {
         return row.offering_id === deployment.offering_id;
       });
@@ -848,6 +848,11 @@ function _renderModelRoutingProvidersTab(list) {
       var providerContext = _modelRoutingProviderContext(access.provider_id);
       if (!providerContext) return;
       var plans = await _planV2RequestNameFaces([wireId], providerContext);
+
+      var required = Object.keys((plans[wireId] || {}).extra_headers || {}).filter(function(name) {
+        return (removedHeaders || []).some(function(removed) { return removed.toLowerCase() === name.toLowerCase(); });
+      });
+      if (required.length) throw new Error(t('settings.requestNameSelectorRequired', { names: required.join(', ') }));
       var connectionId = _ensureV2FaceConnection(providerContext, plans[wireId]);
       if (connectionId && deployment.connection_id !== connectionId) {
         deployment.connection_id = connectionId;
@@ -1513,6 +1518,8 @@ function _ensureV2FaceConnection(context, plan) {
   var connectionId;
   if (existing) {
     connectionId = existing.connection_id;
+
+    if (existing.enabled === false) throw new Error(t('settings.requestNameConnectionDisabled', { name: existing.display_name || existing.connection_id }));
     // Fill only what the face declares and the row lacks: an owner-edited
     // protocol/profile is a deliberate override, not a gap.
     if (!existing.protocol && plan.protocol) existing.protocol = plan.protocol;
@@ -1602,7 +1609,13 @@ async function _addV2Alias(providerId, offeringId) {
   if (!draft) return;
   var wireModelId = String(draft.wireModelId || '').trim();
   var faces = await _planV2RequestNameFaces([wireModelId], context);
-  var faceConnectionId = _ensureV2FaceConnection(context, faces[wireModelId]);
+  var faceConnectionId;
+  try {
+    if (!faces[wireModelId] && connection.row.enabled === false) {
+      throw new Error(t('settings.requestNameConnectionDisabled', { name: connection.row.display_name || connection.row.connection_id }));
+    }
+    faceConnectionId = _ensureV2FaceConnection(context, faces[wireModelId]);
+  } catch (error) { showAlert(error.message); return; }
   if (faceConnectionId) connection = { row: { connection_id: faceConnectionId } };
   var targetConnection = (_stgModelRouting.connections || []).find(function(row) {
     return row.connection_id === connection.row.connection_id;

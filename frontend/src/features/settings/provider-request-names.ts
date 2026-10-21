@@ -146,7 +146,7 @@ export function mountRequestNameEditors(root: HTMLElement, ports: {
     context: { inherited: Record<string, string>; sharedWith: number },
   ) => Promise<RequestNameDraft | null>;
   /** Bind the row to the Connection that serves its (possibly renamed) wire. */
-  route?: (deployment: { deployment_id: string; offering_id: string; wire_model_id: string }, wireId: string) => Promise<void> | void;
+  route?: (deployment: { deployment_id: string; offering_id: string; wire_model_id: string }, wireId: string, removedHeaders: string[]) => Promise<void> | void;
   alert: (message: string) => void;
   render: () => void;
 }): void {
@@ -185,7 +185,7 @@ export function mountRequestNameEditors(root: HTMLElement, ports: {
           // sending it from the Connection"; a value that still matches the
           // Connection stays there rather than being duplicated as an
           // override. The panel refuses the removal on a shared Connection,
-          // and this re-checks because routing runs between the two.
+          // and this re-checks the current owner draft before routing.
           const write = resolveRequestNameHeaders(
             applied.headers,
             connectionHeadersFor(draft, sourceConnectionId));
@@ -199,6 +199,14 @@ export function mountRequestNameEditors(root: HTMLElement, ports: {
             if (others > 0) throw new Error(t('settings.requestNameInheritedShared', {
               count: others, names: write.removed.join(', '),
             }));
+          }
+          // Routing preflights required selectors and disabled connections
+          // before it stages anything. Refusal must not rename or delete
+          // headers in the owner's draft.
+          if (ports.route) await ports.route(row, applied.wireModelId, write.removed);
+          if (draft !== ports.document() || row.wire_model_id !== old) return;
+          if (write.removed.length) {
+            const source = draft.connections.find(item => item.connection_id === sourceConnectionId)!;
             const headers: Record<string, string> = {
               ...(source.extra_headers ?? {}),
             };
@@ -208,10 +216,6 @@ export function mountRequestNameEditors(root: HTMLElement, ports: {
           // Headers are edited in place: renameRequestName owns the id (grants,
           // duplicates, evidence reset), this owns the selectors.
           renameRequestName(draft, id, applied.wireModelId);
-          // Renaming onto a face-pinned wire must also move the row there;
-          // otherwise the renamed id stays on a Connection that cannot serve
-          // it, and the id change looks like a broken save.
-          if (ports.route) await ports.route(row, applied.wireModelId);
           const finalWrite = resolveRequestNameHeaders(
             applied.headers, connectionHeadersFor(draft, row.connection_id));
           if (Object.keys(finalWrite.deployment).length) {

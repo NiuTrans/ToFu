@@ -2,6 +2,32 @@
 
 This document defines the current browser rendering invariants. The storage and wire authority is [CONVERSATION_SYNC_V3.md](contracts/CONVERSATION_SYNC_V3.md); the frontend module boundary is [FRONTEND_ARCHITECTURE.md](FRONTEND_ARCHITECTURE.md).
 
+
+## Navigation operation ownership and request-name refusals
+
+**Problem:** a head advance or conversation switch during a rank jump invalidated
+publication but also prevented its busy cleanup, permanently disabling navigation.
+**Decision:** exact navigation serializes reads and jumps through one identity-owned
+busy slot, independent of the publication generation. Both operations coalesce
+refresh demand; only the slot owner releases it and starts the latest queued page.
+Stale read/hydration results never scroll or publish. **Rejected:** resetting busy
+on every update permits overlapping operations; generation-gated cleanup leaks the
+slot. Specs: `tests/turn_navigation.test.cjs` and
+`tests/visual/test_visual_exact_round_navigation.py`.
+
+**Problem:** deleting an inherited template-face selector appeared successful but
+routing silently restored it; adding a face alias could choose an owner-disabled
+Connection and report success. **Decision:** route planning refuses removal of a
+required template selector visibly, before editing identity, headers or route.
+Ordinary unshared inherited headers remain removable; shared removals remain
+refused. A matching disabled face is refused with an explicit instruction to enable
+it in Connections; no silent enable or duplicate enabled face bypasses owner intent.
+Validation and duplicate checks precede route staging, so refused edits leave the
+owner draft unchanged. **Rejected:** silently restoring selectors hides a refused
+edit; silently enabling connections overrides an owner decision. Specs:
+`tests/request_name_edit_outcomes.test.cjs` and
+`tests/providers/test_provider_request_names_browser.py`.
+
 ## Repaired tool arguments
 
 Problem: a repair badge alone hid which argument correction was applied. Decision: the shared tool-result presenter shows unique repair categories beside the existing badge, with three visible chips and remaining categories in one counted disclosure tooltip. Unknown categories retain their escaped machine name. A failed tool keeps the warning style and never claims a successful fix. Alternatives rejected: duplicating labels across retained renderers or treating argument repair as proof of tool success.
