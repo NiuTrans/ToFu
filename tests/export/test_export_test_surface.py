@@ -355,3 +355,53 @@ def test_optional_sibling_never_waives_mandatory_import(tmp_path, optional_impor
     })
     with pytest.raises(ExportTestSurfaceError, match=r'scripts\.missing_helper'):
         _verify_exported_test_surface(target, source)
+
+
+@pytest.mark.parametrize('helper', (
+    'scripts/fetch_chatgpt_share.py',
+    'scripts/inspect_native_crash.py',
+    'scripts/trace_experiment_reads.py',
+    'scripts/tofudb_profile_report.py',
+    'benchmarks/search_html_reference.py',
+    'benchmarks/search_relevance.py',
+    'benchmarks/tofudb_context_progression.py',
+))
+@pytest.mark.parametrize('mode', ('internal', 'opensource'))
+def test_portable_diagnostic_test_dependencies_follow_retained_source_policy(
+        tmp_path, monkeypatch, helper, mode):
+    import export_pkg._export_core as core
+    from export_pkg import _lists, _state
+    from export_pkg._verify import _verify_exported_test_surface
+
+    source = tmp_path / 'source'
+    path = source / helper
+    path.parent.mkdir(parents=True)
+    path.write_text('VALUE = 1\n')
+    target = tmp_path / mode
+    (target / 'tests').mkdir(parents=True)
+    module = helper.removesuffix('.py').replace('/', '.')
+    (target / 'tests/test_portable.py').write_text(f'import {module}\n')
+    (target / '.gitignore').write_text('/scripts/*\n/benchmarks/*\n')
+    # Select only this diagnostic from the real authority; an absent entry
+    # must remain a collection failure, never become a fixture exemption.
+    monkeypatch.setattr(core, '_OPENSOURCE_KEEP_FILES',
+                        {helper} & _lists._OPENSOURCE_KEEP_FILES)
+    monkeypatch.setattr(core, 'ROOT', source)
+    monkeypatch.setattr(_state, '_EXPORT_SOURCE_SHA', None)
+    core._restore_export_kept_files(target, mode)
+    _verify_exported_test_surface(target, source)
+    assert (target / helper).read_text() == 'VALUE = 1\n'
+    assert not (target / 'export_pkg').exists()
+
+
+def test_public_installer_contract_does_not_require_private_export_toolchain(tmp_path):
+    from pathlib import Path
+    from export_pkg._lists import ROOT
+    from export_pkg._verify import _verify_exported_test_surface
+
+    target = tmp_path / 'public'
+    test = Path('tests/installer/test_install_carried_user_state.py')
+    (target / test).parent.mkdir(parents=True)
+    (target / test).write_bytes((ROOT / test).read_bytes())
+    _verify_exported_test_surface(target, ROOT)
+    assert not (target / 'export_pkg').exists()

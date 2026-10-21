@@ -65,15 +65,8 @@ _EXTRA_KEEPERS = {
     # The internal canvas adapter is excluded publicly; keep its offline tests
     # private with that owner rather than publishing a dangling provider import.
     'tests/evaluations/test_yourprovider_sandbox_submit_watch.py',
-    # Maintainer-only diagnostics; they do not participate in public builds.
-    'scripts/inspect_native_crash.py',
-    'scripts/tofudb_profile_report.py',
-    'scripts/trace_experiment_reads.py',
-
-    # Installed share-export skill helper, not a shipped runtime/build input.
-    # Retain it privately; adding it to public keep-files would expand the
-    # publication surface without an application consumer.
-    'scripts/fetch_chatgpt_share.py',
+    # Portable diagnostic dependencies are owned by the public keep-list;
+    # this set contains only deliberately private source.
     'export.py',                                 # export infra (sanitization patterns)
     'CLAUDE.md',                                 # agent-rules doc (stripped from public)
     'JOURNAL.md',                                # internal evolution journal (public history ships via CHANGELOG.md)

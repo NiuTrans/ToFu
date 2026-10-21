@@ -329,7 +329,10 @@ tags are not moved to repair metadata drift.
 
 Public build/test closure — the restored helper set is explicit and includes
 transitive generator and receipt-assessment imports required by shipped tests.
-Each added helper passes the public secret scan.
+Each added helper passes the public secret scan. Portable diagnostics are
+restored as source only, never together with captured measurements or user data.
+Installer tests run against both shared tiers; only the private export/installer
+coordination check skips when its deliberately unshipped export package is absent.
  Internal-provider acceptance
 tests stay with their excluded adapters; portable measurement and qualification
 helpers remain available to the public tests that exercise them.

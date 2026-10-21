@@ -20,8 +20,6 @@ from pathlib import Path
 
 import pytest
 
-from export_pkg._internal import _SKILL_STATE_ROOTS
-
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,8 +38,11 @@ def _carried_block() -> str:
 
 def test_installer_verifies_every_carried_skill_root():
     """Each root the export restores must be counted by the installer."""
+    internal_export = pytest.importorskip(
+        'export_pkg._internal',
+        reason='private export/installer coordination is not shipped')
     block = _carried_block()
-    for src_rel, dst_rel in _SKILL_STATE_ROOTS:
+    for src_rel, dst_rel in internal_export._SKILL_STATE_ROOTS:
         assert src_rel == dst_rel, (
             f'{src_rel} is restored to {dst_rel}; the verifier reads the '
             f'destination path, so the two must agree')
