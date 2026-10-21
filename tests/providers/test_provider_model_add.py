@@ -864,16 +864,6 @@ def test_probe_outcomes_observational_apply_only_removes_grants(tmp_path, status
 
 @pytest.mark.skipif(not NODE, reason="node not installed")
 def test_manual_alias_has_explicit_identity_but_no_probe_or_switch(tmp_path):
-    out = _run_harness(tmp_path, r"""
-  global.showPrompt = async () => 'esm-manual';
-  await _addV2Alias('p1', 'off-esm');
-  out.deployment = JSON.parse(JSON.stringify(global._stgModelRouting.deployments.at(-1)));
-""")
-    assert out['deployment']['wire_model_id'] == 'esm-manual'
-    assert out['deployment']['identity_confidence'] == 'high'
-    assert out['deployment']['probe_status'] == 'unprobed'
-    assert 'enabled' not in out['deployment']
-def test_manual_alias_has_explicit_identity_but_no_probe_or_switch(tmp_path):
     """A manually added request name is a plain identity, not a state change.
 
     Driven through the request-name PANEL (the wire id plus the headers that

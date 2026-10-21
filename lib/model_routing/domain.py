@@ -21,7 +21,7 @@ from lib.model_catalog._creator_identity import (
 )
 from lib.model_info import release_date as _release_date
 from lib.pricing import pricing_for_model as _pricing_for_model
-from lib.provider.provider_headers import sanitise_extra_headers
+from lib.provider.provider_headers import is_credential_header, sanitise_extra_headers
 
 
 CONTRACT_VERSION = "tofu.model-routing/v2"
@@ -834,9 +834,9 @@ def normalize_document(
         # Per-request-name routing headers. A gateway may expose one wire
         # spelling only under a serving-provider selector while another
         # spelling of the SAME Offering needs none, so the selector cannot
-        # live on the shared Connection. Same sanitizer as Connection headers:
-        # credential-named and transport-reserved names belong on the
-        # encrypted Credential, never in an inspectable document field.
+        # live on the shared Connection. Keep Connection's sanitizer contract,
+        # then reject credential-named Deployment selectors: those belong
+        # on the encrypted Credential, never in an inspectable field.
         deployment_headers, deployment_header_error = sanitise_extra_headers(
             deployment.get("extra_headers"))
         if deployment_header_error:
@@ -844,6 +844,13 @@ def normalize_document(
                 deployment_header_error,
                 field=f"deployments[{index}].extra_headers",
             )
+        for name in deployment_headers:
+            if is_credential_header(name):
+                raise ModelRoutingError(
+                    f"Deployment header {name!r} carries credential material; "
+                    "store it on the encrypted Credential instead",
+                    field=f"deployments[{index}].extra_headers",
+                )
         if deployment_headers:
             deployment["extra_headers"] = deployment_headers
         else:
