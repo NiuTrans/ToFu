@@ -31,6 +31,7 @@ pytestmark = pytest.mark.api
     (8, 'tool_recovery_requests_legacy'), (8, 'tool_recovery_requests_v2'),
     (8, 'tool_recovery_status_httpx_legacy'), (8, 'tool_recovery_status_httpx_v2'),
     (8, 'tool_recovery_status_requests_legacy'), (8, 'tool_recovery_status_requests_v2'),
+    (8, 'tool_recovery_fetch_legacy'), (8, 'tool_recovery_fetch_v2'),
     (2, 'measure_ordered'), (2, 'measure_parallel'), (8, 'measure_ordered'), (8, 'measure_parallel')])
 def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path, count, mode, record_property, monkeypatch):
     source = os.environ.get('TOFU_NATIVE_WORKER_TEST_ARCHIVE')
@@ -50,9 +51,22 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     monkeypatch.setattr(threading.Thread, 'start', start)
     owner = task()
     recover_tool = mode.startswith('tool_recovery_')
-    recover_status = '_status_' in mode
+    recover_fetch = '_fetch_' in mode
+    recover_status = '_status_' in mode or recover_fetch
     status_requests = []
     status_code = 429 if '_requests_' in mode else 503
+    failure_requests = 3 if recover_fetch else 1
+    if recover_fetch:
+        import tofu_search.config as fetch_config
+        from tofu_search.fetch import core as fetch_core
+        from lib.tasks_pkg.handlers.search import _core as search_core
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy',
+                    'https_proxy', 'all_proxy', 'TOFU_SEARCH_PROXY_URL'):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setattr(fetch_config, '_global_config', fetch_config.SearchConfig(
+            proxy_url='', proxy_dual_attempt=False, block_private_addresses=False))
+        monkeypatch.setattr(fetch_core, '_try_browser_fetch', lambda *_a, **_kw: None)
+        monkeypatch.setattr(search_core, 'filter_web_content', lambda content, **_kw: content)
     expected_count = count + int(recover_tool)
     owner['config']['tools']['resultEnvelope'] = 'v2' if mode == 'v2' or mode.endswith('_v2') else 'legacy'
     definitions = [{'type': 'function', 'function': {'name': 'fetch_url', 'parameters': {'type': 'object'}}}]
@@ -88,6 +102,10 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
             assert releases[index].wait(10), 'test did not release its owned read'
             if mode.startswith('measure_'): time.sleep(.04)
             row['_cacheableResult'] = False  # Both lanes perform identical live work.
+            if recover_fetch and call_id in {'original-0', 'recovered-0'}:
+                from lib.tasks_pkg.handlers.search._handlers import _handle_fetch_url
+                return _handle_fetch_url(task, tc, name, call_id, args, rn, row,
+                                         task['config'], None, False)
             source_result = None
             if recover_status and call_id in {'original-0', 'recovered-0'}:
                 import httpx
@@ -121,11 +139,12 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
         def log_message(self, *_args): pass
         def do_GET(self):
             status_requests.append(self.path)
-            first = len(status_requests) == 1
+            first = len(status_requests) <= failure_requests
             body = b'' if first else b'evidence:recovered-0'
             self.send_response(status_code if first else 200)
             if first:
                 self.send_header('Retry-After', '0')
+            self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -144,6 +163,9 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     server.daemon_threads = False  # server_close joins provider and source handlers.
     thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01})
     thread.start()
+    if recover_fetch:
+        source_arguments = json.dumps({'url': f'http://127.0.0.1:{server.server_port}/source.json'})
+        calls[0]['function']['arguments'] = retry['function']['arguments'] = source_arguments
     async def run(executor):
         budget = Budget(1, 32 << 20, 1 << 20, 1 << 20, 3)
         image = NativeArchiveImage(archive=archive, sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
@@ -257,4 +279,5 @@ def test_installed_parallel_tools_keep_exact_duplicate_results_and_join(tmp_path
     record_property('active_tools_after_join', len(entered) - len(exited))
     assert not owner.get('_activeToolContexts') and '_pending_tool_result_envelopes' not in owner
     assert len(startup_faults) == int(mode == 'startup_recovery')
-    assert status_requests == (['/source', '/source'] if recover_status else [])
+    source_path = '/source.json' if recover_fetch else '/source'
+    assert status_requests == ([source_path] * (failure_requests + 1) if recover_status else [])

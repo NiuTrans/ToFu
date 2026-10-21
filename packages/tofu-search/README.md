@@ -76,6 +76,12 @@ stays dependency-free when used standalone.
 - **File assets**: text-based assets (SVG, JSON, XML, YAML, CSS, JS, source
   code) are returned as their raw source by `fetch_page_content`; binary
   assets can be downloaded with the size-/SSRF-guarded `fetch_url_bytes`.
+- **Fetch failure diagnostics**: `fetch_page_content(url, diag=diagnostics)`
+  still returns text or `None`. The mapping carries `reason`/`detail`, plus
+  `http_status` and optional `retry_after` on HTTP failure. `retry_after` is
+  raw response data capped at 64 characters, not an instruction or replay
+  permission. The fetch-owned fields are cleared at the next call. Consumers
+  can explain an unavailable source without downloading it again as a file.
 - **Citation verification**: check a bibliography for hallucinated references
   against CrossRef / arXiv / Semantic Scholar, with zero LLM calls.
 - **Site readers**: pluggable per-domain handlers that read a site through its

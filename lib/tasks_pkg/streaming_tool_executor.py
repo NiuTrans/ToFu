@@ -1043,6 +1043,9 @@ class StreamingToolAccumulator:
                 # from executor, which streaming_tool_executor also uses.)
                 from lib.tasks_pkg.handlers.search._core import _fetch_url_one
                 from lib.tasks_pkg.handlers.search._display import _format_fetch_display
+                from lib.tasks_pkg.handlers.search._presentation import (
+                    fetch_failure_text, join_fetch_results,
+                )
                 from lib.tasks_pkg.tool_display import _short_url
                 user_question = self._task.get('lastUserQuery', '')
                 from lib.search.search_bridge import bind_search_browser
@@ -1069,6 +1072,7 @@ class StreamingToolAccumulator:
                     parts = [None] * len(url_list)
                     display_results = [None] * len(url_list)
                     image_groups = [()] * len(url_list)
+                    fetched = [False] * len(url_list)
                     source_truncated = False
                     def _worker(target_url):
                         if self._task.get('aborted'):
@@ -1109,23 +1113,19 @@ class StreamingToolAccumulator:
                                 }
                             source_truncated |= bool(item.get('source_truncated'))
                             page_content = item.get('page_content')
+                            fetched[idx] = bool(page_content)
                             filtered_chars = item.get('filtered_chars', 0)
-                            error_msg = item.get('error_msg')
                             if page_content:
                                 parts[idx] = (f"Content from {u} "
                                               f"({filtered_chars:,} chars):\n\n{page_content}")
                             else:
-                                parts[idx] = (f"Failed to fetch {u}."
-                                              + (f' ({error_msg})' if error_msg else ''))
+                                parts[idx] = fetch_failure_text(item, task=self._task)
                             display_results[idx] = _format_fetch_display(item, _short_url)
                             image_groups[idx] = tuple(item.get('image_contents') or ())
                     formatted = _ContentWithDisplayResults(
-                        '\n\n'.join(p for p in parts if p),
+                        join_fetch_results([p for p in parts if p]),
                         [d for d in display_results if d is not None],
-                        cacheable=all(
-                            part is not None
-                            and not part.startswith('Failed to fetch ')
-                            for part in parts),
+                        cacheable=all(fetched),
                     )
                     if source_truncated:
                         formatted.result_producer_metadata = {'truncated': True}
@@ -1143,7 +1143,6 @@ class StreamingToolAccumulator:
                         url, user_question, fetch_reason=fetch_reason)
                 page_content = item.get('page_content')
                 filtered_chars = item.get('filtered_chars', 0)
-                error_msg = item.get('error_msg')
                 if page_content:
                     formatted = _ContentWithDisplayResults(
                         f"Content from {url} "
@@ -1157,8 +1156,7 @@ class StreamingToolAccumulator:
                         formatted.image_contents = images
                     return formatted
                 return _ContentWithDisplayResults(
-                    f"Failed to fetch {url}."
-                    + (f' ({error_msg})' if error_msg else ''),
+                    fetch_failure_text(item, task=self._task),
                     [_format_fetch_display(item, _short_url)],
                     cacheable=False,
                 )
