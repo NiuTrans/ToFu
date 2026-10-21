@@ -8939,7 +8939,7 @@ const _toolGroupPorts = {
   markdown: (content) => renderMarkdown(content),
   cleanTranslation: (content) => typeof stripNoTranslateTags === 'function' ? stripNoTranslateTags(content) : content,
   renderLine: (round, searching) => _renderUnifiedToolLine(round, searching),
-  renderSwarm: (round, allRounds) => typeof _buildSwarmPanelHTML === 'function' ? _buildSwarmPanelHTML(round, allRounds) : null,
+  renderSwarm: (round, allRounds, inspectorAnchorHtml) => typeof _buildSwarmPanelHTML === 'function' ? _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) : null,
   renderProgram: (round) => programExecutionCardHtml(round, (key, _fallback, values) => t(key, values)),
   debugEnabled: () => typeof _featureFlags !== 'undefined' && !!_featureFlags.debug_mode,
   taskIdForRound: (round) => typeof _riTaskIdForRound === 'function' ? _riTaskIdForRound(round) : '',
@@ -23675,6 +23675,12 @@ function _recoverSwarmAgents(round, allRounds) {
 function _swarmToggleClass(el, selector, cls) {
   const target = el && typeof el.closest === "function" ? el.closest(selector) : null;
   if (target) {
+    /* The debug anchor lives inside the swarm header; a click on it must open
+     * the inspector, not collapse the panel. */
+    if (cls === 'sw-collapsed'
+        && typeof event !== 'undefined' && event && event.target
+        && typeof event.target.closest === 'function'
+        && event.target.closest('.ri-tool-anchor')) return;
     const open = target.classList.toggle(cls);
     if (cls === 'sw-a-open') target.setAttribute('data-sw-reader-open', String(open));
   }
@@ -23696,7 +23702,7 @@ async function _swarmCopyAgentId(el, evt) {
     el.title = t('convLifecycle.copyFailed');
   }
 }
-function _buildSwarmPanelHTML(round, allRounds) {
+function _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) {
   /* Live path: `_swarmAgents` is populated from swarm_* SSE events.
      Reload path: that field is gone, so recover agents from the persisted
      handle JSON + sibling result rounds — otherwise the completed panel
@@ -24124,6 +24130,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
       `<div class="sw-header-right">` +
         statusPill +
         (elapsed ? `<span class="sw-header-timer"${tickerAttr}>${elapsed}</span>` : "") +
+        (inspectorAnchorHtml || "") +
         `<span class="sw-chevron">${_SW_SVG.chevron}</span>` +
       `</div>` +
     `</div>` +

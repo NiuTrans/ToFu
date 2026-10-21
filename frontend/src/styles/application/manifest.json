@@ -29,11 +29,7 @@
     },
 
     { "path": "32-agent-sidebar-dock.css", "responsibility": "Keyed background-agent dock and responsive right-hand rail" },
-    {
-      "path": "02-inspector-tool-anchors.css",
-      "responsibility": "inspector tool anchors",
-      "legacyTokenSha256": "bb37f0b339cf0c654e11894d578da4b3f84db0bb43e4a3bb24b3058a03672bcc"
-    },
+    { "path": "02-inspector-tool-anchors.css", "responsibility": "inspector tool anchors" },
     {
       "path": "02-composer-geometry.css",
       "responsibility": "composer geometry",

@@ -1717,7 +1717,7 @@ summary.thinking-header::-webkit-details-marker{display:none}
    each believing they owned the same edge, so they printed on top of
    each other. `margin-left:auto` now belongs to this wrapper ALONE.
    Do not re-add `margin-left:auto` to any descendant. */
-.ptool-row-ctl{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}
+.ptool-row-ctl{display:inline-flex;align-items:center;gap:var(--space-2);margin-left:auto;flex-shrink:0}
 .ptool-row-ctl:empty{display:none}
 
 /* Debug entry per tool row — ONE control opening ONE view: the message state
@@ -1725,13 +1725,10 @@ summary.thinking-header::-webkit-details-marker{display:none}
    them). Always visible: a hover-only control is a control the user never
    discovers. Quiet by default so it does not compete with the tool content,
    full strength on hover/focus. */
-.ri-tool-anchor{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;line-height:1.5;color:var(--text-tertiary);background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;flex-shrink:0;opacity:.6;transition:opacity .15s ease,color .15s ease,border-color .15s ease}
+.ri-tool-anchor{display:inline-flex;align-items:center;gap:var(--space-1);padding-block:var(--control-edge-inset);padding-inline:var(--space-2);font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;line-height:1.5;color:var(--text-tertiary);background:none;border:1px solid var(--border);border-radius:var(--radius-xs,8px);cursor:pointer;flex-shrink:0;opacity:.6;transition:opacity .15s ease,color .15s ease,border-color .15s ease}
 .ri-tool-anchor:hover,.ri-tool-anchor:focus-visible{opacity:1;color:var(--accent);border-color:var(--accent)}
 .ri-tool-anchor svg{display:block}
 .ri-tool-anchor-label{letter-spacing:.02em}
-/* Swarm panels carry no shared row header, so their entry gets its own
-   right-aligned strip UNDER the panel — a real block in normal flow. */
-.ri-tool-anchor-row{display:flex;justify-content:flex-end;margin:2px 10px var(--space-1)}
 /* ── COMPOSER LEFT-EDGE LOCK (2026-08-03 owner report) ──────────────────
  * The composer used to be centred in the pane (margin:0 auto), ~(band−820)/2
  * RIGHT of the avatar column in every roomy state — the input box "swam"
@@ -16705,21 +16702,27 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .sw-a-error .sw-a-phase-pill{color:#b23b2e;background:rgba(192,57,43,0.10);}
 
 /* ═══════════════════════════════════════════
-   ★ Tofu swarm PANEL — un-box the dashboard inside its round card
-   Root cause of the "white frame around a beige slab": the ptool redesign
-   (2026-07-08) made each round ONE #FFFDF9 card, but the swarm dashboard
-   still drew itself as a SECOND, darker filled card inside it (bg-secondary
-   + border + shadow, inset by margin) — boxes-in-boxes. Tofu now treats
-   .sw-panel as chrome-less content of its .ptool-turn: the round card is
-   the only frame; status reads from title/pill/progress accents in the
-   wagashi palette (kinako active / matcha complete / azuki failed), and
-   the dark-theme neon + white-alpha fills (invisible on cream) become
-   warm ink steps. Dark/light themes are untouched.
-   ═══════════════════════════════════════════ */
-[data-theme="tofu"] .sw-panel{background:transparent;border:none;box-shadow:none}
-[data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:2px 0}
-[data-theme="tofu"] .sw-panel.sw-active{border:none;box-shadow:none;animation:none}
-[data-theme="tofu"] .sw-header:hover{background:rgba(143,81,38,0.07)}
+   ★ Tofu swarm PANEL — a real paper card inside the conversation surface
+   The previous build (2026-07-08) un-boxed the dashboard entirely
+   (transparent, border-less, full-bleed), which left the header a sharp
+   beige slab flush against the paper — no boundary, no corner radius, and
+   the debug anchor stranded on its own right-aligned row underneath.
+   Tofu now draws .sw-panel as ONE quiet paper card: hairline border,
+   --radius-sm corners, one soft clay shadow; status still reads from
+   title/pill/progress accents in the wagashi palette (kinako active /
+   matcha complete / azuki failed). Dark/light themes are untouched. */
+[data-theme="tofu"] .sw-panel{
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);
+  overflow:hidden;
+}
+[data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:var(--space-1) 0}
+[data-theme="tofu"] .sw-panel.sw-active{border-color:#E2D5BB;box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);animation:none}
+[data-theme="tofu"] .sw-header{border-bottom:1px solid rgba(196,149,106,0.16)}
+[data-theme="tofu"] .sw-panel.sw-collapsed .sw-header{border-bottom:none}
+[data-theme="tofu"] .sw-header:hover{background:rgba(143,81,38,0.05)}
 [data-theme="tofu"] .sw-header-icon{color:#B8884A}
 [data-theme="tofu"] .sw-complete .sw-header-icon{color:#5E8A50}
 [data-theme="tofu"] .sw-header-title{color:#7A441F}
