@@ -3,6 +3,7 @@
  * Types only; generated DTOs remain wire authority.
  * Entry: presentation type exports.
  * Dependencies: conversation-sync.generated, errors, transient-turn, turn-finish. */
+import type { RecordedReasoningEffort } from '../turn-serving-route';
 import type { ToolEffectNotice } from '../tool-effect-presentation';
 import type { AutomationManagementPresentation } from '../../../api/automation.generated';
 import {
@@ -342,7 +343,18 @@ export type ConversationBlockViewModel =
   | QueueStatusBlockViewModel
   | LiveStatusBlockViewModel;
 
+/** Display-only observations. A recorded control is not hidden reasoning text
+ * or a claim that an in-flight provider used the same effort. */
+export interface TurnReasoningViewModel {
+  effort: RecordedReasoningEffort | null;
+  tokens: number | null;
+  tokensSource: 'turn' | 'last-round' | null;
+  tokensLowerBound: boolean;
+  summary: 'readable' | 'unavailable' | 'not-received-yet' | 'not-received' | null;
+}
+
 export interface TurnMetadataViewModel {
+  reasoning?: TurnReasoningViewModel;
   taskTimePresentations?: ReadonlyArray<AutomationManagementPresentation>;
   model?: string;
   preset?: string;

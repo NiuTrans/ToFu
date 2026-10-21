@@ -304,3 +304,24 @@
 .conversation-surface .conversation-action-state[data-state="background"] {
   color: var(--text-tertiary);
 }
+
+/* Recorded controls and metering are information, never an empty disclosure.
+ * Keep the shared header row wrapping/selectable in desktop and narrow panes. */
+.conversation-surface .conversation-turn-header:has(.conversation-reasoning-status) {
+  flex-wrap: wrap;
+}
+.conversation-reasoning-status {
+  display: flex;
+  flex: 0 1 100%;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.conversation-reasoning-summary {
+  font-weight: var(--weight-medium);
+}

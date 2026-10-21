@@ -8,6 +8,10 @@
   "balance_url": "https://platform.openai.com/settings/organization/billing/overview",
   "protocol": "responses",
   "responses_profile": "openai",
+
+  "inference_profile": {
+    "features": {"responses_reasoning_summary": "supported"}
+  },
   "retired_model_ids": [
     "gpt-5.6-luna-pro",
     "gpt-5.6-sol-pro",

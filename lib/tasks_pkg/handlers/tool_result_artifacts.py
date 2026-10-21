@@ -1,7 +1,7 @@
 """Handlers for owner-scoped range/search access to large tool results.
 
 Single-call arguments remain wire-compatible. Native ``reads`` / ``searches``
-batches execute through the shared bounded runner, isolate per-item failures,
+batches execute through the shared concurrent runner, isolate per-item failures,
 and return input-ordered results under one aggregate model-view token budget.
 Canonical query JSON and decoded program values retain the complete page.
 """
@@ -139,15 +139,69 @@ def _fit_one_result(fn_name, result, model, token_budget):
     return _fit_search_result(result, model, token_budget)
 
 
-def _fit_batch_to_budget(fn_name, results, model):
+def _fit_batch_to_budget(fn_name, results, model, *, refit=None):
     wrapper = {'status': 'ok' if all(x.get('status') == 'ok' for x in results) else 'partial_failure', 'items': results}
-    if _model_tokens(fn_name, wrapper, model) > _RESPONSE_TOKEN_BUDGET:
-        share = max(1, (_RESPONSE_TOKEN_BUDGET - 64) // max(1, len(results)))
-        fitted = [_fit_one_result(fn_name, item, model, share) for item in results]
+    total = _model_tokens(fn_name, wrapper, model)
+    if total > _RESPONSE_TOKEN_BUDGET:
+        demands = [_model_tokens(fn_name, item, model) for item in results]
+        # Reserve measured framing plus room for status/projection changes.
+        # Small pages release their unused share; failures remain immutable.
+        remaining = _RESPONSE_TOKEN_BUDGET - max(0, total - sum(demands)) - 64
+        remaining -= sum(demand for item, demand in zip(results, demands)
+                         if item.get('status') != 'ok')
+        pending = sorted((i for i, item in enumerate(results)
+                          if item.get('status') == 'ok'), key=demands.__getitem__)
+        requests = []
+        for position, index in enumerate(pending):
+            share = max(1, remaining // (len(pending) - position))
+            granted = min(demands[index], share)
+            remaining -= granted
+            if granted < demands[index]:
+                requests.append((index, granted, results[index]))
+        if refit is None:
+            replacements = [_fit_one_result(fn_name, item, model, share)
+                            for _, share, item in requests]
+        else:
+            replacements = run_batch_concurrent(
+                requests, lambda request: refit(*request),
+                max_workers=_MAX_BATCH_WORKERS, tag='ToolArtifactFit')
+        fitted = list(results)
+        for (index, _, item), replacement in zip(requests, replacements):
+            fitted[index] = replacement if replacement is not None else {
+                **{key: item[key] for key in ('index', 'artifactRef', 'query') if key in item},
+                'status': 'error',
+                'error': {'code': 'artifact_store_unavailable', 'retryable': True}}
         wrapper = {**wrapper, 'items': fitted, 'status': 'ok' if all(x.get('status') == 'ok' for x in fitted) else 'partial_failure'}
         if _model_tokens(fn_name, wrapper, model) > _RESPONSE_TOKEN_BUDGET:
             return _serialize(_metadata_refusal())
     return _serialize(wrapper)
+
+
+def _fit_source_result(fn_name, arguments, result, *, user_id, repository,
+                       model, token_budget, task):
+    """Refit only through the original source cursor, using observed demand."""
+    identity = {'index': result['index']} if 'index' in result else {}
+    while result.get('status') == 'ok':
+        fitted = _fit_one_result(fn_name, result, model, token_budget)
+        if fitted.get('status') == 'ok':
+            return fitted
+        is_read = fn_name == 'read_tool_artifact'
+        content = result.get('content') or ''
+        if is_read and len(content) <= 1:
+            return fitted
+        extent = (len(content.encode('utf-8')) if is_read
+                  else len(result.get('items') or []))
+        source_limit = arguments.get('limit', 8192 if is_read else 8)
+        smaller_limit = min(source_limit // 2, extent // 2)
+        if smaller_limit < 1:
+            return fitted
+        arguments = {**arguments, 'limit': smaller_limit}
+        # A short EOF page must not be fetched unchanged at several limits.
+        # Keep whole matches/codepoints and let storage sign the new cursor.
+        result = {**_execute_one(
+            fn_name, arguments, user_id=user_id, repository=repository,
+            model=model, token_budget=None, task=task), **identity}
+    return result
 
 
 def _parse_cursor(arguments: dict) -> int | str:
@@ -195,7 +249,7 @@ def _error_result(exc: Exception) -> dict:
 
 def _execute_one(fn_name: str, arguments: dict, *, user_id: int,
                  repository: ToolResultArtifactRepository, model: str = '',
-                 token_budget: int = _RESPONSE_TOKEN_BUDGET,
+                 token_budget: int | None = _RESPONSE_TOKEN_BUDGET,
                  task=None) -> dict:
     try:
         cursor = _parse_cursor(arguments)
@@ -251,17 +305,11 @@ def _execute_one(fn_name: str, arguments: dict, *, user_id: int,
             # Echo the model's own handle so follow-up ranges keep quoting
             # the alias; nested child refs stay canonical digests.
             result['artifactRef'] = raw_ref
-        # Re-query the same immutable cursor with a smaller range/match count.
-        # The source owns both exact evidence and its signed continuation.
-        source_limit = arguments.get('limit', 8192 if fn_name == 'read_tool_artifact' else 8)
-        fitted = _fit_one_result(fn_name, result, model, token_budget)
-        if fitted.get('status') != 'ok' and source_limit > 1:
-            source_limit = max(1, source_limit // 2)
-            return _execute_one(fn_name, {**arguments, 'limit': source_limit},
-                                user_id=user_id, repository=repository,
-                                model=model, token_budget=token_budget,
-                                task=task)
-        return fitted
+        if token_budget is None:
+            return result
+        return _fit_source_result(
+            fn_name, arguments, result, user_id=user_id, repository=repository,
+            model=model, token_budget=token_budget, task=task)
     except Exception as exc:
         failed = _error_result(exc)
         failed['artifactRef'] = arguments.get('artifact_ref')
@@ -306,7 +354,7 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
                 calls,
                 lambda item: _execute_one(
                     fn_name, item, user_id=owner, repository=repository, model=model,
-                    token_budget=max(128, (_RESPONSE_TOKEN_BUDGET - 256) // len(calls)),
+                    token_budget=_RESPONSE_TOKEN_BUDGET,
                     task=task),
                 max_workers=_MAX_BATCH_WORKERS,
                 tag='ToolArtifact',
@@ -316,7 +364,11 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
                 "error": {"code": "artifact_store_unavailable",
                           "retryable": True},
             })} for index, result in enumerate(results)]
-            content = _fit_batch_to_budget(fn_name, indexed, model)
+            content = _fit_batch_to_budget(
+                fn_name, indexed, model,
+                refit=lambda index, budget, page: _fit_source_result(
+                    fn_name, calls[index], page, user_id=owner,
+                    repository=repository, model=model, token_budget=budget, task=task))
             batch_result = json.loads(content)
             succeeded = batch_result['status'] == 'ok'
         else:

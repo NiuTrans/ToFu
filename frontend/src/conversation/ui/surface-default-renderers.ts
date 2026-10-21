@@ -17,6 +17,8 @@ import { isNativeProgramGateway } from '../presentation/program-gateway-presenta
 
 import { programChildParentCallId } from '../presentation/tool-execution-groups';
 
+import { renderReasoningStatus } from './renderers/reasoning-status';
+
 function jsonText(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2) ?? '';
@@ -217,6 +219,7 @@ export function renderDefaultTurnHeader(
   node: HTMLElement,
   turn: ConversationTurnViewModel,
 ): void {
+  const reasoning = renderReasoningStatus(node, turn);
   node.replaceChildren();
   const actor = node.ownerDocument.createElement('span');
   actor.className = 'conversation-turn__actor';
@@ -224,7 +227,7 @@ export function renderDefaultTurnHeader(
   const status = node.ownerDocument.createElement('span');
   status.className = 'conversation-turn__status';
   status.textContent = turn.commandPending || turn.finish?.label || turn.status;
-  node.append(actor, status);
+  node.append(actor, status, ...(reasoning ? [reasoning] : []));
   appendTaskTimePresentations(node, turn);
 }
 

@@ -1,5 +1,40 @@
 # Automatic resource control
 
+## Artifact batch demand
+
+**Problem:** equally divided query budgets stranded spare capacity and repeated
+unchanged source pages. **Decision:** pages initially fit the full response
+allowance, then the batch allocates space by observed demand and re-queries only
+oversized successes. Initial reads and any fitting wave use the existing shared
+demand executor, join before returning, and do not overlap waves. Its worker
+parameter controls idle reuse, not active concurrency. There is no new resident
+pool, queue, cache or retention lifecycle. Existing batch/range limits and the
+7,000-token response allowance remain. **Alternatives rejected:** collecting all
+maximum raw pages first raised transient allocation without improving delivery;
+fixed shares lose usable evidence. Cursor and failure semantics live in
+[TOOL_RESULT_QUERY.md](contracts/TOOL_RESULT_QUERY.md).
+
+A paired 2026-10-21 disposable SQLite probe used the same retained sources and
+`o200k_base` counting for old/new handlers. Eight-item mixed batches, with one
+large page and seven tiny pages, reduced reads from 13 queries to 8 and delivered
+5,120 instead of 2,048 body bytes. Searches fell from 10 queries to 8 and delivered
+20 instead of 5 complete hits. Plain/canonical model views used 2,392–4,863 tokens
+afterward. More evidence intentionally consumes more model tokens: these are
+eliminated source queries and complete-page delivery, not whole-task cost or
+latency savings.
+
+The same mixed samples retained 9,213–18,426 serialized page bytes before batch
+fitting, versus 6,088–7,370 before; returned native JSON grew correspondingly
+through the existing retention owner. Three alternating measured runs after
+warm-up showed median Python traced peaks of 152–289 KB. A dense 16-read sample
+over 65,536-byte ranges kept 128 source queries, 512 returned body bytes per page
+and 5,719 model tokens in both versions. Its waiting-page payload grew from
+19,473 to 273,489 bytes and traced peak from 3.71 to 4.01 MB; the rejected raw-page
+variant reached 14.32 MB. These are serialized payload and Python allocation
+measurements, excluding native allocator/RSS and database/index overhead. Pages
+remain invocation-local; retained output follows the existing TTL/reclamation
+policy. Paired SQLite/TofuDB tests verify exact native capture and restart replay.
+
 ## Canonical Artifact query projections
 
 **Problem:** shorter query views require retained native JSON for program access

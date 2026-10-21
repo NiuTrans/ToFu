@@ -22,6 +22,8 @@ _FEATURE_PROTOCOLS = {
     'responses_cache_breakpoints': 'responses',
     'responses_safety_identifier': 'responses',
     'responses_reasoning_replay': 'responses',
+
+    'responses_reasoning_summary': 'responses',
     'responses_reasoning_mode': 'responses',
     'responses_text_verbosity': 'responses',
     'responses_image_detail': 'responses',
@@ -30,6 +32,7 @@ _FEATURE_PROTOCOLS = {
 }
 _SUBSCRIPTION_FEATURES = frozenset({
     'responses_reasoning_replay', 'responses_prompt_cache',
+    'responses_reasoning_summary',
 })
 
 
@@ -52,7 +55,8 @@ def route_feature(profile, feature: str, *, protocol: str, oauth: str = '') -> b
     if isinstance(features, Mapping) and feature in features:
         return features[feature] == 'supported'
     # Codex's installed Responses dialect requires replay of its encrypted
-    # reasoning items with store=false, and supports prompt-cache affinity.
+    # reasoning items with store=false, supports prompt-cache affinity and
+    # readable reasoning summaries. These are independent wire capabilities.
     # Catalog reasoning/sampling metadata is not a complete wire-feature list:
     # treating an omitted feature as unsupported makes a successful tool round
     # impossible to continue as soon as the backend emits opaque reasoning.

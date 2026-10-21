@@ -110,12 +110,6 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     desktop egress and otherwise fail closed.
     """
     from lib.http_transport.client import http_post
-    owner_scope = ''
-    if owner_user_id is not None:
-        from lib.identity import require_user_id
-        owner_scope = str(require_user_id(
-            owner_user_id, context='provider probe owner'))
-    from lib.http_transport.client import http_post
     # Model-routing v2 stores the Responses wire as ``openai_responses``
     # (``contracts/model_routing_v2.schema.json``). Only ``lib/llm_dispatch/
     # slot.py`` normalized that spelling — the probe did not, so a Responses
