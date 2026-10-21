@@ -126,6 +126,27 @@ def test_lead_for_page_identity_leaves_room_for_late_evidence():
     assert len(excerpt) <= 400
 
 
+@pytest.mark.parametrize('query', ['', 'absent subject'])
+def test_optional_edge_fallback_keeps_source_identity_and_tail_without_claiming_relevance(query):
+    body = 'SOURCE IDENTITY\n\n' + 'unrelated prose\n\n' * 300 + 'SOURCE TRAILER'
+    excerpt = select_relevant_passages(body, query, 500, chunk_chars=120,
+                                       include_lead=True, fallback_edges=True)
+    assert 'SOURCE IDENTITY' in excerpt and 'SOURCE TRAILER' in excerpt
+    assert len(excerpt) <= 500
+    assert all(piece in body for piece in excerpt.split('\n\n[... omitted ...]\n\n'))
+
+
+@pytest.mark.parametrize('budget', [1, 20, 30, 150])
+@pytest.mark.parametrize('chunk_chars', [0, -1, 120])
+def test_edge_fallback_tiny_budgets_keep_bounded_real_source(budget, chunk_chars):
+    body = 'LEAD ' + 'background ' * 100 + 'TRAILER'
+    excerpt = select_relevant_passages(body, '', budget, chunk_chars=chunk_chars,
+                                       fallback_edges=True)
+    assert 0 < len(excerpt) <= budget
+    assert any(piece.strip() and piece in body
+               for piece in excerpt.split('\n\n[... omitted ...]\n\n'))
+
+
 def test_cjk_terms_do_not_join_across_unrelated_words():
     candidates = [row("noise", "北京 unrelated 上海"),
                   row("answer", "京上")]

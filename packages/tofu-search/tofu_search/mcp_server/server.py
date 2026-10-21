@@ -230,6 +230,11 @@ def build_server() -> MCPServer:
             'A recognized HTML #fragment focuses on its section or definition. '
             'Unresolved anchors and plain-text readers may return the whole '
             'page; omit the fragment to request the whole document.\n\n'
+            'Set `query` to a question when you need focused evidence from a '
+            'long page. This selects original passages within `max_chars`, '
+            'without summarizing or making a model call. Marked gaps and '
+            'unselected text do not establish absence; omit `query` for '
+            'ordinary page reading.\n\n'
             'Use it when the user gives you a URL, or to read in depth a page '
             '`web_search` surfaced. Browser rendering is optional: it requires '
             'an available browser integration or installed Playwright browser. '
@@ -242,14 +247,14 @@ def build_server() -> MCPServer:
         ),
     )
     async def fetch_page(url: str, max_chars: int = 200_000,
-                         reason: str = '') -> str:
+                         reason: str = '', query: str = '') -> str:
         """Read a single URL; see the registered description."""
         if reason:
             logger.info('[MCP] fetch_page %s (reason=%s)', url[:100], reason[:80])
         max_chars = max(1_000, min(int(max_chars), 500_000))
         diagnostics = {}
         content = await run_blocking(fetch_page_content, url, max_chars=max_chars,
-                                     diag=diagnostics)
+                                     diag=diagnostics, query=query)
         if not content:
             return _fetch_failure_note(url, diagnostics)
         return content

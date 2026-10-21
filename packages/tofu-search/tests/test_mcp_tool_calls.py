@@ -403,3 +403,25 @@ def test_fetch_page_retains_requested_fragment_through_real_extraction(server, m
     assert 'Requests wait at most 20 seconds.' in text
     assert 'Unrelated' not in text
     assert requested == [url]
+
+
+def test_fetch_page_query_selects_late_source_evidence_within_budget(server, monkeypatch):
+    from types import SimpleNamespace
+
+    from tofu_search.fetch import core, utils
+
+    fact = '缓存延迟为 17 毫秒；此值不代表吞吐量。'
+    body = 'Unrelated background.\n\n' * 4000 + fact
+    calls = []
+
+    def read(url, *_a, **_kw):
+        calls.append(url)
+        return SimpleNamespace(headers={'Content-Type': 'text/plain'}, encoding='utf-8'), body.encode()
+
+    monkeypatch.setattr(core, '_do_request', read)
+    monkeypatch.setattr(core, '_fetch_cache', utils._FetchCache())
+    text, _ = _sync_call(server, 'fetch_page', {
+        'url': 'https://example.com/large', 'query': '缓存延迟', 'max_chars': 1200})
+    assert fact in text
+    assert len(text) <= 1200
+    assert calls == ['https://example.com/large']

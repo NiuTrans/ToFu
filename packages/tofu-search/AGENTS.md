@@ -24,7 +24,10 @@ the only host integration boundary.
 ## Verification
 
 `tofu_search/lexical.py` owns subject parsing/tokenization shared by fetch
-admission, ranking and excerpts; `passages.py` preserves original source spans.
+admission, ranking and excerpts; `passages.py` preserves original source spans
+for search context, query-focused reads and the host's extraction windows.
+`fetch/core.py` keeps focused projection outside the common raw-fetch pipeline;
+verify `tests/test_query_fetch.py` and host `test_fetch_url_full_source.py`.
 `fetch/html_fragments.py` selects literal anchors from the sanitized DOM;
 `fetch/html_extract.py` owns all text extraction and fidelity rules.
 Quality contracts and the offline measurement command live in

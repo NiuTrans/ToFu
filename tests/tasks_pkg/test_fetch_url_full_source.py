@@ -71,6 +71,28 @@ def test_extract_scans_source_after_first_48k_without_a_second_model_pass(monkey
     assert len(prompt) < 50_000
 
 
+@pytest.mark.parametrize(('question', 'fact'), [
+    ('缓存延迟', '缓存延迟为17毫秒，不能据此推断吞吐量。'),
+    ('C++', 'C++ overload resolution preserves this exact qualification.'),
+])
+def test_extract_window_selection_shares_multilingual_technical_matching(question, fact):
+    from lib.search.search_extract import _evidence_excerpt
+    source = 'Unrelated prose.\n\n' * 4000 + fact + '\n\n' + 'Other material.\n\n' * 4000
+    excerpt, exhaustive = _evidence_excerpt(question, source)
+    assert fact in excerpt
+    assert not exhaustive
+    assert len(excerpt) <= 48_000
+
+
+def test_extract_window_no_match_preserves_both_source_edges():
+    from lib.search.search_extract import _evidence_excerpt
+    source = 'SOURCE LEAD\n\n' + 'Unrelated prose.\n\n' * 8000 + 'SOURCE TRAILER'
+    excerpt, exhaustive = _evidence_excerpt('absent subject', source)
+    assert 'SOURCE LEAD' in excerpt and 'SOURCE TRAILER' in excerpt
+    assert not exhaustive
+    assert len(excerpt) <= 48_000
+
+
 def test_direct_fetch_handler_retains_full_source_and_exposes_tail(monkeypatch):
     from lib.tasks_pkg.handlers.search import _core, _handlers
     from lib.tasks_pkg.compaction import _budget

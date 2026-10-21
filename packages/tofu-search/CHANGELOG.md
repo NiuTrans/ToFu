@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.17
+
+- Add optional query-focused reads to `fetch_page_content`, `fetch_url` and
+  MCP `fetch_page`, selecting exact source passages within the output budget.
+  Empty queries and uncapped reads retain ordinary fetching. Focused reads
+  bypass possibly incomplete preview caches and keep existing source limits.
+- Share passage matching with the host's bounded extraction windows, including
+  short CJK and technical queries; retain source edges on lexical misses.
+  No extra model call, network retry, persistent cache or worker is added.
+
 ## 0.12.16
 
 - Preserve safe fetch failure categories and HTTP status in MCP `fetch_page`

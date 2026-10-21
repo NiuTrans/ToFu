@@ -321,6 +321,59 @@ caches or persistent data. Chunk scoring scans the body, while heap selection
 updates priorities only when chosen evidence changes. It does not repeatedly
 sort every remaining candidate when none fits the remaining budget.
 
+## Focused page reads
+
+Problem: a bounded page read exposes a prefix even when the question's evidence
+appears later. The host's separate extraction-window matcher also dropped short
+CJK and symbolic technical terms already supported by the shared lexical owner.
+
+Decision: `fetch_page_content(..., query=...)`, the `fetch_url` facade and MCP
+`fetch_page` use the existing passage selector over the complete received
+source, preserving exact wording and marking gaps. Empty queries retain the
+ordinary pipeline. Explicit or configured `max_chars=0` retains all received
+text. A focused projection sets `diag.truncated` when it omits source text;
+failure diagnostics remain owned by the raw fetch. Selection never establishes
+absence, relevance or entailment by itself.
+
+Focused reads use the existing full-source path and bypass the preview cache:
+an old truncated entry cannot prove source completeness. Selected text does
+not overwrite raw cache entries. The existing byte, extraction, PDF and
+deadline limits still apply; one call does not launch a second fetch or model
+pass. This trades possible warm-cache latency for evidence coverage. There is
+no new persistent store, worker pool or optional dependency. Literal URL
+fragments retain their existing scope before query selection.
+
+The host's `lib/search/search_extract.py` uses that same selector for its
+48,000-character evidence budget and existing single model pass. It retains
+page identity and uses the selector's explicit `fallback_edges` policy to keep
+the beginning and end on a lexical miss. Quote validation, raw source artifacts,
+model admission, cancellation and failure fallback retain their existing owners.
+
+Measurement: six fixed late-evidence questions over captured Python and Rust
+manuals retained their exact reference quotes in 6/6 focused outputs versus 0/6
+prefix outputs. Both requested 2,000 characters; focused output including gaps
+stayed within that cap, while the baseline appended its 13-character truncation
+marker. All selected spans remained literal source text. With four uncached
+samples per case, Python medians were 57–61 ms before and 60–65 ms after; Rust
+medians were 1.30–1.33 s before and 1.38–1.42 s after. The arms ran concurrently
+on a shared host, so these timings are diagnostic, not an isolated speed claim.
+Python-managed allocation peaks remained about 1.34 MB and 31.6 MB respectively;
+process lifetime RSS peaks, including imports, were 151 and 152 MiB. Tracemalloc
+does not cover all native DOM allocations. This selected-source replay uses no
+live network or model and measures coverage and local cost, not answer accuracy.
+
+Alternatives rejected: increasing every preview budget, another matcher in the
+MCP adapter, rewriting source text, trusting a preview cache as complete, or
+weakening quote checks to improve a diagnostic score. The design is informed
+by [MCP Fetch's continuation interface](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch)
+and [Exa's separate full-text/highlight views](https://github.com/exa-labs/agent-skills/blob/main/skills/build-with-exa/references/contents.md);
+neither service is a dependency or a quality baseline for this implementation.
+
+Verify `tests/test_query_fetch.py`, `tests/test_ranked_passages.py`, real MCP
+calls, and the host's `tests/tasks_pkg/test_fetch_url_full_source.py`. Captured
+source comparisons must keep byte-identical inputs and output budgets; synthetic
+regressions and selected pages do not establish search leadership.
+
 ## Source hints and relevance
 
 **Problem:** a hostname suffix collision could inherit a reference-host hint,
