@@ -26,7 +26,7 @@ function queuedOutputTurn(id: string, parentTurnId: string, ordinal: number): Tu
     parentTurnId, actor: 'assistant', kind: 'output', runId: '', status: 'pending',
     currentAttemptId: `attempt-${id}`, projectionRevision: 1,
     createdAt: 3, updatedAt: 4, projection: {},
-    settlement: { cause: null, error: null },
+    settlement: {},
   } as TurnRecord;
 }
 
