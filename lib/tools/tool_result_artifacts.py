@@ -65,7 +65,8 @@ READ_TOOL_ARTIFACT = ToolContractV2(
     name="read_tool_artifact",
     namespace="artifacts",
     model_description=(
-        "Read one or more bounded ranges from prior large tool results."
+        "Read one or more bounded ranges from prior large tool results. "
+        + _SURFACE_CONTRACT['artifactProjectionInheritedReferences']['modelHelp']
     ),
     detailed_help=(
         "For one artifact, use artifact_ref plus optional cursor/limit. For "
@@ -73,7 +74,8 @@ READ_TOOL_ARTIFACT = ToolContractV2(
         "parallelism and return in input order. Each artifact is owner-scoped "
         "and expires. Canonical batches traverse retained children, not previews; "
         "selector is an optional RFC6901 pointer. Pass nextCursor unchanged. "
-        "Missing evidence is not recovered by repeating the original tool."
+        "Missing evidence is not recovered by repeating the original tool. "
+        + _SURFACE_CONTRACT['artifactProjectionInheritedReferences']['help']
     ),
     search_metadata=(
         "large result continuation range cursor",
@@ -125,7 +127,8 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
     namespace="artifacts",
     model_description=(
         "Search retained text; grouped hits list all "
-        f"{_SURFACE_CONTRACT['artifactProjectionMatchGroups']['offsetsField']}."
+        f"{_SURFACE_CONTRACT['artifactProjectionMatchGroups']['offsetsField']}. "
+        + _SURFACE_CONTRACT['artifactProjectionInheritedReferences']['modelHelp']
     ),
     detailed_help=(
         "For one artifact, use artifact_ref and query. For independent "
@@ -135,7 +138,8 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
         "Check coverage/unavailable: zero hits on an incomplete scope cannot "
         "prove absence in unseen content. Model views group only identical "
         "adjacent excerpts from the same source/path; decoded program results "
-        "retain every hit separately."
+        "retain every hit separately. "
+        + _SURFACE_CONTRACT['artifactProjectionInheritedReferences']['help']
     ),
     search_metadata=(
         "find grep prior tool output artifact",

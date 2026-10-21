@@ -1,5 +1,30 @@
 # Automatic resource control
 
+## Canonical Artifact query projections
+
+**Problem:** shorter query views require retained native JSON for program access
+and replay, including on legacy wrapping turns. **Decision:** the declared result
+surface policy reuses the existing canonical single-result and aggregate budgets.
+It adds no worker, queue, cache or retention namespace. V2 turns keep their
+existing retention behavior; legacy Artifact queries now retain the same bounded
+captured page, and mixed-round pressure can retain sibling results through that
+owner. Retention uses the Artifact repository's existing 24-hour default TTL,
+7-day maximum and reclamation lifecycle. Unavailable retention is explicit;
+durable user state is not reclaimed by this projection policy. **Alternatives
+rejected:** hiding replay metadata without retaining its original loses recovery;
+new reference aliases add another publication/lifecycle operation.
+
+A 2026-10-21 disposable SQLite sample covered plain/canonical short pages,
+continuations, an alias and 20-segment reads/searches. Each captured page fit one
+existing manifest; serialized manifests measured 793–4725 bytes, excluding
+database/index overhead. This is the incremental legacy retained-page payload
+for those samples, not a production storage-growth forecast. Seven alternating
+300-call samples of the final short-page projector measured median 48.61 µs
+before and 51.43 µs after reference inheritance. Canonical bytes, offsets,
+provenance and cursors were unchanged. Model payload savings and schema cost are
+in [TOOL_RESULT_QUERY.md](contracts/TOOL_RESULT_QUERY.md); paired-backend tests
+verify restart recovery, scope and mixed-round/failure behavior.
+
 ## Recover provisional worker startup without adding resource owners
 
 **Problem:** a transient physical thread-construction/start failure refused an

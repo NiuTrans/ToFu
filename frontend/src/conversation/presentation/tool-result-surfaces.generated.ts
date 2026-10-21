@@ -51,11 +51,13 @@ export const TOOL_RESULT_SURFACES = {
     },
     "read_tool_artifact": {
       "modelFormat": "artifact_query",
+      "budgetFormat": "canonical",
       "frontendFormat": "verbatim",
       "reason": "Compact declared defaults and render read bodies as exact length-labelled text when smaller; preserve source/retention coverage, gaps, media and signed cursors."
     },
     "search_tool_artifact": {
       "modelFormat": "artifact_query",
+      "budgetFormat": "canonical",
       "frontendFormat": "verbatim",
       "reason": "Compact declared search query defaults and repeated identities; zero matches never imply complete upstream evidence."
     },
@@ -142,6 +144,31 @@ export const TOOL_RESULT_SURFACES = {
       "artifactRef",
       "path"
     ]
+  },
+  "artifactProjectionInheritedReferences": {
+    "field": "artifactRef",
+    "containers": {
+      "read_tool_artifact": {
+        "provenance": [
+          "artifactRef",
+          "path",
+          "segment",
+          "start",
+          "end"
+        ]
+      },
+      "search_tool_artifact": {
+        "items": [
+          "artifactRef",
+          "path",
+          "offset",
+          "offsets",
+          "text"
+        ]
+      }
+    },
+    "modelHelp": "Omitted row artifactRef inherits its page's reference.",
+    "help": "In model views, an omitted artifactRef in a provenance row or search hit inherits that page's artifactRef. Different sources keep explicit references; decoded program results keep every reference."
   },
   "artifactProjectionReadText": {
     "bodyField": "content"

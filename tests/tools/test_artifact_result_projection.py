@@ -54,10 +54,11 @@ def test_zero_matches_mixed_errors_indexes_and_source_coverage_are_not_promoted(
     assert restore_defaults(projected['items'][0]) == first
 
 
-def _expand_match_groups(value):
-    """The model format's offsets list represents every occurrence in order."""
+def _expand_match_groups(value, parent_ref):
+    """Resolve the page reference and every grouped occurrence independently."""
     expanded = []
     for row in value:
+        row = {'artifactRef': parent_ref, **row}
         if 'offsets' in row and 'offset' not in row:
             shared = {key: item for key, item in row.items() if key != 'offsets'}
             expanded.extend({'offset': offset, **shared} for offset in row['offsets'])
@@ -77,9 +78,9 @@ def test_identical_adjacent_excerpts_keep_every_occurrence_in_one_group(partial)
 
     assert len(projected['items']) == 1
     assert projected['items'][0]['offsets'] == [0, 10, 10, 9007199254740993]
-    assert _expand_match_groups(projected['items']) == matches
+    assert _expand_match_groups(projected['items'], projected['artifactRef']) == matches
     restored = restore_defaults(projected)
-    restored['items'] = _expand_match_groups(restored['items'])
+    restored['items'] = _expand_match_groups(restored['items'], restored['artifactRef'])
     assert restored == source
     assert len(raw(projected).encode()) < len(raw(source).encode()) // 2
 
@@ -102,7 +103,8 @@ def test_match_groups_never_merge_distinct_or_unknown_evidence(difference):
         first['path'] = second['path'] = [0]
     source = page(items=[first, second])
     projected = json.loads(project_artifact_result('search_tool_artifact', raw(source)))
-    assert projected['items'] == [first, second]
+    assert len(projected['items']) == 2
+    assert _expand_match_groups(projected['items'], projected['artifactRef']) == [first, second]
 
 
 def test_equal_excerpts_separated_by_another_hit_keep_their_original_order():
@@ -112,7 +114,7 @@ def test_equal_excerpts_separated_by_another_hit_keep_their_original_order():
                {'offset': 3, **common}, {'offset': 4, **common}]
     projected = json.loads(project_artifact_result('search_tool_artifact', raw(page(items=matches))))
     assert len(projected['items']) == 3
-    assert _expand_match_groups(projected['items']) == matches
+    assert _expand_match_groups(projected['items'], projected['artifactRef']) == matches
 
 
 @pytest.mark.parametrize('flag', ['truncated', 'outputTruncated'])
@@ -130,8 +132,10 @@ def test_clipped_view_keeps_nondefault_gaps_resume_and_child_refs():
                  unavailable=[{'artifactRef': OTHER, 'reason': 'expired'}],
                  outputTruncated=True)
     projected = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
-    assert restore_defaults(projected) == value
-    assert projected['items'] == matches
+    restored = restore_defaults(projected)
+    restored['items'] = _expand_match_groups(projected['items'], projected['artifactRef'])
+    assert restored == value
+    assert projected['items'][1]['artifactRef'] == OTHER
 
 
 def test_read_keeps_media_descriptors_and_source_retention_evidence():
@@ -274,7 +278,7 @@ def test_grouped_search_reaches_provider_without_changing_canonical_batch(protoc
     assert model['status'] == 'partial_failure' and model['items'][1] == failed
     assert model['items'][0]['nextCursor'] == first['nextCursor']
     assert len(model['items'][0]['items']) == 2
-    assert _expand_match_groups(model['items'][0]['items']) == matches
+    assert _expand_match_groups(model['items'][0]['items'], model['items'][0]['artifactRef']) == matches
     assert not delivery.evidence['truncated'] and delivery.evidence['viewCoverage'] == 'complete'
 
     messages = [

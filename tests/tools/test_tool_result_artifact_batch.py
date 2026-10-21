@@ -21,7 +21,8 @@ def _invoke(monkeypatch, fn_name, arguments, repository):
     _tc_id, content, is_search = handler._handle_tool_result_artifact(
         {'model': ''}, {}, fn_name, 'tc-batch', arguments, 1, {}, {}, '', False)
     assert is_search is False
-    return json.loads(content)
+    from lib.tools.result_value import capture_result
+    return json.loads(capture_result(content).text())
 
 
 def test_contracts_keep_single_shape_and_add_bounded_batches():

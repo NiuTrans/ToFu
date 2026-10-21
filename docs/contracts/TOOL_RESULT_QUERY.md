@@ -201,6 +201,37 @@ These are model-view payload savings for that sample, not whole-task cost or
 latency claims. The backend projection tests additionally verify retained
 original JSON, restart recovery, owner denial and unchanged next-page progress.
 
+**Page reference inheritance.** Problem: native provenance rows and search hits
+repeat full digests already named by their page. Decision: the model-only
+`artifactProjectionInheritedReferences` contract omits a supported row's
+`artifactRef` only when it equals the nonempty page reference. Each batch page
+binds independently. Different child references, paths, offsets, segments,
+unknown row fields and source content remain exact. An alias is not inferred
+equal to a digest. Unsupported reference shapes retain the original source
+representation. Canonical JSON and decoded program values keep every reference;
+reintroducing the page reference reconstructs each native row. Both short tool
+descriptions and detailed help explain this default.
+
+The declared `budgetFormat: canonical` policy sends these tools through the
+existing single-result retention/budget owner in both wrapping modes. A mixed
+round uses that same canonical aggregate budget and its retained source
+carriers. This preserves replay cursors and native JSON through restart and
+aggregate pressure. Retention failure remains visible and preserves live source
+evidence; it never becomes a claim of durable recovery. No producer-side
+prewrapped success record bypasses source retention. Alternatives rejected:
+blanket reference removal conflates children; minting aliases adds storage work;
+compacting a legacy page without canonical retention loses recoverability.
+Verify reference projection/backend tests and `test_artifact_projection_delivery`.
+
+A paired disposable-SQLite sample using `o200k_base` retained identical canonical
+pages. A 72-byte canonical read fell from 592 to 499 model bytes and 207 to 163
+tokens. Twenty distinct same-source segments fell from 1730 to 730 read tokens
+and 1683 to 683 search tokens; every segment/hit remained present. A page alias
+different from its provenance digest saved no reference tokens. The two provider
+schemas together gained 22 tokens for the inheritance explanation. These are
+payload measurements, not whole-task billing or latency claims. See
+`../RESOURCE_CONTROL.md` for retention cost and projection timing.
+
 **Repeated search excerpts.** Problem: neighboring hits can repeat the same
 quotation and source metadata, consuming the response budget and forcing the
 handler to re-query fewer hits. Decision: after canonical capture, the declared
@@ -216,7 +247,7 @@ program results remain individual hits; cursors, gaps, coverage, media, batch
 indexes and errors retain their existing meanings and budget enforcement.
 
 Alternatives rejected: deduplicating hits loses occurrences; overlapping-window
-merging invents source alignment; page-level reference hoisting hides child
+merging invents source alignment; blanket page-level reference hoisting hides child
 identity. Grouping adds no store, cache or authority. Unknown result shapes retain
 their original projection. The tool declaration explains the local `offsets`
 representation, and canonical retention still supports recovery after compaction.

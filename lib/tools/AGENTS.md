@@ -12,6 +12,9 @@ Verify error reconstruction and artifact/gateway delivery with canonical retenti
 `nonretryable_batch_error` in result_envelope.py shares all-terminal classification;
 artifact query adapters preserve native canonical JSON behind typed model errors.
 Verify artifact failure policy/recovery, decoded results, and model budgets.
+Declared canonical result budgets in `result_surfaces` also govern mixed-round
+pressure. Artifact projection delivery tests cover both wrapping modes and
+retention failure; backend reference tests cover exact values and restart replay.
 
 ## Editing rules
 
