@@ -1335,9 +1335,11 @@
    Tofu now draws .sw-panel as ONE quiet paper card: hairline border,
    --radius-sm corners, one soft clay shadow; status still reads from
    title/pill/progress accents in the wagashi palette (kinako active /
-   matcha complete / azuki failed). Dark/light themes are untouched. */
+   matcha complete / azuki failed). Dark/light themes are untouched.
+   The fill is one step quieter than the message card (#FFFEFA) so the
+   panel reads as paper-on-paper, not a brighter sheet floating above it. */
 [data-theme="tofu"] .sw-panel{
-  background:#FFFEFA;
+  background:#F9F4EA;
   border:1px solid #E2D5BB;
   border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);

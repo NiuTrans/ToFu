@@ -16710,9 +16710,11 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    Tofu now draws .sw-panel as ONE quiet paper card: hairline border,
    --radius-sm corners, one soft clay shadow; status still reads from
    title/pill/progress accents in the wagashi palette (kinako active /
-   matcha complete / azuki failed). Dark/light themes are untouched. */
+   matcha complete / azuki failed). Dark/light themes are untouched.
+   The fill is one step quieter than the message card (#FFFEFA) so the
+   panel reads as paper-on-paper, not a brighter sheet floating above it. */
 [data-theme="tofu"] .sw-panel{
-  background:#FFFEFA;
+  background:#F9F4EA;
   border:1px solid #E2D5BB;
   border-radius:var(--radius-sm);
   box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);
@@ -26978,7 +26980,8 @@ body.kb-open { overflow: hidden; }
 .conversation-surface .bgcmd-queue-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
+  /* Align text, not padded box tops; output expansion retains the first line. */
+  align-items: first baseline;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--turn-rule);
