@@ -1,6 +1,28 @@
 # Changelog
 
 
+## [0.18.3] - 2026-10-21
+
+### Changed
+- Prepare the current committed application and SDK source for Internal and
+  Open distributions with aligned release identities and locked dependencies.
+- Preserve separate sanitized public commits, review rationale, contributor
+  dates and merge relationships during incremental Open publication.
+- Retain source-focused search evidence, received HTML recovery, task progress,
+  artifact reference and command-admission improvements.
+
+### Fixed
+- Verify and publish the same immutable candidate; propagate push and tag
+  failures instead of reporting an incomplete release as successful.
+- Block private paths, credential material and internal domains in new public
+  history, including archived members and intermediate removed content.
+- Preserve inherited routing-header and owner-disabled Connection decisions;
+  refuse invalid request-name edits before mutating the settings draft.
+- Release exact-round navigation ownership after streaming-head or conversation
+  changes, preserving current-page refresh without stale scrolling.
+- Preserve provider-probe evidence and sibling execution ownership across
+  physical worker startup failures.
+
 ## [0.18.2] - 2026-10-19
 
 ### Changed

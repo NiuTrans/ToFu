@@ -1,6 +1,6 @@
 {
   "name": "@rangehow/tofu-sdk",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "description": "TypeScript client for the Tofu headless API",
   "main": "dist/index.js",
   "module": "dist/index.js",
