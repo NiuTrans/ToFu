@@ -382,6 +382,10 @@ URLs for follow-up fetching; `similar_snippets_omitted` reports further listings
 outside the allowance. Related snippet text uses only the content budget left
 after primary evidence. See the [evidence contract](docs/relevance-quality.md#snippet-groups-and-fetched-evidence).
 
+Uncertain follow-ups use the same query-aware ranking before the three-entry
+preview is selected. Their evidence status remains uncertain, and the received
+candidate sidecar stays complete. `rerank=False` retains their arrival order.
+
 ## Optional Dependencies
 
 ```bash

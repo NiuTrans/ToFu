@@ -275,6 +275,29 @@ def test_web_search_preserves_related_discovery_urls_under_content_budget(server
     assert len(text) < 5_500
 
 
+def test_web_search_ranks_uncertain_followups_through_the_pipeline(server, monkeypatch):
+    from tofu_search import SearchConfig, perform_web_search
+    from tofu_search.mcp_server import server as server_mod
+    from tofu_search.search import orchestrator
+
+    query = 'Nimbus WAL 读者 写者 同时进行 官方文档'
+    rows = [{'url': f'https://index{i}.example/a', 'title': f'Nimbus overview {i}',
+             'snippet': 'Nimbus general introduction and navigation.', 'source': 'Bing'}
+            for i in range(3)]
+    target = 'https://manual.example/资料?q=a%2Fb'
+    rows.append({'url': target, 'title': 'Nimbus WAL', 'snippet': 'Nimbus WAL details.', 'source': 'Bing'})
+    monkeypatch.setattr(orchestrator, 'search_bing', lambda *a, **kw: rows)
+    def search(query, **kwargs):
+        return perform_web_search(query, engines=['Bing'], filter_pages=False,
+            deepen=False, config=SearchConfig(search_deadline_secs=5), **kwargs)
+    monkeypatch.setattr(server_mod, 'perform_web_search', search)
+    text, _ = _sync_call(server, 'web_search', {'query': query, 'fetch_pages': False})
+
+    assert target in text
+    assert 'not evidence of relevance or absence' in text
+    assert 'no usable evidence' in text
+
+
 def test_fetch_page_failure_is_explained_not_silent(server, monkeypatch):
     """An unreadable page must not look like an empty page."""
     from tofu_search.mcp_server import server as server_mod

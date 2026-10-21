@@ -134,6 +134,37 @@ in `tests/test_similar_snippet_candidates.py`, actual MCP calls in
 `tests/test_mcp_tool_calls.py`, and the host capture contract in
 `tests/search/test_search_similar_candidates.py` at the repository root.
 
+## Uncertain discovery candidates
+
+**Problem:** selecting the first three uncertain listings exposes engine
+arrival order instead of the most promising follow-ups. This can hide a useful
+source behind generic index pages, especially when a mixed-language query has
+only partial lexical overlap with a document.
+
+**Decision:** pass uncertain candidates through the existing BM25/rank-fusion
+and diversity owner before selecting the diagnostic preview. Keep the complete
+received sidecar; only its ordering changes. Primary evidence is ranked in its
+own pool. Neither ordering nor a successful fetch upgrades lexical uncertainty
+to factual support. Explicit `rerank=False` keeps both pools in their existing
+order. The library, host and MCP share this projection and its existing bounds.
+
+No network/model call, resident worker, cache or durable record is added. The
+extra local scoring pass is bounded by the already received candidate pool.
+In a development replay of 152 observed pools, primary evidence and the full
+uncertain inventory were identical. Sequential local pipeline medians were
+18.44 ms before and 18.54 ms after, including worker setup. The formatted-size
+delta had a zero median and a 1,282-character maximum; selected identities can
+have different lengths even though the count and payload budgets are unchanged.
+These measurements do not establish answer accuracy or general search quality.
+
+**Alternatives considered:** increasing the preview size consumes more agent
+context without selecting better follow-ups; weakening the relevance threshold
+would overstate partial or cross-language evidence; adding a second uncertainty
+scorer duplicates ranking policy. Behavioral specifications cover partial
+matches, mixed scripts, received bodies, primary separation and the explicit
+opt-out in `tests/test_uncertain_candidate_ranking.py`, with native host and MCP
+invocation tests at their existing boundaries.
+
 ## Ranking and excerpts
 
 **Problem:** a collection description can repeat every word of a question while

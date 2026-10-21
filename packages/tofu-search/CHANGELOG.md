@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.14
+
+- Rank uncertain follow-up candidates with the existing query/rank-fusion and
+  diversity policy before selecting the bounded preview. Keep every received
+  candidate and its evidence status; ranking does not establish relevance or
+  factual support. Explicit `rerank=False` preserves arrival order.
+
 ## 0.12.13
 
 - Preserve HTTP failure status and bounded `Retry-After` headers in
