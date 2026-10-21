@@ -39,6 +39,14 @@ cohort grades. Schema and worker behavior are covered by
 `tests/evaluations/test_search_focused_reads.py`. New cohorts measure adaptive
 retrieval with a common focused reader, not a causal comparison against v5.
 
+Contract v7 preserves the common fetcher's safe failure facts in the model's
+tool result as `fetch_failure`. The previous worker-only reason was retained
+in timing evidence but stripped before callback delivery. This hid the cause
+from the agent, including when it retried the same HTTP-refused URL. Both arms
+now use the package's shared safe projection; internal exception text, headers
+and worker identities remain excluded. Earlier cohort records and grades stay
+unchanged. Native callback replay verifies this boundary without model calls.
+
 The default command prints a manifest and makes no network/model calls:
 
 ```bash

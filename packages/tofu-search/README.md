@@ -95,6 +95,11 @@ stays dependency-free when used standalone.
   which may hold only a prefix, so they can incur a new bounded fetch even
   when an ordinary read would hit that cache. Omitted text does not prove
   absence. See [evidence selection](docs/relevance-quality.md#focused-page-reads).
+- **Safe failure observations**: delivery adapters can project a fetch's `diag`
+  with `tofu_search.fetch.diagnostics.fetch_failure_observation`. Known reasons
+  and HTTP statuses remain actionable; private exception details and headers
+  stay outside the projection. MCP uses the same owner. These facts grant no
+  retry or access permission.
 - **Citation verification**: check a bibliography for hallucinated references
   against CrossRef / arXiv / Semantic Scholar, with zero LLM calls.
 - **Site readers**: pluggable per-domain handlers that read a site through its

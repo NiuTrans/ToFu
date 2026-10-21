@@ -382,6 +382,50 @@ def test_native_handoff_records_failures_and_actual_provider(tmp_path, provider,
     assert sum(path == '/api/v4/agent/run' for path, _ in api.calls) == 1
 
 
+@pytest.mark.parametrize('arm', ['tofu', 'ddgs'])
+@pytest.mark.parametrize('reason', ['http_403', 'timeout', 'private_exception_text'])
+def test_native_fetch_failure_preserves_safe_cause_for_the_agent(tmp_path, monkeypatch, arm, reason):
+    from evaluations.programmatic_pilot.native_api import HTTPRuntime
+    from evaluations.search_quality import worker
+    import tofu_search
+
+    def unavailable(_url, **kwargs):
+        kwargs['diag'].update(reason=reason, http_status=403,
+                              detail='PRIVATE_CREDENTIAL', retry_after='PRIVATE_HEADER')
+        return None
+
+    monkeypatch.setattr(worker.os, 'environ', dict(worker.os.environ))
+    monkeypatch.setattr(tofu_search, 'fetch_page_content', unavailable)
+    class Pool:
+        def shutdown(self):
+            pass
+    monkeypatch.setattr(tofu_search, 'get_playwright_pool', Pool)
+    class Worker:
+        def call(self, called_arm, operation, args, **kwargs):
+            if operation == 'search':
+                return copy.deepcopy(evidence()[1][0]['output'])
+            return worker.operation(dict(args, arm=called_arm, operation=operation,
+                                         proxy='', seed=0))
+
+    api = ReplayAPI()
+    runtime = HTTPRuntime(api, {'creator_id': 'test', 'model_id': 'model'}, 'test')
+    result = asyncio.run(run_one(runtime, Worker(), evidence()[0], arm, 0, tmp_path / 'run', 30))
+    runtime.close()
+    call = result['calls'][-1]
+    assert call['accepted'] and call['is_error']
+    failure = call['output']['fetch_failure']
+    assert failure.get('reason') == (reason if reason != 'private_exception_text' else None)
+    assert failure.get('http_status') == (403 if reason == 'http_403' else None)
+    assert isinstance(failure['message'], str) and failure['message']
+    delivery = json.dumps([body for path, body in api.calls if path.endswith('/tool_result')])
+    assert 'fetch_failure' in delivery
+    if reason != 'private_exception_text':
+        assert reason in delivery
+    assert 'PRIVATE_CREDENTIAL' not in delivery and 'PRIVATE_HEADER' not in delivery
+    assert 'private_exception_text' not in delivery
+    assert 'worker_fetch_reason' not in delivery
+
+
 def test_worker_cleanup_failure_remains_blocking_after_model_task_settles(tmp_path):
     from evaluations.programmatic_pilot.native_api import HTTPRuntime
     from lib.project_mod.process_group import ProcessGroupRetirementError
