@@ -343,3 +343,161 @@ def test_manual_route_submits_matrix_beyond_retired_cell_count(harness, monkeypa
     assert len(harness.queued) == 1 and len(harness.queued[0][1]) == 5000
     assert harness.network == []
     assert_secret_free(harness, started)
+
+
+@pytest.mark.parametrize('cache_source', ['memory', 'disk'])
+def test_retargeted_deployment_rebuilds_cached_detect_plan(
+        harness, monkeypatch, cache_source):
+    """An already complete face can change only a Deployment's endpoint."""
+    from routes.api_v1 import providers as routes
+    from lib.model_routing import empty_document
+    from lib.model_routing.repository import InMemoryModelRoutingRepository
+    from lib.model_routing.template_supply import sync_template_supply
+    from lib.provider.provider_template_recipes import (
+        ProviderTemplateRecipeError, compile_provider_template_bundle,
+    )
+
+    try:
+        bundle = compile_provider_template_bundle(
+            'yourprovider', selected_model_ids=['gpt-6.1-sol'])
+    except ProviderTemplateRecipeError:
+        pytest.skip('yourprovider provider template is not shipped in this build')
+    repository = InMemoryModelRoutingRepository()
+    secret = repository.put_secret(BOUNDARY, 'synthetic-probe-key')
+    document = empty_document()
+    document['providers'].append(bundle['provider'])
+    document['provider_accesses'].append(bundle['provider_access'])
+    for collection in ('creators', 'models', 'connections', 'credentials',
+                       'offerings', 'deployments'):
+        document[collection].extend(deepcopy(bundle[collection]))
+    for credential in document['credentials']:
+        credential.update(secret)
+    repository.compare_and_swap(BOUNDARY, document, expected_revision=0)
+    access_id = bundle['provider_access']['provider_access_id']
+    sync_template_supply(boundary=BOUNDARY, repository=repository,
+                         provider_access_ids=[access_id], backfill_only=True)
+    before = repository.get(BOUNDARY).document
+    face = next(row for row in before['connections']
+                if row.get('gateway_namespace') == 'kunlun')
+    wrong = next(row for row in before['connections']
+                 if row.get('gateway_namespace') != 'kunlun')
+    wire = 'kunlunbedrock.gpt-6.1-sol-m17'
+    assert all(face['connection_id'] in row['authorization']['connection_ids']
+               for row in before['credentials'])
+
+    def misroute(document):
+        alias = next(row for row in document['deployments']
+                     if row['wire_model_id'] == wire)
+        alias.update(connection_id=wrong['connection_id'], probe_status='failed')
+
+    repository.mutate(BOUNDARY, misroute)
+    provider_id = bundle['provider']['provider_id']
+    monkeypatch.setattr(routes, '_repository', lambda: repository)
+    reloads = []
+    monkeypatch.setattr(routes, '_hot_reload_dispatcher_slots',
+                        lambda: reloads.append(True))
+    original_sync = routes._sync_one_card_from_template
+    reports = []
+
+    def sync(*args):
+        stats = original_sync(*args)
+        reports.append(stats)
+        return stats
+
+    monkeypatch.setattr(routes, '_sync_one_card_from_template', sync)
+    cache_key = routes._probe_cell_cache_key(BOUNDARY, provider_id)
+    cached = {'provider_id': cache_key, 'credential_ids': [
+        row['credential_id'] for row in before['credentials']],
+        'status': 'done', 'started_at': 1, 'finished_at': 2,
+        'total': 1, 'done_count': 1, 'summary': {'ok': 0, 'disable': 1},
+        'error': None,
+        'cells': {f'0::{wire}': {'key_idx': 0, 'model_id': wire,
+                              'status': 'not_found', 'detail': 'old endpoint'}}}
+    if cache_source == 'memory':
+        routes.CELL_PROBE_TASKS[cache_key] = cached
+    else:
+        harness.cached = cached
+    start = f'/api/v1/providers/{provider_id}/probe-cells/start'
+    status, response = harness.request('POST', start, {})
+    assert status == 200, response
+    assert reports and reports[0]['repaired_deployments'] == 1, reports
+    assert all(reports[0][key] == 0 for key in (
+        'added_connections', 'added_deployments', 'repaired_connections'))
+    assert reloads == [True]
+    assert response['status'] == 'running', response
+    assert response['cells'] == {}
+    assert len(harness.queued) == 1
+    task, work, timeout, runner = harness.queued[0]
+    aliases = [row for row in work if row[3] == wire]
+    assert aliases and all(row[5] == face['base_url'] for row in aliases)
+    assert all(row[6] == face['protocol'] for row in aliases)
+    assert all(row[7]['extra_headers'] == face['extra_headers'] for row in aliases)
+    runner(task, work, timeout)
+    calls = [args for args, _kwargs in harness.network if args[2] == wire]
+    assert calls and all(args[0] == face['base_url'] for args in calls)
+    assert all(args[3] == face['extra_headers'] for args in calls)
+    assert harness.identity_calls == []
+    after = repository.get(BOUNDARY).document
+    assert after['connections'] == before['connections']
+    assert after['credentials'] == before['credentials']
+    assert after['offerings'] == before['offerings']
+    alias = next(row for row in after['deployments'] if row['wire_model_id'] == wire)
+    assert alias['connection_id'] == face['connection_id']
+    assert alias['probe_status'] == 'unprobed'
+    assert 'synthetic-probe-key' not in json.dumps(response)
+
+
+@pytest.mark.parametrize('cache_location', ['memory', 'disk', 'none'])
+def test_retarget_only_repair_rebuilds_plan_and_skips_completed_snapshot(
+        harness, monkeypatch, cache_location):
+    import routes.api_v1.providers as routes
+
+    new_url = 'https://repaired.example/v1'
+    document = harness.repository.document
+    source = document['deployments'][0]['connection_id']
+    connection = next(row for row in document['connections']
+                      if row['connection_id'] == source)
+    document['connections'].append({
+        **deepcopy(connection), 'connection_id': 'repaired-face',
+        'base_url': new_url})
+    old = deepcopy(document)
+    status, started = harness.request('POST', START, {'force': True})
+    assert status == 200, started
+    task, work, timeout, runner = harness.queued.pop()
+    runner(task, work, timeout)
+    assert task['status'] == 'done'
+    completed = provider_probe.public_probe_snapshot(task)
+    harness.cached = completed if cache_location == 'disk' else None
+    if cache_location != 'memory':
+        routes.CELL_PROBE_TASKS.clear()
+
+    def repair(boundary, repository, provider_id):
+        repository.document = deepcopy(old)
+        # Stand in for the sync CAS retargeting a Deployment onto an existing
+        # face. No new row or Connection field is needed for this repair.
+        repository.document['deployments'][0]['connection_id'] = 'repaired-face'
+        repository.revision += 1
+        return {'added_connections': 0, 'added_deployments': 0,
+                'repaired_connections': 0, 'repaired_deployments': 1}
+
+    monkeypatch.setattr(routes, '_sync_one_card_from_template', repair)
+    status, restarted = harness.request('POST', START, {})
+    assert status == 200, restarted
+    assert restarted['status'] == 'running'
+    assert len(harness.queued) == 1
+    new_work = harness.queued[0][1]
+    assert any(row[5] == new_url for row in new_work)
+
+
+def test_retarget_only_sync_hot_reloads_dispatcher(harness, monkeypatch):
+    from lib.model_routing import template_supply
+    import routes.api_v1.providers as routes
+
+    monkeypatch.setattr(template_supply, 'sync_template_supply', lambda **kwargs: {
+        'added_connections': 0, 'added_deployments': 0,
+        'repaired_connections': 0, 'repaired_deployments': 1})
+    reloads = []
+    monkeypatch.setattr(routes, '_hot_reload_dispatcher_slots', lambda: reloads.append(True))
+    stats = routes._sync_one_card_from_template(BOUNDARY, harness.repository, 'provider-a')
+    assert stats['repaired_deployments'] == 1
+    assert reloads == [True]

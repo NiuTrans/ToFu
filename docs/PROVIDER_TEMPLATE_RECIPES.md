@@ -313,8 +313,25 @@ repository boundary; it is never included in the public template or bundle.
      whose public id is rate-limited would read as "this model does not
      work" while the working wire was invisible. The convergence is a
      bounded template-derived write (Connections/Deployments only), and a
-     card that gained a wire skips the cached-snapshot shortcut so the new
-     cell is actually probed.
+     card that gained a wire or retargeted an existing Deployment reloads
+     its bundle and dispatcher and skips completed memory/disk snapshots.
+     Evidence from the former endpoint is not evidence about the repaired cell.
+
+   Problem: repeated face convergence mistook an absent grant for missing
+   initialization and restored owner-revoked access. Decision: initialize
+   grants only for faces created in the current CAS, and only for credentials
+   already authorizing that Model and non-excluded wire on an existing
+   transport for the Offering. Existing-face grants, including newly added
+   credentials, remain exactly as submitted by the credential creation/save
+   boundary. Empty transport/model grants and `excluded_wire_model_ids` are
+   never widened by backfill. Alternative rejected: periodically granting
+   every face cannot distinguish initialization from explicit revocation.
+
+   Supply probes merge per-cell face headers with credential-envelope headers,
+   rather than choosing one dictionary. Credential material wins collisions,
+   matching canonical dispatch's Connection → Deployment → credential order;
+   selector headers and envelope authentication therefore both reach the
+   synthetic transport boundary in the offline specifications.
 
 ## CatPaw Credit-Hub gateway (catpaw.json)
 

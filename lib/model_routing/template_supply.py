@@ -245,11 +245,11 @@ def _live_prober(*, base_url: str, protocol: str, faces: dict,
     def _run(item):
         _idx, key, root, wire, _caps, url, proto = item[:7]
         # A face may select its serving provider with a header (aigc kunlun).
-        # Dropping it here probed the alias on the wrong selector and the
-        # verdict was a false failure for a model that works.
+        # Keep the selector AND envelope authentication. As in dispatch,
+        # credential headers take precedence over transport headers.
         cell_headers = item[7].get('extra_headers') if len(item) > 7 else None
         return root, probe_one_cell(
-            url, key, wire, cell_headers or extra_headers, _PROBE_TIMEOUT,
+            url, key, wire, {**(cell_headers or {}), **extra_headers}, _PROBE_TIMEOUT,
             protocol=proto)
 
     from lib.observability import InstrumentedThreadPoolExecutor
@@ -416,8 +416,9 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
     * a wire sitting on the WRONG DECLARED face is retargeted and its stale
       probe evidence discarded (a 400 from the wrong endpoint is not evidence
       about the model);
-    * every face Connection is granted to the access's credentials, without
-      which dispatch refuses the wire.
+    * a newly created face extends only credentials already authorized for
+      that model/wire on an existing transport; existing face revocations and
+      model/wire restrictions remain owner authority.
 
     The face per wire comes from ``resolve_face``, the shared resolver the
     provider probe already uses and the template compiler encodes (notably the
@@ -450,6 +451,7 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
                    and row.get('provider_access_id') == access_id]
 
     changed = False
+    new_connection_ids: set[str] = set()
 
     def _face_connection(face_name: str, resolution) -> str | None:
         """Connection id for a declared face, created or converged in place."""
@@ -483,6 +485,8 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
         }
         working['connections'].append(row)
         connection_ids.add(connection_id)
+
+        new_connection_ids.add(connection_id)
         by_url[url] = row
         by_id[connection_id] = row
         stats['added_connections'] += 1
@@ -514,6 +518,10 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
             wire = str(row.get('wire_model_id') or '').strip()
             if wire:
                 rows_by_wire.setdefault(wire, []).append(row)
+        source_connection_ids = {
+            row.get('connection_id')
+            for rows in rows_by_wire.values() for row in rows
+        } - new_connection_ids
         wires = {str(wire or '').strip()
                  for wire in (recipe.get('request_ids') or [model_id])}
         wires |= pinned
@@ -530,11 +538,13 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
                     resolution.face_name, resolution)
             if connection_id is None:
                 continue
-            if not is_default_face:
-                # Grants are per credential, so a row that already converges
-                # can still be unroutable after a credential was added later.
+            if connection_id in new_connection_ids:
+                # Absence from an existing face is an owner revocation, not
+                # missing initialization. Only a face created in this CAS may
+                # extend an already-authorized model/wire's transport grant.
                 changed = _grant_face_connection(
-                    credentials, connection_id) or changed
+                    credentials, connection_id, offering['model'], wire,
+                    source_connection_ids) or changed
             rows = rows_by_wire.get(wire) or []
             if any(row.get('connection_id') == connection_id for row in rows):
                 continue  # already converges on its face
@@ -552,7 +562,6 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
                 # measured against the endpoint that could never serve it.
                 rows[0]['connection_id'] = connection_id
                 rows[0]['probe_status'] = 'unprobed'
-                _grant_face_connection(credentials, connection_id)
                 stats['repaired_deployments'] += 1
                 changed = True
                 continue
@@ -571,7 +580,6 @@ def _backfill_request_faces(working: dict, access: dict, template: dict,
                 'probe_status': 'unprobed',
                 'priority': 110,
             })
-            _grant_face_connection(credentials, connection_id)
             stats['added_deployments'] += 1
             stats['accesses'].setdefault(access_id, []).append(
                 f'{model_id}+{wire}')
@@ -645,19 +653,28 @@ def _declares_only(current, declared) -> bool:
             for key, value in declared.items())
     return current == declared
 
-def _grant_face_connection(credentials: list[dict], connection_id: str) -> bool:
-    """Authorize the face Connection for every credential of this access.
+def _grant_face_connection(credentials: list[dict], connection_id: str,
+                           model_ref: dict, wire: str,
+                           source_connection_ids: set[str]) -> bool:
+    """Initialize a NEW face for credentials already allowed this model/wire.
 
-    A wire that routes through a Connection its credential cannot use is
-    rejected at dispatch, so creating OR retargeting the face both need the
-    same grant (mirrors the fresh-install shape). Returns whether anything
-    changed, so a grant-only convergence is persisted rather than discarded
-    as a no-op. Idempotent.
+    Existing-face grants (including new credentials) remain as submitted at
+    the credential creation/save boundary; sync cannot distinguish absence
+    from an explicit revocation. Empty/restricted transport grants, revoked model
+    grants and per-wire exclusions must never be expanded by backfill.
     """
     changed = False
     for credential in credentials:
-        ids = credential.setdefault('authorization', {}).setdefault(
-            'connection_ids', [])
+        authorization = credential.get('authorization') or {}
+        ids = authorization.get('connection_ids') or []
+        if not source_connection_ids.intersection(ids):
+            continue
+        if not any(
+                grant.get('creator_id') == model_ref.get('creator_id')
+                and grant.get('model_id') == model_ref.get('model_id')
+                and wire not in grant.get('excluded_wire_model_ids', [])
+                for grant in authorization.get('models') or []):
+            continue
         if connection_id not in ids:
             ids.append(connection_id)
             changed = True
