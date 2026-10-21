@@ -296,7 +296,10 @@ this acknowledgement does not certify them against today's stricter policy.
 
 History publication refuses effective push-only URL rewrites and separate push
 URLs before trusting that anchor or publishing, so probe and receiving endpoints
-cannot silently diverge. Explicit identical endpoints retain normal proxy support.
+cannot silently diverge. Configuration inspection ignores legacy `GIT_CONFIG`,
+which redirects only `git config` and not Git's transport commands; normal global,
+included and environment-count configuration remains effective. Explicit identical
+endpoints retain normal proxy support.
 All newly reachable source objects and reconciled outputs are scanned without
 Git replacement objects or archive filters, regardless of extension.
 A first run requires an explicit `--history-base`; sanitized baseline bridges
