@@ -240,3 +240,24 @@ These offline checks establish behavior, not live availability or superiority.
 Live qualification must use the effective deployment proxy/browser configuration
 and retain per-query failures. A healthy public-instance listing does not prove
 that the deployment's egress can access it.
+
+## MCP fetch failure observations
+
+Problem: the common fetcher records why a source was unavailable, but the MCP
+adapter discarded that evidence and described browser recovery as generally
+successful even when its optional capabilities were absent.
+
+Decision: pass a request-local diagnostic mapping through the existing fetch
+call and project only known reason categories and valid HTTP status tokens
+into the unavailable text reply. Keep raw exception details and response
+headers out of the model-facing message. Unknown categories retain a generic
+failure; successful extraction or browser recovery returns the original text.
+Tool discovery states the optional browser/PDF requirements and access limits.
+
+Alternatives rejected: another network probe to explain a failed request,
+automatic retries based on a response header, raw provider-error forwarding,
+or an unconditional browser-success promise. The change adds no requests,
+workers, cache entries or capabilities. The output remains text under the
+existing MCP schema. Real MCP calls in `tests/test_mcp_tool_calls.py` verify
+failure propagation, private-detail exclusion and successful recovery;
+`tests/test_mcp_server_smoke.py` checks both supported protocol surfaces.

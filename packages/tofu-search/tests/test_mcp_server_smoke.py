@@ -237,6 +237,14 @@ def test_no_registration_or_config_tool_is_exposed(handshake):
         assert forbidden not in names, f'{forbidden} must not be exposed as a tool'
 
 
+def test_fetch_description_states_optional_browser_and_access_limits(handshake):
+    responses, _ = handshake
+    tool = next(t for t in responses[2]['result']['tools'] if t['name'] == 'fetch_page')
+    description = tool['description'].lower()
+    assert 'browser rendering is optional' in description
+    assert 'access challenges may still prevent reading' in description
+
+
 def test_every_tool_has_a_substantial_description(handshake):
     """A tool description IS the model's usage contract, not documentation."""
     responses, _ = handshake

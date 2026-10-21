@@ -310,6 +310,75 @@ def test_fetch_page_failure_is_explained_not_silent(server, monkeypatch):
     assert 'says nothing about whether the information exists' in text
 
 
+@pytest.mark.parametrize(('cause', 'expected'), [
+    ('timeout', 'timed out'),
+    ('connection_error', 'connection'),
+    ('pdf_extraction_error', 'PDF'),
+    ('bot_wall', 'access challenge'),
+    ('ssrf_blocked', 'network-address policy'),
+    ('skip_domain', 'configured fetch policy'),
+    ('empty_extract', 'readable text'),
+])
+def test_fetch_page_reports_safe_failure_category_without_private_details(
+        server, monkeypatch, cause, expected):
+    from tofu_search.mcp_server import server as server_mod
+
+    calls = []
+
+    def fail(url, **kwargs):
+        calls.append(url)
+        kwargs['diag'].update(reason=cause, detail='private-provider-exception',
+                              retry_after='private-response-header')
+
+    monkeypatch.setattr(server_mod, 'fetch_page_content', fail)
+    text, _ = _sync_call(server, 'fetch_page', {'url': 'https://example.com/gone'})
+
+    assert cause in text and expected in text
+    assert 'private-' not in text
+    assert calls == ['https://example.com/gone']
+
+
+@pytest.mark.parametrize('cause', ['private-unknown-reason', {}, 'http_403\nprivate-header'])
+def test_fetch_page_unknown_reason_keeps_generic_failure(server, monkeypatch, cause):
+    from tofu_search.mcp_server import server as server_mod
+
+    def fail(_url, **kwargs):
+        kwargs['diag'].update(reason=cause, detail='private-exception')
+
+    monkeypatch.setattr(server_mod, 'fetch_page_content', fail)
+    text, _ = _sync_call(server, 'fetch_page', {'url': 'https://example.com/gone'})
+    assert 'Could not read' in text
+    assert 'private-' not in text
+    assert 'try web_search' in text
+
+
+@pytest.mark.parametrize('recovered', [False, True])
+def test_fetch_page_keeps_http_failure_or_recovered_content_from_common_fetcher(
+        server, monkeypatch, recovered):
+    from tofu_search.fetch import core, utils
+    from tofu_search.fetch.http import HttpError
+
+    requested = []
+    recovered_text = 'Readable source evidence from the existing browser provider.'
+
+    def refuse(url, *_args, **_kwargs):
+        requested.append(url)
+        raise HttpError(403, url, retry_after='private-response-header')
+
+    monkeypatch.setattr(core, '_do_request', refuse)
+    monkeypatch.setattr(core, '_fetch_cache', utils._FetchCache())
+    monkeypatch.setattr(core, '_try_browser_fetch',
+                        lambda *_a, **_kw: recovered_text if recovered else None)
+    text, _ = _sync_call(server, 'fetch_page', {'url': 'https://example.com/blocked'})
+
+    assert requested == ['https://example.com/blocked']
+    if recovered:
+        assert text == recovered_text
+    else:
+        assert 'http_403' in text and 'HTTP 403' in text
+        assert 'private-' not in text
+
+
 def test_fetch_page_retains_requested_fragment_through_real_extraction(server, monkeypatch):
     from types import SimpleNamespace
 

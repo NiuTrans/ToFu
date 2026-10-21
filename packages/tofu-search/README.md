@@ -451,6 +451,12 @@ are always retained, so a model can call `fetch_page` when one source needs more
 depth instead of paying for every full page up front. This is a character cap,
 not an exact token count; CJK and Latin text tokenize differently.
 
+`fetch_page` keeps the common fetcher's safe failure category in its unavailable
+reply, including HTTP status, timeout, access challenge and extraction failure.
+It does not expose raw exception details or response headers, and an unknown
+category retains the generic unavailable reply. Browser rendering and PDF
+extraction depend on optional capabilities; neither guarantees source access.
+
 Design constraints an embedder should know (each enforced by a test):
 
 - **stdio is safe.** The library never writes to stdout; logs go to stderr.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.16
+
+- Preserve safe fetch failure categories and HTTP status in MCP `fetch_page`
+  replies without exposing private exception details or response headers.
+  Keep unknown failures generic and successful content unchanged.
+- State optional browser/PDF requirements and access limits in tool discovery.
+  No extra request, retry, dependency or search API is added.
+
 ## 0.12.15
 
 - Focus HTML extraction on recognized URL fragments while retaining the
