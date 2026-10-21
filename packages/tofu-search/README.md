@@ -73,6 +73,10 @@ stays dependency-free when used standalone.
 - **SPA / bot-protection support**: optional Playwright fallback for
   JS-rendered and challenge pages.
 - **PDF extraction**: optional pymupdf / pymupdf4llm integration.
+- **Streamed HTML reads**: recognized React/Fizz completion segments already
+  received in the response are restored before extraction and anchor selection.
+  This uses no page JavaScript or browser; client-only content still needs
+  rendering, and ordinary hidden content remains excluded.
 - **HTML section reads**: a recognized `#fragment` focuses extraction on its
   heading section or definition, including code, tables and links. Unresolved
   or ambiguous anchors keep the whole page; remove the fragment to request the

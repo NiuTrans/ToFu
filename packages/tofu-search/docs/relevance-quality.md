@@ -61,6 +61,61 @@ not field completeness or agent answers. Passing the new tests proves
 these extraction behaviors, not general retrieval superiority or that an agent
 will quote the evidence correctly.
 
+## Received HTML streaming completions
+
+**Problem:** React can send readable HTML inside a hidden transport container
+after its initial shell. Removing all hidden elements immediately loses that
+received body and leaves navigation or an obsolete loading fallback.
+
+**Decision:** `fetch/html_streaming.py` restores recognized Fizz completion
+declarations before the shared extraction and fragment-selection boundary.
+The behavior follows React's
+[streaming contract](https://react.dev/reference/react-dom/server/renderToPipeableStream#streaming-more-content-as-it-loads)
+and [boundary replacement algorithm](https://github.com/facebook/react/blob/v19.2.0/packages/react-dom-bindings/src/server/fizz-instruction-set/ReactDOMFizzInstructionSetShared.js).
+Only an inline classic script containing literal, direct `$RC` instructions
+(optionally preceded by the Fizz `$RB`/`$RV`/`$RC` declarations) is recognized.
+The declaration scanner skips function bodies without evaluating them; it is
+a protocol recognizer, not an interpreter or proof that arbitrary page scripts
+would execute successfully. Unknown statements reject that script's instructions.
+
+Require unique identifiers/instructions, matching identifier prefixes, an empty
+boundary template between paired React comments, and an already received
+`div` with only its `hidden` and `id` transport attributes. Restore children in
+the boundary's original position, replace the old fallback, and retain nested
+completion order. Destination and child visibility rules remain in force.
+Ambiguous or malformed pairs, inert/JSON/module scripts, deferred or conditional
+calls, unsupported runtime syntax and unknown segment forms remain unchanged.
+Serialized application data and incomplete client-rendered bodies are not
+invented into visible source text. This does not evaluate CSP or stylesheets.
+
+Work remains within the existing bounded response and request lifetime, with
+no extra network/model call, dependency, worker, persistent state or browser
+requirement. Ordinary HTML without stream markers avoids the extra parser;
+unrecognized candidates return their original HTML. Stream pages pay for a
+call-local DOM and serialization. Same-parent comment pairs are indexed once,
+so missing closing markers do not cause repeated whole-page scans.
+
+An offline replay of a captured 816,567-byte page recovered 1,514 characters
+from a previous 179-character navigation-only output. Three alternating serial
+samples gave median extraction times of 75.6 → 115.5 ms; the normalization pass
+alone took 53.0 ms with 7.8 MB peak traced Python allocations in a separate run.
+A different page with no server-rendered biography remained without that body.
+Short-readable and documentation-fragment controls retained identical text.
+Synthetic pages with 200/800/1,600 independent completions took 26/184/605 ms:
+DOM mutation cost grows with segment count, so these figures do not establish
+linear performance or an end-to-end deadline guarantee. These shared-host
+measurements describe development inputs, not general speed or answer quality.
+
+**Alternatives considered:** including all hidden nodes exposes unrelated
+content; parsing arbitrary application JSON invents a second rendering owner;
+requiring a browser spends more resources even when the HTML is already here.
+Raising SPA text thresholds misclassifies genuine short sources and does not
+recover received HTML. Keep those concerns with their existing owners.
+`tests/test_html_streaming.py` covers source order, nested/incomplete boundaries,
+visibility, fragment/code/table fidelity, runtime bootstrap syntax, ordinary
+fast paths and public fetching without an extra request. A reviewed React
+runtime fixture is retained under `tests/fixtures/` with its MIT license.
+
 ## HTML fragment scope
 
 **Problem:** reading a documentation URL with an observed `#fragment` returned

@@ -17,6 +17,7 @@ from trafilatura.deduplication import LRUCache
 from trafilatura.settings import LRU_SIZE
 
 from tofu_search.fetch.html_fragments import fragment_identifier, select_fragment_html
+from tofu_search.fetch.html_streaming import restore_completed_streams
 from tofu_search.fetch.utils import _get_bs4
 from tofu_search.log import get_logger
 
@@ -497,6 +498,13 @@ def extract_html_text(html, max_chars, url='', *, scope=None):
         if max_chars and len(code) > max_chars:
             code = code[:max_chars] + '\n[…truncated]'
         return code
+
+    # Completed server-rendered HTML can arrive in a hidden transport segment.
+    # Restore its declared position before the shared visibility/fragment rules.
+    try:
+        html = restore_completed_streams(html)
+    except Exception:
+        logger.debug('Unrecognized HTML stream kept unchanged', exc_info=True)
 
     fragment = fragment_identifier(url)
     if fragment:
