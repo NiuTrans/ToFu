@@ -210,3 +210,63 @@ def test_recovery_observation_cannot_replace_execution_outcome(persistent, obser
         assert outcomes == [('startup-recovery-test', 'failed' if persistent else 'accepted')]
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
+
+
+@pytest.mark.parametrize('kind', ['kernel', 'standalone', 'application'])
+@pytest.mark.parametrize('persistent', [False, True])
+def test_startup_fault_preserves_live_siblings_and_exact_future_ownership(kind, persistent, monkeypatch):
+    prefix = 'startup-sibling-ownership'
+    pool = pool_for(kind, prefix)
+    expected = [0, 2, 3] if persistent else [0, 1, 2, 3]
+    rendezvous = threading.Barrier(len(expected), timeout=5)
+    first_entered = threading.Event()
+    calls, attempts, errors, returned, refused = [], [], [], {}, []
+    lock = threading.Lock()
+    original = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith(prefix + '_'):
+            attempts.append(thread.name)
+            if len(attempts) == 2 or (persistent and len(attempts) == 3):
+                error = OSError(f'physical startup refusal {len(errors) + 1}')
+                errors.append(error)
+                raise error
+        return original(thread)
+
+    def execute(identity):
+        with lock:
+            calls.append(identity)
+        if identity == 0:
+            first_entered.set()
+        rendezvous.wait()
+        return identity
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    try:
+        for identity in range(4):
+            try:
+                returned[identity] = pool.submit(execute, identity)
+            except OSError as error:
+                assert persistent and identity == 1 and kind != 'standalone'
+                assert error is errors[1] and error.__cause__ is errors[0]
+                refused.append(identity)
+            if identity == 0:
+                assert first_entered.wait(1), 'first sibling must own a live carrier'
+        for identity, future in returned.items():
+            if persistent and kind == 'standalone' and identity == 1:
+                with pytest.raises(OSError, match='physical startup refusal 2') as raised:
+                    future.result(2)
+                assert raised.value is errors[1] and raised.value.__cause__ is errors[0]
+                refused.append(identity)
+            else:
+                assert future.result(6) == identity
+        assert sorted(calls) == expected
+        assert len(calls) == len(set(calls))
+        assert refused == ([1] if persistent else [])
+        assert sorted(returned) == (list(range(4)) if kind == 'standalone' else expected)
+    finally:
+        rendezvous.abort()
+        pool.shutdown(wait=True, cancel_futures=True)
+    threads = pool._threads if kind == 'application' else pool.worker_threads_snapshot()
+    assert not threads
+    assert not any(t.name.startswith(prefix + '_') for t in threading.enumerate())
