@@ -97,9 +97,11 @@ def test_tag_push_action_pure():
     assert _tag_push_action('   \n', 'aaa111', force=True) == 'push'
     # Same commit on remote → nothing to do.
     assert _tag_push_action('aaa111\trefs/tags/v1.2.3', 'aaa111', force=False) == 'skip-same'
-    # Different commit: force only with --force, otherwise keep the published tag.
-    assert _tag_push_action('bbb222\trefs/tags/v1.2.3', 'aaa111', force=False) == 'keep'
-    assert _tag_push_action('bbb222\trefs/tags/v1.2.3', 'aaa111', force=True) == 'force'
+    # Published tags never move: --force applies to branch history only.
+    assert _tag_push_action('bbb222\trefs/tags/v1.2.3', 'aaa111', force=False) == 'conflict'
+    assert _tag_push_action('bbb222\trefs/tags/v1.2.3', 'aaa111', force=True) == 'conflict'
+    annotated = 'bbb222\trefs/tags/v1.2.3\naaa111\trefs/tags/v1.2.3^{}\n'
+    assert _tag_push_action(annotated, 'aaa111', force=False) == 'skip-same'
 
 
 # ── Real-git end-to-end (skipped when git is unavailable) ─────────────

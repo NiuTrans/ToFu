@@ -167,8 +167,7 @@ def test_git_push_never_persists_credentials(tmp_path, monkeypatch, capsys):
         {
             'remotes': [{
                 'name': 'origin',
-                # Unreachable on purpose — the push must FAIL so the error
-                # path (console + exception text) is exercised too.
+                # Push errors are injected below; no real network is used.
                 'url': 'https://127.0.0.1:1/example/project.git',
                 'credential': 'github_token',
             }],
@@ -181,7 +180,18 @@ def test_git_push_never_persists_credentials(tmp_path, monkeypatch, capsys):
         monkeypatch.delenv(var, raising=False)
     (tmp_path / 'README.md').write_text('safe\n', encoding='utf-8')
 
-    export._git_push(tmp_path, 'opensource')
+    real_run = publish.subprocess.run
+
+    def fail_push(cmd, **kwargs):
+        if cmd[:2] == ['git', 'push']:
+            return subprocess.CompletedProcess(cmd, 1, '',
+                                               'synthetic authentication failed: ' + cmd[2])
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(publish.subprocess, 'run', fail_push)
+    with pytest.raises(RuntimeError, match='synthetic authentication failed') as error:
+        export._git_push(tmp_path, 'opensource')
+    assert token not in str(error.value)
 
     cfg = subprocess.run(
         ['git', '-C', str(tmp_path), 'config', '--local', '--list'],
