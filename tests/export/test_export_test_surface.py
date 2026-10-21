@@ -268,7 +268,9 @@ def test_missing_tests_tree_is_a_noop(tmp_path):
 def test_retained_generator_is_not_gitignored(tmp_path, monkeypatch, mode):
     import subprocess
     import export_pkg._export_core as core
+    from export_pkg import _state
 
+    monkeypatch.setattr(_state, '_EXPORT_SOURCE_SHA', None)
     source = tmp_path / 'source'
     target = tmp_path / mode
     (source / 'scripts').mkdir(parents=True)
@@ -305,6 +307,7 @@ def test_internal_export_restores_and_checks_test_dependencies(tmp_path, monkeyp
     monkeypatch.setattr(core, '_OPENSOURCE_KEEP_FILES',
                         {'scripts/helper.py'} if keep_helper else set())
     monkeypatch.setattr(_state, '_EXPORT_VERSION', None)
+    monkeypatch.setattr(_state, '_EXPORT_SOURCE_SHA', None)
     monkeypatch.setattr(orchestrate, '_read_version', lambda: '0.18.2')
 
     def copy_source(mode, dest, **kwargs):
