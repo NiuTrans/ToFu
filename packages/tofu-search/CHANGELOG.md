@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.20
+
+- Share browser source extraction between anonymous and authenticated reads.
+  Exclude scripts and computed-hidden content, retain links/code/tables, and
+  include open shadow roots and assigned slots through the existing extractor.
+  Bound DOM projection by the configured source budget and mark truncation.
+- Detect empty application main regions from the restored, sanitized DOM,
+  including roots after large HTML heads. Preserve readable short/SSR content;
+  failed recovery of a known empty main is unavailable rather than cached
+  navigation. Browser readiness follows primary text and the remaining budget.
+
 ## 0.12.19
 
 - Restore recognized React/Fizz HTML completion segments at their declared

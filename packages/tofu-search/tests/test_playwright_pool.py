@@ -256,8 +256,11 @@ def test_async_page_calls_overlap_and_retire_every_context(fake_playwright_modul
         async def wait_for_function(self, *args, **kwargs): pass
         async def wait_for_timeout(self, *args): pass
         def locator(self, *args): return Locator()
-        async def evaluate(self, expression):
-            return 400 if expression.endswith('length') else 'readable page body '*20
+        async def evaluate(self, expression, *args):
+            if 'outerHTML' in expression:
+                return {'html': '<main><p>' + 'readable page body '*20 + '</p></main>',
+                        'truncated': False}
+            return 400
         async def content(self): return '<p>readable page body</p>'
     class Browser:
         async def new_context(self, **kwargs): return Context()
