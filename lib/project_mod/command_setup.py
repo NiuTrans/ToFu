@@ -181,9 +181,11 @@ def _output_argument_view(tokens):
 def _literal_loop_values(raw):
     """Decoded plain-word iterable of one loop, else None.
 
-    Only statically known single words qualify: a value that could word-split,
-    glob or expand would bind differently in ``"$name"`` and bare ``$name``
-    uses, and the unrolled command would stop describing the real one.
+    Only statically known single words qualify. Whitespace or a ``$``/backquote
+    expansion would bind differently in ``"$name"`` and bare ``$name`` uses, so
+    it cannot be reproduced verbatim. A glob is refused for a sharper reason:
+    an unmatched glob stays literal and the loop runs zero iterations, so a
+    static unroll would execute a command the real loop never runs.
     """
     words = [word for word, _ in _scan(raw, words=True) if word.strip()]
     if not words or len(words) > _MAX_LOOP_CANDIDATES:

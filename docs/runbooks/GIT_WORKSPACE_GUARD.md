@@ -581,10 +581,14 @@ observed median **0.017 ms**, maximum **0.027 ms**; not a network-volume guarant
   (measured 2026-10-21, three-candidate node version probe). Decision: admission
   unrolls `for V in <plain words>; do <simple commands>; done` into
   `V=value; <commands>;` per value, capped at 8 values and 64 unrolled commands,
-  one level deep. Each value must be a plain word (no whitespace, glob, quote or
-  expansion) so quoted and bare references bind identically; body command words
-  may not include a control keyword, a trailing chain left open, or an unmanaged
-  `&`. Separators are reproduced verbatim, so a body pipeline/redirect keeps its
+  one level deep. Each value must be a plain word: whitespace or a `$`/backquote
+  expansion would bind differently in quoted and bare references, and a glob is
+  refused because an unmatched glob stays literal and runs zero iterations,
+  which a static unroll cannot reproduce. Body command words may not include a
+  control keyword, a trailing chain left open, or an unmanaged `&`; guard
+  existence with a `[ -x "$V" ] && <cmd>` chain rather than an `if ... fi` body,
+  which stays opaque. Separators are reproduced verbatim, so a body
+  pipeline/redirect keeps its
   structure and each command is classified exactly as if typed once per value.
   Anything outside that shape returns the original source, where the body's real
   command word is now checked after a leading `do`. Alternatives rejected:
