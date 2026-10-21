@@ -308,3 +308,29 @@ def test_fetch_page_failure_is_explained_not_silent(server, monkeypatch):
 
     assert 'Could not read' in text
     assert 'says nothing about whether the information exists' in text
+
+
+def test_fetch_page_retains_requested_fragment_through_real_extraction(server, monkeypatch):
+    from types import SimpleNamespace
+
+    from tofu_search.fetch import core, utils
+
+    url = 'https://example.com/manual#timeout'
+    html = ('<html><body><main><h1>Manual</h1>'
+            '<p>Unrelated introduction about installing a controller and its dependencies.</p>'
+            '<section id="timeout"><h2>Timeout</h2><p>Requests wait at most 20 seconds.</p>'
+            '</section><h2>Installation</h2><p>Unrelated installation details.</p>'
+            '</main></body></html>')
+    requested = []
+
+    def get(target, *_args, **_kwargs):
+        requested.append(target)
+        return SimpleNamespace(headers={'Content-Type': 'text/html'}, encoding='utf-8'), html.encode()
+
+    monkeypatch.setattr(core, '_do_request', get)
+    monkeypatch.setattr(core, '_fetch_cache', utils._FetchCache())
+    text, _ = _sync_call(server, 'fetch_page', {'url': url})
+
+    assert 'Requests wait at most 20 seconds.' in text
+    assert 'Unrelated' not in text
+    assert requested == [url]

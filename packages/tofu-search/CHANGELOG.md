@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.15
+
+- Focus HTML extraction on recognized URL fragments while retaining the
+  enclosing heading section, definition and aliases, or disclosure body.
+  Preserve code, tables and links through the existing extractor. Missing,
+  ambiguous, hidden and unreadable targets fall back to the whole page.
+- Accept readable short fragments without unnecessary browser recovery; keep
+  fragment and whole-page cache identities separate and retain output bounds.
+  No search API, model call or extra network request is added.
+
 ## 0.12.14
 
 - Rank uncertain follow-up candidates with the existing query/rank-fusion and

@@ -191,6 +191,9 @@ def build_server() -> MCPServer:
         description=(
             'Fetch and read one web page (HTML, PDF or plain text), returning '
             'cleaned article text rather than raw markup.\n\n'
+            'A recognized HTML #fragment focuses on its section or definition. '
+            'Unresolved anchors and plain-text readers may return the whole '
+            'page; omit the fragment to request the whole document.\n\n'
             'Use it when the user gives you a URL, or to read in depth a page '
             '`web_search` surfaced. The fetcher transparently handles '
             'JavaScript-rendered pages and bot-protected sites by falling back '

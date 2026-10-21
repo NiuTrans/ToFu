@@ -107,7 +107,7 @@ def _browser_returning(monkeypatch, calls, text):
 # ══════════════════════════════════════════════════════════
 
 def test_spa_shell_falls_to_browser(monkeypatch, harness):
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: None)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: None)
     monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
     _browser_returning(monkeypatch, harness, _BROWSER_TEXT)
 
@@ -121,7 +121,7 @@ def test_spa_shell_falls_to_browser(monkeypatch, harness):
 def test_spa_shell_browser_empty_keeps_partial_shell_text(monkeypatch, harness):
     """Pre-seam behaviour: pw fails + extracted text > 50 chars → partial is returned."""
     partial = 'x' * 100
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: partial)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: partial)
     monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
 
     out = core.fetch_page_content('https://spa-shell-2.example.com/app', max_chars=50000)
@@ -131,7 +131,7 @@ def test_spa_shell_browser_empty_keeps_partial_shell_text(monkeypatch, harness):
 
 
 def test_spa_shell_browser_empty_no_text_returns_none(monkeypatch, harness):
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: None)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: None)
     monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
 
     out = core.fetch_page_content('https://spa-shell-3.example.com/app', max_chars=50000)
@@ -155,7 +155,7 @@ def test_bot_wall_html_falls_to_browser(monkeypatch, harness):
 
 
 def test_bot_text_falls_to_browser(monkeypatch, harness):
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: 'Please log in to continue' * 4)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: 'Please log in to continue' * 4)
     monkeypatch.setattr(core, '_is_bot_extracted_text', lambda text: True)
     _browser_returning(monkeypatch, harness, _BROWSER_TEXT)
 
@@ -166,7 +166,7 @@ def test_bot_text_falls_to_browser(monkeypatch, harness):
 
 
 def test_bot_text_browser_empty_returns_none(monkeypatch, harness):
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: 'login wall' * 20)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: 'login wall' * 20)
     monkeypatch.setattr(core, '_is_bot_extracted_text', lambda text: True)
 
     out = core.fetch_page_content('https://wall-3.example.com/', max_chars=50000)
@@ -252,7 +252,7 @@ def test_auth_source_all_identities_empty_continues_anonymous(monkeypatch, harne
     """Browser empty + replay empty → the anonymous pipeline runs exactly as before."""
     _register_auth_row()
     monkeypatch.setattr(core, '_try_authenticated_fetch', lambda url, src, mc, t: None)
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: 'real public content' * 10)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: 'real public content' * 10)
 
     out = core.fetch_page_content('https://walled.example.com/public', max_chars=50000)
 
@@ -266,7 +266,7 @@ def test_auth_source_all_identities_empty_continues_anonymous(monkeypatch, harne
 # ══════════════════════════════════════════════════════════
 
 def test_playwright_success_never_touches_browser(monkeypatch, harness):
-    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None: None)
+    monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: None)
     monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
     monkeypatch.setattr(core, '_try_playwright_fallback',
                         lambda url, max_chars, timeout: 'rendered by server playwright')

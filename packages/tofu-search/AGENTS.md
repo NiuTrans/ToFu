@@ -25,6 +25,8 @@ the only host integration boundary.
 
 `tofu_search/lexical.py` owns subject parsing/tokenization shared by fetch
 admission, ranking and excerpts; `passages.py` preserves original source spans.
+`fetch/html_fragments.py` selects literal anchors from the sanitized DOM;
+`fetch/html_extract.py` owns all text extraction and fidelity rules.
 Quality contracts and the offline measurement command live in
 `docs/relevance-quality.md`; regression fixtures do not prove live superiority.
 Free source admission and metasearch recovery are owned by `docs/free-search.md`.
