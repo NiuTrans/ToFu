@@ -44,7 +44,7 @@ def check(engine, archive=None, *, binding=None):
     from lib.agent_core.native_artifact import inspect_archive
     from lib.knowledge import ingest, store
     from lib.knowledge.ingest import KnowledgeIngestError
-    from lib.knowledge.native_html import NativeHtmlProjector, NativeHtmlProjectionError
+    from lib.knowledge.native_html import NativeHtmlProjectionError
     from lib.storage.errors import StorageError
     owner = 900071
     if binding is None:

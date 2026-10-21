@@ -13,7 +13,6 @@ import math
 import os
 import platform
 from pathlib import Path
-import resource
 import socket
 import statistics
 import subprocess
