@@ -263,6 +263,9 @@ dedicated-host override; `JOBS=0` is the debugging/serial override.
 
 Every worker owns separate data, storage, log, and temporary roots. Tests may
 not mutate shipped source or use a fixed host-global port as an implicit lock.
+CSS cascade negative controls pass in-memory stylesheet variants to the same
+resolver as their baseline. `tests/meta/test_css_negative_controls.py` forbids
+file/subprocess I/O while executing the recent-search and memory-modal controls.
 Disposable pytest roots live under one current-UID temp parent and encode their
 creating PID; normal teardown removes the current roots, while the next session
 performs one bounded, exact-name reclaim of roots whose owner is dead. Translation

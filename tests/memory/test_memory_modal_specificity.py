@@ -17,24 +17,23 @@ Three things (owner-specified):
   1. DELETION — every `.memory-modal .memory-*` input rule carries NO !important.
   2. EXCLUSION IS LOAD-BEARING (NC-1) — with the shipped CSS, a `.memory-modal`
      input's `background`/`border` resolve to its OWN `--m-*` tokens, NOT the
-     tofu bleed (`#F5F3ED` / `rgba(184,176,160,0.4)`). Neuter: revert the tofu
+     tofu bleed (`#FBF6E9` / `rgba(184,176,160,0.4)`). Neuter: revert the tofu
      selector `:not(.memory-modal) input` → `.modal input` → the bleed now wins
      (higher specificity: it has the [data-theme] attribute the memory rule
-     lacks) → the assertion flips. Restore byte-identical.
+     lacks) → the assertion flips. The shipped CSS is never written.
   3. NO OVER-NARROWING (NC-2 / control) — a GENERIC tofu modal input (a `.modal`
      that is NOT `.memory-modal`, e.g. the browser/apply modal) STILL resolves to
      the tofu styling under the shipped `:not()` rule — proving the exclusion
      removed memory-modal ONLY, not the whole theme.
 
-The NC-1 neuter is applied ON DISK to the real styles.css in a subprocess and
-restored byte-identical (mirrors the sibling conversions' double-neuter form).
+The NC-1 neuter is applied to an in-memory copy of the real styles.css and
+resolved by the same engine as the baseline; no source writes or subprocesses.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 
 import pytest
@@ -295,7 +294,7 @@ _GENERIC_INPUT = _Elem(
     ancestors=[{'modal'}],
 )
 
-_TOFU_MEM_BG = '#F5F3ED'                      # the tofu bleed background
+_TOFU_MEM_BG = '#FBF6E9'                      # the tofu bleed background
 _TOFU_MEM_BORDER = '1px solid rgba(184,176,160,0.4)'  # the tofu bleed border
 
 
@@ -370,7 +369,7 @@ def test_generic_tofu_modal_input_still_gets_theme(css_text):
         f'theme from ALL modals, not just memory-modal.')
 
 
-# ─────────────────────────── NC-1 double-neuter (on-disk, subprocess) ───────────────────────────
+# ─────────────────────────── NC-1 double-neuter (in memory) ───────────────────────────
 
 # NOTE: the shipped bleed selector also carries `:not(.recent-search-input)`
 # (see tests/search/test_recent_search_tofu_specificity.py) and `:not(.settings-panel)`
@@ -381,50 +380,22 @@ _NC1_FIND = '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) 
 _NC1_REPL = '[data-theme="tofu"] .modal:not(.settings-panel) input:not(.recent-search-input){'
 
 
-def _subrun_resolve_mem_bg():
-    """In a FRESH subprocess, resolve the memory input background from the CURRENT
-    on-disk styles.css. Returns the resolved value string."""
-    code = (
-        'import tests.memory.test_memory_modal_specificity as t; '
-        'print("BG=" + str(t._resolve(t._css(), t._MEM_INPUT, "background")))'
-    )
-    r = subprocess.run([sys.executable, '-c', code], cwd=ROOT,
-                       capture_output=True, text=True)
-    out = r.stdout + r.stderr
-    for line in out.splitlines():
-        if line.startswith('BG='):
-            return line[3:]
-    raise AssertionError(f'subprocess did not report BG=: {out}')
-
-
-def test_nc1_reverting_exclusion_reintroduces_bleed(tmp_path):
-    """DOUBLE-NEUTER: revert `:not(.memory-modal)` → `.modal input` on the tofu
-    rule (ON DISK) → the memory input now inherits the tofu bleed → resolution
-    flips to #F5F3ED. Restore byte-identical."""
-    with open(CSS, encoding='utf-8') as f:
-        original = f.read()
-    assert original.count(_NC1_FIND) == 1, (
-        f'NC-1 anchor not unique: count={original.count(_NC1_FIND)}')
+def test_nc1_reverting_exclusion_reintroduces_bleed(css_text):
+    """Remove only `:not(.memory-modal)` in memory: the input inherits the tofu
+    bleed and its background flips to #FBF6E9 without touching shipped CSS."""
+    assert css_text.count(_NC1_FIND) == 1, (
+        f'NC-1 anchor not unique: count={css_text.count(_NC1_FIND)}')
 
     # Baseline (shipped): memory input is NOT the bleed.
-    base_bg = _subrun_resolve_mem_bg()
+    base_bg = _resolve(css_text, _MEM_INPUT, 'background')
     assert base_bg != _TOFU_MEM_BG, f'baseline already bleeding: {base_bg!r}'
 
-    try:
-        with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original.replace(_NC1_FIND, _NC1_REPL, 1))
-        neut_bg = _subrun_resolve_mem_bg()
-        assert neut_bg == _TOFU_MEM_BG, (
-            f'NC-1 did not bite: with the exclusion reverted the memory input '
-            f'background resolved {neut_bg!r}, expected the tofu bleed '
-            f'{_TOFU_MEM_BG!r}. The exclusion is not actually what protects it.')
-    finally:
-        with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original)
-
-    # Restore verified byte-identical.
-    with open(CSS, encoding='utf-8') as f:
-        assert f.read() == original, 'CSS not restored byte-identical after NC-1'
+    neutered_css = css_text.replace(_NC1_FIND, _NC1_REPL, 1)
+    neut_bg = _resolve(neutered_css, _MEM_INPUT, 'background')
+    assert neut_bg == _TOFU_MEM_BG, (
+        f'NC-1 did not bite: with the exclusion reverted the memory input '
+        f'background resolved {neut_bg!r}, expected the tofu bleed '
+        f'{_TOFU_MEM_BG!r}. The exclusion is not actually what protects it.')
 
 
 if __name__ == '__main__':

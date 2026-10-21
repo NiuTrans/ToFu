@@ -7,7 +7,7 @@ cascade — via excluding it at the SOURCE of the over-broad tofu input bleed
 WHY A TEST
 ----------
 The author's intended rule
-    [data-theme="tofu"] .recent-search .recent-search-input {border:2px solid #1a1814}
+    [data-theme="tofu"] .recent-search .recent-search-input {border:2px solid #3B2E1E}
 has specificity (0,3,0). The generic tofu input bleed, before the carve-out, was
     [data-theme="tofu"] .modal:not(.memory-modal) input                 → (0,3,1)
 which OUT-SPECIFIES the author's rule and silently flattened the 2px blocky
@@ -23,14 +23,14 @@ jsdom cannot do this (it resolves classList but does not apply the external
 stylesheet or compute cascade specificity), so we reuse the REAL CSS specificity
 resolver from test_memory_modal_specificity.py against the REAL styles.css.
 
-Four things (mirrors the memory pilot's acceptance criteria):
+Five things (mirrors the memory pilot's acceptance criteria):
   1. DELETION — the `.recent-search .recent-search-input` rules carry NO
      !important (the fix is source-exclusion, not a counter-rule).
-  2. EXCLUSION IS LOAD-BEARING (NC, on disk) — with the shipped CSS the recent
-     input's `border` resolves to the authored `2px solid #1a1814`, NOT the
+  2. EXCLUSION IS LOAD-BEARING (NC, in memory) — with the shipped CSS the recent
+     input's `border` resolves to the authored `2px solid #3B2E1E`, NOT the
      bleed's 1px. Neuter: revert `input:not(.recent-search-input)` → `input` on
-     the tofu bleed → the bleed (0,3,1) now out-specifies the author (0,3,0) →
-     the border flips to the 1px bleed. Restore byte-identical.
+     an in-memory copy of the tofu bleed → it now out-specifies the author →
+     the border flips to the 1px bleed. The shipped CSS is never written.
   3. SPECIFICITY MATH — encode the (0,3,0) < (0,3,1) relationship that makes the
      source-exclusion (rather than an !important) the correct fix.
   4. NO OVER-NARROWING (control) — a GENERIC tofu modal input (browser/apply
@@ -45,21 +45,18 @@ Four things (mirrors the memory pilot's acceptance criteria):
      bleed also killed the 30px right padding that keeps typed text clear
      of the button. Fix: chain the authored selectors to
      `.recent-search .recent-search-input` (0,2,0) — mirrors the
-     `.mp-add-row .mp-path-input` pattern. NC: un-chain the base rule on
-     disk → padding flips to the bleed's 10px 12px.
+     `.mp-add-row .mp-path-input` pattern. NC: un-chain the base rule in
+     memory → padding flips to the bleed's 10px 12px.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 
 import pytest
 
 # Reuse the sanctioned CSS specificity engine — single source of truth.
 from tests.memory.test_memory_modal_specificity import (  # noqa: E402
-    CSS,
     _Elem,
     _css,
     _iter_rules,
@@ -69,10 +66,6 @@ from tests.memory.test_memory_modal_specificity import (  # noqa: E402
 )
 
 pytestmark = pytest.mark.unit
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-
 
 # ─────────────────────────── test elements ───────────────────────────
 
@@ -95,7 +88,7 @@ _SETTINGS_INPUT = _Elem(
     'input', set(), theme='tofu', ancestors=[{'modal', 'settings-panel'}],
 )
 
-_TOFU_INTENDED_BORDER = '2px solid #1a1814'          # authored blocky border
+_TOFU_INTENDED_BORDER = '2px solid #3B2E1E'          # authored blocky border
 _TOFU_BLEED_BORDER = '1px solid rgba(184,176,160,0.4)'  # the over-broad bleed
 _BLEED_SELECTOR = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
@@ -211,7 +204,7 @@ def test_tofu_generic_modal_rules_do_not_match_settings_panel(css_text):
         f'settings input border resolved to the tofu bleed {border!r}')
 
 
-# ─────────────────────────── NC double-neuter (on-disk, subprocess) ───────────────────────────
+# ─────────────────────────── NC double-neuter (in memory) ───────────────────────────
 
 _NC_FIND = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
@@ -219,50 +212,23 @@ _NC_FIND = (
 _NC_REPL = '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input{'
 
 
-def _subrun_resolve_recent_border() -> str:
-    """In a FRESH subprocess, resolve the recent-search input border from the
-    CURRENT on-disk styles.css."""
-    code = (
-        'import tests.search.test_recent_search_tofu_specificity as t; '
-        'print("BORDER=" + str(t._resolve(t._css(), t._RECENT_INPUT, "border")))'
-    )
-    r = subprocess.run([sys.executable, '-c', code], cwd=ROOT,
-                       capture_output=True, text=True)
-    out = r.stdout + r.stderr
-    for line in out.splitlines():
-        if line.startswith('BORDER='):
-            return line[len('BORDER='):]
-    raise AssertionError(f'subprocess did not report BORDER=: {out}')
-
-
-def test_nc_reverting_exclusion_reintroduces_bleed():
-    """DOUBLE-NEUTER: revert `input:not(.recent-search-input)` → `input` on the
-    tofu bleed (ON DISK) → the recent input now inherits the bleed → the border
-    resolution flips to the 1px bleed. Restore byte-identical."""
-    with open(CSS, encoding='utf-8') as f:
-        original = f.read()
-    assert original.count(_NC_FIND) == 1, (
-        f'NC anchor not unique: count={original.count(_NC_FIND)}')
+def test_nc_reverting_exclusion_reintroduces_bleed(css_text):
+    """Revert `input:not(.recent-search-input)` → `input` in memory: the recent
+    input's border flips to the 1px bleed without touching the shipped CSS."""
+    assert css_text.count(_NC_FIND) == 1, (
+        f'NC anchor not unique: count={css_text.count(_NC_FIND)}')
 
     # Baseline (shipped): recent input border is the authored 2px, not the bleed.
-    base_border = _subrun_resolve_recent_border()
+    base_border = _resolve(css_text, _RECENT_INPUT, 'border')
     assert base_border == _TOFU_INTENDED_BORDER, (
         f'baseline not authored border: {base_border!r}')
 
-    try:
-        with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original.replace(_NC_FIND, _NC_REPL, 1))
-        neut_border = _subrun_resolve_recent_border()
-        assert neut_border == _TOFU_BLEED_BORDER, (
-            f'NC did not bite: with the exclusion reverted the recent input '
-            f'border resolved {neut_border!r}, expected the tofu bleed '
-            f'{_TOFU_BLEED_BORDER!r}. The exclusion is not what protects it.')
-    finally:
-        with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original)
-
-    with open(CSS, encoding='utf-8') as f:
-        assert f.read() == original, 'CSS not restored byte-identical after NC'
+    neutered_css = css_text.replace(_NC_FIND, _NC_REPL, 1)
+    neut_border = _resolve(neutered_css, _RECENT_INPUT, 'border')
+    assert neut_border == _TOFU_BLEED_BORDER, (
+        f'NC did not bite: with the exclusion reverted the recent input '
+        f'border resolved {neut_border!r}, expected the tofu bleed '
+        f'{_TOFU_BLEED_BORDER!r}. The exclusion is not what protects it.')
 
 
 # ─────────────── 5. BASE .modal input bleed (theme-agnostic) ───────────────
@@ -314,50 +280,23 @@ _NC2_FIND = '.recent-search .recent-search-input {'
 _NC2_REPL = '.recent-search-input {'
 
 
-def _subrun_resolve_recent_padding() -> str:
-    """In a FRESH subprocess, resolve the recent-search input padding from the
-    CURRENT on-disk styles.css."""
-    code = (
-        'import tests.search.test_recent_search_tofu_specificity as t; '
-        'print("PADDING=" + str(t._resolve(t._css(), t._RECENT_INPUT, "padding")))'
-    )
-    r = subprocess.run([sys.executable, '-c', code], cwd=ROOT,
-                       capture_output=True, text=True)
-    out = r.stdout + r.stderr
-    for line in out.splitlines():
-        if line.startswith('PADDING='):
-            return line[len('PADDING='):]
-    raise AssertionError(f'subprocess did not report PADDING=: {out}')
+def test_nc_unchaining_selector_reintroduces_base_bleed(css_text):
+    """Un-chain `.recent-search .recent-search-input` in memory: the base
+    `.modal input` bleed wins again and padding flips to 10px 12px."""
+    assert css_text.count(_NC2_FIND) == 1, (
+        f'NC-2 anchor not unique: count={css_text.count(_NC2_FIND)}')
 
-
-def test_nc_unchaining_selector_reintroduces_base_bleed():
-    """DOUBLE-NEUTER: un-chain `.recent-search .recent-search-input` →
-    `.recent-search-input` (ON DISK) → the base `.modal input` bleed wins
-    again → padding flips to 10px 12px. Restore byte-identical."""
-    with open(CSS, encoding='utf-8') as f:
-        original = f.read()
-    assert original.count(_NC2_FIND) == 1, (
-        f'NC-2 anchor not unique: count={original.count(_NC2_FIND)}')
-
-    base_padding = _subrun_resolve_recent_padding()
+    base_padding = _resolve(css_text, _RECENT_INPUT, 'padding')
     assert base_padding == _AUTHORED_PADDING, (
         f'baseline not authored padding: {base_padding!r}')
 
-    try:
-        with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original.replace(_NC2_FIND, _NC2_REPL, 1))
-        neut_padding = _subrun_resolve_recent_padding()
-        assert neut_padding == _BASE_BLEED_PADDING, (
-            f'NC-2 did not bite: with the selector un-chained the recent input '
-            f'padding resolved {neut_padding!r}, expected the base bleed '
-            f'{_BASE_BLEED_PADDING!r}. The chained selector is not what '
-            f'protects it.')
-    finally:
-        with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original)
-
-    with open(CSS, encoding='utf-8') as f:
-        assert f.read() == original, 'CSS not restored byte-identical after NC-2'
+    neutered_css = css_text.replace(_NC2_FIND, _NC2_REPL, 1)
+    neut_padding = _resolve(neutered_css, _RECENT_INPUT, 'padding')
+    assert neut_padding == _BASE_BLEED_PADDING, (
+        f'NC-2 did not bite: with the selector un-chained the recent input '
+        f'padding resolved {neut_padding!r}, expected the base bleed '
+        f'{_BASE_BLEED_PADDING!r}. The chained selector is not what '
+        f'protects it.')
 
 
 if __name__ == '__main__':
