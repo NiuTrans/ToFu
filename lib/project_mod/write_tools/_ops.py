@@ -362,7 +362,10 @@ def _write_with_undo(target, content, base, rel_path, original_content, *,
         # or corrupt journal forces the fail-loud disk read below and never
         # persists as reusable state. The snapshot is consumed by the one RMW
         # below while this same admission remains held (never a stale projection).
-        state['preparedJournal'] = list(mods._cache_get(session_dir))
+        # Validate the undo authority before replacing user bytes, without
+        # paying a full-history parse per edit. Rows materialized here are handed
+        # to this admission's commit, so a fold never re-reads the same journal.
+        state['preparedJournal'] = mods._assert_journal_ready(session_dir)
         state['writing'] = True
         record = None
         published = False
@@ -2217,7 +2220,9 @@ def _admit_edit_groups(groups, conv_id, stack):
             finally:
                 state.pop('recovering', None)
             # A later root's corrupt journal must not follow an earlier write.
-            mods._cache_get(directory)
+            # Validation by identity, not a full materialization: an edit must not
+            # pay for re-parsing the whole history before writing one file.
+            mods._assert_journal_ready(directory)
         except Exception as error:
             for target in session['targets']:
                 errors[target] = error

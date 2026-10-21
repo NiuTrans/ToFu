@@ -17,6 +17,29 @@ from lib.tools.execution_timing import timing_phase
 _held = threading.local()
 _descriptor_guard = threading.Lock()
 _active_descriptors = set()
+# abs session dir -> {thread ident: thread name}. Diagnostics only: it never
+# decides admission, and it is cleared at the last departure.
+_holders = {}
+
+
+def _record_holder(directory, present):
+    with _descriptor_guard:
+        owned = _holders.setdefault(directory, {}) if present else _holders.get(directory)
+        if owned is None:
+            return
+        if present:
+            owned[threading.get_ident()] = threading.current_thread().name
+        else:
+            owned.pop(threading.get_ident(), None)
+            if not owned:
+                _holders.pop(directory, None)
+
+
+def _holder_names(directory):
+    with _descriptor_guard:
+        owned = dict(_holders.get(directory, {}))
+    owned.pop(threading.get_ident(), None)
+    return [name for _, name in sorted(owned.items())]
 
 
 def _after_fork_child():
@@ -49,12 +72,21 @@ class SessionLockError(OSError):
 class SessionLockBusy(SessionLockError):
     """Transient admission failure, distinct from unsafe lock identity/storage."""
 
-    def __init__(self, waited_seconds):
+    def __init__(self, waited_seconds, session_dir=None, holders=()):
         self.waited_seconds = waited_seconds
+        self.session_dir = session_dir
+        self.holders = tuple(holders)
+        scope = (f' Shared by every writer of this project journal ({session_dir}),'
+                 ' not by the edited file.' if session_dir else '')
+        holder = (' Active local holder(s): ' + ', '.join(self.holders) + '.'
+                  if self.holders else
+                  ' No other thread in this process holds it, so another process '
+                  'is committing.')
         super().__init__(
             f'Project journal lock is busy after {waited_seconds:.2f}s; '
             'no file mutation was performed. Wait for the active project operation, '
-            'then re-read the file and recompute the edit before retrying.')
+            'then re-read the file and recompute the edit before retrying.'
+            + scope + holder)
 
 
 def session_state(session_dir):
@@ -111,15 +143,18 @@ def locked_session(session_dir):
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
-                        raise SessionLockBusy(time.monotonic() - started)
+                        raise SessionLockBusy(time.monotonic() - started, directory,
+                                              _holder_names(directory))
                     time.sleep(min(0.01, max(0, deadline - time.monotonic())))
         current = os.stat(os.path.join(directory, '.journal.lock'), follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
             raise SessionLockError('Project journal lock changed during admission')
         state = held[directory] = {'afterRelease': callbacks}
+        _record_holder(directory, True)
         try:
             yield state
         finally:
+            _record_holder(directory, False)
             del held[directory]
     finally:
         # A child's at-fork callback already closed the inherited descriptor.

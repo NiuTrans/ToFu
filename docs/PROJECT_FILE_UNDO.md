@@ -140,6 +140,53 @@ index publication; failed migration leaves the previous inline journal valid.
 Older inline records are converted once on the next confirmed journal update.
 There is no change to owner/root attribution or the selected storage backend.
 
+## Append commits and bounded folds
+
+Problem: an 8,838-record, 8.1 MB journal was rewritten in full for every file
+edit while the project journal admission was held. That admission is one per
+repository root, shared by every conversation, so at ~200 ms per commit a second
+conversation editing an unrelated file exhausted its 30 s wait and reported
+`[journal-busy]` although no two writers touched the same file. The published
+file-scoped lease already covers the edited path; what serialized unrelated
+projects of work was the commit, not the file.
+
+Decision: a small record is **appended** to `modifications.journal` (one
+newline-terminated line, fsynced before the change is acknowledged) and the
+index is not touched. A record larger than `_JOURNAL_APPEND_MAX_RECORD_BYTES`, or
+one that would push the log past `_JOURNAL_TAIL_MAX_BYTES`, folds instead: the
+live log is renamed to `modifications.journal.fold`, an index containing every
+record plus the `absorbedFold` identity of that artifact is published, and only
+then is the artifact unlinked. A crash before publication replays the artifact;
+a crash after it replays nothing. A torn trailing line has no newline and is
+never trusted — its prepared intent is the recovery evidence. A failed append is
+truncated back to its previous size, so an unacknowledged record never becomes
+visible.
+
+History is index + fold artifact + log, replayed in that order. The index stays
+the readable authority for anything that needs joined history (undo,
+projections, payload reclamation), so undo and its payload ledger keep their
+existing contract. Appending requires an index whose payloads are already packed
+references; a legacy inline index is folded once, which is the existing migration
+point rather than a new one.
+
+Write admission validates the authority by journal identity instead of
+re-parsing the index per edit: an unchanged journal is validated once per
+process, and any external append or replacement changes the identity and forces
+a full validation. Duplicate `changeId` detection uses an identity-keyed id set
+too, so an append never materializes the history.
+
+Alternatives rejected: narrowing the admission to the edited file (writers to
+one append log must still exclude each other, so it removes nothing); raising
+the admission timeout (turns a visible failure into a hidden stall); one file
+per record (a directory scan per read, and it moves ordering into the
+filesystem); keeping the index resident (it already exceeds the history cache
+budget); trimming history to keep commits cheap (loses undo).
+
+Measurement: on a copy of the real 8,838-record journal, 60 small commits went
+from 220 ms to 2 ms each and from ~493 MB of repeated index rewrites to 30 KB of
+appended lines, with identical history content afterwards. Executable specs:
+`tests/project_mod/test_project_journal_append.py`.
+
 Internal projections request metadata only. Original contents are materialized
 after conversation/path selection, and undo verifies each selected range before
 mutation. Missing, changed or symlinked payloads fail visibly and block older

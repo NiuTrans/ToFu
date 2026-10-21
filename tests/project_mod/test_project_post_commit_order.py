@@ -61,7 +61,7 @@ def test_corrupt_journal_rejects_before_target_or_intent_mutation(project, inval
 
 def test_delayed_same_file_listener_cannot_regress_round_snapshot(project, monkeypatch):
     entered, release, second_committed = (threading.Event() for _ in range(3))
-    flush = mods._flush_to_disk
+    commit = mods._commit_record
     notifications = []
 
     def slow_listener(task, entry):
@@ -71,12 +71,13 @@ def test_delayed_same_file_listener_cannot_regress_round_snapshot(project, monke
             assert release.wait(10)
         notifications.append(task)
 
-    def observe_commit(session, rows):
-        flush(session, rows)
-        if rows[-1]['taskId'] == 'second':
+    def observe_commit(session, record, change_id=None):
+        committed = commit(session, record, change_id)
+        if record.get('taskId') == 'second':
             second_committed.set()
+        return committed
 
-    monkeypatch.setattr(mods, '_flush_to_disk', observe_commit)
+    monkeypatch.setattr(mods, '_commit_record', observe_commit)
     monkeypatch.setattr(mods, '_live_change_listeners', [slow_listener])
     monkeypatch.setattr(locks, '_wait_seconds', lambda: 0.05)
 
