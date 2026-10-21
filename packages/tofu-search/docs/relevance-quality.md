@@ -116,6 +116,73 @@ visibility, fragment/code/table fidelity, runtime bootstrap syntax, ordinary
 fast paths and public fetching without an extra request. A reviewed React
 runtime fixture is retained under `tests/fixtures/` with its MIT license.
 
+## Browser evidence and rendering admission
+
+**Problem:** the browser paths preferred `textContent`, which includes scripts
+and hidden descendants and loses source links/formatting. Both paths duplicated
+that extraction and treated 200 characters of navigation as readiness. Static
+shell detection inspected only the first 8,000 HTML characters, missing roots
+after large heads, while short readable server-rendered pages could trigger it.
+
+**Decision:** `fetch/rendered_source.py` owns the shared browser readiness and
+source projection. Both identities retain their navigation, cookies/proxy and
+retirement owners. One selector priority (`main`, main role, then `article`)
+governs static admission and browser readiness, so an unrelated article card
+cannot mask an empty main. Prefer primary-region text, then the existing
+bounded stability check. Readiness and authenticated redirect settling share
+the remaining monotonic navigation budget; they do not start fresh waits after
+it expires. Readiness remains a heuristic, not proof all future updates ended.
+This follows Playwright's
+[page-loading distinction](https://playwright.dev/python/docs/navigations#when-is-the-page-loaded)
+and the DOM distinction between
+[rendered text and raw textContent](https://developer.mozilla.org/en-US/docs/Web/API/Node/textContent#differences_from_innertext).
+
+Project a source-ordered snapshot into an inactive document without mutating
+the live page. Exclude script/style/inert subtrees, explicit hidden elements,
+computed `display:none`/`content-visibility:hidden`, and text with hidden
+visibility. Explicitly visible descendants remain readable. Open shadow roots
+and assigned slots follow composed content order, without duplicating light DOM
+or exposing unused slot fallbacks. Closed shadow roots remain inaccessible.
+The shared HTML extractor then preserves headings, links, code, tables, fragment
+scope and its existing visibility rules. An unavailable projection never falls
+back to raw DOM text. This is text evidence, not a pixel-visibility guarantee:
+offscreen/overlapped/transparent content and disclosure state have no new policy.
+
+Snapshot accounting uses the configured `fetch_max_bytes` value as its DOM
+source-character budget, counting shallow markup and text in source order.
+The existing text budget applies afterward; source truncation is marked even
+for uncapped presentation. The DOM itself already belongs to the browser;
+projection does not claim to cap page JavaScript or network subresource memory.
+Snapshot/extraction work is request-local and uses the existing demand worker.
+No persistent cache, resident pool, model call, paid API or new dependency is
+introduced. Existing cancellation joins context cleanup.
+
+`fetch/html_rendering.py` receives signals from the same restored, sanitized
+DOM used for extraction. Real application attributes are distinguished from
+examples in scripts; readable primary text overrides length-only and optional
+noscript hints. A known application with an empty/loading main region can try
+the existing anonymous/browser recovery chain. If both yield nothing, report
+`spa_shell` through the existing failure boundary and do not cache navigation
+as success. Ambiguous partial text retains its previous fallback behavior.
+
+Controlled browser replay exposed hidden/script text in the old output and
+returned a delayed page's script literal after 1.07 s, before its body arrived.
+The source projection recovered clean structured evidence after 3.56 s. A short
+readable page took 10.83 → 1.98 s, including cold browser startup in that case.
+These two local Chromium inputs establish the observed defect and recovery,
+not broad network speed or agent accuracy. The optional real-browser test also
+covers computed visibility, shadow roots, slots, deadlines, source truncation,
+both identities and cleanup, using only loopback fixtures.
+
+**Alternatives rejected:** raising text thresholds still counts menus; using
+only `innerText` loses links and preformatted structure; an unconditional
+browser retry adds cost to already readable HTML; including arbitrary hidden
+HTML makes non-rendered data look like evidence. Keep one extraction owner.
+Run `tests/test_html_rendering_admission.py` and `test_rendered_page_source.py`,
+then `TOFU_SEARCH_TEST_BROWSER=1 pytest tests/test_rendered_dom_browser.py` with
+the optional Playwright runtime. Base-package CI skips only that opt-in test;
+ordinary source/admission tests need neither a browser nor external network.
+
 ## HTML fragment scope
 
 **Problem:** reading a documentation URL with an observed `#fragment` returned

@@ -100,7 +100,9 @@ def test_scope_metadata_does_not_claim_a_previous_fragment_for_a_new_page():
     extract_html_text(html, 0, URL + '#workers', scope=scope)
     assert scope['custom'] == 'caller value' and scope['fragment'] == 'workers'
     extract_html_text(html, 0, URL + '#missing', scope=scope)
-    assert scope == {'custom': 'caller value'}
+    assert scope['custom'] == 'caller value'
+    assert set(scope) == {'custom', 'rendering'}
+    assert scope['rendering']['readable_primary'] is True
 
 
 @pytest.mark.parametrize('selection', ['<html><body></body></html>', 'error'])
@@ -116,7 +118,8 @@ def test_failed_scope_extraction_retains_full_document(monkeypatch, selection):
     monkeypatch.setattr(html_extract, 'select_fragment_html', select)
     scope = {}
     assert extract_html_text(html, 0, URL + '#workers', scope=scope) == expected
-    assert not scope
+    assert set(scope) == {'rendering'}
+    assert scope['rendering']['readable_primary'] is True
 
 
 def test_public_fetch_accepts_short_scope_without_browser_and_keeps_cache_identity(monkeypatch):

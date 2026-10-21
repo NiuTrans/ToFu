@@ -17,6 +17,7 @@ from trafilatura.deduplication import LRUCache
 from trafilatura.settings import LRU_SIZE
 
 from tofu_search.fetch.html_fragments import fragment_identifier, select_fragment_html
+from tofu_search.fetch.html_rendering import javascript_notice, rendering_signals
 from tofu_search.fetch.html_streaming import restore_completed_streams
 from tofu_search.fetch.utils import _get_bs4
 from tofu_search.log import get_logger
@@ -465,9 +466,10 @@ def _prepare_article_tree(html):
     return tree
 
 
-def _sanitized_soup(html):
+def _sanitized_soup(html, *, rendering=None):
     """Use one visibility/navigation boundary for scopes and full documents."""
     soup = _get_bs4()(html, 'html.parser')
+    requires_javascript = javascript_notice(soup) if rendering is not None else False
     for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe',
                 'noscript', 'form', 'svg', 'input', 'select', 'textarea']:
         for element in soup.find_all(tag):
@@ -477,6 +479,8 @@ def _sanitized_soup(html):
     for element in soup.find_all(class_=re.compile(
             r'\b(cookie|popup|modal|banner|advert|sidebar|menu|nav)\b', re.I)):
         element.decompose()
+    if rendering is not None:
+        rendering.update(rendering_signals(soup, requires_javascript=requires_javascript))
     return soup
 
 
@@ -491,6 +495,7 @@ def extract_html_text(html, max_chars, url='', *, scope=None):
     if scope is not None:
         scope.pop('fragment', None)
         scope.pop('document_text', None)
+        scope.pop('rendering', None)
 
     # ── Phase 0: Code-hosting blob extraction (GitHub embeds code in JSON) ──
     code = _try_extract_code_blob(html, url)
@@ -509,7 +514,8 @@ def extract_html_text(html, max_chars, url='', *, scope=None):
     fragment = fragment_identifier(url)
     if fragment:
         try:
-            soup = _sanitized_soup(html)
+            rendering = scope.setdefault('rendering', {}) if scope is not None else None
+            soup = _sanitized_soup(html, rendering=rendering)
             selected = select_fragment_html(soup, fragment)
             if selected:
                 text = _extract_html_document(selected, max_chars, url)
@@ -522,10 +528,10 @@ def extract_html_text(html, max_chars, url='', *, scope=None):
                     return text
         except Exception:
             logger.debug('HTML fragment extraction could not retain its scope', exc_info=True)
-    return _extract_html_document(html, max_chars, url)
+    return _extract_html_document(html, max_chars, url, scope=scope)
 
 
-def _extract_html_document(html, max_chars, url):
+def _extract_html_document(html, max_chars, url, *, scope=None):
     """Extract one already-selected document through the common fidelity path."""
     # ── Phase 1: Try trafilatura for main text extraction ──
     # Serialized via _TRAFILATURA_LOCK — see module-level note on lxml
@@ -546,7 +552,8 @@ def _extract_html_document(html, max_chars, url):
 
     # ── Phase 2: BeautifulSoup fallback / link extraction ──
     try:
-        soup = _sanitized_soup(html)
+        rendering = scope.setdefault('rendering', {}) if scope is not None else None
+        soup = _sanitized_soup(html, rendering=rendering)
         # ★ Priority: <main> before <article> — <article> can be a single card/widget
         #   while <main> wraps the full page content (e.g. HuggingFace collections)
         main_el = None

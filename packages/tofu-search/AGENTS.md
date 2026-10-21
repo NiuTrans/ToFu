@@ -32,6 +32,10 @@ verify `tests/test_query_fetch.py` and host `test_fetch_url_full_source.py`.
 `fetch/html_extract.py` owns all text extraction and fidelity rules.
 `fetch/html_streaming.py` restores declared received completions before that
 visibility boundary; verify `tests/test_html_streaming.py` and its runtime fixture.
+`fetch/html_rendering.py` classifies that DOM for recovery; `fetch/rendered_source.py`
+owns bounded browser readiness/projection through the same extractor. Verify
+`test_html_rendering_admission.py`, `test_rendered_page_source.py`, then opt-in
+`TOFU_SEARCH_TEST_BROWSER=1 pytest .../test_rendered_dom_browser.py` with Playwright.
 Quality contracts and the offline measurement command live in
 `docs/relevance-quality.md`; regression fixtures do not prove live superiority.
 Free source admission and metasearch recovery are owned by `docs/free-search.md`.

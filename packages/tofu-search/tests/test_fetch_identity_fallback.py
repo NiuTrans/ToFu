@@ -108,7 +108,7 @@ def _browser_returning(monkeypatch, calls, text):
 
 def test_spa_shell_falls_to_browser(monkeypatch, harness):
     monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: None)
-    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
+    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result, **_kwargs: True)
     _browser_returning(monkeypatch, harness, _BROWSER_TEXT)
 
     out = core.fetch_page_content('https://spa-shell-1.example.com/app', max_chars=50000)
@@ -122,7 +122,7 @@ def test_spa_shell_browser_empty_keeps_partial_shell_text(monkeypatch, harness):
     """Pre-seam behaviour: pw fails + extracted text > 50 chars → partial is returned."""
     partial = 'x' * 100
     monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: partial)
-    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
+    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result, **_kwargs: True)
 
     out = core.fetch_page_content('https://spa-shell-2.example.com/app', max_chars=50000)
 
@@ -132,7 +132,7 @@ def test_spa_shell_browser_empty_keeps_partial_shell_text(monkeypatch, harness):
 
 def test_spa_shell_browser_empty_no_text_returns_none(monkeypatch, harness):
     monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: None)
-    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
+    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result, **_kwargs: True)
 
     out = core.fetch_page_content('https://spa-shell-3.example.com/app', max_chars=50000)
 
@@ -267,7 +267,7 @@ def test_auth_source_all_identities_empty_continues_anonymous(monkeypatch, harne
 
 def test_playwright_success_never_touches_browser(monkeypatch, harness):
     monkeypatch.setattr(core, '_extract_html_text', lambda html, limit, url=None, scope=None: None)
-    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result: True)
+    monkeypatch.setattr(core, '_looks_like_spa_shell', lambda html, result, **_kwargs: True)
     monkeypatch.setattr(core, '_try_playwright_fallback',
                         lambda url, max_chars, timeout: 'rendered by server playwright')
 

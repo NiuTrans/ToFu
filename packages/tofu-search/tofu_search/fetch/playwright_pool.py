@@ -9,7 +9,6 @@ import asyncio as asyncio
 import atexit
 import inspect
 import os
-import re
 import sys
 import threading
 import time
@@ -477,7 +476,10 @@ class PlaywrightPool:
         extract logic as :meth:`_do_fetch` so output is identical to the
         anonymous path.
         """
-        from tofu_search.fetch.html_extract import extract_html_text
+        from tofu_search.fetch.rendered_source import (
+            extract_rendered_source,
+            wait_for_rendered_source,
+        )
 
         url = (payload or {}).get('url') or ''
         timeout = int((payload or {}).get('timeout') or 20)
@@ -493,7 +495,7 @@ class PlaywrightPool:
             await _await_result(page.route('**/*.{png,jpg,jpeg,gif,svg,webp,ico,woff,woff2,ttf,otf,mp4,mp3,webm}',
                        lambda route: route.abort()))
 
-            t0 = time.time()
+            t0 = time.monotonic()
             await _await_result(page.goto(url, timeout=timeout * 1000, wait_until='domcontentloaded'))
 
             # ── Render wait for an AUTHENTICATED load ──
@@ -515,73 +517,27 @@ class PlaywrightPool:
             # 1) If we landed on a login wall, the cookies may still be being
             #    exchanged for a session — give the redirect a chance to leave.
             if _on_auth_wall():
-                _wall_deadline = time.time() + _max_render_wait
-                while time.time() < _wall_deadline and _on_auth_wall():
-                    await _await_result(page.wait_for_timeout(500))
+                _wall_deadline = min(t0 + timeout, time.monotonic() + _max_render_wait)
+                while time.monotonic() < _wall_deadline and _on_auth_wall():
+                    await _await_result(page.wait_for_timeout(
+                        min(500, max(0, (_wall_deadline - time.monotonic()) * 1000))))
                 if _on_auth_wall():
                     logger.info('[Pool:auth] still on an auth wall after %.1fs — '
                                 'stored session likely expired/insufficient: %s',
-                                time.time() - t0, page.url[:100])
+                                time.monotonic() - t0, page.url[:100])
                 else:
                     logger.debug('[Pool:auth] left the auth wall in %.1fs — now %s',
-                                 time.time() - t0, page.url[:90])
+                                 time.monotonic() - t0, page.url[:90])
 
-            try:
-                await _await_result(page.wait_for_function(
-                    'document.body && document.body.innerText.trim().length > 200',
-                    timeout=max(int((_max_render_wait - (time.time() - t0)) * 1000), 1000),
-                ))
-            except Exception as e:
-                logger.debug('[Pool:auth] render wait timed out for %s: %s', url[:80], e)
+            await wait_for_rendered_source(page, deadline=t0 + timeout)
+            elapsed = time.monotonic() - t0
 
-            # 2) Text-stability settle — the SPA mounts its real content after
-            #    the auth check resolves, so the first non-empty body is usually
-            #    a shell. Two consecutive equal lengths = done.
-            _prev_len, _stable = 0, 0
-            for _ in range(8):
-                if time.time() - t0 > timeout:
-                    break
-                try:
-                    _cur = await _await_result(page.evaluate('document.body.innerText.trim().length'))
-                except Exception:
-                    break
-                if _cur == _prev_len and _cur > 0:
-                    _stable += 1
-                    if _stable >= 2:
-                        break
-                else:
-                    _stable = 0
-                _prev_len = _cur
-                await _await_result(page.wait_for_timeout(500))
-            elapsed = time.time() - t0
+            text = await extract_rendered_source(page, max_chars, url)
+            if text:
+                logger.info('[Pool:auth] Rendered source: %d chars in %.1fs — %s',
+                            len(text), elapsed, url[:80])
+            return text
 
-            _remaining_ms = max(int((timeout - elapsed) * 1000), 3000)
-            try:
-                body_text = await _await_result(page.locator('body').text_content(timeout=_remaining_ms)) or ''
-            except Exception as _tc_err:
-                logger.debug('[Pool:auth] text_content failed, trying evaluate: %s', _tc_err)
-                try:
-                    body_text = await _await_result(page.evaluate('document.body?.innerText || ""'))
-                except Exception as _eval_err:
-                    logger.debug('[Pool:auth] evaluate also failed: %s', _eval_err)
-                    body_text = ''
-            body_text = re.sub(r'\n{3,}', '\n\n', body_text).strip()
-
-            if body_text and len(body_text) > 50:
-                if max_chars and len(body_text) > max_chars:
-                    body_text = body_text[:max_chars] + '\n[…truncated]'
-                logger.info('[Pool:auth] OK %s chars in %.1fs — %s',
-                            f'{len(body_text):,}', elapsed, url[:80])
-                return body_text
-
-            html = await _await_result(page.content())
-            text = await run_browser_blocking(extract_html_text, html, max_chars or 0, url=url)
-            if text and len(text) > 50:
-                logger.info('[Pool:auth] OK (extract) %s chars in %.1fs — %s',
-                            f'{len(text):,}', elapsed, url[:80])
-                return text
-            logger.info('[Pool:auth] empty content (login wall?) — %s', url[:80])
-            return None
         except Exception as e:
             logger.warning('[Pool:auth] error (%s) — %s: %s',
                            type(e).__name__, url[:80], e, exc_info=True)
@@ -596,7 +552,10 @@ class PlaywrightPool:
     async def _do_fetch(self, browser, url, timeout, max_chars):
         """在专用线程内执行：打开页面 → 渲染 → 提取文本。"""
         # Import here to avoid circular imports — html_extract is a sibling module
-        from tofu_search.fetch.html_extract import extract_html_text
+        from tofu_search.fetch.rendered_source import (
+            extract_rendered_source,
+            wait_for_rendered_source,
+        )
 
         context = None
         try:
@@ -608,73 +567,17 @@ class PlaywrightPool:
             await _await_result(page.route('**/analytics*', lambda route: route.abort()))
             await _await_result(page.route('**/tracking*', lambda route: route.abort()))
 
-            t0 = time.time()
+            t0 = time.monotonic()
             await _await_result(page.goto(url, timeout=timeout * 1000, wait_until='domcontentloaded'))
 
-            # ── 智能渲染等待 ──
-            _max_render_wait = min(timeout, 12)
-            try:
-                await _await_result(page.wait_for_function(
-                    'document.body && document.body.innerText.trim().length > 200',
-                    timeout=_max_render_wait * 1000,
-                ))
-            except Exception as e:
-                logger.debug('[Fetch] page render wait timed out for: %s: %s', url[:100], e, exc_info=True)
+            await wait_for_rendered_source(page, deadline=t0 + timeout)
+            elapsed = time.monotonic() - t0
 
-            # 等文本稳定: 每 0.5s 检查一次，连续 2 次长度不变 → 渲染完毕
-            _prev_len = 0
-            _stable_count = 0
-            for _ in range(8):
-                try:
-                    _cur_len = await _await_result(page.evaluate('document.body.innerText.trim().length'))
-                except Exception as e:
-                    logger.debug('[Fetch] body text length check failed for %s: %s', url[:80], e, exc_info=True)
-                    break
-                if _cur_len == _prev_len and _cur_len > 200:
-                    _stable_count += 1
-                    if _stable_count >= 2:
-                        break
-                else:
-                    _stable_count = 0
-                _prev_len = _cur_len
-                await _await_result(page.wait_for_timeout(500))
-
-            elapsed = time.time() - t0
-
-            # ── 提取文本 ──
-            # Use locator('body').text_content() instead of page.inner_text('body').
-            # inner_text() performs actionability checks (waits for element to be
-            # visible & stable) which hangs on pages that never finish JS execution
-            # (e.g. Google News redirect stubs). text_content() skips actionability
-            # checks entirely — it reads raw DOM text immediately, which is exactly
-            # what we need for scraping. Falls back to evaluate() if needed.
-            _remaining_ms = max(int((timeout - elapsed) * 1000), 3000)
-            try:
-                body_text = await _await_result(page.locator('body').text_content(timeout=_remaining_ms)) or ''
-            except Exception as _tc_err:
-                logger.debug('[Fetch] locator text_content failed, trying evaluate: %s', _tc_err)
-                try:
-                    body_text = await _await_result(page.evaluate('document.body?.innerText || ""'))
-                except Exception as _eval_err:
-                    logger.debug('[Fetch] evaluate also failed: %s', _eval_err)
-                    body_text = ''
-            body_text = re.sub(r'\n{3,}', '\n\n', body_text).strip()
-
-            if body_text and len(body_text) > 50:
-                if max_chars and len(body_text) > max_chars:
-                    body_text = body_text[:max_chars] + '\n[…truncated]'
-                logger.debug('[Pool] Playwright OK: %s chars in %.1fs — %s', f'{len(body_text):,}', elapsed, url[:80])
-                return body_text
-
-            # innerText 不行，退而用 trafilatura/BS4 解析渲染后的 HTML
-            html = await _await_result(page.content())
-            text = await run_browser_blocking(extract_html_text, html, max_chars or 0, url=url)
-            if text and len(text) > 50:
-                logger.debug('[Pool] Playwright (extract) OK: %s chars in %.1fs — %s', f'{len(text):,}', elapsed, url[:80])
-                return text
-
-            logger.debug('[Pool] Playwright got empty content — %s', url[:80])
-            return None
+            text = await extract_rendered_source(page, max_chars, url)
+            if text:
+                logger.debug('[Pool] Rendered source: %d chars in %.1fs — %s',
+                             len(text), elapsed, url[:80])
+            return text
 
         except Exception as e:
             # Self-recovering fallback: caller treats None as "Playwright failed"

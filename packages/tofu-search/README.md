@@ -72,6 +72,11 @@ stays dependency-free when used standalone.
   [quality contracts and reproducible measurements](docs/relevance-quality.md).
 - **SPA / bot-protection support**: optional Playwright fallback for
   JS-rendered and challenge pages.
+- **Browser evidence fidelity**: anonymous and authenticated rendering share
+  bounded source projection and ordinary HTML extraction. Scripts and hidden
+  content are excluded; links, code, tables and open shadow/slot text survive.
+  Empty application main regions trigger recovery instead of treating menus
+  as complete source. The browser dependency and executable remain optional.
 - **PDF extraction**: optional pymupdf / pymupdf4llm integration.
 - **Streamed HTML reads**: recognized React/Fizz completion segments already
   received in the response are restored before extraction and anchor selection.

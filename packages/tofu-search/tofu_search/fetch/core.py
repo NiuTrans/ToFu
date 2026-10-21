@@ -20,6 +20,7 @@ from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolE
 from tofu_search.config import get_config
 from tofu_search.fetch.html_extract import extract_html_publish_date
 from tofu_search.fetch.html_extract import extract_html_text as _extract_html_text
+from tofu_search.fetch.html_rendering import empty_application_main
 from tofu_search.fetch.http import HttpError as _HttpError
 from tofu_search.fetch.http import do_request as _do_request
 from tofu_search.fetch.http import try_authenticated_fetch as _try_authenticated_fetch
@@ -541,7 +542,8 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     # ── SPA-shell detection: HTML present but too little extracted text ──
     selected_fragment = bool(html_scope.get('fragment'))
     if (not is_pdf and html_for_spa_check and _looks_like_spa_shell(
-            html_for_spa_check, html_scope.get('document_text', result))):
+            html_for_spa_check, html_scope.get('document_text', result),
+            signals=html_scope.get('rendering'))):
         logger.debug('SPA shell detected (HTML=%sB, text=%d), trying Playwright — %s',
                      f'{len(html_for_spa_check):,}', len(result) if result else 0, url[:80])
         pw_result = _try_playwright_fallback(url, max_chars, timeout)
@@ -554,7 +556,7 @@ def _fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
             logger.info('[Fetch] Browser fallback OK after SPA shell — %s (%d chars)',
                         url[:80], len(browser_text))
             return browser_text
-        if result and len(result) > 50:
+        if result and len(result) > 50 and not empty_application_main(html_scope.get('rendering')):
             if max_chars: _fetch_cache.put(url, result)
             if max_chars and len(result) > max_chars:
                 return result[:max_chars] + '\n[…truncated]'

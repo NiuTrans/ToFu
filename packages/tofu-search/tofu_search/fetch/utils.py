@@ -503,10 +503,6 @@ SPA_DOMAINS = frozenset({
     'volcengine.com',
 })
 
-# Playwright 需要 JS 渲染的最小可提取文本长度阈值
-_SPA_MIN_TEXT_LEN = 150
-
-
 def _is_known_spa(url):
     """检查 URL 是否属于已知需要 JS 渲染的 SPA 域名。"""
     try:
@@ -517,63 +513,25 @@ def _is_known_spa(url):
         return False
 
 
-def _looks_like_spa_shell(raw_html, extracted_text):
-    """
-    启发式判断 requests 拿到的 HTML 是不是一个 JS 空壳 (需要 JS 渲染)。
-    同时要避免误判 —— 有些页面本来就文字很少 (如 example.com)。
+def _looks_like_spa_shell(raw_html, extracted_text, *, signals=None):
+    """Use the restored extraction DOM, including roots beyond a large head.
 
-    判定为 SPA 空壳的条件 (需满足 至少一个):
-      A) HTML 中包含典型 SPA 挂载点标记 (id="root"/"app"/__next 等) 且文本极少
-      B) HTML > 2KB 但提取文本 < 100 字符 (大 HTML 却没内容, 强信号)
-      C) <noscript> 中包含 "enable JavaScript" 且有 SPA 挂载点 (最强信号 —
-         即使导航菜单贡献了较多文字, 真实内容仍需 JS 渲染, 如 volcengine.com)
+    Core passes call-local signals from its existing parse. Direct diagnostic
+    callers reuse that owner lazily instead of matching application examples
+    inside script strings or inventing a separate visibility policy.
     """
     if not raw_html:
         return False
-    html_str = raw_html if isinstance(raw_html, str) else raw_html.decode('utf-8', errors='ignore')
-    html_len = len(html_str)
-    text_len = len(extracted_text) if extracted_text else 0
+    from tofu_search.fetch.html_rendering import needs_rendering
 
-    # A) 检查 SPA 挂载点标记
-    _SPA_MARKERS = (
-        'id="root"', 'id="app"', 'id="__next"', 'id="__nuxt"',
-        'id="main-app"', 'id="react-root"', 'id="vue-app"',
-        'data-reactroot', 'ng-app=', 'ng-version=',
-    )
-    html_lower = html_str[:8000].lower()
-    has_spa_marker = any(m.lower() in html_lower for m in _SPA_MARKERS)
+    html = raw_html if isinstance(raw_html, str) else raw_html.decode('utf-8', errors='ignore')
+    if signals is None:
+        from tofu_search.fetch.html_extract import _sanitized_soup
+        from tofu_search.fetch.html_streaming import restore_completed_streams
 
-    if has_spa_marker and text_len < _SPA_MIN_TEXT_LEN:
-        return True
-
-    # B) 大 HTML + 极少文本 = 强 SPA 信号 (2KB+ HTML 但 < 100 字文本)
-    if html_len > 2000 and text_len < 100:
-        return True
-
-    # C) <noscript> 中明确要求启用 JavaScript + SPA 挂载点 = 确定是 SPA
-    #    很多 SPA 框架 (React/Vue/Angular/Modern.js) 在 <noscript> 中放置
-    #    "You need to enable JavaScript to run this app" 之类的提示。
-    #    这种情况下即使 HTML 中有导航菜单等文字 (导致 text_len 较高),
-    #    真实页面内容也必须靠 JS 渲染。只在有 SPA 挂载点时才触发，避免
-    #    误判那些仅因增强功能而提示 JS 的非 SPA 页面。
-    if has_spa_marker:
-        # 搜索 <noscript> 块中的 JS-required 提示
-        noscript_re = re.compile(r'<noscript[^>]*>(.*?)</noscript>', re.I | re.DOTALL)
-        for m in noscript_re.finditer(html_str[:50000]):
-            ns_text = m.group(1).lower()
-            if any(kw in ns_text for kw in (
-                'enable javascript', 'requires javascript',
-                'javascript is required', 'javascript is disabled',
-                'need to enable javascript', 'need javascript',
-                'activate javascript', 'turn on javascript',
-                '启用 javascript', '需要启用 javascript',
-                '请启用 javascript', '开启 javascript',
-            )):
-                logger.debug('SPA noscript+marker detected (text=%d) — '
-                             'JS required message in <noscript>', text_len)
-                return True
-
-    return False
+        signals = {}
+        _sanitized_soup(restore_completed_streams(html), rendering=signals)
+    return needs_rendering(len(html), extracted_text, signals)
 
 
 # ═══════════════════════════════════════════════════════
