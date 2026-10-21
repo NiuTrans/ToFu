@@ -221,6 +221,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     defer_on_shared_contention: bool = False,
                     owner_user_id: int | None = None,
                     model_budget_admit=None,
+                    attempt_timeout=None,
+                    first_byte_timeout=None,
                     ) -> ProviderStreamResult:
     """Stream through the provider pool and return ``ProviderStreamResult``.
 
@@ -231,6 +233,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     best-effort preference that relaxes rather than falsely reporting no slot.
     Waiting callbacks are liveness-only; retry callbacks represent a real
     failed request, and attempt-restart fences any partial streamed text.
+    ``attempt_timeout`` / ``first_byte_timeout`` are the caller's own hard
+    bounds on one physical attempt (see ``stream_chat``); they are orthogonal
+    to ``max_retries`` rotation and keep a silent slot from consuming a
+    bounded caller's entire budget.
     """
     from lib.llm import (
         AbortedError,
@@ -243,7 +249,12 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         RateLimitError,
         stream_chat,
     )
-    from lib.llm.llm_errors import EndpointUnreachableError, ModelRouteMissingError, RequestScopedError
+    from lib.llm.llm_errors import (
+        EndpointUnreachableError,
+        ModelRouteMissingError,
+        RequestScopedError,
+        RequestTransportError,
+    )
 
     def _fire_attempt_restart(reason: str) -> None:
         _notify_attempt_restart(
@@ -550,6 +561,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_stream_wait=_on_stream_wait,
                     api_protocol=slot.protocol or 'openai',
                     owner_user_id=owner_user_id,
+                    attempt_timeout=attempt_timeout,
+                    first_byte_timeout=first_byte_timeout,
                 ))
             if _provider_reported_network_failure(stream_result, msg, finish):
                 _rotate_slot_for_provider_network_failure(
@@ -775,6 +788,39 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             logger.warning('%s Image content error — not retrying on other slots '
                            '(same image = same rejection)', tag)
             raise   # Same payload = same rejection on all keys
+
+        except RequestTransportError as e:
+            # A RESPONSE-READ timeout is pair evidence: this pair accepted the
+            # whole request and then stopped producing bytes. It must rotate
+            # here, because surfacing it (the branch below) leaves slot health
+            # untouched — the picker then re-selects the same dead pair and a
+            # caller-funded retry buys nothing.
+            #
+            # Every other transport failure keeps the old surface-untouched
+            # behaviour. An upload timeout never delivered the request body and
+            # 'delivery_ambiguous' may already have been billed; neither is
+            # evidence that this pair cannot serve the payload.
+            if e.failure_stage != 'read':
+                slot.release()
+                logger.warning(
+                    '%s Transport failure (%s, stage=%s) on %s:%s — '
+                    'surfacing to caller: %.300s',
+                    log_prefix, type(e).__name__, e.failure_stage,
+                    slot.key_name, slot.model, str(e))
+                raise
+            slot.record_error(is_rate_limit=False)
+            state.last_err = e
+            state.note_generic_error(
+                slot, is_timeout=True, strict_model=strict_model)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Request timed out', status_code=0)
+            logger.warning(
+                '%s Transport timeout on %s:%s (stage=%s) — excluded pair, '
+                'rotating: %.200s',
+                log_prefix, slot.key_name, slot.model, e.failure_stage, str(e))
+            _fire_attempt_restart('transport timeout — rotating slot')
 
         except RequestScopedError as e:
             # Request-scoped 4xx (404/422) — THIS request's semantics, not

@@ -60,7 +60,28 @@ silently; the marker is cleared by the next successful commit and never
 regresses a committed turn. A boot sweep (`run_boot_translation_sweep`, wired
 into the post-ready path) re-spawns whole-turn translations for recently-active
 conversations whose settled turns still lack a translation — covering both a
-recorded failure and a restart that dropped the in-flight task. The
+recorded failure and a restart that dropped the in-flight task. Because that
+sweep is bounded to recent conversations, the conversation-open read path
+(`GET /api/v4/conversations/<id>/sync`) also admits one debounced, detached
+recovery pass (`schedule_translation_recovery`): reopening a conversation is
+the observable evidence that its untranslated turn matters, and it was
+previously the one moment that never retried anything. Both drivers skip turns
+that already carry a live translation task (`_active_whole_turn_spawns`), so
+overlapping triggers cannot pay twice for the same text.
+
+Translation budgets are split by question, not by size alone. One physical
+attempt is bounded by the size table's dispatch timeout (`60/120/180s`),
+enforced now on the STREAMING transport as well; the response-header wait is
+bounded separately at 20s (`translation_first_byte_timeout_seconds`), because
+pre-header silence is proof the slot is dead, not evidence the answer is nearly
+ready. The task's total budget is at least two full attempts
+(`translation_total_deadline_seconds`), so the unavoidable first failure still
+leaves a retry. A per-attempt transport timeout is pair evidence: streaming
+dispatch excludes that (key, model) pair and rotates, instead of surfacing the
+timeout and letting the picker re-select the same dead slot. Problem: a
+provider that never sent headers held the only attempt for 90.7s until the
+whole budget expired, so a 2783-char answer reported failure without ever
+trying another model (conv `mvhiznrwv669ue`, turn `f85740dd`, 2026-10-21). The
 `_Accumulator` survives only to translate live per-round previews during
 generation and to stamp those cached translations onto the projection's
 segments at settle (`finalize_incremental` is now stamp-only); it no longer

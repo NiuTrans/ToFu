@@ -414,6 +414,7 @@ def sweep_conversation_translations(
 
         page = list_turns(conversation_id, user_id=user_id, light=True)
         rows = (page or {}).get("turns") or []
+        active_keys = _active_whole_turn_keys()
         respawned = 0
         for row in rows:
             if respawned >= max_respawn:
@@ -433,9 +434,11 @@ def sweep_conversation_translations(
                 turn_id = str(row.get("turnId") or row.get("id") or "")
                 if not turn_id:
                     continue
+                if (conversation_id, turn_id) in active_keys:
+                    continue
                 if should_skip_automatic_translation(content, target, target_code):
                     continue
-                _spawn_whole_turn_translation(
+                admitted = _spawn_whole_turn_translation(
                     conversation_id=conversation_id,
                     turn_id=turn_id,
                     content=content,
@@ -444,7 +447,8 @@ def sweep_conversation_translations(
                     message_id="",
                     prioritize=False,
                 )
-                respawned += 1
+                if admitted:
+                    respawned += 1
             except Exception as exc:
                 logger.debug(
                     "[AutoTranslate] sweep skipped one turn conv=%s: %s",
@@ -464,6 +468,108 @@ def sweep_conversation_translations(
         return 0
 
 
+def _active_whole_turn_keys() -> set[tuple[str, str]]:
+    """Return ``(conversation_id, turn_id)`` pairs with a live translation.
+
+    Every producer (terminal coordinator, per-turn flow sync, boot sweep,
+    open-path recovery) funnels through :func:`_spawn_whole_turn_translation`.
+    Without one shared liveness predicate, an overlapping trigger re-spawns
+    a turn that is already being translated and the user pays twice for the
+    same text. In-flight work carries no durable marker yet (the failure mark
+    is written at settlement), so this must be asked of the runtime.
+    """
+    try:
+        from lib.translate.runtime._state import _translate_runtime
+
+        active: set[tuple[str, str]] = set()
+        for task in _translate_runtime.snapshot():
+            if not isinstance(task, dict):
+                continue
+            if task.get("field") != "translatedContent":
+                continue
+            if task.get("status") not in {"pending", "queued", "running"}:
+                continue
+            conversation_id = str(task.get("convId") or "")
+            turn_id = str(task.get("turnId") or "")
+            if conversation_id and turn_id:
+                active.add((conversation_id, turn_id))
+        return active
+    except Exception as exc:
+        # Liveness is an optimisation here: failing to read it must not
+        # suppress a translation that is genuinely missing.
+        logger.debug("[AutoTranslate] live-task probe failed: %s", exc)
+        return set()
+
+
+# ── Open-path recovery ──
+# A turn whose translation failed stays failed until something re-spawns it.
+# Boot sweep only covers the last 32 recently-touched conversations within 7
+# days, so in practice nothing re-spawned it: the user reopened the exact
+# conversation that had failed (mvhiznrwv669ue, 2026-10-21) and still saw
+# English. Recovery therefore belongs on the READ path — opening a
+# conversation is the observable evidence that its untranslated turn matters.
+#
+# Debounce is per conversation and generous: opening a conversation polls the
+# snapshot endpoint continuously, and a failed turn must not be retried once
+# per poll. The sweep itself is bounded (_SWEEP_MAX_RESPAWN) and skips turns
+# that already have a live task.
+_RECOVERY_DEBOUNCE_SECONDS = 300.0
+_RECOVERY_TRACKED_CONVERSATIONS = 512
+_recovery_guard = threading.Lock()
+_recovery_last_attempt: dict[str, float] = {}
+
+
+def schedule_translation_recovery(
+    conversation_id: str,
+    *,
+    user_id: Any,
+) -> bool:
+    """Re-spawn missing translations for one conversation, off-request.
+
+    Called from the conversation-open read path. Returns True when a recovery
+    pass was admitted. Never raises and never blocks the caller: the sweep runs
+    on a detached thread after the response has been handed back, is bounded in
+    turns, and is idempotent because turns with a live task or a committed
+    translation are skipped.
+    """
+    if not conversation_id or user_id in (None, ""):
+        return False
+    now = time.monotonic()
+    with _recovery_guard:
+        last = _recovery_last_attempt.get(conversation_id)
+        if last is not None and now - last < _RECOVERY_DEBOUNCE_SECONDS:
+            return False
+        if len(_recovery_last_attempt) >= _RECOVERY_TRACKED_CONVERSATIONS:
+            # Bound resident cardinality; the oldest entry is the least
+            # likely to be reopened before its debounce would expire.
+            oldest = min(_recovery_last_attempt, key=_recovery_last_attempt.get)
+            _recovery_last_attempt.pop(oldest, None)
+        _recovery_last_attempt[conversation_id] = now
+
+    def _run() -> None:
+        try:
+            respawned = sweep_conversation_translations(
+                conversation_id, user_id=user_id)
+            if respawned:
+                logger.info(
+                    "[AutoTranslate] open-path recovery respawned %d "
+                    "translation(s) conv=%s",
+                    respawned, conversation_id[:8],
+                )
+        except Exception as exc:
+            logger.debug(
+                "[AutoTranslate] open-path recovery failed conv=%s: %s",
+                conversation_id[:8], exc,
+            )
+
+    threading.Thread(
+        target=_run,
+        daemon=True,
+        name=f"translate-recovery-{conversation_id[:8]}",
+    ).start()
+    return True
+
+
 def _spawn_whole_turn_translation(
     *,
     conversation_id: str,
@@ -473,12 +579,23 @@ def _spawn_whole_turn_translation(
     user_id: Any,
     message_id: str,
     prioritize: bool = True,
-) -> None:
+) -> bool:
+    """Spawn one whole-turn translation unless that turn already has one.
+
+    Returns True when a task was admitted.
+    """
     from lib.translate import (
         _do_translate,
         _translate_runtime,
     )
     from lib.translate.execution import submit_translation_task
+
+    if (conversation_id, turn_id) in _active_whole_turn_keys():
+        logger.debug(
+            "[AutoTranslate] turn already translating conv=%s turn=%s",
+            conversation_id[:8], turn_id[:8],
+        )
+        return False
 
     task_id = uuid.uuid4().hex[:12]
     _translate_runtime.create(
@@ -522,6 +639,7 @@ def _spawn_whole_turn_translation(
         user_id=user_id,
         message_id=message_id,
     )
+    return True
 
 
 def _push_noop(
@@ -561,6 +679,7 @@ def _cancel_incremental(task: dict[str, Any]) -> None:
 __all__ = [
     "schedule_terminal_turn_translations",
     "schedule_settled_visible_turn_translations",
+    "schedule_translation_recovery",
     "sweep_conversation_translations",
     "run_boot_translation_sweep",
 ]
