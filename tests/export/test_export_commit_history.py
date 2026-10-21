@@ -710,7 +710,7 @@ def test_history_rejects_distinct_actual_push_endpoints_before_builder(
 @pytest.mark.parametrize('member_name', [
     'nested/.GIT/config', 'nested\\file.txt', 'nested:name.txt', './alias.txt',
     'nested//alias.txt', 'tail.', 'tail ', 'nested/alias\x7f.txt',
-    'nested/.git./config', 'nested/.git /config',
+    'nested/.git./config', 'nested/.git /config', 'docs///',
 ])
 def test_removed_history_archive_refuses_nonportable_member_names(repositories, member_name):
     import io
@@ -753,3 +753,148 @@ def test_removed_history_source_refuses_nonportable_paths(repositories, filename
     assert git(public, 'rev-parse', 'HEAD') == original
     assert not (public / '.git/tofu-export-history.json').exists()
     assert not (public / '.git/tofu-export-history.pending.json').exists()
+
+
+@pytest.mark.parametrize('member_kind', ['compressed-directory-data', 'directory-symlink', 'file-special'])
+def test_removed_history_archive_refuses_directory_payloads_and_special_types(repositories, member_kind):
+    import io
+    import zipfile
+    from export_pkg._publish import ExportPublishSafetyError
+
+    source, public, base, original = repositories
+    directory = member_kind != 'file-special'
+    member = zipfile.ZipInfo('docs/' if directory else 'safe.txt')
+    member.create_system = 3
+    member.external_attr = {'compressed-directory-data': 0o40755,
+                            'directory-symlink': 0o120777,
+                            'file-special': 0o10644}[member_kind] << 16
+    value = b'ghp_' + b'A' * 36 if member_kind == 'compressed-directory-data' else b''
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as archive:
+        archive.writestr(member, value, compress_type=zipfile.ZIP_DEFLATED)
+    assert not value or value not in stream.getvalue()
+    asset = source / 'asset.zip'
+    asset.write_bytes(stream.getvalue())
+    git(source, 'add', '-A')
+    git(source, 'commit', '-qm', 'Intermediate archive metadata')
+    asset.unlink()
+    git(source, 'add', '-A')
+    git(source, 'commit', '-qm', 'Remove archived metadata')
+
+    with pytest.raises(ExportPublishSafetyError):
+        sync(source, public, git(source, 'rev-parse', 'HEAD'), candidate(public, {}), base=base)
+    assert git(public, 'rev-parse', 'HEAD') == original
+    assert not (public / '.git/tofu-export-history.json').exists()
+    assert not (public / '.git/tofu-export-history.pending.json').exists()
+
+
+def test_history_accepts_empty_plain_archive_directories(repositories):
+    import io
+    import zipfile
+
+    source, public, base, _ = repositories
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as archive:
+        directory = zipfile.ZipInfo('docs/')
+        directory.create_system = 3
+        directory.external_attr = (0o40755 << 16) | 0x10
+        archive.writestr(directory, b'')
+        archive.writestr('docs/readme.txt', b'Public archive content.\n')
+    (source / 'asset.zip').write_bytes(stream.getvalue())
+    git(source, 'add', '-A')
+    git(source, 'commit', '-qm', 'Plain portable archive')
+    tip = git(source, 'rev-parse', 'HEAD')
+    result = sync(source, public, tip, candidate(public, {}), base=base)
+    assert subprocess.check_output(['git', 'show', result.mapping[tip] + ':asset.zip'],
+                                   cwd=public) == stream.getvalue()
+
+
+@pytest.mark.parametrize('resume_kind', ['same-source', 'new-source', 'pending'])
+@pytest.mark.parametrize('receiver_change', ['added', 'instead-of'])
+def test_history_resume_rechecks_legacy_ancestry_at_every_receiving_endpoint(
+        repositories, tmp_path, monkeypatch, resume_kind, receiver_change):
+    from export_pkg import _history as history, _publish as publish
+
+    source, public, base, _ = repositories
+    remote1, remote2, empty = (bare(tmp_path / name) for name in ('one', 'two', 'empty'))
+    legacy = commit(public, 'Existing public snapshot', {'legacy.ts': 'https://GIT.internal.example.com/old\n'})
+    for remote in (remote1, remote2):
+        git(public, 'push', str(remote), 'main')
+    tip = commit(source, 'Safe incremental change', {'safe.py': 'SAFE = 1\n'})
+    (public / 'legacy.ts').unlink()
+    candidate(public, {'safe.py': 'SAFE = 1\n'})
+    remotes = [{'name': 'one', 'url': str(remote1)}, {'name': 'two', 'url': str(remote2)}]
+    monkeypatch.setitem(publish._GIT_REPOS, 'opensource', {'branch': 'main', 'remotes': remotes})
+
+    def builder(destination, tree, message, *, published_tip=None):
+        return history.synchronize_public_history(source, destination, tip, tree, message,
+            history_base=base, published_tip=published_tip).public_tip
+
+    write_state = history._write_state
+    if resume_kind == 'pending':
+        def fail_cursor(path, value):
+            if path.name == 'tofu-export-history.json':
+                raise OSError('synthetic lost cursor acknowledgement')
+            return write_state(path, value)
+        monkeypatch.setattr(history, '_write_state', fail_cursor)
+        with pytest.raises(OSError, match='cursor acknowledgement'):
+            publish._git_push(public, 'opensource', history_builder=builder)
+        monkeypatch.setattr(history, '_write_state', write_state)
+    else:
+        publish._git_push(public, 'opensource', history_builder=builder)
+    head = git(public, 'rev-parse', 'HEAD')
+    cursor, pending = (public / '.git' / ('tofu-export-history' + suffix + '.json')
+                       for suffix in ('', '.pending'))
+    before = {path: path.read_bytes() if path.exists() else None for path in (cursor, pending)}
+    remote_before = [git(remote, 'rev-parse', 'refs/heads/main') for remote in (remote1, remote2)]
+    assert git(public, 'merge-base', legacy, head) == legacy
+    if resume_kind == 'new-source':
+        tip = commit(source, 'Next incremental change', {'next.py': 'NEXT = 1\n'})
+        candidate(public, {'next.py': 'NEXT = 1\n'})
+    if receiver_change == 'added':
+        remotes.append({'name': 'new', 'url': str(empty)})
+    else:
+        git(public, 'config', 'url.' + str(empty) + '.insteadOf', str(remote2))
+
+    with pytest.raises(publish.ExportPublishSafetyError):
+        publish._git_push(public, 'opensource', history_builder=builder, is_release=True)
+    assert git(public, 'rev-parse', 'HEAD') == head
+    assert {path: path.read_bytes() if path.exists() else None for path in (cursor, pending)} == before
+    assert [git(remote, 'rev-parse', 'refs/heads/main') for remote in (remote1, remote2)] == remote_before
+    assert subprocess.run(['git', 'show-ref'], cwd=empty, capture_output=True).returncode == 1
+
+
+def test_history_partial_retry_keeps_previously_acknowledged_legacy_frontier(
+        repositories, tmp_path, monkeypatch):
+    from export_pkg import _history as history, _publish as publish
+
+    source, public, base, _ = repositories
+    remotes = [bare(tmp_path / name) for name in ('one', 'two')]
+    legacy = commit(public, 'Existing public snapshot', {'legacy.ts': 'https://GIT.internal.example.com/old\n'})
+    for remote in remotes:
+        git(public, 'push', str(remote), 'main')
+    tip = commit(source, 'Safe incremental change', {'safe.py': 'SAFE = 1\n'})
+    (public / 'legacy.ts').unlink()
+    candidate(public, {'safe.py': 'SAFE = 1\n'})
+    monkeypatch.setitem(publish._GIT_REPOS, 'opensource', {'branch': 'main', 'remotes': [
+        {'name': name, 'url': str(remote)} for name, remote in zip(('one', 'two'), remotes)]})
+    push_branch = publish._push_branch
+    def fail_second(run, remote, branch, **kwargs):
+        if remote == 'two':
+            raise RuntimeError('synthetic second receiver unavailable')
+        return push_branch(run, remote, branch, **kwargs)
+    monkeypatch.setattr(publish, '_push_branch', fail_second)
+    frontiers = []
+    def builder(destination, tree, message, *, published_tip=None):
+        frontiers.append(published_tip)
+        return history.synchronize_public_history(source, destination, tip, tree, message,
+            history_base=base, published_tip=published_tip).public_tip
+    with pytest.raises(RuntimeError, match='second receiver'):
+        publish._git_push(public, 'opensource', history_builder=builder)
+    head = git(public, 'rev-parse', 'HEAD')
+    count = git(public, 'rev-list', '--count', head)
+    monkeypatch.setattr(publish, '_push_branch', push_branch)
+    publish._git_push(public, 'opensource', history_builder=builder)
+    assert frontiers == [legacy, legacy]
+    assert git(public, 'rev-list', '--count', 'HEAD') == count
+    assert all(git(remote, 'rev-parse', 'refs/heads/main') == head for remote in remotes)

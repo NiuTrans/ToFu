@@ -288,7 +288,9 @@ public path policy; every blob and contributor/message field is sanitized and
 checked, including archived members and ancestors removed from the final tree.
 Raw Git paths and archive member names share the export-relative path validator
 before normalization; traversal, metadata aliases and non-portable names refuse
-the batch even if a later commit removes them.
+the batch even if a later commit removes them. Archive directories must be
+empty plain directories; special member types and compressed directory payloads
+refuse publication rather than bypassing the content gate.
 Public changes retain separate subjects, bodies, authors, dates and merge
 parents. Internal-only single-parent commits fold away; original object IDs,
 private refs, tags, signatures and notes never enter newly rebuilt objects.
@@ -309,9 +311,14 @@ A first run requires an explicit `--history-base`; sanitized baseline bridges
 make cutoff/out-of-range parent trees explicit without asserting that an older
 snapshot title proves equivalence. Later runs resume an integrity-checked private
 `.git/tofu-export-history.json` cursor, not an untrusted source-message trailer.
+The cursor retains the initial acknowledged legacy anchor. Every resume,
+including pending settlement and unchanged retries, requires that anchor within
+the freshly probed common ancestry of all actual receivers. Empty or newly
+redirected receivers cannot inherit a previous target's disclosure authority;
+partial pushes may retry when every receiver still has the admitted frontier.
 The final reconcile commit equals the verified export index tree; ref CAS and a
 pending cursor settle retries without duplicate history. Foreign public/source
-advances or policy changes require review.
+advances, cursors without ancestry evidence, or policy changes require review.
 
 Symbolic object directories, replacement objects, grafts and alternates are
 refused. One batch shares limits of 8 GiB imported data, 16 GiB source reads,
@@ -328,7 +335,9 @@ Release publication prepares and commits all version metadata first. Use
 `export.py --release` for the prepared version, never a late `--bump` after a
 source SHA or candidate gate was frozen. `scripts/release_open.sh` publishes the
 same gated candidate, and push/tag failures remain failures; immutable published
-tags are not moved to repair metadata drift.
+tags are not moved to repair metadata drift. Publication disables implicit
+follow-tags so only the explicitly admitted branch and release-tag refspecs
+travel; unrelated local annotations are not release artifacts.
 
 Public build/test closure — the restored helper set is explicit and includes
 transitive generator and receipt-assessment imports required by shipped tests.
