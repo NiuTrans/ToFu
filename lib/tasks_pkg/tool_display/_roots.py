@@ -85,7 +85,7 @@ def _extract_first_path_arg(fn_name, fn_args):
         if isinstance(edits, list):
             for e in edits:
                 if isinstance(e, dict) and (e.get('path') or batch_path):
-                    return e['path'] or batch_path
+                    return e.get('path') or batch_path
         return batch_path or ''
     if fn_name == 'grep_search' or fn_name == 'find_files':
         searches = fn_args.get('searches')

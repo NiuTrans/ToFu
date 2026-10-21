@@ -22,8 +22,12 @@ Run:
 """
 from __future__ import annotations
 
+import asyncio
+from copy import deepcopy
+import json
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -40,7 +44,7 @@ _OWNER = 5150251
 def _document(deployment_headers=None):
     document = empty_document(revision=0)
     document['creators'].append({
-        'creator_id': 'openai', 'name': 'OpenAI', 'kind': 'vendor'})
+        'creator_id': 'openai', 'name': 'OpenAI'})
     document['models'].append({
         'creator_id': 'openai', 'model_id': 'gpt-6.1-sol',
         'display_name': 'GPT-6.1 Sol', 'capabilities': ['text'],
@@ -124,16 +128,6 @@ def test_probe_plan_layers_request_name_headers_over_the_connection():
     Probing without the selector returned ``invalid_response`` for a cell that
     answers 200 through the dispatcher — a false verdict on a working model.
     """
-    from lib.model_routing.probe_plan import probe_contexts
-
-    document = normalize_document(
-        _document({'x-context-provider': 'kunlun'}))
-def test_probe_plan_layers_request_name_headers_over_the_connection():
-    """The matrix must probe with the headers the REAL request sends.
-
-    Probing without the selector returned ``invalid_response`` for a cell that
-    answers 200 through the dispatcher — a false verdict on a working model.
-    """
     from lib.model_routing.probe_plan import matrix_probe_plan
 
     document = normalize_document(
@@ -167,9 +161,6 @@ def test_dispatch_adapter_and_dispatcher_merge_the_same_way():
             or 'candidate.deployment.get("extra_headers")' in source, module.__name__
 
 
-def test_native_route_includes_request_name_headers():
-    import inspect
-    from lib.model_routing import native_route
 def test_probe_routes_openai_responses_to_the_responses_endpoint(monkeypatch):
     """The stored v2 spelling must reach ``/responses``, not chat.
 
@@ -215,6 +206,122 @@ def test_native_route_includes_request_name_headers():
 
     source = inspect.getsource(native_route)
     assert 'chosen.deployment.get("extra_headers")' in source
+
+
+_CREDENTIAL_HEADER_NAMES = [
+    'x-access-token', 'X-Access-Token', 'X-ACCESS-TOKEN',
+    'x-goog-api-key', 'X-Goog-Api-Key', 'X-GOOG-API-KEY',
+    'x-client-secret', 'X-Client-Secret', 'X-CLIENT-SECRET',
+]
+
+
+@pytest.mark.parametrize('name', _CREDENTIAL_HEADER_NAMES)
+def test_domain_refuses_credential_named_deployment_headers(name):
+    with pytest.raises(ModelRoutingError) as error:
+        normalize_document(_document({name: 'synthetic-header-secret'}))
+    assert error.value.kind == 'model_routing_invalid'
+    assert error.value.field == 'deployments[0].extra_headers'
+    assert 'credential' in str(error.value).lower()
+    assert 'synthetic-header-secret' not in str(error.value)
+
+
+@pytest.mark.parametrize('name', _CREDENTIAL_HEADER_NAMES)
+def test_connection_header_admission_contract_is_unchanged(name):
+    document = _document({'x-context-provider': 'kunlun'})
+    document['connections'][0]['extra_headers'] = {name: 'existing-metadata'}
+    normalized = normalize_document(document)
+    assert normalized['connections'][0]['extra_headers'] == {
+        name: 'existing-metadata'}
+    assert normalized['deployments'][0]['extra_headers'] == {
+        'x-context-provider': 'kunlun'}
+
+
+@pytest.fixture
+def header_repository():
+    from lib.model_routing.repository import InMemoryModelRoutingRepository
+
+    repository = InMemoryModelRoutingRepository()
+    boundary = _boundary()
+    repository.put_secret(boundary, 'synthetic-api-key',
+                          secret_reference='secret-1')
+    repository.compare_and_swap(
+        boundary, _document({'x-context-provider': 'kunlun'}),
+        expected_revision=0)
+    return repository, boundary
+
+
+@pytest.mark.parametrize('name', _CREDENTIAL_HEADER_NAMES)
+def test_cas_rejects_credential_headers_without_changing_authority(
+        header_repository, name):
+    repository, boundary = header_repository
+    before = repository.get(boundary)
+    candidate = deepcopy(before.document)
+    candidate['deployments'][0]['extra_headers'][name] = 'synthetic-header-secret'
+
+    with pytest.raises(ModelRoutingError) as error:
+        repository.compare_and_swap(
+            boundary, candidate, expected_revision=before.revision)
+
+    assert error.value.kind == 'model_routing_invalid'
+    assert error.value.field == 'deployments[0].extra_headers'
+    after = repository.get(boundary)
+    assert after.revision == before.revision
+    assert after.document == before.document
+    assert 'synthetic-header-secret' not in json.dumps(after.public_document())
+
+
+@pytest.fixture
+def header_api(header_repository, monkeypatch):
+    from quart import Quart
+    import routes.api_v1.auth as auth
+    import routes.api_v1.providers as routes
+
+    repository, boundary = header_repository
+    context = SimpleNamespace(
+        owner_user_id=boundary.owner_user_id, tenant_id=boundary.tenant_id,
+        is_authenticated=True, has_scope=lambda scope: scope == 'providers')
+    monkeypatch.setattr(auth, 'current_auth', lambda: context)
+    monkeypatch.setattr(routes, 'current_auth', lambda: context)
+    monkeypatch.setattr(routes, '_repository', lambda: repository)
+    reloads = []
+    monkeypatch.setattr(routes, '_hot_reload_dispatcher_slots',
+                        lambda: reloads.append(True))
+    app = Quart(__name__, static_folder=None)
+    app.config['TESTING'] = True
+    app.register_blueprint(routes.api_v1_providers_bp)
+
+    def request(method, body=None):
+        async def go():
+            response = await app.test_client().open(
+                '/api/v1/model-routing', method=method, json=body)
+            return response.status_code, await response.get_json()
+        return asyncio.run(go())
+
+    return request, repository, boundary, reloads
+
+
+@pytest.mark.parametrize('name', _CREDENTIAL_HEADER_NAMES)
+def test_api_rejects_credential_headers_and_preserves_safe_projection(
+        header_api, name):
+    request, repository, boundary, reloads = header_api
+    status, before = request('GET')
+    assert status == 200
+    candidate = deepcopy(before['model_routing'])
+    candidate['deployments'][0]['extra_headers'][name] = 'synthetic-header-secret'
+    status, rejected = request('PUT', {
+        'expected_revision': before['revision'], 'model_routing': candidate})
+
+    assert status == 400, rejected
+    assert rejected['field'] == 'deployments[0].extra_headers'
+    assert 'credential' in rejected['error'].lower()
+    assert 'synthetic-header-secret' not in json.dumps(rejected)
+    status, after = request('GET')
+    assert status == 200
+    assert after == before
+    assert after['model_routing']['deployments'][0]['extra_headers'] == {
+        'x-context-provider': 'kunlun'}
+    assert repository.get(boundary).revision == before['revision']
+    assert reloads == []
 
 
 if __name__ == '__main__':

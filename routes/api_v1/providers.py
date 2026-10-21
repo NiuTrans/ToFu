@@ -143,7 +143,7 @@ def _sync_one_card_from_template(boundary, repository, provider_id: str) -> dict
             provider_id, exc, exc_info=True)
         return None
     if (stats.get('added_connections') or stats.get('added_deployments')
-            or stats.get('repaired_connections')):
+            or stats.get('repaired_connections') or stats.get('repaired_deployments')):
         _hot_reload_dispatcher_slots()
     return stats
 
@@ -668,7 +668,8 @@ def probe_provider_cells_start(provider_id: str):
         synced = _sync_one_card_from_template(boundary, repository, provider_id)
         card_changed = bool(synced and (synced.get("added_connections")
                                         or synced.get("added_deployments")
-                                        or synced.get("repaired_connections")))
+                                        or synced.get("repaired_connections")
+                                        or synced.get("repaired_deployments")))
         if card_changed:
             authority = repository.get(boundary)
             bundle = _provider_bundle(authority.public_document(), provider_id)
@@ -689,8 +690,8 @@ def probe_provider_cells_start(provider_id: str):
                     and not card_changed):
                 return api_ok(public_probe_snapshot(existing))
 
-        # A card that just gained a wire id has cells the snapshot cannot
-        # describe; resuming it would render the new row permanently unprobed.
+        # Added or retargeted request names invalidate the completed snapshot:
+        # its cells describe the previous wire ids or transport endpoints.
         if not force and not scoped and not explicit_targets and not card_changed:
             cached = _read_persisted_probe_snapshot(cache_key, credential_ids)
             if isinstance(cached, dict) and cached.get("cells"):

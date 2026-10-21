@@ -1819,11 +1819,6 @@ def test_round_directory_exact_actor_ranks_without_projection_reads(conversation
 
 
 def test_round_directory_route_validates_explicit_lane_and_head(flask_client, conversation_sync_db):
-    path = "/api/v4/conversations/conv-sync-a/turns/rounds"
-    response = flask_client.get(path + "?laneId=main&syncSeq=0&limit=1")
-    assert response.status_code == 200
-    assert response.get_json()["totalRounds"] == 0
-def test_round_directory_route_validates_explicit_lane_and_head(flask_client, conversation_sync_db):
     from lib.conversation_sync.validation import decode
     path = "/api/v4/conversations/conv-sync-a/turns/rounds"
     response = flask_client.get(path + "?laneId=main&syncSeq=0&limit=1")
