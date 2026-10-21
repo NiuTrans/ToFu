@@ -262,91 +262,21 @@ def test_missing_tests_tree_is_a_noop(tmp_path):
     _verify_exported_test_surface(dest, src)
 
 
-@pytest.mark.parametrize('mode', ('internal', 'opensource'))
-def test_retained_generator_is_not_gitignored(tmp_path, monkeypatch, mode):
+def test_retained_public_generator_is_not_gitignored(tmp_path, monkeypatch):
     import subprocess
     import export_pkg._export_core as core
 
     source = tmp_path / 'source'
-    target = tmp_path / mode
+    target = tmp_path / 'public'
     (source / 'scripts').mkdir(parents=True)
-    (source / 'scripts/helper.py').write_text("VALUE = 'RETAINED_SAMPLE'\n")
+    (source / 'scripts/helper.py').write_text('VALUE = 1\n')
     target.mkdir()
     (target / '.gitignore').write_text('/scripts/*\n')
     monkeypatch.setattr(core, 'ROOT', source)
     monkeypatch.setattr(core, '_OPENSOURCE_KEEP_FILES', {'scripts/helper.py'})
-    monkeypatch.setattr(core, '_sanitize_source_opensource',
-                        lambda text, rel: text.replace('RETAINED_SAMPLE', 'PUBLIC_SAMPLE'))
-    core._restore_export_kept_files(target, mode)
-    expected = 'PUBLIC_SAMPLE' if mode == 'opensource' else 'RETAINED_SAMPLE'
-    assert (target / 'scripts/helper.py').read_text() == f"VALUE = '{expected}'\n"
+    core._restore_opensource_kept_files(target)
     subprocess.run(['git', 'init', '-q'], cwd=target, check=True)
     retained = subprocess.run(['git', 'check-ignore', 'scripts/helper.py'], cwd=target)
     private = subprocess.run(['git', 'check-ignore', 'scripts/private.py'], cwd=target, capture_output=True)
     assert retained.returncode == 1
     assert private.returncode == 0
-
-
-@pytest.mark.parametrize('keep_helper', (True, False))
-def test_internal_export_restores_and_checks_test_dependencies(tmp_path, monkeypatch, keep_helper):
-    import export_pkg._export_core as core
-    import export_pkg._orchestrate as orchestrate
-    from export_pkg import _state
-    from export_pkg._verify import ExportTestSurfaceError, _verify_exported_test_surface
-
-    source = tmp_path / 'source'
-    (source / 'scripts').mkdir(parents=True)
-    (source / 'scripts/helper.py').write_text('VALUE = 1\n')
-    target = tmp_path / 'internal'
-    monkeypatch.setattr(core, 'ROOT', source)
-    monkeypatch.setattr(orchestrate, 'ROOT', source)
-    monkeypatch.setattr(core, '_OPENSOURCE_KEEP_FILES',
-                        {'scripts/helper.py'} if keep_helper else set())
-    monkeypatch.setattr(_state, '_EXPORT_VERSION', None)
-    monkeypatch.setattr(orchestrate, '_read_version', lambda: '0.18.2')
-
-    def copy_source(mode, dest, **kwargs):
-        assert mode == 'internal'
-        (dest / 'tests').mkdir(parents=True)
-        (dest / 'tests/test_retained.py').write_text('import scripts.helper\n')
-        (dest / '.gitignore').write_text('/scripts/*\n')
-        return {'copied': 2, 'sanitized': 0}
-
-    checked = []
-
-    def verify(dest):
-        _verify_exported_test_surface(dest, source)
-        checked.append(dest)
-
-    monkeypatch.setattr(orchestrate, '_export_via_tar_with_sanitize', copy_source)
-    monkeypatch.setattr(orchestrate, '_verify_exported_test_surface', verify)
-    for name in ('_create_skeleton', '_print_export_summary', '_verify_exported_js_syntax',
-                 '_verify_exported_py_syntax', '_verify_exported_py_integrity'):
-        monkeypatch.setattr(orchestrate, name, lambda *args: None)
-
-    if keep_helper:
-        orchestrate.export_project('internal', target)
-        assert (target / 'scripts/helper.py').read_text() == 'VALUE = 1\n'
-        assert checked == [target]
-    else:
-        with pytest.raises(ExportTestSurfaceError, match=r'scripts\.helper'):
-            orchestrate.export_project('internal', target)
-        assert not checked
-
-
-@pytest.mark.parametrize('optional_import', (
-    'def later():\n    import scripts.gen_x\n',
-    'try:\n    import scripts.gen_x\nexcept ImportError:\n    pass\n',
-))
-def test_optional_sibling_never_waives_mandatory_import(tmp_path, optional_import):
-    from export import ExportTestSurfaceError, _verify_exported_test_surface
-
-    source = tmp_path / 'source'
-    source.mkdir()
-    _make_src(source)
-    target = tmp_path / 'target'
-    _make_dest(target, {
-        'test_required.py': 'import scripts.missing_helper\n' + optional_import,
-    })
-    with pytest.raises(ExportTestSurfaceError, match=r'scripts\.missing_helper'):
-        _verify_exported_test_surface(target, source)

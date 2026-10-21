@@ -178,7 +178,7 @@ const panel = fs.readFileSync(
 const saved = [];
 let cleared = 0;
 const sample = [
-  { id: 'ctx_a', type: 'identity', text: 'Works at Meituan', source: 'manual' },
+  { id: 'ctx_a', type: 'identity', text: 'Works at YourProvider', source: 'manual' },
   { id: 'ctx_b', type: 'work_rule', condition: 'submitting cluster jobs',
     action: 'use hope MCP', source: 'assistant' },
   { id: 'ctx_c', type: 'response_preference', text: 'Reply in Chinese',
@@ -213,14 +213,14 @@ const { document, check, report } = setup({
   try {
     await refreshPreferences();
     check('three_category_cards', document.querySelectorAll('.ctx-group').length === 3);
-    check('identity_rendered', document.body.textContent.includes('Works at Meituan'));
+    check('identity_rendered', document.body.textContent.includes('Works at YourProvider'));
     check('rule_condition_rendered', document.body.textContent.includes('submitting cluster jobs'));
     check('rule_action_rendered', document.body.textContent.includes('use hope MCP'));
     check('response_preference_rendered', document.body.textContent.includes('Reply in Chinese'));
     check('category_icons_visible', document.querySelectorAll('.ctx-group-icon svg').length === 3);
     check('initially_clean', document.getElementById('ctxSaveBtn').disabled === true);
 
-    _contextUpdateField(0, 'text', 'Works at Meituan as an engineer');
+    _contextUpdateField(0, 'text', 'Works at YourProvider as an engineer');
     check('edit_marks_dirty', document.getElementById('ctxDirtyState').textContent.length > 0);
     check('valid_edit_enables_save', document.getElementById('ctxSaveBtn').disabled === false);
     await savePreferences(document.getElementById('ctxSaveBtn'));

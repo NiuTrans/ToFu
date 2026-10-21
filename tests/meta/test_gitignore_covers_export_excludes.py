@@ -61,10 +61,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 # deliberate, reviewable act of saying "yes, this export-excluded file stays in
 # the private repo" — the guard fails loudly for anything NOT listed.
 _EXTRA_KEEPERS = {
-
-    # The internal canvas adapter is excluded publicly; keep its offline tests
-    # private with that owner rather than publishing a dangling provider import.
-    'tests/evaluations/test_meituan_sandbox_submit_watch.py',
     # Maintainer-only diagnostics; they do not participate in public builds.
     'scripts/inspect_native_crash.py',
     'scripts/tofudb_profile_report.py',
@@ -107,8 +103,8 @@ _EXTRA_KEEPERS = {
     'scripts/release_open.sh',
     # ── Internal-only tooling: tracked on purpose, never public ─────────────
     # Syncs our template to the SSO-gated ModelPlaza catalog; exercised only by
-    # the internal bundles/meituan tier, useless to a public checkout.
-    'scripts/meituan_template_sync.py',
+    # the internal bundles/yourprovider tier, useless to a public checkout.
+    'scripts/yourprovider_template_sync.py',
 }
 
 # ── The pet's RAW MASTER ART: tracked on purpose, never published ────────────

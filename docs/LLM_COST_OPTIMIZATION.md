@@ -353,7 +353,7 @@ final-message replay. No live check runs implicitly.
 ## Long-agent Codex parity contract (v2)
 
 The 2026-08-24 comparison keeps the model fixed: Tofu and Codex CLI 0.149.1
-both call the same Meituan `kimi-k3` slot with the same thinking setting. The
+both call the same YourProvider `kimi-k3` slot with the same thinking setting. The
 isolated loopback-only `evaluations/codex_kimi_proxy` translates one Codex
 Responses request into exactly one Kimi Chat Completions request. It preserves
 instructions/messages, strict function schemas, tool choice, thinking, usage,

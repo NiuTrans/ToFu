@@ -20,7 +20,7 @@ declares which one it speaks via its capability:
 
 2. ``audio_chat`` — omni CHAT models that accept audio INLINE as an
    ``input_audio`` content-part in a normal ``/chat/completions`` request and
-   reply with the transcript (Meituan gateway's ``gemini-3-flash-preview``,
+   reply with the transcript (YourProvider gateway's ``gemini-3-flash-preview``,
    ``LongCat-Flash-Omni``). These do NOT expose ``/audio/transcriptions`` at
    all — tagging them ``transcription`` would POST to a 404. For these we build
    the ``input_audio`` messages and route through :func:`dispatch_chat`

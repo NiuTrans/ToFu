@@ -81,7 +81,7 @@ _PROFILES = {
         credential_boundary="host-only",
         trajectory_format="ATIF-v1.7",
         comparison_target=(
-            "Production Tofu AgentRuntime over the same Meituan kimi-k3"
+            "Production Tofu AgentRuntime over the same YourProvider kimi-k3"
         ),
         default_max_output_tokens=None,
         default_context_window_tokens=272_000,
@@ -140,7 +140,7 @@ _PROFILES = {
         agent_version="0.149.1",
         credential_boundary="host-only",
         trajectory_format="ATIF-v1.7",
-        comparison_target="Codex CLI 0.149.1 over the same Meituan kimi-k3",
+        comparison_target="Codex CLI 0.149.1 over the same YourProvider kimi-k3",
         default_max_output_tokens=None,
         default_context_window_tokens=272_000,
         default_max_rounds=None,

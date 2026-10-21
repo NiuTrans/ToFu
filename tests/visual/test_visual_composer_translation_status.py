@@ -58,14 +58,14 @@ def test_composer_translation_receipt(translation_receipt_server, browser, tmp_p
         assert '2.3s' in page.locator('.composer-translation-status').inner_text()
         pending = page.locator('.composer-translation-status').bounding_box()
         assert pending and pending['width'] > 100 and pending['height'] < 90
-        page.evaluate("receipt.finish(receiptWait,'completed','deepseek-v4-flash-meituan')")
+        page.evaluate("receipt.finish(receiptWait,'completed','deepseek-v4-flash-yourprovider')")
         # Successful attribution belongs to the durable message. Only pending
         # work and unresolved failure/cancellation stay in the composer.
         assert page.locator('.composer-translation-status').count() == 0
         page.evaluate("receiptWait=receipt.begin('visual-conv','send');receiptClock=4600;"
-                      "receipt.finish(receiptWait,'failed','deepseek-v4-flash-meituan')")
+                      "receipt.finish(receiptWait,'failed','deepseek-v4-flash-yourprovider')")
         text = page.locator('.composer-translation-status').inner_text()
-        assert 'deepseek-v4-flash-meituan' in text and '2.3s' in text
+        assert 'deepseek-v4-flash-yourprovider' in text and '2.3s' in text
         box = page.locator('.composer-translation-status').bounding_box()
         assert box and box['x'] >= 0 and box['x'] + box['width'] <= width + 1
         page.screenshot(path=str(tmp_path / f'composer-translation-{width}.png'), full_page=True)

@@ -174,7 +174,7 @@ class TestBuildBody:
 
     def test_gemini_reasoning_effort_ladder(self):
         """Gemini 3.x is a reasoning model whose depth is controlled ONLY by
-        the OpenAI-style ``reasoning_effort`` string on the sankuai gateway.
+        the OpenAI-style ``reasoning_effort`` string on the example-corp gateway.
         The legacy ``enable_thinking`` boolean and nested ``thinking_level``
         are silently ignored, so build_body must emit ``reasoning_effort``
         and nothing else."""
@@ -254,7 +254,7 @@ class TestBuildBody:
     def test_kimi_k3_reasoning_effort_ladder(self):
         """Kimi K3 takes the TOP-LEVEL ``reasoning_effort`` string
         (low/high/max, default max — official quickstart, verified live
-        against the sankuai gateway 2026-07-24). Tofu's depth ladder
+        against the example-corp gateway 2026-07-24). Tofu's depth ladder
         collapses onto the three K3 rungs rounding UP; no thinking /
         enable_thinking block may be emitted."""
         from lib.llm import build_body

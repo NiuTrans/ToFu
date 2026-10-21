@@ -977,7 +977,7 @@
       ]
     },
     {
-      "creator_id": "meituan",
+      "creator_id": "yourprovider",
       "model_ids": [
         "LongCat-2.0"
       ],

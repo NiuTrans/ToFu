@@ -313,14 +313,14 @@ def test_round0_semantic_progress_timeout_retries_with_truthful_direct_label(
                 'routeMode': 'direct',
                 'decisionReason': 'configured_bypass',
             },
-            '_dispatch': {'key': 'sankuai_key_1', 'model': 'kimi-k3'},
+            '_dispatch': {'key': 'example_corp_key_1', 'model': 'kimi-k3'},
             'stream_elapsed_ms': 300_100,
             'trace_id': 'TRACE-PROGRESS-DEADLINE',
         },
     )
 
     assert decision['action'] == 'continue'
-    assert task['_force_rotate_pair'] == ('sankuai_key_1', 'kimi-k3')
+    assert task['_force_rotate_pair'] == ('example_corp_key_1', 'kimi-k3')
     phase_events = [event for event in task['events']
                     if event.get('type') == 'phase']
     assert phase_events[-1]['max'] == 2
@@ -373,7 +373,7 @@ def test_consecutive_semantic_timeout_stops_before_slot_cycle(monkeypatch):
                        'reasoning_content': 'x' * 200},
         last_finish_reason='stop', tid='test', model='kimi-k3', round_num=0,
         _premature_retry_count=0, messages=[],
-        usage=_semantic_progress_timeout_usage('sankuai_key_1'),
+        usage=_semantic_progress_timeout_usage('example_corp_key_1'),
     )
     assert first['action'] == 'continue'
     assert task['_no_actionable_retry_streak'] == 1
@@ -385,7 +385,7 @@ def test_consecutive_semantic_timeout_stops_before_slot_cycle(monkeypatch):
                        'reasoning_content': 'y' * 2_000},
         last_finish_reason='stop', tid='test', model='kimi-k3', round_num=1,
         _premature_retry_count=1, messages=[],
-        usage=_semantic_progress_timeout_usage('sankuai_key_0'),
+        usage=_semantic_progress_timeout_usage('example_corp_key_0'),
     )
 
     assert second['action'] == 'break'
@@ -411,7 +411,7 @@ def test_actionable_progress_resets_semantic_timeout_retry_streak(monkeypatch):
                        'reasoning_content': 'x' * 200},
         last_finish_reason='stop', tid='test', model='kimi-k3', round_num=0,
         _premature_retry_count=0, messages=[],
-        usage=_semantic_progress_timeout_usage('sankuai_key_1'),
+        usage=_semantic_progress_timeout_usage('example_corp_key_1'),
     )
     assert first['action'] == 'continue'
 
@@ -439,7 +439,7 @@ def test_actionable_progress_resets_semantic_timeout_retry_streak(monkeypatch):
                        'reasoning_content': 'z' * 200},
         last_finish_reason='stop', tid='test', model='kimi-k3', round_num=2,
         _premature_retry_count=1, messages=[],
-        usage=_semantic_progress_timeout_usage('sankuai_key_0'),
+        usage=_semantic_progress_timeout_usage('example_corp_key_0'),
     )
     assert later_failure['action'] == 'continue'
     assert later_failure['premature_retry_count'] == 2

@@ -9568,10 +9568,7 @@ function _handleSwarmPhase(ev, c) {
             status: "searching",
             toolName: "spawn_agents",
 
-            // A legacy mirror may carry only conversation routing and a run ID.
-            // Leave its producer unknown until the durable launch supplies it;
-            // inventing taskId=runId prevents scoped reconciliation to that row.
-            taskId: swarmFrameExecutionTaskId(ev) || undefined,
+            taskId: swarmFrameExecutionTaskId(ev) || ev.swarmId || ev.swarm_id || undefined,
             attemptId: ev.attemptId || undefined,
             _swarmRunId: ev.swarmId || ev.swarm_id || undefined,
             _swarm: true,
@@ -18396,6 +18393,10 @@ function selectTheme(theme) {
   applyTheme(theme);
 }
 
+function _syncRangeOutput(input, outputId, suffix) {
+  const output = document.getElementById(outputId);
+  if (output) output.textContent = String(input && input.value || '') + String(suffix || '');
+}
 
 /* Cost dashboard aliases — moved to myday.js */
 
@@ -19638,8 +19639,9 @@ function _startBuildWatch() {
    *   server responds.  This eliminates all localStorage desync bugs.
    *   On failure we fall back to the IndexedDB cache + a backoff retry
    *   (see _bootReconnectWithBackoff below). */
-  /* Restore the exact saved identity through ordinary conversation navigation.
-   *   Without a saved identity, fall back to the most recent conversation. */
+  /* Restore last active conversation from sessionStorage (if any).
+   *   If the conv exists on the server, we'll navigate to it after loading.
+   *   Otherwise, fall back to the most recent conversation. */
   /* sessionStorage is PER-TAB and dies on a browser close/reopen — it only
    *   survives an in-tab reload. Fall back to the localStorage mirror (written
    *   on every leave via _persistLastActiveConv below) so a genuine COLD open
@@ -19862,8 +19864,8 @@ function _startBuildWatch() {
    *   they're still on the welcome screen (activeConvId still null). */
   function _bootRestoreActiveConv(restoredId) {
     if (activeConvId) return;  // user already navigated during the load — leave them be
-    // Catalog omission is not deletion; navigation resolves and fences the exact ID.
-    if (restoredId) {
+    const restoredConv = restoredId && conversations.find(c => c.id === restoredId);
+    if (restoredConv) {
       loadConversation(restoredId);
       return;
     }
@@ -23361,12 +23363,7 @@ function _recoverSwarmAgents(round, allRounds) {
          master._snapshot_tool_timeline). Without this the reloaded card
          showed no tools/timeline even though the agent used them live. */
       const tools = Array.isArray(a.tools) ? a.tools : [];
-      /* The dock sends normalized snapshot agents back through this adapter;
-         their wire aliases have already become `_toolCalls`/`_toolCallsOmitted`. */
-      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls
-        : (Array.isArray(a._toolCalls) ? a._toolCalls : []);
-      const toolCallsOmitted = typeof a.toolCallsOmitted === "number"
-        ? a.toolCallsOmitted : a._toolCallsOmitted;
+      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls : [];
       /* Restore the live stopwatch's anchor (backend `startedAt`, epoch ms
          — see master._build_agent_snapshot). The per-agent timer renders only
          while the agent is running AND has a `_startedAt`; that field used to
@@ -23396,8 +23393,6 @@ function _recoverSwarmAgents(round, allRounds) {
       }
       return {
         id: a.id || "",
-        executionTaskId: a.executionTaskId,
-        conversationId: a.conversationId,
         role: a.role || "agent",
         model: a.model || "",
         objective: a.objective || "",
@@ -23416,8 +23411,8 @@ function _recoverSwarmAgents(round, allRounds) {
         messageReceiptsVersion: a.messageReceiptsVersion,
         tools,
         _toolCalls: toolCalls,
-        _toolCallsOmitted: (typeof toolCallsOmitted === "number" && toolCallsOmitted > 0)
-          ? toolCallsOmitted : 0,
+        _toolCallsOmitted: (typeof a.toolCallsOmitted === "number" && a.toolCallsOmitted > 0)
+          ? a.toolCallsOmitted : 0,
         _startedAt: startedAt || undefined,
         /* Stall evidence persisted by the backend (master._build_agent_snapshot)
            — without carrying it here a reloaded stalled card loses its
@@ -25111,6 +25106,7 @@ const runtimeActions = Object.freeze({
   _safeClipboardWrite,
   _swarmCopyAgentId,
   _swarmToggleClass,
+  _syncRangeOutput,
   _timerInstructionToggle,
   _timerPollToggle,
   _timerWatcherToggle,

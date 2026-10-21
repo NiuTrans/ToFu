@@ -325,7 +325,7 @@
   rotates its address between lookups (one host was observed answering as both
   `10.176.18.71` and `10.192.19.176` minutes apart), so an IP allowlist rots
   silently while the hostname stays true. Matching is exact or parent-suffix on
-  a DOT BOUNDARY (`example-corp.com` admits `your-llm-gateway.example.com`, but never
+  a DOT BOUNDARY (`internal.example.com` admits `your-llm-gateway.example.com`, but never
   `evil-example-corp.com`), and it is consulted AFTER the literal-IP branch so
   naming a host can never launder a bare-IP target. Default empty ⇒ byte-identical
   to 0.5.2.

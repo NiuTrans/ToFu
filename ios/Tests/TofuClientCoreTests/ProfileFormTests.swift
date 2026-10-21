@@ -71,7 +71,7 @@ final class ProfileFormTests: XCTestCase {
     func test_toProfile_trims_parses_uuid_and_normalizes_project_path() {
         let p = ProfileForm.toProfile(
             id: 0, alias: "  ml ",
-            baseUrl: "  https://5665bc99-279b-4edf-8553-c7b7804c6e02-vscode-zw05.mlp.sankuai.com/proxy/15000/  ",
+            baseUrl: "  https://5665bc99-279b-4edf-8553-c7b7804c6e02-vscode-zw05.mlp.internal.example.com/proxy/15000/  ",
             authType: .codeServerPassword, lastUsedAt: 5, projectPath: "  "
         )
         XCTAssertEqual(p.alias, "ml")

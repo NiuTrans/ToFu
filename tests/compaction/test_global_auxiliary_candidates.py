@@ -26,7 +26,7 @@ def _alternate(native, model, kind='subscription'):
     doc['credentials'][1]['kind'] = kind
     if kind != 'api_key':
         doc['offerings'][1].pop('actual_pricing', None)
-    doc['providers'][1]['brand'] = 'meituan'
+    doc['providers'][1]['brand'] = 'yourprovider'
     return doc['offerings'][1]
 
 
