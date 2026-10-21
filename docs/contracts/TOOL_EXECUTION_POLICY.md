@@ -118,6 +118,20 @@ Each subsequent call still passes normal authority and recovery admission.
 Verify `tests/tasks_pkg/test_tool_outcome_finality.py` for legacy/V2 delivery,
 late exceptions, unknown writes, timeout attribution and successful read retry.
 
+**Admitted fetch batch completeness.** Problem: the ordinary fetch handler silently
+truncated `urls` to ten entries although the canonical schema declares no such
+limit; streaming and Paper already retained the full batch. Decision: the handler
+preserves every admitted source through the existing demand executor, including
+partial failures. The executor's existing resource
+policy owns worker reuse and demand; the handler adds no independent count gate.
+Alternatives rejected: clipping prefetched records discards already obtained
+source evidence; adding a schema limit would restrict the advertised capability.
+Verify `test_fetch_batch_completeness.py`. The
+controlled 13-URL fixture now makes 13 requests and retains 13 source records,
+instead of silently issuing ten. Both legacy and V2 runs reached 13 active source
+entries on the fixture host through the existing executor. This measures admitted
+work and demand response, not production throughput.
+
 **Settled result publication.** Problem: a worker returning after the parallel
 deadline could overwrite result cards and emit new handler frames after the
 timeout already reached the model. Decision: common result settlement revokes

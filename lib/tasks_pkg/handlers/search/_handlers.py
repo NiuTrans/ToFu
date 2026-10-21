@@ -624,10 +624,9 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
 
     handler_t0 = _time.time()
     user_question = task.get('lastUserQuery', '')
-    MAX_BATCH = 10
 
     url_list = []
-    for spec in urls_specs[:MAX_BATCH]:
+    for spec in urls_specs:
         if isinstance(spec, dict) and spec.get('url'):
             url_list.append(spec['url'])
         elif isinstance(spec, str) and spec.strip():
