@@ -50,12 +50,13 @@ CONTRACT = {'contractVersion': 'tofu.tool-result-surfaces/v1',
                                               'semantics.'},
                   'read_tool_artifact': {'modelFormat': 'artifact_query',
                                          'frontendFormat': 'verbatim',
-                                         'reason': 'Compact declared artifact '
-                                                   'query defaults and '
-                                                   'repeated identities; '
-                                                   'preserve source/retention '
-                                                   'coverage, gaps, media and '
-                                                   'signed cursors.'},
+                                         'reason': 'Compact declared defaults '
+                                                   'and render read bodies as '
+                                                   'exact length-labelled text '
+                                                   'when smaller; preserve '
+                                                   'source/retention coverage, '
+                                                   'gaps, media and signed '
+                                                   'cursors.'},
                   'search_tool_artifact': {'modelFormat': 'artifact_query',
                                            'frontendFormat': 'verbatim',
                                            'reason': 'Compact declared search '
@@ -135,6 +136,11 @@ CONTRACT = {'contractVersion': 'tofu.tool-result-surfaces/v1',
                                    'sharedFields': ['text',
                                                     'artifactRef',
                                                     'path']},
+ 'artifactProjectionReadText': {'bodyField': 'content'},
+ 'errorProjectionText': {'bodyField': 'summary'},
+ 'textProjection': {'sectionFormat': 'length_labelled_unicode_text',
+                    'selection': 'smaller_utf8_than_compact_json',
+                    'allowedControlCharacters': ['\t', '\n', '\r']},
  'reportFields': ['final_answer', 'result', 'partial_output'],
  'notifications': {'swarm': {'container': 'swarm-update',
                              'legacyContainer': 'task-notification',

@@ -7,6 +7,9 @@ result envelopes, visibility, and tool-search metadata. Task handlers live under
 `lib/tasks_pkg/handlers/`; domain implementations keep their own authority.
 Read `docs/modules/tools_execution.md`.
 
+`result_projection_text.py` owns shared exact text framing for model views.
+Verify error reconstruction and artifact/gateway delivery with canonical retention.
+
 ## Editing rules
 
 - Define each tool once with a stable name, explicit JSON schema, capability,
