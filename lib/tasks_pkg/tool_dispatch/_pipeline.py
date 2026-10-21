@@ -48,6 +48,7 @@ from lib.tools.result_projection import (
 )
 
 from lib.tasks_pkg.tool_dispatch._approval import _handle_approval
+from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch, has_prefetch, remap_prefetch
 from lib.tasks_pkg.tool_dispatch._flags import (
     ORDERED_STATE_TOOLS as _ORDERED_STATE_TOOLS,
     _cache_entry_producer_metadata,
@@ -622,6 +623,7 @@ def _settle_tool_result(
     # Production dispatch supplies an invocation-local map.  The task fallback
     # remains for focused direct callers, but no long task needs to retain every
     # settled body across later LLM rounds or nested gateway pipelines.
+    discard_prefetch(task, fn_name, round_entry)
     _settled = (settled_results if settled_results is not None
                 else task.setdefault('_settled_tool_results', {}))
     if tc_id in _settled:
@@ -2240,6 +2242,7 @@ def execute_tool_pipeline(
     # Provider flood admission occurs before parsing, never by replacing a
     # legitimate repeated action with another occurrence's result.
     for _item_idx, item in enumerate(parsed_tcs):
+        original_call_id = item[2]
         item = _repair_current_tool_call_identity(
             task, messages, parsed_tcs, _item_idx, item,
             round_num=round_num, tid=tid, receipts=_call_id_receipts,
@@ -2247,6 +2250,8 @@ def execute_tool_pipeline(
             used_ids=_used_call_ids, claimed_ids=claimed_model_call_ids,
             settled_results=_settled_results, pending_envelopes=_pending_envelopes)
         tc, fn_name, tc_id, fn_args, rn, round_entry, _parse_err = item
+        if tc_id != original_call_id:
+            remap_prefetch(task, fn_name, original_call_id, tc_id, fn_args, round_entry, project_path)
 
         # JSON parse failure / hallucinated-tool rejection: never execute.
         if _parse_err:
@@ -2378,7 +2383,8 @@ def execute_tool_pipeline(
             continue
 
         # ── Dedup check for idempotent tools ──
-        if fn_name in _idempotent_tools and not task.get('aborted'):
+        if fn_name in _idempotent_tools and not task.get('aborted') and not has_prefetch(
+                task, fn_name, tc_id, fn_args, round_entry, project_path):
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
 

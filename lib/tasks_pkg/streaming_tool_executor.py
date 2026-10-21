@@ -27,10 +27,11 @@ Architecture
    still-running futures are **waited on** (not cancelled), since they are
    already in-progress and would be executed serially otherwise — waiting
    is strictly faster than cancelling + re-executing from scratch.
-7. The results are stored in the task's ``_tool_result_cache`` dict, keyed
-   exactly like ``tool_dispatch._make_cache_key``.  When
-   ``execute_tool_pipeline`` runs, it finds pre-computed results in the
-   dedup cache and skips re-execution.
+7. Reusable results are stored in the task's ``_tool_result_cache`` dict, keyed
+   like ``tool_dispatch._make_cache_key``. Completed non-cacheable source results
+   use a distinct one-use occurrence receipt in the same bounded owner.
+   ``execute_tool_pipeline`` delivers reusable hits directly; occurrence
+   receipts pass ordinary admission and are consumed by the domain handler.
 """
 
 import json
@@ -97,8 +98,8 @@ class _ContentWithDisplayResults(str):
         instance.engine_breakdown = None
         instance.vertical = None
         # Outcome policy, independent of the tool's contract-level
-        # idempotency. Transient failures must fall through to the ordinary
-        # handler instead of becoming an authoritative prefetch hit.
+        # idempotency. Completed failures may satisfy only their exact
+        # occurrence through the ordinary handler, never another cached read.
         instance.cacheable = bool(cacheable)
         return _carry_trusted_result(instance, content)
 
@@ -333,6 +334,10 @@ class StreamingToolAccumulator:
     def close(self, *, cancel_futures: bool = True,
               wait: bool = False) -> None:
         """Idempotently release speculative work on every round exit path."""
+        if self._task.get('aborted'):
+            from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch
+            for _rn, entry in self._announced.values():
+                discard_prefetch(self._task, entry.get('toolName'), entry)
         if self._closed:
             return
         self._closed = True
@@ -363,6 +368,8 @@ class StreamingToolAccumulator:
         if not self._announced and not self._futures:
             return
         for tc_id, (round_num, round_entry) in self._announced.items():
+            from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch
+            discard_prefetch(self._task, round_entry.get('toolName'), round_entry)
             self._discarded_announced.append((tc_id, round_num, round_entry))
         self._announced.clear()
         self._announced_signatures.clear()
@@ -461,6 +468,8 @@ class StreamingToolAccumulator:
                 candidates.remove(signature)
                 continue
             orphans.append((tc_id, rn, entry))
+            from lib.tasks_pkg.tool_dispatch._prefetch import discard_prefetch
+            discard_prefetch(self._task, entry.get('toolName'), entry)
             self._announced.pop(tc_id, None)
             self._announced_signatures.pop(tc_id, None)
             discarded_future = self._futures.pop(tc_id, None)
@@ -815,7 +824,14 @@ class StreamingToolAccumulator:
             )
             from lib.write_freshness import project_read_cache_generation
             generation = project_read_cache_generation()
+            from lib.tasks_pkg.tool_dispatch._prefetch import capture_prefetch
+            announced = self._announced.get(tc_id)
+            receipt = (capture_prefetch(self._task, fn_name, tc_id, fn_args,
+                       announced[1], self._project_path) if announced else None)
             content = self._execute_one(fn_name, fn_args)
+            payload = getattr(content, 'prefetched_source_result', None)
+            if receipt is not None and not getattr(content, 'cacheable', True) and payload is not None:
+                return receipt.bind(payload)
             if fn_name in _PROJECT_CACHEABLE_TOOLS:
                 return _ToolResultCacheReceipt((content,), generation)
             return content
@@ -1073,6 +1089,7 @@ class StreamingToolAccumulator:
                     display_results = [None] * len(url_list)
                     image_groups = [()] * len(url_list)
                     fetched = [False] * len(url_list)
+                    source_items = [None] * len(url_list)
                     source_truncated = False
                     def _worker(target_url):
                         if self._task.get('aborted'):
@@ -1112,6 +1129,7 @@ class StreamingToolAccumulator:
                                     'saved_path': None, 'is_asset': False,
                                 }
                             source_truncated |= bool(item.get('source_truncated'))
+                            source_items[idx] = item
                             page_content = item.get('page_content')
                             fetched[idx] = bool(page_content)
                             filtered_chars = item.get('filtered_chars', 0)
@@ -1127,6 +1145,8 @@ class StreamingToolAccumulator:
                         [d for d in display_results if d is not None],
                         cacheable=all(fetched),
                     )
+                    if not all(fetched):
+                        formatted.prefetched_source_result = tuple(source_items)
                     if source_truncated:
                         formatted.result_producer_metadata = {'truncated': True}
                     all_images = tuple(img for group in image_groups for img in group)
@@ -1155,11 +1175,13 @@ class StreamingToolAccumulator:
                     if images:
                         formatted.image_contents = images
                     return formatted
-                return _ContentWithDisplayResults(
+                formatted = _ContentWithDisplayResults(
                     fetch_failure_text(item, task=self._task),
                     [_format_fetch_display(item, _short_url)],
                     cacheable=False,
                 )
+                formatted.prefetched_source_result = (item,)
+                return formatted
 
             return ''
 
@@ -1251,7 +1273,7 @@ class StreamingToolAccumulator:
         return content_str, len(content_str)
 
     def inject_into_cache(self, task: dict) -> int:
-        """Inject pre-execution results into the dedup cache.
+        """Publish reusable results and exact completed occurrences to the cache owner.
 
         Waits for ALL submitted futures to complete (with a timeout),
         since these tools would be executed serially by the normal pipeline
@@ -1259,7 +1281,7 @@ class StreamingToolAccumulator:
         cancelling and re-executing from scratch.
 
         Returns:
-            Count of successfully injected results.
+            Count of published reusable results and occurrence handoffs.
         """
         from lib.tasks_pkg.tool_dispatch._flags import (
             _ensure_tool_result_cache,
@@ -1269,6 +1291,12 @@ class StreamingToolAccumulator:
             _project_cache_entry_is_current,
         )
         _ensure_tool_result_cache(task)
+        from lib.tasks_pkg.tool_dispatch._prefetch import PrefetchedToolResult, publish_prefetch
+
+        def publish_occurrence(content, tc_id, fn_args):
+            announced = self._announced.get(tc_id)
+            return bool(announced and task is self._task and publish_prefetch(
+                task, content, fn_args, announced[1], self._project_path))
 
         injected = 0
         # First pass: collect already-done futures immediately
@@ -1277,6 +1305,10 @@ class StreamingToolAccumulator:
             if future.done() and not future.cancelled():
                 try:
                     content = future.result(timeout=0)
+
+                    if isinstance(content, PrefetchedToolResult):
+                        injected += int(publish_occurrence(content, tc_id, fn_args))
+                        continue
 
                     generation = getattr(content, 'generation', None)
                     if isinstance(content, _ToolResultCacheReceipt):
@@ -1383,6 +1415,10 @@ class StreamingToolAccumulator:
                                          'timeout probe unavailable: %s',
                                          self._tid, _e)
                     content = future.result(timeout=_wait_timeout)
+
+                    if isinstance(content, PrefetchedToolResult):
+                        injected += int(publish_occurrence(content, tc_id, fn_args))
+                        continue
 
                     generation = getattr(content, 'generation', None)
                     if isinstance(content, _ToolResultCacheReceipt):
