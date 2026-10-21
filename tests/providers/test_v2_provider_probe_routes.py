@@ -445,3 +445,59 @@ def test_retargeted_deployment_rebuilds_cached_detect_plan(
     assert alias['connection_id'] == face['connection_id']
     assert alias['probe_status'] == 'unprobed'
     assert 'synthetic-probe-key' not in json.dumps(response)
+
+
+@pytest.mark.parametrize('cache_location', ['memory', 'disk', 'none'])
+def test_retarget_only_repair_rebuilds_plan_and_skips_completed_snapshot(
+        harness, monkeypatch, cache_location):
+    import routes.api_v1.providers as routes
+
+    new_url = 'https://repaired.example/v1'
+    document = harness.repository.document
+    source = document['deployments'][0]['connection_id']
+    connection = next(row for row in document['connections']
+                      if row['connection_id'] == source)
+    document['connections'].append({
+        **deepcopy(connection), 'connection_id': 'repaired-face',
+        'base_url': new_url})
+    old = deepcopy(document)
+    status, started = harness.request('POST', START, {'force': True})
+    assert status == 200, started
+    task, work, timeout, runner = harness.queued.pop()
+    runner(task, work, timeout)
+    assert task['status'] == 'done'
+    completed = provider_probe.public_probe_snapshot(task)
+    harness.cached = completed if cache_location == 'disk' else None
+    if cache_location != 'memory':
+        routes.CELL_PROBE_TASKS.clear()
+
+    def repair(boundary, repository, provider_id):
+        repository.document = deepcopy(old)
+        # Stand in for the sync CAS retargeting a Deployment onto an existing
+        # face. No new row or Connection field is needed for this repair.
+        repository.document['deployments'][0]['connection_id'] = 'repaired-face'
+        repository.revision += 1
+        return {'added_connections': 0, 'added_deployments': 0,
+                'repaired_connections': 0, 'repaired_deployments': 1}
+
+    monkeypatch.setattr(routes, '_sync_one_card_from_template', repair)
+    status, restarted = harness.request('POST', START, {})
+    assert status == 200, restarted
+    assert restarted['status'] == 'running'
+    assert len(harness.queued) == 1
+    new_work = harness.queued[0][1]
+    assert any(row[5] == new_url for row in new_work)
+
+
+def test_retarget_only_sync_hot_reloads_dispatcher(harness, monkeypatch):
+    from lib.model_routing import template_supply
+    import routes.api_v1.providers as routes
+
+    monkeypatch.setattr(template_supply, 'sync_template_supply', lambda **kwargs: {
+        'added_connections': 0, 'added_deployments': 0,
+        'repaired_connections': 0, 'repaired_deployments': 1})
+    reloads = []
+    monkeypatch.setattr(routes, '_hot_reload_dispatcher_slots', lambda: reloads.append(True))
+    stats = routes._sync_one_card_from_template(BOUNDARY, harness.repository, 'provider-a')
+    assert stats['repaired_deployments'] == 1
+    assert reloads == [True]

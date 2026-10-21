@@ -690,8 +690,8 @@ def probe_provider_cells_start(provider_id: str):
                     and not card_changed):
                 return api_ok(public_probe_snapshot(existing))
 
-        # Added or retargeted request names invalidate the completed snapshot:
-        # its cells describe the previous wire ids or transport endpoints.
+        # Added wires and retargeted deployments invalidate completed evidence:
+        # the old snapshot measured a different matrix or endpoint.
         if not force and not scoped and not explicit_targets and not card_changed:
             cached = _read_persisted_probe_snapshot(cache_key, credential_ids)
             if isinstance(cached, dict) and cached.get("cells"):

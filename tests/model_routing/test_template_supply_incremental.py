@@ -219,3 +219,90 @@ def test_an_unrelated_card_scope_leaves_the_card_untouched():
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.parametrize('restriction', ['face_revoked', 'model_revoked', 'wire_excluded'])
+def test_fresh_install_owner_restrictions_survive_backfill(restriction):
+    from tests.model_routing.test_template_supply_sync import _seed_mini_card
+
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(_OWNER)
+    bundle = _seed_mini_card(repository, boundary, selected=('gpt-6.1-sol',))
+    access_id = bundle['provider_access']['provider_access_id']
+    face_id = next(row['connection_id'] for row in bundle['connections']
+                   if row.get('gateway_namespace') == 'kunlun')
+
+    def restrict(document):
+        auth = document['credentials'][0]['authorization']
+        if restriction == 'face_revoked':
+            auth['connection_ids'].remove(face_id)
+        elif restriction == 'model_revoked':
+            auth['models'] = []
+        else:
+            auth['models'][0]['excluded_wire_model_ids'] = [_ALIAS]
+        return document
+
+    repository.mutate(boundary, restrict)
+    before = repository.get(boundary)
+    sync_template_supply(boundary=boundary, repository=repository,
+                         prober=_never_probe, provider_access_ids=[access_id],
+                         backfill_only=True)
+    after = repository.get(boundary)
+    assert after.document['credentials'] == before.document['credentials']
+    assert after.revision == before.revision
+
+
+@pytest.mark.parametrize('restriction', ['no_connections', 'no_models', 'excluded_wire'])
+def test_new_face_does_not_expand_restricted_credentials(restriction):
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(_OWNER)
+    bundle = _seed_card_without_the_new_face(repository, boundary)
+    access_id = bundle['provider_access']['provider_access_id']
+
+    def restrict(document):
+        auth = document['credentials'][0]['authorization']
+        if restriction == 'no_connections':
+            auth['connection_ids'] = []
+        elif restriction == 'no_models':
+            auth['models'] = []
+        else:
+            auth['models'][0]['excluded_wire_model_ids'] = [_ALIAS]
+        return document
+
+    repository.mutate(boundary, restrict)
+    before = repository.get(boundary).document['credentials']
+    stats = sync_template_supply(boundary=boundary, repository=repository,
+                                prober=_never_probe, provider_access_ids=[access_id],
+                                backfill_only=True)
+    assert stats['added_connections'] == 1
+    assert repository.get(boundary).document['credentials'] == before
+
+
+@pytest.mark.parametrize('grant_face', [False, True])
+def test_new_credential_existing_face_grant_is_explicit(grant_face):
+    from copy import deepcopy
+    from tests.model_routing.test_template_supply_sync import _seed_mini_card
+
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(_OWNER)
+    bundle = _seed_mini_card(repository, boundary, selected=('gpt-6.1-sol',))
+    access_id = bundle['provider_access']['provider_access_id']
+    face_id = next(row['connection_id'] for row in bundle['connections']
+                   if row.get('gateway_namespace') == 'kunlun')
+
+    def add_credential(document):
+        credential = deepcopy(document['credentials'][0])
+        credential['credential_id'] = 'credential-added-later'
+        if not grant_face:
+            credential['authorization']['connection_ids'].remove(face_id)
+        document['credentials'].append(credential)
+        return document
+
+    repository.mutate(boundary, add_credential)
+    before = repository.get(boundary)
+    sync_template_supply(boundary=boundary, repository=repository,
+                         prober=_never_probe, provider_access_ids=[access_id],
+                         backfill_only=True)
+    after = repository.get(boundary)
+    assert after.document['credentials'] == before.document['credentials']
+    assert after.revision == before.revision

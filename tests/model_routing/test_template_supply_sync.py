@@ -723,3 +723,33 @@ def test_template_probe_cells_start_without_window_and_preserve_evidence(monkeyp
     assert not any(t.name.startswith('template-supply') for t in threading.enumerate())
     if not fail_start:
         print(f'32 template cells: {(time.monotonic() - started) * 1000:.2f} ms; 0 workers')
+
+
+@pytest.mark.parametrize('cell_headers', [None, {}, {
+    'x-context-provider': 'kunlun', 'Authorization': 'face-token',
+    'X-Collision': 'face',
+}])
+def test_template_probe_merges_face_and_credential_headers(monkeypatch, cell_headers):
+    from lib.model_routing import template_supply
+    from lib.provider import provider_probe
+
+    envelope = {'Authorization': 'synthetic-envelope-token',
+                'X-Collision': 'credential', 'X-Owner': 'owner'}
+    work = (0, 'synthetic-key', 'model', 'wire', [],
+            'https://example.invalid/v1', 'openai')
+    if cell_headers is not None:
+        work += ({'extra_headers': cell_headers},)
+    monkeypatch.setattr(provider_probe, 'build_probe_work', lambda *a, **k: [work])
+    received = []
+
+    def probe(url, key, wire, headers, timeout, **kwargs):
+        received.append(dict(headers))
+        return 'ok', ''
+
+    monkeypatch.setattr(provider_probe, 'probe_one_cell', probe)
+    before = dict(envelope)
+    assert template_supply._live_prober(
+        base_url='https://example.invalid/v1', protocol='openai', faces={},
+        api_key='synthetic-key', extra_headers=envelope, recipes=[]) == {'model': 'ok'}
+    assert received == [{**(cell_headers or {}), **envelope}]
+    assert envelope == before
