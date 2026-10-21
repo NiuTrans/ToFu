@@ -104,14 +104,27 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     ``str | None`` return threw it away, so every distinct failure surfaced to
     the model as one indistinguishable "Failed to fetch". On return it carries
     ``reason`` (a stable machine token) and ``detail`` (a human sentence).
+    HTTP failures also carry ``http_status`` and an optional bounded raw
+    ``retry_after`` header. These are response facts, not replay permission.
     Passing nothing preserves the historical signature exactly.
     """
+    if diag is not None:
+        for key in ('reason', 'detail', 'truncated', 'http_status', 'retry_after'):
+            diag.pop(key, None)
+
     def _diag(reason, detail):
         """Record the failure cause; always returns None so callers can `return _diag(...)`."""
         if diag is not None:
             diag['reason'] = reason
             diag['detail'] = detail
         return None
+
+    def _http_diag(error, detail):
+        if diag is not None:
+            diag['http_status'] = error.status_code
+            if error.retry_after is not None:
+                diag['retry_after'] = error.retry_after
+        return _diag('http_%d' % error.status_code, detail)
 
     cfg = get_config()
     if max_chars is None: max_chars = cfg.fetch_max_chars_search
@@ -331,8 +344,7 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                 browser_text = _try_browser_fetch(url, max_chars, reason='HTTP %d' % e.status_code)
                 if browser_text:
                     return browser_text
-            return _diag('http_%d' % e.status_code,
-                         'Server returned HTTP %d (%s).' % (e.status_code, label))
+            return _http_diag(e, 'Server returned HTTP %d (%s).' % (e.status_code, label))
         else:
             _circuit.record_failure(url)
             logger.warning('HTTP %d — %s', e.status_code, url[:120])
@@ -342,8 +354,7 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                     logger.info('[Fetch] Browser fallback OK after HTTP %d — %s (%d chars)',
                                 e.status_code, url[:80], len(browser_text))
                     return browser_text
-        return _diag('http_%d' % e.status_code,
-                     'Server returned HTTP %d.' % e.status_code)
+        return _http_diag(e, 'Server returned HTTP %d.' % e.status_code)
     except requests.exceptions.SSLError as e:
         is_legacy_renegotiation = 'UNSAFE_LEGACY_RENEGOTIATION' in str(e)
         if is_legacy_renegotiation and _HAS_LEGACY_SSL:

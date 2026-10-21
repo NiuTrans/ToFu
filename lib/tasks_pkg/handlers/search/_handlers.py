@@ -26,7 +26,8 @@ from lib.tasks_pkg.handlers.search._display import (
 )
 
 from lib.tasks_pkg.handlers.search._presentation import (
-    failed_search_observation, format_search_observations, search_observation,
+    failed_search_observation, fetch_failure_text, format_search_observations,
+    join_fetch_results, search_observation,
 )
 
 logger = get_logger(__name__)
@@ -377,6 +378,12 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 
     from lib.tasks_pkg.tool_display import _short_url
     dr = _format_fetch_display(item, _short_url)
+    if not item['page_content'] and item.get('reason') != 'irrelevant':
+        failure = fetch_failure_text(item, task=task, round_entry=round_entry)
+        round_entry['_cacheableResult'] = False
+        _finalize_tool_round(task, rn, round_entry, [dr],
+                            query_override=f'📄 {target_url}', status='error')
+        return tc_id, failure, False
     _finalize_tool_round(task, rn, round_entry, [dr], query_override=f'📄 {target_url}')
 
     page_content = item['page_content']
@@ -670,11 +677,10 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
         # Build text content for LLM
         page_content = item['page_content']
         filtered_chars = item['filtered_chars']
-        error_msg = item['error_msg']
         if page_content:
             part = f"Content from {target_url} ({filtered_chars:,} chars):\n\n{page_content}"
         else:
-            part = f"Failed to fetch {target_url}." + (f' ({error_msg})' if error_msg else '')
+            part = fetch_failure_text(item, task=task, round_entry=round_entry)
 
         part_images = tuple(item.get('image_contents') or ())
         if part_images:
@@ -687,9 +693,11 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
     if source_truncated:
         from lib.tools.result_projection import TOOL_RESULT_PRODUCER_METADATA_KEY
         round_entry[TOOL_RESULT_PRODUCER_METADATA_KEY] = {'truncated': True}
+    tool_content = join_fetch_results(all_parts)
+    from lib.tools.result_value import tool_result_failure_verdict
     _finalize_tool_round(task, rn, round_entry, all_display_results,
-                         query_override=f'📄 {n} URLs')
-    tool_content = '\n\n'.join(all_parts)
+                        query_override=f'📄 {n} URLs',
+                        status=tool_result_failure_verdict(tool_content) or 'done')
     if all_image_contents:
         from lib.mcp.result_content import MCPToolResult
         tool_content = MCPToolResult(

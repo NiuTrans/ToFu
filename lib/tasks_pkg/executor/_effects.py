@@ -1,7 +1,8 @@
 """Tool occurrence effect evidence at the common handler boundary.
 
 Entry: begin_tool_effect, finish_tool_effect, uncertain_effect_error,
-tool_timeout_result, tool_exception_result.
+tool_timeout_result, tool_exception_result, tool_http_response_result,
+http_retry_after_action.
 Policy: docs/contracts/TOOL_EFFECT_RECOVERY.md.
 Conversation attempts use their event commit barrier; registered children use
 their existing task-result checkpoint. Storage-free calls keep process scope.
@@ -182,29 +183,48 @@ def _repeatable_effect(task, tool_name, round_entry):
     return repeatable, effect
 
 
+class _HttpResponseFailure(Exception):
+    """Response facts supplied by a trusted domain adapter, without a body."""
+    def __init__(self, status, retry_after):
+        if type(status) is not int or not 400 <= status <= 599:
+            raise ValueError('HTTP failure requires an integer error response status')
+        self.status, self.retry_after = status, retry_after
+        super().__init__(f'HTTP {status}')
+
+
+def tool_http_response_result(task, tool_name, round_entry, *, status,
+                              retry_after=None, message):
+    """Project trusted domain HTTP facts through the same effect-policy owner."""
+    return tool_exception_result(task, tool_name, round_entry,
+        _HttpResponseFailure(status, retry_after), message=message)
+
+
 def _http_status_failure(exception):
     """Read typed response metadata only; status never proves replay authority."""
     import httpx
     import requests
 
-    if isinstance(exception, httpx.HTTPStatusError):
+    if isinstance(exception, _HttpResponseFailure):
+        status, retry_after = exception.status, exception.retry_after
+    elif isinstance(exception, httpx.HTTPStatusError):
         response = exception.response
-        response_type = httpx.Response
+        if not isinstance(response, httpx.Response):
+            return None
+        status, retry_after = response.status_code, response.headers.get('Retry-After')
     elif isinstance(exception, requests.exceptions.HTTPError):
         response = exception.response
-        response_type = requests.Response
+        # Requests error responses are falsey; presence is not a truth test.
+        if not isinstance(response, requests.Response):
+            return None
+        status, retry_after = response.status_code, response.headers.get('Retry-After')
     else:
         return None
-    # Requests error responses are falsey; their presence is not a truth test.
-    if not isinstance(response, response_type):
-        return None
-    status = response.status_code
     if type(status) is not int or status not in {408, 429, 500, 502, 503, 504}:
         return None
-    return status, response.headers.get('Retry-After')
+    return status, retry_after
 
 
-def _http_retry_wait(value):
+def http_retry_after_action(value):
     """Normalize bounded Retry-After data into advice, without sleeping or IO."""
     from datetime import datetime, timezone
     from email.utils import parsedate_to_datetime
@@ -333,7 +353,7 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
         status, retry_after = http_status
         code = 'tool_http_rate_limited' if status == 429 else 'tool_http_unavailable'
         retryable = repeatable
-        action = (f'HTTP {status}. {_http_retry_wait(retry_after)} Retry through the normal '
+        action = (f'HTTP {status}. {http_retry_after_action(retry_after)} Retry through the normal '
                   'tool gateway and authorization checks.' if repeatable else
                   f'HTTP {status}. Check service readiness and reconcile the prior outcome; '
                   'do not repeat this operation automatically.')

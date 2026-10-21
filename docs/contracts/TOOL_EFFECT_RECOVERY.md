@@ -87,7 +87,10 @@ reusing provider-specific retry heuristics changes tool recovery authority. Veri
 Problem: a typed HTTP 429/503 response from a repeatable tool previously directed
 runtime repair and discarded the server's wait hint. Decision: the same common
 projection accepts actual HTTPX `HTTPStatusError`/Requests `HTTPError` response
-objects. Status 429 maps to `tool_http_rate_limited`; 408, 500, 502, 503 and 504 map
+objects, or the trusted domain adapter's `tool_http_response_result` port.
+That port accepts typed response facts from the owning transport; it does not
+parse failure prose or model-supplied result JSON. Status 429 maps to
+`tool_http_rate_limited`; 408, 500, 502, 503 and 504 map
 to `tool_http_unavailable`. These statuses permit recovery advice, not a guarantee
 of eventual success. `retryable` still requires current/captured effect-policy
 agreement. Unknown writes retain their operation and inspection evidence before
@@ -116,6 +119,30 @@ projection at 43 → 51 μs for a seconds hint and 44 → 63 μs for a date hint
 Built-in connection/runtime and HTTP connection/timeout cases retained
 byte-identical output, with median changes under 1 μs. This measures pure failure
 projection only, not production throughput; no resident state or retry loop is added.
+
+Problem: the actual fetch pipeline discarded HTTP wait hints, retried failed
+HTTP responses through binary-asset staging, and finalized empty failure text
+as a successful tool result. Decision: `tofu-search` diagnostics carry the
+integer response status and an optional bounded raw `Retry-After`; the host's
+`search/_core.py` retains these facts and skips asset staging after a reported
+HTTP failure. Existing successful browser recovery and genuine binary extraction
+fallback keep their owners. The package clears fetch-owned diagnostics between
+calls; no response body, credential or exception graph is retained in them.
+
+`search/_presentation.py` projects fetch failures for ordinary, batch, streaming
+and paper adapters. Task-bound HTTP failures reuse the common effect-policy
+projection; taskless consumers retain response facts without inventing replay
+authority. All-failed batches carry canonical execution failure; a mixed completed
+batch retains every success and per-source failure. An irrelevant readable page
+remains a semantic result. Failure results are not admitted to the reusable cache,
+so a later invocation can observe recovery. Alternatives rejected: inferring
+binary content from every empty result causes duplicate requests; parsing HTTP
+status from prose invents facts; changing display badges cannot settle failure.
+Verify `test_fetch_http_failure_evidence.py`, the search package's request-budget
+tests, fetch/paper adapters, and installed native parallel recovery with the real
+fetch handler. A local 503 with a 3,600-second wait hint makes one HTTP request
+instead of two within a normal fetch invocation. Existing transport retries
+still share their declared budget; this is not a throughput claim.
 
 Cost measurement (64 synthetic occurrences per disposable store, 60 warm): intent commit p95 was 1.87 ms on
 SQLite and 2.58 ms on native TofuDB; the marker was 109 JSON bytes and the complete carried event 533 bytes

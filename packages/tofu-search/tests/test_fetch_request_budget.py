@@ -148,8 +148,34 @@ def test_retry_after_outside_budget_returns_the_origin_status_without_sleep(monk
         with pytest.raises(fetch_http.HttpError) as error:
             fetch_http.do_request(url, 1, deadline_ts=time.time() + 2)
         assert error.value.status_code == 503
+        assert error.value.retry_after == '3600'
         assert sleeps == []
         assert calls == ['/page']
+
+
+@pytest.mark.parametrize('retry_after, expected', [('120', '120'), ('9' * 65, None)])
+def test_public_fetch_diagnostics_keep_bounded_response_facts(monkeypatch, retry_after, expected):
+    from tofu_search import fetch_page_content
+    from tofu_search.fetch import core
+    monkeypatch.setattr(core, '_try_browser_fetch', lambda *_a, **_k: None)
+    diag = {}
+    with origin(lambda h, n: reply(h, 503, {'Retry-After': retry_after})) as (url, calls):
+        assert fetch_page_content(url, timeout=1, deadline_secs=2, diag=diag) is None
+        assert diag['reason'] == 'http_503' and diag['http_status'] == 503
+        assert diag.get('retry_after') == expected
+        assert calls == ['/page']
+
+
+def test_reused_diagnostics_do_not_leak_prior_http_failure(monkeypatch):
+    from tofu_search import fetch_page_content
+    from tofu_search.fetch import core
+    monkeypatch.setattr(core, '_try_browser_fetch', lambda *_a, **_k: None)
+    diag = {'custom': 'caller field', 'reason': 'http_503', 'detail': 'old failure',
+            'http_status': 503, 'retry_after': '120', 'truncated': True}
+    with origin(lambda h, n: reply(h, 200, {'Content-Type': 'application/json'})) as (url, calls):
+        assert fetch_page_content(url, diag=diag) == 'content'
+        assert calls == ['/page']
+    assert diag == {'custom': 'caller field'}
 
 
 def test_non_retryable_http_status_remains_terminal():

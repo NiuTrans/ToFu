@@ -63,7 +63,7 @@ tofu-agent = "tofu_agent.cli:main"
 # deliberately separate so embedding Tofu never implies PostgreSQL or a
 # checked-out web application.
 full = [
-    "tofu-search>=0.12.12",
+    "tofu-search>=0.12.13",
     "trafilatura>=2.3.1",
     "Pillow>=10.0",
     "python-pptx>=0.6.21",
@@ -103,7 +103,7 @@ release = [
 app = [
     "psycopg[binary,pool]>=3.2",
     "uv>=0.4",
-    "tofu-search>=0.12.12",
+    "tofu-search>=0.12.13",
     "trafilatura>=2.3.1",
     "Pillow>=10.0",
     "python-pptx>=0.6.21",
@@ -164,7 +164,7 @@ test = [
     "tinycss2>=1.2",
     # The repository suite exercises document/media/search parsing too, so it
     # needs the `full` surface (duplicated — extras cannot compose).
-    "tofu-search>=0.12.12",
+    "tofu-search>=0.12.13",
     "trafilatura>=2.3.1",
     "Pillow>=10.0",
     "python-pptx>=0.6.21",
@@ -201,7 +201,7 @@ dev = [
     "ruff",
     "pyright>=1.1.403",
     # Same `full` duplication as `test`.
-    "tofu-search>=0.12.12",
+    "tofu-search>=0.12.13",
     "trafilatura>=2.3.1",
     "Pillow>=10.0",
     "python-pptx>=0.6.21",
