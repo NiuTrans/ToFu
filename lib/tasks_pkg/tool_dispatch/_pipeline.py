@@ -880,6 +880,10 @@ def _settle_tool_result(
     # in messages/events. This prevents byte counters, empty freshness fields,
     # evidence ids, and contract plumbing from consuming model context.
     tool_result_evidence = None
+    # Configuration selects wrapping for ordinary producer values. An already
+    # owned envelope keeps its declared model view even on a legacy turn.
+    _uses_v2_result_contract = _uses_v2_result_contract or (
+        isinstance(tool_content, TrustedResultText) and tool_content.envelope)
     if _uses_v2_result_contract and isinstance(tool_content, str):
         from lib.tools.result_envelope import split_tool_result_delivery
 
