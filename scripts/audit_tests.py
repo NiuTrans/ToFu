@@ -95,6 +95,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from typing import NamedTuple
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASELINE_PATH = os.path.join(REPO, 'tests', 'audit_baseline.json')
@@ -211,7 +212,78 @@ def _body_asserts(fn) -> bool:
     return False
 
 
-def _closure_asserts(fn, local_funcs: dict, helper_funcs: dict, depth: int = 2) -> bool:
+def _qualified_name(node) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _qualified_name(node.value)
+        return f'{parent}.{node.attr}' if parent else ''
+    return ''
+
+
+class _ImportedTestFunction(NamedTuple):
+    function: ast.AST
+    module: ast.Module
+
+
+def _callee_asserts(callee, local_funcs, helper_funcs, depth, module_tree):
+    if isinstance(callee, _ImportedTestFunction):
+        # A delegated driver's own helpers belong to its module, not its caller.
+        module_tree = callee.module
+        local_funcs = _module_function_defs(module_tree)
+        helper_funcs = {**_shared_helper_defs(),
+                        **_imported_test_helper_defs(module_tree)}
+        callee = callee.function
+    return _closure_asserts(callee, local_funcs, helper_funcs, depth,
+                            module_tree=module_tree)
+
+
+def _parametrized_drivers(fn, module_tree, bindings):
+    """Resolve closed single-callable matrices without executing decorators."""
+    drivers = {}
+    if module_tree is None:
+        return drivers
+    constants = defaultdict(list)
+    for statement in module_tree.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id].append(statement.value)
+    for decorator in fn.decorator_list:
+        if (not isinstance(decorator, ast.Call)
+                or _qualified_name(decorator.func) != 'pytest.mark.parametrize'
+                or len(decorator.args) < 2
+                or any(k.arg == 'indirect' and not (
+                    isinstance(k.value, ast.Constant) and k.value.value is False)
+                    for k in decorator.keywords)):
+            continue
+        parameter, cases = decorator.args[:2]
+        if not isinstance(parameter, ast.Constant) or not isinstance(parameter.value, str):
+            continue
+        if isinstance(cases, ast.Name) and len(constants[cases.id]) == 1:
+            cases = constants[cases.id][0]
+        if isinstance(cases, (ast.List, ast.Tuple)) and cases.elts:
+            targets = [bindings.get(_qualified_name(case)) for case in cases.elts]
+            if all(target is not None for target in targets):
+                drivers[parameter.value] = targets
+    return drivers
+
+
+def _owned_method_defs(fn, module_tree):
+    if module_tree is None or not fn.args.args:
+        return {}
+    receiver = fn.args.args[0].arg
+    if receiver not in {'self', 'cls'}:
+        return {}
+    for owner in ast.walk(module_tree):
+        if isinstance(owner, ast.ClassDef) and fn in owner.body:
+            return {f'{receiver}.{name}': method
+                    for name, method in _module_function_defs(owner).items()}
+    return {}
+
+
+def _closure_asserts(fn, local_funcs: dict, helper_funcs: dict, depth: int = 2,
+                     *, module_tree=None) -> bool:
     """True if ``fn`` OR any function it calls (up to ``depth`` levels) asserts.
 
     The suite delegates assertions constantly — a jsdom test body is often just
@@ -224,13 +296,26 @@ def _closure_asserts(fn, local_funcs: dict, helper_funcs: dict, depth: int = 2) 
         return True
     if depth <= 0:
         return False
+    assigned = {n.id for n in ast.walk(fn)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    shadowed = assigned | {arg.arg for arg in ast.walk(fn.args) if isinstance(arg, ast.arg)}
+    bindings = {name: helper for name, helper in {**helper_funcs, **local_funcs}.items()
+                if name.split('.')[0] not in shadowed}
+    scoped = {**_imported_test_helper_defs(fn), **_owned_method_defs(fn, module_tree)}
+    bindings.update({name: helper for name, helper in scoped.items()
+                     if name.split('.')[0] not in assigned})
+    matrices = _parametrized_drivers(fn, module_tree, bindings)
     for n in ast.walk(fn):
         if not isinstance(n, ast.Call):
             continue
-        nm = _call_name(n)
-        callee = local_funcs.get(nm) or helper_funcs.get(nm)
+        nm = _qualified_name(n.func)
+        if nm in matrices and nm not in assigned:
+            if all(_callee_asserts(target, local_funcs, helper_funcs,
+                                   depth - 1, module_tree) for target in matrices[nm]):
+                return True
+        callee = bindings.get(nm)
         if callee is not None and callee is not fn:
-            if _closure_asserts(callee, local_funcs, helper_funcs, depth - 1):
+            if _callee_asserts(callee, local_funcs, helper_funcs, depth - 1, module_tree):
                 return True
     return False
 
@@ -391,48 +476,51 @@ def _shared_helper_defs() -> dict:
     return _SHARED_HELPERS_CACHE
 
 
-def _imported_test_helper_defs(tree: ast.AST) -> dict:
-    """Resolve explicitly imported helpers owned by another test module.
+def _module_function_defs(tree) -> dict:
+    return {node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
-    A few integration suites deliberately share a behavioral driver from a
-    neighboring ``tests/test_*.py`` module.  Those calls are just as capable of
-    failing as helpers in ``tests/_*.py``; restricting closure analysis to the
-    latter misclassifies the consumer as assertion-free.  Only explicit
-    ``from tests... import name`` edges are followed, so this does not turn the
-    audit into an import executor or a repository-wide name guesser.
-    """
-    imported: dict = {}
-    for node in tree.body:
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        module_name = node.module or ''
-        if not module_name.startswith('tests.'):
-            continue
-        relative_path = module_name.replace('.', '/') + '.py'
-        absolute_path = os.path.join(REPO, relative_path)
-        cache_key = (REPO, relative_path)
-        if cache_key not in _IMPORTED_TEST_MODULE_CACHE:
-            definitions: dict = {}
-            try:
-                with open(absolute_path, encoding='utf-8') as source_file:
-                    imported_tree = ast.parse(
-                        source_file.read(), filename=relative_path)
-            except (OSError, SyntaxError):
-                imported_tree = None
-            if imported_tree is not None:
-                definitions = {
-                    item.name: item for item in imported_tree.body
-                    if isinstance(
-                        item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                }
-            _IMPORTED_TEST_MODULE_CACHE[cache_key] = definitions
-        definitions = _IMPORTED_TEST_MODULE_CACHE[cache_key]
-        for alias in node.names:
-            if alias.name == '*':
-                continue
-            definition = definitions.get(alias.name)
-            if definition is not None:
-                imported[alias.asname or alias.name] = definition
+
+def _test_module_functions(module_name) -> dict:
+    if not module_name.startswith('tests.'):
+        return {}
+    relative_path = module_name.replace('.', '/') + '.py'
+    cache_key = (REPO, relative_path)
+    if cache_key not in _IMPORTED_TEST_MODULE_CACHE:
+        definitions = {}
+        try:
+            with open(os.path.join(REPO, relative_path), encoding='utf-8') as source:
+                tree = ast.parse(source.read(), filename=relative_path)
+        except (OSError, SyntaxError):
+            pass
+        else:
+            definitions = {name: _ImportedTestFunction(fn, tree)
+                           for name, fn in _module_function_defs(tree).items()}
+        _IMPORTED_TEST_MODULE_CACHE[cache_key] = definitions
+    return _IMPORTED_TEST_MODULE_CACHE[cache_key]
+
+
+def _imported_test_helper_defs(scope: ast.AST) -> dict:
+    """Follow only explicit test imports in this module/function's own scope."""
+    imported = {}
+    for node in scope.body:
+        if isinstance(node, ast.ImportFrom) and not node.level:
+            module_name = node.module or ''
+            definitions = _test_module_functions(module_name)
+            for alias in node.names:
+                if alias.name == '*':
+                    continue
+                name = alias.asname or alias.name
+                if alias.name in definitions:
+                    imported[name] = definitions[alias.name]
+                else:
+                    imported.update({f'{name}.{fn}': target for fn, target in
+                        _test_module_functions(f'{module_name}.{alias.name}').items()})
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imported.update({f'{name}.{fn}': target for fn, target in
+                                 _test_module_functions(alias.name).items()})
     return imported
 
 
@@ -857,7 +945,7 @@ def analyze_file(rel: str) -> FileReport:
         rep.test_names.add(n.name)
         if _skip_only(n):
             rep.add('A1', n.lineno, f'{n.name}() can only skip — never fails')
-        elif not _closure_asserts(n, local_funcs, helper_funcs):
+        elif not _closure_asserts(n, local_funcs, helper_funcs, module_tree=tree):
             rep.add('A', n.lineno, f'{n.name}() has no assertion (incl. helpers)')
         _laun = _laundered(n)
         if _laun:
