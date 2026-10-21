@@ -2378,7 +2378,7 @@ def execute_tool_pipeline(
             continue
 
         # ── Dedup check for idempotent tools ──
-        if fn_name in _idempotent_tools:
+        if fn_name in _idempotent_tools and not task.get('aborted'):
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
 

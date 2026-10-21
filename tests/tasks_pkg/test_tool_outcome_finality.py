@@ -17,6 +17,25 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize('mode', ['legacy', 'v2'])
+def test_owner_abort_vetoes_reusable_cache_delivery(mode, observations):
+    from lib.tasks_pkg.tool_dispatch._flags import _make_cache_key, _store_tool_result_cache_entry
+    entered = []
+    def handler(*args):
+        entered.append(True)
+        pytest.fail('A cancelled occurrence entered its handler')
+    task = task_for(handler, mode)
+    key = _make_cache_key('fetch_url', {'url': 'https://example.test/result'})
+    _store_tool_result_cache_entry(task, key, ('CACHED-READ-SUCCESS', False))
+    task['aborted'] = True
+    row, messages, settled = dispatch(task)
+    assert not entered
+    assert row['status'] == 'aborted'
+    assert settled[0].execution_status == 'aborted'
+    assert 'CACHED-READ-SUCCESS' not in messages[0]['content']
+    assert [entry['outcome'] for entry in observations[1]] == ['aborted']
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'v2'])
 @pytest.mark.parametrize('late_result', ['success', 'error'])
 def test_late_worker_cannot_rewrite_a_published_timeout(
         mode, late_result, observations, monkeypatch):

@@ -99,6 +99,7 @@ translation could grant an entire write-capable group unexpectedly; text-only
 fallback changes the requested task. Neither is used for explicit policy errors.
 
 A tool call is settled exactly once, including cancellation and failure. The
+owner's explicit abort also vetoes reusable-cache delivery before execution. The
 runtime distinguishes transport failure, invalid arguments, unavailable tool,
 permission denial, handler failure, and user abort. Repair is limited to
 syntax/shape problems and cannot silently change the requested capability.
