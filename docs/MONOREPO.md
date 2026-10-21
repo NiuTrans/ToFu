@@ -286,6 +286,9 @@ changes and rationale that reviewers need in Open pull requests. Decision:
 independent public-only Git repository. Each retained tree follows the current
 public path policy; every blob and contributor/message field is sanitized and
 checked, including archived members and ancestors removed from the final tree.
+Raw Git paths and archive member names share the export-relative path validator
+before normalization; traversal, metadata aliases and non-portable names refuse
+the batch even if a later commit removes them.
 Public changes retain separate subjects, bodies, authors, dates and merge
 parents. Internal-only single-parent commits fold away; original object IDs,
 private refs, tags, signatures and notes never enter newly rebuilt objects.

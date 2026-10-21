@@ -705,3 +705,51 @@ def test_history_rejects_distinct_actual_push_endpoints_before_builder(
                           cwd=unacknowledged, capture_output=True).returncode != 0
     assert subprocess.run(['git', 'rev-parse', '--verify', 'refs/tags/v1.0.0'],
                           cwd=unacknowledged, capture_output=True).returncode != 0
+
+
+@pytest.mark.parametrize('member_name', [
+    'nested/.GIT/config', 'nested\\file.txt', 'nested:name.txt', './alias.txt',
+    'nested//alias.txt', 'tail.', 'tail ', 'nested/alias\x7f.txt',
+    'nested/.git./config', 'nested/.git /config',
+])
+def test_removed_history_archive_refuses_nonportable_member_names(repositories, member_name):
+    import io
+    import zipfile
+    from export_pkg._publish import ExportPublishSafetyError
+
+    source, public, base, original = repositories
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(member_name, b'safe content')
+    asset = source / 'asset.zip'
+    asset.write_bytes(stream.getvalue())
+    git(source, 'add', '-A')
+    git(source, 'commit', '-qm', 'Intermediate archived content')
+    asset.unlink()
+    git(source, 'add', '-A')
+    git(source, 'commit', '-qm', 'Remove archived content')
+    tree = candidate(public, {})
+
+    with pytest.raises(ExportPublishSafetyError, match='path'):
+        sync(source, public, git(source, 'rev-parse', 'HEAD'), tree, base=base)
+    assert git(public, 'rev-parse', 'HEAD') == original
+    assert not (public / '.git/tofu-export-history.json').exists()
+    assert not (public / '.git/tofu-export-history.pending.json').exists()
+
+
+@pytest.mark.parametrize('filename', ['safe\\name.txt', 'safe:name.txt', 'tail.', 'tail '])
+def test_removed_history_source_refuses_nonportable_paths(repositories, filename):
+    from export_pkg._publish import ExportPublishSafetyError
+
+    source, public, base, original = repositories
+    commit(source, 'Intermediate named content', {filename: 'safe content\n'})
+    (source / filename).unlink()
+    git(source, 'add', '-A')
+    git(source, 'commit', '-qm', 'Remove named content')
+    tree = candidate(public, {})
+
+    with pytest.raises(ExportPublishSafetyError, match='path'):
+        sync(source, public, git(source, 'rev-parse', 'HEAD'), tree, base=base)
+    assert git(public, 'rev-parse', 'HEAD') == original
+    assert not (public / '.git/tofu-export-history.json').exists()
+    assert not (public / '.git/tofu-export-history.pending.json').exists()
