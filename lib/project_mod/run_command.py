@@ -1167,8 +1167,13 @@ def command_background_refusal(command):
                 return ('Error [workspace-lease-background-unsupported]: unresolved dynamic '
                         'executable cannot retain a verified managed child lifetime. Use a '
                         'literal executable, a `NAME=value` binding followed by `"$NAME"`, '
-                        'a `for NAME in <plain words>` loop, or a script file; '
-                        'command was not started.')
+                        'a `for NAME in <plain words>` loop, or a script file. A '
+                        'candidate-executable probe qualifies as `for NAME in <plain '
+                        'words>; do [ -x "$NAME" ] && "$NAME" --version; done`: plain '
+                        'absolute words only (no glob/`~`/`$VAR`; an unmatched glob stays '
+                        'literal and runs zero iterations, which a static unroll cannot '
+                        'reproduce), and guard existence with a `[ -x "$NAME" ] && <cmd>` '
+                        'chain rather than an `if ... fi` body; command was not started.')
             if words and os.path.basename(words[0]) in {'nohup', 'disown', 'setsid'}:
                 detached = True
                 break
