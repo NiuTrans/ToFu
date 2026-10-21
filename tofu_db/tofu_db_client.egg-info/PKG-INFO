@@ -1,0 +1,74 @@
+Metadata-Version: 2.1
+Name: tofu-db-client
+Version: 0.1.0
+Summary: Standalone synchronous storage.v2 client for Tofu-DB
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# Tofu-DB Python client
+
+Install independently with `pip install ./tofu_db` from this checkout. The wheel
+is `tofu-db-client`; its import is `tofu_db`. No Tofu server dependencies are
+required. This client connects to an already supervised `tofu-db serve` process;
+the host owns launch, readiness, secrets, and shutdown.
+
+```python
+import time
+from tofu_db import StorageV2Session
+
+# Values supplied by the host's launch/authentication boundary.
+with StorageV2Session(host, port, secret, owner_id=owner_id,
+                      tenant_id=tenant_id, timeout=5.0) as session:
+    response = session.request(
+        "record.get",
+        {"user_id": owner_id, "namespace": "example_harness", "key": "run-42"},
+        command_id=None,
+        deadline_unix_ms=int((time.time() + 5.0) * 1000),
+    )
+    response.raise_for_error()
+    result = response.json()
+```
+
+`StorageV2Session`, `StorageV2Response`, `StorageV2Error`, and
+`StorageV2ProtocolError` are the public API. Sessions are synchronous and owned by
+one caller; use one session per concurrent request. Use a context manager or
+`close()`. Failed handshakes close their socket, and responses must match the
+request and a schema offered during negotiation.
+
+Mutations may return a `storage.committed-events/v1` envelope, identified by
+`_storageCommitContract`. `response.value()` validates and unwraps the operation result;
+`response.json()` returns the decoded envelope. Its `events` are
+post-commit wake hints. Native `storage.commit-notice/v1` hints contain
+`userId`, `topic`, `key`, and `sequence`, never transcript content. Consumers
+may use them to wake a reader, then replay durable state. Hints are bounded and
+may be lost; neither their presence nor their absence replaces replay/cursor
+validation. Tofu-specific topic translation belongs to Tofu's storage adapter,
+not this transport package.
+
+For harness-owned durable state, use `record.put/get/list/delete` with your own
+namespace and explicit owner. `record.put` takes `namespace`, `key`, `value` and
+an optional `expected_version`; supply a stable `command_id` for the logical
+write. The native/legacy differential tests cover round trips and version
+conflicts for these operations.
+
+Requests use the semantic catalog in `contracts/storage_operations_v1.json` and
+the wire contract in `contracts/storage_v2.json`. The generated default schema
+comes from that same catalog generator. Owner/tenant IDs must match the daemon's
+authenticated scope; payload identity is explicit. Mutations require a stable
+command ID. The client does not automatically retry: transport failure after
+submission is an ambiguous outcome, not proof that a write failed. Applications
+must resolve it through the operation's documented receipt/version contract.
+
+Tofu-specific error translation, committed-event publication, and process
+supervision remain in `lib/storage/`. The historical
+`scripts.tofudb_v2_client` import forwards to this implementation.
+
+CRC32C acceleration is optional and lazy. Importing this package never starts a
+compiler. One background worker per process may compile for at most five
+seconds; requests use the verified Python implementation while it runs. Cache
+ownership, permissions and ABI are checked before loading, publication is
+atomic, and interpreter exit kills an active compiler process group. The
+private cache keeps at most eight versions, evicts idle entries and cleans
+interrupted staging on the next build. Source admission is 16 KiB and accepted
+libraries are at most 2 MiB. Missing compilers or unsafe caches only disable
+acceleration; they never disable checksum validation.

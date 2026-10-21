@@ -74,7 +74,7 @@ def record_rate_limit(provider_id: str, key_name: str,
     error resets it to zero) plus the daily ``rate_limited`` total; both are
     shown on the Settings card. That is ALL a 429 may do here.
 
-    Owner policy (2026-07-29, after the sankuai-anthropic total-outage): a
+    Owner policy (2026-07-29, after the example-corp-anthropic total-outage): a
     429 streak NEVER disables a key. 429 is backpressure — the answer is the
     slot-local steering cooldown and RPM decay, so the key rejoins the
     moment the upstream recovers, with zero human action. Only an explicit
@@ -107,7 +107,7 @@ def record_gateway_error(provider_id: str, key_name: str,
     These say "the upstream behind the gateway is sick", never "this key is
     sick" — and they hit every key on the provider uniformly, so feeding
     them into the daily success-rate column both wrecks the card's honesty
-    and TRIPS the auto-disable gate (2026-08-03 sankuai 502 storm: 813
+    and TRIPS the auto-disable gate (2026-08-03 example-corp 502 storm: 813
     failures in ~2h auto-disabled 2 of 3 healthy keys for the day; only the
     third key's success volume plus the last-resort guard kept service up).
 
@@ -149,7 +149,7 @@ def mark_key_exhausted(provider_id: str, key_name: str,
             (``exhausted_models``) instead of flipping the key-wide
             ``exhausted`` flag. This matters on AGGREGATING GATEWAYS where
             one key proxies several upstream vendors (2026-07-28 incident:
-            a qwen→Aliyun ``insufficient_quota`` on ``sankuai_key_1``
+            a qwen→Aliyun ``insufficient_quota`` on ``example_corp_key_1``
             key-wide-exhausted the key, cross-vendor poisoning kimi→Moonshot
             capacity routed through the same key). A single-vendor account
             converges to the same end state — each sibling model trips its
@@ -160,7 +160,7 @@ def mark_key_exhausted(provider_id: str, key_name: str,
             ``model=''`` is also passed DELIBERATELY for HTTP 402 Payment
             Required (owner ruling 2026-07-29): a 402 is emitted by the
             gateway's OWN credit-validation layer about the ACCOUNT's
-            credit pool (sankuai: ext.error.source=AIGC, stage=validation),
+            credit pool (example-corp: ext.error.source=AIGC, stage=validation),
             so every model on the key is dead and the key-wide flag is the
             honest stop — per-model there would just burn one live 402
             per remaining model before converging.

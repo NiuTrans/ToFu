@@ -163,34 +163,34 @@ global.runtimeScope = window.runtimeScope = {
 };
 
 /* Two brand groups, deliberately given in the WORST section order for the
- * brand-grouping rule: the 'meituan' group is inserted FIRST, but 'Claude'
- * must sort before 'Meituan' — so the section order must be FIXED by the
+ * brand-grouping rule: the 'yourprovider' group is inserted FIRST, but 'Claude'
+ * must sort before 'YourProvider' — so the section order must be FIXED by the
  * sort, not inherited. Models within each group are in model_id order (what
  * the config file holds) which is NOT display-name order.
  *
  * The picker groups by brand through the typed core/model-group policy,
  * not provider_id, so the section key is the detected brand: the two
- * dated-id models detect as 'claude', the rest as 'meituan'.
+ * dated-id models detect as 'claude', the rest as 'yourprovider'.
  *
  * The fixture pins `brand` EXPLICITLY rather than relying on _detectBrand
  * matching the provider NAME: the opensource export (export.py rule 11/15)
  * historically rewrote the internal org's retained detect pattern
- * ('meituan' → 'yourprovider') while the typed label table and this
- * file ship verbatim — so a name-detection fixture groups 'Meituan' models
+ * ('yourprovider' → 'yourprovider') while the typed label table and this
+ * file ship verbatim — so a name-detection fixture groups 'YourProvider' models
  * by their model_ids in the public tree (claude/gemini/kimi sections) and
  * every section assertion goes red there. An explicit brand is also the
  * PRODUCTION shape (server_config providers carry brand), so nothing is
  * lost: the oauth pair still exercises the detect fall-through (brand
  * 'oauth' → _detectBrand on the model_id → 'claude'). */
 const MODELS = [
-  { model_id: 'aws.claude-opus-4.6', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'aws.claude-opus-4.8', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'claude-fable-5', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'gemini-3.5-flash', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'gemini-3.6-flash', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'hy3-preview', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'kimi-k3', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
-  { model_id: 'yuju-claude-opus-5-evaDaily', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'aws.claude-opus-4.6', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'aws.claude-opus-4.8', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'claude-fable-5', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'gemini-3.5-flash', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'gemini-3.6-flash', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'hy3-preview', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'kimi-k3', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
+  { model_id: 'yuju-claude-opus-5-evaDaily', provider_id: 'example-corp', provider_name: 'YourProvider', brand: 'yourprovider', capabilities: ['text'] },
   { model_id: 'claude-opus-4-1-20250805', provider_id: 'oauth_claude', provider_name: 'Zzz Subscription', brand: 'oauth', capabilities: ['text'] },
   { model_id: 'claude-sonnet-4-5-20250929', provider_id: 'oauth_claude', provider_name: 'Zzz Subscription', brand: 'oauth', capabilities: ['text'] },
 ];
@@ -213,27 +213,27 @@ try {
   const L = labels();
   check('all_models_rendered', L.length === 10);
 
-  // The Meituan section, in display-name order. This is the payload assertion:
+  // The YourProvider section, in display-name order. This is the payload assertion:
   // "Claude Opus 5" must sit with the other Claudes even though its model_id
   // (yuju-…) sorts last, and 3.5 must precede 3.6.
-  const wantMeituan = [
+  const wantYourProvider = [
     'Claude Opus 4.6', 'Claude Opus 4.8', 'Claude Opus 5',
     'Fable 5', 'Gemini 3.5 Flash', 'Gemini 3.6 Flash',
     'Hunyuan HY3 Preview', 'Kimi K3',
   ];
-  const gotMeituan = L.filter((x) => wantMeituan.indexOf(x) >= 0);
+  const gotYourProvider = L.filter((x) => wantYourProvider.indexOf(x) >= 0);
   check('models_in_display_name_order',
-    gotMeituan.join('|') === wantMeituan.join('|'));
+    gotYourProvider.join('|') === wantYourProvider.join('|'));
   check('opus5_sits_with_claudes',
-    gotMeituan.indexOf('Claude Opus 5') === 2);
+    gotYourProvider.indexOf('Claude Opus 5') === 2);
 
   // ══ 2. Section headers ordered by brand-group display name ══
   // Typed brand grouping: the dated oauth models detect as
-  // 'claude' → 'Claude'; the sankuai models as 'meituan' → 'Meituan'. Even
-  // though 'meituan' was inserted first, Claude must sort before it.
+  // 'claude' → 'Claude'; the example-corp models as 'yourprovider' → 'YourProvider'. Even
+  // though 'yourprovider' was inserted first, Claude must sort before it.
   const S = sections();
   check('two_sections_rendered', S.length === 2);
-  check('sections_in_name_order', S.join('|') === 'Claude|Meituan');
+  check('sections_in_name_order', S.join('|') === 'Claude|YourProvider');
 
   // ══ 3. Cache MISS models don't throw and sort by stripped id ══
   // oauth_claude's dated ids have no _modelPricingCache entry → the label IS

@@ -68,7 +68,7 @@ def _settings(host_tmp_path: Path) -> OpenCodeBaselineSettings:
         opencode_sha256=digest,
         opencode_cache_seed=seed,
         model=_MODEL,
-        provider_face="meituan-chat",
+        provider_face="yourprovider-chat",
         provider_slot_id="glm-slot-fixture",
     )
 
@@ -162,7 +162,7 @@ def test_formal_dry_run_is_secret_free_and_round_trips_runtime(
     assert runtime["opencodeVersion"] == OPENCODE_VERSION
     assert runtime["opencodeCacheSeed"]["version"] \
         == OPENCODE_PROVIDER_NPM_VERSION
-    assert manifest["provider_face"] == "meituan-chat"
+    assert manifest["provider_face"] == "yourprovider-chat"
     assert manifest["provider_slot_id"] == "glm-slot-fixture"
     assert len(manifest["harbor_binary_sha256"]) == 64
     agent = config["agents"][0]
@@ -243,7 +243,7 @@ def test_settings_validation_rejects_bad_pins(host_tmp_path):
         "opencode_sha256": digest,
         "opencode_cache_seed": seed,
         "model": _MODEL,
-        "provider_face": "meituan-chat",
+        "provider_face": "yourprovider-chat",
         "provider_slot_id": "glm-slot-fixture",
     }
     with pytest.raises(ValueError, match="SHA-256"):

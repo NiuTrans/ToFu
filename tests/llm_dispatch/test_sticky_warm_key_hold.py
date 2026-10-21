@@ -2,7 +2,7 @@
 
 Background (real incident, conv mqwqyrrd on aws.claude-opus-4.8, 2026-06-28)
 ===========================================================================
-Anthropic's prompt cache is keyed PER API key. When ``sankuai_key_0`` hits its
+Anthropic's prompt cache is keyed PER API key. When ``example_corp_key_0`` hits its
 per-minute RPM limit, ``Slot.record_error(is_rate_limit=True)`` cools it for a
 mere 0.5s. The conversation-sticky picker then correctly routes AROUND the
 cooled key onto a cold one — but that cold key's server-side cache never held
@@ -65,9 +65,9 @@ def dispatcher_two_keys():
     d = get_dispatcher()
     d.initialize()
     slot0 = Slot(key_name='key_0', api_key='sk-0', model=_MODEL,
-                 capabilities={'text'}, provider_id='sankuai', latency_ema=10.0)
+                 capabilities={'text'}, provider_id='default', latency_ema=10.0)
     slot1 = Slot(key_name='key_1', api_key='sk-1', model=_MODEL,
-                 capabilities={'text'}, provider_id='sankuai', latency_ema=20.0)
+                 capabilities={'text'}, provider_id='default', latency_ema=20.0)
     with d._lock:
         d.slots.extend([slot0, slot1])
 

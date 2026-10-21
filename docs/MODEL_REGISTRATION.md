@@ -330,7 +330,7 @@ the [thinking doc](https://ai.google.dev/gemini-api/docs/thinking) pins the
 default as On(medium) with no disable rung, and the
 [pricing page](https://ai.google.dev/gemini-api/docs/pricing) gives intro
 $2/$10 input/output (+$0.10 cache-read) per million tokens through
-2026-11-30, then $4/$20 (+$0.20). The Meituan AIGC gateway serves it:
+2026-11-30, then $4/$20 (+$0.20). The YourProvider AIGC gateway serves it:
 live probe 2026-10-17 returned HTTP 429 with a per-model RPM message (the
 deployment exists; the project key holds no quota), not the 400
 `不支持的模型类型` that unserved ids (e.g. `mimo-v2.6-pro`) return.
@@ -699,7 +699,7 @@ The grant a credential holds for one ModelRef is
 `{creator_id, model_id, excluded_wire_model_ids}`. A green dot on a
 (credential × request name) cell means the model grant exists AND this
 request name is not in its exclusion list — so two request names sharing a
-ModelRef (`glm-5.3` vs `glm-53-meituan`) toggle independently. Toggling a
+ModelRef (`glm-5.3` vs `glm-53-yourprovider`) toggle independently. Toggling a
 cell adds/removes that wire's exclusion; the model grant itself is minted
 when the first cell is enabled and dropped when the last reachable cell is
 disabled. The adjacent probe pip describes that exact credential × request
@@ -804,7 +804,7 @@ exclusions and clears probe status. Removing the final name retains an empty
 Offering; no Model ID is synthesized into a Deployment or probe cell. Adding a
 catalog Model uses an exact endpoint-matched template's declared `request_ids`,
 or an explicit, editable default equal to the Model ID when no recipe exists.
-The Meituan recipe binds V4.1 Flash identity to its declared V4 Flash wire names.
+The YourProvider recipe binds V4.1 Flash identity to its declared V4 Flash wire names.
 `tests/providers/test_provider_request_names_browser.py` covers the real Settings flow.
 
 
@@ -821,7 +821,7 @@ dispatcher:
   never reads ProviderAccess, Offering, Deployment, wire identifier, alias, or
   route state. The catalog renders one row per semantic Model: provider
   namespaces (``kimi/kimi-k2.5``) and supply-channel variants
-  (``Qwen3_8-27B-Meituan``, FP8 re-registrations, a trailing ``instruct`` tag
+  (``Qwen3_8-27B-YourProvider``, FP8 re-registrations, a trailing ``instruct`` tag
   on an otherwise identical registration) are the same Model rented through
   different supply paths, so they collapse into the canonical bare
   registration under its developer, with facts the canonical row lacks
