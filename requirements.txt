@@ -152,7 +152,9 @@ jsonschema>=4.18
 # >=0.12.11: PDF extraction failures remain diagnostics, never source bodies.
 # >=0.12.12: retain bounded similar-source candidates and received distinct bodies.
 # SOFT floor for startup; snippet groups do not certify page equivalence.
-tofu-search>=0.12.12
+# >=0.12.13: rank uncertain follow-up candidates before the bounded preview.
+# SOFT floor for startup; ranking preserves evidence status and received rows.
+tofu-search>=0.12.13
 trafilatura>=2.3.1
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches

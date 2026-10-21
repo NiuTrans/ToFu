@@ -3062,7 +3062,7 @@ provides-extras = ["full", "storage", "release", "app", "test", "dev", "worker",
 
 [[package]]
 name = "tofu-search"
-version = "0.12.12"
+version = "0.12.13"
 source = { editable = "packages/tofu-search" }
 dependencies = [
     { name = "beautifulsoup4" },

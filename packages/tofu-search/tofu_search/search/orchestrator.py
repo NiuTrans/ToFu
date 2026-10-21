@@ -790,6 +790,11 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         logger.debug('[Search] step6 skipped — caller passed rerank=False')
     else:
         relevant = rerank_by_bm25(query, relevant, max_results)
+        # Discovery still needs useful ordering when lexical evidence is
+        # uncertain. Keep every received candidate and its evidence status;
+        # the existing preview selects from this ranked sidecar afterward.
+        if unverified:
+            unverified = rerank_by_bm25(query, unverified, len(unverified))
     final_count = min(len(relevant), max_results)
     step_timings['step6_bm25_rerank'] = time.time() - step6_t0
 
