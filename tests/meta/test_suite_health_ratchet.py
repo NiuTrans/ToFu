@@ -193,6 +193,71 @@ def test_assertion_closure_follows_explicit_neighbor_test_helper(
     assert not [item for item in report.findings if item[0] == 'A']
 
 
+@pytest.mark.parametrize(('source', 'unchecked'), [
+    ('from tests import test_driver as driver\n'
+     'def test_subject():\n    driver.exercise()\n', False),
+    ('import tests.test_driver as driver\n'
+     'def test_subject():\n    driver.exercise()\n', False),
+    ('def test_subject():\n'
+     '    from tests.test_driver import exercise as run\n    run()\n', False),
+    ('from tests import test_driver as driver\n'
+     '@pytest.mark.parametrize("scenario", [driver.exercise, driver.exercise])\n'
+     'def test_subject(scenario):\n    scenario()\n', False),
+    ('from tests import test_driver as driver\n'
+     'SCENARIOS = (driver.exercise,)\n'
+     '@pytest.mark.parametrize("scenario", SCENARIOS)\n'
+     'def test_subject(scenario):\n    scenario()\n', False),
+    ('from tests import test_driver as driver\n'
+     '@pytest.mark.parametrize("scenario", [driver.exercise, driver.unchecked])\n'
+     'def test_subject(scenario):\n    scenario()\n', True),
+    ('from tests import test_driver as driver\n'
+     '@pytest.mark.parametrize("scenario", [driver.exercise, unknown])\n'
+     'def test_subject(scenario):\n    scenario()\n', True),
+    ('from tests import test_driver as driver\n'
+     'def test_subject():\n    driver.unchecked()\n', True),
+    ('def test_subject():\n'
+     '    from tests.test_driver import unchecked as run\n    run()\n'
+     'def unrelated():\n'
+     '    from tests.test_driver import exercise as run\n    run()\n', True),
+    ('from tests import test_driver as driver\n'
+     'def _run():\n    assert 1 == 1\n'
+     'def test_subject():\n    driver.delegates_without_assertion()\n', True),
+    ('from tests import test_driver as driver\n'
+     'def test_subject(driver):\n    driver.exercise()\n', True),
+    ('def test_subject():\n'
+     '    from tests.test_driver import exercise as run\n'
+     '    run = unknown\n    run()\n', True),
+    ('class TestOwner:\n'
+     '    def _run(self):\n        assert 2 + 2 == 4\n'
+     '    def test_subject(self):\n        self._run()\n', False),
+    ('class OtherOwner:\n'
+     '    def _run(self):\n        assert 2 + 2 == 4\n'
+     'class TestOwner:\n'
+     '    def _run(self):\n        return 4\n'
+     '    def test_subject(self):\n        self._run()\n', True),
+])
+def test_assertion_closure_resolves_only_owned_explicit_drivers(
+        tmp_path, monkeypatch, source, unchecked):
+    audit = _load_audit_module()
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir()
+    (tests_dir / 'test_driver.py').write_text(
+        'def exercise():\n    assert 2 + 2 == 4\n'
+        'def unchecked():\n    return 4\n'
+        'def _run():\n    return 4\n'
+        'def delegates_without_assertion():\n    _run()\n', encoding='utf-8')
+    (tests_dir / 'test_consumer.py').write_text(source, encoding='utf-8')
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_consumer.py'))
+
+    findings = [item for item in report.findings if item[0] == 'A']
+    assert bool(findings) is unchecked
+    if unchecked:
+        assert len(findings) == 1 and 'test_subject()' in findings[0][2]
+
+
 def test_dead_path_scan_ignores_prose_and_negative_absence_guards(
         tmp_path, monkeypatch):
     """F describes a dead *lookup*, not documentation or an absence pin."""

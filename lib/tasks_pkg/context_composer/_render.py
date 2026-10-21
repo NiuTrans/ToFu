@@ -319,20 +319,15 @@ def _managed_block_hashes(
     return latest
 
 
-def verified_block_hash(messages, block_id, *, wire=False, existing_hashes=None):
+def verified_block_hash(messages, block_id, *, wire=False):
     """Read actual envelope bytes; final wire bodies no longer carry private flags.
 
-    ``existing_hashes`` may carry the map the composition render pass already
-    computed for THIS SAME list (same identity, unchanged length): the caller
-    owns that proof, and the block lookup then skips a second full regex scan.
-    Any other input — a foreign list, an unknown map, or a grown/shrunk
-    history — falls back to measuring the actual envelopes here.
+    Render-local maps are not transferable receipts. Every verification reads
+    current contents, including in-place edits that preserve list identity and
+    length; no unowned hash hint can bypass this admission boundary.
     """
     if not isinstance(messages, list):
         return None
-    if existing_hashes is not None and not wire:
-        if isinstance(existing_hashes, dict):
-            return existing_hashes.get(block_id)
     if wire:
         messages = [{**message, '_contextComposer': True} for message in messages if isinstance(message, dict)]
     return _managed_block_hashes(messages).get(block_id)
@@ -816,8 +811,7 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
     names = ','.join(f"{row['id']}:{row['chars']}" for row in manifest
                      if row['injected'])
     _emit_context_summary(request, names, total)
-    return ComposeResult(messages=messages, manifest=manifest, plan=plan,
-                         managed_block_hashes=dict(existing_hashes))
+    return ComposeResult(messages=messages, manifest=manifest, plan=plan)
 
 
 __all__ = ['render_context']

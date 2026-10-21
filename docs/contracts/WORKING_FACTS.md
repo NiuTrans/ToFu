@@ -259,6 +259,13 @@ input through the existing request lease; native context observes its owned
 admitted history. Both use the same dependency service. Suppressed, compacted-away and altered blocks cannot
 borrow a manifest's old receipt. Composer acquisition remains read-only.
 
+Preparation derives the block hash from the admitted message contents. A task's
+cached hash map is not evidence: list identity and length stay unchanged when a
+message or its text is replaced. Render-local reuse remains local to rendering;
+passing that unowned map across the dependency boundary was rejected because it
+can bind facts the request no longer contains. The later wire check is retained
+as an independent confirmation boundary, not a substitute for correct admission.
+
 A crash, cancellation, unavailable confirmation or replaced pending request keeps
 explicit uncertain consumption. A new successful request cannot confirm an
 older unknown request, nor can a revision between recorded extrema be invented.

@@ -116,6 +116,30 @@ Only stale owned recovery sections are withdrawn; dialogue/results/audit history
 L1/advanced/L2/reactive compaction carries state before budget/adoption checks; rejected candidates cannot mutate live messages/task/notes. Truncation counts and protects required state, or leaves overflow for refusal.
 **Problem:** update-driven recovery duplicates visible progress. **Decision:** restore only missing state, at most one current carrier; preserve accepted items verbatim and label the separate explanation field's origin.
 **Rejected:** per-round throttles and append-only recovery still duplicate state; hiding cards hides bad input. Specs: `tests/goals/test_checklist_context.py`.
+
+**Problem:** repeated composition reparses unchanged gateway receipts, while
+message/list identity cannot prove that a receipt survived clipping or call
+rebinding. **Decision:** each projection pairs the actual assistant/tool history
+and consumes each declared occurrence once. Only receipt interpretation is
+memoized, by exact immutable text chunks and direct/gateway kind, within the
+current round, message list and normalized accepted checklist values. Failed
+scans publish nothing; compaction candidates bypass the memo. Each successful
+scan replaces its cache with only still-paired receipts, so retained entries
+scale with admitted history and release with the task. Text chunks are borrowed,
+not copied into another joined payload. No cache entry authorizes a tool.
+**Alternatives rejected:** identity-only prefixes miss in-place edits; frozen
+whole-history prefixes add overhead to ordinary reads. Pairing remains O(messages).
+
+Measurement: Python 3.12, synthetic 128/2,048/8,192-message histories with 4 KiB
+read receipts and identical public checklist projections. Warm gateway histories
+improved by 8.9–9.8×; the 8,192-message case went from 31.20 to 3.50 ms. Direct
+reads improved from 2.06 to 1.77 ms at that size. Traced retained allocations were
+about 403 KiB for the gateway case versus 322 KiB previously, and 272 bytes for
+direct reads versus 322 KiB. These are local component measurements, not live
+request latency. Specs: `tests/goals/test_checklist_evidence_memo.py` cover reuse,
+in-place changes, partial batches, duplicate IDs, failure atomicity and candidate
+isolation alongside the restoration suite.
+
 ### Provider-native compaction
 Provider-native automatic compaction is a third execution location, not a third
 transcript authority. Verified public GPT-5.6 Responses and supported direct

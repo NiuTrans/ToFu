@@ -33,6 +33,17 @@ pytest and lint. Alternatives rejected: removing the import loses the fixture;
 blanket unused/redefinition suppressions also hide accidental duplicate imports.
 Verify fixture providers and collected test identities when changing these exports.
 
+Problem: integration wrappers delegate assertions to neighboring test drivers,
+including module aliases, function-local imports and callable parameter matrices.
+Decision: the health census resolves explicit test imports statically, within
+their owning module/function/class and the existing two-call depth. A literal
+single-callable matrix counts only if every listed driver resolves and asserts;
+shadowed names, unknown cases and assertion-free drivers remain findings.
+Alternatives rejected: executing imports would run fixture side effects; matching
+unqualified method names could borrow an unrelated driver's assertions. Synthetic
+export paths use the existing explicit fixture-path declaration, not a blanket
+dead-path exemption. Verify `tests/meta/test_suite_health_ratchet.py`.
+
 Focused tool fixtures retain real admission before the handler under test.
 Fixtures with a conversation and project path supply an owner-checked project
 binding through the repository read port; an ordinary conversation can declare
@@ -309,6 +320,14 @@ then keep SBOM upload enabled so the accepted release remains auditable.
 Test-suite health is checked mechanically by `scripts/audit_tests.py` and
 `tests/meta/test_suite_health_ratchet.py`; the ratchet covers executable quality
 signals, not incident metadata.
+
+Open G-ratchet follow-up: the recorded source-read identities predate module
+relocations and the new `test_frontend_tofu_paper_comfort.py` CSS-text guard.
+First move that guard's chroma, contrast and flat-ground requirements to actual
+computed-style checks, preserving its mutation controls. Then reconcile the
+renamed test/source pairs and retired installer/style guards before lowering
+the baseline. A smaller total alone does not prove that no new dependency was
+introduced; keep the identity gate failing until that comparison is complete.
 
 
 ## Research and background-delivery regression
