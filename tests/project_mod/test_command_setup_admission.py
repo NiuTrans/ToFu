@@ -223,15 +223,17 @@ def test_explicit_cd_target_is_not_cdpath_ambiguous(repo, monkeypatch):
 
 
 def test_dynamic_head_refusal_names_every_probe_correction(repo):
-    """The candidate-executable refusal must name each unlock: plain absolute
-    words (no glob/`~`/`$VAR`), an `&&` guard chain rather than an `if` body,
-    and the script-file escape hatch."""
-    command = 'for c in /x/*/node "$HOME/.local/bin/node"; do "$c" --version; done'
+    """Unsupported executable-name globs get fixed-leaf/quoted-probe guidance,
+    supported guards, and the script-file escape hatch—not a blanket glob ban."""
+    command = 'for c in /x/*/node* "$HOME/.local/bin/node"; do "$c" --version; done'
     refusal = commands.command_background_refusal(command)
     assert 'workspace-lease-background-unsupported' in refusal
     assert '[ -x "$NAME" ] && "$NAME" --version' in refusal
     assert 'if ... fi' in refusal
     assert 'glob' in refusal and '$VAR' in refusal
+
+    assert 'fixed literal executable filename' in refusal
+    assert 'quoted $HOME' in refusal
     assert 'script file' in refusal
 
 
