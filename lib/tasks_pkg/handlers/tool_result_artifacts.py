@@ -340,7 +340,7 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
     media_refs = []
     if fn_name == 'read_tool_artifact':
         if is_batch:
-            for item in batch_result['items']:
+            for item in batch_result.get('items', []):
                 if item.get('status') == 'ok':
                     media_refs.extend(_media_descriptors_of(item))
         elif succeeded:
