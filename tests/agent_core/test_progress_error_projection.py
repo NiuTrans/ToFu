@@ -72,3 +72,17 @@ def test_settled_failure_keeps_original_operation_and_recovery_identity(status):
     assert expected
     assert nonretryable_failure_signature(batch_call(), text, execution_status=status) == expected
     assert nonretryable_failure_signature(batch_call(), 'opaque failure', execution_status=status) is None
+
+
+@pytest.mark.parametrize('tool,field', [('read_tool_artifact', 'reads'), ('search_tool_artifact', 'searches')])
+@pytest.mark.parametrize('projection', ['model', 'envelope'])
+def test_declared_native_batch_requires_every_cause_and_keeps_business_arguments(tool, field, projection):
+    failure = batch_failure()
+    text = failure.to_model_text() if projection == 'model' else failure.to_envelope_text()
+    first = {'function': {'name': tool, 'arguments': {field: [{'artifact_ref': 'source', 'cursor': '0'}]}}}
+    original = nonretryable_failure_signature(first, text)
+    assert original
+    changed = {'function': {'name': tool, 'arguments': {field: [{'artifact_ref': 'source', 'cursor': '1'}]}}}
+    assert nonretryable_failure_signature(changed, text) != original
+    missing_cause = {'function': {'name': tool, 'arguments': {field: [{}, {}]}}}
+    assert nonretryable_failure_signature(missing_cause, text) is None

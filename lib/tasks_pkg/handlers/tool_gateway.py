@@ -1080,26 +1080,10 @@ def _execute_program(
 
 def _nonretryable_batch_error(results):
     """Classify only a nonempty batch of explicit settled terminal failures."""
-    from dataclasses import replace
-    from lib.tools.result_envelope import tool_result_error, typed_tool_error
-
-    if not results:
-        return None
-    codes = []
-    for result in results:
-        if result.get('status') not in ('error', 'rejected'):
-            return None
-        error = tool_result_error(result.get('error'))
-        if error is None or error.retryable:
-            return None
-        codes.append(error.code)
-    failure = typed_tool_error(
-        'tool_batch_failed', retryable=False,
-        message='Every child in this batch failed and cannot be retried unchanged.',
-        next_action=(
-            'Inspect each child error and use corrected arguments or another authorized tool. '
-            'Do not replay the unchanged batch or uncertain effects; independent work may continue.'))
-    return replace(failure, items=({'failureCodes': codes},))
+    from lib.tools.result_envelope import nonretryable_batch_error, tool_result_error
+    return nonretryable_batch_error(
+        tool_result_error(result.get('error')) if result.get('status') in ('error', 'rejected')
+        else None for result in results)
 
 
 @tool_registry.handler(EXECUTE_PROGRAM_NAME, category='tools',

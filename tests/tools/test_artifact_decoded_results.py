@@ -71,7 +71,10 @@ def invoke(monkeypatch, store, name, arguments, *, owner=17):
     monkeypatch.setattr(handler, '_finalize_tool_round', lambda *args, **kwargs: None)
     _, output, _ = handler._handle_tool_result_artifact(
         {'model': ''}, {}, name, 'artifact-test', arguments, 1, {}, {}, '', False)
-    result = json.loads(output)
+    from lib.tools.result_value import capture_result
+    # The declared program value is canonical source JSON, independently of
+    # the typed error envelope shown to the model.
+    result = json.loads(capture_result(output).text())
     contract = READ_TOOL_ARTIFACT if name == 'read_tool_artifact' else SEARCH_TOOL_ARTIFACT
     Draft202012Validator(contract.decoded_result_schema).validate(result)
     return result

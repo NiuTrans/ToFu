@@ -22,6 +22,7 @@ from lib.tools.contracts import ToolContractError
 from lib.tools.tool_result_artifacts import (
     TOOL_RESULT_ARTIFACT_CONTRACTS,
     TOOL_RESULT_ARTIFACT_NAMES,
+    artifact_failure_envelope,
 )
 
 
@@ -67,12 +68,11 @@ def _mime_ext(mime):
 #: Stay inside ``budget_tool_result_v2``'s pass-through band. Otherwise a
 #: continuation response can itself spill into another artifact pointer.
 from lib.tool_results.tool_result_query_contract import CONTRACT, SIGNED_CURSOR_PREFIXES
+from lib.tools.result_surfaces_generated import CONTRACT as _RESULT_SURFACES
 _RESPONSE_TOKEN_BUDGET = CONTRACT['response']['tokens']
 _MAX_BATCH_WORKERS = 4
-_BATCH_KEYS = {
-    "read_tool_artifact": "reads",
-    "search_tool_artifact": "searches",
-}
+_BATCH_KEYS = {name: _RESULT_SURFACES['batchFailureArguments'][name]
+               for name in TOOL_RESULT_ARTIFACT_NAMES}
 
 
 def _count_tokens(text: str, model: str) -> int:
@@ -89,10 +89,13 @@ def _serialize(result: dict) -> str:
                       separators=(",", ":"))
 
 
-def _model_tokens(fn_name: str, text: str, model: str) -> int:
+def _model_tokens(fn_name: str, result: dict, model: str) -> int:
     """Use the common delivery projection; returned/captured JSON stays exact."""
     from lib.tools.result_surfaces import project_model_source
-    return _count_tokens(project_model_source(fn_name, text), model)
+    text = _serialize(result)
+    failure = artifact_failure_envelope(fn_name, result, text)
+    view = failure.to_model_text() if failure is not None else project_model_source(fn_name, text)
+    return _count_tokens(view, model)
 
 
 def _metadata_refusal(result=None):
@@ -104,7 +107,7 @@ def _metadata_refusal(result=None):
 
 def _fit_read_result(result, model, token_budget):
     # Opaque cursors cannot be reconstructed after trimming text locally.
-    if _model_tokens('read_tool_artifact', _serialize(result), model) <= token_budget:
+    if _model_tokens('read_tool_artifact', result, model) <= token_budget:
         return result
     if result.get('resumeCursor') or str(result.get('nextCursor', '')).startswith(SIGNED_CURSOR_PREFIXES):
         return _metadata_refusal(result)
@@ -114,7 +117,7 @@ def _fit_read_result(result, model, token_budget):
         mid = (low + high) // 2
         prefix = visible[:mid]
         candidate = {**result, 'content': prefix, 'nextCursor': str(int(result.get('offset', 0)) + len(prefix.encode())), 'truncated': True, 'outputTruncated': True}
-        if _model_tokens('read_tool_artifact', _serialize(candidate), model) <= token_budget:
+        if _model_tokens('read_tool_artifact', candidate, model) <= token_budget:
             best, low = candidate, mid + 1
         else:
             high = mid - 1
@@ -122,7 +125,7 @@ def _fit_read_result(result, model, token_budget):
 
 
 def _fit_search_result(result, model, token_budget):
-    if _model_tokens('search_tool_artifact', _serialize(result), model) <= token_budget:
+    if _model_tokens('search_tool_artifact', result, model) <= token_budget:
         return result
     # The cursor has consumed every match in this page. Shortening a quotation
     # (or dropping a match) would strand evidence behind that cursor, including
@@ -138,14 +141,13 @@ def _fit_one_result(fn_name, result, model, token_budget):
 
 def _fit_batch_to_budget(fn_name, results, model):
     wrapper = {'status': 'ok' if all(x.get('status') == 'ok' for x in results) else 'partial_failure', 'items': results}
-    text = _serialize(wrapper)
-    if _model_tokens(fn_name, text, model) > _RESPONSE_TOKEN_BUDGET:
+    if _model_tokens(fn_name, wrapper, model) > _RESPONSE_TOKEN_BUDGET:
         share = max(1, (_RESPONSE_TOKEN_BUDGET - 64) // max(1, len(results)))
         fitted = [_fit_one_result(fn_name, item, model, share) for item in results]
-        text = _serialize({**wrapper, 'items': fitted, 'status': 'ok' if all(x.get('status') == 'ok' for x in fitted) else 'partial_failure'})
-        if _model_tokens(fn_name, text, model) > _RESPONSE_TOKEN_BUDGET:
+        wrapper = {**wrapper, 'items': fitted, 'status': 'ok' if all(x.get('status') == 'ok' for x in fitted) else 'partial_failure'}
+        if _model_tokens(fn_name, wrapper, model) > _RESPONSE_TOKEN_BUDGET:
             return _serialize(_metadata_refusal())
-    return text
+    return _serialize(wrapper)
 
 
 def _parse_cursor(arguments: dict) -> int | str:
@@ -361,6 +363,16 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
             content,
             canonical=CapturedToolResult(
                 tuple(parts), retention_coverage=coverage))
+
+    if not succeeded:
+        from lib.tools.result_value import TrustedResultText, capture_result
+        native_value = batch_result if is_batch else json.loads(content)
+        failure = artifact_failure_envelope(fn_name, native_value, content)
+        if failure is not None:
+            # As with gateway failures, model policy and native decoded evidence
+            # share one capture. No display wrapper becomes program input.
+            content = TrustedResultText(failure.to_envelope_text(),
+                canonical=capture_result(content, execution_status='error'), envelope=True)
 
     batch_key = _BATCH_KEYS[fn_name]
     batch_size = len(raw_arguments.get(batch_key) or [])
