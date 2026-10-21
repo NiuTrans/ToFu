@@ -10,6 +10,39 @@ from tests.support.frontend_visual import frontend_visual_page as frontend_visua
 pytestmark = pytest.mark.visual
 
 
+def _row_alignment(page, queue_id):
+    """Read glyph line boxes, not the differently padded control containers."""
+    return page.locator(f'[data-queue-id="{queue_id}"]').evaluate("""row => {
+      const firstLine = node => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const box = range.getClientRects()[0];
+        return {top:box.top, bottom:box.bottom, center:(box.top+box.bottom)/2};
+      };
+      const label = firstLine(row.querySelector('.bgcmd-output-label'));
+      const cancel = row.querySelector('[data-conversation-action="remove-queue"]');
+      const action = firstLine(cancel);
+      const summary = row.querySelector('summary').getBoundingClientRect();
+      const button = cancel.getBoundingClientRect();
+      const idLines = [...row.querySelector('.bgcmd-id').getClientRects()];
+      return {delta:action.center-label.center, buttonHeight:button.height,
+        buttonTop:button.top, summaryTop:summary.top, summaryBottom:summary.bottom,
+        overlap:idLines.some(line => line.right>button.left && line.left<button.right
+          && line.top<button.bottom && line.bottom>button.top),
+        overflow:row.scrollWidth>row.clientWidth+1};
+    }""")
+
+
+def _assert_row_alignment(page, queue_id):
+    geometry = _row_alignment(page, queue_id)
+    assert abs(geometry['delta']) <= 1.5, geometry
+    assert geometry['buttonTop'] < geometry['summaryBottom'], geometry
+    assert geometry['buttonHeight'] >= 28, geometry
+    assert not geometry['overlap'], geometry
+    assert not geometry['overflow'], geometry
+    return geometry
+
+
 @pytest.mark.parametrize('theme', ['tofu', 'dark', 'light'])
 @pytest.mark.parametrize('width', [1100, 390])
 @pytest.mark.parametrize('language', ['en', 'zh'])
@@ -61,10 +94,15 @@ def test_adjacent_background_completions_share_one_queue_header(
     collapsed = tmp_path / f'background-queue-{language}-{theme}-{width}-collapsed.png'
     page.locator('#queue-fixture').screenshot(path=str(collapsed))
 
+    _assert_row_alignment(page, 'q-a')
+    before_open = _assert_row_alignment(page, 'q-b')
     second = page.locator('[data-queue-id="q-b"]')
     second.locator('summary').focus()
     page.keyboard.press('Enter')
     assert second.locator('details').evaluate('(node)=>node.open')
+
+    after_open = _assert_row_alignment(page, 'q-b')
+    assert abs(after_open['delta'] - before_open['delta']) <= 1, after_open
     assert not page.locator('[data-queue-id="q-a"] details').evaluate('(node)=>node.open')
     assert '<script>unsafe</script>' in second.locator('.sw-card-raw-pre').inner_text()
     assert len(second.locator('.sw-card-raw-pre').inner_text()) == 2000
@@ -84,6 +122,19 @@ def test_adjacent_background_completions_share_one_queue_header(
       &&document.activeElement===reader.summary&&getSelection().toString()===reader.selected
       &&reader.cancel===reader.row.querySelector('[data-conversation-action="remove-queue"]')""")
     assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+
+    _assert_row_alignment(page, 'q-b')
+    # The identifier wraps in its evidence column; the action stays on the
+    # summary's first line even when both the summary and output are tall.
+    page.evaluate("""() => {
+      items=items.map(item=>({...item,backgroundCommand:{...item.backgroundCommand,
+        commandId:'bg_'+('long-command-id-'.repeat(9))}}));render();
+    }""")
+    _assert_row_alignment(page, 'q-b')
+    second.locator('summary').focus()
+    page.keyboard.press('Enter')
+    assert second.locator('details').evaluate('(node)=>node.open')
+    _assert_row_alignment(page, 'q-b')
     second.locator('[data-conversation-action="remove-queue"]').click()
     assert page.evaluate('intents') == [{'type': 'remove-queue', 'conversationId': 'visual', 'queueId': 'q-b'}]
     assert second.count() == 1, 'Cancel intent alone is not an authoritative acknowledgement'
