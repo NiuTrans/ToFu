@@ -26,13 +26,13 @@
 > which the authenticated device-pairing boundary addresses
 > INDEPENDENTLY of this kit.
 >
-> **Kit readiness, checked 2026-10-09** — so a future submitter starts from
+> **Kit readiness, checked 2026-10-21** — so a future submitter starts from
 > facts rather than re-deriving them:
-> - `manifest.store.json` = 12 permissions, version 5.8.0, matching the
+> - `manifest.store.json` = 12 permissions, version 5.8.1, matching the
 >   shipped manifest; `downloads`, `webRequest`, and `webNavigation` present,
 >   `activeTab` absent.
 > - `bash scripts/package_extension.sh --store` produces a valid
->   `tofu-browser-bridge-5.8.0-store.zip` (8 files, `<all_urls>`).
+>   `tofu-browser-bridge-5.8.1-store.zip` (8 files, `<all_urls>`).
 > - `tests/release/test_chrome_store_manifest_parity.py` — 25/25, and it DERIVES the
 >   required permissions from the extension's real `chrome.*` calls, so it
 >   keeps this kit honest while it sits idle.

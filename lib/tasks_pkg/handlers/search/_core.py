@@ -604,15 +604,19 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
                     'trying bound browser for %s', url_for_log(target_url))
 
     try:
-        from lib.browser.file_transfer import MAX_TRANSFER_BYTES
+        from lib.browser.file_transfer import (
+            MAX_TRANSFER_BYTES,
+            MAX_TRANSFER_COMMAND_TIMEOUT_SECONDS,
+        )
         from lib.search.search_bridge import require_bound_browser_file
         # Explicit file intent uses the streaming file budget, not the search
         # body's in-memory FETCH_MAX_BYTES. The direct fast path stays small;
         # larger files use the existing bounded browser-to-server stream.
+        # File intent also owns its deadline, independent of search-page tuning.
         receipt = require_bound_browser_file(
             target_url,
             max_bytes=MAX_TRANSFER_BYTES,
-            timeout=_lib.FETCH_TIMEOUT,
+            timeout=MAX_TRANSFER_COMMAND_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         try:
@@ -638,6 +642,7 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
                 'browser_file_transfer_offline',
                 'browser_file_transfer_unbound',
                 'browser_file_transfer_command_failed',
+                'browser_file_transfer_timeout',
                 'browser_file_transfer_capacity',
                 'browser_file_transfer_owner_capacity',
                 'browser_file_transfer_staging_capacity',
@@ -654,6 +659,18 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
                 }
                 else 'Stop: this file exceeds the supported 500 MiB download ceiling.'
                 if code == 'browser_file_transfer_too_large'
+                else (
+                    'Check the reported transfer stage, source site responsiveness, '
+                    'and selected browser-to-Tofu connection before retrying; '
+                    'do not repeat the unchanged stalled transfer.'
+                )
+                if code == 'browser_file_transfer_timeout'
+                else (
+                    'Reload the current browser extension served by this Tofu instance '
+                    'for transfer-stage diagnostics, and check the source site and '
+                    'browser-to-Tofu connection before retrying.'
+                )
+                if code == 'browser_file_transfer_aborted'
                 else 'Retry once; report the browser file-transfer failure if it repeats.'
             )
         elif ((BrowserProtocolRejected and isinstance(

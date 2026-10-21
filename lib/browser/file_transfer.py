@@ -36,6 +36,7 @@ from lib.log import audit_log, get_logger
 logger = get_logger(__name__)
 
 TRANSFER_TTL_SECONDS = 180
+MAX_TRANSFER_COMMAND_TIMEOUT_SECONDS = 120
 MAX_TRANSFER_BYTES = 500 * 1024 * 1024
 MAX_CHUNK_BYTES = 256 * 1024
 MIN_TRANSFER_CHUNK_BYTES = 16 * 1024
@@ -1088,7 +1089,8 @@ def fetch_file_via_browser(
     transfer_id = transfer['transferId']
     consumed = False
     try:
-        command_timeout = max(35, min(120, int(timeout or 35)))
+        command_timeout = max(35, min(
+            MAX_TRANSFER_COMMAND_TIMEOUT_SECONDS, int(timeout or 35)))
         result, error = send_browser_command(
             'fetch_file_to_server',
             {
@@ -1097,9 +1099,9 @@ def fetch_file_via_browser(
                 'transferToken': transfer['transferToken'],
                 'maxBytes': transfer['maxBytes'],
                 'chunkBytes': transfer['chunkBytes'],
-                # Leave five seconds for command-result settlement after the
-                # extension's own fetch/stream deadline.
-                'timeoutMs': (command_timeout - 5) * 1000,
+                # Reserve five seconds for failed-transfer cleanup, then five
+                # more for command-result settlement (both on the same budget).
+                'timeoutMs': (command_timeout - 10) * 1000,
             },
             timeout=command_timeout,
             client_id=device,
@@ -1118,6 +1120,22 @@ def fetch_file_via_browser(
                 'browser_file_transfer_too_large',
                 f"Browser response exceeds the {transfer['maxBytes']}-byte limit",
                 status=413,
+            )
+        if (isinstance(error, str)
+                and error.startswith('browser_file_transfer_timeout: ')):
+            raise BrowserFileTransferError(
+                'browser_file_transfer_timeout',
+                text_for_log(error),
+                status=504,
+            )
+        if error == 'signal is aborted without reason':
+            # Old workers dropped the AbortSignal reason. The cause/stage is
+            # unknown; this is not evidence of a timeout or a source failure.
+            raise BrowserFileTransferError(
+                'browser_file_transfer_aborted',
+                'Browser file transfer was aborted; cause and stage are unknown '
+                '(the browser extension returned no abort reason).',
+                status=502,
             )
         if error:
             raise BrowserFileTransferError(
@@ -1158,6 +1176,7 @@ def fetch_file_via_browser(
 __all__ = [
     'BrowserFileTransferError', 'BrowserFileTransferStore',
     'TRANSFER_TTL_SECONDS', 'MAX_TRANSFER_BYTES',
+    'MAX_TRANSFER_COMMAND_TIMEOUT_SECONDS',
     'MAX_CHUNK_BYTES', 'MIN_TRANSFER_CHUNK_BYTES',
     'MAX_STAGING_ARTIFACTS', 'STAGING_HANDOFF_GRACE_SECONDS',
     'STAGING_FILENAME_PREFIX',
