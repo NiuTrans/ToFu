@@ -4,7 +4,7 @@ import uuid
 import pytest
 
 from tests.project_mod.test_project_dispatch_repository import context
-from tests.project_mod.test_coordinator_workers import runtime as runtime, base_runtime
+from tests.project_mod.test_coordinator_workers import runtime, base_runtime
 from tests.project_mod import test_coordinator_request_budget as contracts
 from lib.storage.service import get_storage_client
 

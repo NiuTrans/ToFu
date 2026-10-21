@@ -3,7 +3,7 @@ import uuid
 
 import pytest
 
-from tests.project_mod.test_coordinator_worker_handoff import run as run, runtime, base_runtime, context
+from tests.project_mod.test_coordinator_worker_handoff import run, runtime, base_runtime, context
 from tests.project_mod import test_coordinator_worker_handoff as contracts
 from tests.project_mod import test_coordinator_dependency_links as links
 

@@ -13,13 +13,13 @@ from functools import lru_cache
 
 import hashlib
 import json
-import os as os
+import os
 from pathlib import Path
 import sys
 import time
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 
 from lib.identity import PrincipalContext
 
@@ -29,14 +29,8 @@ logger = get_logger(__name__)
 
 
 from .native_binary import (
-    NativeProcessError as NativeProcessError,
-    NativeConfigurationError as NativeConfigurationError,
-    _seal,
-    _memfd as _memfd,
-    _ADD_SEALS as _ADD_SEALS,
-    _GET_SEALS as _GET_SEALS,
-    _WRITE_SEAL as _WRITE_SEAL,
-    _ALL_SEALS as _ALL_SEALS,
+    NativeProcessError, NativeConfigurationError, _seal, _memfd,
+    _ADD_SEALS, _GET_SEALS, _WRITE_SEAL, _ALL_SEALS,
 )
 
 

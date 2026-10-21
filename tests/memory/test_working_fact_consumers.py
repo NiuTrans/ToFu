@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.memory.test_working_facts import (artifact, facts as facts, storage as storage, turn_service,
+from tests.memory.test_working_facts import (artifact, facts, storage, turn_service,
     record, owner, dependency, PRINCIPAL)
-from tests.memory.test_working_facts_context import quiet_notes as quiet_notes, task_for
+from tests.memory.test_working_facts_context import quiet_notes, task_for
 from lib.memory.working_facts import consumers
 from lib.memory.working_facts.contract import validate
 from lib.memory.working_facts.repository import FactConflict, FactsUnavailable

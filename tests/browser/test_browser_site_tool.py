@@ -8,11 +8,11 @@ import pytest
 from lib.browser import adapters
 from lib.browser.site_tool import site_tool
 
-# The modelplaza site pack ships with bundles/meituan (internal builds only);
+# The modelplaza site pack ships with bundles/yourprovider (internal builds only);
 # these boundary tests name it explicitly, so the module skips when the pack
 # is absent (opensource tree) instead of misreporting adapter behavior.
 if not (Path(__file__).resolve().parents[2]
-        / 'bundles' / 'meituan' / 'site_packs' / 'modelplaza.json').is_file():
+        / 'bundles' / 'yourprovider' / 'site_packs' / 'modelplaza.json').is_file():
     pytest.skip('modelplaza site pack is not shipped in this build',
                 allow_module_level=True)
 

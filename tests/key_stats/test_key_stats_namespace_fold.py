@@ -3,9 +3,9 @@
 fold into their ACCOUNT namespace at key_stats load time.
 
 The 2026-07-29 invisible-total-outage: key-health history was recorded per
-FACE card (``sankuai_anthropic::…`` — the duplicate provider card an
+FACE card (``example_corp_anthropic::…`` — the duplicate provider card an
 Anthropic wire used to require), while the Settings UI renders one card per
-ACCOUNT (``sankuai::…``) after the account/face separation (charter #23).
+ACCOUNT (``example-corp::…``) after the account/face separation (charter #23).
 Result: all three Opus-5 keys auto-stopped on the anthropic face and the
 settings panel showed 87–93% healthy green; a PERSISTENT manual re-enable
 written against the face namespace (the 22:20 incident fix) controlled

@@ -94,7 +94,7 @@ struct AddEditProfileView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             FieldError(errors["baseUrl"])
-            Text("Paste the full address, e.g. https://…-vscode-….mlp.sankuai.com/proxy/15000/")
+            Text("Paste the full address, e.g. https://…-vscode-….mlp.internal.example.com/proxy/15000/")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } header: {

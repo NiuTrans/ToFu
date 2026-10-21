@@ -15,7 +15,7 @@ from lib.storage_authority_sql.json_document import JsonBytes
 from lib.storage_authority_sql.logical_outbox import LogicalOutboxPipeline, policy_from_config
 from lib.storage_authority_sql.logical_replay import BackendReplayTarget, replay_records
 from lib.storage_authority_sql.logical_shadow import LogicalCommitShadow
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend
 
 pytestmark = pytest.mark.unit
 

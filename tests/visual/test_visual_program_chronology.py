@@ -8,9 +8,9 @@ import json
 import pytest
 
 from tests._runtime_sections import ROOT, native_module_path
-from tests.support.frontend_visual import (
-    frontend_visual_origin as frontend_visual_origin,
-    frontend_visual_page as frontend_visual_page,
+from tests.support.frontend_visual import (  # noqa: F401
+    frontend_visual_origin,
+    frontend_visual_page,
 )
 
 pytestmark = pytest.mark.visual

@@ -466,12 +466,6 @@ recovery. The default attempt query/public DTO never includes this private confi
 The task manager resolves the accepted primary root against registered bindings
 before freezing its task-start context. Unregistered roots confer no scoped
 trigger; browser project IDs and global project selection cannot confer ownership.
-
-Typed remote workspace locators remain owned by `lib/desktop/remote.py`; optional
-local automation capture leaves those ordinary chats unscoped without consulting
-local binding storage. An explicit automation project still requires its owned
-canonical local-root binding. Rejecting remote tool routing as an invalid local
-root would let optional automation metadata prevent otherwise valid chat entry.
 No pool/timer or cache eviction is added. `test_projects.py`, owned project HTTP
 contracts and conversation/task ownership tests cover replay, isolation and capture.
 

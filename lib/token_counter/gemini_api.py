@@ -9,7 +9,7 @@ Activated ONLY when ``base_url`` points to:
   - ``{region}-aiplatform.googleapis.com`` (Vertex AI)
   - a gateway that proxies ``/google/{v1,v1beta}`` paths
 
-The Meituan gateway DOES NOT proxy this endpoint (verified 2026-05 —
+The YourProvider gateway DOES NOT proxy this endpoint (verified 2026-05 —
 all ``/v1/gemini/...`` paths return 404). On those setups this
 backend silently declines, letting the dispatcher fall through to
 tiktoken.

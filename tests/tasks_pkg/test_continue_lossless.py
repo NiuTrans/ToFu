@@ -1125,7 +1125,7 @@ class TestAnthropicSignatureCapture:
 
 
 class TestOpenAICompatReasoningDetails:
-    """The PRODUCTION path for aws.claude-opus-4.8: the sankuai gateway is
+    """The PRODUCTION path for aws.claude-opus-4.8: the example-corp gateway is
     OpenAI-compat (no protocol=anthropic), and streams the Claude thinking
     signature OpenRouter-style as `reasoning_details:[{type:thinking,
     signature:...}]`. Capture it on the way in, rebuild it on replay."""

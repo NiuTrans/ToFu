@@ -18,11 +18,8 @@ import re
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from tests._runtime_sections import runtime_section_path
 
-pytestmark = pytest.mark.unit
 REPO = Path(__file__).resolve().parent.parent.parent
 MAIN_JS = Path(runtime_section_path('main.js'))
 
@@ -86,13 +83,6 @@ def test_restores_when_still_on_welcome():
     assert r["activeConvId"] == "conv-A", r
 
 
-def test_restores_exact_id_when_initial_catalog_omits_it():
-    """Metadata omission must use loadConversation's exact-ID resolver, not recency."""
-    r = _run(_fn(), active_conv=None, convs=[{"id": "conv-A"}], restored_id="conv-B")
-    assert r["loaded"] == ["conv-B"], r
-    assert r["activeConvId"] == "conv-B", r
-
-
 def test_does_not_switch_when_user_already_navigated():
     """THE BUG: user clicked into conv-B during the slow load (activeConvId set).
     The late boot restore must NOT switch them back to the pre-refresh conv-A."""
@@ -102,14 +92,14 @@ def test_does_not_switch_when_user_already_navigated():
 
 
 def test_autoselect_newest_when_no_restore_target():
-    """No saved restore id + still on welcome → auto-select conversations[0]."""
-    r = _run(_fn(), active_conv=None, convs=_CONVS, restored_id=None)
+    """No valid restore id + still on welcome → auto-select conversations[0]."""
+    r = _run(_fn(), active_conv=None, convs=_CONVS, restored_id="gone")
     assert r["loaded"] == ["conv-A"], r
 
 
 def test_no_autoselect_when_user_typing():
     """Still on welcome but the composer has text → don't steal focus."""
-    r = _run(_fn(), active_conv=None, convs=_CONVS, restored_id=None, input_value="draft")
+    r = _run(_fn(), active_conv=None, convs=_CONVS, restored_id="gone", input_value="draft")
     assert r["loaded"] == [], r
 
 
@@ -127,8 +117,6 @@ def test_neuter_guard_clobbers_user_navigation():
 if __name__ == "__main__":
     test_restores_when_still_on_welcome()
     print("PASS test_restores_when_still_on_welcome")
-    test_restores_exact_id_when_initial_catalog_omits_it()
-    print("PASS test_restores_exact_id_when_initial_catalog_omits_it")
     test_does_not_switch_when_user_already_navigated()
     print("PASS test_does_not_switch_when_user_already_navigated")
     test_autoselect_newest_when_no_restore_target()

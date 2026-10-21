@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from tests.memory.test_working_facts import (facts as facts, artifact as artifact, storage as storage, turn_service as turn_service,
+from tests.memory.test_working_facts import (facts, artifact, storage, turn_service,
     PRINCIPAL, record, owner, dependency)
 from tests.artifacts.test_artifact_review import read, requirements, decide
 from lib.artifacts import core, review

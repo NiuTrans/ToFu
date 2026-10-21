@@ -6,7 +6,7 @@ from lib.memory.working_facts import repository, service
 from lib.memory.working_facts.repository import FactConflict
 from lib.storage import StorageError
 from tests.artifacts.test_turn_review import (
-    subject as subject, storage as storage, turn_service, configure, read, PRINCIPAL,
+    subject, storage, turn_service, configure, read, PRINCIPAL,
 )
 
 pytestmark = pytest.mark.unit

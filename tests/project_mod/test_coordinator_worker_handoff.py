@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from tests.project_mod.test_coordinator_continuation import (
-    run as run, runtime, base_runtime, context, delegate, end, activate, controls, report,
+    run, runtime, base_runtime, context, delegate, end, activate, controls, report,
 )
 from tests.project_mod.test_coordinator_request_budget import bind
 from lib.project_dispatch.delegation import capture_worker_policy

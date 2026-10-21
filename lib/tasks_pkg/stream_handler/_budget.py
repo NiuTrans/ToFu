@@ -40,7 +40,7 @@ logger = get_logger(__name__)
 #   (see ``_zero_byte_backoff_seconds``) so we don't hammer a poisoned
 #   upstream pool that is overwhelmingly likely to zero-byte the next
 #   request milliseconds later.  Recurring trigger: ``aws.claude-opus-4.7``
-#   via sankuai gateway.  Retries go through append_event 'phase:retrying'
+#   via example-corp gateway.  Retries go through append_event 'phase:retrying'
 #   so the UI shows a spinner with attempt count.
 _PREMATURE_RETRY_MAX_CLASSIC = 16
 _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
@@ -75,7 +75,7 @@ _CANNED_GREETING_RETRY_MAX = 2
 
 # Tool-calls-finish-without-payload retry budget (the gateway reports
 # finish_reason=tool_calls but the stream carried ZERO tool_call deltas —
-# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/sankuai
+# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/example-corp
 # incident, conv msh3qeplzneph5 R3). Ending the turn there delivers a
 # preamble as if it were the conclusion. The poisoned round DID bill
 # prompt + completion tokens (unlike zero-byte), and the failure is

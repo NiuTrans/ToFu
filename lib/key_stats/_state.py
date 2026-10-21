@@ -131,7 +131,7 @@ def _list_siblings(provider_id: str) -> list:
     authority and cannot mix equal Provider IDs belonging to two owners.
 
     Scope = same *provider_id* only.  Cross-provider "last key" counting is
-    deliberately incorrect (a Meituan key shouldn't be kept alive just because
+    deliberately incorrect (a YourProvider key shouldn't be kept alive just because
     the user also has an OpenAI key).
     """
     now = time.monotonic()
@@ -172,8 +172,8 @@ def _fold_namespaces_unlocked(stats: dict | None = None,
     cache changed (the caller then persists).
 
     Why this exists (2026-07-29 invisible-total-outage): key-health history
-    was recorded per duplicate face CARD (``sankuai_anthropic::…``) while the
-    Settings UI renders one card per ACCOUNT (``sankuai::…``, charter #23).
+    was recorded per duplicate face CARD (``example_corp_anthropic::…``) while the
+    Settings UI renders one card per ACCOUNT (``example-corp::…``, charter #23).
     The account/face config merge stops NEW face-namespace recordings, but
     the state already on disk — day-scoped billing-stops and PERSISTENT
     manual overrides — would stay orphaned on a namespace nothing reads and
@@ -489,7 +489,7 @@ def _new_entry() -> dict:
         # Gateway-class failures (502/503/504, upstream-vendor transients,
         # mid-stream SSE errors): counted on their OWN counter so a gateway
         # outage never enters the success-rate denominator nor the
-        # auto-disable gate (2026-08-03 sankuai 502 storm auto-disabled 2 of
+        # auto-disable gate (2026-08-03 example-corp 502 storm auto-disabled 2 of
         # 3 healthy keys for the day).
         'gateway_errors': 0,
         'last_error': '',

@@ -8,7 +8,7 @@ from tests.knowledge.test_knowledge_file_ownership import (
 )
 from tests.knowledge.test_knowledge_local_publication import files
 from tests.knowledge.test_knowledge_publication import RAW
-from tests.knowledge.test_native_knowledge_publication import native_publication_store as native_publication_store
+from tests.knowledge.test_native_knowledge_publication import native_publication_store
 
 pytestmark = pytest.mark.unit
 

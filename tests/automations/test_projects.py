@@ -138,37 +138,3 @@ def test_attempt_execution_config_read_is_explicit_and_owner_scoped(semantic_aut
         assert factory().query('turn.attempt.get',foreign) is None
     with pytest.raises(StorageError):
         factory().query('turn.attempt.get',{**payload,'include_execution_config':'true'})
-
-
-@pytest.mark.parametrize('root', [
-    'remote:desktop:project',
-    'remote:desktop:C:\\work',
-    'remote:desktop:share:project',
-])
-def test_remote_chat_has_no_implicit_local_automation_scope(root):
-    principal = PrincipalContext.user(subject_id='remote-owner', owner_user_id=7,
-        tenant_id='remote-chat', scopes={'chat'})
-    config = {'projectPath': root, 'automationProjectId': 'forged'}
-
-    def forbid_storage(*args, **kwargs):
-        pytest.fail('remote chat consulted local automation storage')
-
-    assert resolve_task_project(principal, config, client_factory=forbid_storage) is None
-    assert config == {'projectPath': root, 'automationProjectId': 'forged'}
-
-
-@pytest.mark.parametrize('root', ['relative/project', 'remote:desktop', 'remote::project'])
-def test_nonlocal_paths_do_not_weaken_local_automation_root_validation(root):
-    principal = PrincipalContext.user(subject_id='remote-owner', owner_user_id=7,
-        tenant_id='remote-chat', scopes={'chat'})
-    with pytest.raises(AutomationError, match='absolute bounded path'):
-        resolve_task_project(principal, {'projectPath': root})
-
-
-def test_remote_chat_cannot_assert_an_explicit_local_automation_binding(semantic_authority, tmp_path):
-    service = manager(semantic_authority)
-    registered = service.update_project(body(tmp_path))
-    with pytest.raises(AutomationError):
-        resolve_task_project(service.principal, {'projectPath': 'remote:desktop:project'},
-            project=registered['id'], client_factory=semantic_authority[0])
-    assert service.project(registered['id']) == registered

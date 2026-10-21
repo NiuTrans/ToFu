@@ -12,9 +12,9 @@ import pytest
 from lib.native_binary import NativeConfigurationError
 from lib.storage.errors import StorageError
 from lib.storage_authority_sql.native_checkpoint_config import NativeCheckpointConfiguration
-from tests.storage_authority_sql.test_logical_session_contract import pipeline as pipeline
-from tests.storage_authority_sql.test_native_checkpoint_rpc import configuration as configuration, serving as serving
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend, acquire, call, rows, snapshot
+from tests.storage_authority_sql.test_logical_session_contract import pipeline
+from tests.storage_authority_sql.test_native_checkpoint_rpc import configuration, serving
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend, acquire, call, rows, snapshot
 
 pytestmark = pytest.mark.api
 

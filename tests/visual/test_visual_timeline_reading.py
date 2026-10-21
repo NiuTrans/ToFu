@@ -9,7 +9,7 @@ import pytest
 
 from tests._runtime_sections import ROOT, native_module_path, runtime_section
 from tests.frontend.test_frontend_tool_rounds_wire_parity import _run_harness
-from tests.support.frontend_visual import frontend_visual_origin as frontend_visual_origin, frontend_visual_page as frontend_visual_page
+from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page  # noqa: F401
 
 pytestmark = pytest.mark.visual
 

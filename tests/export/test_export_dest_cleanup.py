@@ -153,7 +153,7 @@ class ToolchainSelfExclusionTest(unittest.TestCase):
         # tofu_overleaf_mcp/export.py) is no longer collateral damage.
         self.assertIn('export.py', export.ALWAYS_EXCLUDE_ROOT_ONLY_FILES)
         self.assertNotIn('export.py', export.ALWAYS_EXCLUDE_FILES)
-        self.assertIn('export_pkg', export.ALWAYS_EXCLUDE_DIRS)
+        self.assertIn('export_pkg', export.OPENSOURCE_EXTRA_EXCLUDE_DIRS)
         self.assertIn('JOURNAL.md', export.OPENSOURCE_EXTRA_EXCLUDE_FILES)
         for rel, name in (('export.py', 'export.py'),
                           ('export_pkg/_lists.py', '_lists.py'),

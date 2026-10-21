@@ -12,7 +12,7 @@ from tests.knowledge.test_knowledge_media_temporary import (
     test_unknown_media_commit_retains_primary_and_original_source as check_unknown,
 )
 from tests.knowledge.test_knowledge_publication import RAW, assert_published_files
-from tests.knowledge.test_native_knowledge_publication import native_publication_store as native_publication_store
+from tests.knowledge.test_native_knowledge_publication import native_publication_store
 
 pytestmark = pytest.mark.unit
 

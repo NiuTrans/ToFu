@@ -2,7 +2,7 @@
 import pytest
 
 
-from tests.support.frontend_visual import frontend_visual_origin as frontend_visual_origin, frontend_visual_page as frontend_visual_page
+from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page  # noqa: F401
 pytestmark = pytest.mark.visual
 
 

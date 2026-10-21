@@ -1,9 +1,29 @@
 #!/usr/bin/env python3
-"""Shareable exports omit private maintainer tooling, including stale copies.
+"""tests/export/test_export_pkg_publish_exclusion.py — the export toolchain never
+reaches the public tree.
 
-The export package contains private sanitization markers. Internal and public
-exports exclude it; personal backups retain it. The keeper registry tracks the
-private source, and runtime imports must not depend on an excluded package.
+WHY
+---
+``export_pkg/_lists.py`` carries private markers (real API keys, Feishu
+secrets, internal usernames/domains) as sanitization patterns — publishing
+the package would leak exactly what the sanitizers exist to strip. The
+package therefore sits in ``OPENSOURCE_EXTRA_EXCLUDE_DIRS`` (``export.py``
+is in ``ALWAYS_EXCLUDE_FILES`` for the same reason): tracked in the private
+repo as the release tool, physically absent from every opensource export.
+
+WHAT IS PINNED
+--------------
+* ``_should_exclude`` drops ``export_pkg/…`` in opensource mode but keeps it
+  in internal/personal (colleagues and self-use backups re-export).
+* The gitignore drift-guard registers ``export_pkg/`` as a keeper PREFIX, so
+  "tracked privately, never published" stays one sanctioned mechanism.
+* The opensource mirror cleanup deletes a stale ``export_pkg/`` already
+  sitting in the publish dest (excluded content must not ride ``git add -A``
+  forever — the promo incident class); an internal live-install dest keeps it.
+* No shipped runtime module references ``export_pkg`` — only the ``export.py``
+  facade and ``tests/`` may, so an opensource tree never dangles an import.
+
+Run:  python -B -m pytest tests/export/test_export_pkg_publish_exclusion.py
 """
 
 from __future__ import annotations
@@ -26,16 +46,17 @@ pytestmark = pytest.mark.unit
 _ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-@pytest.mark.parametrize('mode', ['internal', 'opensource'])
-def test_export_pkg_excluded_from_shareable_exports(mode):
-    assert export._should_exclude(
-        'export_pkg/_lists.py', '_lists.py', mode) is not None
-    assert export._should_exclude('export_pkg', 'export_pkg', mode) is not None
-
-
-def test_personal_backup_keeps_export_toolchain():
-    assert export._should_exclude(
-        'export_pkg/_lists.py', '_lists.py', 'personal') is None
+def test_export_pkg_excluded_only_in_opensource():
+    reason = export._should_exclude(
+        'export_pkg/_lists.py', '_lists.py', 'opensource')
+    assert reason is not None, (
+        'export_pkg/ must be stripped from opensource exports — '
+        '_lists.py carries private markers as sanitization patterns')
+    for mode in ('internal', 'personal'):
+        assert export._should_exclude(
+            'export_pkg/_lists.py', '_lists.py', mode) is None, (
+            f'{mode}: export_pkg/ must SHIP — colleagues and self-use '
+            'backups re-export from the installed tree')
 
 
 def test_export_py_facade_excluded_everywhere_but_personal():
@@ -68,8 +89,11 @@ def test_keeper_prefix_registered_in_drift_guard():
         'every package module as a drift offender')
 
 
-def test_stale_export_pkg_removed_from_both_shareable_destinations():
-    """Neither shareable tier may preserve a previously exported toolchain."""
+def test_stale_export_pkg_mirror_deleted_in_opensource_kept_in_internal():
+    """A prior opensource export can leave a stale export_pkg/ in the publish
+    dest; the mirror cleanup must delete it (same contract as promo/). An
+    internal live-install dest preserves it (FUSE I/O optimisation — the tar
+    copy refreshes it in place)."""
     with tempfile.TemporaryDirectory() as d:
         dest = Path(d)
         (dest / 'export_pkg').mkdir()
@@ -84,8 +108,9 @@ def test_stale_export_pkg_removed_from_both_shareable_destinations():
 
         internal_got = [x.name for x in export._dest_cleanup_targets(
             dest, 'internal', src_names)]
-        assert 'export_pkg' in internal_got, (
-            'internal publication must remove a previously exported private toolchain')
+        assert 'export_pkg' not in internal_got, (
+            'internal live-install dest keeps the toolchain dir (re-copied '
+            'in place by the tar stream)')
         assert 'lib' in internal_got
 
 

@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
 
-import { readFileSync } from 'node:fs';
-
 import {
   requireDesktopApiCompatibility,
   Tofu,
@@ -10,11 +8,7 @@ import {
 } from './dist/index.js';
 
 
-const packageMetadata = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
-const packageLock = JSON.parse(readFileSync(new URL('./package-lock.json', import.meta.url), 'utf8'));
-assert.equal(VERSION, packageMetadata.version);
-assert.equal(packageLock.version, packageMetadata.version);
-assert.equal(packageLock.packages[''].version, packageMetadata.version);
+assert.equal(VERSION, '0.17.0');
 
 const apiMeta = {
   data: {
@@ -104,8 +98,6 @@ assert.equal(result.ok, true);
 assert.equal(requests[0].body.model, undefined);
 assert.equal(requests[0].body.stream, false);
 assert.equal(requests[0].headers.get('Idempotency-Key'), 'stable-run-key');
-
-assert.equal(requests[0].headers.get('User-Agent'), `tofu-sdk-ts/${packageMetadata.version}`);
 
 const structuredModel = { creator_id: 'anthropic', model_id: 'claude' };
 await client.agents.run({

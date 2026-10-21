@@ -8,7 +8,7 @@ import pytest
 
 from lib.storage.errors import StorageError
 from lib.storage_authority_sql.operations_pkg import _runs
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend
 from tests.storage_authority_sql.test_native_checkpoint_handoff import TransactionClient
 
 pytestmark = pytest.mark.unit

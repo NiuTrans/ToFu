@@ -6,7 +6,7 @@ WHY
 ---
 The matrix's "Probe & Recommend" sends a tiny ``/chat/completions`` request
 (``max_tokens: 1``) to every (key × model-id) cell. For models with no chat
-surface the gateway has NO chat binding to route to — the Meituan AIGC
+surface the gateway has NO chat binding to route to — the YourProvider AIGC
 gateway (a Java service) then picks a random upstream from an EMPTY candidate
 list: ``Random.nextInt(0)`` → ``IllegalArgumentException: bound must be
 positive`` → HTTP 500. Confirmed against the live persisted snapshot

@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from tests.project_mod.test_coordinator_workers import runtime as runtime, base_runtime, context, _worker_task
+from tests.project_mod.test_coordinator_workers import runtime, base_runtime, context, _worker_task
 from lib.project_dispatch.request_budget import bind_source_account, allowance
 from lib.agent_core.execution_budget import ModelBudgetExceeded
 

@@ -122,9 +122,9 @@ class ProbeCellClassificationTest(unittest.TestCase):
 
     def test_provider_error_detail_redacts_echoed_app_id(self):
         status, detail = self._probe(
-            400, 'invalid model name for appId 1000000000000000001')
+            400, 'invalid model name for appId YOUR_API_KEY_HERE')
         self.assertEqual(status, 'not_found')
-        self.assertNotIn('1000000000000000001', detail)
+        self.assertNotIn('YOUR_API_KEY_HERE', detail)
         self.assertIn('appId ***', detail)
 
     def test_400_chinese_route_missing_is_not_found(self):

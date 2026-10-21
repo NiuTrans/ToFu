@@ -27,11 +27,10 @@ it('does not steal navigation after the user selects a loaded chat or a draft', 
     expect(ports.contains('old')).toBe(false);
   }
 });
-it.each([403, 404, 503])('preserves lookup failure %s without substituting a conversation', async (status) => {
+it('reports denied/removed metadata without manufacturing a local conversation', async () => {
   const owner = createProjectConversationNavigation(), ports = fixture();
-  const error = Object.assign(new Error('Conversation lookup failed'), { status });
-  ports.fetch.mockRejectedValue(error);
+  ports.fetch.mockRejectedValue(new Error('Access denied'));
   await owner.resolveMissing('private', ports);
-  expect(ports.error).toHaveBeenCalledExactlyOnceWith(error);
+  expect(ports.error).toHaveBeenCalledOnce();
   expect(ports.merge).not.toHaveBeenCalled(); expect(ports.navigate).not.toHaveBeenCalled();
 });

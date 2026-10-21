@@ -14,7 +14,7 @@ from lib.storage.errors import StorageError
 from lib.storage.client import StorageClient
 from lib.storage_authority_sql.operations import resolve_operation_contract
 from tests.storage_authority_sql.test_native_checkpoint_storage import (
-    backend as backend, opened as opened, acquire, binding, call, rows, snapshot, HEADERS, SNAPSHOTS,
+    backend, opened, acquire, binding, call, rows, snapshot, HEADERS, SNAPSHOTS,
     _process_checkpoint,
 )
 

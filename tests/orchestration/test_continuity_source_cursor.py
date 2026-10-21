@@ -4,7 +4,7 @@ import pytest
 from lib.orchestration.continuity import run_boot_continuity_pass
 from tests.orchestration.test_continuity_durable_election import create, retire
 from tests.orchestration.test_orchestration_continuity import _service_factories
-from tests.support.semantic_authorities import semantic_authority as semantic_authority
+from tests.support.semantic_authorities import semantic_authority
 
 pytest_plugins = ('tests.support.postgres_cluster',)
 pytestmark = pytest.mark.api
