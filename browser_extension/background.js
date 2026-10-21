@@ -3858,7 +3858,10 @@ async function _transferRequest(path, options) {
         body: opts.body,
         signal: opts.signal,
       });
-      const data = await response.json().catch(() => null);
+      const data = await response.json().catch((error) => {
+        if (opts.signal && opts.signal.aborted) throw error;
+        return null;
+      });
       if (!response.ok) {
         const error = new Error(_transferErrorMessage(data, response.status));
         error.status = response.status;
@@ -3869,6 +3872,8 @@ async function _transferRequest(path, options) {
       return data || {};
     } catch (error) {
       lastError = error;
+      // An expired operation cannot recover by reusing its aborted signal.
+      if (opts.signal && opts.signal.aborted) throw error;
       if (error && error.status && error.status < 500) throw error;
       if (attempt + 1 >= attempts) throw error;
     }
@@ -3917,12 +3922,22 @@ async function cmdFetchFileToServer(params) {
   }
 
   const controller = params._controller || new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let phase = 'requesting upstream response';
+  let readBytes = 0;
+  let totalBytes = 0;
+  let timeoutError = null;
+  const timer = setTimeout(() => {
+    timeoutError = new Error(
+      `browser_file_transfer_timeout: Timed out after ${timeoutMs / 1000}s ` +
+      `while ${phase} (${readBytes} bytes read, ${totalBytes} bytes staged)`);
+    controller.abort(timeoutError);
+  }, timeoutMs);
   const basePath = `/api/browser/file-transfers/${encodeURIComponent(transferId)}`;
   let completed = false;
   let reader = null;
+  let response = null;
   try {
-    const response = params._response || await fetch(url, {
+    response = params._response || await fetch(url, {
         method: 'GET', credentials: 'include', redirect: 'follow',
         cache: 'no-store', signal: controller.signal,
       });
@@ -3944,6 +3959,7 @@ async function cmdFetchFileToServer(params) {
     if (contentLength != null && contentLength > maxBytes) {
       throw new Error(`Browser response exceeds the ${maxBytes}-byte limit`);
     }
+    phase = 'starting server transfer';
     await _transferRequest(`${basePath}/start`, {
       token: transferToken,
       signal: controller.signal,
@@ -3961,7 +3977,6 @@ async function cmdFetchFileToServer(params) {
     if (!response.body) throw new Error('Browser response body is not streamable');
 
     reader = response.body.getReader();
-    let totalBytes = 0;
     let sequence = 0;
     let pendingBytes = 0;
     const pending = new Uint8Array(chunkBytes);
@@ -3974,6 +3989,7 @@ async function cmdFetchFileToServer(params) {
       }
       const chunk = pending.subarray(0, pendingBytes);
       const chunkSha256 = await _sha256Hex(chunk);
+      phase = 'uploading server chunk';
       await _transferRequest(`${basePath}/chunks/${sequence}`, {
         method: 'PUT', token: transferToken,
         contentType: 'application/octet-stream', chunkSha256,
@@ -3985,9 +4001,11 @@ async function cmdFetchFileToServer(params) {
     };
 
     while (true) {
+      phase = 'reading upstream body';
       const {done, value} = await reader.read();
       if (done) break;
       const incoming = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+      readBytes += incoming.byteLength;
       if (totalBytes + pendingBytes + incoming.byteLength > maxBytes) {
         controller.abort();
         throw new Error(`Browser response exceeds the ${maxBytes}-byte limit`);
@@ -4003,6 +4021,7 @@ async function cmdFetchFileToServer(params) {
       }
     }
     await sendPendingChunk();
+    phase = 'committing server file';
     const receipt = await _transferRequest(`${basePath}/complete`, {
       token: transferToken,
       signal: controller.signal,
@@ -4014,10 +4033,23 @@ async function cmdFetchFileToServer(params) {
     }
     completed = true;
     return receipt;
+  } catch (error) {
+    // Fetch/read errors may omit signal.reason. The owned timer is the
+    // authority for a deadline; unrelated aborts retain their original cause.
+    throw timeoutError || error;
   } finally {
     clearTimeout(timer);
-    if (reader && !completed) {
-      try { await reader.cancel(); } catch (_) {}
+    if (!completed) {
+      controller.abort();
+      if (reader) {
+        try { await reader.cancel(); } catch (_) {
+          // Abort can already have errored/closed this reader.
+        }
+      } else if (response && response.body) {
+        try { await response.body.cancel(); } catch (_) {
+          // A header/start refusal still owns the unlocked upstream body.
+        }
+      }
     }
     if (!completed) {
       // Cleanup uses a fresh request rather than the aborted transfer signal.

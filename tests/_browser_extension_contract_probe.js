@@ -646,6 +646,95 @@ async function fileTransferDeadlineProbe() {
   return {scheduled, cleared, result};
 }
 
+async function fileTransferTimeoutProbe() {
+  const phase = mode.split(':')[1];
+  const targetUrl = 'https://files.example.test/download?signature=never-log-this';
+  const requests = [];
+  const timers = new Map();
+  let nextTimer = 0;
+  let transferSignal = null;
+  let readCount = 0;
+  let readerCancelled = false;
+  let bodyCancelled = false;
+  let cleanupHasFreshSignal = false;
+  context.setTimeout = (callback, delay) => {
+    const id = ++nextTimer;
+    timers.set(id, {callback, delay});
+    return id;
+  };
+  context.clearTimeout = (id) => { timers.delete(id); };
+  function stall(signal) {
+    return new Promise((_resolve, reject) => {
+      if (signal.aborted) {
+        reject(new Error('signal is aborted without reason'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        // Chrome can discard AbortSignal.reason: the owner must still report
+        // its own deadline, phase and progress instead of this generic text.
+        reject(new Error('signal is aborted without reason'));
+      }, {once: true});
+      Promise.resolve().then(() => {
+        const timer = [...timers.values()].find((row) => row.delay === 30000);
+        timer.callback();
+      });
+    });
+  }
+  context.fetch = async (url, options = {}) => {
+    const value = String(url);
+    const kind = value === targetUrl ? 'upstream'
+      : options.method === 'DELETE' ? 'delete'
+      : value.includes('/chunks/') ? 'chunk'
+      : value.endsWith('/start') ? 'start' : 'complete';
+    requests.push(kind);
+    if (kind === 'delete') {
+      cleanupHasFreshSignal = options.signal !== transferSignal && !options.signal.aborted;
+      return {ok: true, status: 200, json: async () => ({ok: true})};
+    }
+    if (kind === 'upstream') transferSignal = options.signal;
+    if (kind === phase) return stall(options.signal);
+    if (phase === `${kind}-json`) {
+      return {ok: true, status: 200, json: () => stall(options.signal)};
+    }
+    if (phase === 'startRejected' && kind === 'start') {
+      return {ok: false, status: 403,
+              json: async () => ({error: 'source read denied'})};
+    }
+    if (kind === 'upstream') {
+      return {
+        ok: true, status: 200, url: targetUrl,
+        headers: {get() { return null; }},
+        body: {
+          getReader() { return {
+            async read() {
+              if (phase === 'read') return stall(transferSignal);
+              return readCount++ === 0
+                ? {done: false, value: new Uint8Array(16384)} : {done: true};
+            },
+            async cancel() { readerCancelled = true; },
+          }; },
+          async cancel() { bodyCancelled = true; },
+        },
+      };
+    }
+    return {ok: true, status: 200, json: async () => ({ok: true})};
+  };
+  vm.runInContext(`SERVER_URL = 'https://tofu.test'; CLIENT_ID = 'probe-client';
+    BRIDGE_SECRET = 'probe-secret';`, context);
+  await vm.runInContext(`executeAndReport({id: 'timeout-command',
+    type: 'fetch_file_to_server', params: {
+      url: '${targetUrl}', transferId: 'transfer-timeout',
+      transferToken: 'one-time-token', maxBytes: 65536,
+      chunkBytes: 16384, timeoutMs: 30000,
+    }})`, context);
+  return {
+    result: vm.runInContext('_resultQueue[0]', context), requests,
+    readerCancelled, bodyCancelled, cleanupHasFreshSignal,
+    upstreamAborted: Boolean(transferSignal && transferSignal.aborted),
+    activeTimers: timers.size,
+  };
+}
+
 function installDom(html) {
   const {JSDOM} = require('jsdom');
   const dom = new JSDOM(html, {url: 'https://example.com/list?page=1'});
@@ -1288,6 +1377,10 @@ const probes = {
   fetch: fetchProbe,
   fileTransferCleanup: fileTransferCleanupProbe,
   fileTransferDeadline: fileTransferDeadlineProbe,
+  ...Object.fromEntries([
+    'upstream', 'start', 'read', 'chunk', 'complete',
+    'start-json', 'chunk-json', 'complete-json', 'startRejected',
+  ].map((phase) => [`fileTransferTimeout:${phase}`, fileTransferTimeoutProbe])),
   fileTransfer: fileTransferProbe,
   protocol426: protocolProbe,
   rate429: rateLimitProbe,

@@ -1049,3 +1049,103 @@ def test_explicit_download_limit_refusal_is_not_a_retryable_command_failure(
         assert 'Retry' not in result['next_action']
     assert not store._transfers
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('search_timeout', [1, 15])
+def test_explicit_download_stream_deadline_is_not_the_search_page_deadline(
+        monkeypatch, tmp_path, search_timeout):
+    import lib as settings
+    import lib.browser.access as access
+    import lib.browser.protocol as protocol
+    import lib.browser.queue as queue
+    import lib.browser.file_transfer as transfer_mod
+    import lib.search.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+
+    _patch_fetched_root(monkeypatch, tmp_path)
+    store = transfer_mod.BrowserFileTransferStore()
+    monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
+    monkeypatch.setattr(settings, 'FETCH_TIMEOUT', search_timeout)
+    monkeypatch.setattr(core, 'fetch_url_bytes', lambda _url: None)
+    monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
+    monkeypatch.setattr(protocol, 'require_capabilities', lambda *a: {'profile': 'Work'})
+    monkeypatch.setattr(access, 'require_access', lambda *a, **kw: 'files.test')
+    monkeypatch.setattr(
+        search_bridge, 'require_bound_browser_file',
+        lambda url, **kw: transfer_mod.fetch_file_via_browser(
+            url, client_id='browser-a', owner_user_id='41', **kw))
+    payload = b'PK\x03\x04slow but valid file'
+    issued_deadlines = []
+
+    def send(command, params, **route):
+        assert command == 'fetch_file_to_server'
+        issued_deadlines.append((route['timeout'], params['timeoutMs']))
+        auth = dict(owner_user_id='41', client_id='browser-a',
+                    token=params['transferToken'])
+        transfer_id = params['transferId']
+        store.start(transfer_id, final_url='https://files.test/slow.zip',
+                    response_status=200, content_type='application/zip',
+                    content_length=len(payload), **auth)
+        store.append_chunk(transfer_id, 0, payload, **auth)
+        return store.complete(transfer_id, total_bytes=len(payload),
+                              chunk_count=1, **auth), None
+
+    monkeypatch.setattr(queue, 'send_browser_command', send)
+    result = core.download_url_to_server(
+        'https://files.test/slow.zip', owner_user_id='41')
+    assert result['location'] == 'server_staging'
+    assert Path(result['saved_path']).read_bytes() == payload
+    assert result['sha256'] == hashlib.sha256(payload).hexdigest()
+    assert issued_deadlines == [(120, 110000)]
+    assert settings.FETCH_TIMEOUT == search_timeout
+    assert not store._transfers
+
+
+@pytest.mark.parametrize(('message', 'expected_code'), [
+    ('browser_file_transfer_timeout: Timed out after 110s while reading upstream body '
+     '(16384 bytes read, 0 bytes staged)', 'browser_file_transfer_timeout'),
+    ('signal is aborted without reason', 'browser_file_transfer_aborted'),
+    ('unrelated signal is aborted without reason', 'browser_file_transfer_command_failed'),
+])
+def test_explicit_download_distinguishes_deadline_from_unexplained_abort(
+        monkeypatch, tmp_path, message, expected_code):
+    import lib.browser.access as access
+    import lib.browser.protocol as protocol
+    import lib.browser.queue as queue
+    import lib.browser.file_transfer as transfer_mod
+    import lib.search.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+
+    _patch_fetched_root(monkeypatch, tmp_path)
+    store = transfer_mod.BrowserFileTransferStore()
+    monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
+    monkeypatch.setattr(core, 'fetch_url_bytes', lambda _url: None)
+    monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
+    monkeypatch.setattr(protocol, 'require_capabilities', lambda *a: {'profile': 'Work'})
+    monkeypatch.setattr(access, 'require_access', lambda *a, **kw: 'files.test')
+    monkeypatch.setattr(
+        search_bridge, 'require_bound_browser_file',
+        lambda url, **kw: transfer_mod.fetch_file_via_browser(
+            url, client_id='browser-a', owner_user_id='41', **kw))
+    calls = []
+
+    def send(*args, **kwargs):
+        calls.append(args)
+        return None, message
+
+    monkeypatch.setattr(queue, 'send_browser_command', send)
+    result = core.download_url_to_server(
+        'https://files.test/slow.zip', owner_user_id='41')
+    assert result['error_code'] == expected_code
+    if expected_code == 'browser_file_transfer_timeout':
+        assert 'reading upstream body' in result['error_msg']
+        assert '16384 bytes read' in result['error_msg']
+        assert 'source site' in result['next_action']
+        assert 'Retry once' not in result['next_action']
+    elif expected_code == 'browser_file_transfer_aborted':
+        assert 'unknown' in result['error_msg']
+        assert 'extension' in result['next_action']
+        assert result['retryable'] is False
+    assert len(calls) == 1
+    assert not store._transfers
+    assert not list(tmp_path.iterdir())

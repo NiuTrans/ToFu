@@ -576,7 +576,7 @@ def test_fetch_transport_consumes_only_server_completed_receipt(
     )
     assert seen['command'] == 'fetch_file_to_server'
     assert seen['timeout'] == 35
-    assert seen['params']['timeoutMs'] == 30_000
+    assert seen['params']['timeoutMs'] == 25_000
     assert receipt['location'] == 'server_staging'
     assert Path(receipt['path']).read_bytes() == payload
     os.unlink(receipt['path'])
@@ -1175,3 +1175,55 @@ def test_completed_transfer_metadata_expiry_preserves_fresh_receipt_handoff(tran
     monkeypatch.setattr(transfer_mod, '_browser_staging_budget_bytes', lambda: 1)
     _create(store)
     assert path.exists(), 'fresh completed artifacts outlive transport metadata'
+
+
+@pytest.mark.parametrize(('phase', 'description', 'read_bytes', 'staged_bytes'), [
+    ('upstream', 'requesting upstream response', 0, 0),
+    ('start', 'starting server transfer', 0, 0),
+    ('read', 'reading upstream body', 0, 0),
+    ('chunk', 'uploading server chunk', 16384, 0),
+    ('complete', 'committing server file', 16384, 16384),
+
+    ('start-json', 'starting server transfer', 0, 0),
+    ('chunk-json', 'uploading server chunk', 16384, 0),
+    ('complete-json', 'committing server file', 16384, 16384),
+])
+def test_extension_timeout_reports_stage_and_progress_without_retrying_aborted_io(
+        phase, description, read_bytes, staged_bytes):
+    from tests._browser_extension_probe import run_extension_probe
+
+    probe = run_extension_probe(f'fileTransferTimeout:{phase}')
+    result = probe['result']
+    assert result['result'] is None
+    assert result['error'].startswith('browser_file_transfer_timeout: ')
+    assert '30s' in result['error']
+    assert description in result['error']
+    assert f'{read_bytes} bytes read, {staged_bytes} bytes staged' in result['error']
+    assert 'signature' not in result['error']
+    assert 'one-time-token' not in result['error']
+    assert probe['requests'].count('upstream') == 1
+    request_phase = phase.split('-')[0]
+    if request_phase != 'read':
+        assert probe['requests'].count(request_phase) == 1
+    assert probe['requests'][-1] == 'delete'
+    assert probe['cleanupHasFreshSignal'] is True
+    assert probe['activeTimers'] == 0
+    assert probe['upstreamAborted'] is True
+    if request_phase in {'read', 'chunk', 'complete'}:
+        assert probe['readerCancelled'] is True
+    elif request_phase == 'start':
+        assert probe['bodyCancelled'] is True
+
+
+def test_extension_start_refusal_closes_upstream_before_reader_exists():
+    from tests._browser_extension_probe import run_extension_probe
+
+    probe = run_extension_probe('fileTransferTimeout:startRejected')
+    assert probe['result']['result'] is None
+    assert probe['result']['error'] == 'source read denied'
+    assert probe['requests'] == ['upstream', 'start', 'delete']
+    assert probe['bodyCancelled'] is True
+    assert probe['readerCancelled'] is False
+    assert probe['upstreamAborted'] is True
+    assert probe['cleanupHasFreshSignal'] is True
+    assert probe['activeTimers'] == 0
