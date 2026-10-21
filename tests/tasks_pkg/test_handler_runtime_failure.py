@@ -2,7 +2,7 @@
 import pytest
 
 from lib.tasks_pkg.executor._execute import _dispatch_admitted_tool_one
-from tests.tasks_pkg.test_tool_outcome_finality import observations
+from tests.tasks_pkg.test_tool_outcome_finality import observations as observations
 
 pytestmark = pytest.mark.unit
 

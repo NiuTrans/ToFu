@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from lib.tasks_pkg.coordinator_policy import COORDINATOR_TOOLS
-from tests.tasks_pkg.test_coordinator_policy import coordinator
+from tests.tasks_pkg.test_coordinator_policy import coordinator as coordinator
 
 pytestmark = pytest.mark.unit
 

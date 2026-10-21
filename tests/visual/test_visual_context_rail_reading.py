@@ -8,8 +8,8 @@ import json
 import pytest
 
 from tests._runtime_sections import ROOT, runtime_section
-from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page  # noqa: F401
-from tests.visual.test_visual_timeline_reading import timeline_bundle  # noqa: F401
+from tests.support.frontend_visual import frontend_visual_origin, frontend_visual_page as frontend_visual_page  # noqa: F401
+from tests.visual.test_visual_timeline_reading import timeline_bundle as timeline_bundle
 
 pytestmark = pytest.mark.visual
 

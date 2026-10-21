@@ -16,7 +16,7 @@ from lib.tools.contracts import ToolContractV2
 from lib.tools.result_envelope import (
     split_tool_result_delivery, tool_result_error, typed_tool_error,
 )
-from tests.tasks_pkg.test_tool_outcome_finality import observations, task_for
+from tests.tasks_pkg.test_tool_outcome_finality import observations as observations, task_for
 
 pytestmark = pytest.mark.unit
 

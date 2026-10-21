@@ -11,7 +11,7 @@ from lib.tools.contracts import ToolContractV2
 from lib.tools.effect_recovery import effect_recovery_policy
 from lib.tools.result_envelope import tool_result_error, typed_tool_error
 from tests.tasks_pkg.test_tool_outcome_finality import (
-    dispatch, observations, task_for,
+    dispatch, observations as observations, task_for,
 )
 
 pytestmark = pytest.mark.unit

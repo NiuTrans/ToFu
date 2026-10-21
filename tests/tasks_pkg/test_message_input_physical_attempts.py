@@ -9,7 +9,6 @@ import time
 
 import pytest
 
-from lib.llm.request import ModelRequestBudgetScope, dispatch_model_request
 from lib.llm.request import (
     ModelRequestBudgetScope, dispatch_model_request, mark_model_request_dispatched,
 )

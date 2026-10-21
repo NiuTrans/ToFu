@@ -466,7 +466,6 @@ def _project_presence_block(request: ComposeRequest) -> str:
     empty string for non-Coordinator conversations so the block costs nothing
     outside its intended scope.
     """
-    task = request.task or {}
     # Only the bound Coordinator conversation gets presence.
     from lib.conversations.project_coordination import ProjectCoordinationRepository
     binding = ProjectCoordinationRepository(request.user_id).read(request.project_path)

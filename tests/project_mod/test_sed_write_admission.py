@@ -5,7 +5,7 @@ import pytest
 
 from lib.project_mod import run_command as commands, tools, workspace_lease as leases
 from lib.project_mod.command_analysis import command_segment_targets, is_literal_sed_filter
-from tests.project_mod.test_command_writer_scope import _other_file_writer, _run, repo
+from tests.project_mod.test_command_writer_scope import _other_file_writer, _run, repo as repo
 
 pytestmark = pytest.mark.unit
 

@@ -5,7 +5,7 @@ import json
 import pytest
 
 from lib.tools.result_envelope import tool_result_error
-from tests.tasks_pkg.test_tool_outcome_finality import dispatch, observations
+from tests.tasks_pkg.test_tool_outcome_finality import dispatch, observations as observations
 from tests.tasks_pkg.test_tool_timeout_recovery import recovery_task
 
 pytestmark = pytest.mark.unit

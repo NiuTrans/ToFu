@@ -1,6 +1,7 @@
 """URL hints never certify ownership or replace evidence about the query."""
 
 import pytest
+
 from tofu_search.search.authority import authority_label, classify_authority
 from tofu_search.search.format import format_search_for_tool_response
 from tofu_search.search.rerank import rerank_by_bm25

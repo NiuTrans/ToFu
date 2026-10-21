@@ -11,7 +11,7 @@ from lib.tasks_pkg.tool_display import _build_tool_round_entry
 from lib.tools.result_envelope import tool_result_error
 from tests.mcp_protocol.test_mcp_call_health import _make_bridge_with_server
 from tests.mcp_protocol.test_mcp_recovery_classification import protocol_error
-from tests.tasks_pkg.test_tool_outcome_finality import observations, task_for
+from tests.tasks_pkg.test_tool_outcome_finality import observations as observations, task_for
 
 pytestmark = pytest.mark.unit
 

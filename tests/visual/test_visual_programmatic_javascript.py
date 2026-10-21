@@ -11,7 +11,7 @@ import pytest
 
 from tests._runtime_sections import native_module_path, runtime_section_path
 from tests.support.frontend_visual import ROOT
-from tests.tasks_pkg.test_javascript_dependency_chains import local_gateway  # noqa: F401
+from tests.tasks_pkg.test_javascript_dependency_chains import local_gateway as local_gateway
 
 pytestmark = pytest.mark.visual
 pytest_plugins = ("tests.support.frontend_visual",)
