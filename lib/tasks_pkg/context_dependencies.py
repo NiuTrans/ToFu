@@ -32,13 +32,9 @@ def prepare(task, messages):
     if not rows:
         return
     from lib.tasks_pkg.context_composer import verified_block_hash
-    existing = task.get('_managedBlockHashes') or {}
-    existing_map = (existing.get('map')
-                    if existing.get('_messages_identity') == id(messages)
-                    and existing.get('_messages_length') == len(messages)
-                    else None)
-    actual = verified_block_hash(messages, 'working_facts',
-                                 existing_hashes=existing_map)
+    # Binding is an authority boundary: list identity/length do not prove its
+    # contents. A render-local hash map is not a receipt for later mutations.
+    actual = verified_block_hash(messages, 'working_facts')
     row = next((row for row in reversed(rows) if row.get('hash') == actual), None)
     if row is None or not row.get('provenance', {}).get('facts'):
         return
