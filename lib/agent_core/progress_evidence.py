@@ -51,7 +51,22 @@ def counted_result_evidence(counts: Mapping[str, int]) -> tuple[str, ...]:
     return tuple(f'{count}:{digest}' for digest, count in sorted(counts.items()))
 
 
-def nonretryable_failure_signature(call: dict, result) -> str | None:
+def nonretryable_failure_signature(
+        call: dict, result, *, execution_status: str | None = None) -> str | None:
+    """Fingerprint a classified failure only after honoring owned outcome facts.
+
+    Adapters supply the current pipeline occurrence's status (``unknown`` when
+    absent). Direct canonical carriers also preserve their producer's verdict.
+    Detached typed projections remain usable by callers without outcome metadata.
+    """
+    from lib.tools.result_value import CapturedToolResult
+    if execution_status is None:
+        canonical = result if isinstance(result, CapturedToolResult) else getattr(result, 'canonical', None)
+        if isinstance(canonical, CapturedToolResult):
+            execution_status = canonical.execution_status
+    if execution_status is not None and execution_status not in {
+            'error', 'failed', 'rejected', 'aborted', 'cancelled', 'unanswerable'}:
+        return None
     from lib.tools.result_envelope import ToolResultEnvelopeV2, nonretryable_tool_error_code
     code = nonretryable_tool_error_code(result)
     if not code:

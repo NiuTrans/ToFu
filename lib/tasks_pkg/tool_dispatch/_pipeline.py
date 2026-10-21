@@ -720,16 +720,16 @@ def _settle_tool_result(
         except Exception:
             logger.warning('[ToolPipeline] scientific original capture failed',exc_info=True)
 
-    # Local JavaScript gets a separate transient result lane. Capture only
+    # Internal consumers borrow a separate transient result lane. Capture only
     # after post-tool hooks (the semantic/redaction boundary) and before model
-    # compaction. The sink owns its hard byte budget and never enters ``task``
-    # or the durable transcript.
+    # compaction. Program sinks own their byte budget; progress adapters retain
+    # only occurrence status. Neither enters ``task`` or the durable transcript.
     if internal_result_sink is not None:
         try:
             internal_result_sink.capture(tc_id, captured_result)
         except Exception as exc:
             logger.warning(
-                '[ToolPipeline] internal program result capture failed for '
+                '[ToolPipeline] internal result capture failed for '
                 '%s: %s', tc_id, exc)
 
     # Mutable control-plane observers execute every time. When a fresh result
@@ -2142,7 +2142,8 @@ def execute_tool_pipeline(
         Current model identifier (for logging).
     internal_result_sink : optional
         Transient, byte-bounded receiver for post-hook/pre-compaction results.
-        Used only by the local JavaScript backend; never retained on ``task``.
+        Programs retain bounded source data; progress adapters borrow only the
+        canonical execution status. Never retained on ``task``.
 
     publish_direct_gateway_siblings : bool
         Publish the direct-call multiset for this provider response. Nested

@@ -37,6 +37,8 @@ progress_evidence.py owns normalized operation/result hashes, counted result
 evidence and nonretryable-operation hashes shared by the Python runner and native
 gateway. Verify result-evidence, native-progress, root
 adapter, breaker and checkpoint neighbors; it grants no execution authority.
+Owned execution status precedes typed-projection classification; successful
+source examples cannot become terminal failures. Verify progress-outcome authority.
 execution_deadline_unix_ms reads the earliest validated task/shared-tree expiry
 without creating a ledger; verify parent/child, zero, invalid and integer bounds.
 Native run binding can shorten this original deadline, never extend it.

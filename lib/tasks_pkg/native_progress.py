@@ -37,10 +37,11 @@ class NativeGatewayProgress:
         self.batch = None
         self._lock = threading.Lock()
 
-    def record(self, round_num: int, call: dict, result):
+    def record(self, round_num: int, call: dict, result, *, execution_status: str | None = None):
         # Hashing/decoding borrows the completed result outside the shared lock.
         # Only bounded hash/count publication is serialized across callbacks.
-        signature = nonretryable_failure_signature(call, result) if self.limits.nonretryable_failure_rounds else None
+        signature = (nonretryable_failure_signature(call, result, execution_status=execution_status)
+                     if self.limits.nonretryable_failure_rounds else None)
         digest = tool_result_evidence(call, result) if self.limits.no_progress_rounds else None
         with self._lock:
             if self.gateway is None:

@@ -213,6 +213,7 @@ Internal event-delivery failures are typed local failures, not provider failures
 - Never infer success from non-empty content.
 - Never turn a provider/tool error into `done/stop`; an exhausted model fallback settles as `done/error` so browser, replay, and persistence consume the same terminal event.
 - Only the typed result contract feeds the terminal tool-failure breaker; never infer retry policy from legacy text.
+- **Problem:** successful source documents can contain exact typed error examples. **Decision:** root and native adapters first borrow the current pipeline occurrence's canonical execution status through `internal_result_sink`, then derive nonretryable operation identity from its typed projection. Success or absent/mismatched status cannot prove terminal failure, and root result lookup is confined to the current dispatch. The transient handoff retains only status strings, never source bodies or a second ledger. **Alternative rejected:** reparsing display JSON as execution authority falsely stops valid reads, including cached reads. Detached typed projections remain supported by the pure fingerprint helper; production adapters always supply an explicit status. Verify `test_progress_outcome_authority.py`, `test_progress_error_projection.py`, and gateway failure-recovery tests.
 - Recovery crosses the stream-handler API as `RecoveryDecision`, never an open-ended dict.
 - `TurnVerdict` derives durable completion fail-closed; missing evidence fails.
 - Never push a frame whose authoritative write failed.
