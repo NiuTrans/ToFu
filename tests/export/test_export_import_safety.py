@@ -127,10 +127,15 @@ def test_push_branch_url_target_never_sets_upstream():
         if cmd[:2] == ['git', 'push'] and len(calls) == 1:
             raise RuntimeError('error: failed to push some refs — fetch first')
 
-    _push_branch(git_run, 'https://ghp_x@example.com/r.git', 'main', force=False)
-    assert calls[0] == ['git', 'push', 'https://ghp_x@example.com/r.git', 'main']
-    assert calls[1] == ['git', 'fetch', 'https://ghp_x@example.com/r.git', 'main']
-    assert calls[-1] == ['git', 'push', 'https://ghp_x@example.com/r.git', 'main']
+    target = 'https://ghp_x@example.com/r.git'
+    _push_branch(git_run, target, 'main', force=False)
+    pushes = [cmd for cmd in calls if cmd[:2] == ['git', 'push']]
+    assert len(pushes) == 2
+    assert all('-u' not in cmd and '--set-upstream' not in cmd for cmd in pushes)
+    assert all(cmd[-2:] == [target, 'main'] for cmd in pushes)
+    assert any(cmd[:2] == ['git', 'fetch'] and cmd[-2:] == [target, 'main']
+               for cmd in calls)
+    assert any(cmd[:2] == ['git', 'merge'] for cmd in calls)
 
 
 def test_push_branch_named_remote_keeps_upstream_retry():
@@ -145,10 +150,11 @@ def test_push_branch_named_remote_keeps_upstream_retry():
             raise RuntimeError('error: failed to push some refs — fetch first')
 
     _push_branch(git_run, 'origin', 'main', force=False)
-    assert calls == [
-        ['git', 'push', 'origin', 'main'],
-        ['git', 'push', '-u', 'origin', 'main'],
-    ]
+    pushes = [cmd for cmd in calls if cmd[:2] == ['git', 'push']]
+    assert len(pushes) == 2
+    assert '-u' not in pushes[0] and '-u' in pushes[1]
+    assert all(cmd[-2:] == ['origin', 'main'] for cmd in pushes)
+    assert not any(cmd[:2] in (['git', 'fetch'], ['git', 'merge']) for cmd in calls)
 
 
 @pytest.mark.skipif(shutil.which('git') is None, reason='git not installed')
@@ -184,8 +190,10 @@ def test_git_push_never_persists_credentials(tmp_path, monkeypatch, capsys):
 
     def fail_push(cmd, **kwargs):
         if cmd[:2] == ['git', 'push']:
+            target = next(value for value in cmd if value.startswith('https://'))
+            assert token in target
             return subprocess.CompletedProcess(cmd, 1, '',
-                                               'synthetic authentication failed: ' + cmd[2])
+                                               'synthetic authentication failed: ' + target)
         return real_run(cmd, **kwargs)
 
     monkeypatch.setattr(publish.subprocess, 'run', fail_push)
