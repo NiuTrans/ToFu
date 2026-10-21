@@ -699,7 +699,9 @@ def test_template_probe_cells_start_without_window_and_preserve_evidence(monkeyp
         nonlocal starts
         if thread.name.startswith('template-supply'):
             starts += 1
-            if fail_start and starts == 2:
+            # The recoverable executor retries this cell once on the same
+            # Future. Refuse both physical starts so it has no probe evidence.
+            if fail_start and starts in (2, 3):
                 raise RuntimeError('unstarted template probe')
         return original(thread)
 
