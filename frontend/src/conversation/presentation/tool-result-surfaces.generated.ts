@@ -47,7 +47,7 @@ export const TOOL_RESULT_SURFACES = {
     "read_tool_artifact": {
       "modelFormat": "artifact_query",
       "frontendFormat": "verbatim",
-      "reason": "Compact declared artifact query defaults and repeated identities; preserve source/retention coverage, gaps, media and signed cursors."
+      "reason": "Compact declared defaults and render read bodies as exact length-labelled text when smaller; preserve source/retention coverage, gaps, media and signed cursors."
     },
     "search_tool_artifact": {
       "modelFormat": "artifact_query",
@@ -136,6 +136,21 @@ export const TOOL_RESULT_SURFACES = {
       "text",
       "artifactRef",
       "path"
+    ]
+  },
+  "artifactProjectionReadText": {
+    "bodyField": "content"
+  },
+  "errorProjectionText": {
+    "bodyField": "summary"
+  },
+  "textProjection": {
+    "sectionFormat": "length_labelled_unicode_text",
+    "selection": "smaller_utf8_than_compact_json",
+    "allowedControlCharacters": [
+      "\t",
+      "\n",
+      "\r"
     ]
   },
   "reportFields": [

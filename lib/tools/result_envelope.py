@@ -184,7 +184,10 @@ def _model_projection(value: Mapping[str, Any]) -> tuple[str, str]:
             sparse_recovery = _sparse_recovery_projection(recovery)
             if sparse_recovery:
                 payload["recovery"] = sparse_recovery
-        return _compact_json(payload), "error"
+        from lib.tools.result_projection_text import compact_text_field
+        from lib.tools.result_surfaces_generated import CONTRACT
+        return compact_text_field(payload, CONTRACT['errorProjectionText']['bodyField'],
+                                  original=_compact_json(payload)), "error"
 
     payload = {"status": "partial"}
     if summary:
@@ -483,7 +486,9 @@ def tool_result_error(value: Any) -> ToolResultErrorV2 | None:
         try:
             value = json.loads(value)
         except (TypeError, ValueError):
-            return None
+            from lib.tools.result_projection_text import load_text_field
+            from lib.tools.result_surfaces_generated import CONTRACT
+            value = load_text_field(value, CONTRACT['errorProjectionText']['bodyField'])
     if not isinstance(value, dict) or value.get("status") != "error":
         return None
     if value.get("contractVersion") == TOOL_RESULT_CONTRACT_VERSION:
@@ -547,6 +552,10 @@ def tool_result_observation(
             if isinstance(evidence.get("error"), Mapping) else None),
     }
     projection_kind = str(evidence.get("projectionKind") or "text")
+    if projection_kind == 'error' and not isinstance(parsed, dict):
+        from lib.tools.result_projection_text import load_text_field
+        from lib.tools.result_surfaces_generated import CONTRACT
+        parsed = load_text_field(content_text, CONTRACT['errorProjectionText']['bodyField'])
     if projection_kind == "text":
         observation["summary"] = content_text
         return observation
@@ -565,6 +574,8 @@ def tool_result_observation(
         return observation
 
     if projection_kind == "error":
+        if isinstance(parsed.get('items'), list):
+            observation['items'] = parsed['items']
         error = {
             "code": str(parsed.get("code") or ""),
             "retryable": parsed.get("retryable"),

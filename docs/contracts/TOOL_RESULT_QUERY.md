@@ -1,5 +1,34 @@
 # Canonical tool result queries
 
+**Verbatim read text.** Problem: JSON-string escaping adds model tokens to code,
+quoted documents and newline-heavy artifact bodies after page metadata is already
+compacted. Decision: the declared read projection can emit one compact metadata
+line followed by `content (text; N chars):` and the exact body. `N` counts Unicode
+codepoints, including CR/LF and tabs. Indexed batches retain ordered per-page
+sections, error entries and every unknown metadata field. The complete candidate
+must use fewer UTF-8 bytes than the prior compact JSON; otherwise JSON remains.
+Non-display control characters also retain JSON. Body text is never interpreted
+as application JSON or as another section.
+
+Canonical capture, decoded program results and frontend metadata retain the
+original authority page. Normal V2 budgets count the selected model view before
+fitting, including metadata and signed continuation. Common error framing keeps
+partial failures readable without changing their failed settlement. Legacy
+result mode retains its existing producer JSON delivery. No source query, token
+limit, cursor, storage record, worker or cache is added. Alternatives rejected:
+omitting provenance or cursors removes recovery; raising budgets preserves the
+escaping cost; locally clipping a body can strand evidence behind its cursor.
+Verify `test_artifact_read_text_projection` and `test_artifact_read_text_backends`
+through both storage authorities, ordinary settlement, reopen/replay, owner
+denial and OpenAI/Responses/Anthropic request encoding.
+
+A fixed five-receipt capture/budget/delivery probe preserved complete views and
+canonical hashes while exact `o200k_base` counts fell from 4,554 to 3,838 (15.7%).
+The code and mixed-failure samples fell 20.2% and 18.3%; short and unescaped prose
+were byte-identical. This is a component payload measurement, not paid task
+savings or a latency claim. Formatting uses transient strings under the existing
+result bounds, without another retention or concurrency owner.
+
 Canonical tool-result reads/searches share `contracts/tool_result_query_v1.json`
 with the SQL authority. `artifact_query.rs` walks bounded immutable manifests,
 retains child provenance/media limitations, applies JSON pointers, and signs

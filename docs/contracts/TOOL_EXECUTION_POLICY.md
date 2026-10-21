@@ -119,6 +119,21 @@ Each subsequent call still passes normal authority and recovery admission.
 Verify `tests/tasks_pkg/test_tool_outcome_finality.py` for legacy/V2 delivery,
 late exceptions, unknown writes, timeout attribution and successful read retry.
 
+**Exact failure text.** Problem: the common error projection re-escaped multiline
+diagnostics and already-formatted partial results inside JSON, consuming context
+again. Its observation reconstruction also omitted retained error items.
+Decision: `result_projection_text.py` owns the existing gateway's Unicode-length
+text framing. The declared error policy may place `summary` after a compact JSON
+metadata line when the complete representation is smaller in UTF-8. Error codes,
+retryability, next actions, items, retention references and cursors remain in
+metadata; short results and unsafe control text keep their original JSON.
+The error reader requires an exact body length, and owned observations retain
+every item. Source text cannot establish a canonical failure verdict.
+Alternatives rejected: clipping diagnostics loses recovery evidence; changing
+only the artifact caller leaves other failure paths re-escaping their results;
+dropping the error wrapper loses the admitted execution verdict. Verify
+`test_error_text_projection`, canonical pipeline, outcome and timeout suites.
+
 **Completed speculative occurrences.** Problem: excluding a failed fetch from
 reusable cache discarded an already completed read, so formal dispatch issued
 the same request again, including after a server wait hint. Decision:

@@ -13,6 +13,7 @@ from __future__ import annotations
 from lib.tools.result_projection_json import (
     dump_projection_json as _json, load_projection_json,
 )
+from lib.tools.result_projection_text import text_section
 
 
 # These keys are producer receipt controls, not recursive application keys.
@@ -87,7 +88,7 @@ def project_gateway_result(tool_name: str, text: str) -> str | None:
                     metadata[key] = item
             lines.extend((f'\n## results[{index}]', _json(metadata)))
             for key, body in bodies:
-                lines.extend((f'{key} (text; {len(body)} chars):', body))
+                lines.append(text_section(key, body))
         return '\n'.join(lines)
     except (ValueError, TypeError, RecursionError, OverflowError):
         return None
