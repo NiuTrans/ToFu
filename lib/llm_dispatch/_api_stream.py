@@ -561,8 +561,13 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_stream_wait=_on_stream_wait,
                     api_protocol=slot.protocol or 'openai',
                     owner_user_id=owner_user_id,
-                    attempt_timeout=attempt_timeout,
-                    first_byte_timeout=first_byte_timeout,
+                    # Only forwarded when set: interactive callers (and every
+                    # transport double that mirrors `stream_chat`) must see the
+                    # historical call shape unchanged.
+                    **({'attempt_timeout': attempt_timeout}
+                       if attempt_timeout is not None else {}),
+                    **({'first_byte_timeout': first_byte_timeout}
+                       if first_byte_timeout is not None else {}),
                 ))
             if _provider_reported_network_failure(stream_result, msg, finish):
                 _rotate_slot_for_provider_network_failure(

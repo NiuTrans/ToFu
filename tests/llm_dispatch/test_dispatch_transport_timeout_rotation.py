@@ -59,6 +59,27 @@ def _timeout_error(cause='attempt_deadline'):
         cause_type=cause)
 
 
+def test_interactive_dispatch_keeps_the_historical_stream_call_shape(
+        monkeypatch):
+    """A transport double that mirrors the old signature must still work."""
+    from lib.llm_dispatch import api
+
+    monkeypatch.setattr(api, 'get_dispatcher',
+                        lambda: _FakeDispatcher([_make_slot()]))
+
+    def _strict_stream(body, **kwargs):
+        unexpected = set(kwargs) & {'attempt_timeout', 'first_byte_timeout'}
+        assert not unexpected, f'unexpected transport kwargs: {unexpected}'
+        return _OK
+
+    import lib.llm as llm_mod
+    monkeypatch.setattr(llm_mod, 'stream_chat', _strict_stream)
+
+    message, _finish, _usage = api.dispatch_stream(
+        [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
+    assert message['content'] == '译文'
+
+
 def test_attempt_timeout_rotates_to_the_next_pair(monkeypatch):
     from lib.llm_dispatch import api
 
