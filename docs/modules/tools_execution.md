@@ -105,16 +105,29 @@ Eligible single-destination Git HTTPS/SSH and curl/wget commands race lightweigh
 Normal tools remain model-synchronous: one result; bounded progress is presentation-only. `ToolExecutionContext` wraps task abort, scoped cleanup, deadlines, progress, and output. HTTP/push Stop share one owner-checked manager path; commands use TERM/grace/KILL/reap. Detached lifecycles stay unchanged. See [`../EVENTS.md`](../contracts/EVENTS.md). High-level `produce_video`, `produce_report`, `produce_slides`, and `produce_research` are explicit detached producers. A successful handler stamps one accepted-task receipt; after the whole tool batch settles, root chat uses the established clean-finish path (`finishReason=stop`) and emits a deterministic acknowledgement. The background task runtime—not another model round—owns polling, progress, completion, error, and artifact-quality truth.
 ## Anchored edit content preservation
 
+**Model contract:** `edit_file` recommends `replace` for additions as well as
+changes and deletions: `anchor` is the old text and `content` is its complete
+replacement. Executable before/after examples include retained text and explicit
+newlines. The required operation remains explicit; existing insert calls stay
+supported with new-text-only content. This avoids teaching two competing content
+shapes as equally preferred. A genuine echo rejection points to complete
+replacement and leaves direction to the caller. Merely lengthening insertion
+warnings or silently reversing direction would preserve the ambiguity. Schema,
+discovery and executable examples are covered by
+`tests/project_mod/test_project_write_tool_schemas.py`.
+
 **Problem:** treating every shared boundary line as a copied anchor rejects
 independent code blocks ending in `}` or `});`; on the insertion edge it can
 silently remove the new block's closing syntax. **Decision:** the shared insert
-finalizer only treats a boundary run as anchor context when it includes a
-letter, number or identifier underscore. Punctuation and whitespace alone stay
-literal, including multi-line runs. Qualifying head/tail copies at the insertion
-edge retain existing repair; copies on the far side fail before writing. Middle
-anchor runs stay literal, and `replace` always uses the complete replacement.
+finalizer only treats a boundary run as anchor context when it repeats the
+complete anchor and includes a letter or number. Partial
+overlaps (including returns, `pass`, closing tags and language terminators),
+punctuation and whitespace stay literal. Complete identifying copies at the
+insertion edge retain existing repair; copies on the far side fail before
+writing. `replace` always uses the complete replacement.
 **Alternatives rejected:** disabling every echo guard permits duplicate
-definitions; reversing insertion direction guesses the model's intent; a syntax
+definitions; special-casing delimiters leaves shared statements and closing tags
+unsafe; reversing insertion direction guesses the model's intent; a syntax
 parser cannot prove intent and is unavailable for many file types. Verify
 `tests/project_mod/test_insert_structural_overlap.py` and the unified-edit,
 atomic-preflight and error-kind suites.

@@ -1573,26 +1573,21 @@ def _line_window_before(file_content, anchor_idx):
 
 
 def _anchor_echo_lines(anchor, content, *, from_end):
-    """Whole lines at one content boundary that repeat the anchor's head/tail.
+    """Whole-line boundary copy of the complete, non-structural anchor.
 
-    ``insert_*`` keeps the anchor, so re-emitting its leading or trailing lines
-    duplicates text that is already in the file. A run taken from the middle of
-    a longer anchor stays: that can be intended repetition, and the escape
-    hatch for deliberate duplication is ``operation=replace``. Whitespace and
-    punctuation alone cannot identify copied context: separate code blocks
-    routinely share braces, brackets and blank lines. Preserve those bytes.
+    A partial overlap cannot prove duplication: independent blocks share
+    returns, closing tags, braces and blank lines. Even a complete anchor made
+    only of punctuation/whitespace is not identifying context. Preserve those
+    bytes; deliberate duplication of an identifying anchor uses ``replace``.
     """
     anchor_lines = anchor.split('\n')
     body = content[:-1] if content.endswith('\n') else content
     content_lines = body.split('\n') if body else []
-    best = 0
-    for k in range(1, min(len(anchor_lines), len(content_lines)) + 1):
-        run = content_lines[-k:] if from_end else content_lines[:k]
-        if ((run == anchor_lines[:k] or run == anchor_lines[-k:])
-                and any(char.isalnum() or char == '_'
-                        for line in run for char in line)):
-            best = k
-    return best
+    count = len(anchor_lines)
+    run = content_lines[-count:] if from_end else content_lines[:count]
+    if run == anchor_lines and any(char.isalnum() for char in anchor):
+        return count
+    return 0
 
 
 def _strict_echo_run(content_lines, neighbour, position):
@@ -1643,10 +1638,9 @@ def _strip_anchor_echo(file_content, anchor_idx, anchor, content, position):
     """Repair one insert's whole-line anchor echo.
 
     Returns ``(content, stripped_chars, error)``. The anchor always stays, so a
-    re-typed run of its lines at the insertion edge is duplication; it is
-    stripped (a partial run of a multi-line anchor included — that geometry
-    used to leave the anchor twice, and a duplicated ``def`` or assignment still
-    parses, so no guard fired).
+    complete copy at the insertion edge is duplication and is stripped.
+    Partial overlaps and structural-only anchors stay literal: equality of
+    common syntax cannot establish that a new block is copied context.
 
     An echo on the FAR side is refused instead: content then says both "insert
     this next to the anchor" and "and here is the anchor again", which either
@@ -1678,12 +1672,12 @@ def _strip_anchor_echo(file_content, anchor_idx, anchor, content, position):
         other = 'insert_before' if position == 'after' else 'insert_after'
         side = 'end' if position == 'after' else 'start'
         return content, 0, (
-            f'content repeats the anchor at its {side}, the side away from '
-            f'insert_{position}. The anchor stays where the operation puts it, '
-            f'so that copy would either duplicate it or move the anchor\'s own '
-            'body into the inserted block. Put the new text on the other side '
-            f'({other}, content = new text only), or use operation=replace if a '
-            'deliberate copy is intended.')
+            f'content repeats anchor text at its {side}; insert_{position} '
+            'already keeps the anchor. Use operation=replace with anchor=the '
+            'existing text and content=the complete desired replacement, '
+            'including retained anchor text and newlines. If only adding lines, '
+            f'keep insert_{position} for that side or choose {other} for the '
+            'opposite side, with content=new lines only. Direction was not guessed.')
     kept = lines[start:len(lines) - end]
     rest = '\n'.join(kept) + ('\n' if trailing_newline else '')
     return rest, len(content) - len(rest), None

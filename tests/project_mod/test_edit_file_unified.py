@@ -435,10 +435,9 @@ def test_insert_before_anchor_echo_stripped(tmp_path):
 
 
 @pytest.mark.unit
-def test_insert_partial_anchor_echo_is_stripped(tmp_path):
-    # Only the first line of a two-line anchor repeated: it is still a copy of
-    # text the insert already keeps, and the duplicate parses, so no guard
-    # would have fired.
+def test_insert_partial_anchor_overlap_is_preserved(tmp_path):
+    # Reusing one line of an anchor does not establish that the model copied
+    # context. Only a complete identifying anchor can trigger echo repair.
     target = tmp_path / 'sample.txt'
     target.write_text('A\nB\nnew_tail\n', encoding='utf-8')
 
@@ -448,8 +447,8 @@ def test_insert_partial_anchor_echo_is_stripped(tmp_path):
     }])
 
     assert result.startswith('Applied 1/1 edits')
-    assert 'auto-repaired: stripped the anchor copy' in result
-    assert target.read_text(encoding='utf-8') == 'A\nB\nextra\nnew_tail\n'
+    assert 'auto-repaired' not in result
+    assert target.read_text(encoding='utf-8') == 'A\nB\nA\nextra\nnew_tail\n'
 
 
 @pytest.mark.unit

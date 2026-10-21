@@ -1,0 +1,6 @@
+{
+  "file": {
+    "path": "build_frontend.mjs",
+    "content": "function before() {\n  return 'before';\n}\nfunction existing() {\n  return 'existing';\n}\nfunction after() {\n  const value = 'after';\n  return value;\n}\n"
+  }
+}

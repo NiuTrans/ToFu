@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+
 from jsonschema import Draft7Validator
 import pytest
 
@@ -60,11 +63,9 @@ def test_write_schema_accepts_empty_content_or_ref_but_not_missing_or_both():
 def test_edit_schema_keeps_anchor_efficiency_and_partial_failure_contracts():
     desc = PROJECT_TOOL_EDIT_FILE['function']['description']
     for phrase in (
-            '1–30 ordered anchored edits', 'earlier round',
+            'ordered anchored edits', 'earlier round', 'Prefer replace',
+            'complete desired replacement', 'retained anchor', 'all line breaks',
             'insert_after/insert_before', 'content is only new text',
-            'do not repeat', 'add B between A/C', 'Safe insertion echoes',
-            'pure echoes', 'Replace uses full content',
-            'even when it retains the anchor', 'never adds line breaks',
             'match exactly once',
             'replace_all permits multiple matches only for replace',
             'Later edits see earlier changes',
@@ -83,10 +84,27 @@ def test_edit_contract_survives_resident_projection_search_and_budget():
     item = found['items'][0]
     assert item['name'] == 'edit_file'
     assert item['arguments_schema'] == resident['function']['parameters']
-    assert 'even when it retains the anchor' in item['summary']
-    projected = fit_tool_schema_budget([resident], budget_tokens=385, model='kimi-k3')
+    assert 'Prefer replace' in item['summary']
+    projected = fit_tool_schema_budget([resident], budget_tokens=1000, model='kimi-k3')
     assert projected and projected[0]['function']['description'] == resident['function']['description']
-    assert tool_schema_tokens(projected, model='kimi-k3') <= 385
+    assert tool_schema_tokens(projected, model='kimi-k3') <= 1000
+
+
+def test_edit_description_examples_execute_the_promised_order(tmp_path):
+    from lib.project_mod.write_tools import tool_edit_file
+
+    function = PROJECT_TOOL_EDIT_FILE['function']
+    examples = re.findall(r'`(\{"operation"[^`]+\})`', function['description'])
+    assert len(examples) == 2
+    for example, expected in zip(examples, ['A\nB\nC\n', 'B\nA\nC\n']):
+        target = tmp_path / 'sample.txt'
+        target.write_text('A\nC\n', encoding='utf-8')
+        edit = {'path': target.name, **json.loads(example)}
+        args = {'description': 'Insert B', 'edits': [edit]}
+        Draft7Validator(function['parameters']).validate(args)
+        result = tool_edit_file(str(tmp_path), args['edits'])
+        assert result.startswith('Applied 1/1 edits'), result
+        assert target.read_text(encoding='utf-8') == expected
 
 
 def test_edit_schema_rejects_empty_edits_and_preserves_requested_batch_size():

@@ -1,0 +1,5 @@
+{
+  "description": "Synthetic offline stream through the real loop: write a sample, insert independent functions before and after a shared closing brace, then replace one return. Asserts exact bytes and durable settlement.",
+  "mode": "replay",
+  "recorded_at": "2026-10-21"
+}

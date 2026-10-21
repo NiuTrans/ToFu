@@ -9,6 +9,44 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize('operation', ['insert_after', 'insert_before'])
+@pytest.mark.parametrize('anchor', ['}', '});', '___', '   '])
+def test_complete_structural_anchor_does_not_identify_copied_context(
+        tmp_path, operation, anchor):
+    target = tmp_path / 'sample.txt'
+    target.write_text(anchor + '\nTAIL\n', encoding='utf-8')
+    addition = 'new body\n' + anchor
+    result = tool_edit_file(str(tmp_path), [{
+        'path': target.name, 'operation': operation,
+        'anchor': anchor, 'content': addition,
+    }])
+    blocks = [anchor, addition] if operation == 'insert_after' else [addition, anchor]
+    assert result.startswith('Applied 1/1 edits'), result
+    assert 'auto-repaired' not in result
+    assert target.read_text(encoding='utf-8') == '\n'.join(blocks) + '\nTAIL\n'
+
+
+@pytest.mark.parametrize('operation', ['insert_after', 'insert_before'])
+@pytest.mark.parametrize(('anchor', 'addition'), [
+    ('function existing() {\n  return 0;\n}', 'function added() {\n  return 0;\n}'),
+    ('def existing():\n    pass', 'def added():\n    pass'),
+    ('<section id="existing">\n</section>', '<section id="added">\n</section>'),
+    ('def existing\n  work\nend', 'def added\n  other\nend'),
+])
+def test_partial_anchor_overlap_is_not_proof_of_copied_context(
+        tmp_path, operation, anchor, addition):
+    target = tmp_path / 'sample.txt'
+    target.write_text(anchor + '\n', encoding='utf-8')
+    result = tool_edit_file(str(tmp_path), [{
+        'path': target.name, 'operation': operation,
+        'anchor': anchor, 'content': addition,
+    }])
+    blocks = [anchor, addition] if operation == 'insert_after' else [addition, anchor]
+    assert result.startswith('Applied 1/1 edits'), result
+    assert 'auto-repaired' not in result
+    assert target.read_text(encoding='utf-8') == '\n'.join(blocks) + '\n'
+
+
+@pytest.mark.parametrize('operation', ['insert_after', 'insert_before'])
 @pytest.mark.parametrize('boundary', ['}', '};', '});', ']', ');', '', '    '])
 def test_shared_closing_syntax_is_inserted_verbatim(tmp_path, operation, boundary):
     anchor = f'function existing() {{\n  existing();\n{boundary}'

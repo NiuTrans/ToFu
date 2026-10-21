@@ -404,13 +404,14 @@ PROJECT_TOOL_EDIT_FILE = {
     "function": {
         "name": "edit_file",
         "description": (
-            "Apply 1–30 ordered anchored edits; read/write targets in an earlier round. "
-            "For mid-file changes; append at end-of-file with write_file(append=true). "
-            "Replace uses full content even when it retains the anchor; never adds "
-            "line breaks. Prefer insert_after/insert_before for new lines: content is "
-            "only new text; do not repeat anchor/neighbor lines. Example: add B between "
-            "A/C: anchor A, content B. Safe insertion echoes are stripped; pure echoes "
-            "rejected. Anchors match exactly once; "
+            "Apply ordered anchored edits; read/write targets in an earlier round. "
+            "Prefer replace, including additions: content is the complete desired "
+            "replacement, including retained anchor text and all line breaks. "
+            'After A: `{"operation":"replace","anchor":"A","content":"A\\nB"}`; '
+            'before A: `{"operation":"replace","anchor":"A","content":"B\\nA"}`. '
+            "For insert_after/insert_before, content is only new text; the anchor "
+            "stays automatically. Append at end-of-file with write_file(append=true). "
+            "Anchors match exactly once; "
             "replace_all permits multiple matches only for replace. Later edits see "
             "earlier changes. Atomic preflight defaults true: any validation failure "
             "writes nothing. With atomic=false, one failure neither rolls back nor "
@@ -443,17 +444,21 @@ PROJECT_TOOL_EDIT_FILE = {
                             },
                             "operation": {
                                 "type": "string",
-                                "enum": ["insert_after", "insert_before", "replace"],
-                                "description": "Insert keeps anchor; replace substitutes it with content.",
+                                "enum": ["replace", "insert_after", "insert_before"],
+                                "description": (
+                                    "Prefer replace for complete old-to-new edits, including additions. "
+                                    "insert_after adds content below anchor; insert_before above it."),
                             },
                             "anchor": {
                                 "type": "string",
                                 "minLength": 1,
-                                "description": "Exact, normally unique existing text.",
+                                "description": "Exact, normally unique existing text. For replace, this is the old text being removed.",
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Insert: only new text. Replace: full replacement, empty to delete.",
+                                "description": (
+                                    "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete. "
+                                    "Insert: added lines only, without copied anchor/context."),
                             },
                             "replace_all": {
                                 "type": "boolean",

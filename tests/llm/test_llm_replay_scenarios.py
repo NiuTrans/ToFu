@@ -418,6 +418,21 @@ def test_write_file_tool(tmp_path, monkeypatch):
     _assert_invariants_clean(task)
 
 
+def test_edit_file_preserves_independent_code_blocks(tmp_path, monkeypatch):
+    run = _run_loop_scenario(
+        'edit_file_blocks', tmp_path=tmp_path, monkeypatch=monkeypatch,
+        user_prompt='Create the sample, add functions before and after it, then refine the new return.',
+        with_project=True)
+    expected = _expected('edit_file_blocks')
+    target = run['project_path'] / expected['file']['path']
+    assert target.read_bytes() == expected['file']['content'].encode('utf-8')
+    results = _tool_result_messages(run['messages'])
+    assert any('Applied 3/3 edits' in str(result.get('content')) for result in results)
+    assert run['task']['finishReason'] == 'stop'
+    assert not run['task'].get('error')
+    _assert_invariants_clean(run['task'])
+
+
 def test_incomplete_tool_stream_retries_before_any_write(tmp_path, monkeypatch):
     from lib.tasks_pkg.stream_handler import _budget
     monkeypatch.setenv('TOFU_DEFAULT_TOOL_PLUGINS', '*')
