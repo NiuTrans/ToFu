@@ -779,6 +779,22 @@ def _settle_tool_result(
             round_entry['compactedFromChars'] = fresh_result_chars
             round_entry['compactedToChars'] = len(tool_content)
 
+    # Issue the existing snapshot metadata before budgeting. Its model-visible
+    # read expression consumes the same result budget as the diagnostic body.
+    _program_input = None
+    _program_latch = task.get('_ptc_local')
+    if isinstance(_program_latch, dict) and _program_latch.get('tier') == 'program':
+        from lib.tasks_pkg.manager import task_user_id
+        from lib.tools.program_results import retain_program_result, describe_program_input
+        _owner_id = task_user_id(task)
+        _retained_input = retain_program_result(task, fn_name, fn_args, tc_id,
+                                               captured_result, user_id=_owner_id)
+        _catalog = task.get('_executable_tool_catalog') or []
+        _names = {(tool.get('function') or {}).get('name') for tool in _catalog
+                  if isinstance(tool, dict)} - {None}
+        _program_input = describe_program_input(task, _retained_input,
+                                                user_id=_owner_id, catalog_names=_names)
+
     # Layer 0: Budget tool results before they enter context. V2 applies one
     # bounded envelope contract to every tool; legacy mode retains its older
     # per-tool exemptions. Oversized batched read_files results use the
@@ -804,6 +820,7 @@ def _settle_tool_result(
                 projection_items=projection_items,
                 producer_metadata=producer_metadata,
                 recovery_policy=_tool_result_recovery_policy(task, fn_name),
+                program_input=_program_input,
             )
         else:
             tool_content = budget_tool_result(fn_name, tool_content,
@@ -858,34 +875,21 @@ def _settle_tool_result(
                     generation=getattr(_cached_entry, 'generation', None),
                     expected_entry=_cached_entry)
 
-    _program_input = None
-    _program_latch = task.get('_ptc_local')
-    if isinstance(_program_latch, dict) and _program_latch.get('tier') == 'program':
-        from lib.tasks_pkg.manager import task_user_id
-        from lib.tools.program_results import retain_program_result, describe_program_input
-        _owner_id = task_user_id(task)
-        _retained_input = retain_program_result(task, fn_name, fn_args, tc_id,
-                                               captured_result, user_id=_owner_id)
-        _catalog = task.get('_executable_tool_catalog') or []
-        _names = {(tool.get('function') or {}).get('name') for tool in _catalog
-                  if isinstance(tool, dict)} - {None}
-        _program_input = describe_program_input(task, _retained_input,
-                                                user_id=_owner_id, catalog_names=_names)
-
     # The canonical V2 envelope is server-owned evidence. Keep it only through
     # the current round's aggregate-budget pass, and place the sparse projection
     # in messages/events. This prevents byte counters, empty freshness fields,
     # evidence ids, and contract plumbing from consuming model context.
     tool_result_evidence = None
     if _uses_v2_result_contract and isinstance(tool_content, str):
-        from lib.tools.result_envelope import split_tool_result_delivery, with_program_input
+        from lib.tools.result_envelope import split_tool_result_delivery
 
-        internal_envelope = (with_program_input(tool_content, _program_input)
-                             if _program_input is not None else tool_content)
+        internal_envelope = tool_content
         delivery = split_tool_result_delivery(internal_envelope)
         tool_content = _project_spilled_artifact_alias(
             task, round_entry, fn_name, internal_envelope, delivery.model_text)
-        tool_result_evidence = delivery.evidence
+        tool_result_evidence = (dict(delivery.evidence,
+            visibleBytes=len(tool_content.encode('utf-8', errors='replace')))
+            if delivery.evidence is not None else None)
         if pending_envelopes is not None:
             pending_envelopes[tc_id] = internal_envelope
 
@@ -1246,7 +1250,9 @@ def _apply_round_aggregate_budget(
                 _parsed_call[5] if _parsed_call is not None else None,
                 _parsed_call[1] if _parsed_call is not None else '',
                 new_internal_content, delivery.model_text)
-            tool_result_evidence = delivery.evidence
+            tool_result_evidence = (dict(delivery.evidence,
+                visibleBytes=len(new_content.encode('utf-8', errors='replace')))
+                if delivery.evidence is not None else None)
             pending_envelopes[tool_call_id] = new_internal_content
         else:
             new_content = new_internal_content

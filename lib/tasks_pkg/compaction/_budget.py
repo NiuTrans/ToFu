@@ -355,13 +355,31 @@ def _source_recovery(
     )
 
 
+def _render_budget_envelope(envelope, finalize_view=None):
+    """Apply already-known host facts before counting any model projection.
+
+    The finalizer is pure: retention happens outside the fitting search. It
+    carries canonical outcomes without interpreting application JSON as policy.
+    """
+    from lib.tools.result_envelope import _model_projection
+    from lib.tools.result_value import TrustedResultText, capture_result
+    value = envelope.to_dict()
+    if finalize_view is not None:
+        value = finalize_view(value)
+    value['visibleBytes'] = len(_model_projection(value)[0].encode('utf-8'))
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    canonical = capture_result(text, execution_status='error') if value.get('status') == 'error' else None
+    return TrustedResultText(text, canonical=canonical, envelope=True)
+
+
 def _materialize_envelope(*, status: str, summary: str, items: list[Any],
                           artifact_ref: str, truncated: bool, raw_bytes: int,
                           observed_at_ms: int, world_version: str,
                           evidence_id: str, model: str,
                           recovery=None, error=None, failed_execution=False,
                           artifact_content: str = "",
-                          token_budget: int = TOOL_RESULT_V2_MAX_TOKENS) -> str:
+                          token_budget: int = TOOL_RESULT_V2_MAX_TOKENS,
+                          finalize_view=None) -> str:
     from lib.tools.result_envelope import ToolResultEnvelopeV2
 
     # A summary that is the raw content itself (plain-text results) makes the
@@ -400,7 +418,7 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
                 candidate_truncated: bool) -> str:
         visible_status = (
             "partial" if candidate_truncated and status == "ok" else status)
-        return ToolResultEnvelopeV2(
+        return _render_budget_envelope(ToolResultEnvelopeV2(
             status=visible_status, summary=candidate_summary,
             items=tuple(candidate_items), artifact_ref=artifact_ref,
             cursor=_resume_cursor(candidate_summary),
@@ -408,7 +426,7 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
             raw_bytes=raw_bytes, visible_bytes=0,
             observed_at_ms=observed_at_ms, world_version=world_version,
             evidence_id=evidence_id, recovery=recovery, error=error,
-        ).with_visible_bytes().to_envelope_text()
+        ), finalize_view)
 
     # Preserve a complete result whenever its final model projection fits.
     # A fixed summary/item split is only a fallback allocation, not permission
@@ -419,10 +437,11 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
             return complete
 
     accepted: list[Any] = []
-    summary_budget = (token_budget // 2 if items else token_budget - 500)
-    fitted_summary = _fit_summary(
-        summary, token_budget=max(256, summary_budget), model=model,
-        marker=recovery_marker)
+    # Only mixed summary/items need an initial allocation. Plain diagnostics
+    # fit directly against their final metadata below, without a fixed reserve.
+    fitted_summary = (_fit_summary(
+        summary, token_budget=max(256, token_budget // 2), model=model,
+        marker=recovery_marker) if items else summary)
     truncated = truncated or fitted_summary != summary
     for item in items:
         candidate = _render(
@@ -468,9 +487,9 @@ def _materialize_envelope(*, status: str, summary: str, items: list[Any],
         if remaining_items:
             remaining_items.pop()
             continue
-        # Envelope metadata plus the bounded marker is deliberately tiny. This
-        # is defensive for a pathological token counter, and still guarantees
-        # a deterministic bounded result instead of unbounded recursion.
+        # Required facts may exceed a pathological limit. Preserve them for
+        # complete-prompt admission instead of silently dropping recovery or
+        # inventing a successful fit; never recurse without a smaller body.
         return _render("Result truncated.", [], True)
 
 
@@ -490,6 +509,7 @@ def _materialize_file_read_envelope(
     error=None,
     failed_execution=False,
     token_budget: int = TOOL_RESULT_V2_MAX_TOKENS,
+    finalize_view=None,
 ) -> str:
     """Fit the file preview window, then share preview space max-min fairly.
 
@@ -513,7 +533,7 @@ def _materialize_file_read_envelope(
         return text[:head] + "…" + text[-(limit - head - 1):]
 
     def _render(preview_cap: int, *, path_limit: int,
-                include_details: bool) -> ToolResultEnvelopeV2:
+                include_details: bool) -> str:
         visible_items: list[dict[str, Any]] = []
         for position, source in enumerate(source_items, 1):
             preview = str(source.get("preview") or "")
@@ -541,7 +561,7 @@ def _materialize_file_read_envelope(
                 source.get("previewTruncated") or len(prefix) < len(preview))
             visible_items.append(item)
 
-        return ToolResultEnvelopeV2(
+        return _render_budget_envelope(ToolResultEnvelopeV2(
             status=status,
             summary=fitted_summary,
             items=tuple(visible_items),
@@ -555,18 +575,18 @@ def _materialize_file_read_envelope(
             evidence_id=evidence_id,
             recovery=recovery,
             error=error,
-        ).with_visible_bytes()
+        ), finalize_view)
 
     # Identity/status is non-negotiable. Progressive fallbacks only remove
     # optional detail and shorten pathological paths in the bounded 64-item
     # model preview. Complete batch observations remain outside this preview.
     minimal = _render(0, path_limit=384, include_details=True)
-    if _result_tokens(minimal.to_model_text(), model) > token_budget:
+    if _model_result_tokens(minimal, model) > token_budget:
         minimal = _render(0, path_limit=160, include_details=False)
-    if _result_tokens(minimal.to_model_text(), model) > token_budget:
+    if _model_result_tokens(minimal, model) > token_budget:
         fitted_summary = _fit_summary(summary, token_budget=128, model=model)
         minimal = _render(0, path_limit=48, include_details=False)
-    if _result_tokens(minimal.to_model_text(), model) > token_budget:
+    if _model_result_tokens(minimal, model) > token_budget:
         # Defensive last form for malformed non-schema callers. It still keeps
         # one identity/status row per preview item instead of first-file bias.
         fitted_summary = (
@@ -582,20 +602,20 @@ def _materialize_file_read_envelope(
     if max_preview_chars is not None:
         high = min(high, max(0, int(max_preview_chars)))
     if high <= 0:
-        return minimal.to_envelope_text()
+        return minimal
 
     best = minimal
     low = 1
     while low <= high:
         middle = (low + high) // 2
         candidate = _render(middle, path_limit=384, include_details=True)
-        if _result_tokens(candidate.to_model_text(), model) \
+        if _model_result_tokens(candidate, model) \
                 <= token_budget:
             best = candidate
             low = middle + 1
         else:
             high = middle - 1
-    return best.to_envelope_text()
+    return best
 
 
 def _store_tool_result_artifact(content: str, *, user_id: int,
@@ -633,7 +653,14 @@ def _replay_ref_note(sources, *, limit: int = 4) -> str:
 
 def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
     from lib.tools.result_value import capture_result, TrustedResultText, persist_result
+    from lib.tools.result_envelope import ToolResultProgramInputV2, with_program_input
+    program_input_issued = 'program_input' in kwargs
+    program_input = kwargs.pop('program_input', None)
     if isinstance(content, TrustedResultText) and content.envelope:
+        if program_input_issued:
+            # The pipeline revalidates publication on each occurrence; an
+            # absent current handle must withdraw a cached advertisement.
+            content = with_program_input(content, program_input)
         policy = _normalized_recovery_policy(kwargs.get('recovery_policy', 'artifact'))
         limit = SOURCE_TOOL_RESULT_V2_MAX_TOKENS if policy == 'source' else TOOL_RESULT_V2_MAX_TOKENS
         if _model_result_tokens(content, kwargs.get('model', '')) <= limit:
@@ -655,34 +682,36 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
                 summary = '[Canonical retention unavailable.]\n' + summary
         from lib.tools.result_envelope import tool_result_error
         retained_error = tool_result_error(content)
+        failed_execution = canonical.execution_status != 'ok' or old.get('status') == 'error'
+
+        def finalize_view(value):
+            if failed_execution:
+                value['status'] = 'error'
+                value['error'] = old.get('error')
+            for key in ('freshness', 'recovery', 'programInput', 'resultId',
+                        'executionStatus', 'sourceCoverage'):
+                if key in old:
+                    value[key] = old[key]
+            value['viewCoverage'] = 'partial'
+            value['retentionCoverage'] = retention
+            if artifact_ref:
+                value['cursor'] = '0'
+            return value
+
         view = _materialize_envelope(
             status=('partial' if old.get('status') == 'error' and retained_error is None
                     else old.get('status', 'partial')), summary=summary,
             items=old.get('items',[]), artifact_ref=artifact_ref, truncated=True,
             raw_bytes=old.get('rawBytes',0), observed_at_ms=old.get('observedAtMs',0),
             world_version=old.get('worldVersion',''), evidence_id=old.get('evidenceId',''),
-            model=kwargs.get('model',''), token_budget=limit, error=retained_error)
-        reduced = json.loads(view)
-        if old.get('status') == 'error':
-            reduced['status'] = 'error'
-            reduced['error'] = old.get('error')
-        for key in ('freshness', 'recovery'):
-            if key in old:
-                reduced[key] = old[key]
-        for key in ('resultId','executionStatus','sourceCoverage','retentionCoverage'):
-            if key in old: reduced[key]=old[key]
-        reduced['viewCoverage']='partial'
-        reduced['retentionCoverage'] = retention
-        if artifact_ref:
-            reduced['cursor']='0'
-            if canonical.artifact_ref:
-                from dataclasses import replace
-                from lib.tools.result_value import ResultPart
-                canonical = replace(canonical,
-                    parts=(ResultPart('artifact', reference=artifact_ref),), children=())
-        from lib.tools.result_envelope import _model_projection
-        reduced['visibleBytes'] = len(_model_projection(reduced)[0].encode('utf-8'))
-        return TrustedResultText(json.dumps(reduced,ensure_ascii=False),canonical=canonical,envelope=True)
+            model=kwargs.get('model',''), token_budget=limit, error=retained_error,
+            failed_execution=failed_execution, finalize_view=finalize_view)
+        if artifact_ref and canonical.artifact_ref:
+            from dataclasses import replace
+            from lib.tools.result_value import ResultPart
+            canonical = replace(canonical,
+                parts=(ResultPart('artifact', reference=artifact_ref),), children=())
+        return TrustedResultText(view, canonical=canonical, envelope=True)
     canonical = capture_result(content, source_coverage=(
         'partial' if (kwargs.get('producer_metadata') or {}).get('truncated') else (kwargs.get('producer_metadata') or {}).get('sourceCoverage')))
     if isinstance(content, dict) and (content.get('__screenshot__') or content.get('__batch_images__')):
@@ -694,70 +723,61 @@ def budget_tool_result_v2(tool_name, content, *, user_id, **kwargs):
     projected_source = project_model_source(tool_name, source)
     projection_changed = projected_source is not source
     source = TrustedResultText(projected_source, canonical=canonical)
-    view = _budget_tool_result_view_v2(tool_name, source, user_id=user_id, **kwargs)
-    value = json.loads(view)
     hidden_source = (int(user_id or 0) > 0 and not canonical.private_children
                      and canonical.source_omitted is True)
     producer_lost_tail = bool((kwargs.get('producer_metadata') or {}).get('truncated'))
     retain_formatted_source = int(user_id or 0) > 0 and not canonical.private_children and (
         canonical.projection_normalized or projection_changed or len(canonical.parts) > 1)
-    if (canonical.requires_reference() or hidden_source or producer_lost_tail
-            or retain_formatted_source) and not value.get('artifactRef'):
+    retention_attempted = (canonical.requires_reference() or hidden_source
+                           or producer_lost_tail or retain_formatted_source)
+    retained_ref = ''
+    if retention_attempted:
         try:
-            value['artifactRef'] = persist_result(canonical, user_id=user_id)
-            value['cursor'] = '0'
-            # Retaining a durable reference is not withholding. Only a view
-            # that actually dropped content (envelope overflow / producer
-            # truncation, decided honestly by the view itself) is partial; a
-            # complete inline view keeps status=ok/truncated=False so the
-            # model never burns a read_tool_artifact round-trip on evidence
-            # it already holds — the ref exists for post-compaction
-            # recovery, not for an immediate redundant read.
-            if value.get('truncated'):
-                value['status'] = 'partial'
+            retained_ref = persist_result(canonical, user_id=user_id)
         except Exception as exc:
             logger.warning('[ToolResultV2] canonical retention unavailable (%s)', type(exc).__name__)
+
+    # Only host execution metadata grants error interpretation. Application
+    # JSON that resembles an error remains an ordinary successful document.
+    from lib.tools.result_envelope import tool_result_error
+    failed_execution = canonical.execution_status != 'ok'
+    error = (tool_result_error(content)
+             if failed_execution and isinstance(content, TrustedResultText) else None)
+
+    def finalize_view(value):
+        if retention_attempted and not retained_ref:
             value['retentionCoverage'] = 'unavailable'
             value['summary'] += '\n[Canonical retention unavailable.]'
-    if hidden_source:
-        value['truncated'] = True
-        value['status'] = 'partial'
+        if hidden_source:
+            value['truncated'] = True
+            value['status'] = 'partial'
+            if value.get('artifactRef'):
+                value['summary'] += ('\n[Original source retained; use '
+                                     'search_tool_artifact or read_tool_artifact '
+                                     'with artifactRef to inspect it.]')
         if value.get('artifactRef'):
-            value['summary'] += ('\n[Original source retained; use '
-                                 'search_tool_artifact or read_tool_artifact '
-                                 'with artifactRef to inspect it.]')
-    if value.get('artifactRef'):
-        value['cursor'] = '0'  # Canonical manifests never use preview byte offsets.
-    if canonical.execution_status != 'ok':
-        value['status'] = 'error'
-        # A host-owned failure may already be a sparse typed error. Preserve
-        # its recovery fields instead of burying them inside generic items.
-        # Execution metadata grants this interpretation; JSON shape alone
-        # never changes a successful document read into a failed tool call.
-        from lib.tools.result_envelope import tool_result_error
-        error = tool_result_error(content) if isinstance(content, TrustedResultText) else None
-        if error is not None:
-            from dataclasses import asdict
-            value['error'] = asdict(error)
-            payload = json.loads(content)
-            if (set(payload) <= {'status', 'code', 'message', 'retryable',
-                                 'nextAction', 'next_action'}
-                    and value.get('items') == [payload]):
-                value['items'] = []
-                value['summary'] = error.message or error.code
-    value.update(resultId=canonical.result_id, executionStatus=canonical.execution_status,
-                 sourceCoverage=canonical.source_coverage,
-                 retentionCoverage=value.get('retentionCoverage',
-                     'unavailable' if value.get('truncated') and not value.get('artifactRef')
-                     else canonical.retention_coverage),
-                 viewCoverage='partial' if value.get('truncated') else 'complete')
-    from lib.tools.result_envelope import _model_projection
-    value['visibleBytes'] = len(_model_projection(value)[0].encode('utf-8'))
+            value['cursor'] = '0'  # Canonical manifests have no preview byte offset.
+        if failed_execution:
+            value['status'] = 'error'
+        elif isinstance(program_input, ToolResultProgramInputV2):
+            value['programInput'] = program_input.to_dict()
+        value.update(resultId=canonical.result_id, executionStatus=canonical.execution_status,
+                     sourceCoverage=canonical.source_coverage,
+                     retentionCoverage=value.get('retentionCoverage',
+                         'unavailable' if value.get('truncated') and not value.get('artifactRef')
+                         else canonical.retention_coverage),
+                     viewCoverage='partial' if value.get('truncated') else 'complete')
+        return value
+
+    view = _budget_tool_result_view_v2(
+        tool_name, source, user_id=user_id, error=error,
+        failed_execution=failed_execution, retained_ref=retained_ref,
+        retention_attempted=retention_attempted, finalize_view=finalize_view, **kwargs)
     if canonical.artifact_ref:
         from dataclasses import replace
         from lib.tools.result_value import ResultPart
         canonical = replace(canonical, parts=(ResultPart('artifact', reference=canonical.artifact_ref),), children=())
-    return TrustedResultText(json.dumps(value, ensure_ascii=False), canonical=canonical, envelope=True)
+    return TrustedResultText(view, canonical=canonical, envelope=True)
 
 
 def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
@@ -766,7 +786,9 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
                           tool_arguments: dict[str, Any] | None = None,
                           projection_items: list[Any] | None = None,
                           producer_metadata: Mapping[str, Any] | None = None,
-                          recovery_policy: str = "artifact") -> str:
+                          recovery_policy: str = "artifact", error=None,
+                          failed_execution: bool = False, retained_ref: str = '',
+                          retention_attempted: bool = False, finalize_view=None) -> str:
     """Return one bounded envelope under the tool's declared recovery policy.
 
     Volatile results retain the conservative 8k+artifact contract. Cheaply
@@ -811,6 +833,10 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
     exceeds_inline_budget = raw_result_tokens > token_budget
     preserve_file_identities = False
     summary, items, structurally_truncated = _candidate_items(content)
+    if (error is not None and len(items) == 1 and isinstance(items[0], dict)
+            and set(items[0]) <= {'status', 'code', 'message', 'retryable',
+                                  'nextAction', 'next_action'}):
+        summary, items = error.message or error.code, []
 
     # Structured projections can differ in size from their source JSON. Detect
     # that before deciding whether a durable recovery artifact is necessary.
@@ -818,13 +844,14 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
     # a multi-megabyte result on the hot path.
     if not exceeds_inline_budget:
         from lib.tools.result_envelope import ToolResultEnvelopeV2
-        inline_probe = ToolResultEnvelopeV2(
-            status="ok", summary=summary, items=tuple(items),
+        inline_probe = _render_budget_envelope(ToolResultEnvelopeV2(
+            status="error" if error is not None else "ok", error=error,
+            summary=summary, items=tuple(items), artifact_ref=retained_ref,
             raw_bytes=len(raw), observed_at_ms=max(
                 0, int(observed_at_ms or 0)),
             world_version=str(world_version or ""),
             evidence_id=evidence_id,
-        ).with_visible_bytes().to_envelope_text()
+        ), finalize_view)
         exceeds_inline_budget = (
             _model_result_tokens(inline_probe, model) > token_budget)
 
@@ -842,6 +869,8 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
                    if len(file_items) <= 64 else
                    "up to 64 file results are shown in this preview window; ")
                 + (
+                    "follow the original error's recovery advice."
+                    if failed_execution else
                     "rerun read_files using recovery.arguments with narrower "
                     "per-file ranges for omitted source evidence."
                     if recovery_policy == "source" else
@@ -860,17 +889,18 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
              or producer_metadata.get("status") == "partial"))
     envelope_overflow = exceeds_inline_budget or structurally_truncated
     needs_recovery = envelope_overflow or producer_truncated
-    artifact_ref = (_store_tool_result_artifact(
-        content, user_id=user_id, observed_at_ms=observed_at_ms)
-        if envelope_overflow and recovery_policy == "artifact" else "")
+    artifact_ref = retained_ref
+    if envelope_overflow and recovery_policy == 'artifact' and not retention_attempted:
+        artifact_ref = _store_tool_result_artifact(
+            content, user_id=user_id, observed_at_ms=observed_at_ms)
     # A producer-side cap means the missing bytes never reached this boundary,
     # so persisting the already-truncated string cannot recover them. Point the
     # model back to the source tool even when its normal overflow policy is an
     # artifact.
     recovery = (
         _source_recovery(tool_name, tool_arguments)
-        if producer_truncated
-        or (envelope_overflow and recovery_policy == "source")
+        if not failed_execution and (producer_truncated
+            or (envelope_overflow and recovery_policy == "source"))
         else None)
     if needs_recovery and not artifact_ref and recovery is None:
         if preserve_file_identities:
@@ -879,20 +909,16 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
                 + ("every file is listed with a bounded preview. "
                    if len(items) <= 64 else
                    "up to 64 file results are shown in this preview window. ")
-                + "Full result unavailable; "
-                "rerun with narrower per-file ranges."
+                + ("Full diagnostics unavailable; inspect the prior outcome."
+                   if failed_execution else
+                   "Full result unavailable; rerun with narrower per-file ranges.")
             )
         else:
-            summary = (
-                _fit_summary(
-                    summary, token_budget=5_000, model=model,
-                    marker=_UNAVAILABLE_RESULT_MARKER)
-            )
             if not summary.endswith(_UNAVAILABLE_RESULT_MARKER):
                 summary += _UNAVAILABLE_RESULT_MARKER
     if preserve_file_identities:
         return _materialize_file_read_envelope(
-            status="partial",
+            status="error" if error is not None else "partial",
             summary=summary,
             items=items,
             artifact_ref=artifact_ref,
@@ -902,10 +928,11 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
             evidence_id=evidence_id,
             model=model,
             recovery=recovery,
-            token_budget=token_budget,
+            error=error, failed_execution=failed_execution,
+            token_budget=token_budget, finalize_view=finalize_view,
         )
     return _materialize_envelope(
-        status="partial" if needs_recovery else "ok",
+        status="error" if error is not None else "partial" if needs_recovery else "ok",
         summary=summary,
         items=items,
         artifact_ref=artifact_ref,
@@ -916,8 +943,9 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
         evidence_id=evidence_id,
         model=model,
         recovery=recovery,
+        error=error, failed_execution=failed_execution,
         artifact_content=content,
-        token_budget=token_budget,
+        token_budget=token_budget, finalize_view=finalize_view,
     )
 
 
@@ -1143,6 +1171,22 @@ def enforce_round_aggregate_budget_v2(
         result_budget = min(
             TOOL_RESULT_V2_MAX_TOKENS, max(1, limit - (total - before)))
         reduced_status = "error" if retained_error is not None else "partial"
+        from lib.tools.result_envelope import ToolResultProgramInputV2
+        program_input = ToolResultProgramInputV2.from_dict(value.get('programInput'))
+
+        def finalize_view(reduced_value):
+            for key in ('resultId', 'executionStatus', 'sourceCoverage', 'retentionCoverage'):
+                if key in value:
+                    reduced_value[key] = value[key]
+            if program_input is not None and not failed_execution:
+                reduced_value['programInput'] = program_input.to_dict()
+            reduced_value['viewCoverage'] = 'partial'
+            if not artifact_ref:
+                reduced_value['retentionCoverage'] = 'unavailable'
+            if failed_execution:
+                reduced_value['status'] = 'error'
+            return reduced_value
+
         if is_file_read_projection(source_items):
             reduced = _materialize_file_read_envelope(
                 status=reduced_status,
@@ -1159,7 +1203,7 @@ def enforce_round_aggregate_budget_v2(
                 max_preview_chars=0,
                 recovery=recovery,
                 error=retained_error, failed_execution=failed_execution,
-                token_budget=result_budget,
+                token_budget=result_budget, finalize_view=finalize_view,
             )
         else:
             reduced = _materialize_envelope(
@@ -1174,25 +1218,11 @@ def enforce_round_aggregate_budget_v2(
                 evidence_id=evidence_id, model=model,
                 recovery=recovery, error=retained_error,
                 failed_execution=failed_execution, token_budget=result_budget,
+                finalize_view=finalize_view,
             )
         from lib.tools.result_value import TrustedResultText
         if isinstance(content, TrustedResultText):
-            reduced_value = json.loads(reduced)
-            for key in ('resultId', 'executionStatus', 'sourceCoverage', 'retentionCoverage'):
-                if key in value:
-                    reduced_value[key] = value[key]
-            from lib.tools.result_envelope import ToolResultProgramInputV2, with_program_input
-            program_input = ToolResultProgramInputV2.from_dict(value.get('programInput'))
-            if program_input is not None:
-                reduced_value['programInput'] = program_input.to_dict()
-            reduced_value['viewCoverage'] = 'partial'
-            if not artifact_ref:
-                reduced_value['retentionCoverage'] = 'unavailable'
-            if failed_execution:
-                reduced_value['status'] = 'error'
-            reduced = TrustedResultText(json.dumps(reduced_value, ensure_ascii=False),
-                                        canonical=content.canonical, envelope=True)
-            reduced = with_program_input(reduced, program_input)
+            reduced = TrustedResultText(reduced, canonical=content.canonical, envelope=True)
         after = _model_result_tokens(reduced, model)
         if after < before:
             tool_results[tc_id] = (reduced, tool_name, tool_use_id)
