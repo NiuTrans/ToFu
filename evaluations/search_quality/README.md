@@ -134,6 +134,34 @@ an overlong observed quotation from an invented one without weakening grading.
 Verify `tests/evaluations/test_search_candidate_projection.py` alongside the
 existing runner and native HTTP contracts before a new cohort.
 
+Contract v5 makes citation-host admission an explicit task policy. The default
+`reference_hosts` retains the existing grades: the quoted source must belong to
+the task's host list. A new cohort may declare `citation_policy=observed_pages`
+when its reference sources are examples rather than an exhaustive authority
+list. Such a task still requires search discovery, a successful accepted fetch,
+the expected answer, an observed 8–350-character quotation and all frozen quote
+predicates. Unknown policies fail before prompting and scoring.
+
+Problem: exact-reference URL misses can return a more specific official page;
+counting those misses as unsupported answers confuses annotation coverage with
+evidence quality. Decision: report the selected policy and
+`citation_host_allowed` separately from the legacy `primary_host` flag, which
+continues to mean membership in the declared host list. The new policy does not
+declare arbitrary pages trustworthy or establish semantic entailment.
+Alternatives rejected: adding discovered domains to an allowlist after seeing
+answers, changing old cohort grades, or removing observed-quote requirements.
+The production agent loop, retrieval adapters and budgets remain shared. Task
+selection, reference predicates and the policy must be frozen before live calls.
+
+Custom cohorts pass their task list to `manifest(..., task_pack=...)` and
+reuse `live`; the CLI retains its four default tasks. Registration snapshots
+the list, validates artifact identities, hashes its content and derives prompts
+once. Execution checks and consumes that registered list, including completion
+counts, rather than loading the default questions again. A changed task/prompt
+manifest is rejected before dispatch. Worker preflight also rejects a DDGS
+version that differs from the declared pin. These boundaries keep custom cohorts
+on the same execution and cleanup owners; no parallel evaluation loop is needed.
+
 Reference sources, checked 2026-10-21:
 
 - [Python 3.13 TaskGroup](https://docs.python.org/3.13/library/asyncio-task.html)

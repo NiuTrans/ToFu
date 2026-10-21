@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -37,12 +38,20 @@ def source_fingerprint(root):
                    for p in files})
 
 
-def manifest(root, model, provider, trials, timeout):
+def manifest(root, model, provider, trials, timeout, *, task_pack=None):
+    default_pack = task_pack is None
+    task_pack = json.loads(canonical(tasks() if default_pack else task_pack))
+    if not isinstance(task_pack, list) or not task_pack:
+        raise ValueError('A task pack must be a nonempty list')
+    identifiers = [task.get('id') if isinstance(task, dict) else None for task in task_pack]
+    if (any(not isinstance(name, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,95}', name)
+            for name in identifiers) or len(set(identifiers)) != len(identifiers)):
+        raise ValueError('A task pack needs unique, safe artifact identifiers')
     return {'contract': CONTRACT, 'diagnostic_only': True, 'leadership_claim': False,
-            'source_sha256': source_fingerprint(root), 'task_pack_sha256': digest(tasks()),
+            'source_sha256': source_fingerprint(root), 'task_pack_sha256': digest(task_pack),
             'tofu_source_sha256': python_tree_digest(root / 'packages/tofu-search/tofu_search'),
-            'reference_checked_on': '2026-10-21', 'tasks': tasks(),
-            'task_prompts': {task['id']: task_prompt(task) for task in tasks()},
+            'reference_checked_on': '2026-10-21' if default_pack else None, 'tasks': task_pack,
+            'task_prompts': {task['id']: task_prompt(task) for task in task_pack},
             'model': model, 'provider': provider, 'agent_config': agent_config(),
             'system': SYSTEM, 'tools': tool_schemas(timeout), 'trials': trials,
             'timeout_seconds': timeout, 'infrastructure_retries': 0,
@@ -58,13 +67,13 @@ def manifest(root, model, provider, trials, timeout):
             'network': 'one explicit proxy; TLS verified; no direct-path racing',
             'order': 'alternate arm order by task and repetition; sequential fresh workers',
             'seed': 20261021,
-            'acceptance': 'all exact fact values, primary hosts, observed quotations and '
+            'acceptance': 'all exact fact values, declared citation-host policies, observed quotations and '
                           'reference predicates; native task/model/tool provenance required',
-            'limitations': ['Four diagnostic tasks; no population or leadership inference.',
+            'limitations': [f'{len(task_pack)} diagnostic tasks; no population or leadership inference.',
                            'Retrieval comparison with common fetch, not two complete search products.',
                            'Reference predicates are not a semantic entailment judge.',
                            'JSON or one enclosing JSON fence is accepted; format compliance is separate.',
-                           'Museum references can change; revalidate before later cohorts.',
+                           'References can change; revalidate before later cohorts.',
                            'Client source is pinned; running application source is not certified.',
                            'Recorded model cost is application accounting, not an invoice.']}
 
@@ -275,11 +284,16 @@ def summarize(records, expected):
 
 
 async def live(args, root, registration, workers):
+    registered_tasks = json.loads(canonical(registration['tasks']))
+    if (digest(registered_tasks) != registration['task_pack_sha256'] or
+            {task['id']: task_prompt(task) for task in registered_tasks} != registration['task_prompts']):
+        raise ValueError('Registered task pack or prompts changed before execution')
     output = Artifacts(args.output)
     api = JsonAPI(args.origin, token=os.environ.get(args.api_token_env) if args.api_token_env else None)
     runtime = HTTPRuntime(api, registration['model'], args.provider)
     identities = {arm: workers.call(arm, 'identity', {}) for arm in ARMS}
     if (any('error' in receipt for receipt in identities.values())
+            or identities['ddgs'].get('identity', {}).get('ddgs') != DDGS_VERSION
             or identities['tofu'].get('identity', {}).get('tofu_source_sha256')
             != registration['tofu_source_sha256']):
         output.write('preflight_failure.json', identities)
@@ -291,7 +305,7 @@ async def live(args, root, registration, workers):
     records = []
     try:
         for trial in range(args.trials):
-            for index, task in enumerate(tasks()):
+            for index, task in enumerate(registered_tasks):
                 for arm in (ARMS if (trial + index) % 2 == 0 else ARMS[::-1]):
                     record = await run_one(runtime, workers, task, arm, trial,
                                            args.output / f'{trial}-{task["id"]}-{arm}', args.timeout)
@@ -304,7 +318,7 @@ async def live(args, root, registration, workers):
         try:
             runtime.close()
         finally:
-            summary = summarize(records, len(tasks()) * 2 * args.trials)
+            summary = summarize(records, len(registered_tasks) * 2 * args.trials)
             summary['source_unchanged'] = source_fingerprint(root) == registration['source_sha256']
             if not summary['source_unchanged']:
                 for pair in summary['pairs']:

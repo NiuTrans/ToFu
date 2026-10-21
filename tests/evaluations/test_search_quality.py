@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from evaluations.search_quality.contracts import (
-    ARMS, SYSTEM, agent_config, score, task_prompt, tasks, tool_schemas, url_key,
+    ARMS, DDGS_VERSION, SYSTEM, agent_config, score, task_prompt, tasks, tool_schemas, url_key,
 )
 from evaluations.search_quality.runner import (
     Workers, execute_tool, live, manifest, public_rounds, run_one, summarize,
@@ -99,6 +99,58 @@ def test_reference_requires_search_then_fetch_then_exact_observed_quote():
     assert not score(task, json.dumps(answer), calls[::-1])['passed']
     calls[-1]['accepted'] = False
     assert not score(task, json.dumps(answer), calls)['passed']
+
+
+@pytest.mark.parametrize('policy,passed', [('reference_hosts', False), ('observed_pages', True)])
+def test_citation_policy_separates_observed_evidence_from_reference_host_membership(policy, passed):
+    task, calls, answer = evidence()
+    task['citation_policy'] = policy
+    alternate = 'https://independent.example/reference'
+    calls[0]['output']['results'][0]['url'] = alternate
+    calls[1]['output']['url'] = alternate
+    for fact in answer.values():
+        fact['url'] = alternate
+
+    result = score(task, json.dumps(answer), calls)
+
+    assert result['passed'] is passed
+    assert result['citation_policy'] == policy
+    assert not result['retrieval']['primary_page_fetched']
+    assert all(not fact['primary_host'] for fact in result['facts'].values())
+    assert all(fact['citation_host_allowed'] is passed for fact in result['facts'].values())
+
+
+@pytest.mark.parametrize('fault', ['undiscovered', 'unfetched', 'failed_fetch', 'unaccepted',
+                                  'invented_quote', 'wrong_value', 'invalid_url'])
+def test_observed_page_policy_still_requires_successful_retrieval_and_literal_support(fault):
+    task, calls, answer = evidence()
+    task['citation_policy'] = 'observed_pages'
+    if fault == 'undiscovered':
+        calls.pop(0)
+    elif fault == 'unfetched':
+        calls.pop()
+    elif fault == 'failed_fetch':
+        calls[-1]['is_error'] = True
+    elif fault == 'unaccepted':
+        calls[-1]['accepted'] = False
+    elif fault == 'invented_quote':
+        answer['introduced']['quote'] = 'SQLite first offered JSONB in version 3.45.0.'
+    elif fault == 'wrong_value':
+        answer['introduced']['value'] = '3.46.0'
+    elif fault == 'invalid_url':
+        for fact in answer.values():
+            fact['url'] = 'file:///tmp/source'
+    assert not score(task, json.dumps(answer), calls)['passed']
+
+
+@pytest.mark.parametrize('policy', ['any', '', None, {}, []])
+def test_unknown_citation_policy_is_rejected_before_prompting_and_scoring(policy):
+    task, calls, answer = evidence()
+    task['citation_policy'] = policy
+    with pytest.raises(ValueError, match='citation policy'):
+        task_prompt(task)
+    with pytest.raises(ValueError, match='citation policy'):
+        score(task, json.dumps(answer), calls)
 
 
 @pytest.mark.parametrize('fault', ['wrong_value', 'fabricated_quote', 'host_collision',
@@ -361,6 +413,91 @@ def test_source_mismatch_stops_before_any_application_call(tmp_path, monkeypatch
     assert not (args.output / 'manifest.json').exists()
 
 
+def test_registered_task_pack_is_snapshotted_and_drives_actual_execution(tmp_path, monkeypatch):
+    from evaluations.search_quality import runner
+
+    selected = [evidence()[0]]
+    registration = manifest(ROOT, {'creator_id': 'test', 'model_id': 'model'}, 'test', 1, 30,
+                            task_pack=selected)
+    selected[0]['question'] = 'Changed by caller after registration'
+    assert registration['tasks'][0]['question'] != selected[0]['question']
+    seen, closed = [], []
+
+    class Worker:
+        proxy = ''
+        def call(self, arm, operation, *args, **kwargs):
+            assert operation == 'identity'
+            return {'identity': {'tofu_source_sha256': registration['tofu_source_sha256'],
+                                 'ddgs': DDGS_VERSION}}
+
+    runtime = SimpleNamespace(in_flight=0, close=lambda: closed.append(True))
+    monkeypatch.setattr(runner, 'HTTPRuntime', lambda *_a: runtime)
+    monkeypatch.setattr(runner, 'JsonAPI', lambda *_a, **_kw: SimpleNamespace(call=lambda *_a: {}))
+
+    async def execute(_runtime, _workers, task, arm, trial, _output, _timeout):
+        seen.append((task['id'], arm))
+        return {'task': task['id'], 'arm': arm, 'trial': trial, 'passed': True,
+                'provenance_valid': True, 'schema_fingerprints': ['shared'],
+                'seconds': 0, 'failure': None, 'cleanup_failure': None}
+
+    monkeypatch.setattr(runner, 'run_one', execute)
+    args = SimpleNamespace(output=tmp_path / 'cohort', origin='http://127.0.0.1:15000',
+                           api_token_env=None, provider='test', trials=1, timeout=30)
+    asyncio.run(live(args, ROOT, registration, Worker()))
+    assert seen == [(registration['tasks'][0]['id'], arm) for arm in ARMS]
+    assert closed == [True]
+    assert json.loads((args.output / 'summary.json').read_text())['complete']
+
+
+@pytest.mark.parametrize('fault', ['empty', 'duplicate', 'path_escape'])
+def test_task_pack_refuses_ambiguous_or_unsafe_artifact_identities(fault):
+    selected = [evidence()[0]]
+    if fault == 'empty':
+        selected = []
+    elif fault == 'duplicate':
+        selected *= 2
+    else:
+        selected[0]['id'] = '../escape'
+    with pytest.raises(ValueError, match='task pack'):
+        manifest(ROOT, {'creator_id': 'test', 'model_id': 'model'}, 'test', 1, 30,
+                 task_pack=selected)
+
+
+def test_changed_registered_tasks_stop_before_worker_or_application_creation(tmp_path, monkeypatch):
+    from evaluations.search_quality import runner
+
+    def forbidden(*_a, **_kw):
+        pytest.fail('Changed task pack must not dispatch')
+
+    registration = manifest(ROOT, {'creator_id': 'test', 'model_id': 'model'}, 'test', 1, 30)
+    registration['tasks'][0]['question'] = 'Changed after registration'
+    monkeypatch.setattr(runner, 'JsonAPI', forbidden)
+    args = SimpleNamespace(output=tmp_path / 'cohort')
+    with pytest.raises(ValueError, match='task pack'):
+        asyncio.run(live(args, ROOT, registration, SimpleNamespace(call=forbidden)))
+
+
+def test_ddgs_version_mismatch_stops_before_application_call(tmp_path, monkeypatch):
+    from evaluations.search_quality import runner
+    registration = manifest(ROOT, {'creator_id': 'test', 'model_id': 'model'}, 'test', 1, 30)
+
+    class API:
+        def call(self, *_a, **_kw):
+            pytest.fail('Mismatched retrieval version must not reach application')
+
+    class Worker:
+        def call(self, *_a, **_kw):
+            return {'identity': {'tofu_source_sha256': registration['tofu_source_sha256'],
+                                 'ddgs': 'wrong-version'}}
+
+    monkeypatch.setattr(runner, 'JsonAPI', lambda *_a, **_kw: API())
+    args = SimpleNamespace(output=tmp_path / 'cohort', origin='http://127.0.0.1:15000',
+                           api_token_env=None, provider='test', trials=1, timeout=30)
+    with pytest.raises(ValueError, match='identity preflight'):
+        asyncio.run(live(args, ROOT, registration, Worker()))
+    assert (args.output / 'preflight_failure.json').is_file()
+
+
 def test_unsettled_worker_stops_the_cohort_and_preserves_incomplete_summary(tmp_path, monkeypatch):
     from lib.project_mod.process_group import ProcessGroupRetirementError
     class API(ReplayAPI):
@@ -373,7 +510,8 @@ def test_unsettled_worker_stops_the_cohort_and_preserves_incomplete_summary(tmp_
         proxy = ''
         def call(self, arm, operation, *args, **kwargs):
             if operation == 'identity':
-                return {'identity': {'tofu_source_sha256': registration['tofu_source_sha256']}}
+                return {'identity': {'tofu_source_sha256': registration['tofu_source_sha256'],
+                                     'ddgs': DDGS_VERSION}}
             raise ProcessGroupRetirementError('Synthetic worker still alive')
     api = API()
     monkeypatch.setattr('evaluations.search_quality.runner.JsonAPI', lambda *a, **kw: api)

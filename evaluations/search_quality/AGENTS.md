@@ -1,13 +1,14 @@
 # Search quality diagnostic
 
-`contracts.py` owns frozen public questions, budgets and conservative evidence
-predicates. `runner.py` transports the native application API through the
+`contracts.py` owns default public questions, budgets, citation-host policies
+and conservative evidence predicates. `runner.py` registers frozen task packs
+and transports the native application API through the
 existing HTTPRuntime; `worker.py` executes disposable free retrieval operations.
 Read `README.md` for scope, invocation, cost interpretation and evidence limits.
 
 Changing questions, predicates, adapters or budgets starts a new cohort.
 Keep reference answers out of model prompts and equal tool schemas in both arms.
-Never promote these four tasks into a search leadership claim.
+Never promote these diagnostic cohorts into a search leadership claim.
 
 `source_corpus.py` pins external source annotations; `source_probe.py` reuses
 the disposable workers for a separate model-free coverage probe. Read
