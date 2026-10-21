@@ -7,6 +7,26 @@ optional, and deployment resources still belong to that caller. Provider
 documentation can inform local algorithms without making that provider a
 runtime dependency.
 
+## Admitting a free source
+
+**Problem:** a successful HTTP response can contain a structurally valid result
+list for another topic. The page title and search field can still echo the
+original query. Transport success, parsed result count and query echo therefore
+cannot establish useful search coverage.
+
+**Decision:** inspect received result content and preserve failed attempts when
+qualifying a new source, endpoint, region or transport. Compare representative
+queries on the same declared route and retain the original response evidence.
+A host alias that redirects to the same service is not an independent source;
+a different serialization of the same listings does not improve coverage.
+Keep transport outcomes separate from lexical uncertainty and factual support.
+Missing a benchmark's reference URL does not prove a result is irrelevant.
+
+**Alternatives rejected:** changing defaults from one successful request,
+treating query echo as a relevance check, or adding retry paths solely because
+another implementation lists them. Community implementations inform hypotheses;
+their availability claims still need verification on the intended route.
+
 ## Source URL fidelity
 
 Problem: Bing wraps organic result addresses in URL-safe Base64, while an
