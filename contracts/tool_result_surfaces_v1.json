@@ -92,6 +92,10 @@
     "formatPrefixes": ["trq1.", "trq2."],
     "viewTruncatedField": "outputTruncated"
   },
+  "artifactProjectionMatchGroups": {
+    "offsetsField": "offsets",
+    "sharedFields": ["text", "artifactRef", "path"]
+  },
   "reportFields": [
     "final_answer",
     "result",

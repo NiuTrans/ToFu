@@ -144,6 +144,35 @@ These are model-view payload savings for that sample, not whole-task cost or
 latency claims. The backend projection tests additionally verify retained
 original JSON, restart recovery, owner denial and unchanged next-page progress.
 
+**Repeated search excerpts.** Problem: neighboring hits can repeat the same
+quotation and source metadata, consuming the response budget and forcing the
+handler to re-query fewer hits. Decision: after canonical capture, the declared
+`artifactProjectionMatchGroups` model format groups only consecutive native
+matches with identical text, artifact reference and optional path. A group keeps
+those fields once and lists every original `offset` in `offsets`, preserving
+order, duplicate occurrences and exact integer spelling. Missing and empty paths
+remain distinct. An unknown match field, a reserved `offsets` field or an invalid
+path disables grouping for that match. Groups never cross source/path boundaries
+or intervening different matches; no neighboring quotations are stitched together.
+Expanding each group yields the exact original sequence. Canonical/decoded
+program results remain individual hits; cursors, gaps, coverage, media, batch
+indexes and errors retain their existing meanings and budget enforcement.
+
+Alternatives rejected: deduplicating hits loses occurrences; overlapping-window
+merging invents source alignment; page-level reference hoisting hides child
+identity. Grouping adds no store, cache or authority. Unknown result shapes retain
+their original projection. The tool declaration explains the local `offsets`
+representation, and canonical retention still supports recovery after compaction.
+
+Measurement used 24-hit plain and canonical sources on disposable SQLite and
+TofuDB authorities, following every continuation with a 20-hit page request.
+Exact `o200k_base` output totals fell from 7,061 to 1,931 tokens on SQLite and
+7,068 to 1,938 on TofuDB (72.6% combined). Bounded reads and one-hit pages kept their
+model output byte-for-byte. OpenAI, Responses and Anthropic request encodings
+preserved the exact projected content, including all grouped offsets and
+distinct sources; no provider request was sent. These are fixed-sample payload
+savings, not whole-task cost or latency claims.
+
 Verify both selected authorities with `tests/tools/test_tool_result_query_backends.py`,
 SQL cursor budgets with `tests/tools/test_tool_result_query_canonical.py`, and native
 artifact/migration neighbors. Task quote admission additionally verifies
