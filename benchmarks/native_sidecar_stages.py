@@ -71,7 +71,8 @@ def install_sidecar_stages(stack):
         if operation == 'turn.attempt.start':
             original_measured=measured
             def measured(*args, **kwargs):
-                import cProfile, pstats
+                import cProfile
+                import pstats
                 from pathlib import Path
                 profile=cProfile.Profile()
                 profile.enable()

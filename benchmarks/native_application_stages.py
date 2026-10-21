@@ -84,7 +84,7 @@ class Stages:
     def install(self,stack,provider):
         from lib import observability
         from lib.conversation_sync import task_start
-        from lib.tasks_pkg import spawn,native_prepared,native_terminal
+        from lib.tasks_pkg import native_prepared,native_terminal
         from lib.tasks_pkg.native_terminal import NativeTaskTerminalPolicy
         from lib.tasks_pkg.native_execution import NativeTaskRounds
         from lib.tasks_pkg.native_context import NativeContextPolicy
