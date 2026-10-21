@@ -1026,7 +1026,7 @@ const _toolGroupPorts = {
   markdown: (content) => renderMarkdown(content),
   cleanTranslation: (content) => typeof stripNoTranslateTags === 'function' ? stripNoTranslateTags(content) : content,
   renderLine: (round, searching) => _renderUnifiedToolLine(round, searching),
-  renderSwarm: (round, allRounds) => typeof _buildSwarmPanelHTML === 'function' ? _buildSwarmPanelHTML(round, allRounds) : null,
+  renderSwarm: (round, allRounds, inspectorAnchorHtml) => typeof _buildSwarmPanelHTML === 'function' ? _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) : null,
   renderProgram: (round) => programExecutionCardHtml(round, (key, _fallback, values) => t(key, values)),
   debugEnabled: () => typeof _featureFlags !== 'undefined' && !!_featureFlags.debug_mode,
   taskIdForRound: (round) => typeof _riTaskIdForRound === 'function' ? _riTaskIdForRound(round) : '',

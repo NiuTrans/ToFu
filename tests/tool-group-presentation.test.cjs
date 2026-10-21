@@ -152,6 +152,25 @@ test('settled long panels render the bounded tail, active panels preserve every 
   });
 });
 
+test('swarm debug anchor joins the panel header; no solo anchor row under the panel',()=>{
+  /* The anchor used to render as `.ri-tool-anchor-row`, a right-aligned strip
+   * UNDER the swarm panel. It now travels with the round into renderSwarm,
+   * which places it inside .sw-header-right. */
+  let receivedAnchor;
+  const ui=createToolGroupPresentation(ports({
+    debugEnabled:()=>true,
+    renderSwarm:(round,allRounds,anchor)=>{receivedAnchor=anchor;return `<div class="sw-panel"><div class="sw-header"><div class="sw-header-right">${anchor||''}</div></div></div>`;},
+  }));
+  const launch=round(3,{toolName:'spawn_agents',_swarm:true,_swarmAgents:[{id:'a'}],_taskId:'task-x',llmRound:2});
+  documentFor(ui.renderSlot(launch,[launch]),d=>{
+    assert.equal(d.querySelector('.ri-tool-anchor-row'),null,'no solo anchor row under the panel');
+    const anchor=d.querySelector('.sw-header-right .ri-tool-anchor');
+    assert.ok(anchor,'anchor inside the swarm header-right cluster');
+    assert.equal(anchor.dataset.riState,'task-x:3');
+  });
+  assert.ok(receivedAnchor&&receivedAnchor.includes('ri-tool-anchor'),'renderSwarm receives the anchor html');
+});
+
 test('inspector refs retain task/turn authority, escaped actions and bounded one-time diagnostics',()=>{
   let logs=0;const ui=createToolGroupPresentation(ports({debugEnabled:()=>true,debugLog:()=>logs++,taskIdForRound:()=> 'fallback'}));
   const r=round(1,{inspectorRef:{taskId:'task<unsafe>',roundNum:4,turn:'turn<unsafe>'}});

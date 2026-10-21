@@ -221,6 +221,10 @@ def test_shipped_css_has_no_negative_margin_overlay():
         f'.ri-tool-anchor floats over the row again: {body}')
     assert not re.search(r'opacity:\s*0[;,}]', body), (
         f'.ri-tool-anchor is hover-only again (opacity:0): {body}')
+    # The solo under-panel strip (.ri-tool-anchor-row) was retired when the
+    # swarm debug anchor moved into the panel header-right cluster. If the
+    # class ever comes back it must not be a zero-height overlay.
     row = re.search(r'\.ri-tool-anchor-row\{([^}]*)\}', css)
-    assert row and 'height:0' not in row.group(1), (
-        '.ri-tool-anchor-row is a zero-height overlay again')
+    if row:
+        assert 'height:0' not in row.group(1), (
+            '.ri-tool-anchor-row is a zero-height overlay again')

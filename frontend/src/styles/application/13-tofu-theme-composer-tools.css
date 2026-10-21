@@ -1327,21 +1327,27 @@
 [data-theme="tofu"] .sw-a-error .sw-a-phase-pill{color:#b23b2e;background:rgba(192,57,43,0.10);}
 
 /* ═══════════════════════════════════════════
-   ★ Tofu swarm PANEL — un-box the dashboard inside its round card
-   Root cause of the "white frame around a beige slab": the ptool redesign
-   (2026-07-08) made each round ONE #FFFDF9 card, but the swarm dashboard
-   still drew itself as a SECOND, darker filled card inside it (bg-secondary
-   + border + shadow, inset by margin) — boxes-in-boxes. Tofu now treats
-   .sw-panel as chrome-less content of its .ptool-turn: the round card is
-   the only frame; status reads from title/pill/progress accents in the
-   wagashi palette (kinako active / matcha complete / azuki failed), and
-   the dark-theme neon + white-alpha fills (invisible on cream) become
-   warm ink steps. Dark/light themes are untouched.
-   ═══════════════════════════════════════════ */
-[data-theme="tofu"] .sw-panel{background:transparent;border:none;box-shadow:none}
-[data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:2px 0}
-[data-theme="tofu"] .sw-panel.sw-active{border:none;box-shadow:none;animation:none}
-[data-theme="tofu"] .sw-header:hover{background:rgba(143,81,38,0.07)}
+   ★ Tofu swarm PANEL — a real paper card inside the conversation surface
+   The previous build (2026-07-08) un-boxed the dashboard entirely
+   (transparent, border-less, full-bleed), which left the header a sharp
+   beige slab flush against the paper — no boundary, no corner radius, and
+   the debug anchor stranded on its own right-aligned row underneath.
+   Tofu now draws .sw-panel as ONE quiet paper card: hairline border,
+   --radius-sm corners, one soft clay shadow; status still reads from
+   title/pill/progress accents in the wagashi palette (kinako active /
+   matcha complete / azuki failed). Dark/light themes are untouched. */
+[data-theme="tofu"] .sw-panel{
+  background:#FFFEFA;
+  border:1px solid #E2D5BB;
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);
+  overflow:hidden;
+}
+[data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:var(--space-1) 0}
+[data-theme="tofu"] .sw-panel.sw-active{border-color:#E2D5BB;box-shadow:var(--clay-sm),0 2px 8px rgba(92,72,44,0.05);animation:none}
+[data-theme="tofu"] .sw-header{border-bottom:1px solid rgba(196,149,106,0.16)}
+[data-theme="tofu"] .sw-panel.sw-collapsed .sw-header{border-bottom:none}
+[data-theme="tofu"] .sw-header:hover{background:rgba(143,81,38,0.05)}
 [data-theme="tofu"] .sw-header-icon{color:#B8884A}
 [data-theme="tofu"] .sw-complete .sw-header-icon{color:#5E8A50}
 [data-theme="tofu"] .sw-header-title{color:#7A441F}

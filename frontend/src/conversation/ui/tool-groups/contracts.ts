@@ -26,7 +26,7 @@ export interface ToolGroupPorts {
   markdown(content: string): string;
   cleanTranslation(content: string): string;
   renderLine(round: ToolGroupRound, searching: boolean): string;
-  renderSwarm(round: ToolGroupRound, allRounds: readonly ToolGroupRound[]): string | null;
+  renderSwarm(round: ToolGroupRound, allRounds: readonly ToolGroupRound[], inspectorAnchorHtml?: string): string | null;
   renderProgram(round: ToolGroupRound): string;
   debugEnabled(): boolean;
   taskIdForRound(round: ToolGroupRound): string;
