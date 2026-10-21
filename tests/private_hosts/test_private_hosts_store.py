@@ -60,7 +60,7 @@ def _isolated_store():
     (_GW.upper(), _GW),
     (f'{_GW}:443', _GW),
     (f'{_GW}.', _GW),
-    ('  example-corp.com  ', 'example-corp.com'),
+    ('  internal.example.com  ', 'internal.example.com'),
     ('http://user:pw@host.example.com/x', 'host.example.com'),
 ])
 def test_normalize_accepts_what_users_paste(_isolated_store, raw, expected):
@@ -105,7 +105,7 @@ def test_upsert_then_enabled_hosts(_isolated_store):
 def test_new_entry_defaults_to_enabled(_isolated_store):
     """Adding a host IS the statement of intent — no second switch to flip."""
     ph = _isolated_store
-    assert ph.upsert_host('example-corp.com')['enabled'] is True
+    assert ph.upsert_host('internal.example.com')['enabled'] is True
 
 
 def test_toggle_and_delete_are_normalization_insensitive(_isolated_store):
@@ -126,17 +126,17 @@ def test_toggle_unknown_host_returns_false(_isolated_store):
 
 def test_disabled_entry_is_not_handed_to_the_fetcher(_isolated_store):
     ph = _isolated_store
-    ph.upsert_host('example-corp.com', enabled=False)
+    ph.upsert_host('internal.example.com', enabled=False)
     assert ph.list_hosts()[0]['enabled'] is False
     assert ph.enabled_hosts() == set(), 'a disabled row must not exempt anything'
 
 
 def test_survives_reload_from_disk(_isolated_store):
     ph = _isolated_store
-    ph.upsert_host('example-corp.com')
+    ph.upsert_host('internal.example.com')
     ph._cache_loaded = False
     ph._cache.clear()
-    assert ph.enabled_hosts() == {'example-corp.com'}
+    assert ph.enabled_hosts() == {'internal.example.com'}
 
 
 def test_unusable_stored_row_is_dropped_on_load(_isolated_store):
@@ -163,15 +163,15 @@ def _sync_kwargs(env=None):
 
 
 def test_store_feeds_the_search_config(_isolated_store):
-    _isolated_store.upsert_host('example-corp.com')
-    assert set(_sync_kwargs()['allow_private_hosts']) == {'example-corp.com'}
+    _isolated_store.upsert_host('internal.example.com')
+    assert set(_sync_kwargs()['allow_private_hosts']) == {'internal.example.com'}
 
 
 def test_store_wins_over_env(_isolated_store):
     """Settings is authoritative; env must not override a configured store."""
-    _isolated_store.upsert_host('example-corp.com')
+    _isolated_store.upsert_host('internal.example.com')
     kw = _sync_kwargs({'TOFU_SEARCH_ALLOW_PRIVATE_HOSTS': 'other.example.com'})
-    assert set(kw['allow_private_hosts']) == {'example-corp.com'}
+    assert set(kw['allow_private_hosts']) == {'internal.example.com'}
 
 
 def test_env_still_works_as_a_bootstrap_fallback(_isolated_store):
@@ -198,7 +198,7 @@ def test_unreadable_store_fails_closed(_isolated_store):
 def test_allowlisting_a_host_grants_no_credentials(_isolated_store):
     """Reachability must not imply a login."""
     from lib.auth_sources import match_source
-    _isolated_store.upsert_host('example-corp.com')
+    _isolated_store.upsert_host('internal.example.com')
     assert match_source(f'https://{_GW}/ml/x') is None, (
         'an allowlist entry must NOT register an auth source')
 
@@ -210,7 +210,7 @@ def test_private_host_store_exposes_no_credential_surface(_isolated_store):
     for name in ph.__all__:
         low = name.lower()
         assert not any(b in low for b in banned), f'{name} mixes gates'
-    for row in (ph.upsert_host('example-corp.com'), *ph.list_hosts()):
+    for row in (ph.upsert_host('internal.example.com'), *ph.list_hosts()):
         for key in row:
             assert not any(b in key.lower() for b in banned), f'{key} mixes gates'
 
@@ -222,7 +222,7 @@ def test_auth_source_does_not_grant_an_ssrf_exemption(_isolated_store):
     # migration (docs/SITE_PACKS.md).
     from lib.auth_sources import _static_catalog
     catalog = {d['domain'] for d in _static_catalog()}
-    assert 'example-corp.com' in catalog, 'precondition: the domain is in the auth catalog'
+    assert 'internal.example.com' in catalog, 'precondition: the domain is in the auth catalog'
     # It is in the CREDENTIAL catalog, yet grants no reachability by itself.
     assert _isolated_store.enabled_hosts() == set()
     assert set(_sync_kwargs()['allow_private_hosts']) == set()

@@ -25,7 +25,7 @@ def test_unknown_new_catalogue_models_are_not_fabricated():
         }
 
 
-def test_sankuai_catalog_models_promoted_to_vendor_windows():
+def test_example_corp_catalog_models_promoted_to_vendor_windows():
     """2026-08-14 owner-approved promotion: vendor-documented windows moved
     from the runtime-data backfill into static knowledge, so fresh installs
     and template setups resolve them without a seeded server_config."""
@@ -61,7 +61,7 @@ def test_sankuai_catalog_models_promoted_to_vendor_windows():
 
 def test_deepseek_v4_flash_line_resolves_across_every_spelling():
     """2026-09-21 regression: the catalogue identity ``deepseek-v4.1-flash``
-    — the id the Meituan bundle registers and the live sinkuai route serves —
+    — the id the YourProvider bundle registers and the live sinkuai route serves —
     resolved to the 128K DeepSeek family estimate, so the Context Health Bar
     showed a 128K window (and went 'hot' at ~115K) while the same route
     enforced 1M. The rule was spelled as the needles 'deepseek-flash' /
@@ -77,7 +77,7 @@ def test_deepseek_v4_flash_line_resolves_across_every_spelling():
                   'deepseek-v41-flash',         # unseparated run
                   'deepseek-v4-flash',          # legacy wire spelling
                   'deepseek-v4-flash-huawei', 'deepseek-v4-flash-tencent',
-                  'deepseek-v4-flash-meituan',
+                  'deepseek-v4-flash-yourprovider',
                   'deepseek-v4-flash-vision-exp',
                   'deepseek-flash'):            # versionless canonical id
         assert context_profile(model) == {
@@ -98,7 +98,7 @@ def test_deepseek_v3_line_keeps_the_family_estimate():
     line's canonical (current-generation) id."""
     from lib.model_info import context_profile
 
-    for model in ('deepseek-v3.2', 'deepseek-v3-0324', 'deepseek-v31-meituan',
+    for model in ('deepseek-v3.2', 'deepseek-v3-0324', 'deepseek-v31-yourprovider',
                   'deepseek-chat', 'deepseek-reasoner', 'deepseek-r1-0528',
                   'deepseek-r1-flash'):
         assert context_profile(model) == {
@@ -213,16 +213,16 @@ def test_stale_expand_never_pins_below_static_window(monkeypatch):
     import lib.context_limits as limits
     from lib.model_info import resolved_context_profile
 
-    monkeypatch.setattr(limits, '_LEARNED', {'sankuai::kimi-k3': 383_727})
+    monkeypatch.setattr(limits, '_LEARNED', {'example-corp::kimi-k3': 383_727})
     monkeypatch.setattr(limits, '_META', {
-        'sankuai::kimi-k3': {'source': 'expand', 'ts': 0, 'strikes': 0},
+        'example-corp::kimi-k3': {'source': 'expand', 'ts': 0, 'strikes': 0},
     })
-    assert resolved_context_profile('kimi-k3', 'sankuai') == {
+    assert resolved_context_profile('kimi-k3', 'example-corp') == {
         'window': 1_000_000, 'source': 'repository_verified', 'exact': True,
     }
     # An expand ABOVE static still surfaces (the gateway really accepted more).
-    monkeypatch.setattr(limits, '_LEARNED', {'sankuai::claude-opus-5': 1_110_553})
-    assert resolved_context_profile('claude-opus-5', 'sankuai')['window'] == 1_110_553
+    monkeypatch.setattr(limits, '_LEARNED', {'example-corp::claude-opus-5': 1_110_553})
+    assert resolved_context_profile('claude-opus-5', 'example-corp')['window'] == 1_110_553
 
 
 def test_per_model_policy_assembled_from_routing_v2(monkeypatch):
@@ -239,7 +239,7 @@ def test_per_model_policy_assembled_from_routing_v2(monkeypatch):
     monkeypatch.setattr(limits, '_META', {})
     document = {
         'provider_accesses': [
-            {'provider_access_id': 'acc-1', 'provider_id': 'sankuai'},
+            {'provider_access_id': 'acc-1', 'provider_id': 'example-corp'},
             {'provider_access_id': 'acc-2', 'provider_id': 'other'},
         ],
         'offerings': [
@@ -258,16 +258,16 @@ def test_per_model_policy_assembled_from_routing_v2(monkeypatch):
     }
     per_model = _per_model_context_from_routing(document)
 
-    scoped = per_model['sankuai::kimi-k3']
+    scoped = per_model['example-corp::kimi-k3']
     assert scoped == {
         'window': 1_000_000, 'source': 'repository_verified', 'exact': True,
     }
     assert per_model['kimi-k3'] is scoped          # bare alias, first-wins
     assert per_model['other::kimi-k3'] is not scoped
-    assert per_model['sankuai::future-model-x'] == {
+    assert per_model['example-corp::future-model-x'] == {
         'window': 777_000, 'source': 'offering', 'exact': True,
     }
-    assert 'sankuai::retired-model' not in per_model
+    assert 'example-corp::retired-model' not in per_model
     assert 'retired-model' not in per_model
 
 
@@ -370,9 +370,9 @@ global.getConvById = () => ({
   messages: [{role: 'assistant', usage: {prompt_tokens: 50000}}],
 });
 global.activeConvId = 'c1';
-const perModel = {'sankuai::kimi-k3': {window: 1000000, source: 'repository_verified', exact: true}};
+const perModel = {'example-corp::kimi-k3': {window: 1000000, source: 'repository_verified', exact: true}};
 if (process.env.WITH_BARE_ALIAS === '1') {
-  perModel['kimi-k3'] = perModel['sankuai::kimi-k3'];
+  perModel['kimi-k3'] = perModel['example-corp::kimi-k3'];
 }
 global._contextPolicy = {per_model: perModel};
 global.runtimeScope.ConversationTurnRead = {

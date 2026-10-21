@@ -45,9 +45,9 @@ def test_model_switch_composer_stays_visible(frontend_visual_page, theme, width,
     expect(notice).to_contain_text('切换原因：generic: SSE error: cyber_policy')
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     page.evaluate("""()=>{turn=JSON.parse(JSON.stringify(turn));view.mainLane.turns=[turn];turn.status='completed';
-      turn.source.projection.lastRoundUsage={model:'kimi-k3',resolvedModel:'kimi-k3',providerId:'sankuai'};paint()}""")
+      turn.source.projection.lastRoundUsage={model:'kimi-k3',resolvedModel:'kimi-k3',providerId:'example-corp'};paint()}""")
     expect(notice).to_be_visible()
-    expect(notice).to_contain_text('实际模型：kimi-k3 · sankuai')
+    expect(notice).to_contain_text('实际模型：kimi-k3 · example-corp')
     page.screenshot(path=str(tmp_path/f'model-switch-{theme}-{width}.png'))
     page.evaluate("delete turn.metadata.fallback;paint()")
     expect(notice).to_have_count(0)

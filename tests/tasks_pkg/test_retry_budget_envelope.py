@@ -50,7 +50,7 @@ def _fresh_task(*, phase_counter: int | None = None) -> dict:
     return t
 
 
-def _zero_byte_usage(elapsed_ms: int = 4500, *, key='sankuai_key_0',
+def _zero_byte_usage(elapsed_ms: int = 4500, *, key='example_corp_key_0',
                      model='aws.claude-opus-4.7'):
     return {
         '_stream_anomaly': True,
@@ -62,7 +62,7 @@ def _zero_byte_usage(elapsed_ms: int = 4500, *, key='sankuai_key_0',
         'trace_id': 'M-BUDGET-TEST',
         'resp_trace_id': 'r-budget-1',
         'stream_elapsed_ms': elapsed_ms,
-        '_dispatch': {'key': key, 'model': model, 'provider_id': 'sankuai'},
+        '_dispatch': {'key': key, 'model': model, 'provider_id': 'example-corp'},
     }
 
 
@@ -195,10 +195,10 @@ def test_zero_byte_writes_force_rotate_pair():
         round_num=0,
         _premature_retry_count=0,
         messages=[],
-        usage=_zero_byte_usage(key='sankuai_key_0', model='aws.claude-opus-4.7'),
+        usage=_zero_byte_usage(key='example_corp_key_0', model='aws.claude-opus-4.7'),
     )
     assert decision['action'] == 'continue'
-    assert task.get('_force_rotate_pair') == ('sankuai_key_0', 'aws.claude-opus-4.7')
+    assert task.get('_force_rotate_pair') == ('example_corp_key_0', 'aws.claude-opus-4.7')
 
 
 def test_classic_premature_close_retries_on_another_slot():
@@ -225,12 +225,12 @@ def test_classic_premature_close_retries_on_another_slot():
             '_missing_finish_reason': True,
             'trace_id': 'M-CLASSIC',
             'stream_elapsed_ms': 30000,
-            '_dispatch': {'key': 'sankuai_key_0', 'model': 'aws.claude-opus-4.7'},
+            '_dispatch': {'key': 'example_corp_key_0', 'model': 'aws.claude-opus-4.7'},
         },
     )
     assert decision['action'] == 'continue'
     assert task.get('_force_rotate_pair') == (
-        'sankuai_key_0', 'aws.claude-opus-4.7')
+        'example_corp_key_0', 'aws.claude-opus-4.7')
 
 
 def test_classic_premature_close_retries_up_to_16():

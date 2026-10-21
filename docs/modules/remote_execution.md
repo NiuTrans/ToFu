@@ -186,7 +186,7 @@ parity under `tests/desktop_dist/`, remote worktree routing under `tests/tasks_p
 and `tests/tools/`, and asynchronous polling under `tests/browser/`.
 
 Hope large-checkpoint publication is owned by the private environment provider's
-[Worker result publication contract](../../bundles/meituan/environment-provider/README.md#worker-result-publication).
+[Worker result publication contract](../../bundles/yourprovider/environment-provider/README.md#worker-result-publication).
 Problem: sequential transport prevented a real 25.5 GB research checkpoint from
 being delivered. Decision: admit an optional host-pinned Java6 uploader into the
 source seal, preserving actor/operation destinations, one publication intent,

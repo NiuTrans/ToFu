@@ -20,7 +20,7 @@ from scripts import rootless_terminal_bench_21 as bench
 
 
 pytestmark = pytest.mark.unit
-MODEL = "deepseek-v4-flash-meituan"
+MODEL = "deepseek-v4-flash-yourprovider"
 
 
 def _config_args(

@@ -165,7 +165,7 @@ class LiveConformanceTest(unittest.TestCase):
             compiled = await cli.post(
                 '/api/v1/providers/templates/compile',
                 headers=headers,
-                json={'template_key': 'meituan',
+                json={'template_key': 'yourprovider',
                       'selected_model_ids': ['LongCat-2.0']},
             )
             self.assertEqual(

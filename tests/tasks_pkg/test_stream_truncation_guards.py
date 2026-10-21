@@ -807,7 +807,7 @@ class TestAsyncProxyFor(unittest.TestCase):
 
     # Fictional pair on purpose: the bypass host and the URL host must keep
     # their suffix relationship through the opensource export sanitizer — a
-    # real internal pair (your-llm-gateway.example.com + example-corp.com) gets rewritten
+    # real internal pair (your-llm-gateway.example.com + internal.example.com) gets rewritten
     # INDEPENDENTLY (host → api.openai.com, suffix → example-corp.com) and
     # the exported test then fails deterministically on CI while passing
     # locally. 'corp-example.internal' survives every rewrite rule verbatim.

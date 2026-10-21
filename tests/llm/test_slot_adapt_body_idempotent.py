@@ -12,9 +12,9 @@ shared body for a different slot: a Gemini attempt bakes
 ``tool_calls[0].extra_content.google.thought_signature`` into a PREFIX
 tool_call, then the recovered Claude attempt re-serializes the polluted prefix
 → different wire bytes → prompt-cache key shift → full prefix miss. On the
-OpenAI transport path (sankuai gateway, ``api_protocol='openai'``) the body is
+OpenAI transport path (example-corp gateway, ``api_protocol='openai'``) the body is
 serialized VERBATIM (no Anthropic allowlist rebuild), so the pollution reaches
-the wire — matching mrne3bqe (aws.claude-opus-4.8 via sankuai) hitting 503→429
+the wire — matching mrne3bqe (aws.claude-opus-4.8 via example-corp) hitting 503→429
 slot swaps at R4/R5.
 
 Fix: deep-copy ``body['messages']`` before model families that perform per-slot
@@ -42,7 +42,7 @@ _MODEL = 'aws.claude-opus-4.8'
 
 
 class _Slot:
-    def __init__(self, model, provider_id='sankuai', thinking_format='',
+    def __init__(self, model, provider_id='default', thinking_format='',
                  protocol='', responses_profile=''):
         self.model = model
         self.provider_id = provider_id
@@ -76,7 +76,7 @@ def _history():
 def _prebuilt_body():
     body = build_body(_MODEL, _history(), max_tokens=2048, thinking_enabled=True,
                       thinking_depth='medium', tools=_tools(), stream=True,
-                      provider_id='sankuai')
+                      provider_id='default')
     body['_task_id'] = 'taskX'
     return body
 

@@ -24,7 +24,7 @@ class HarborRunSpec:
     state_root: Path
     prepared_cache_root: Path
     jobs_dir: Path
-    model: str = "deepseek-v4-flash-meituan"
+    model: str = "deepseek-v4-flash-yourprovider"
     harness: str = "tofu"
     allow_guest_credentials: bool = False
     python_runtime_image: str | None = None

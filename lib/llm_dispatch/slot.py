@@ -211,7 +211,7 @@ class Slot:
     # Gateway-class outages (HTTP 502/503/504, upstream-vendor transients
     # wrapped in 4xx, mid-stream SSE errors). Counted separately for the
     # same reason: a gateway storm hits EVERY key on the provider
-    # uniformly, so it says nothing about key health (2026-08-03 sankuai
+    # uniformly, so it says nothing about key health (2026-08-03 example-corp
     # 502 storm: 813 such failures crushed the daily key-card success
     # rates to 40%/77%/10% and auto-disabled 2 of 3 healthy keys).
     gateway_errors: int = 0
@@ -473,11 +473,11 @@ class Slot:
                 not briefly cooled down and retried.
             is_account_quota: True when the quota signal is HTTP 402 Payment
                 Required — the gateway ACCOUNT's own credit pool is empty
-                (sankuai body: ext.error.source=AIGC, stage=validation), so
+                (example-corp body: ext.error.source=AIGC, stage=validation), so
                 EVERY model on this key is dead and the honest stop is the
                 key-wide ``exhausted`` flag. Per-model convergence there
                 just burns one live 402 per remaining model (2026-07-29
-                sankuai_key_2: 12 of 43 model entries stopped, ~30 more
+                example_corp_key_2: 12 of 43 model entries stopped, ~30 more
                 live 402s queued for real users). A 429+insufficient_quota
                 body stays VENDOR-AMBIGUOUS and keeps per-model granularity
                 (2026-07-28 aggregating-gateway contract).
@@ -598,7 +598,7 @@ class Slot:
             pass
         elif is_gateway:
             # Gateway-class outage — own daily counter ONLY. Feeding the
-            # failure stats here is what crushed all three sankuai key
+            # failure stats here is what crushed all three example-corp key
             # cards and auto-disabled two of them during the 2026-08-03
             # 502 storm; feeding the 429 streak would equally misattribute
             # an upstream outage to per-key contention.
