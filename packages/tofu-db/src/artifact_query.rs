@@ -56,6 +56,7 @@ pub(crate) fn failure_classification(error: &io::Error) -> Option<(&'static str,
 fn signed_cursor(raw: &str) -> bool {
     raw.split_once('.').is_some_and(|(prefix, _)| {
         Some(prefix) == CONTRACT["cursor"]["currentPrefix"].as_str()
+            || Some(prefix) == CONTRACT["cursor"]["previousPrefix"].as_str()
             || Some(prefix) == CONTRACT["cursor"]["legacyPrefix"].as_str()
     })
 }
@@ -264,12 +265,110 @@ struct Position {
     expiry: u64,
     partial: bool,
 }
-fn scoped_mac(key: &[u8], binding: &Value, bytes: &[u8]) -> io::Result<Hmac<Sha256>> {
+fn position_bytes(position: &Position) -> Vec<u8> {
+    let policy = &CONTRACT["cursor"]["positionEncoding"];
+    let mut values = vec![
+        policy["byteOffsetFlag"].as_u64().unwrap()
+            | if position.partial {
+                policy["partialFlag"].as_u64().unwrap()
+            } else {
+                0
+            },
+        position.r.len() as u64,
+    ];
+    values.extend(position.r.iter().map(|n| *n as u64));
+    for field in policy["fields"].as_array().unwrap() {
+        values.push(match field.as_str().unwrap() {
+            "p" => position.p as u64,
+            "b" => position.b as u64,
+            "o" => position.o as u64,
+            "skip" => position.skip as u64,
+            "expiry" => position.expiry,
+            _ => unreachable!("declared position field"),
+        });
+    }
+    let mut bytes = Vec::with_capacity(values.len());
+    for mut value in values {
+        while value >= 128 {
+            bytes.push((value as u8 & 127) | 128);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+    }
+    bytes
+}
+
+fn position_from_bytes(bytes: &[u8]) -> io::Result<Position> {
+    let fail = || query_failure("invalid_cursor", "Invalid continuation cursor");
+    let mut offset = 0;
+    let mut integer = || -> io::Result<u64> {
+        let mut value = 0;
+        for shift in (0..64).step_by(7) {
+            let byte = *bytes.get(offset).ok_or_else(fail)?;
+            offset += 1;
+            if (shift == 63 && byte > 1) || (shift != 0 && byte == 0) {
+                return Err(fail());
+            }
+            value |= u64::from(byte & 127) << shift;
+            if byte & 128 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(fail())
+    };
+    let policy = &CONTRACT["cursor"]["positionEncoding"];
+    let partial = policy["partialFlag"].as_u64().unwrap();
+    let byte_offset = policy["byteOffsetFlag"].as_u64().unwrap();
+    let flags = integer()?;
+    let count = usize::try_from(integer()?).map_err(|_| fail())?;
+    if flags & !(partial | byte_offset) != 0
+        || flags & byte_offset == 0
+        || count > bound("depth") + 1
+    {
+        return Err(fail());
+    }
+    let mut position = Position {
+        partial: flags & partial != 0,
+        ..Position::default()
+    };
+    for _ in 0..count {
+        position
+            .r
+            .push(usize::try_from(integer()?).map_err(|_| fail())?);
+    }
+    for field in policy["fields"].as_array().unwrap() {
+        let value = integer()?;
+        if field == "expiry" {
+            position.expiry = value;
+            continue;
+        }
+        let value = usize::try_from(value).map_err(|_| fail())?;
+        match field.as_str().unwrap() {
+            "p" => position.p = value,
+            "b" => position.b = value,
+            "o" => position.o = value,
+            "skip" => position.skip = value,
+            _ => unreachable!("declared position field"),
+        }
+    }
+    if offset != bytes.len() {
+        return Err(fail());
+    }
+    Ok(position)
+}
+
+fn scoped_mac(
+    key: &[u8],
+    binding: &Value,
+    bytes: &[u8],
+    previous: bool,
+) -> io::Result<Hmac<Sha256>> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key).map_err(|_| invalid_data("Invalid cursor key"))?;
-    let domain = CONTRACT["cursor"]["authentication"]["domain"]
-        .as_str()
-        .expect("cursor signing domain");
+    let domain = CONTRACT["cursor"]["authentication"]
+        [if previous { "previousDomain" } else { "domain" }]
+    .as_str()
+    .expect("cursor signing domain");
     mac.update(domain.as_bytes());
     mac.update(b"\0");
     mac.update(&encode(binding)?);
@@ -278,8 +377,10 @@ fn scoped_mac(key: &[u8], binding: &Value, bytes: &[u8]) -> io::Result<Hmac<Sha2
     Ok(mac)
 }
 fn sign(key: &[u8], binding: &Value, position: &Position) -> io::Result<String> {
-    let bytes = encode(position)?;
-    let signature = scoped_mac(key, binding, &bytes)?.finalize().into_bytes();
+    let bytes = position_bytes(position);
+    let signature = scoped_mac(key, binding, &bytes, false)?
+        .finalize()
+        .into_bytes();
     let prefix = CONTRACT["cursor"]["currentPrefix"]
         .as_str()
         .expect("current cursor prefix");
@@ -334,32 +435,38 @@ fn decode(
     if split.next().is_some() {
         return Err(fail());
     }
-    let position: Position = if Some(prefix) == CONTRACT["cursor"]["currentPrefix"].as_str() {
-        let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| fail())?;
-        scoped_mac(key, binding, &bytes)?
-            .verify_slice(&signature)
-            .map_err(|_| fail())?;
-        serde_json::from_slice(&bytes).map_err(|_| fail())?
-    } else if Some(prefix) == CONTRACT["cursor"]["legacyPrefix"].as_str() {
-        if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let previous = Some(prefix) == CONTRACT["cursor"]["previousPrefix"].as_str();
+    let position: Position =
+        if previous || Some(prefix) == CONTRACT["cursor"]["currentPrefix"].as_str() {
+            let signature = URL_SAFE_NO_PAD.decode(signature).map_err(|_| fail())?;
+            scoped_mac(key, binding, &bytes, previous)?
+                .verify_slice(&signature)
+                .map_err(|_| fail())?;
+            if previous {
+                serde_json::from_slice(&bytes).map_err(|_| fail())?
+            } else {
+                position_from_bytes(&bytes)?
+            }
+        } else if Some(prefix) == CONTRACT["cursor"]["legacyPrefix"].as_str() {
+            if signature.len() != 64 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(fail());
+            }
+            let signature: Vec<u8> = (0..64)
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&signature[i..i + 2], 16).map_err(|_| fail()))
+                .collect::<io::Result<_>>()?;
+            let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| fail())?;
+            mac.update(&bytes);
+            mac.verify_slice(&signature).map_err(|_| fail())?;
+            let (scope, position): (Value, Position) =
+                serde_json::from_slice(&bytes).map_err(|_| fail())?;
+            if scope != *binding {
+                return Err(fail());
+            }
+            position
+        } else {
             return Err(fail());
-        }
-        let signature: Vec<u8> = (0..64)
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&signature[i..i + 2], 16).map_err(|_| fail()))
-            .collect::<io::Result<_>>()?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| fail())?;
-        mac.update(&bytes);
-        mac.verify_slice(&signature).map_err(|_| fail())?;
-        let (scope, position): (Value, Position) =
-            serde_json::from_slice(&bytes).map_err(|_| fail())?;
-        if scope != *binding {
-            return Err(fail());
-        }
-        position
-    } else {
-        return Err(fail());
-    };
+        };
     if position.r.len() > bound("depth") + 1 || position.r.iter().any(|i| *i >= bound("scanNodes"))
     {
         return Err(fail());
@@ -943,7 +1050,10 @@ mod tests {
             current,
             fixture["native"]["currentCursor"].as_str().unwrap()
         );
-        for version in ["legacyCursor", "currentCursor"] {
+        assert!(
+            current.len() * 100 < fixture["native"]["previousCursor"].as_str().unwrap().len() * 60
+        );
+        for version in ["legacyCursor", "previousCursor", "currentCursor"] {
             let cursor = &fixture["native"][version];
             assert_eq!(decode(&key, binding, cursor, true, now).unwrap(), position);
             assert!(decode(&[255; 32], binding, cursor, true, now).is_err());
@@ -968,7 +1078,7 @@ mod tests {
         assert!(decode(
             &key,
             binding,
-            &json!(current.replacen("trq2.", "trq1.", 1)),
+            &json!(current.replacen("trq3.", "trq2.", 1)),
             true,
             now,
         )
@@ -979,6 +1089,55 @@ mod tests {
         };
         let signed = sign(&key, binding, &invalid).unwrap();
         assert!(decode(&key, binding, &json!(signed), true, now).is_err());
+    }
+
+    #[test]
+    fn compact_positions_reject_authenticated_malformed_bytes() {
+        let fixture = cursor_vectors();
+        let key: Vec<u8> = serde_json::from_value(fixture["keyBytes"].clone()).unwrap();
+        let binding = &fixture["binding"];
+        for raw in fixture["native"]["invalidPositionBytesHex"]
+            .as_array()
+            .unwrap()
+        {
+            let raw = raw.as_str().unwrap();
+            let bytes: Vec<u8> = (0..raw.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&raw[i..i + 2], 16).unwrap())
+                .collect();
+            let mac = scoped_mac(&key, binding, &bytes, false)
+                .unwrap()
+                .finalize()
+                .into_bytes();
+            let token = format!(
+                "trq3.{}.{}",
+                URL_SAFE_NO_PAD.encode(&bytes),
+                URL_SAFE_NO_PAD.encode(mac)
+            );
+            assert!(
+                decode(&key, binding, &json!(token), true, 0).is_err(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_positions_keep_large_offsets_and_partial_state() {
+        for value in [0, 127, 128, 16383, 16384, u32::MAX as usize, usize::MAX] {
+            let position = Position {
+                r: vec![127; 9],
+                p: value,
+                b: value,
+                o: value,
+                skip: value,
+                expiry: u64::MAX,
+                partial: true,
+            };
+            assert_eq!(
+                position_from_bytes(&position_bytes(&position)).unwrap(),
+                position
+            );
+        }
     }
 
     fn put(database: &mut AuthorityDatabase, text: &str, media: &str) -> String {

@@ -174,7 +174,7 @@ def test_unknown_tool_does_not_gain_artifact_projection():
 @pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
 @pytest.mark.parametrize('more_pages', [False, True])
 @pytest.mark.parametrize('coverage', ['complete', 'incomplete'])
-@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.', 'trq3.'])
 def test_exact_page_omits_replay_cursor_without_changing_evidence_or_continuation(
         name, more_pages, coverage, prefix):
     value = page(name, resumeCursor=prefix + 'opaque-original.signature',
@@ -193,14 +193,14 @@ def test_exact_page_omits_replay_cursor_without_changing_evidence_or_continuatio
 
 
 @pytest.mark.parametrize('clipped', [True, None, 'false', 0, {}])
-@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.', 'trq3.'])
 def test_clipped_or_unknown_view_state_keeps_exact_replay_cursor(clipped, prefix):
     value = page(resumeCursor=prefix + 'opaque-original.signature', outputTruncated=clipped)
     result = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
     assert result['resumeCursor'] == value['resumeCursor']
 
 
-@pytest.mark.parametrize('cursor', ['0', 'future-v2.opaque', 'trq3.future', '', None, {'cursor': 'opaque'}])
+@pytest.mark.parametrize('cursor', ['0', 'future-v2.opaque', 'trq4.future', '', None, {'cursor': 'opaque'}])
 def test_unsigned_or_unknown_replay_cursor_is_not_interpreted(cursor):
     value = page(resumeCursor=cursor)
     result = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
