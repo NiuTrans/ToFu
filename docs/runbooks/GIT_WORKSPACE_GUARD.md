@@ -575,27 +575,53 @@ observed median **0.017 ms**, maximum **0.027 ms**; not a network-volume guarant
   `CDPATH` with a relative bare `cd` is refused before spawn; absolute or
   `./`-prefixed targets keep an inspectable cwd identity.
 
-  A **literal `for` loop** is the one repetition shape the view unrolls. Problem:
-  the common probe `for p in a b; do "$p" -v; done` names its executable through
-  a loop variable, so it was refused whenever the iterable was already known
-  (measured 2026-10-21, three-candidate node version probe). Decision: admission
-  unrolls `for V in <plain words>; do <simple commands>; done` into
-  `V=value; <commands>;` per value, capped at 8 values and 64 unrolled commands,
-  one level deep. Each value must be a plain word: whitespace or a `$`/backquote
-  expansion would bind differently in quoted and bare references, and a glob is
-  refused because an unmatched glob stays literal and runs zero iterations,
-  which a static unroll cannot reproduce. Body command words may not include a
-  control keyword, a trailing chain left open, or an unmanaged `&`; guard
-  existence with a `[ -x "$V" ] && <cmd>` chain rather than an `if ... fi` body,
-  which stays opaque. Separators are reproduced verbatim, so a body
-  pipeline/redirect keeps its
-  structure and each command is classified exactly as if typed once per value.
-  Anything outside that shape returns the original source, where the body's real
-  command word is now checked after a leading `do`. Alternatives rejected:
-  allow unresolvable dynamic heads generally (loses the detach proof); treat
-  `for` as always opaque (keeps refusing known-literal probes); expand the loop
-  by executing it (admission is pure). The unrolled text is admission-only and
-  never replaces the executed or approved source.
+  **Loop executable identities.** Problem: version probes name their executable
+  through a loop variable; ordinary directory globs, quoted HOME and an `if -x`
+  guard previously caused an unresolved-head refusal before spawn. Decision:
+  literal simple loops still unroll into `V=value; <commands>;` per value,
+  capped at 8 candidates/64 projected commands, one level deep. Values must
+  bind identically in quoted and bare references; active tilde, variable/command
+  expansion and filesystem-dependent lists do not become guessed literal values.
+  Unmatched POSIX globs remain one literal loop value, not zero iterations.
+  Stateful builtins, assignments or variable-writing printf forms invalidate
+  loop substitution. Prior alias/builtin/control setup also prevents loop
+  projection: nominally inert output may have acquired shell-defined effects.
+  The shared redirection parser exposes prefix-hidden assignments and real
+  command heads rather than treating an IO operator as the executable. The
+  loop variable must not be shell-maintained/special. Body separators and
+  redirects retain ordinary per-command classification.
+
+  A complete **fixed-leaf path version probe** instead projects nominal executable
+  identities, without enumerating any paths: candidates must contain `/` and
+  end with a literal executable filename; only directory components may glob,
+  and a `$HOME`/`${HOME}` prefix must be double-quoted. The body allows inert
+  echo/printf and exactly one `"$V" --version` (or `-v`/`-V`) call. Optional
+  guards are `[ -x "$V" ] && <probe>` or
+  `if [ -x "$V" ]; then <probe>; fi`; every live reference is quoted. Filename
+  globs, other variables/expansions, rebinding, nested control, other body
+  commands and file redirects decline the complete probe projection. Each
+  actual filename still goes through the existing detach/writer owner: `-x`
+  and version flags prove neither readonlyness nor child retirement. Git,
+  shells and mutators keep conservative claims; surrounding writes/redirects
+  retain their own targets. No synthetic basename is used for approval, Git
+  execution hardening, root resolution, snapshots, display or execution.
+
+  Unknown shapes keep original-source admission. The lifetime check inspects
+  real command heads after unquoted control introducers (`do`, `then`, `else`,
+  conditions) before setup/privilege wrappers; quoted keywords remain command
+  names. Both loop projection paths are pure and admission-only: the real shell
+  expands the original command once with its final environment/cwd, including
+  missing/non-executable candidates and arbitrary glob result cardinality.
+  The fixed-leaf assumption is valid despite changing HOME/cwd/glob matches,
+  not a filesystem snapshot or sandbox proof. Review this bounded recognizer
+  when a shared structured shell/process authority can establish broader
+  identities without guessed bindings. Alternatives rejected: blanket dynamic
+  head bypass (loses detach evidence), glob enumeration then original-source
+  execution (races and changes cardinality), and caller-side script rewrites
+  (hide the mechanism defect). Specs: `test_path_probe_loop_admission.py` plus
+  `test_command_setup_admission.py`, writer/recorded/descendant-retirement
+  neighbors; private real executables verify no replay and lease-free overlap
+  only for ordinary runtime probes, not a readonly exemption.
 - **Recorded background execution** binds the exact server-generated wrapper
   to its original command through an internal typed admission scope, not model
   arguments. Record-file redirects do not make an opaque test a source writer.

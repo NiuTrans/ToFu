@@ -1145,21 +1145,28 @@ def command_background_refusal(command):
     if not detached:
         # Quoting or an absolute executable path must not hide the command word.
         from .command_analysis import (
-            _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts, command_segment_words,
+            _ENV_ASSIGNMENT_GUARD_RE, _unwrap_command_parts, _shell_words,
+            command_segment_output_targets,
         )
         for segment in _split_pipeline(source):
             try:
-                words = list(command_segment_words(segment))
+                tokens = _shell_words(segment, strict=True, redirects=True)
+                # Unquoted reserved words introduce commands; quoted/escaped
+                # names are executables instead. Peel before setup/wrappers so
+                # `then X=value "$X"` cannot hide an unproved real head.
+                while tokens and segment[tokens[0].start:tokens[0].end] in {
+                        'do', 'if', 'then', 'elif', 'else', 'while', 'until', '!'}:
+                    tokens = tokens[1:]
+                # Redirections/adjacent IO numbers may precede the executable
+                # or assignments. Retain their writer effects in original-source
+                # admission, but use the shared parser to inspect the real head.
+                core = segment[tokens[0].start:] if tokens else ''
+                words = list(command_segment_output_targets(core).words)
             except ValueError:
                 continue  # Malformed shell source is still leased, never executed as readonly.
             while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
                 words = words[1:]
             words = _unwrap_command_parts(words)
-            # `do` opens a loop body, it is not the command word. Without this
-            # the loop body's real (possibly variable) head escaped the check
-            # that a literal for-loop unrolling now makes answerable.
-            while words and words[0] == 'do':
-                words = words[1:]
             # An unparsed heredoc's body is not a sequence of shell command
             # heads. Keep its conservative writer claim, not a payload-based
             # dynamic-executable refusal. Proven literal bodies were masked.
@@ -1167,13 +1174,14 @@ def command_background_refusal(command):
                 return ('Error [workspace-lease-background-unsupported]: unresolved dynamic '
                         'executable cannot retain a verified managed child lifetime. Use a '
                         'literal executable, a `NAME=value` binding followed by `"$NAME"`, '
-                        'a `for NAME in <plain words>` loop, or a script file. A '
-                        'candidate-executable probe qualifies as `for NAME in <plain '
-                        'words>; do [ -x "$NAME" ] && "$NAME" --version; done`: plain '
-                        'absolute words only (no glob/`~`/`$VAR`; an unmatched glob stays '
-                        'literal and runs zero iterations, which a static unroll cannot '
-                        'reproduce), and guard existence with a `[ -x "$NAME" ] && <cmd>` '
-                        'chain rather than an `if ... fi` body; command was not started.')
+                        'bounded literal loop, or a script file. Path version probes '
+                        'also support directory globs and a quoted $HOME prefix when '
+                        'every candidate has a fixed literal executable filename, '
+                        'the command uses a quoted loop variable with --version/-v/-V, '
+                        'and the optional guard is `[ -x "$NAME" ] && "$NAME" --version` '
+                        'or `if [ -x "$NAME" ]; then "$NAME" --version; fi`. Unquoted '
+                        '$VAR, executable-name globs, rebinding, extra commands/redirects '
+                        'and other if ... fi shapes stay unproved; command was not started.')
             if words and os.path.basename(words[0]) in {'nohup', 'disown', 'setsid'}:
                 detached = True
                 break

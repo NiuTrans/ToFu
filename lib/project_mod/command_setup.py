@@ -3,8 +3,8 @@
 Git environment overrides remain visible because they select metadata/index
 ownership. Only leading inert scalar assignments and exact literal `command -v` discovery
 are understood. A proven scalar executable can be referenced by the immediately
-following simple command. A bounded `for NAME in <plain words>` loop is unrolled
-under the same bounds so a value-named command word is still inspectable.
+following simple command. Bounded literal loops and fixed-leaf path version
+probes expose executable identities without expanding paths or rewriting execution.
 Unsupported grammar keeps the original conservative view; this is cooperative
 scheduling, not proof that opaque programs are readonly.
 """
@@ -22,12 +22,28 @@ _MAX_LOOP_COMMANDS = 64
 _LOOP_HEAD = re.compile(r'\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in(?:\s+(.*))?\Z', re.S)
 _LOOP_KEYWORDS = frozenset({
     'for', 'while', 'until', 'do', 'done', 'if', 'then', 'elif', 'else', 'fi',
-    'case', 'esac', 'select', 'function', 'time', 'coproc',
+    'case', 'esac', 'select', 'function', 'time', 'coproc', '!',
 })
 # A loop value is bound verbatim, so it must stay one plain shell word: no
 # whitespace (unquoted use would word-split), no quote/metacharacter that the
 # in-place substitution below could not reproduce.
 _PLAIN_LOOP_VALUE = re.compile(r'[A-Za-z0-9_./:@%+=~-]+\Z')
+
+_PROBE_LEAF = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.+-]*\Z')
+_HOME_PROBE_PREFIX = re.compile(r'^"\$(?:HOME|\{HOME\})(?=/|"/)')
+_LOOP_STATEFUL_HEADS = frozenset({
+    '.', 'alias', 'unalias', 'builtin', 'command', 'cd', 'pushd', 'popd',
+    'declare', 'typeset', 'local', 'export', 'readonly', 'unset', 'read',
+    'eval', 'exec', 'source', 'set', 'shift', 'getopts', 'let', 'trap',
+    'hash', 'enable', 'shopt', 'setopt', 'unsetopt',
+})
+
+
+def _ordinary_loop_variable(name):
+    # Shell-maintained variables (including _) cannot retain the loop binding
+    # across predicates/printf. Uppercase/special setup is not a probe variable.
+    return (name != '_' and not name.isupper()
+            and not name.startswith(('BASH_', 'GIT_', 'ZSH_')))
 
 
 def _substitution_end(source, start):
@@ -181,11 +197,10 @@ def _output_argument_view(tokens):
 def _literal_loop_values(raw):
     """Decoded plain-word iterable of one loop, else None.
 
-    Only statically known single words qualify. Whitespace or a ``$``/backquote
-    expansion would bind differently in ``"$name"`` and bare ``$name`` uses, so
-    it cannot be reproduced verbatim. A glob is refused for a sharper reason:
-    an unmatched glob stays literal and the loop runs zero iterations, so a
-    static unroll would execute a command the real loop never runs.
+    Only statically known single words qualify. Expansion or word splitting
+    cannot be reproduced verbatim. An unmatched POSIX glob remains one literal
+    loop value, while matches have filesystem-dependent values/cardinality;
+    neither is a concrete list that this pure unroller may guess.
     """
     words = [word for word, _ in _scan(raw, words=True) if word.strip()]
     if not words or len(words) > _MAX_LOOP_CANDIDATES:
@@ -202,7 +217,8 @@ def _literal_loop_values(raw):
                 quote = '' if quote else character
             elif quote != "'" and character in '$`':
                 return None
-            elif not quote and character in '*?[<>|&;(){}#':
+            elif not quote and (character in '*?[<>|&;(){}#'
+                                or character == '~' and index == 0):
                 return None
             index += 1
         if quote:
@@ -224,36 +240,27 @@ def _substitute_loop_reference(token, variable, value):
     untouched. Any other reference (``$@``, another name) makes the loop
     opaque rather than silently binding a guessed value.
     """
-    output, index = [], 0
+    output, quote, index = [], '', 0
     while index < len(token):
         character = token[index]
-        if character == '\\':
+        if character == '\\' and quote != "'":
             output.append(token[index:index + 2])
             index += 2
             continue
-        if character == "'":
-            end = token.find("'", index + 1)
-            if end < 0:
-                return None
-            output.append(token[index:end + 1])
-            index = end + 1
-            continue
-        if character == '`':
+        if character in "'\"" and (not quote or quote == character):
+            quote = '' if quote else character
+        elif quote != "'" and character == '`':
             return None
-        if character == '$':
-            braced = token.startswith('${' + variable + '}', index)
-            if braced or token.startswith('$' + variable, index):
-                end = index + len(variable) + (3 if braced else 1)
-                following = token[end:end + 1]
-                if braced or not (following.isalnum() or following == '_'):
-                    output.append(value)
-                    index = end
-                    continue
-            if _REFERENCE.match(token, index) is not None:
+        elif quote != "'" and character == '$':
+            reference = _REFERENCE.match(token, index)
+            if reference is None or (reference.group(1) or reference.group(2)) != variable:
                 return None
+            output.append(value)
+            index = reference.end()
+            continue
         output.append(character)
         index += 1
-    return ''.join(output)
+    return ''.join(output) if not quote else None
 
 
 def _loop_extent(segments, start):
@@ -269,6 +276,133 @@ def _loop_extent(segments, start):
             joined = ''.join(span + separator for span, separator in segments[start:stop])
             return joined + segments[stop][0], segments[stop][1], stop + 1
     return None
+
+
+def _probe_path_leaf(raw):
+    """Invariant nominal executable, not a resolved path or existence proof.
+
+    Only directory components may glob. A HOME prefix must be double-quoted,
+    so even whitespace/metacharacters in the final child HOME remain path data.
+    No environment, filesystem or shell is consulted; only the leaf is emitted
+    for ordinary per-command classification, never for approval or execution.
+    """
+    from .command_analysis import _mask_quoted_literals, shell_source_has_expansion
+    word = _HOME_PROBE_PREFIX.sub('"/home', raw, count=1)
+    if shell_source_has_expansion(word, pathname=False):
+        return None
+    shape = _mask_quoted_literals(word)
+    if (any(character in shape for character in '<>;&|(){}#')
+            or shape.startswith('~')):
+        return None
+    decoded = shlex.split(word, comments=False)
+    if len(decoded) != 1 or '/' not in decoded[0]:
+        return None
+    leaf = decoded[0].rsplit('/', 1)[1]
+    return leaf if _PROBE_LEAF.fullmatch(leaf) and leaf not in {'.', '..'} else None
+
+
+def _probe_output_word(raw, variable):
+    """Decode literal output data and double-quoted loop references only."""
+    output, quote, index = [], '', 0
+    while index < len(raw):
+        character = raw[index]
+        if character == '\\' and quote != "'":
+            output.append(raw[index:index + 2])
+            index += 2
+            continue
+        if character in "'\"" and (not quote or quote == character):
+            quote = '' if quote else character
+        elif quote != "'" and character == '$':
+            reference = _REFERENCE.match(raw, index)
+            if (quote != '"' or reference is None
+                    or (reference.group(1) or reference.group(2)) != variable):
+                return None
+            output.append('path')
+            index = reference.end()
+            continue
+        elif quote != "'" and character == '`':
+            return None
+        elif not quote and character in '<>;&|(){}*?[]~#':
+            return None
+        output.append(character)
+        index += 1
+    decoded = shlex.split(''.join(output), comments=False)
+    return decoded[0] if not quote and len(decoded) == 1 else None
+
+
+def _inert_printf_format(value):
+    # Only literal POSIX conversions qualify; shell %n/-v variable assignment
+    # and unknown dialect-specific directives cannot preserve a loop binding.
+    return (not value.startswith('-') and '%' not in re.sub(
+        r'%(?:%|[-+ #0]*[0-9]*(?:\.[0-9]+)?[diouxXfFeEgGaAcsb])', '', value))
+
+
+def _path_probe_view(variable, iterable, body):
+    """Complete version-only body; symbolic union, not loop execution/unrolling.
+
+    The optional exact -x guard selects no new identity. Inert output and one
+    quoted variable version call cannot rebind the loop variable. Unknown
+    grammar/effects decline the entire plan, preserving conservative admission.
+    """
+    references = {f'"${variable}"', f'"${{{variable}}}"'}
+    body = list(body)
+    tokens, separator = body[0]
+    guard = tokens[1:] if tokens[:1] == ['if'] else tokens
+    executable_guard = (len(guard) == 4 and guard[:2] == ['[', '-x']
+                        and guard[2] in references and guard[3] == ']')
+    if tokens[:1] == ['if']:
+        if (not executable_guard or separator not in (';', '\n')
+                or len(body) < 3 or body[-1][0] != ['fi']
+                or body[1][0][:1] != ['then']):
+            return None
+        body = [(body[1][0][1:], body[1][1]), *body[2:-1]]
+    elif executable_guard and separator == '&&':
+        body = body[1:]
+    projected, invocations = [], 0
+    for tokens, separator in body:
+        if not tokens or separator not in (';', '\n'):
+            return None
+        if len(tokens) == 2 and tokens[0] in references and tokens[1] in {'--version', '-v', '-V'}:
+            projected.append((None, tokens[1]))
+            invocations += 1
+            continue
+        if tokens[0] not in {'echo', 'printf'}:
+            return None
+        arguments = [_probe_output_word(token, variable) for token in tokens[1:]]
+        if any(argument is None for argument in arguments):
+            return None
+        if tokens[0] == 'printf':
+            if (not arguments or not _inert_printf_format(arguments[0])
+                    or '$' in tokens[1] or '`' in tokens[1]):
+                return None  # -v/%n can assign shell variables, not inert output.
+        projected.append((shlex.join([tokens[0], *arguments]), None))
+    if invocations != 1:
+        return None
+    words = [word for word, _ in _scan(iterable, words=True) if word.strip()]
+    if not words or len(words) > _MAX_LOOP_CANDIDATES:
+        return None
+    leaves = [_probe_path_leaf(word) for word in words]
+    if any(leaf is None for leaf in leaves) or len(leaves) * len(projected) > _MAX_LOOP_COMMANDS:
+        return None
+    # Keep each actual nominal name: no placeholder runtime/readonly exemption.
+    # Version-only argv prevents a fabricated Git path from minting a hardened
+    # inspection; the existing writer and detach owners classify every leaf.
+    return ''.join((output if output is not None else shlex.join([leaf, flag])) + ';'
+                   for leaf in leaves for output, flag in projected)
+
+
+def _loop_command_preserves_binding(tokens):
+    from .command_analysis import command_segment_output_targets
+    # The shared redirect parser exposes the real first word, including a
+    # redirect-prefixed assignment. Do not propagate through an opaque prefix.
+    parsed = command_segment_output_targets(' '.join(tokens))
+    words = parsed.words
+    if (not parsed.complete or not words or _ASSIGNMENT.fullmatch(words[0])
+            or words[0].rsplit('/', 1)[-1] in _LOOP_STATEFUL_HEADS):
+        return False
+    if words[0].rsplit('/', 1)[-1] == 'printf':
+        return len(words) > 1 and _inert_printf_format(words[1])
+    return True
 
 
 def _loop_view(segments, start):
@@ -288,6 +422,9 @@ def _loop_view(segments, start):
         return None
     from .command_heredoc import _without_descriptor_duplications
     segment, separator, following = extent
+
+    if separator == '&':
+        return None  # The whole loop detaches too; never erase its closing &.
     if '<<' in segment:
         return None  # Heredoc payload is data, not repeatable command words.
     # `2>&1` is a descriptor alias, not background: blank it before splitting so
@@ -299,6 +436,8 @@ def _loop_view(segments, start):
     if match is None:
         return None
     variable, iterable = match.group(1), match.group(2)
+    if not _ordinary_loop_variable(variable):
+        return None
     opening = [word for word, _ in _scan(parts[1][0], words=True) if word.strip()]
     if not opening or opening[0] != 'do':
         return None
@@ -309,14 +448,18 @@ def _loop_view(segments, start):
                 for span, separator in parts[2:-1])
     if any(not tokens for tokens, _ in body):
         return None
-    if any(token in _LOOP_KEYWORDS for tokens, _ in body for token in tokens):
-        return None
     # An unmanaged `&` cannot be reproduced by repetition: the unrolled text
     # would describe a foreground command the shell never ran. A body whose
     # chain is left open (`&&`/`||`/`|` before `done`) cannot be repeated either.
     if any(span_separator == '&' for _, span_separator in body):
         return None
     if body[-1][1] not in (';', '\n'):
+        return None
+
+    probe = _path_probe_view(variable, iterable or '', body)
+    if probe is not None:
+        return probe, separator, following
+    if any(token in _LOOP_KEYWORDS for tokens, _ in body for token in tokens):
         return None
     values = _literal_loop_values(iterable or '')
     if values is None or len(values) * len(body) > _MAX_LOOP_COMMANDS:
@@ -331,6 +474,8 @@ def _loop_view(segments, start):
                 if resolved is None:
                     return None
                 substituted.append(resolved)
+            if not _loop_command_preserves_binding(substituted):
+                return None  # Never substitute past assignments/stateful shell builtins.
             # Separators are reproduced verbatim so `2>&1` and `a | b` keep
             # their structure instead of turning into separate commands.
             chunks.append(' '.join(substituted) + span_separator)
@@ -344,6 +489,7 @@ def command_setup_view(source):
     try:
         segments = _scan(source)
         output, bindings = [], {}
+        loop_context_proven = True
         previous = ''
         index = 0
         while index < len(segments):
@@ -353,6 +499,8 @@ def command_setup_view(source):
                 bindings.clear()
             tokens = [word for word, _ in _scan(segment, words=True) if word.strip()]
             if tokens and tokens[0] == 'for':
+                if not loop_context_proven:
+                    return source  # Prior alias/builtin/control setup can change body semantics.
                 loop = _loop_view(segments, index - 1)
                 if loop is None:
                     return source
@@ -404,6 +552,14 @@ def command_setup_view(source):
                         if executable is None:
                             return source
                         rest[0] = shlex.quote(executable)
+                if rest:
+                    from .command_analysis import command_segment_output_targets
+                    parsed = command_segment_output_targets(' '.join(rest))
+                    if (not parsed.complete or not parsed.words
+                            or _ASSIGNMENT.fullmatch(parsed.words[0])
+                            or parsed.words[0].rsplit('/', 1)[-1]
+                            in (_LOOP_STATEFUL_HEADS | _LOOP_KEYWORDS)):
+                        loop_context_proven = False
                 output.append(' '.join(_output_argument_view(rest)) + separator)
                 # A shell command may change variables (`read`, functions, etc.).
                 # Do not carry a guessed binding past any non-setup command.
