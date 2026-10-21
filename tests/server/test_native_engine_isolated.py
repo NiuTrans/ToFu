@@ -118,6 +118,7 @@ def test_build_routes_snapshot_and_cargo_target_to_private_directory(source, tmp
     private.mkdir()
     calls = []
     monkeypatch.setattr(engines.shutil, 'which', lambda name, **kw: '/toolchain/' + name)
+    monkeypatch.setattr(engines, '_c_compiler_accepts_date_time', lambda _: True)
     monkeypatch.setattr(runtime_guards, 'probe_system_resources', lambda env: SimpleNamespace(
         effective_cpu_count=2, effective_memory_available_mb=2048))
     monkeypatch.setattr(engines, '_run', lambda command, **kw: calls.append(kw))

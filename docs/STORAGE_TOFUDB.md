@@ -1248,6 +1248,15 @@ Project Brain payload admission: **Problem:** native 8 MiB projection/checkpoint
 
 ## Native engine external build inputs
 
+The external declaration covers production compile inputs, not fixtures reached
+only through `#[cfg(test)]` modules. The literal census proves exact test guards
+and transitive module references; shared or uncertain production references still
+require declaration. Retained Rust source bytes remain hashed unchanged, while
+test-only fixture bytes are neither hashed nor copied into release snapshots.
+Adding test fixtures to the production namespace or ignoring all fixture paths
+would respectively broaden attestation or hide real closure violations.
+`tests/server/test_native_engine_identity.py` covers these boundaries.
+
 **Problem:** omitted project schemas break checkpoint builds and leave stale engine identities. **Decision:** package.metadata.tofu external-inputs declares VERSION/ contracts files; Rust build.rs and Python hash exact bytes under @external/ keys. Owned snapshots mirror inputs and keep a validated ledger for deleting only their obsolete copies. Missing, escaping, duplicate or symlinked inputs refuse. Alternatives: unhashed copies admit stale engines; disabled features lose capabilities; broad copies cross source boundaries. Direct/staged tests cover edits. **Manifest reads — Problem:** discovery and selection reparse manifests in separate children. **Decision:** each fingerprint/layout invocation reuses successful parses with child timeout/failure isolation; later calls read disk afresh. The standard-library parser uses isolated Python startup (`-I -S`): inherited module paths, checkout modules and site hooks cannot execute during source identity. This removes an ambient-code boundary without changing the ten-second child deadline or source hash protocol. **Alternatives:** global caching misses edits; in-process parsing removes isolation; extending child timeouts retains unrelated startup code. `system_native_manifest_child_isolation_20261016.json` retains ambient-import counterexamples and component measurements; the earlier full-cohort timeout cause remains unproven. `system_native_source_manifests_20261015.json` covers identity tests and diagnostic clocks. The ordinary HTTP ROOT fixture accepts an explicit daemon engine, verifies current source and content pin, and records the selected disposable authority. This selectability is not native functional/performance or production admission.
 
 
