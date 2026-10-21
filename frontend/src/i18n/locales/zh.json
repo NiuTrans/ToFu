@@ -520,6 +520,8 @@
   "bgCommand.noPayload": "无结果内容",
   "bgCommand.output": "命令结果",
   "bgCommand.queued": "后台命令已完成 · 结果送达未确认",
+
+  "bgCommand.queuedMany": "{count} 条后台命令已完成 · 结果送达未确认",
   "bgCommand.truncated": "输出预览已截断。",
   "boot.details": "启动详情 · Debug logs",
   "boot.sendPaused": "服务正在恢复，暂时无法发送；草稿会保留。",

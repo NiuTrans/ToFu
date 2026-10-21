@@ -10,9 +10,10 @@ import {
   type ConversationBlockViewModel,
   type ConversationQueueItemViewModel,
 } from '../../presentation/conversation-view-model';
-import type { ConversationSurfaceRenderers } from '../surface-contracts';
+import type { ConversationSurfaceRenderers, ConversationQueueItemRenderContext } from '../surface-contracts';
+import { createButton } from '../../../ui/button';
 import type { ClassicConversationRendererPorts } from './ports';
-import { preserveDetailsOpen } from './stable-dom';
+import { directClassChild, preserveDetailsOpen } from './stable-dom';
 import { textFor } from './localized-copy';
 import { renderBackgroundCompletion } from './text-blocks';
 import { renderGoalRecoveryNotice } from './goal-recovery-notice';
@@ -205,11 +206,79 @@ export function renderQueueStatusBlock(
   node.replaceChildren(status);
 }
 
+/** Shared status chrome only; each result remains in its Surface-owned queue row. */
+function renderBackgroundQueueItem(
+  node: HTMLElement,
+  item: ConversationQueueItemViewModel,
+  ports: ClassicConversationRendererPorts,
+  context?: ConversationQueueItemRenderContext,
+): void {
+  const completion = item.source.backgroundCommand!;
+  const { count, index } = context?.backgroundCommandGroup ?? { count: 1, index: 0 };
+  const document = node.ownerDocument;
+  if (!node.classList.contains('bgcmd-queue-item')) node.replaceChildren();
+  node.className = 'conversation-queue-item message bgcmd-queue-item';
+  node.dataset.bgcmdGroupEdge = count === 1 ? 'single'
+    : index === 0 ? 'first' : index === count - 1 ? 'last' : 'middle';
+
+  let header = directClassChild<HTMLElement>(node, 'bgcmd-queue-header');
+  if (index === 0) {
+    if (!header) {
+      header = document.createElement('header');
+      header.className = 'bgcmd-queue-header';
+      const icon = document.createElement('span');
+      icon.className = 'queue-item-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = QUEUE_ITEM_ICON_SVG;
+      const label = document.createElement('span');
+      label.className = 'bgcmd-queue-label';
+      header.append(icon, label);
+      node.prepend(header);
+    }
+    const text = count > 1
+      ? textFor(ports, 'bgCommand.queuedMany',
+        '{count} background commands finished · delivery unconfirmed', { count })
+      : textFor(ports, 'bgCommand.queued', 'Background command finished · delivery unconfirmed');
+    const label = header.querySelector<HTMLElement>('.bgcmd-queue-label')!;
+    if (label.textContent !== text) label.textContent = text;
+  } else header?.remove();
+
+  let row = directClassChild<HTMLElement>(node, 'bgcmd-queue-row');
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'bgcmd-queue-row';
+    const position = document.createElement('span');
+    position.className = 'bgcmd-queue-position';
+    const evidence = document.createElement('div');
+    evidence.className = 'bgcmd-queue-evidence';
+    const cancel = createButton({ label: '', variant: 'ghost', size: 'sm', wrap: true }, document);
+    cancel.classList.add('bgcmd-queue-cancel');
+    cancel.dataset.conversationAction = 'remove-queue';
+    row.append(position, evidence, cancel);
+    node.appendChild(row);
+  }
+  const position = row.querySelector<HTMLElement>('.bgcmd-queue-position')!;
+  const positionText = item.position > 0 ? `#${item.position}` : '';
+  if (position.textContent !== positionText) position.textContent = positionText;
+  position.hidden = !positionText;
+  const cancel = row.querySelector<HTMLButtonElement>('.bgcmd-queue-cancel')!;
+  const cancelLabel = textFor(ports, 'bgCommand.cancelDelivery', 'Cancel delivery');
+  if (cancel.textContent !== cancelLabel) cancel.textContent = cancelLabel;
+  cancel.setAttribute('aria-label', `${cancelLabel}: ${completion.commandId}${positionText ? ` (${positionText})` : ''}`);
+  renderBackgroundCompletion(row.querySelector<HTMLElement>('.bgcmd-queue-evidence')!, completion, ports);
+}
+
 export function renderNativeQueueItem(
   node: HTMLElement,
   item: ConversationQueueItemViewModel,
   ports: ClassicConversationRendererPorts,
+  context?: ConversationQueueItemRenderContext,
 ): void {
+  if (item.source.backgroundCommand) {
+    renderBackgroundQueueItem(node, item, ports, context);
+    return;
+  }
+  delete node.dataset.bgcmdGroupEdge;
   node.className = `conversation-queue-item message user-msg qsrc-${
     item.source.isPeerMessage
       ? (item.source.isPeerHuman ? 'operator' : 'agent')
@@ -223,9 +292,7 @@ export function renderNativeQueueItem(
   icon.innerHTML = QUEUE_ITEM_ICON_SVG;
   const label = document.createElement('span');
   label.className = 'message-role';
-  label.textContent = item.source.backgroundCommand
-    ? textFor(ports, 'bgCommand.queued', 'Background command finished · delivery unconfirmed')
-    : item.source.steerFallback
+  label.textContent = item.source.steerFallback
     ? textFor(ports, 'queue.steerFallbackLabel',
       'Insert window closed · queued')
     : textFor(ports, 'sidebar.queued', 'Queued');
@@ -253,16 +320,12 @@ export function renderNativeQueueItem(
   cancel.type = 'button';
   cancel.className = 'msg-action-btn queue-item-cancel';
   cancel.dataset.conversationAction = 'remove-queue';
-  cancel.textContent = item.source.backgroundCommand
-    ? textFor(ports, 'bgCommand.cancelDelivery', 'Cancel delivery')
-    : textFor(ports, 'queue.cancelMsg', 'Cancel');
+  cancel.textContent = textFor(ports, 'queue.cancelMsg', 'Cancel');
   header.appendChild(cancel);
   const body = document.createElement('div');
   body.className = 'message-body conversation-queue-item__body';
   body.textContent = item.text || textFor(ports, 'queue.attachment', 'Attachment');
-  if (item.source.backgroundCommand) {
-    renderBackgroundCompletion(body, item.source.backgroundCommand, ports);
-  } else if (item.text) body.title = item.text;
+  if (item.text) body.title = item.text;
   const attachmentKinds = [
     item.source.hasImages ? 'img' : '',
     item.source.hasPdfs ? 'pdf' : '',

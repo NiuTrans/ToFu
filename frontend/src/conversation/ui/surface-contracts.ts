@@ -41,6 +41,11 @@ export interface ConversationLaneRenderContext {
   conversationId: string;
 }
 
+/** Derived adjacency only; no synthetic queue identity or delivery state. */
+export interface ConversationQueueItemRenderContext {
+  backgroundCommandGroup?: { count: number; index: number };
+}
+
 export interface ConversationSurfaceRenderers {
   /** Release block-owned requests/listeners before DOM retirement. */
   disposeBlock?(node: HTMLElement): void;
@@ -88,6 +93,7 @@ export interface ConversationSurfaceRenderers {
     node: HTMLElement,
     item: ConversationQueueItemViewModel,
     conversationId: string,
+    context?: ConversationQueueItemRenderContext,
   ): void;
 }
 

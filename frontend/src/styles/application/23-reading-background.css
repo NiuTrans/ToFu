@@ -57,3 +57,85 @@
   font-size: var(--conversation-font-size-caption);
   color: var(--text-tertiary);
 }
+
+/* Queue completion runs share one heading and a continuous evidence surface.
+ * Direct queueId siblings retain focus/selection and exact cancel ownership. */
+.conversation-surface .conversation-queue-item.bgcmd-queue-item {
+  display: block;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  max-width: var(--msg-measure);
+  content-visibility: visible;
+}
+
+.conversation-surface .bgcmd-queue-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface .bgcmd-queue-header .queue-item-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.conversation-surface .bgcmd-queue-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--turn-rule);
+  border-block-end: 0;
+  background: var(--turn-process-surface);
+}
+
+.conversation-surface .bgcmd-queue-item:is([data-bgcmd-group-edge="first"], [data-bgcmd-group-edge="single"]) .bgcmd-queue-row {
+  border-start-start-radius: var(--radius-sm);
+  border-start-end-radius: var(--radius-sm);
+}
+
+.conversation-surface .bgcmd-queue-item:is([data-bgcmd-group-edge="last"], [data-bgcmd-group-edge="single"]) .bgcmd-queue-row {
+  border-block-end: 1px solid var(--turn-rule);
+  border-end-start-radius: var(--radius-sm);
+  border-end-end-radius: var(--radius-sm);
+}
+
+.conversation-surface .bgcmd-queue-item:is([data-bgcmd-group-edge="last"], [data-bgcmd-group-edge="single"]) {
+  margin-block-end: var(--space-5);
+}
+
+.conversation-surface .bgcmd-queue-position {
+  grid-column: 1;
+  padding-block: var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--leading-body);
+}
+
+.conversation-surface .bgcmd-queue-evidence {
+  grid-column: 2;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .bgcmd-queue-evidence .bgcmd-details {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.conversation-surface .bgcmd-queue-evidence .bgcmd-summary {
+  padding-block: var(--space-1);
+}
+
+.conversation-surface .bgcmd-queue-cancel {
+  grid-column: 3;
+}

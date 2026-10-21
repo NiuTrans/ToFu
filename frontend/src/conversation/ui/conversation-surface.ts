@@ -24,6 +24,7 @@ import { moveRetainedNodeBefore } from './rich-card-reconciliation';
 import type {
   ConversationTurnRenderContext,
   ConversationWindowState,
+  ConversationQueueItemRenderContext,
   ConversationSurfaceOptions,
   ConversationSurface,
 } from './surface-contracts';
@@ -679,7 +680,20 @@ export function createConversationSurface(
     queue: ReadonlyArray<ConversationQueueItemViewModel>,
   ): void => {
     const existing = directKeyedChildren(queueContainer, 'queueId');
+    // Scan each contiguous completion run once. Keep every row as a direct
+    // queueId child; ordinary instructions break the shared visual surface.
+    let groupStart = 0;
+    let groupEnd = 0;
     queue.forEach((item, index) => {
+      let context: ConversationQueueItemRenderContext | undefined;
+      if (item.source.backgroundCommand) {
+        if (index >= groupEnd) {
+          groupStart = index;
+          groupEnd = index + 1;
+          while (groupEnd < queue.length && queue[groupEnd].source.backgroundCommand) groupEnd++;
+        }
+        context = { backgroundCommandGroup: { count: groupEnd - groupStart, index: index - groupStart } };
+      }
       let node = existing.get(item.queueId) as ManagedQueueElement | undefined;
       if (!node) {
         node = queueContainer.ownerDocument.createElement('article');
@@ -688,10 +702,13 @@ export function createConversationSurface(
       }
       const renderer = options.renderQueueItem;
       if (!sameQueueItem(node._tofuQueueItem, item)
+          || node._tofuQueueContext?.backgroundCommandGroup?.count !== context?.backgroundCommandGroup?.count
+          || node._tofuQueueContext?.backgroundCommandGroup?.index !== context?.backgroundCommandGroup?.index
           || node._tofuQueueRenderer !== renderer) {
-        (renderer ?? renderDefaultQueueItem)(node, item, currentConversationId);
+        (renderer ?? renderDefaultQueueItem)(node, item, currentConversationId, context);
         node._tofuQueueItem = item;
         node._tofuQueueRenderer = renderer;
+        node._tofuQueueContext = context;
       }
       node.dataset.queueId = item.queueId;
       placeAt(queueContainer, node, index);

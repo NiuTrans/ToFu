@@ -11,7 +11,7 @@ import type {
 } from '../presentation/conversation-view-model';
 import { RoundOutline } from './round-outline';
 import { moveRetainedNodeBefore } from './rich-card-reconciliation';
-import type { ConversationSurfaceRenderers } from './surface-contracts';
+import type { ConversationSurfaceRenderers, ConversationQueueItemRenderContext } from './surface-contracts';
 
 export type ManagedBlockElement = HTMLElement & {
   _tofuBlock?: ConversationBlockViewModel;
@@ -87,6 +87,7 @@ export type ManagedLaneHeaderElement = HTMLElement & {
 export type ManagedQueueElement = HTMLElement & {
   _tofuQueueItem?: ConversationQueueItemViewModel;
   _tofuQueueRenderer?: ConversationSurfaceRenderers['renderQueueItem'];
+  _tofuQueueContext?: ConversationQueueItemRenderContext;
 };
 
 export function directPart(parent: Element, part: string): HTMLElement | null {

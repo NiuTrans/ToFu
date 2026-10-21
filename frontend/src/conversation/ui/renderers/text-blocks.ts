@@ -37,31 +37,38 @@ export function renderBackgroundCompletion(
   ports: ClassicConversationRendererPorts,
 ): void {
   const document = node.ownerDocument;
-  const details = document.createElement('details');
-  details.className = 'bgcmd-details';
-  details.open = preserveDetailsOpen(node, false);
-  const summary = document.createElement('summary');
-  summary.className = 'bgcmd-summary';
-  summary.append(`${textFor(ports, 'bgCommand.output', 'Command result')} · `);
-  const commandId = document.createElement('code');
-  commandId.className = 'bgcmd-id';
-  commandId.textContent = completion.commandId.slice(0, 128);
-  summary.appendChild(commandId);
-  const command = document.createElement('pre');
-  command.className = 'bgcmd-command';
-  command.textContent = completion.command.slice(0, 2000);
-  const output = document.createElement('pre');
-  output.className = 'sw-card-raw-pre';
-  output.textContent = completion.resultPreview.slice(0, 2000)
-    || textFor(ports, 'bgCommand.noPayload', 'No result available.');
-  details.append(summary, command, output);
-  if (completion.resultTruncated || completion.resultPreview.length > 2000) {
-    const note = document.createElement('p');
-    note.className = 'bgcmd-note';
-    note.textContent = textFor(ports, 'bgCommand.truncated', 'Output preview truncated.');
-    details.append(note);
+  let details = directClassChild<HTMLDetailsElement>(node, 'bgcmd-details');
+  if (details?.dataset.commandId !== completion.commandId) {
+    details = document.createElement('details');
+    details.className = 'bgcmd-details';
+    details.dataset.commandId = completion.commandId;
+    node.replaceChildren(details);
   }
-  node.replaceChildren(details);
+  // Queue rank/count changes are not new evidence. Retain native reader nodes
+  // and replace text only when its value changes; unchanged selections survive.
+  const part = (parent: HTMLElement, name: string, tag: string): HTMLElement => {
+    let child = directClassChild<HTMLElement>(parent, name);
+    if (!child) {
+      child = document.createElement(tag);
+      child.className = name;
+      parent.appendChild(child);
+    }
+    return child;
+  };
+  const setText = (target: HTMLElement, value: string): void => {
+    if (target.textContent !== value) target.textContent = value;
+  };
+  const summary = part(details, 'bgcmd-summary', 'summary');
+  setText(part(summary, 'bgcmd-output-label', 'span'),
+    `${textFor(ports, 'bgCommand.output', 'Command result')} · `);
+  setText(part(summary, 'bgcmd-id', 'code'), completion.commandId.slice(0, 128));
+  setText(part(details, 'bgcmd-command', 'pre'), completion.command.slice(0, 2000));
+  setText(part(details, 'sw-card-raw-pre', 'pre'), completion.resultPreview.slice(0, 2000)
+    || textFor(ports, 'bgCommand.noPayload', 'No result available.'));
+  if (completion.resultTruncated || completion.resultPreview.length > 2000) {
+    setText(part(details, 'bgcmd-note', 'p'),
+      textFor(ports, 'bgCommand.truncated', 'Output preview truncated.'));
+  } else directClassChild(details, 'bgcmd-note')?.remove();
 }
 
 export function renderTextBlock(
@@ -76,11 +83,15 @@ export function renderTextBlock(
   const completion = turn?.source.projection.backgroundCommand;
   if (completion) {
     renderBackgroundCompletion(node, completion, ports);
-    const label = node.ownerDocument.createElement('p');
-    label.className = 'bgcmd-label';
-    label.textContent = textFor(ports, 'bgCommand.freshTurn',
+    let label = directClassChild<HTMLElement>(node, 'bgcmd-label');
+    if (!label) {
+      label = node.ownerDocument.createElement('p');
+      label.className = 'bgcmd-label';
+      node.prepend(label);
+    }
+    const text = textFor(ports, 'bgCommand.freshTurn',
       'Background command finished · submitted as turn input');
-    node.prepend(label);
+    if (label.textContent !== text) label.textContent = text;
     return;
   }
   let body = directClassChild<HTMLElement>(node, 'md-content');

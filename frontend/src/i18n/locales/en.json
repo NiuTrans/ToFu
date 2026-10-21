@@ -520,6 +520,8 @@
   "bgCommand.noPayload": "No result available.",
   "bgCommand.output": "Command result",
   "bgCommand.queued": "Background command finished · delivery unconfirmed",
+
+  "bgCommand.queuedMany": "{count} background commands finished · delivery unconfirmed",
   "bgCommand.truncated": "Output preview truncated.",
   "boot.details": "Startup details · Debug logs",
   "boot.sendPaused": "The service is recovering. Sending is paused; your draft is kept.",

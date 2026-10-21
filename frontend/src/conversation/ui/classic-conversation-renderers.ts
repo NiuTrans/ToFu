@@ -174,8 +174,8 @@ export function createClassicConversationRenderers(
     renderLaneHeader(node, lane) {
       renderBranchLaneHeader(node, lane, ports);
     },
-    renderQueueItem(node, item) {
-      renderNativeQueueItem(node, item, ports);
+    renderQueueItem(node, item, _conversationId, context) {
+      renderNativeQueueItem(node, item, ports, context);
     },
   };
 }

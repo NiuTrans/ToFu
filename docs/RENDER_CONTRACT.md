@@ -450,6 +450,22 @@ expandable output bounded to 2,000 characters with explicit truncation and
 after verified provider completion; fresh-turn evidence says submitted as input.
 Snapshot/replay/reload use the same fields, not a browser command-state registry.
 
+**Problem:** adjacent completed background commands repeated a full queued-message
+header and separated each output with message-sized whitespace. **Decision:** the
+Surface derives contiguous completion runs from the existing flat queue. One
+localized status/count heading precedes compact, continuous result rows; ordinary
+queued messages break a run and keep their own position/source presentation.
+Each row remains a direct, keyed `queueId` child with its own output disclosure
+and **Cancel delivery** action. Grouping never deduplicates equal command IDs,
+changes queue order or acknowledges delivery. Group-count/position changes patch
+retained evidence and controls in place, preserving reader folds, focus and
+unchanged selected output. **Alternatives rejected:** a synthetic queue item or
+bulk cancellation changes delivery identity; wrapping/recreating rows loses
+reader state; CSS-only hiding leaves duplicated status content. No additional
+transport, timer, durable state or result cache is introduced. Specs:
+`ui/background-command-queue.test.ts` and
+`tests/visual/test_visual_background_command_queue.py`.
+
 A confirmed background receipt carries its exact delivery `queueId`. Its accepted
 attempt event removes `removedQueueIds` in the same reducer update that installs
 the receipt. Stale attempts, duplicate sequences and rejected/gapped patches
