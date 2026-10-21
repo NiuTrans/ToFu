@@ -61,6 +61,25 @@ not field completeness or agent answers. Passing the new tests proves
 these extraction behaviors, not general retrieval superiority or that an agent
 will quote the evidence correctly.
 
+## PDF failure evidence
+
+**Problem:** PDF extraction returned human-readable failure placeholders as
+nonempty strings. Fetching could cache them as document bodies, and callers
+could mistake a missing optional dependency or parse error for source evidence.
+
+**Decision:** `extract_pdf_text` raises `PDFExtractionError` for unavailable
+capabilities, oversized inputs, parse failures and documents with no extractable
+text. `fetch_page_content` returns `None` with `diag.reason=pdf_extraction_error`
+and an actionable detail; failures never enter its body cache. Empty rich
+extraction first tries the existing raw-text fallback. Optional dependencies
+still load lazily, document handles close, and successful source text is kept.
+
+**Alternatives considered:** matching error-shaped text at each caller would
+misclassify documents that quote those same messages and leave other callers
+exposed. Installing native PDF dependencies for every web search would add
+startup and deployment costs. The extractor owns typed failure; fetch owns its
+existing failure/diagnostic projection.
+
 ## Ranking and excerpts
 
 **Problem:** a collection description can repeat every word of a question while
