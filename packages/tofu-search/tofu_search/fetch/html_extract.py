@@ -16,6 +16,7 @@ import trafilatura
 from trafilatura.deduplication import LRUCache
 from trafilatura.settings import LRU_SIZE
 
+from tofu_search.fetch.html_fragments import fragment_identifier, select_fragment_html
 from tofu_search.fetch.utils import _get_bs4
 from tofu_search.log import get_logger
 
@@ -463,8 +464,32 @@ def _prepare_article_tree(html):
     return tree
 
 
-def extract_html_text(html, max_chars, url=''):
-    """Extract readable text from HTML. Preserves links as a markdown section at the end."""
+def _sanitized_soup(html):
+    """Use one visibility/navigation boundary for scopes and full documents."""
+    soup = _get_bs4()(html, 'html.parser')
+    for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe',
+                'noscript', 'form', 'svg', 'input', 'select', 'textarea']:
+        for element in soup.find_all(tag):
+            element.decompose()
+    for element in soup.find_all(_explicitly_hidden):
+        element.decompose()
+    for element in soup.find_all(class_=re.compile(
+            r'\b(cookie|popup|modal|banner|advert|sidebar|menu|nav)\b', re.I)):
+        element.decompose()
+    return soup
+
+
+def extract_html_text(html, max_chars, url='', *, scope=None):
+    """Extract readable source, focusing a recognized URL fragment when possible.
+
+    Optional ``scope`` records the matched ``fragment`` and sanitized whole-page
+    ``document_text`` for SPA detection only after successful extraction.
+    Unknown, ambiguous, hidden or unreadable targets keep the whole document.
+    Code-hosting extraction retains its existing owner and priority.
+    """
+    if scope is not None:
+        scope.pop('fragment', None)
+        scope.pop('document_text', None)
 
     # ── Phase 0: Code-hosting blob extraction (GitHub embeds code in JSON) ──
     code = _try_extract_code_blob(html, url)
@@ -473,6 +498,27 @@ def extract_html_text(html, max_chars, url=''):
             code = code[:max_chars] + '\n[…truncated]'
         return code
 
+    fragment = fragment_identifier(url)
+    if fragment:
+        try:
+            soup = _sanitized_soup(html)
+            selected = select_fragment_html(soup, fragment)
+            if selected:
+                text = _extract_html_document(selected, max_chars, url)
+                if text:
+                    if scope is not None:
+                        scope['fragment'] = fragment
+                        # A short section is not proof of an empty page, and a
+                        # matching loading stub is not proof of a readable one.
+                        scope['document_text'] = soup.get_text(' ', strip=True)
+                    return text
+        except Exception:
+            logger.debug('HTML fragment extraction could not retain its scope', exc_info=True)
+    return _extract_html_document(html, max_chars, url)
+
+
+def _extract_html_document(html, max_chars, url):
+    """Extract one already-selected document through the common fidelity path."""
     # ── Phase 1: Try trafilatura for main text extraction ──
     # Serialized via _TRAFILATURA_LOCK — see module-level note on lxml
     # text_content() thread-unsafety crashing the server.
@@ -492,15 +538,7 @@ def extract_html_text(html, max_chars, url=''):
 
     # ── Phase 2: BeautifulSoup fallback / link extraction ──
     try:
-        soup = _get_bs4()(html, 'html.parser')
-        for tag in ['script','style','nav','header','footer','aside','iframe',
-                     'noscript','form','svg','input','select','textarea']:
-            for el in soup.find_all(tag): el.decompose()
-        for el in soup.find_all(_explicitly_hidden):
-            el.decompose()
-        for el in soup.find_all(class_=re.compile(
-                r'\b(cookie|popup|modal|banner|advert|sidebar|menu|nav)\b', re.I)):
-            el.decompose()
+        soup = _sanitized_soup(html)
         # ★ Priority: <main> before <article> — <article> can be a single card/widget
         #   while <main> wraps the full page content (e.g. HuggingFace collections)
         main_el = None

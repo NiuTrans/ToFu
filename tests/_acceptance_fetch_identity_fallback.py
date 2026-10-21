@@ -13,8 +13,9 @@ Checks (no network, no pytest — plain script, exit 1 on any FAIL):
   2. BEHAVIOUR: a 200 SPA-shell outcome drives fetch_page_content into the
      registered BrowserProvider with reason='spa_shell' (the internal SSO-app
      failure shape). On 0.5.1 the provider is never consulted → FAIL;
-  3. BEHAVIOUR: an auth-source replay failure consults the provider with
-     reason='auth_source_failed' BEFORE the anonymous GET;
+  3. BEHAVIOUR: browser-first sources avoid cookie replay when the browser
+     succeeds; explicit cookies-replay sources recover through the browser
+     before any anonymous GET;
   4. chatui seam: install_search_bridge() leaves a browser provider AND an
      auth-source provider registered (the host half of the contract).
 
@@ -48,7 +49,7 @@ def main():
         register_browser_provider,
     )
 
-    print('acceptance: tofu_search identity-fallback seams (deployed)')
+    print(f'acceptance: tofu_search identity-fallback seams (imported from {tofu_search.__file__})')
 
     # ── 1. version floor ──
     ver = getattr(tofu_search, '__version__', '0.0.0')
@@ -57,7 +58,7 @@ def main():
     check('version >= 0.5.2', _v(ver) >= (0, 5, 2), f'installed={ver}')
 
     # ── shared fakes: every network/render hop is stubbed, offline ──
-    calls = {'browser': [], 'do_request': 0}
+    calls = {'browser': [], 'do_request': 0, 'auth_replay': 0}
 
     class _ProbeBrowser(BrowserProvider):
         def is_connected(self):
@@ -89,6 +90,7 @@ def main():
         '_try_browser_fetch', '_do_request', '_get_reader', '_should_fetch',
         '_is_known_spa', '_is_bot_protection', '_is_bot_extracted_text',
         '_extract_html_text', '_looks_like_spa_shell', '_try_playwright_fallback',
+        '_try_authenticated_fetch',
     )}
     saved_provider = get_browser_provider()
     saved_auth = get_auth_source_provider()
@@ -100,7 +102,7 @@ def main():
         core._is_known_spa = lambda url: False
         core._is_bot_protection = lambda html: False
         core._is_bot_extracted_text = lambda text: False
-        core._extract_html_text = lambda html, limit, url=None: None
+        core._extract_html_text = lambda html, limit, url=None, scope=None: None
         core._looks_like_spa_shell = lambda html, result: True
         core._try_playwright_fallback = lambda url, max_chars, timeout: None
         register_browser_provider(_ProbeBrowser())
@@ -111,23 +113,33 @@ def main():
               calls['browser'] == ['spa_shell'], f'calls={calls["browser"]}')
         check('SPA shell → provider content returned', out == 'probe-content', f'out={out!r}')
 
-        # ── 3. auth-source failure → browser consulted FIRST ──
+        # ── 3. registry strategy owns identity order and browser recovery ──
         class _Auth(AuthSourceProvider):
             def match_source(self, url):
                 return {'domain': 'accept-walled.example.com',
+                        'access_strategy': strategy,
                         'cookies': [{'name': 's', 'value': 'x'}]}
 
-        calls['browser'].clear()
-        calls['do_request'] = 0
+        def failed_replay(url, src, mc, timeout):
+            calls['auth_replay'] += 1
+            return None
+
         register_auth_source_provider(_Auth())
-        real_auth_fetch = core._try_authenticated_fetch
-        core._try_authenticated_fetch = lambda url, src, mc, t: None
-        out = core.fetch_page_content('https://accept-walled.example.com/', max_chars=50000)
-        core._try_authenticated_fetch = real_auth_fetch
-        check('auth-source failure → BrowserProvider consulted (reason=auth_source_failed)',
-              calls['browser'] == ['auth_source_failed'], f'calls={calls["browser"]}')
-        check('auth-source failure → anonymous GET skipped once browser delivers',
-              calls['do_request'] == 0, f'do_request={calls["do_request"]}')
+        core._try_authenticated_fetch = failed_replay
+        for strategy, reason, replays in (
+                ('browser_first', 'auth_source_browser_first', 0),
+                ('cookies_replay', 'auth_source_browser_fallback', 1)):
+            calls['browser'].clear()
+            calls['do_request'] = calls['auth_replay'] = 0
+            out = core.fetch_page_content(
+                'https://accept-walled.example.com/' + strategy, max_chars=50000)
+            check(f'{strategy} → BrowserProvider consulted ({reason})',
+                  calls['browser'] == [reason], f'calls={calls["browser"]}')
+            check(f'{strategy} → registry controls cookie replay',
+                  calls['auth_replay'] == replays, f'replays={calls["auth_replay"]}')
+            check(f'{strategy} → provider content returned', out == 'probe-content')
+            check(f'{strategy} → anonymous GET skipped once browser delivers',
+                  calls['do_request'] == 0, f'do_request={calls["do_request"]}')
     finally:
         for k, v in saved.items():
             setattr(core, k, v)
@@ -145,10 +157,10 @@ def main():
 
     if FAILURES:
         print(f'\nACCEPTANCE FAIL ({len(FAILURES)}): {FAILURES}')
-        print('hint: deploy tofu-search 0.5.2 into the serving env '
-              '(pip install from the tofu-search repo at 495f63f), then re-run.')
+        print('hint: inspect the failed behavior and the imported package path; '
+              'run the package identity-fallback tests before reinstalling.')
         return 1
-    print('\nACCEPTANCE PASS — deployed tofu_search carries the identity-fallback seams')
+    print('\nACCEPTANCE PASS — imported tofu_search carries the identity-fallback seams')
     return 0
 
 

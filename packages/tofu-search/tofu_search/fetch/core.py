@@ -330,6 +330,7 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
     result = None
     is_pdf = False
     html_for_spa_check = None
+    html_scope = {}
 
     try:
         resp, raw = _do_request(url, timeout, verify=True, deadline_ts=_url_deadline_ts)
@@ -475,7 +476,7 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                 return _try_browser_fetch(url, max_chars, reason='login_wall')
             html_for_spa_check = html
             _html_head_cache.put(url, html[:20480])
-            result = _extract_html_text(html, extraction_limit, url=url)
+            result = _extract_html_text(html, extraction_limit, url=url, scope=html_scope)
     except PDFExtractionError as e:
         logger.info('[Fetch] PDF extraction unavailable — %s: %s', url[:80], e)
         return _diag('pdf_extraction_error', str(e))
@@ -504,7 +505,9 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                      'browser fallback also failed to get past it.')
 
     # ── SPA-shell detection: HTML present but too little extracted text ──
-    if not is_pdf and html_for_spa_check and _looks_like_spa_shell(html_for_spa_check, result):
+    selected_fragment = bool(html_scope.get('fragment'))
+    if (not is_pdf and html_for_spa_check and _looks_like_spa_shell(
+            html_for_spa_check, html_scope.get('document_text', result))):
         logger.debug('SPA shell detected (HTML=%sB, text=%d), trying Playwright — %s',
                      f'{len(html_for_spa_check):,}', len(result) if result else 0, url[:80])
         pw_result = _try_playwright_fallback(url, max_chars, timeout)
@@ -527,7 +530,7 @@ def fetch_page_content(url, max_chars=None, pdf_max_chars=None, timeout=None,
                      'readable text, and JS rendering plus the browser fallback both '
                      'yielded nothing (often a login-walled single-page app).')
 
-    if result and len(result) > 50:
+    if result and (len(result) > 50 or selected_fragment):
         if max_chars: _fetch_cache.put(url, result)
         logger.debug('OK (%s chars%s) — %s', f'{len(result):,}', ', PDF' if is_pdf else '', url[:80])
         if max_chars and not is_pdf and len(result) > max_chars:

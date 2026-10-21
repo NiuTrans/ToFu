@@ -73,6 +73,11 @@ stays dependency-free when used standalone.
 - **SPA / bot-protection support**: optional Playwright fallback for
   JS-rendered and challenge pages.
 - **PDF extraction**: optional pymupdf / pymupdf4llm integration.
+- **HTML section reads**: a recognized `#fragment` focuses extraction on its
+  heading section or definition, including code, tables and links. Unresolved
+  or ambiguous anchors keep the whole page; remove the fragment to request the
+  whole page explicitly. Plain-text readers and browser body-text responses
+  may still return the complete document.
 - **File assets**: text-based assets (SVG, JSON, XML, YAML, CSS, JS, source
   code) are returned as their raw source by `fetch_page_content`; binary
   assets can be downloaded with the size-/SSRF-guarded `fetch_url_bytes`.

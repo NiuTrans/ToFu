@@ -61,6 +61,53 @@ not field completeness or agent answers. Passing the new tests proves
 these extraction behaviors, not general retrieval superiority or that an agent
 will quote the evidence correctly.
 
+## HTML fragment scope
+
+**Problem:** reading a documentation URL with an observed `#fragment` returned
+the same whole-page prefix as its bare URL. A definition late in a large manual
+could remain outside the output budget even after an agent followed its anchor.
+
+**Decision:** `fetch/html_fragments.py` selects a literal identifier from the
+existing sanitized DOM, decoding a conventional fragment exactly once. Heading
+scopes include subordinate headings; definition scopes retain aliases and
+their descriptions; disclosure scopes retain both the summary signature and
+the associated body. The common extractor preserves source wording, code,
+tables and links. Duplicate, absent, hidden, unsupported or unreadable targets
+keep the original whole-document extraction. Text-fragment directives are not
+interpreted. Code-hosting extraction keeps its existing priority.
+
+HTTP fetching accepts a successfully extracted short scope without treating it
+as an empty page or SPA shell. The existing SPA check uses sanitized whole-page
+text, so a matched loading stub still needs rendering. Bot/login checks,
+request admission, deadlines,
+byte limits and final output bounds remain in force. Cache keys retain the
+requested fragment, so a scoped result cannot replace a whole-page result.
+Plain-text readers and browser body-text responses may return the whole page;
+the selector does not invent markup for those paths. Removing the fragment
+requests the complete document through its existing output limits.
+
+Selection is call-local and adds no request, model, dependency, resident worker,
+cache or durable state. It parses at most the already byte-bounded HTML; an
+unresolved fragment pays the additional DOM pass before normal extraction.
+In an identical-source replay, a 43,777-byte Python reference page shrank from
+10,314 to 309 extracted characters; a 955,558-byte Rust reference page shrank
+from 300,940 to 2,106. Both target definitions remained readable within a
+20,000-character output budget. Warm serial extraction medians, four samples
+per arm with alternating order, were 56.1 → 33.8 ms and 1,305.5 → 554.7 ms.
+For missing anchors on those same pages, whole-page output stayed identical
+but medians increased from 56.2 to 82.8 ms and from 1,340.8 to 1,880.7 ms;
+the extra DOM pass is a measurable fallback cost. Bare URLs avoid that pass.
+These two development pages establish scope and local extraction cost, not
+network speed, broad accuracy or correct agent quotation.
+
+**Alternatives considered:** slicing at a matching token can split a definition
+and confuses prose with anchor identity. Selecting only the target element
+loses Sphinx descriptions and Rustdoc bodies located beside signatures. An LLM
+summary changes evidence and introduces cost. Structural selection reuses the
+existing fidelity boundary and fails back to the full document. Specifications
+live in `tests/test_html_fragments.py`; actual MCP calls exercise the same
+public fetch path in `tests/test_mcp_tool_calls.py`.
+
 ## PDF failure evidence
 
 **Problem:** PDF extraction returned human-readable failure placeholders as
