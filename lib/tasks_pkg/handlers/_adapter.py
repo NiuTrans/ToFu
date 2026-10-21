@@ -194,7 +194,9 @@ def run_batch_concurrent(
         round has a single transition for N independent network calls and a
         user watching a spinner cannot tell whether all three queries are slow
         or just one is (). Fired for FAILURES too (``ok=False``) —
-        a silent failure would stall the done-counter and make an already-dead
+        including abort-skips. A worker that successfully returns ``None``
+        still has ``ok=True``; result emptiness does not determine execution.
+        A silent failure would stall the done-counter and make an already-dead
         query look like it is still working. A raising callback is logged and
         swallowed: progress reporting must never fail the batch.
 
@@ -211,14 +213,14 @@ def run_batch_concurrent(
     if n == 0:
         return []
 
-    def _guarded(item: T) -> R | None:
+    def _guarded(item: T) -> tuple[R | None, bool]:
         if abort is not None:
             try:
                 if abort():
-                    return None
+                    return None, False
             except Exception as e:  # a broken predicate must not wedge the batch
                 logger.debug('[%s] abort predicate raised: %s', tag, e)
-        return worker(item)
+        return worker(item), True
 
     t0 = time.time()
     ordered: list[R | None] = [None] * n
@@ -240,7 +242,7 @@ def run_batch_concurrent(
             idx = futures[fut]
             _ok = True
             try:
-                ordered[idx] = fut.result()
+                ordered[idx], _ok = fut.result()
             except Exception as e:
                 logger.error('[%s] batch worker failed at idx=%d: %s', tag, idx, e, exc_info=True)
                 ordered[idx] = None

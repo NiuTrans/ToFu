@@ -1,5 +1,20 @@
 # Tools and execution
 This domain defines tool visibility, model schemas, validation/dispatch, and result projection; MCP/plugin setup lives in [`../TOOL_PLUGINS.md`](../contracts/TOOL_PLUGINS.md) and [`../TOOL_SEARCH_EXECUTION_GATEWAY.md`](../contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md). The always-on `inspect_image` schema stays within 350 tokens while retaining original-source rendering, upload/path routing, single-region cost guidance, grid, mixed-unit, and read-only semantics. Its coordinates use the visible frame after EXIF orientation and explicit clockwise `rotate`; explicit `crop` wins, while centre `zoom` runs only without a crop. `sourceSize` is EXIF-normalized, `encodedSourceSize` is the stored pixel matrix, `cropBox` is post-rotate, and the browser applies no further crop.
+
+## Ordered batch completion
+
+`lib/tasks_pkg/handlers/_adapter.py` preserves one ordered result per input
+occurrence, including duplicates, and emits progress when requested. **Problem:** an abort
+skip and a successful empty result both returned `None`, so skipped retrievals
+were reported as successful. **Decision:** the worker carries its execution
+outcome separately from its value. Skips, submission failures and worker errors
+report `ok=False`; a successful `None` remains `ok=True`. Started siblings still
+join and retain their results. Progress observer errors cannot change settlement.
+**Alternative rejected:** inferring success from result truthiness misclassifies
+valid empty results. Worker reuse hints remain separate from active concurrency.
+Verify `tests/tasks_pkg/test_batch_abort_outcomes.py`, per-item visibility and
+the search/fetch, paper and Artifact batch suites.
+
 ## Ownership
 | Concern | Owner |
 |---|---|
