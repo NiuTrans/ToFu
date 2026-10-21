@@ -3,15 +3,46 @@
 Serial handlers and authoritative streaming prefetch share this owner. The
 package owns query-focused excerpt selection; the host owns the automatic
 per-tool budget and captures observations before any presentation work.
+fetch_failure_text and join_fetch_results preserve canonical fetch failures
+across ordinary, streaming and paper adapters via the common effect owner.
 """
 from __future__ import annotations
 
 import json
 
 from lib.tasks_pkg.handlers.search._display import _vertical_header_for_llm
-from lib.tools.result_value import CapturedToolResult, ResultPart, TrustedResultText
+from lib.tools.result_value import (
+    CapturedToolResult, ResultPart, TrustedResultText, tool_result_failure_verdict,
+)
 
 SEARCH_PREVIEW_CONTENT_CHARS = 20_000
+
+
+def fetch_failure_text(item, *, task=None, round_entry=None):
+    """Preserve failed source facts; only the common policy owner suggests replay."""
+    message = f"Failed to fetch {item['url']}."
+    facts = item.get('http_failure')
+    if (isinstance(task, dict) and isinstance(facts, dict)
+            and type(facts.get('status')) is int and 400 <= facts['status'] <= 599):
+        from lib.tasks_pkg.executor._effects import tool_http_response_result
+        return tool_http_response_result(task, 'fetch_url', round_entry or {},
+            status=facts['status'], retry_after=facts.get('retry_after'),
+            message=message + ' ' + str(facts.get('detail') or f"HTTP {facts['status']}"))
+    if item.get('error_msg'):
+        message += f" ({item['error_msg']})"
+    # An irrelevant readable page is a semantic verdict, not failed IO.
+    status = 'ok' if item.get('reason') == 'irrelevant' else 'error'
+    return TrustedResultText(message, canonical=CapturedToolResult(
+        (ResultPart('text', message),), execution_status=status))
+
+
+def join_fetch_results(parts, separator='\n\n'):
+    """A completed mixed batch retains every source; all-failed reads stay errors."""
+    text = separator.join(parts)
+    if parts and all(tool_result_failure_verdict(part) for part in parts):
+        return TrustedResultText(text, canonical=CapturedToolResult(
+            (ResultPart('text', text),), execution_status='error'))
+    return text
 
 
 def search_observation(query, results, diagnostics=None, engine_breakdown=None,

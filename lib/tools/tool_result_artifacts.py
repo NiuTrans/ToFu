@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from lib.tools.contracts import ToolContractV2, ToolErrorContract
 from lib.tool_results.tool_result_query_generated import CONTRACT as _QUERY_CONTRACT
+from lib.tools.result_surfaces_generated import CONTRACT as _SURFACE_CONTRACT
 
 
 _QUERY_ERRORS = tuple(
@@ -118,7 +119,8 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
     name="search_tool_artifact",
     namespace="artifacts",
     model_description=(
-        "Search one or more prior large tool results by text."
+        "Search retained text; grouped hits list all "
+        f"{_SURFACE_CONTRACT['artifactProjectionMatchGroups']['offsetsField']}."
     ),
     detailed_help=(
         "For one artifact, use artifact_ref and query. For independent "
@@ -126,7 +128,9 @@ SEARCH_TOOL_ARTIFACT = ToolContractV2(
         "parallelism and return in input order. Continue each item with its "
         "nextCursor when truncated. Search covers retained text, not image pixels. "
         "Check coverage/unavailable: zero hits on an incomplete scope cannot "
-        "prove absence in unseen content."
+        "prove absence in unseen content. Model views group only identical "
+        "adjacent excerpts from the same source/path; decoded program results "
+        "retain every hit separately."
     ),
     search_metadata=(
         "find grep prior tool output artifact",

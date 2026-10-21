@@ -40,6 +40,8 @@ from ._engine import (
     _build_trace,
     _translate_freetext,
     _translate_one_chunk,
+    translation_attempt_timeout_seconds,
+    translation_first_byte_timeout_seconds,
     translation_total_deadline_seconds,
 )
 
@@ -56,6 +58,9 @@ __all__ = [
     '_build_trace',
     # size-derived wall budget shared with the async worker
     'translation_total_deadline_seconds',
+    # per-attempt bound handed to the transport (must stay under the total)
+    'translation_attempt_timeout_seconds',
+    'translation_first_byte_timeout_seconds',
     # typed content-guard refusal (REST surface maps it to 502 + envelope)
     'TranslationContentRefused',
     # module ref re-exported for parity with the original top-level import

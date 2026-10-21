@@ -1,4 +1,4 @@
-"""Only declared defaults and complete-view replay cursors may be omitted."""
+"""Native model pages omit declared defaults and group only exact adjacent hits."""
 import json
 import pytest
 from lib.tools.artifact_result_projection import project_artifact_result
@@ -52,6 +52,67 @@ def test_zero_matches_mixed_errors_indexes_and_source_coverage_are_not_promoted(
     assert projected['items'][0]['coverage'] == 'incomplete'
     assert projected['items'][0]['index'] == 0
     assert restore_defaults(projected['items'][0]) == first
+
+
+def _expand_match_groups(value):
+    """The model format's offsets list represents every occurrence in order."""
+    expanded = []
+    for row in value:
+        if 'offsets' in row and 'offset' not in row:
+            shared = {key: item for key, item in row.items() if key != 'offsets'}
+            expanded.extend({'offset': offset, **shared} for offset in row['offsets'])
+        else:
+            expanded.append(row)
+    return expanded
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_identical_adjacent_excerpts_keep_every_occurrence_in_one_group(partial):
+    text = 'Exact quote: 中🙂\n"evidence" ' * 12
+    matches = [{'offset': offset, 'text': text, 'artifactRef': REF,
+                'path': ['/children/0', '/parts/0']} for offset in [0, 10, 10, 9007199254740993]]
+    source = page(items=matches, truncated=partial,
+                  nextCursor='trq2.exact-continuation.signature' if partial else None)
+    projected = json.loads(project_artifact_result('search_tool_artifact', raw(source)))
+
+    assert len(projected['items']) == 1
+    assert projected['items'][0]['offsets'] == [0, 10, 10, 9007199254740993]
+    assert _expand_match_groups(projected['items']) == matches
+    restored = restore_defaults(projected)
+    restored['items'] = _expand_match_groups(restored['items'])
+    assert restored == source
+    assert len(raw(projected).encode()) < len(raw(source).encode()) // 2
+
+
+@pytest.mark.parametrize('difference', ['text', 'artifactRef', 'path', 'missing_path',
+                                      'unknown', 'reserved_offsets', 'invalid_path'])
+def test_match_groups_never_merge_distinct_or_unknown_evidence(difference):
+    first = {'offset': 0, 'text': 'same text', 'artifactRef': REF, 'path': ['/parts/0']}
+    second = {**first, 'offset': 4}
+    if difference in {'text', 'artifactRef', 'path'}:
+        second[difference] = {'text': 'different', 'artifactRef': OTHER,
+                              'path': ['/children/1', '/parts/0']}[difference]
+    elif difference == 'missing_path':
+        second.pop('path')
+    elif difference == 'unknown':
+        first['future'] = second['future'] = {'value': 1}
+    elif difference == 'reserved_offsets':
+        first['offsets'] = second['offsets'] = [99]
+    else:
+        first['path'] = second['path'] = [0]
+    source = page(items=[first, second])
+    projected = json.loads(project_artifact_result('search_tool_artifact', raw(source)))
+    assert projected['items'] == [first, second]
+
+
+def test_equal_excerpts_separated_by_another_hit_keep_their_original_order():
+    common = {'text': 'same', 'artifactRef': REF}
+    matches = [{'offset': 0, **common}, {'offset': 1, **common},
+               {'offset': 2, 'text': 'another', 'artifactRef': OTHER},
+               {'offset': 3, **common}, {'offset': 4, **common}]
+    projected = json.loads(project_artifact_result('search_tool_artifact', raw(page(items=matches))))
+    assert len(projected['items']) == 3
+    assert _expand_match_groups(projected['items']) == matches
 
 
 @pytest.mark.parametrize('flag', ['truncated', 'outputTruncated'])
@@ -113,7 +174,7 @@ def test_unknown_tool_does_not_gain_artifact_projection():
 @pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])
 @pytest.mark.parametrize('more_pages', [False, True])
 @pytest.mark.parametrize('coverage', ['complete', 'incomplete'])
-@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.', 'trq3.'])
 def test_exact_page_omits_replay_cursor_without_changing_evidence_or_continuation(
         name, more_pages, coverage, prefix):
     value = page(name, resumeCursor=prefix + 'opaque-original.signature',
@@ -132,14 +193,14 @@ def test_exact_page_omits_replay_cursor_without_changing_evidence_or_continuatio
 
 
 @pytest.mark.parametrize('clipped', [True, None, 'false', 0, {}])
-@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.', 'trq3.'])
 def test_clipped_or_unknown_view_state_keeps_exact_replay_cursor(clipped, prefix):
     value = page(resumeCursor=prefix + 'opaque-original.signature', outputTruncated=clipped)
     result = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
     assert result['resumeCursor'] == value['resumeCursor']
 
 
-@pytest.mark.parametrize('cursor', ['0', 'future-v2.opaque', 'trq3.future', '', None, {'cursor': 'opaque'}])
+@pytest.mark.parametrize('cursor', ['0', 'future-v2.opaque', 'trq4.future', '', None, {'cursor': 'opaque'}])
 def test_unsigned_or_unknown_replay_cursor_is_not_interpreted(cursor):
     value = page(resumeCursor=cursor)
     result = json.loads(project_artifact_result('search_tool_artifact', raw(value)))
@@ -183,6 +244,58 @@ def test_budget_delivery_retains_original_decoded_source_and_complete_view(monke
     assert json.loads(envelope.canonical.text()) == value
     assert delivery.evidence['viewCoverage'] == 'complete'
     assert not delivery.evidence['truncated']
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'responses', 'anthropic'])
+def test_grouped_search_reaches_provider_without_changing_canonical_batch(protocol, monkeypatch):
+    from lib.llm._sse_core import prepare_request
+
+    quote = 'Exact quote 中🙂\n"line"'
+    matches = [{'offset': offset, 'text': quote, 'artifactRef': REF,
+                'path': ['/parts/0']} for offset in [0, 9007199254740993]]
+    matches.append({'offset': 7, 'text': quote, 'artifactRef': OTHER, 'path': ['/parts/0']})
+    failed = {'index': 1, 'status': 'error', 'artifactRef': OTHER,
+              'error': {'code': 'artifact_unavailable', 'retryable': False}}
+    first = page(index=0, items=matches, nextCursor='trq2.next.signature',
+                 truncated=True, coverage='incomplete')
+    value = {'status': 'partial_failure', 'items': [first, failed]}
+    source = raw(value)
+    retained = []
+
+    def persist(canonical, *, user_id):
+        retained.append((user_id, canonical.text()))
+        return 'tool-result:' + 'c' * 64
+
+    monkeypatch.setattr('lib.tools.result_value.persist_result', persist)
+    envelope = budget_tool_result_v2('search_tool_artifact', source, user_id=42)
+    delivery = split_tool_result_delivery(envelope)
+    model = json.loads(delivery.model_text)
+    assert retained == [(42, source)] and envelope.canonical.text() == source
+    assert model['status'] == 'partial_failure' and model['items'][1] == failed
+    assert model['items'][0]['nextCursor'] == first['nextCursor']
+    assert len(model['items'][0]['items']) == 2
+    assert _expand_match_groups(model['items'][0]['items']) == matches
+    assert not delivery.evidence['truncated'] and delivery.evidence['viewCoverage'] == 'complete'
+
+    messages = [
+        {'role': 'user', 'content': 'Read every exact match and retain its source.'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{
+            'id': 'artifact-call', 'type': 'function', 'function': {
+                'name': 'search_tool_artifact', 'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': 'artifact-call', 'content': delivery.model_text},
+    ]
+    plan = prepare_request({'model': 'fixture-model', 'messages': messages},
+        api_key='fixture-key', base_url='https://provider.invalid/v1', api_protocol=protocol)
+    wire = json.loads(plan.body.payload)
+    if protocol == 'openai':
+        content = next(item['content'] for item in wire['messages'] if item['role'] == 'tool')
+    elif protocol == 'responses':
+        content = next(item['output'] for item in wire['input']
+                       if item.get('type') == 'function_call_output')
+    else:
+        content = next(block['content'] for item in wire['messages']
+                       for block in item['content'] if block.get('type') == 'tool_result')
+    assert content == delivery.model_text
 
 
 @pytest.mark.parametrize('name', ['read_tool_artifact', 'search_tool_artifact'])

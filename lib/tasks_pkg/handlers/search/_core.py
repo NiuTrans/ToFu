@@ -818,6 +818,7 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
     asset_transport = None
     asset_sha256 = None
     error_msg = None
+    http_failure = None
     reason = 'extracted_ok' if page_content else 'fetch_failed'
 
     if irrelevant:
@@ -829,6 +830,19 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
             'irrelevant to the query. The page was readable — re-fetching it '
             'will not change the verdict; refine the query or try another source.'
         )
+    elif (not page_content and type(_fetch_diag.get('http_status')) is int
+          and 400 <= _fetch_diag['http_status'] <= 599):
+        # An answered HTTP failure is not evidence of an unextractable binary.
+        # Keep the response facts; staging would issue another identical GET.
+        from lib.tasks_pkg.executor._effects import http_retry_after_action
+        page_image_contents = ()
+        status = _fetch_diag['http_status']
+        http_failure = {'status': status, 'retry_after': _fetch_diag.get('retry_after'),
+                        'detail': _fetch_diag.get('detail') or f'Server returned HTTP {status}.'}
+        reason = f'fetch_failed:http_{status}'
+        error_msg = http_failure['detail']
+        if http_failure['retry_after'] is not None:
+            error_msg += ' ' + http_retry_after_action(http_failure['retry_after'])
     elif not page_content:
         # Binary-asset staging replaces the page text with a staged-file note;
         # any reader images belong to the dropped text, not to the asset.
@@ -862,6 +876,7 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
         'is_pdf': is_pdf, 'raw_chars': raw_chars,
         'filtered_chars': filtered_chars, 'error_msg': error_msg,
         'saved_path': saved_path, 'is_asset': is_asset, 'reason': reason,
+        'http_failure': http_failure,
         'location': asset_location, 'transport': asset_transport,
         'sha256': asset_sha256,
         'image_contents': page_image_contents,

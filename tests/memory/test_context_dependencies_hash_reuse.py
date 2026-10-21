@@ -1,9 +1,7 @@
-"""Pin that context_dependencies.prepare reuses the render-pass block hash map.
+"""Render-local hash reuse cannot authorize later working-fact dependencies.
 
-The render pass regex-scans every composer carrier once; the round's working
-fact dependency preparation must answer from that map instead of re-scanning
-the full history. The identity/length guard prevents a stale map from being
-trusted after any structural change.
+Preparation verifies actual admitted content; final-wire observation also
+rechecks bytes instead of inheriting stale or unowned task metadata.
 """
 from __future__ import annotations
 
@@ -24,61 +22,63 @@ def _composer_msg(block_id, body):
                 f'<!-- tofu-context:{block_id}:end -->')}]}
 
 
-def test_verified_block_hash_reuses_matching_map():
+def test_verified_block_hash_rechecks_current_content():
     messages = [_composer_msg('working_facts', 'the facts')]
-    expected = _managed_block_hashes(messages)
-    calls = []
-    original = _managed_block_hashes
-    import lib.tasks_pkg.context_composer._render as render
-    render._managed_block_hashes = lambda m: calls.append(m) or original(m)
-    try:
-        result = verified_block_hash(messages, 'working_facts',
-                                     existing_hashes=expected)
-    finally:
-        render._managed_block_hashes = original
-    assert result == expected['working_facts']
-    assert calls == []  # answered from the handed map, no second scan
+    before = verified_block_hash(messages, 'working_facts')
+    messages[0]['content'][0]['text'] = _composer_msg(
+        'working_facts', 'different evidence')['content'][0]['text']
+    after = verified_block_hash(messages, 'working_facts')
+    assert before != after
+    assert after == _managed_block_hashes(messages)['working_facts']
 
 
-def test_verified_block_hash_rescans_on_foreign_map():
+def test_wire_hash_rechecks_bytes_without_composer_metadata():
     messages = [_composer_msg('working_facts', 'the facts')]
-    result = verified_block_hash(messages, 'working_facts',
-                                 existing_hashes={'working_facts': 'stale'})
-    # A caller-supplied map that does NOT match the real scan is still
-    # authoritative only for the caller that proved the identity/length;
-    # here we verify a map is used as-is (the guard lives in
-    # context_dependencies.prepare, which checks identity+length first).
-    assert result == 'stale'
+    expected = _managed_block_hashes(messages)['working_facts']
+    messages[0].pop('_contextComposer')
+    result = verified_block_hash(messages, 'working_facts', wire=True)
+    assert result == expected
 
 
-def test_prepare_uses_render_pass_map_only_for_same_list(monkeypatch):
+@pytest.mark.parametrize('change', ['unchanged', 'append', 'new_list', 'replace', 'edit_content'])
+def test_prepare_binds_only_the_actual_admitted_content(change, monkeypatch):
+    from lib.identity import PrincipalContext
     from lib.tasks_pkg import context_dependencies
+
     messages = [_composer_msg('working_facts', 'the facts')]
-    real_map = _managed_block_hashes(messages)
-    task = {'_managedBlockHashes': {'_messages_identity': id(messages),
-                                    '_messages_length': len(messages),
-                                    'map': real_map}}
-    captured = {}
-    original = verified_block_hash
-    def spy(msgs, block_id, **kwargs):
-        captured['existing'] = kwargs.get('existing_hashes')
-        return original(msgs, block_id, **kwargs)
-    monkeypatch.setattr('lib.tasks_pkg.context_composer.verified_block_hash', spy)
-    # No working_facts manifest rows → prepare returns before the hash lookup.
-    task.setdefault('_contextManifest', [])
+    hashes = _managed_block_hashes(messages)
+    principal = PrincipalContext.user(subject_id='fact-owner', owner_user_id=1)
+    task = {'id': 'consumer-task', 'convId': 'consumer-conversation', '_userId': 1,
+            '_principalContext': principal.to_payload(),
+            '_managedBlockHashes': {'_messages_identity': id(messages),
+                                    '_messages_length': len(messages), 'map': hashes},
+            '_contextManifest': [{'id': 'working_facts', 'injected': True,
+                'appended': True, 'hash': hashes['working_facts'],
+                'provenance': {'conversationId': 'consumer-conversation',
+                    'taskId': 'consumer-task', 'facts': [{'id': 'fact-a', 'revision': 2}]}}]}
+    prepared = []
+    monkeypatch.setattr('lib.memory.working_facts.consumers.prepare',
+                        lambda **kwargs: prepared.append(kwargs))
+    if change == 'append':
+        messages.append({'role': 'user', 'content': 'continue'})
+    elif change == 'new_list':
+        messages = list(messages)
+    elif change == 'replace':
+        messages[0] = _composer_msg('working_facts', 'different evidence')
+    elif change == 'edit_content':
+        messages[0]['content'][0]['text'] = _composer_msg(
+            'working_facts', 'different evidence')['content'][0]['text']
+
     context_dependencies.prepare(task, messages)
-    assert captured == {}
-    # A structural change (length) must make prepare distrust the map.
-    task['_contextManifest'] = [{'id': 'working_facts', 'injected': True,
-                                 'appended': True, 'hash': real_map['working_facts'],
-                                 'provenance': {'facts': []}}]
-    monkeypatch.setattr(context_dependencies, '_scope', lambda t: None)
-    monkeypatch.setattr('lib.memory.working_facts.consumers.prepare', lambda **k: None)
-    from lib.memory.working_facts.repository import digest
-    monkeypatch.setattr('lib.memory.working_facts.repository.digest', lambda *a: 'b')
-    messages.append({'role': 'user', 'content': 'grow'})
-    try:
-        context_dependencies.prepare(task, messages)
-    except Exception:
-        pass  # scope/ownership may still raise; we only inspect the handoff
-    assert captured.get('existing') is None  # length mismatch → rescan
+    if change in {'replace', 'edit_content'}:
+        assert prepared == []
+        assert '_workingFactDependencyPending' not in task
+    else:
+        assert len(prepared) == 1
+        assert prepared[0]['principal'] == principal
+        assert prepared[0]['conversation_id'] == task['convId']
+        assert prepared[0]['task_id'] == task['id']
+        assert prepared[0]['facts'] == [{'id': 'fact-a', 'revision': 2}]
+        pending = task['_workingFactDependencyPending']
+        assert pending['hash'] == verified_block_hash(messages, 'working_facts')
+        assert not pending['wireMatched'] and pending['binding']

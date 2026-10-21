@@ -59,6 +59,25 @@ def test_fitting_model_page_is_not_requeried_or_refused(operation, more):
     assert len(project_model_source(operation, handler._serialize(result)).encode()) <= 700
 
 
+def test_repeated_search_excerpts_fit_without_requerying_or_dropping_hits():
+    matches = [{'offset': offset, 'text': 'Exact evidence 中🙂\n' * 8,
+                'artifactRef': REFERENCE, 'path': ['/parts/0']} for offset in range(20)]
+    source = page('search_tool_artifact', items=matches)
+    queries = []
+
+    def search(**arguments):
+        queries.append(arguments)
+        return {**source, 'items': matches[:arguments['limit']]}
+
+    result = handler._execute_one('search_tool_artifact', {
+        'artifact_ref': REFERENCE, 'query': 'Exact', 'limit': 20}, user_id=17,
+        repository=SimpleNamespace(search=search), token_budget=1100)
+
+    assert result == {'status': 'ok', **source}
+    assert len(queries) == 1 and queries[0]['limit'] == 20
+    assert len(project_model_source('search_tool_artifact', handler._serialize(result)).encode()) <= 1100
+
+
 @pytest.mark.parametrize('operation', ['read_tool_artifact', 'search_tool_artifact'])
 def test_batch_view_fits_without_discarding_canonical_page_data(operation, monkeypatch):
     # Default metadata is intentionally larger than the model budget; the
@@ -118,7 +137,7 @@ def test_required_or_unrecognized_metadata_still_consumes_budget(operation, chan
     assert 'nextCursor' not in result
 
 
-@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.', 'trq3.'])
 def test_opaque_next_cursor_never_survives_local_body_clipping(prefix):
     source = {'status': 'ok', **page(
         'read_tool_artifact', nextCursor=prefix + 'next-page', content='evidence ' * 500)}

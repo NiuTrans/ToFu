@@ -1196,6 +1196,7 @@ def execute_paper_tool(name, args_str, user_question='', abort=None,
 
         all_parts = []
         all_display = []
+        from lib.tasks_pkg.handlers.search._presentation import fetch_failure_text, join_fetch_results
         for idx, item in enumerate(ordered):
             u = url_list[idx]
             if item is None:
@@ -1209,14 +1210,12 @@ def execute_paper_tool(name, args_str, user_question='', abort=None,
             all_display.append(backend.format_fetch_display(item, _short_url))
             page_content = item['page_content']
             filtered_chars = item['filtered_chars']
-            error_msg = item.get('error_msg')
             if page_content:
                 all_parts.append(
                     f"Content from {u} ({filtered_chars:,} chars):\n\n{page_content}")
             else:
-                all_parts.append(
-                    f"Failed to fetch {u}." + (f' ({error_msg})' if error_msg else ''))
-        return '\n\n---\n\n'.join(all_parts), all_display, None, None, None
+                all_parts.append(fetch_failure_text(item))
+        return join_fetch_results(all_parts, '\n\n---\n\n'), all_display, None, None, None
 
     else:
         # ── Full-set branch: every non-search tool goes through chat's SHARED

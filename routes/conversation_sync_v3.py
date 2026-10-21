@@ -397,6 +397,22 @@ async def conversation_sync_snapshot(conversation_id: str):
         response.headers["Server-Timing"] = (
             f"snapshot;dur={read_ms:.2f}, encode;dur={encode_ms:.2f}"
         )
+        # Opening a conversation is the observable evidence that its turns
+        # matter right now, and it is the last reliable moment to repair a
+        # translation that failed earlier: the boot sweep only covers recent
+        # conversations, so without this a failed turn stayed English until a
+        # restart. Detached + debounced + fail-soft, so it never delays this
+        # response.
+        try:
+            from lib.translate.terminal import schedule_translation_recovery
+
+            schedule_translation_recovery(
+                conversation_id, user_id=user_id)
+        except Exception as exc:
+            logger.debug(
+                "[AutoTranslate] recovery admission failed conv=%s: %s",
+                conversation_id[:8], exc,
+            )
         return response, status
     except ConversationSyncNotFound as exc:
         return api_not_found(str(exc))

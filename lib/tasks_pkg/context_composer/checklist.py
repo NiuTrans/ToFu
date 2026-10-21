@@ -107,76 +107,71 @@ def _complete_carrier(message: dict, state: dict) -> bool:
 def _current_evidence(messages: list[dict], state: dict, *,
                       task: dict | None = None,
                       memoize: bool = True) -> dict | None:
-    """Find a complete visible witness of the runtime's current accepted state.
+    """Pair current history, reusing only unchanged receipt interpretations.
 
-    Pair within each assistant call batch, not a global id set: providers can
-    recycle ids and a foreign result must not inherit an earlier todo identity.
-
-    When ``task`` is supplied the full-history scan is memoized on it for the
-    scope of one round's composition/admission: callers resolve a stable
-    ``(round, list identity, state)`` key via ``_evidence_memo_scope`` and the
-    memo records how far the last scan reached. The next lookup re-scans ONLY
-    the appended suffix and folds it into the memoized result; any structural
-    change (replacement, truncation, compaction, removed carrier) misses the
-    memo and falls back to a full scan, so behavior is identical while the
-    2-4 identical per-round walks collapse to one. The memo is round-scoped:
-    in-place content edits landing AFTER a memo write could stay unobserved
-    within that round, which is why cross-round reuse always re-validates.
+    Metadata is read on every projection: clipping, replacement, reused call
+    ids and edited assistant declarations must not inherit a previous witness.
+    Only parsing a paired receipt is memoized, keyed by its exact immutable
+    text and interpretation kind within one round/list/accepted-state scope.
+    Compaction candidates never read or publish the task's memo.
     """
-    memo_key = None
-    if memoize and isinstance(task, dict):
-        memo_key = _evidence_memo_scope(messages, state, task)
-        memo = task.get('_checklistEvidenceMemo') if memo_key else None
-        if (isinstance(memo, dict) and memo.get('key') == memo_key
-                and memo.get('scanned', 0) <= len(messages)
-                and all(messages[index] is candidate for index, candidate in
-                        enumerate(memo.get('prefix') or ()))):
-            return _evidence_scan_suffix(messages, state, memo)
-    newest = _evidence_scan_range(messages, state, 0, len(messages), None)
+    memo_key = _evidence_memo_scope(messages, state, task) if (
+        memoize and isinstance(task, dict)) else None
+    memo = task.get('_checklistEvidenceMemo') if memo_key is not None else None
+    cached = memo.get('receipts') if (
+        isinstance(memo, dict) and memo.get('key') == memo_key) else None
+    retained = {} if memo_key is not None else None
+    newest = _evidence_scan(messages, state,
+                            cached=cached if isinstance(cached, dict) else {},
+                            retained=retained)
     if memo_key is not None:
-        task['_checklistEvidenceMemo'] = {
-            'key': memo_key,
-            'scanned': len(messages),
-            'prefix': [id(message) for message in messages],
-            'evidence': newest,
-        }
+        # Publish only after the complete scan succeeds. Dropped receipts do
+        # not accumulate: this replaces the previous projection's cache.
+        task['_checklistEvidenceMemo'] = {'key': memo_key, 'receipts': retained}
     return newest
 
 
-def _evidence_scan_range(messages: list[dict], state: dict, start: int,
-                         end: int, newest: dict | None) -> dict | None:
-    """Scan messages[start:end] for the newest complete witness.
+def _receipt_visible(message: dict, state: dict, kind: str,
+                     cached: dict, retained: dict | None) -> bool:
+    # Freeze text chunks rather than retaining a second joined payload. An
+    # in-place edit to a list block must also invalidate the interpretation.
+    text = message.get('content')
+    if not isinstance(text, str):
+        text = tuple(block['text'] for block in text
+                     if isinstance(block, dict) and isinstance(block.get('text'), str)
+                     ) if isinstance(text, list) else ()
+    previous = cached.get(id(message))
+    if previous is not None and previous[:2] == (kind, text):
+        visible = previous[2]
+    else:
+        body = _message_text(message)
+        visible = (_accepted_result(body, state) if kind == 'todo'
+                   else bool(_gateway_result_visible(body, state)))
+    if retained is not None:
+        retained[id(message)] = (kind, text, visible)
+    return visible
 
-    Assistant call batching is per-message: each assistant turn RESETS the
-    open call-id map, and a tool message pairs only with an unmatched id from
-    the CURRENT batch. A suffix scan therefore re-seeds the batch from the
-    last assistant turn BEFORE ``start`` — older unmatched ids are
-    unreachable because tool results always follow their own batch.
-    """
-    calls: dict[str, str] = {}
-    for message in messages[max(0, start - 1):start]:
-        if message.get('role') == 'assistant':
-            calls = {call.get('id'): (call.get('function') or {}).get('name', '')
-                     for call in message.get('tool_calls') or []
-                     if isinstance(call, dict) and call.get('id')}
-    for message in messages[start:end]:
+
+def _evidence_scan(messages: list[dict], state: dict, *,
+                    cached: dict, retained: dict | None) -> dict | None:
+    """Read current call batches; consume each declared occurrence once."""
+    open_calls = {}
+    newest = None
+    for message in messages:
         role = message.get('role')
         if role == 'assistant':
-            calls = {call.get('id'): (call.get('function') or {}).get('name', '')
-                     for call in message.get('tool_calls') or []
-                     if isinstance(call, dict) and call.get('id')}
+            open_calls = {call.get('id'): (call.get('function') or {}).get('name', '')
+                          for call in message.get('tool_calls') or []
+                          if isinstance(call, dict) and call.get('id')}
         if _is_checklist_carrier(message):
             if _complete_carrier(message, state):
                 newest = message
         elif role == 'tool':
-            name = calls.pop(message.get('tool_call_id'), '')
-            if name in _TODO_TOOL_NAMES:
-                if _accepted_result(_message_text(message), state):
-                    newest = message
-            elif name in _GATEWAY_TOOL_NAMES:
-                visible = _gateway_result_visible(_message_text(message), state)
-                if visible:
-                    newest = message
+            name = open_calls.pop(message.get('tool_call_id'), '')
+            kind = 'todo' if name in _TODO_TOOL_NAMES else (
+                'gateway' if name in _GATEWAY_TOOL_NAMES else '')
+            if kind and _receipt_visible(message, state, kind, cached, retained):
+                newest = message
     return newest
 
 
@@ -188,19 +183,11 @@ def _evidence_memo_scope(messages: list[dict], state: dict,
         round_num = _round_num(task)
     except Exception:
         return None
-    return (round_num, id(messages), id(state))
-
-
-def _evidence_scan_suffix(messages: list[dict], state: dict,
-                          memo: dict) -> dict | None:
-    """Fold the appended suffix into the memoized evidence and prefix."""
-    start = int(memo.get('scanned') or 0)
-    newest = _evidence_scan_range(messages, state, start, len(messages),
-                                  memo.get('evidence'))
-    memo['scanned'] = len(messages)
-    memo['prefix'] = [id(message) for message in messages]
-    memo['evidence'] = newest
-    return newest
+    # todo_state_from_task returns detached normalized snapshots. Their values,
+    # including explanation and content, identify accepted progress, not id().
+    state_key = (state['version'], state['update_count'], state['explanation'],
+                 tuple((item['content'], item['status']) for item in state['todos']))
+    return (round_num, id(messages), state_key)
 
 
 def reconcile_checklist_context(messages: list[dict], task: dict | None,

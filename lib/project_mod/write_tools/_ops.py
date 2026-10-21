@@ -362,7 +362,10 @@ def _write_with_undo(target, content, base, rel_path, original_content, *,
         # or corrupt journal forces the fail-loud disk read below and never
         # persists as reusable state. The snapshot is consumed by the one RMW
         # below while this same admission remains held (never a stale projection).
-        state['preparedJournal'] = list(mods._cache_get(session_dir))
+        # Validate the undo authority before replacing user bytes, without
+        # paying a full-history parse per edit. Rows materialized here are handed
+        # to this admission's commit, so a fold never re-reads the same journal.
+        state['preparedJournal'] = mods._assert_journal_ready(session_dir)
         state['writing'] = True
         record = None
         published = False
@@ -2217,7 +2220,9 @@ def _admit_edit_groups(groups, conv_id, stack):
             finally:
                 state.pop('recovering', None)
             # A later root's corrupt journal must not follow an earlier write.
-            mods._cache_get(directory)
+            # Validation by identity, not a full materialization: an edit must not
+            # pay for re-parsing the whole history before writing one file.
+            mods._assert_journal_ready(directory)
         except Exception as error:
             for target in session['targets']:
                 errors[target] = error
@@ -2236,13 +2241,16 @@ def _edit_group_failure(operation, path, error):
 
 @_with_workspace_writer
 def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
-                   allow_outside=False, atomic=True):
+                   allow_outside=False, atomic=True, batch_path=None):
     """Preflight a sequential mixed batch, then publish one transition per file.
 
     Atomic preflight is the default: an invalid operation, destination or match
     prevents every write. Only explicit ``atomic=False`` permits legacy partial
     application. This does not promise cross-file rollback after I/O failure.
     Later edits see earlier in-memory changes; receipts keep original indexes.
+
+    ``batch_path`` is the call's declared file for every edit that omits its
+    own ``path`` — one batch may still span files by naming a path per edit.
     """
     if not edits:
         return 'No edits provided.'
@@ -2260,7 +2268,9 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
                 i, edit, '{path, operation, anchor, content}')
             continue
 
-        rp = edit.get('path', '')
+        own_path = edit.get('path')
+        rp = own_path if isinstance(own_path, str) and own_path.strip() \
+            else (batch_path or '')
         operation = edit.get('operation', '')
         anchor = edit.get('anchor', '')
         content = edit.get('content')
@@ -2271,7 +2281,8 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
                 or not isinstance(content, str)):
             strings[i] = (
                 f'[{i}] FAIL [{EK_INVALID_EDIT}] '
-                'Missing required field (path, anchor, or content)')
+                'Missing required field (path, anchor, or content) — name the '
+                'file once in the batch `path`, or on this edit')
             continue
         if not isinstance(operation, str) or operation not in _EDIT_OPERATIONS:
             strings[i] = (f'[{i}] FAIL [{EK_INVALID_EDIT}] Invalid operation: '

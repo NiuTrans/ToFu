@@ -53,6 +53,7 @@ from lib.llm.llm_errors import (
     PROVIDER_RESPONSE_ERRORS,
     RateLimitError,
     RequestTransportError,
+    ResponseReadTimeoutError,
     RetryableAPIError,
     SubscriptionConnectionError,
     _RETRYABLE,
@@ -118,6 +119,12 @@ def _iter_response_bytes(response):
             yield bytes(line) + b'\n\n'
 
 
+# Expiry causes that represent the CALLER's own per-attempt bound rather than
+# an upstream hiccup. They must not re-enter the same-slot retry loop: the
+# slot already had its full window.
+_CALLER_BOUND_EXPIRY_CAUSES = frozenset({'attempt_deadline', 'response_headers'})
+
+
 def stream_chat(body, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=None,
                 abort_check=None, log_prefix='', api_key=None, base_url=None,
@@ -125,7 +132,9 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 adapter=None, on_attempt_restart=None,
                 on_first_byte_wait=None,
                 on_stream_wait=None,
-                owner_user_id=None) -> ProviderStreamResult:
+                owner_user_id=None,
+                attempt_timeout=None,
+                first_byte_timeout=None) -> ProviderStreamResult:
     """Streaming chat completion with callbacks.
 
     Automatically retries on transient connection errors up to
@@ -148,6 +157,16 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
     historical name it reports current transport silence both before the first
     byte and during a mid-stream stall. New callers should use
     ``on_stream_wait``.
+
+    ``attempt_timeout`` (seconds, optional): hard wall bound on ONE physical
+    attempt, armed on the response body reader. ``first_byte_timeout`` (seconds,
+    optional): bound on the response-header wait. Both exist because the idle
+    window only measures silence: a provider that accepts the socket and then
+    sends nothing, or trickles keep-alives without output, is otherwise
+    unbounded — an optional caller (translation) then spends its entire budget
+    on one attempt and can never afford the retry that would have worked.
+    Expiry is a retryable transport failure, never a user abort; the defaults
+    (``None``) keep every interactive caller unchanged.
 
     Returns:
         A typed provider-stream result. Legacy callers may still unpack it as
@@ -178,7 +197,9 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 oauth=oauth, adapter=adapter,
                 on_first_byte_wait=on_first_byte_wait,
                 on_stream_wait=on_stream_wait,
-                owner_user_id=owner_user_id))
+                owner_user_id=owner_user_id,
+                attempt_timeout=attempt_timeout,
+                first_byte_timeout=first_byte_timeout))
             usage = attach_limit_learned(stream_result.usage, _limit_learned)
             return stream_result.with_usage(usage)
         except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError, EndpointUnreachableError):
@@ -193,6 +214,19 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
             # far belongs to a discarded attempt.
             _fire_attempt_restart('model-limit clamp retry')
             continue
+        except ResponseReadTimeoutError as e:
+            if e.cause_type in _CALLER_BOUND_EXPIRY_CAUSES:
+                # A caller-imposed bound already spent its whole window on
+                # this slot. Retrying the SAME slot would spend the caller's
+                # remaining budget the same way, so escape to dispatch, which
+                # excludes the pair and rotates.
+                raise
+            last_err = e
+            if attempt < MAX_STREAM_RETRIES:
+                _fire_attempt_restart(
+                    'transport retry: %s' % e.__class__.__name__)
+            wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
+            timed_call('transport_backoff', abortable_sleep, wait, abort_check)
         except _RETRYABLE as e:
             last_err = e
             if attempt < MAX_STREAM_RETRIES:
@@ -244,7 +278,8 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                       api_key=None, base_url=None, extra_headers=None,
                       api_protocol='openai', oauth='', adapter=None,
                       on_first_byte_wait=None, on_stream_wait=None,
-                      owner_user_id=None):
+                      owner_user_id=None, attempt_timeout=None,
+                      first_byte_timeout=None):
     """Single attempt at a streaming chat completion (sync transport)."""
     from lib.llm._transport import transport_owner_scope
     _owner_scope = transport_owner_scope(owner_user_id)
@@ -363,6 +398,19 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
         on_abort=lambda: _tp.interrupt_response_read(_resp_holder.get('resp')),
         idle_timeout=_tp.stream_idle_timeout_seconds(),
         on_idle_timeout=lambda: _tp.interrupt_response_read(_resp_holder.get('resp')))
+    _attempt_deadline_at = (
+        time.monotonic() + float(attempt_timeout)
+        if attempt_timeout and float(attempt_timeout) > 0 else None)
+    # The header wait precedes any response handle, so it cannot be interrupted
+    # by the body watchdog. Its own bound is the tighter of the two the caller
+    # supplied: a caller that only sets ``attempt_timeout`` must still be able
+    # to abandon a slot that never sends headers.
+    _header_bounds = [
+        float(value) for value in (first_byte_timeout, attempt_timeout)
+        if value and float(value) > 0
+    ]
+    _first_byte_deadline = (
+        time.monotonic() + min(_header_bounds) if _header_bounds else None)
     try:
         _conn_t0 = time.monotonic()
         try:
@@ -473,7 +521,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                         timeout=(CONNECT_TIMEOUT, None),
                                         proxies=_server_route.requests_proxies(),
                                         allow_redirects=False),
-                                    is_aborted=lambda: _watchdog.aborted)
+                                    is_aborted=lambda: _watchdog.aborted,
+                                    first_byte_deadline=_first_byte_deadline,
+                                    timeout_seconds=first_byte_timeout)
                             except requests.exceptions.ConnectionError as e:
                                 from lib.subscription_routes import (
                                     is_safe_connect_failure,
@@ -526,7 +576,10 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                 stream=True, timeout=(CONNECT_TIMEOUT, None),
                                 proxies=_generic_proxies,
                                 allow_redirects=False),
-                            is_aborted=lambda: _watchdog.aborted)
+                            is_aborted=lambda: _watchdog.aborted,
+                            first_byte_deadline=_first_byte_deadline,
+                            timeout_seconds=(
+                                min(_header_bounds) if _header_bounds else None))
                 _resp_holder['resp'] = resp
                 if _watchdog.aborted:
                     # Stop landed in the narrow window between header receipt
@@ -640,6 +693,13 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 logger.debug('%s debug SSE capture open failed: %s',
                              log_prefix, _dbg_open_e)
                 _dbg_sse_fp = None
+        if _attempt_deadline_at is not None:
+            # Headers arrived: bound the remaining physical attempt so a
+            # provider that trickles keep-alives without producing output is
+            # still a retryable failure inside the caller's budget.
+            _watchdog.arm_attempt_deadline(
+                _attempt_deadline_at - time.monotonic(),
+                lambda: _tp.interrupt_response_read(_resp_holder.get('resp')))
         raw_chunks = _iter_response_bytes(resp)
         try:
             for raw_chunk in raw_chunks:
@@ -652,10 +712,11 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                      log_prefix, _dbg_write_e)
                 if plan.raw_archive_capture is not None:
                     plan.raw_archive_capture.append_response(raw_chunk)
-                if _watchdog.idle_timed_out:
+                if _watchdog.idle_timed_out or _watchdog.attempt_deadline_expired:
                     # The watchdog closed the socket after
-                    # IDLE_STREAM_TIMEOUT_S of silence. Fall through to
-                    # finalize() so the premature-close diagnostics fire.
+                    # IDLE_STREAM_TIMEOUT_S of silence or at the caller's
+                    # per-attempt deadline. Fall through to finalize() so the
+                    # premature-close diagnostics fire.
                     break
                 _watchdog.notify_transport_bytes(len(raw_chunk))
                 if abort_check and abort_check():
@@ -678,7 +739,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                            'error_kind': type(_iter_e).__name__,
                            'stream_evidence': _interrupted_evidence,
                        }})
-            if _watchdog.idle_timed_out:
+            if _watchdog.idle_timed_out or _watchdog.attempt_deadline_expired:
                 # Closing the response from the watchdog thread usually
                 # surfaces as an I/O error here; treat it as a premature close
                 # (finalize will flag _missing_done) rather than re-raising.
@@ -713,13 +774,27 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
             except Exception as _dbg_close_e:
                 logger.debug('%s debug SSE capture close failed: %s',
                              log_prefix, _dbg_close_e)
-        byte_stream.finalize(interrupted=acc.aborted_by_client or _watchdog.aborted)
+        byte_stream.finalize(interrupted=(
+            acc.aborted_by_client or _watchdog.aborted
+            or _watchdog.attempt_deadline_expired))
         if _watchdog.aborted:
             # A close() can surface as a CLEAN end of iteration on some
             # urllib3 versions — without this check an aborted attempt would
             # finalize as a silent empty/partial "success".
             raise AbortedError(
                 'User aborted while waiting on %s' % plan.url, url=plan.url)
+        if _watchdog.attempt_deadline_expired:
+            # Same clean-EOF trap, but this is NOT a user abort: the caller set
+            # a per-attempt bound and the provider did not finish inside it.
+            # Surface it as the retryable read timeout so dispatch rotates to
+            # another slot instead of accepting a partial body.
+            _report_network_outcome(False, 'read_timeout')
+            from lib.llm.llm_errors import ResponseReadTimeoutError
+
+            raise ResponseReadTimeoutError(
+                base_url=plan.url,
+                timeout_seconds=attempt_timeout,
+                cause_type='attempt_deadline')
         if byte_stream.stopped and acc.saw_done and not acc.aborted_by_client:
             def _record_tail(raw_chunk):
                 _progress.mark_transport_bytes(len(raw_chunk))

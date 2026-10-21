@@ -13,6 +13,9 @@ def test_failed_record_write_does_not_publish_cache_or_listener(tmp_path, monkey
     original = mods.get_modifications(base)
     def fail(*args, **kwargs):
         raise OSError('injected disk full')
+    # Both durable commit mechanisms must fail closed: the append fast path and
+    # the whole-index fold.
+    monkeypatch.setattr(mods, '_append_to_tail', fail)
     monkeypatch.setattr(mods, '_atomic_json_write', fail)
     monkeypatch.setattr(mods, '_live_change_listeners', [lambda *args: events.append(args)])
     assert mods._record_modification(base, 'write_file', 'second', task_id='task') is False

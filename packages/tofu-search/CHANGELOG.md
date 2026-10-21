@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.12.13
+## 0.12.14
 
 - Rank uncertain follow-up candidates with the existing query/rank-fusion and
   diversity policy before selecting the bounded preview. Keep every received
   candidate and its evidence status; ranking does not establish relevance or
   factual support. Explicit `rerank=False` preserves arrival order.
+
+## 0.12.13
+
+- Preserve HTTP failure status and bounded `Retry-After` headers in
+  `fetch_page_content(..., diag=...)`, including content-decoding recovery.
+  The diagnostics remain JSON-compatible response facts; they grant no retry
+  authority, retain no response body and add no requests or sleep.
+- Clear fetch-owned diagnostics at the next call so a reused mapping cannot
+  attribute an old HTTP failure to a new source. Existing browser recovery
+  still returns successful evidence through the same public entry point.
 
 ## 0.12.12
 

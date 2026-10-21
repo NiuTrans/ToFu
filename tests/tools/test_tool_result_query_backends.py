@@ -103,7 +103,7 @@ def test_signed_route_cursor_survives_restart_and_rejects_changed_bindings(repo,
     root = manifest(repo, children=[{'name': 'tool', 'callId': 'child', 'artifactRef': child}])
     first = repo.read_range(user_id=1, artifact_ref=root, now_ms=repo.query_test_now_ms + 1, limit=5)
     cursor = first['nextCursor']
-    assert cursor.startswith('trq2.')
+    assert cursor.startswith('trq3.')
     storage.stop(); storage.start()
     rest = repo.read_range(user_id=1, artifact_ref=root, now_ms=repo.query_test_now_ms + 2, offset=cursor)
     assert first['content'] + rest['content'] == '中abcdefß' * 20
@@ -134,14 +134,19 @@ def test_search_adjacent_unicode_and_window_boundary_offsets(repo):
 
 
 @pytest.mark.parametrize('canonical', [False, True])
+@pytest.mark.parametrize('distinct_excerpts', [False, True])
 def test_handler_search_budget_retains_authority_quotes_and_cursors(
-        repo, monkeypatch, canonical):
+        repo, monkeypatch, canonical, distinct_excerpts):
     from lib.tasks_pkg.handlers import tool_result_artifacts as handler
     from lib.tools.result_surfaces import project_model_source
 
     monkeypatch.setattr(
         handler, '_count_tokens', lambda text, _model: len(text.encode('utf-8')))
-    text = ('中🙂' * 80 + 'needle' + '背景' * 160) * 24
+    # Distinct excerpts still exercise the real budget/requery boundary;
+    # identical excerpts must fit without discarding requested occurrences.
+    text = ''.join('中🙂' * 80 + 'needle'
+                   + (f'{index:02d}' if distinct_excerpts else '')
+                   + '背景' * 160 for index in range(24))
     ref = (manifest(repo, [{'kind': 'text', 'text': text}], ttl=120000)
            if canonical else put(repo, text, ttl=120000))
     arguments = {'artifact_ref': ref, 'query': 'needle', 'limit': 20}
@@ -150,7 +155,11 @@ def test_handler_search_budget_retains_authority_quotes_and_cursors(
 
     page = handler._execute_one(
         'search_tool_artifact', arguments, user_id=1, repository=repo)
-    assert page['status'] == 'ok' and 0 < len(page['items']) < len(original['items'])
+    assert page['status'] == 'ok'
+    if distinct_excerpts:
+        assert 0 < len(page['items']) < len(original['items'])
+    else:
+        assert page['items'] == original['items']
     expected = repo.search(user_id=1, **{**arguments, 'limit': len(page['items'])})
     assert page == {'status': 'ok', **expected}
     assert all('needle' in item['text'] for item in page['items'])
@@ -245,6 +254,7 @@ def test_model_cursor_projection_preserves_owned_source_and_continuation(
     from lib.agent_core.storage_errors import StorageError
     from lib.tasks_pkg.compaction._budget import budget_tool_result_v2
     from lib.tools.result_envelope import split_tool_result_delivery
+    from tests.tools.test_artifact_result_projection import _expand_match_groups
 
     reference = manifest(repo, [{'kind': 'text', 'text': 'needle 中文🙂\n' * 8}],
                          ttl=120000)
@@ -255,7 +265,7 @@ def test_model_cursor_projection_preserves_owned_source_and_continuation(
     else:
         def query(cursor):
             return repo.search(user_id=1, artifact_ref=reference, cursor=cursor,
-                               query='needle', limit=1 if more_pages else 20)
+                               query='needle', limit=5 if more_pages else 20)
     page = {'status': 'ok', **query(0)}
     assert page['truncated'] is more_pages
     source = json.dumps(page, ensure_ascii=False, separators=(',', ':'))
@@ -265,6 +275,9 @@ def test_model_cursor_projection_preserves_owned_source_and_continuation(
 
     assert 'resumeCursor' not in model
     assert model.get('nextCursor') == page['nextCursor']
+    if name == 'search_tool_artifact':
+        assert len(model['items']) == 1
+        assert _expand_match_groups(model['items']) == page['items']
     assert delivery.evidence['viewCoverage'] == 'complete'
     assert delivery.evidence['retentionCoverage'] == 'complete'
     retained_ref = delivery.evidence['artifactRef']

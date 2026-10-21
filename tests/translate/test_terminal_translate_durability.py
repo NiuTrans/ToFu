@@ -196,7 +196,7 @@ def test_sweep_respawns_only_untranslated_settled_turns(monkeypatch):
     spawned = []
     monkeypatch.setattr(
         terminal, '_spawn_whole_turn_translation',
-        lambda **kw: spawned.append(kw))
+        lambda **kw: spawned.append(kw) is None)
 
     def _skip(content, target, target_code):
         return content == 'already chinese'

@@ -10,7 +10,9 @@ tree.
 """
 
 # Synthetic repository/package fixtures, never shipped-source anchors.
-_AUDIT_SYNTHETIC_REPO_PATHS = ('scripts/helper.py', 'scripts/private.py')
+_AUDIT_SYNTHETIC_REPO_PATHS = (
+    'scripts/helper.py', 'scripts/private.py', 'tests/test_retained.py',
+)
 
 import pytest
 

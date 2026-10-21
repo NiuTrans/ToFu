@@ -2,7 +2,8 @@
 
 Provides multi-engine search, URL dedup, snippet grouping, concurrent page
 fetch and body dedup, optional LLM content filtering, BM25 reranking, and
-result formatting.
+result formatting. ``fetch_page_content(..., diag=...)`` retains JSON-compatible
+HTTP failure status and bounded Retry-After response facts without retry authority.
 
 Usage::
 

@@ -65,9 +65,11 @@ __all__ = [
 
 class HttpError(Exception):
     """HTTP error carrying a status code so callers can differentiate 404 vs 5xx."""
-    def __init__(self, status_code, url):
+    def __init__(self, status_code, url, *, retry_after=None):
         self.status_code = status_code
         self.url = url
+        self.retry_after = (retry_after if isinstance(retry_after, str)
+                            and len(retry_after) <= 64 else None)
         super().__init__(f'HTTP {status_code} for {url[:120]}')
 
 
@@ -151,9 +153,10 @@ def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
     conn_ms = int((time.time() - t0) * 1000)
     if not resp.ok:
         status = resp.status_code
+        retry_after = resp.headers.get('Retry-After')
         resp.close()
         logger.debug('[Fetch] resp %d in %dms — %s', status, conn_ms, domain)
-        raise HttpError(status, url)
+        raise HttpError(status, url, retry_after=retry_after)
     ct = resp.headers.get('Content-Type', '').lower()
     cl = int(resp.headers.get('Content-Length', 0) or 0)
     if cl > cfg.fetch_max_bytes:
@@ -185,8 +188,9 @@ def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
                       extra_headers={'Accept-Encoding': 'gzip, deflate'})
         if not resp2.ok:
             status = resp2.status_code
+            retry_after = resp2.headers.get('Retry-After')
             resp2.close()
-            raise HttpError(status, url) from e
+            raise HttpError(status, url, retry_after=retry_after) from e
         chunks, dl = [], 0
         try:
             for chunk in resp2.iter_content(65536):

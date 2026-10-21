@@ -30,6 +30,19 @@ committed undo index; `undo_payloads.py` owns immutable packed content and
 selection-time hydration under `contracts/project_undo_payload_ref_v1.schema.json`. Both use `session_lock.py` before the cache lock.
 Read `docs/PROJECT_FILE_UNDO.md` for acknowledgement and conflict rules.
 
+`modifications.py` commits one record by appending a line to
+`modifications.journal`; it folds the whole index only for an oversized record,
+a bounded log, or a whole-history replacement (undo). Admission is per project
+journal, so its cost must stay proportional to the edit, not to the history: a
+write validates the journal by identity plus a validated append offset instead
+of re-materializing the index, and any caller that does materialize it (undo,
+projections, a fold) hands those rows to that same admission rather than making
+the commit re-read them. Substituting `_cache_get` for `_assert_journal_ready`
+in an admission path is what makes a large journal stall unrelated edits.
+`docs/PROJECT_FILE_UNDO.md` owns the crash and ordering rules plus the
+measurement. Verify `test_project_journal_append.py` with the contention,
+payload and post-commit neighbors.
+
 `workspace_lease.py` owns cooperative checkout/file exclusion and descriptor
 lifetime, not authorization. `run_command.py` owns command write-scope admission;
 any heredoc admission view must preserve the original execution/approval source.

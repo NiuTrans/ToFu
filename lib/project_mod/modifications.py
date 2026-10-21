@@ -108,14 +108,51 @@ def _mods_cache_weight(session_dir, mods, identity):
     return size
 
 
-def _journal_identity(session_dir):
-    """Atomic replacement identity, not a TTL; disk remains authoritative."""
+_JOURNAL_INDEX_NAME = 'modifications.json'
+# Commits append here instead of rewriting the index, so one edit costs one
+# small write instead of a full-journal rewrite under the project admission.
+_JOURNAL_TAIL_NAME = 'modifications.journal'
+# Crash artifact of a fold that renamed the tail aside: replayed after the index
+# and before the live tail, then merged by the next confirmed index write.
+_JOURNAL_FOLD_NAME = 'modifications.journal.fold'
+_JOURNAL_TAIL_MAX_BYTES = 512 * 1024
+# A record larger than this is folded into the index rather than logged, so one
+# big pre-image cannot force a fold every few edits.
+_JOURNAL_APPEND_MAX_RECORD_BYTES = 8 * 1024
+# session_dir -> (index identity, index is payload-compacted). Appending assumes
+# the folded prefix already stores payload references; an unknown or changed
+# index is folded once, which migrates legacy inline content in place.
+_JOURNAL_INDEX_COMPACT = {}
+# session_dir -> (identity, changeIds). Identity-keyed and reconstructible: one
+# 32-char id per record instead of the full row, so a commit can detect a
+# replayed changeId without materializing an 8 MB history.
+_JOURNAL_CHANGE_IDS = {}
+# session_dir -> identity that a full structural validation confirmed.
+_JOURNAL_VALIDATED = {}
+
+
+def _journal_file(session_dir, name):
+    return os.path.join(session_dir, name)
+
+
+def _file_identity(path):
     try:
-        metadata = os.stat(os.path.join(session_dir, 'modifications.json'), follow_symlinks=False)
+        metadata = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return None
     return (metadata.st_dev, metadata.st_ino, metadata.st_size,
             metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def _journal_identity(session_dir):
+    """Identity of every durable journal component, not a TTL.
+
+    A commit appends to the tail, so the tail's size and timestamps belong to
+    the identity: a cached snapshot never stands in for an appended record.
+    """
+    return (_file_identity(_journal_file(session_dir, _JOURNAL_INDEX_NAME)),
+            _file_identity(_journal_file(session_dir, _JOURNAL_TAIL_NAME)),
+            os.path.exists(_journal_file(session_dir, _JOURNAL_FOLD_NAME)))
 
 # ── Live-change listeners ─────────────────────────────────────────────
 # Presentation-only channel: the task engine subscribes
@@ -167,8 +204,16 @@ def _write_compact_json(handle, data):
             if index:
                 yield ','
             yield encoder.encode(record)
-        yield ']}'
-    tokens = (metadata_tokens() if isinstance(data, dict) and set(data) == {'modifications'}
+        absorbed = data.get('absorbedFold')
+        if absorbed is not None:
+            yield '],"absorbedFold":'
+            yield encoder.encode(absorbed)
+            yield '}'
+        else:
+            yield ']}'
+    tokens = (metadata_tokens()
+              if isinstance(data, dict) and set(data) <= {'modifications', 'absorbedFold'}
+              and 'modifications' in data
               else encoder.iterencode(data))
     pieces = []
     size = written = 0
@@ -400,24 +445,38 @@ def _clean_stale_tmp(session_dir):
 
 
 def _load_from_disk(session_dir):
-    """Load authoritative history; only a missing file means empty history.
+    """Load authoritative history; only a missing journal means empty history.
+
+    History is the index envelope plus the append log. The log is replayed after
+    the index because appends are newer than the folded prefix; a fold artifact
+    is replayed only when the index does not already record absorbing it.
 
     Read failures and malformed records remain visible and never rename,
     replace or silently discard durable evidence. A rejected load must not
     populate the cache, so later mutations cannot overwrite it with [] plus
     a newly appended record.
     """
-    session_file = os.path.join(session_dir, 'modifications.json')
+    session_file = os.path.join(session_dir, _JOURNAL_INDEX_NAME)
     try:
         size = os.stat(session_file).st_size
         with timing_phase('undo_index_read', bytes_read=size):
             with open(session_file) as handle:
                 data = json.load(handle)
     except FileNotFoundError:
-        return []
+        data = {'modifications': []}
     if not isinstance(data, dict) or not isinstance(data.get('modifications'), list):
         raise ValueError('Invalid modification journal envelope')
     records = data['modifications']
+    _validate_records(records)
+    absorbed = data.get('absorbedFold')
+    if absorbed is None or list(absorbed) != list(_fold_identity(session_dir) or ()):
+        records = records + _read_tail(session_dir, _JOURNAL_FOLD_NAME)
+    records = records + _read_tail(session_dir, _JOURNAL_TAIL_NAME)
+    _remember_index_state(session_dir, data['modifications'], records)
+    return records
+
+
+def _validate_records(records):
     for record in records:
         if (not isinstance(record, dict)
                 or not isinstance(record.get('type'), str) or not record['type']
@@ -430,8 +489,151 @@ def _load_from_disk(session_dir):
         for field in undo_payloads.FIELDS:
             if undo_payloads.is_reference(record.get(field)):
                 undo_payloads.validate_reference(record[field])
+
+
+def _tail_names():
+    return (_JOURNAL_FOLD_NAME, _JOURNAL_TAIL_NAME)
+
+
+def _read_tail(session_dir, name):
+    """Parse one append log; a torn final line is an unacknowledged append.
+
+    A commit fsyncs a complete newline-terminated line before acknowledging, so
+    only a line WITHOUT its newline can be a crash mid-append: it is dropped
+    here and its prepared intent is reconciled by write recovery.
+    """
+    path = _journal_file(session_dir, name)
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read()
+    except FileNotFoundError:
+        return []
+    complete = data.rfind(b'\n')
+    if complete < 0:
+        return []
+    records = []
+    with timing_phase('undo_journal_tail', bytes_read=len(data)):
+        for line in data[:complete].split(b'\n'):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError as error:
+                raise ValueError('Invalid modification journal tail record') from error
+            _validate_records([record])
+            records.append(record)
     return records
 
+
+def _fold_identity(session_dir):
+    return _file_identity(_journal_file(session_dir, _JOURNAL_FOLD_NAME))
+
+
+def _index_is_compact(session_dir):
+    """Append only onto an index whose payloads are already packed references."""
+    identity = _file_identity(_journal_file(session_dir, _JOURNAL_INDEX_NAME))
+    if identity is None:
+        return False
+    stamp = _JOURNAL_INDEX_COMPACT.get(session_dir)
+    return stamp is not None and stamp[0] == identity and stamp[1]
+
+
+def _remember_index_state(session_dir, index_records, records):
+    """Record whether the index is payload-compacted for safe appending.
+
+    ``index_records`` is what the index itself stores; ``records`` is the whole
+    replayed history. Packed references are required of BOTH, because an append
+    writes one compact reference row and must not sit beside inline content that
+    a later fold would have migrated.
+    """
+    identity = _file_identity(_journal_file(session_dir, _JOURNAL_INDEX_NAME))
+    inline = any(record.get(field) is not None and not undo_payloads.is_reference(record[field])
+                 for record in records for field in undo_payloads.FIELDS)
+    if identity is None:
+        _JOURNAL_INDEX_COMPACT.pop(session_dir, None)
+    else:
+        _JOURNAL_INDEX_COMPACT[session_dir] = (identity, not inline)
+
+
+def _tail_appendable(session_dir, record, payload):
+    """Small records append; a large pre-image would force a fold per edit."""
+    if len(payload) > _JOURNAL_APPEND_MAX_RECORD_BYTES:
+        return False
+    size = _file_identity(_journal_file(session_dir, _JOURNAL_TAIL_NAME))
+    return size is None or size[2] + len(payload) <= _JOURNAL_TAIL_MAX_BYTES
+
+
+def _append_to_tail(session_dir, record):
+    """Append one record and fsync before the change is acknowledged.
+
+    One write of one line keeps the record atomic against other appends; the
+    caller already holds project admission, so this never rewrites the index.
+    """
+    payload = _tail_line(record)
+    path = _journal_file(session_dir, _JOURNAL_TAIL_NAME)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    try:
+        previous = _torn_tail_offset(descriptor)
+        try:
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        except BaseException:
+            # Bytes that never reached the disk must not become visible to a
+            # reader: an unacknowledged commit is rolled back, not left as
+            # half-trusted evidence.
+            try:
+                os.ftruncate(descriptor, previous)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(descriptor)
+    return len(payload)
+
+
+def _torn_tail_offset(descriptor):
+    """Length of the log's complete-line prefix, discarding a crashed append.
+
+    A record is acknowledged only after its newline is durable, so bytes after the
+    last newline were never committed and must not be glued to the next record.
+    """
+    size = os.fstat(descriptor).st_size
+    if size == 0:
+        return 0
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    data = b''
+    while len(data) < size:
+        chunk = os.read(descriptor, size - len(data))
+        if not chunk:
+            break
+        data += chunk
+    complete = data.rfind(b'\n') + 1
+    if complete != size:
+        os.ftruncate(descriptor, complete)
+        os.fsync(descriptor)
+    return complete
+
+
+def _tail_line(record):
+    return json.dumps(record, ensure_ascii=True, separators=(',', ':')).encode('ascii') + b'\n'
+
+
+def _write_all(descriptor, payload):
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError('Short journal append')
+        view = view[written:]
+
+
+def _journal_bytes(session_dir):
+    total = 0
+    for name in (_JOURNAL_INDEX_NAME, _JOURNAL_TAIL_NAME, _JOURNAL_FOLD_NAME):
+        identity = _file_identity(_journal_file(session_dir, name))
+        if identity is not None:
+            total += identity[2]
+    return total
 
 def _publish_cache(session_dir, mods, identity):
     """Admit a confirmed snapshot by bytes/count; never truncate durable history."""
@@ -501,24 +703,61 @@ def modification_cache_snapshot() -> dict[str, int]:
 
 
 def _flush_to_disk(session_dir, mods):
-    """Atomically persist ``mods`` to ``session_dir``'s modifications.json.
+    """Fold ``mods`` into the index and retire the append log.
 
-    Removes the file when the list is empty. Caller holds session admission.
+    This is the only path that rewrites the whole journal: it runs for a large
+    pre-image, a bounded tail, or a whole-history replacement (undo), not for
+    every edit. Sequence: move the live tail aside so a crash cannot lose
+    acknowledged appends, publish the index that contains every record AND the
+    identity of the artifact it absorbed, then unlink that artifact. A crash
+    before publication replays the artifact; a crash after it replays nothing.
+
+    Removes every component when the list is empty. Caller holds session
+    admission.
     """
-    session_file = os.path.join(session_dir, 'modifications.json')
+    session_file = _journal_file(session_dir, _JOURNAL_INDEX_NAME)
+    tail = _journal_file(session_dir, _JOURNAL_TAIL_NAME)
+    fold = _journal_file(session_dir, _JOURNAL_FOLD_NAME)
     try:
         if mods:
+            if os.path.exists(fold):
+                # An earlier fold left an artifact behind: keep any record this
+                # caller's snapshot does not already carry.
+                known = {row.get('changeId') for row in mods if row.get('changeId')}
+                mods.extend(row for row in _read_tail(session_dir, _JOURNAL_FOLD_NAME)
+                            if row.get('changeId') not in known)
             with timing_phase('undo_content_compaction', records=len(mods)):
                 compact = undo_payloads.compact_records(session_dir, mods,
                     buffer_budget=_MODS_CACHE_MAX_SESSION_BYTES)
+            if os.path.exists(tail):
+                os.replace(tail, fold)
+                _sync_journal_directory(session_dir)
+            absorbed = _fold_identity(session_dir)
+            envelope = {'modifications': compact}
+            if absorbed is not None:
+                envelope['absorbedFold'] = list(absorbed)
             with timing_phase('undo_index_write', records=len(compact)) as measurement:
-                written = _atomic_json_write(session_file, {'modifications': compact})
+                written = _atomic_json_write(session_file, envelope)
                 if measurement is not None and type(written) is int:
                     measurement['bytes_written'] += written
             mods[:] = compact
+            _JOURNAL_INDEX_COMPACT[session_dir] = (
+                _file_identity(session_file), True)
+            if absorbed is not None:
+                os.unlink(fold)
+                _sync_journal_directory(session_dir)
         else:
-            if os.path.exists(session_file):
-                os.remove(session_file)
+            removed = False
+            for path in (session_file, tail, fold):
+                if os.path.exists(path):
+                    os.remove(path)
+                    removed = True
+            # An empty journal has no seal to validate against; a stale memo would
+            # silently vouch for a history that no longer exists.
+            _JOURNAL_INDEX_COMPACT.pop(session_dir, None)
+            _JOURNAL_VALIDATED.pop(session_dir, None)
+            _JOURNAL_CHANGE_IDS.pop(session_dir, None)
+            if removed:
                 _sync_journal_directory(session_dir)
     except Exception as e:
         logger.error('[Modifications] failed to save %s: %s',
@@ -588,6 +827,152 @@ def _locked_rmw(session_dir, mutator):
             logger.warning('Undo payload reclamation deferred; committed history remains authoritative')
         return ret
 
+
+def _journal_seal(session_dir):
+    """The fold-replaced components plus the live append log identity.
+
+    Appends only grow the log, so a memo of (index, fold artifact, validated
+    offset) describes everything already checked. Keying it on the whole journal
+    identity would be wrong: every append would invalidate the memo and the next
+    edit would re-parse the 8 MB index again.
+    """
+    return (_file_identity(_journal_file(session_dir, _JOURNAL_INDEX_NAME)),
+            _fold_identity(session_dir),
+            _file_identity(_journal_file(session_dir, _JOURNAL_TAIL_NAME)))
+
+
+def _assert_journal_ready(session_dir):
+    """Fail closed on an unreadable authority without re-parsing a large index.
+
+    A write must reject a corrupt journal before replacing user bytes, but a full
+    parse of an 8 MB index is not an edit cost. Validation is memoized per sealed
+    prefix and validated offset; lines appended beyond it are validated
+    incrementally, while a folded, renamed or replaced journal forces a full
+    validation again.
+
+    Returns the materialized records when this call performed a full load, else
+    ``None`` so a caller that needs the whole history does not parse twice.
+    """
+    index_identity, fold_identity, tail = _journal_seal(session_dir)
+    tail_size = tail[2] if tail else 0
+    memo = _JOURNAL_VALIDATED.get(session_dir)
+    if (memo is not None and memo[0] == index_identity
+            and memo[1] == fold_identity and memo[2] <= tail_size):
+        if memo[2] < tail_size:
+            ids, offset = _tail_change_ids_since(session_dir, memo[2])
+            _JOURNAL_CHANGE_IDS.setdefault(session_dir, (index_identity, set()))[1].update(ids)
+            _JOURNAL_VALIDATED[session_dir] = (index_identity, fold_identity, offset)
+        return None
+    mods = _load_from_disk(session_dir)
+    index_identity, fold_identity, tail = _journal_seal(session_dir)
+    _JOURNAL_CHANGE_IDS[session_dir] = (
+        index_identity, {row.get('changeId') for row in mods if row.get('changeId')})
+    _JOURNAL_VALIDATED[session_dir] = (index_identity, fold_identity, tail[2] if tail else 0)
+    return mods
+
+
+def _tail_change_ids_since(session_dir, offset):
+    """Validate appended lines after ``offset``; a torn trailing line stops it."""
+    with open(_journal_file(session_dir, _JOURNAL_TAIL_NAME), 'rb') as handle:
+        handle.seek(offset)
+        data = handle.read()
+    complete = data.rfind(b'\n')
+    if complete < 0:
+        return set(), offset
+    ids = set()
+    for line in data[:complete].split(b'\n'):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError as error:
+            raise ValueError('Invalid modification journal tail record') from error
+        _validate_records([record])
+        if record.get('changeId'):
+            ids.add(record['changeId'])
+    return ids, offset + complete + 1
+
+
+def _known_change_ids(session_dir):
+    """ChangeIds already committed for this journal, without materializing rows."""
+    return _JOURNAL_CHANGE_IDS.get(session_dir, (None, set()))[1]
+
+
+def _publish_after_append(session_dir, mods):
+    """Admit the appended projection without weighing a large history.
+
+    An in-memory record is always larger than its JSON encoding, so a journal
+    already above the resident budget cannot be admitted. Checking bytes skips
+    a full weight walk of the projection on every edit.
+    """
+    if _journal_bytes(session_dir) > min(_MODS_CACHE_MAX_SESSION_BYTES, _MODS_CACHE_MAX_BYTES):
+        _invalidate_cache(session_dir)
+        return
+    _publish_cache(session_dir, mods, _journal_identity(session_dir))
+
+
+def _commit_record(session_dir, record, change_id=None):
+    """Durably commit one new record; ``False`` when its identity is present.
+
+    The fast path appends one line, so a commit costs the record rather than the
+    history and the project admission around it stays proportional to the edit.
+    A large pre-image or an oversized log folds instead — the only remaining
+    whole-journal rewrite. Caller-visible guarantees are unchanged: the record
+    is fsynced before the caller is told the change is recorded, and an
+    unreadable journal still fails loudly instead of being replaced.
+    """
+    with locked_session(session_dir) as state:
+        # The pending commit is not a projection: duplicate detection uses the
+        # validated id index, so a small append never materializes the history.
+        # A caller that just validated under this admission hands its rows over
+        # rather than making the fold re-read the same journal.
+        validated = state.pop('preparedJournal', None)
+        if validated is None:
+            validated = _assert_journal_ready(session_dir)
+        if change_id is not None and change_id in _known_change_ids(session_dir):
+            rows = validated if validated is not None else _load_from_disk(session_dir)
+            existing = next((row for row in rows if row.get('changeId') == change_id), None)
+            if existing is not None:
+                if not _same_recovery_evidence(
+                        undo_payloads.hydrate_record(session_dir, existing), record):
+                    raise _RecoveryIdentityConflict(
+                        'Prepared change identity has conflicting journal evidence')
+                return False
+        with timing_phase('undo_content_compaction', records=1):
+            compact = undo_payloads.compact_records(session_dir, [record],
+                buffer_budget=_MODS_CACHE_MAX_SESSION_BYTES)[0]
+        payload = _tail_line(compact)
+        if _index_is_compact(session_dir) and _tail_appendable(session_dir, compact, payload):
+            with timing_phase('undo_index_write', records=0) as measurement:
+                written = _append_to_tail(session_dir, compact)
+                if measurement is not None:
+                    measurement['bytes_written'] += written
+            # The line just written is trusted by construction: advance the
+            # validated mark so the next edit does not re-parse anything.
+            index_identity, fold_identity, tail = _journal_seal(session_dir)
+            if change_id is not None:
+                _JOURNAL_CHANGE_IDS.setdefault(session_dir, (index_identity, set()))[1].add(change_id)
+            _JOURNAL_VALIDATED[session_dir] = (
+                index_identity, fold_identity, tail[2] if tail else 0)
+            if validated is not None:
+                # A caller that already materialized the projection keeps it warm.
+                validated.append(compact)
+                _publish_cache(session_dir, validated, _journal_identity(session_dir))
+            else:
+                _invalidate_cache(session_dir)
+        else:
+            mods = validated
+            if mods is None:
+                mods = _cached_current(session_dir) or _load_from_disk(session_dir)
+            mods.append(compact)
+            _flush_to_disk(session_dir, mods)
+            _publish_cache(session_dir, mods, _journal_identity(session_dir))
+            index_identity, fold_identity, tail = _journal_seal(session_dir)
+            _JOURNAL_CHANGE_IDS[session_dir] = (
+                index_identity, {row.get('changeId') for row in mods if row.get('changeId')})
+            _JOURNAL_VALIDATED[session_dir] = (
+                index_identity, fold_identity, tail[2] if tail else 0)
+        return True
 
 def _with_recovered_session(function):
     @wraps(function)
@@ -789,24 +1174,8 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         except (OSError, TypeError, ValueError):
             mod['postImage'] = {'kind': 'unavailable'}
 
-    duplicate = False
-
-    def _append(rows):
-        nonlocal duplicate
-        existing = (next((row for row in rows if row.get('changeId') == change_id), None)
-                    if change_id is not None else None)
-        if existing is not None:
-            if not _same_recovery_evidence(undo_payloads.hydrate_record(session_dir, existing), mod):
-                raise _RecoveryIdentityConflict('Prepared change identity has conflicting journal evidence')
-            # The same locked RMW reload checks identity and confirms durability;
-            # a separate full-journal read would double work for every edit.
-            duplicate = True
-            return
-        rows.append(mod)
-
     try:
-        _locked_rmw(session_dir, _append)
-
+        duplicate = _commit_record(session_dir, mod, change_id) is False
     except _RecoveryIdentityConflict:
         raise
     except Exception as e:

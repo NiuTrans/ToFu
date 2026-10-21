@@ -35,10 +35,11 @@ def binding(payload, operation):
             str(payload.get('selector', ''))]
 
 
-def _scoped_mac(key, payload, operation, data):
+def _scoped_mac(key, payload, operation, data, *, previous=False):
     """Bind the complete query without repeating its text inside the cursor."""
     mac = hmac.new(key, digestmod=hashlib.sha256)
-    mac.update(CONTRACT['cursor']['authentication']['domain'].encode('utf-8'))
+    domain = 'previousDomain' if previous else 'domain'
+    mac.update(CONTRACT['cursor']['authentication'][domain].encode('utf-8'))
     mac.update(b'\0')
     mac.update(json.dumps(binding(payload, operation), ensure_ascii=False,
                           separators=(',', ':')).encode('utf-8'))
@@ -58,8 +59,63 @@ def _decode_base64url(text):
     return data
 
 
+def _position_bytes(state):
+    """The signed position omits JSON keys, never any position information."""
+    policy = CONTRACT['cursor']['positionEncoding']
+    fields = [key for key in policy['fields'] if key != policy['optionalField']]
+    if (type(state) is not dict or set(state) != {'r', 'partial', *fields}
+            or type(state['partial']) is not bool or type(state['r']) is not list):
+        invalid()
+    values = [policy['partialFlag'] if state['partial'] else 0, len(state['r']),
+              *state['r'], *(state[key] for key in fields)]
+    encoded = bytearray()
+    for value in values:
+        if type(value) is not int or not 0 <= value < 1 << 64:
+            invalid()
+        while value >= 128:
+            encoded.append((value & 127) | 128)
+            value >>= 7
+        encoded.append(value)
+    return bytes(encoded)
+
+
+def _position_from_bytes(data):
+    """Decode bounded canonical uint64 values after MAC verification."""
+    policy = CONTRACT['cursor']['positionEncoding']
+    offset = 0
+
+    def integer():
+        nonlocal offset
+        value = 0
+        for shift in range(0, 64, 7):
+            if offset >= len(data):
+                invalid()
+            byte = data[offset]
+            offset += 1
+            if shift == 63 and byte > 1:
+                invalid()
+            value |= (byte & 127) << shift
+            if not byte & 128:
+                if shift and byte == 0:
+                    invalid()
+                return value
+        invalid()
+
+    flags, count = integer(), integer()
+    if flags & ~policy['partialFlag'] or count > LIMITS['depth'] + 1:
+        invalid()
+    state = {'r': [integer() for _ in range(count)]}
+    for key in policy['fields']:
+        if key != policy['optionalField']:
+            state[key] = integer()
+    state['partial'] = bool(flags & policy['partialFlag'])
+    if offset != len(data):
+        invalid()
+    return state
+
+
 def encode_cursor(session, payload, operation, state):
-    data = json.dumps(state, separators=(',', ':')).encode('utf-8')
+    data = _position_bytes(state)
     signature = _scoped_mac(cursor_key(session), payload, operation, data)
     token = '.'.join((CONTRACT['cursor']['currentPrefix'], _base64url(data),
                       _base64url(signature)))
@@ -85,13 +141,14 @@ def decode_cursor(session, payload, operation):
         return {'r': [], 'p': 0, 'o': 0, 'skip': int(raw), 'expiry': 0, 'partial': False}
     try:
         prefix, token, signature = raw.split('.')
-        if prefix == CONTRACT['cursor']['currentPrefix']:
+        if prefix in (CONTRACT['cursor']['currentPrefix'], CONTRACT['cursor']['previousPrefix']):
+            previous = prefix == CONTRACT['cursor']['previousPrefix']
             data = _decode_base64url(token)
             supplied = _decode_base64url(signature)
-            expected = _scoped_mac(cursor_key(session), payload, operation, data)
+            expected = _scoped_mac(cursor_key(session), payload, operation, data, previous=previous)
             if not hmac.compare_digest(supplied, expected):
                 invalid()
-            state = json.loads(data)
+            state = json.loads(data) if previous else _position_from_bytes(data)
         elif prefix == CONTRACT['cursor']['legacyPrefix']:
             data = base64.urlsafe_b64decode(token + '=' * (-len(token) % 4))
             expected = hmac.new(cursor_key(session), data, hashlib.sha256).hexdigest()

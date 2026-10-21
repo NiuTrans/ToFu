@@ -30,7 +30,9 @@ def _relative(path):
     parts = path.split('/')
     # Runtime authority, checkout control and undo evidence are never model files.
     if any(part.lower() in {'.git', '.worktrees', 'data', 'logs', 'uploads',
-                           'write-intents-v1', 'modifications.json', 'project.json',
+                           'write-intents-v1', 'modifications.json',
+                           'modifications.journal', 'modifications.journal.fold',
+                           'project.json',
                            '.env', '.venv', 'node_modules', '__pycache__', 'target', 'dist', 'build'}
            or part.lower().startswith(('.tofu', '.env.')) or part.lower() == '.native' for part in parts):
         raise ValueError('File scope cannot access runtime or checkout metadata')
