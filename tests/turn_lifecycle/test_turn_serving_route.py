@@ -38,7 +38,7 @@ const kimi = resolveTurnServingRoute({
   model: 'kimi-k3',
   lastRoundUsage: {round: 50, model: 'kimi-k3', tokensIn: 100000, tokensOut: 50},
   apiRounds: [
-    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'example-corp', 'example_corp_key_0', 'k123')},
+    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'sankuai', 'sankuai_key_0', 'k123')},
     compaction('gemini-3.5-flash-lite', 'gemini'),
   ],
 });
@@ -58,7 +58,7 @@ const fallback = resolveTurnServingRoute({
     tokensIn: 30000, tokensOut: 100,
   },
   apiRounds: [
-    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'example-corp', 'example_corp_0', 'k123')},
+    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'sankuai', 'sankuai_0', 'k123')},
     {round: 1, tag: 'R1-FALLBACK', ...dispatch('glm-5.3', 'zhipu', 'zhipu_0', 'f123')},
     compaction('gemini-3.5-flash-lite', 'gemini'),
   ],
@@ -66,7 +66,7 @@ const fallback = resolveTurnServingRoute({
 const billed = resolveTurnServingRoute({
   model: 'kimi-k3',
   apiRounds: [
-    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'example-corp', 'example_corp_0', 'k123')},
+    {round: 1, tag: 'R1', ...dispatch('kimi-k3', 'sankuai', 'sankuai_0', 'k123')},
     {round: 1, tag: 'R1-BILLED', responseAuthoring: false,
       ...dispatch('gemini-discarded', 'gemini', 'g_0', 'd123')},
     compaction('gemini-3.5-flash-lite', 'gemini'),
@@ -112,7 +112,7 @@ console.log(JSON.stringify({kimi, sol, fallback, billed, legacyFallback, snapsho
 
     assert routes['kimi'] == {
         'model': 'kimi-k3', 'logicalModel': 'kimi-k3',
-        'providerId': 'example-corp', 'keyName': 'example_corp_key_0',
+        'providerId': 'sankuai', 'keyName': 'sankuai_key_0',
         'keyTail': 'k123', 'source': 'last-round',
     }
     assert routes['sol']['model'] == 'gpt-5.6-sol'
@@ -120,7 +120,7 @@ console.log(JSON.stringify({kimi, sol, fallback, billed, legacyFallback, snapsho
     assert routes['fallback']['model'] == 'glm-5.3'
     assert routes['fallback']['providerId'] == 'zhipu'
     assert routes['billed']['model'] == 'kimi-k3'
-    assert routes['billed']['providerId'] == 'example-corp'
+    assert routes['billed']['providerId'] == 'sankuai'
     assert routes['legacyFallback']['model'] == 'glm-5.3'
     assert routes['snapshot'] == {
         'model': 'beta-wire-b', 'logicalModel': 'alpha',
@@ -188,7 +188,7 @@ const kimi = renderFinishInfo({...base,
   model: 'kimi-k3',
   lastRoundUsage: {round: 50, model: 'kimi-k3', tokensIn: 10, tokensOut: 5},
   apiRounds: [
-    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'example-corp', 'example_corp_0', '1234')},
+    {round: 50, tag: 'R50', ...dispatch('kimi-k3', 'sankuai', 'sankuai_0', '1234')},
     {kind: 'compaction', tag: 'COMPACTION-L2', ...dispatch('gemini-3.5-flash-lite', 'gemini', 'g_0', '9999')},
   ],
 }, false);
@@ -222,7 +222,7 @@ console.log(JSON.stringify({kimi, sol, fallback, routed}));
     rendered = json.loads(run.stdout.strip().splitlines()[-1])
 
     assert 'kimi-k3' in rendered['kimi']
-    assert 'example-corp' in rendered['kimi']
+    assert 'sankuai' in rendered['kimi']
     assert 'gemini' not in rendered['kimi']
     assert 'gpt-5.6-sol' in rendered['sol']
     assert 'gpt-5.6-terra' not in rendered['sol']

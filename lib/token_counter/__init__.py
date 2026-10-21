@@ -13,11 +13,11 @@ details and verification dates):
   Provider        Best available counter          Confidence
   ==============  ==============================  ==================
   Anthropic       Upstream ``count_tokens`` API   exact
-                  (proxied by YourProvider gateway)
+                  (proxied by Meituan gateway)
   AWS Bedrock     (same answer via Anthropic)     exact
   Google Gemini   Native ``countTokens`` — ONLY   exact
                   when connected directly to
-                  Google; YourProvider gateway skips
+                  Google; Meituan gateway skips
                   it (gracefully → tiktoken).
   OpenAI (GPT-*)  ``tiktoken`` (official)         exact
   DeepSeek        ``deepseek_tokenizer`` pip      exact

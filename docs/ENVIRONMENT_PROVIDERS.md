@@ -61,7 +61,7 @@ Without configured services or trusted `environment_provider_ids` /
 discovery tool is offered. Installing a provider is not proof of usable actor
 credentials. `compute_wait` also requires an executing Evolution run; native
 collection requires an attached project. No deployment-wide opt-in is added.
-The SDK package and existing private YourProvider providers remain optional and
+The SDK package and existing private Meituan providers remain optional and
 release-separated. A deployment still owns live platform acceptance.
 
 | Tool | Behavior |
@@ -224,7 +224,7 @@ at the provider and adds no persistent polling worker. `read_job_output` adapter
 remain responsible for exact owned-job binding, deadlines and remote transport. Declared cost bounds must be enforced by each real adapter; schema
 validation alone does not enforce remote cost or seal a source file.
 
-The private `bundles/yourprovider/environment-provider` distribution now declares a
+The private `bundles/meituan/environment-provider` distribution now declares a
 `hope` compute entry point. Its adapter uses explicit actor-bound host ports for
 MCP calls, sealed job preparation, exact-operation/exit evidence and output
 reads. It disables transport replay and quota retries on submission, preserves

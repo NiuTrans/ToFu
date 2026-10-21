@@ -126,7 +126,7 @@ class RateLimitError(Exception):
             is_credential_delivery_anomaly)
         # True when the body names a PROJECT/APP-level model limit shared with
         # OTHER tenants or keys of the gateway account (Moonshot project TPM,
-        # or the example-corp gateway's app/model RPM envelope). This is EXTERNAL
+        # or the sankuai gateway's app/model RPM envelope). This is EXTERNAL
         # contention, not key health: it must not feed the model success-rate
         # column nor the consecutive-429 auto-exhaust streak (see
         # Slot.record_error is_shared_contention branch).
@@ -444,7 +444,7 @@ class EndpointUnreachableError(Exception):
 # ══════════════════════════════════════════════════════════
 
 # Body markers that mean "this gateway has NO route for the model" — as
-# opposed to "route exists but the payload was rejected". The YourProvider AIGC
+# opposed to "route exists but the payload was rejected". The Meituan AIGC
 # gateway answers a missing route with HTTP 400 stage=validation and a
 # CHINESE message ("不支持的模型类型(model=…)"); reading it as a generic
 # deterministic 400 burns every remaining key of the dead model and lets
@@ -507,7 +507,7 @@ _QUOTA_EXHAUSTED_PATTERNS = [
 
 # Phrases in a 4xx body that mean the failure is an UPSTREAM-VENDOR TRANSIENT,
 # not a client/auth error — the gateway itself is telling us to retry later.
-# Observed on the toio/example-corp gateway (2026-07-26): the claude-opus-5 vendor
+# Observed on the toio/sankuai gateway (2026-07-26): the claude-opus-5 vendor
 # outage surfaced as HTTP 400 AND 403 with message
 # "请求失败,请稍后(再)尝试" + ext.error.source=UPSTREAM_VENDOR, and our
 # classifier treated the 403 as an auth failure (pair exclusion) and the 400
@@ -525,7 +525,7 @@ _UPSTREAM_TRANSIENT_PATTERNS = [
 
 # Phrases in a 4xx body emitted by the gateway's own ROUTING layer when it
 # fails to resolve a vendor group — a 503 wearing a 4xx costume, NOT an auth
-# rejection. Observed on the toio/example-corp gateway (2026-07-26, 19:15–19:54):
+# rejection. Observed on the toio/sankuai gateway (2026-07-26, 19:15–19:54):
 # 22 hits of ``resolve groups failed: model unsupported by selected groups:
 # claude-opus-5`` (HTTP 403) inside one 40-minute vendor-storm window, 10 of
 # them misclassified PermissionError_ → task deaths / kimi fallbacks wearing
@@ -789,7 +789,7 @@ def decode_error_body(resp) -> str:
 
     ``requests`` falls back to ISO-8859-1 for ``text/*`` responses without an
     explicit charset (the RFC 2616 default), which garbles UTF-8 CJK payloads
-    from gateways that omit the charset header — observed on the example-corp toio
+    from gateways that omit the charset header — observed on the sankuai toio
     gateway (2026-07-25): its Chinese 400 body surfaced as ``è¯·æ±...``
     mojibake in both logs and the frontend retry HUD. API error bodies are
     JSON per OpenAI/Anthropic convention and thus virtually always UTF-8, so
@@ -938,7 +938,7 @@ def parse_subscription_retry_after(err_msg: str, *, now: float = None):
 # tenants or keys of the gateway account. Every phrase in ONE group must
 # appear (narrow on purpose): a per-key/per-account throttle must NEVER match,
 # or a genuinely sick key would be laundered into "external contention" and
-# stop feeding the dead-key safety nets. Observed canonical bodies (example-corp):
+# stop feeding the dead-key safety nets. Observed canonical bodies (sankuai):
 #   Moonshot: "request reached project (kimi-k3) TPM rate limit"
 #   Gateway:  "App:**62518在模型:kimi-k3每分钟请求次数超过限制"
 _SHARED_PROJECT_LIMIT_PATTERN_GROUPS = (

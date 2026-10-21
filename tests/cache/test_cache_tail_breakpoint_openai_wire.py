@@ -38,7 +38,7 @@ Route B — switch this provider to the Anthropic wire. **NOT settled.** Probing
   endpoint's cache behaviour is asserted here, in either direction. Deciding it
   needs the gateway team's internal observability, not more outside probing.
   (Note for whoever picks this up: the base_url in
-  static/provider_templates/yourprovider_claude_code.json is ``/v1/anthropic``, which
+  static/provider_templates/meituan_claude_code.json is ``/v1/anthropic``, which
   returns 404 — the reachable path has an extra segment. That template has never
   served live traffic.)
 

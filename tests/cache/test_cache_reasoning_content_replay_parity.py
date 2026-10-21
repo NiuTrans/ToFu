@@ -21,7 +21,7 @@ gates — carry ``reasoning_content`` whenever thinking is present; carry
 is dropped identically on both paths by ``_assistant_blocks`` (Anthropic) and —
 since 2026-07-26 (epic pt_8ffba515096142af) — STRIPPED from the Claude wire by
 ``_inject_claude_reasoning_details`` (the old "needs both, pass through" shape
-was falsified in production: the example-corp gateway hard-400s unsigned Opus 5
+was falsified in production: the sankuai gateway hard-400s unsigned Opus 5
 thinking with ``signature: Field required``). For NON-Claude models the field
 still reaches the wire, so live↔replay parity remains load-bearing there —
 DeepSeek's ``model_requires_reasoning_content_replay`` (unsigned reasoning_content

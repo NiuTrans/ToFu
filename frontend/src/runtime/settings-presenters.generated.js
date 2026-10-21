@@ -2089,7 +2089,7 @@ function _renderProvidersTab() {
 /* ═══════════════════════════════════════════════════════════════════
    settings/access matrix — per-(credential × wire id) capability grid.
 
-   Some gateways (e.g. YourProvider AIGC) give each credential a *different*
+   Some gateways (e.g. Meituan AIGC) give each credential a *different*
    quota and a *different* set of accessible models. The flat model list
    can't express that: the v2 authority stores the grant as
    ``credential.authorization.models`` (an allow-list of ModelRefs), which
@@ -2108,7 +2108,7 @@ function _renderProvidersTab() {
    keys from the owner-scoped secret store — the browser never sees them —
    and sends a tiny request to EVERY (credential × wire id) pair, granted
    or not: discovering reachable pairs the allow-list does not grant yet
-   is the matrix's whole point on gateways like YourProvider. Progress is
+   is the matrix's whole point on gateways like Meituan. Progress is
    persisted server-side under data/config/probe_cache/, so closing
    Settings (or restarting the server) never loses it — the UI re-attaches
    by provider id and keeps polling. Only "Retest" (force) discards the
@@ -6745,7 +6745,7 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   _mcpInstallIsReinstall = !!isReinstall;
 
   // Icon may be either an emoji (e.g. '🐙') OR an inline SVG string (e.g.
-  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like YourProvider/Hope).
+  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like Meituan/Hope).
   // Using .textContent would render the SVG source as literal text, which
   // is the "path d=…" garble users saw when opening brand-icon apps.
   // Catalog icons are server-owned (lib/mcp/registry.py), not user input,
@@ -7350,7 +7350,6 @@ runtimeScope._proxyPoolTest = _proxyPoolTest;
 runtimeScope._proxyPoolToggleEditor = _proxyPoolToggleEditor;
 runtimeScope._proxyPoolToggleUrlVisibility = _proxyPoolToggleUrlVisibility;
 runtimeScope._proxyPoolUrlChanged = _proxyPoolUrlChanged;
-runtimeScope._refreshCostExperimentReport = _refreshCostExperimentReport;
 runtimeScope._removeV2Alias = _removeV2Alias;
 runtimeScope._removeV2Offering = _removeV2Offering;
 runtimeScope._runMatrixProbe = _runMatrixProbe;
@@ -7364,7 +7363,6 @@ runtimeScope._stageV2CheckedCatalogModels = _stageV2CheckedCatalogModels;
 runtimeScope._stageV2CustomModelFromPicker = _stageV2CustomModelFromPicker;
 runtimeScope._startNewV2ApiKey = _startNewV2ApiKey;
 runtimeScope._switchMtProvider = _switchMtProvider;
-runtimeScope._syncCostExperimentUi = _syncCostExperimentUi;
 runtimeScope._syncResponsesExperimentUi = _syncResponsesExperimentUi;
 runtimeScope._testMtProvider = _testMtProvider;
 runtimeScope._testSearchBrowser = _testSearchBrowser;

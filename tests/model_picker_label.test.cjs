@@ -36,8 +36,8 @@ function catalog(displayNames) {
   return {
     contract_version: 'tofu.model-routing/v2',
     creators: [{ creator_id: 'deepseek', name: 'DeepSeek' }],
-    providers: [{ provider_id: 'example-corp', name: 'YourProvider' }],
-    provider_accesses: [{ provider_access_id: 'access', provider_id: 'example-corp', display_name: 'YourProvider', enabled: true }],
+    providers: [{ provider_id: 'sankuai', name: 'Meituan' }],
+    provider_accesses: [{ provider_access_id: 'access', provider_id: 'sankuai', display_name: 'Meituan', enabled: true }],
     models: ids.map(model_id => ({ creator_id: 'deepseek', model_id, display_name: displayNames[model_id] ?? model_id })),
     offerings: ids.map((model_id, index) => ({ offering_id: `o${index}`, provider_access_id: 'access', enabled: true,
       identity_state: 'confirmed', model: { creator_id: 'deepseek', model_id }, capabilities: ['text'] })),

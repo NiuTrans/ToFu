@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 CACHE_FIX_GEN = 7
 
 # ── Cache-marker capability matrix ──
-# Empirically probed on the example-corp gateway (2026-05-03).
+# Empirically probed on the sankuai gateway (2026-05-03).
 #   1. Needs markers       → claude, glm-5, qwen, deepseek
 #   2. Auto-caches         → minimax, doubao (markers harmful), kimi
 #   3. Unknown             → default NO markers
@@ -207,7 +207,7 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     verbatim and the gateway's OpenAI→Anthropic translation carries the
     marker INTO ``tool_result.content[*]``, which the vendor hard-rejects
     (HTTP 400 "cache_control may not be specified within
-    `tool_result.content`" — example-corp toio gateway, yuju-claude-opus-5,
+    `tool_result.content`" — sankuai toio gateway, yuju-claude-opus-5,
     2026-07-25; the masked variant surfaces as a generic「请求失败」400).
     So on non-Anthropic wires a ``tool`` message is UNMARKABLE and the
     tail/mid scans walk past it to the assistant/user turn.

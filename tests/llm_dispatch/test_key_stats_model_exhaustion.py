@@ -2,7 +2,7 @@
 """tests/llm_dispatch/test_key_stats_model_exhaustion.py — per-(key, model) billing-stop
 granularity guards (epic pt_69e9d6038c9344dc, 2026-07-28 incident).
 
-The incident: example_corp_key_1 took an Aliyun ``insufficient_quota`` on
+The incident: sankuai_key_1 took an Aliyun ``insufficient_quota`` on
 qwen3.5-plus (11:10:34) and ``mark_key_exhausted`` flipped the KEY-WIDE
 flag — on an aggregating gateway where the same key also routes
 kimi-k3→Moonshot, a qwen billing-stop cross-poisoned kimi capacity. And
@@ -285,11 +285,11 @@ class TestAccountVsModelQuotaScope:
     vendor's quota-death must not poison sibling vendors routed through
     the same key. An HTTP 402 Payment Required is a different signal
     class: it is emitted by the gateway's OWN credit-validation layer
-    (example-corp body: ext.error.source=AIGC, stage=validation) about the
+    (sankuai body: ext.error.source=AIGC, stage=validation) about the
     ACCOUNT's credit pool, so EVERY model on that key is dead and the
     honest stop is the key-wide ``exhausted`` flag. Per-model stops there
     just make each remaining model burn one live 402 before converging
-    (43 model entries on the example-corp account, 12 stopped, ~30 more live
+    (43 model entries on the sankuai account, 12 stopped, ~30 more live
     402s queued for real users on 2026-07-29).
     """
 
@@ -345,7 +345,7 @@ class TestAccountVsModelQuotaScope:
 @pytest.mark.unit
 class TestDayRolloverRecovery:
     """「credit 按日赋予 ⇒ credit 停机次日自动恢复」机制守卫
-    (owner requirement, 2026-07-29 example_corp_key_2 402 storm).
+    (owner requirement, 2026-07-29 sankuai_key_2 402 storm).
 
     The mechanism: billing-stops live in the DAY-SCOPED ``stats`` map, so
     ``_ensure_fresh_unlocked`` resetting stats at the calendar boundary IS

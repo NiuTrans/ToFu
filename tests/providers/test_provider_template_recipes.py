@@ -290,26 +290,26 @@ def test_every_shared_builtin_compiles_an_onboarding_bundle():
         assert bundle['connections'][0]['base_url'], row['key']
 
 
-def test_yourprovider_v41_identity_keeps_its_v4_wire_names():
+def test_meituan_v41_identity_keeps_its_v4_wire_names():
     bundles = {
         'deepseek': compile_provider_template_bundle('deepseek', selected_model_ids=['deepseek-v4-flash']),
-        'yourprovider': compile_provider_template_bundle('yourprovider', selected_model_ids=['deepseek-v4.1-flash']),
+        'meituan': compile_provider_template_bundle('meituan', selected_model_ids=['deepseek-v4.1-flash']),
     }
     assert bundles['deepseek']['offerings'][0]['model'] == {
         'creator_id': 'deepseek', 'model_id': 'deepseek-v4-flash'}
-    assert bundles['yourprovider']['offerings'][0]['model'] == {
+    assert bundles['meituan']['offerings'][0]['model'] == {
         'creator_id': 'deepseek', 'model_id': 'deepseek-v4.1-flash'}
 
     assert [row['wire_model_id'] for row in bundles['deepseek']['deployments']] == [
         'deepseek-v4-flash',
     ]
     assert sorted(
-        row['wire_model_id'] for row in bundles['yourprovider']['deployments']
+        row['wire_model_id'] for row in bundles['meituan']['deployments']
     ) == [
         'deepseek-flash',
         'deepseek-v4-flash',
         'deepseek-v4-flash-huawei',
-        'deepseek-v4-flash-yourprovider',
+        'deepseek-v4-flash-meituan',
         'deepseek-v4-flash-tencent',
     ]
 
@@ -333,7 +333,7 @@ def test_compiled_offerings_follow_their_model_authority():
 def test_bundle_model_rows_keep_the_recipe_context_window():
     # Provider context is constrained only by the resolved Model authority.
     bundle = compile_provider_template_bundle(
-        'yourprovider', selected_model_ids=['Doubao-Seed-1.6'])
+        'meituan', selected_model_ids=['Doubao-Seed-1.6'])
     model = next(
         row for row in bundle['models'] if row['model_id'] == 'Doubao-Seed-1.6')
     assert model['context_window'] == 256000

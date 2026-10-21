@@ -63,7 +63,7 @@ def _fixture(
         "images": {"fixture-image": {"tasks": [_TASK]}},
     }), encoding="utf-8")
     settings = TofuKimiCandidateSettings(
-        provider_face="yourprovider-chat",
+        provider_face="meituan-chat",
         provider_slot_id="kimi-slot-fixture",
         agent_version="0.17.0",
         experiment_arm="prompt_lean_kimi",

@@ -251,7 +251,7 @@ def test_consolidation_ignores_legacy_distil_action(tmp_data_dir, monkeypatch):
     import lib.memory.user_profile as up
     import lib.memory.profile_consolidate as pc
 
-    original = '## Preferences\n- Reply in Chinese\n## About the user\n- Works at YourProvider'
+    original = '## Preferences\n- Reply in Chinese\n## About the user\n- Works at Meituan'
     assert up.save_profile(original)['saved']
     before = up.load_profile()
 
@@ -734,14 +734,14 @@ def test_profile_block_keeps_every_context_category(tmp_data_dir):
     import lib.memory.user_profile as up
 
     up.save_context_items([
-        {'type': 'identity', 'text': 'Works at YourProvider'},
+        {'type': 'identity', 'text': 'Works at Meituan'},
         {'type': 'work_rule', 'condition': 'submitting cluster jobs',
          'action': 'use hope MCP'},
         {'type': 'response_preference', 'text': 'Reply in Chinese'},
     ])
     block = up.render_profile_block()
     assert block is not None
-    assert 'Works at YourProvider' in block
+    assert 'Works at Meituan' in block
     assert 'submitting cluster jobs' in block and 'use hope MCP' in block
     assert 'Reply in Chinese' in block
 
@@ -751,7 +751,7 @@ def test_context_composer_injects_all_items_for_unrelated_turn(tmp_data_dir):
     from lib.tasks_pkg.context_composer import compose_task_context
 
     up.save_context_items([
-        {'type': 'identity', 'text': 'Works at YourProvider'},
+        {'type': 'identity', 'text': 'Works at Meituan'},
         {'type': 'work_rule', 'condition': 'reading internal docs',
          'action': 'use xuecheng MCP'},
         {'type': 'response_preference', 'text': 'Lead with the conclusion'},
@@ -767,7 +767,7 @@ def test_context_composer_injects_all_items_for_unrelated_turn(tmp_data_dir):
         has_real_tools=False, conv_id='', task=task)
     text = '\n'.join(str(message.get('content', '')) for message in messages)
     assert '[USER CONTEXT]' in text
-    assert 'Works at YourProvider' in text
+    assert 'Works at Meituan' in text
     assert 'reading internal docs' in text and 'use xuecheng MCP' in text
     assert 'Lead with the conclusion' in text
     assert len(task['_appliedPreferences']['items']) == 3

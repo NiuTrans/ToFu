@@ -1,2 +1,0 @@
-[console_scripts]
-tofu-overleaf-mcp = tofu_overleaf_mcp.server:main

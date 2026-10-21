@@ -800,7 +800,7 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
   _mcpInstallIsReinstall = !!isReinstall;
 
   // Icon may be either an emoji (e.g. '🐙') OR an inline SVG string (e.g.
-  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like YourProvider/Hope).
+  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like Meituan/Hope).
   // Using .textContent would render the SVG source as literal text, which
   // is the "path d=…" garble users saw when opening brand-icon apps.
   // Catalog icons are server-owned (lib/mcp/registry.py), not user input,

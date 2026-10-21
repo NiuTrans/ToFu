@@ -1,6 +1,6 @@
 """OpenAI wire: text-only content part lists collapse to bare strings.
 
-Strict OpenAI-compatible gateways (example-corp AIGC validation stage, probed
+Strict OpenAI-compatible gateways (sankuai AIGC validation stage, probed
 2026-08-31 with MiniMax-M2) hard-reject list-form message content with
 HTTP 400 — even a single ``{'type': 'text', 'text': ...}`` part — and only
 accept bare strings. ``prepare_request`` therefore collapses text-only part

@@ -674,7 +674,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             ]
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
 
-        # Strict OpenAI-compatible gateways (example-corp AIGC validation stage,
+        # Strict OpenAI-compatible gateways (sankuai AIGC validation stage,
         # probed 2026-08-31 with MiniMax-M2) hard-reject list-form message
         # content with HTTP 400 even for a single text part — only bare
         # strings pass. For those gateways collapse text-only part lists (no cache_control or
@@ -1148,7 +1148,7 @@ class SSEAccumulator:
         # calls), or (b) the model/gateway emitting the concatenated name
         # itself. The existing raw_sse_anomaly.log could NOT decide it: its
         # tool_calls samples are 100% ``toolu_bdrk_`` (bedrock line), zero
-        # frames from the example-corp OpenAI-compat line where the incident
+        # frames from the sankuai OpenAI-compat line where the incident
         # happened. So sample the shape here, on whatever line is live.
         # These counters change NO behaviour.
         self._tc_obs_index_absent = 0
@@ -1597,7 +1597,7 @@ class SSEAccumulator:
         # and the opaque Claude signature, in separate chunks:
         #   [{"type":"thinking","thinking":"…"}]    ← text delta
         #   [{"type":"thinking","signature":"…"}]   ← signature (once per turn)
-        # The YourProvider/example-corp OpenAI-compat gateway uses exactly this shape
+        # The Meituan/sankuai OpenAI-compat gateway uses exactly this shape
         # for Claude models, so harvest both keys here.
         rd_parts = delta.get('reasoning_details')
         if isinstance(rd_parts, list):
@@ -2425,7 +2425,7 @@ class SSEAccumulator:
             )
 
         # Diagnostics: tool_calls finish reason with ZERO payload
-        # (2026-08-06 kimi-k3/example-corp incident, conv msh3qeplzneph5 R3).
+        # (2026-08-06 kimi-k3/sankuai incident, conv msh3qeplzneph5 R3).
         # The gateway closed the stream cleanly reporting
         # finish_reason=tool_calls, yet not one tool_call delta accumulated
         # — the model's tool calls were lost UPSTREAM. Downstream this used

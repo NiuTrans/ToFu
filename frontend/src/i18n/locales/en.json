@@ -765,7 +765,7 @@
   "context.eyebrow": "PERSONAL CONTEXT",
   "context.identityAdd": "Add fact",
   "context.identityDesc": "Your organization, role, domain, and stable environment.",
-  "context.identityEmpty": "For example: I work at YourProvider",
+  "context.identityEmpty": "For example: I work at Meituan",
   "context.identityTitle": "About me",
   "context.intro": "Only explicit, lasting background, rules and response preferences are saved. Edit or delete them here; one-off requests are not saved.",
   "context.loadFailed": "Load failed",

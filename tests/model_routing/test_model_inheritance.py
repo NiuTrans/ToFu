@@ -18,7 +18,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.parametrize('model_id,effort', [('kimi-k3', 'max'), ('grok-4.6', 'xhigh')])
 def test_mainstream_templates_share_model_profile_and_presets(model_id, effort):
-    providers = ('catpaw', 'yourprovider') if model_id == 'kimi-k3' else ('xai', 'yourprovider')
+    providers = ('catpaw', 'meituan') if model_id == 'kimi-k3' else ('xai', 'meituan')
     bundles = [compile_provider_template_bundle(key, selected_model_ids=[model_id])
                for key in providers]
     assert bundles[0]['models'] == bundles[1]['models']

@@ -478,8 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser('comparison-verify', help='Rehash original evidence referenced by a paired report')
     verify.add_argument('report', type=Path)
     msubmit = sub.add_parser(
-        'yourprovider-submit',
-        help='Plan a yourprovider-sandbox canvas submission (dry-run prints the plan)',
+        'meituan-submit',
+        help='Plan a meituan-sandbox canvas submission (dry-run prints the plan)',
     )
     msubmit.add_argument('--base-canvas-id', required=True)
     msubmit.add_argument('--model-id', required=True)
@@ -494,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
     msubmit.add_argument('--dry-run', action='store_true')
 
     mscore = sub.add_parser(
-        'yourprovider-score',
+        'meituan-score',
         help='Collect per-trial rewards from dolphinfs trajectories and audit',
     )
     mscore.add_argument('--evaluate-name', required=True)
@@ -522,8 +522,8 @@ def main(argv: list[str] | None = None) -> int:
             report = verify_report(args.report)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0 if report['ok'] else 1
-        if args.command == 'yourprovider-submit':
-            from .yourprovider_sandbox.submit import MassConfig, build_submit_plan
+        if args.command == 'meituan-submit':
+            from .meituan_sandbox.submit import MassConfig, build_submit_plan
             mass = MassConfig(
                 task_count=args.task_count,
                 attempts=args.attempts,
@@ -571,8 +571,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        if args.command == 'yourprovider-score':
-            from .yourprovider_sandbox.score import (
+        if args.command == 'meituan-score':
+            from .meituan_sandbox.score import (
                 DEFAULT_OUTPUT_ROOT,
                 collect_scores,
                 resolve_trajectory_root,

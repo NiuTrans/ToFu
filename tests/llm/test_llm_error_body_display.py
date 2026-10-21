@@ -131,7 +131,7 @@ class TestSummarizeErrorBody:
             'API HTTP 502: <html>Bad Gateway</html>'
 
     def test_non_envelope_json_passthrough(self):
-        # The example-corp 500-wrap shape carries signal in other fields — keep raw.
+        # The sankuai 500-wrap shape carries signal in other fields — keep raw.
         raw = '{"status":500,"data":"No matching constant for [529]"}'
         assert summarize_error_body(raw) == raw
 

@@ -1,7 +1,7 @@
 """Regression test: zero-byte gateway anomaly on round 0 must auto-retry.
 
 Prior behaviour: ``_is_anomaly_empty`` had a ``round_num > 0`` guard, so
-a example-corp-gateway zero-byte close on the FIRST round of a task surfaced
+a sankuai-gateway zero-byte close on the FIRST round of a task surfaced
 as a fatal "API流异常终止" error with NO retry. We split the predicate
 so the zero-byte signature (no content + anomaly + tiny thinking + fast
 elapsed) admits round 0, while the looser ``stream_anomaly + empty``

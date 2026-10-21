@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: tofu-mtsso-auth
-Version: 0.1.1
-Summary: Bounded MCP adapter for the official MTSSO CLI contract
-Requires-Python: >=3.10

@@ -1,7 +1,7 @@
 """Regression: a round-0 empty stop must RETRY (empty_stop bucket), not be
 declared a terminal ``content_filter``.
 
-Root cause (proven by ``debug/repro_conv_empty_stop.py``): the example-corp gateway
+Root cause (proven by ``debug/repro_conv_empty_stop.py``): the sankuai gateway
 occasionally returns a 200-OK ``finish_reason=stop`` with no visible content on
 a very large prompt. This is TRANSIENT — replaying the identical request gets
 clean content. The old heuristic in ``lib/tasks_pkg/llm_fallback.py`` labelled

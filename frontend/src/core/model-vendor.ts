@@ -19,7 +19,7 @@ export interface VendorIdentity {
 const CREATOR_LABELS: Readonly<Record<string, string>> = Object.freeze({
   openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', deepseek: 'DeepSeek',
   moonshot: 'Moonshot AI', kimi: 'Moonshot AI', zhipu: 'Zhipu AI', glm: 'Zhipu AI',
-  minimax: 'MiniMax', bytedance: 'ByteDance', doubao: 'ByteDance', yourprovider: 'YourProvider',
+  minimax: 'MiniMax', bytedance: 'ByteDance', doubao: 'ByteDance', meituan: 'Meituan',
   xiaomi: 'Xiaomi', alibaba: 'Alibaba', qwen: 'Alibaba', meta: 'Meta',
   mistral: 'Mistral AI', xai: 'xAI', tencent: 'Tencent', baidu: 'Baidu',
   stepfun: 'StepFun', antgroup: 'Ant Group', sensetime: 'SenseTime',

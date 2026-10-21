@@ -6,9 +6,9 @@ Same family as the key_stats fold (epic pt_782133699c6d4ac1), one subsystem
 over: ``model_context_limits`` keys are ``<slot.provider_id>::<model>``, so
 the account/face merge (charter #23) orphaned every entry learned under the
 duplicate anthropic CARD — measured on the fleet file:
-``example_corp_anthropic::claude-opus-5 = 1110553`` (an EXPAND learned from a real
-accepted 1.1M prompt tonight) and ``example_corp_anthropic::aws.claude-opus-4.7``.
-Post-merge slots carry ``provider_id='default'`` → both lookups miss → the
+``sankuai_anthropic::claude-opus-5 = 1110553`` (an EXPAND learned from a real
+accepted 1.1M prompt tonight) and ``sankuai_anthropic::aws.claude-opus-4.7``.
+Post-merge slots carry ``provider_id='sankuai'`` → both lookups miss → the
 learned window is silently lost (over-compaction or fresh 400s until
 re-learned).
 

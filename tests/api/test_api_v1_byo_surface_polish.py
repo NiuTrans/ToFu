@@ -297,7 +297,7 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
 
         _new_loop_run(go())
 
-    def test_provider_template_compiles_yourprovider_faces_into_v2_connections(self):
+    def test_provider_template_compiles_meituan_faces_into_v2_connections(self):
         async def go():
             cli = self.app.test_client()
             headers = {'Authorization': f'Bearer {self.alice}'}
@@ -305,13 +305,13 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
                 '/api/v1/providers/templates', headers=headers)
             self.assertEqual(listed.status_code, 200)
             templates = (await listed.get_json())['items']
-            self.assertIn('yourprovider', {row['key'] for row in templates})
+            self.assertIn('meituan', {row['key'] for row in templates})
 
             compiled = await cli.post(
                 '/api/v1/providers/templates/compile',
                 headers=headers,
                 json={
-                    'template_key': 'yourprovider',
+                    'template_key': 'meituan',
                     'selected_model_ids': [
                         'LongCat-2.0', 'claude-opus-4.8',
                     ],
@@ -321,7 +321,7 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
                 compiled.status_code, 200,
                 await compiled.get_data(as_text=True))
             bundle = (await compiled.get_json())['provider_bundle']
-            self.assertEqual(bundle['provider']['brand'], 'yourprovider')
+            self.assertEqual(bundle['provider']['brand'], 'meituan')
             # Every DECLARED face compiles into a Connection. These two models
             # deploy on the OpenAI and Anthropic wires; the third (kunlun's
             # selector-pinned Responses face) may exist without a deployment.

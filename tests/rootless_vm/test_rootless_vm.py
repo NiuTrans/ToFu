@@ -1296,7 +1296,7 @@ def test_harbor_runner_builds_secret_free_single_trial_command(host_tmp_path):
     rendered = " ".join(argv)
     assert argv[0] == str(harbor.resolve())
     assert "rootless_vm.harbor_tofu_agent:TofuHostAgent" in argv
-    assert "deepseek-v4-flash-yourprovider" in argv
+    assert "deepseek-v4-flash-meituan" in argv
     assert "API_KEY" not in rendered
     assert argv[argv.index("--n-concurrent") + 1] == "1"
     for name in ("state", "cache", "jobs"):

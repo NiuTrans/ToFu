@@ -2,7 +2,7 @@
 never reach the wire.
 
 PRODUCTION INCIDENT (epic pt_8ffba515096142af, forensics in JOURNAL 2026-07-26):
-the example-corp OpenAI-compat gateway streams Opus 5 thinking as ``reasoning_content``
+the sankuai OpenAI-compat gateway streams Opus 5 thinking as ``reasoning_content``
 but NEVER returns a signature (0/92 thinking segments across 15 recent done
 tasks; live state snapshots show assistant turns with ``reasoning_content`` and
 no ``thinking_signature``).  Replaying those turns puts an UNSIGNED thinking

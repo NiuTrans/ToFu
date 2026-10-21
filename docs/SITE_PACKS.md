@@ -1,9 +1,9 @@
 # Site packs: site internalization and release tiering
 
 **Status:** P1–P4 landed. The declarative engine, three-layer loading, the
-yourprovider release bundle, user-tier management (HTTP API + Settings UI), and
+meituan release bundle, user-tier management (HTTP API + Settings UI), and
 mutation pipelines all run today; the xiaohongshu core pack and the
-bundles/yourprovider packs are L1 references. Remaining roadmap items say "will".
+bundles/meituan packs are L1 references. Remaining roadmap items say "will".
 
 **Owners:** `lib/site_packs/` (loader + pipeline interpreter),
 [`contracts/site_pack_v1.schema.json`](../contracts/site_pack_v1.schema.json)
@@ -25,7 +25,7 @@ Site- and company-specific logic historically lived in four unrelated shapes:
 - `lib/auth_sources.py` hardcoded `DEFAULT_SOURCES` in Python.
 - `lib/browser/adapters.py` hardcoded built-in adapters (URLs, login flows,
   extraction JS) behind `_register_builtins()`.
-- `static/provider_templates/yourprovider.json` shipped company models to everyone.
+- `static/provider_templates/meituan.json` shipped company models to everyone.
 
 The opensource export scrubbed these file-by-file (`export_pkg/_sanitize.py`),
 which treated symptoms: any new hardcoded reference silently became a scrub
@@ -108,13 +108,13 @@ directory — data, tests, and docs for one distribution audience, not a Python
 distribution (so it stays out of `packages/` and the workspace):
 
 ```
-bundles/yourprovider/
+bundles/meituan/
   site_packs/{modelplaza,friday}.json
-  provider_templates/yourprovider.json
+  provider_templates/meituan.json
   tests/                        # intranet acceptance tests moved out of tests/
 ```
 
-`bundles/yourprovider/` is included by the `internal`/`personal` export modes and
+`bundles/meituan/` is included by the `internal`/`personal` export modes and
 excluded as one whole-directory rule by the `opensource` mode
 (`export_pkg/_lists.py`). The core tree — code, tests, fixtures, tool
 descriptions, docs examples — keeps zero references to company hosts, so the
@@ -131,7 +131,7 @@ Adjacent loaders adopt the same three-layer shape:
   `auth_sources.json` row — `source_spec()` remains the single accessor.
 - **Provider templates.** `lib/model_info/data/` ← `static/provider_templates/`
   ← `bundles/*/provider_templates/` ← `<config_path>/provider_templates/`
-  (new user tier). `yourprovider.json` moves into the bundle.
+  (new user tier). `meituan.json` moves into the bundle.
 - **Tool descriptions.** Model-facing descriptions (e.g. `browser_site`) are
   generated from the registry: a static preamble plus one capability sentence
   per registered pack. An unregistered pack leaves zero trace in prompts, UI,
@@ -144,10 +144,10 @@ Adjacent loaders adopt the same three-layer shape:
   `lib/site_packs/data/xiaohongshu.json` and kept in every distribution as the
   reference L1 pack. "Kept" means kept as clean data — no Python hardcoding
   survives the migration.
-- **YourProvider bundle (landed).** ModelPlaza and Friday packs, the example-corp SSO
+- **Meituan bundle (landed).** ModelPlaza and Friday packs, the sankuai SSO
   auth source (projected by the ModelPlaza pack's `auth.domain`), the
-  `yourprovider` provider template, the yourprovider template test suites, and the
-  intranet acceptance scripts live under `bundles/yourprovider/`
+  `meituan` provider template, the meituan template test suites, and the
+  intranet acceptance scripts live under `bundles/meituan/`
   (`make test-bundles`). The SSO cookie evidence notes ride along in the
   bundle README.
 
@@ -176,8 +176,8 @@ Adjacent loaders adopt the same three-layer shape:
   health, and `site_tool.py` keep working unchanged; registry-generated tool
   descriptions; the auth-source catalog projection.
 - **P2 — migration (landed).** Xiaohongshu runs as the core L1 pack;
-  ModelPlaza/Friday, the example-corp SSO auth source, the yourprovider provider
-  template and the intranet acceptance tests live under `bundles/yourprovider/`;
+  ModelPlaza/Friday, the sankuai SSO auth source, the meituan provider
+  template and the intranet acceptance tests live under `bundles/meituan/`;
   the opensource export excludes `bundles/` whole and the core tree carries
   no company-host references in the site-pack domain. `DEFAULT_SOURCES` is
   empty; the auth catalog is fully pack-projected.

@@ -91,7 +91,7 @@ _RULES: tuple[tuple[str, str], ...] = (
     ('glm-5-1', '2026-04'),
     ('glm-5v-turbo', '2026-05'),
     # ── Moonshot Kimi ────────────────────────────────────────────
-    # kimi-k3 was live on the example-corp gateway by 2026-07-17
+    # kimi-k3 was live on the sankuai gateway by 2026-07-17
     # (lib/model_info/_max_output.py).
     ('kimi-k2-7-code', '2026-06'),
     ('kimi-k3', '2026-07'),
@@ -127,7 +127,7 @@ _RULES: tuple[tuple[str, str], ...] = (
     # ── Tencent Hunyuan ──────────────────────────────────────────
     ('hy4-preview', '2026-07'),
     ('hy3-preview', '2026-04'),
-    # ── YourProvider LongCat ──────────────────────────────────────────
+    # ── Meituan LongCat ──────────────────────────────────────────
     # 2601/2603 in the flash ids are the vendor iteration stamps.
     ('longcat-2-0', '2026-06'),
     ('longcat-flash-omni-2603', '2026-03'),

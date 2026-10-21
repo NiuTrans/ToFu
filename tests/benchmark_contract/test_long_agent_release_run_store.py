@@ -53,7 +53,7 @@ def _manifest(role: str, *, thinking: str = "high") -> dict:
             "binarySha256" if baseline else "commitSha256": (
                 _sha("codex") if baseline else _sha("tofu")),
         },
-        provider_face="yourprovider-chat",
+        provider_face="meituan-chat",
         provider_slot_id="kimi-slot-fixture",
         thinking=thinking,
         experiment_arm="codex_0_149_1" if baseline else "control",

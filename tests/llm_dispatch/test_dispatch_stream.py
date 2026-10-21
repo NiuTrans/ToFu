@@ -628,7 +628,7 @@ class TestSettleStreamResultHelper:
             'prompt_tokens_details': {'cached_tokens': 98_000},
         }
         _settle_stream_result(
-            _make_slot(model='kimi-k3', key='example-corp-key'), usage,
+            _make_slot(model='kimi-k3', key='sankuai-key'), usage,
             latency=5.0, ttft=None, state=self._state(),
             cache_conv_id='conv-kimi', tag='[t]')
 

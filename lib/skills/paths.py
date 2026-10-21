@@ -46,7 +46,7 @@ PROJECT_SKILL_ROOTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # Internal-only platform guides (CodeLab, MLP, Hope). Git-tracked inside
     # the ``bundles/`` tree, which opensource export excludes wholesale, so
     # these reach internal sites without leaking to the public mirror.
-    (os.path.join('bundles', 'yourprovider', 'skills'), 'project-internal-dev',
+    (os.path.join('bundles', 'meituan', 'skills'), 'project-internal-dev',
      ('personal', 'internal')),
 )
 

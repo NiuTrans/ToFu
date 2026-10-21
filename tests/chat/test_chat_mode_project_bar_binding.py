@@ -416,7 +416,7 @@ def test_build_toolbar_overrides_carries_provider_chip_pick(provisional):
     # preference stays blank. _buildToolbarOverrides must forward the live pick
     # into the submitted overrides, or the backend resolver falls back to the
     # blank conv value and auto-routes away from the provider the user pinned
-    # (the "catpaw selected but dispatched to example-corp" bug).
+    # (the "catpaw selected but dispatched to sankuai" bug).
     _run(r'''
 const target = saved('target'); setup(target); activeConvId = target.id;
 serverModel = 'kimi-k3';

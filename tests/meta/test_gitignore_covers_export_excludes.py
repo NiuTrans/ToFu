@@ -64,7 +64,7 @@ _EXTRA_KEEPERS = {
 
     # The internal canvas adapter is excluded publicly; keep its offline tests
     # private with that owner rather than publishing a dangling provider import.
-    'tests/evaluations/test_yourprovider_sandbox_submit_watch.py',
+    'tests/evaluations/test_meituan_sandbox_submit_watch.py',
     # Portable diagnostic dependencies are owned by the public keep-list;
     # this set contains only deliberately private source.
     'export.py',                                 # export infra (sanitization patterns)
@@ -105,8 +105,8 @@ _EXTRA_KEEPERS = {
     'scripts/release_open.sh',
     # ── Internal-only tooling: tracked on purpose, never public ─────────────
     # Syncs our template to the SSO-gated ModelPlaza catalog; exercised only by
-    # the internal bundles/yourprovider tier, useless to a public checkout.
-    'scripts/yourprovider_template_sync.py',
+    # the internal bundles/meituan tier, useless to a public checkout.
+    'scripts/meituan_template_sync.py',
 }
 
 # ── The pet's RAW MASTER ART: tracked on purpose, never published ────────────

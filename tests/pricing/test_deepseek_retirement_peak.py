@@ -130,7 +130,7 @@ def test_v4_and_v41_keep_distinct_display_names():
     from lib.pricing import MODEL_PRICING, pricing_for_model
     assert MODEL_PRICING['deepseek-v4-flash']['name'] == 'DeepSeek V4 Flash'
     assert MODEL_PRICING['deepseek-flash']['name'] == 'DeepSeek V4.1 Flash'
-    # The YourProvider gateway's logical V4.1 id must resolve too: that lookup is
+    # The Meituan gateway's logical V4.1 id must resolve too: that lookup is
     # what the picker prints for the model, so a miss shows the raw id.
     for mid in ('deepseek-v4.1-flash', 'deepseek-v4-1-flash'):
         assert pricing_for_model(mid)['name'] == 'DeepSeek V4.1 Flash'
@@ -247,7 +247,7 @@ def test_shipped_deepseek_rows_carry_live_peak_block():
     items during 01:00-04:00 + 06:00-10:00 UTC on weekdays (REPLACES the
     retired 2026-08-16 Beijing-time schedule). Off-peak lookups return the
     V4.1 bases ($0.15), peak-window lookups double them and stamp peakMul.
-    The YourProvider-gateway mirror (-huawei) must NOT carry it — the 2x policy is
+    The Meituan-gateway mirror (-huawei) must NOT carry it — the 2x policy is
     DeepSeek-direct only. deepseek-v4-pro lost its peak block on 2026-09-10:
     it routes to V4.1 Flash from 2026-09-14 and keeps the old V4 Pro price
     card until then."""
@@ -283,7 +283,7 @@ def test_v41_flash_pricing_rows():
     from lib.pricing import MODEL_PRICING
     for mid in ('deepseek-flash', 'deepseek-v4-flash',
                 'deepseek-v4-flash-huawei', 'deepseek-v4-flash-tencent',
-                'deepseek-v4-flash-yourprovider', 'deepseek-v4-flash-vision-exp'):
+                'deepseek-v4-flash-meituan', 'deepseek-v4-flash-vision-exp'):
         row = MODEL_PRICING[mid]
         assert row['input'] == 0.15 and row['output'] == 0.60, mid
         assert row['cacheReadMul'] == 0.02, mid

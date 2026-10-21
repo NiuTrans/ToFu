@@ -62,7 +62,7 @@ def _manifest() -> dict:
             "name": "tofu", "version": "0.17.0",
             "commitSha256": _sha_text("tofu-agent"),
         },
-        provider_face="yourprovider-chat",
+        provider_face="meituan-chat",
         provider_slot_id="kimi-slot-fixture",
         thinking="high",
         experiment_arm="prompt_lean_kimi",

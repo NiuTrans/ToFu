@@ -1,5 +1,0 @@
-overleaf-mcp-plus[compile]==0.3.1
-mcp<3,>=2
-httpx<1,>=0.28
-jsonschema<5,>=4.18
-psutil>=5.9

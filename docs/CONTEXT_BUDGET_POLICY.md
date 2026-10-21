@@ -279,7 +279,7 @@ A line's window belongs to the line: `deepseek-v4.1-flash` (catalogue
 identity), `deepseek-v4-1-flash`, `deepseek-v4-flash` (legacy wire spelling)
 and the versionless canonical `deepseek-flash` are one served model at 1M. The
 2026-09-21 gauge report (128K shown for a route enforcing 1M, live on
-example-corp/YourProvider) came from spelling these as needles `deepseek-flash` /
+sankuai/Meituan) came from spelling these as needles `deepseek-flash` /
 `deepseek-v4-flash`, neither of which is a substring of an id whose version is
 punctuated with a dot, so the V3-era 128K family estimate won silently. The
 max-output table (`_max_output._deepseek_max_output`) rides the same parser.

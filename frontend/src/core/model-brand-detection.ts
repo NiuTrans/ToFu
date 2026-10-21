@@ -34,8 +34,8 @@ export const CREATOR_TO_BRAND: Readonly<Record<string, string>> = Object.freeze(
   minimax: 'minimax',
   bytedance: 'doubao',
   doubao: 'doubao',
-  yourprovider: 'yourprovider',
-  longcat: 'yourprovider',
+  meituan: 'meituan',
+  longcat: 'meituan',
   alibaba: 'qwen',
   qwen: 'qwen',
   meta: 'meta',
@@ -74,7 +74,7 @@ export function brandForCreator(creatorId: unknown): string {
 
 const MODEL_BRAND_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/yeysai|thunlp|tsinghua|清华/i, 'tsinghua'],
-  [/example-corp|longcat|yourprovider|your-corp|your-mascot/i, 'yourprovider'],
+  [/sankuai|longcat|meituan|三快|龙猫/i, 'meituan'],
   [/openrouter/i, 'openrouter'],
   [/mimo|xiaomi/i, 'mimo'],
   [/shubiaobiao|数标标/i, 'shubiaobiao'],

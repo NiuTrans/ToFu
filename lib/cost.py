@@ -74,11 +74,11 @@ logger = get_logger(__name__)
 #
 # Vendor cache-read spellings beyond the two canonical ones (probed live):
 #   cached_tokens                — Moonshot/Kimi top-level (also what the
-#                                  example-corp gateway emits for kimi-k3; it
+#                                  sankuai gateway emits for kimi-k3; it
 #                                  reports the auto-cache hit HERE while
 #                                  pinning cache_read_tokens=0 — probed
 #                                  2026-07-24, 3328/3367 tok = 98.8% hit)
-#   effectiveCachedTokens        — example-corp gateway camelCase variant
+#   effectiveCachedTokens        — sankuai gateway camelCase variant
 #   prompt_cache_hit_tokens      — DeepSeek direct API
 #   cached_content_token_count   — Gemini (usageMetadata shape)
 # First TRUTHY value wins, so an explicit 0 on a canonical key (the gateway's
@@ -362,7 +362,7 @@ def _anthropic_residual_input(usage: Optional[dict], normalized_input: int) -> i
     that spells BOTH conventions at once. ``normalize_usage`` documents the
     assumption that a payload "carries ONE convention only (OpenAI keys XOR
     Anthropic keys)", under which its alias order is explicitly "immaterial".
-    The example_corp_anthropic gateway violates that XOR: it emits ``prompt_tokens``
+    The sankuai_anthropic gateway violates that XOR: it emits ``prompt_tokens``
     (the cache-INCLUSIVE total) *beside* ``cache_*_input_tokens`` (residual
     semantics). The alias order then resolves ``input`` to the TOTAL while the
     structural detector says ``'anthropic'`` — so the whole prefix was re-priced
@@ -417,7 +417,7 @@ def split_input_tokens(usage: Optional[dict]) -> tuple[int, int]:
     total = inp
     # A provider that reports cache tokens WITHOUT any prompt-token field
     # (``prompt_tokens`` / ``input_tokens`` both absent or 0 — e.g. the
-    # Kimi/example-corp gateway reports the auto-cache hit in ``cached_tokens`` and
+    # Kimi/sankuai gateway reports the auto-cache hit in ``cached_tokens`` and
     # omits the prompt total) would otherwise collapse ``total`` to 0 while
     # ``cache_read`` is tens of thousands — the frontend then renders the
     # contradictory "total input 0 · cache read 39.2k". The total prompt can

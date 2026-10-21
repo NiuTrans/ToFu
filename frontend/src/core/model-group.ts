@@ -22,7 +22,7 @@ export const MODEL_GROUP_BRAND_NAMES: Readonly<Record<string, string>> =
     grok: 'Grok',
     mistral: 'Mistral',
     glm: 'GLM',
-    yourprovider: 'YourProvider',
+    meituan: 'Meituan',
     kimi: 'Kimi',
     bedrock: 'Bedrock',
     openrouter: 'OpenRouter',

@@ -13,7 +13,7 @@ Rationale (why this test is load-bearing):
     that non-chat set → silently excluded from chat dispatch, even though
     the intent of ``audio_chat`` is "omni chat model that also takes audio".
   * Every currently-shipped omni model (``gemini-3-flash-preview``,
-    ``LongCat-Flash-Omni-2603`` — both in yourprovider.json AND
+    ``LongCat-Flash-Omni-2603`` — both in meituan.json AND
     DEFAULT_SLOT_CONFIGS) carries ``text`` alongside ``audio_chat`` so the
     guard is presently unreachable.
   * This test prevents a future edit from dropping ``text`` and silently
@@ -51,7 +51,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 
 def _template_json_paths() -> list[str]:
-    # The yourprovider template retired into its release-tier bundle; audio_chat
+    # The meituan template retired into its release-tier bundle; audio_chat
     # coverage is audited across both the shipped and the bundle catalogs.
     return sorted(
         glob.glob(os.path.join(_ROOT, 'static', 'provider_templates', '*.json'))
@@ -85,7 +85,7 @@ def test_shipped_provider_templates_have_audio_chat_with_text():
     )
     # Sanity: the audit isn't vacuously green — some audio_chat models
     # MUST exist in shipped templates. (2026-07 baseline: gemini-3-flash-preview
-    # + LongCat-Flash-Omni-2603 in yourprovider.json.) Scoped to the internal
+    # + LongCat-Flash-Omni-2603 in meituan.json.) Scoped to the internal
     # tree: opensource exports do NOT ship the internal provider template,
     # so their shipped set legitimately contains zero audio_chat models —
     # the violations audit above still covers every template that IS there.

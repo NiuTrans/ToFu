@@ -37,11 +37,11 @@ class ConvAffinityTest(unittest.TestCase):
         # is the second key.
         self._slot_a = Slot(
             key_name='key_A', api_key='sk-a', model='sticky-model',
-            capabilities={'text'}, provider_id='default', latency_ema=10.0,
+            capabilities={'text'}, provider_id='sankuai', latency_ema=10.0,
         )
         self._slot_b = Slot(
             key_name='key_B', api_key='sk-b', model='sticky-model',
-            capabilities={'text'}, provider_id='default', latency_ema=20.0,
+            capabilities={'text'}, provider_id='sankuai', latency_ema=20.0,
         )
         with self.d._lock:
             self.d.slots.extend([self._slot_a, self._slot_b])
@@ -109,7 +109,7 @@ class ConvAffinityTest(unittest.TestCase):
 
         auxiliary = Slot(
             key_name='aux_key', api_key='sk-aux', model='affinity-aux-model',
-            capabilities={'text'}, provider_id='default', latency_ema=1.0,
+            capabilities={'text'}, provider_id='sankuai', latency_ema=1.0,
         )
         with self.d._lock:
             self.d.slots.append(auxiliary)
@@ -133,7 +133,7 @@ class ConvAffinityTest(unittest.TestCase):
         for a DIFFERENT route scope via the legacy unscoped ``conv_id`` alias.
 
         conv mtxxaf2l: the conversation once landed on CatPaw, so the unscoped
-        alias held a CatPaw key. A later turn preferred example-corp, but the
+        alias held a CatPaw key. A later turn preferred sankuai, but the
         unscoped fallback re-picked CatPaw's key and re-seeded the scoped
         entry — the wrong provider became sticky. ``get_preferred_key`` is now
         exact-or-absent.

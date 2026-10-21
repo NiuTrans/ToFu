@@ -42,7 +42,7 @@ def _sample_task():
         'status': 'running',
         'finishReason': 'stop',
         'model': 'aws.claude-opus-4.8',
-        'provider_id': 'example-corp',
+        'provider_id': 'sankuai',
         'usage': {'inputTokens': 14, 'outputTokens': 7812},
         'apiRounds': [{'usage': {'outputTokens': 100}}, {'usage': {'outputTokens': 200}}],
         'cost': {'costCny': 76.5498, 'costUsd': 10.57},

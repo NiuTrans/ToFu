@@ -670,10 +670,10 @@ def test_amap_key_rides_the_url_and_rollinggo_rides_a_header():
 
 
 def test_no_dead_card_for_a_business_gated_vendor():
-    """Ctrip / YourProvider must NOT get an entry — in EITHER catalog.
+    """Ctrip / Meituan must NOT get an entry — in EITHER catalog.
 
     Both were researched: Ctrip's MCP is corporate-only (its individual-facing
-    'wendao' product is not MCP at all) and YourProvider's open platform is
+    'wendao' product is not MCP at all) and Meituan's open platform is
     merchant-side behind a business review. An entry would render an Install
     button that cannot succeed. Their status belongs in docs and a
     business-access ticket, not in a clickable card.
@@ -685,12 +685,12 @@ def test_no_dead_card_for_a_business_gated_vendor():
     import lib.mcp.registry as reg
     import lib.skills.catalog as skills
 
-    banned = ('ctrip', 'xiecheng', '携程', 'yourprovider', '美团', 'dianping', '点评')
+    banned = ('ctrip', 'xiecheng', '携程', 'meituan', '美团', 'dianping', '点评')
     for surface, entries in (('mcp', reg.get_catalog()),
                              ('skills', skills.get_catalog())):
         for entry in entries:
             haystack = f"{entry['id']} {entry.get('name', '')}".lower()
-            # 'yourprovider' legitimately appears in internal_only research-cluster
+            # 'meituan' legitimately appears in internal_only research-cluster
             # entries (hope / xuecheng / llm) — those are corp-internal dev
             # tools, not consumer life-service cards.
             if entry.get('internal_only'):

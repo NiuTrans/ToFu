@@ -67,7 +67,7 @@ def test_chat_exposes_reasoning_content_for_tool_replay(monkeypatch):
 
     _, usage = chat_module.chat(
         [{"role": "user", "content": "use the tool"}],
-        model="deepseek-v4-flash-yourprovider",
+        model="deepseek-v4-flash-meituan",
         api_key="test-only",
         base_url="https://public.example/v1",
         max_retries=0,

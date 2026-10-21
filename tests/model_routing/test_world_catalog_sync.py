@@ -259,7 +259,7 @@ def test_retired_template_models_are_pruned_from_registry():
     assert followup['pruned'] == 0
     assert not _has_model(repository.get(boundary).document, 'gpt-6-astra-pro')
     # deepseek-chat is GLOBALLY retired (official 2026-07-24; the stale
-    # YourProvider-gateway authorship was removed 2026-09-06): never inserted.
+    # Meituan-gateway authorship was removed 2026-09-06): never inserted.
     assert not _has_model(repository.get(boundary).document, 'deepseek-chat')
 
 
@@ -267,7 +267,7 @@ def test_no_template_authors_a_retired_identity():
     """Anti-oscillation invariant: retired is global.
 
     deepseek-chat/deepseek-reasoner flipped in and out of the registry when
-    deepseek.json retired them while yourprovider.json still authored them — the
+    deepseek.json retired them while meituan.json still authored them — the
     UI's retired chip advised removal, a PUT wiped the rows, and the next
     boot sync re-inserted them.  No shipped template may author an offering
     whose canonical identity any template retires; the sync's catalogue

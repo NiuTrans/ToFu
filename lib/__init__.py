@@ -84,9 +84,7 @@ def _cfg(env_key, saved_key, default, *, empty_env_is_unset=False):
 # requests and Settings-managed providers route through owner-scoped v2.
 # Preferred: LLM_API_KEYS=key1,key2,key3  (comma-separated, any number)
 # Legacy single-var: LLM_API_KEY still works (for 1 key only)
-_DEFAULT_KEYS = [
-    # Add your API keys here, or set LLM_API_KEYS env var
-]  # No hardcoded or persisted-provider fallback.
+_DEFAULT_KEYS = []  # No hardcoded or persisted-provider fallback.
 
 def _parse_api_keys():
     """Build legacy direct-call keys strictly from explicit environment."""

@@ -16,12 +16,12 @@ MODEL = 'glm-5.3'
 EXPECTED_CAPS = {'text', 'thinking'}
 
 
-def test_glm53_is_in_official_and_yourprovider_templates():
-    # The yourprovider template moved under bundles/yourprovider/ in 6e19b6d14 (site
+def test_glm53_is_in_official_and_meituan_templates():
+    # The meituan template moved under bundles/meituan/ in 6e19b6d14 (site
     # packs); the loader chain still merges it (docs/SITE_PACKS.md §4).
     locations = (
         ROOT / 'static/provider_templates' / 'glm.json',
-        ROOT / 'bundles/yourprovider/provider_templates' / 'yourprovider.json',
+        ROOT / 'bundles/meituan/provider_templates' / 'meituan.json',
     )
     for path in locations:
         filename = path.name
