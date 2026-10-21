@@ -23,7 +23,7 @@ and work use the shared scan/manifest/depth limits; results remain bounded per p
 
 Cursor encoding: **Problem:** repeating the full query binding in every cursor
 consumed model context and could exceed the 2,048-character cursor limit for a
-valid Unicode selector or search term. **Decision:** new `trq2` cursors carry
+valid Unicode selector or search term. **Decision:** `trq2` cursors carry
 only the existing bounded position. The unchanged private key authenticates the
 complete owner/root/operation/query/selector binding as well as the position.
 `cursor.authentication` defines the domain-separated HMAC-SHA256 framing;
@@ -32,10 +32,10 @@ The full 32-byte MAC and payload use canonical unpadded base64url. Route, seek,
 observed-expiry and authority checks remain unchanged. No alias store, additional
 record, cache, key rotation or retention change is introduced.
 
-Both authorities still verify previously issued `trq1` cursors with their
-original framing and key. Updated handlers accept both formats, and model-view
-projection recognizes both without dropping required continuations. A prior
-reader cannot consume newly issued `trq2` values; upgrade the reading authority
+Both authorities verify previously issued `trq1` and `trq2` cursors with their
+original framing and key. Updated handlers accept all three formats, and model-view
+projection recognizes them without dropping required continuations. A prior
+reader cannot consume newly issued `trq3` values; upgrade the reading authority
 before issuing them. Existing numeric read offsets and zero search cursors keep
 their prior behavior. **Alternatives rejected:** shrinking valid query/selector
 limits removes capability; shortening an existing signed token breaks its MAC;
@@ -50,6 +50,34 @@ the freshly generated canonical `resultId`, exact `o200k_base` model-view totals
 fell from 5,034 to 3,831 on SQLite (23.9%) and from 5,118 to 3,873 on TofuDB (24.3%).
 All remaining non-cursor page fields, including body, provenance and coverage,
 matched. These are sample payload savings, not whole-task cost or latency claims.
+
+Position encoding: **Problem:** position JSON keys still dominate short range
+reads even after query bindings are removed. **Decision:** new `trq3` cursors use
+the canonical `cursor.positionEncoding` layout: unsigned LEB128 flags, route
+length/indices and ordered position fields. Every position bit remains, including
+the native segment byte offset, observed expiry and partial-coverage flag. The
+full 32-byte HMAC authenticates the exact payload and the original query binding
+under a distinct `trq3` domain. Authentication precedes position decoding.
+
+Both readers reject overlong or overflowing uint64 values, unknown flags, foreign
+byte-offset layouts, missing fields and trailing bytes; route depth/node bounds
+and expiry checks still apply. New encoding adds no alias store, key, cache or
+record lifecycle. Tool metadata, quotes, provenance, coverage and recovery errors
+remain unchanged. **Alternatives rejected:** JSON tuples retain unnecessary text
+encoding overhead; compression adds framing and decompression work to tiny
+payloads; shortening the MAC loses integrity; source-reference aliases add state.
+Shared independent wire vectors and malformed signed payloads cover all three
+cursor versions, including exact integer boundaries and changed owner/query scope.
+
+A paired reader-upgrade probe followed 380 pages across 20 plain/canonical
+read/search cases on the same disposable SQLite and TofuDB authorities. For
+8-byte reads, exact `o200k_base` model-output totals fell from 32,294 to 26,499
+tokens on SQLite (17.9%) and from 33,186 to 26,795 on TofuDB (19.3%). Complete
+single-page reads stayed byte-identical. All non-cursor page fields matched;
+52 prior-reader replay/continuation calls succeeded after reopening with the new
+reader. OpenAI, Responses and Anthropic request encodings retained the exact
+model content. These are fixed-query payload measurements, with no provider
+request or whole-task cost/latency claim.
 
 Query recovery: **Problem:** the handler labeled every storage protocol failure
 as `invalid_cursor`, losing invalid-selector and expired-evidence causes and

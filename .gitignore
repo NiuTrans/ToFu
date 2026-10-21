@@ -119,6 +119,7 @@ __pycache__/
 !/benchmarks/
 /benchmarks/*
 !/benchmarks/AGENTS.md
+!/benchmarks/tool_result_projection.py
 !/benchmarks/search_relevance.py
 !/benchmarks/search_html_reference.py
 !/benchmarks/desktop_runtime.py

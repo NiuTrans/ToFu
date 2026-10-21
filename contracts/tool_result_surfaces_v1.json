@@ -89,7 +89,7 @@
   },
   "artifactProjectionReplayCursor": {
     "field": "resumeCursor",
-    "formatPrefixes": ["trq1.", "trq2."],
+    "formatPrefixes": ["trq1.", "trq2.", "trq3."],
     "viewTruncatedField": "outputTruncated"
   },
   "artifactProjectionMatchGroups": {

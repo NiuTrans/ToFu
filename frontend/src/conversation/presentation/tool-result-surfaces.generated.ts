@@ -125,7 +125,8 @@ export const TOOL_RESULT_SURFACES = {
     "field": "resumeCursor",
     "formatPrefixes": [
       "trq1.",
-      "trq2."
+      "trq2.",
+      "trq3."
     ],
     "viewTruncatedField": "outputTruncated"
   },

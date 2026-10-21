@@ -103,7 +103,7 @@ def test_signed_route_cursor_survives_restart_and_rejects_changed_bindings(repo,
     root = manifest(repo, children=[{'name': 'tool', 'callId': 'child', 'artifactRef': child}])
     first = repo.read_range(user_id=1, artifact_ref=root, now_ms=repo.query_test_now_ms + 1, limit=5)
     cursor = first['nextCursor']
-    assert cursor.startswith('trq2.')
+    assert cursor.startswith('trq3.')
     storage.stop(); storage.start()
     rest = repo.read_range(user_id=1, artifact_ref=root, now_ms=repo.query_test_now_ms + 2, offset=cursor)
     assert first['content'] + rest['content'] == '中abcdefß' * 20

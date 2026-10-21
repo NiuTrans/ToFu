@@ -137,7 +137,7 @@ def test_required_or_unrecognized_metadata_still_consumes_budget(operation, chan
     assert 'nextCursor' not in result
 
 
-@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.'])
+@pytest.mark.parametrize('prefix', ['trq1.', 'trq2.', 'trq3.'])
 def test_opaque_next_cursor_never_survives_local_body_clipping(prefix):
     source = {'status': 'ok', **page(
         'read_tool_artifact', nextCursor=prefix + 'next-page', content='evidence ' * 500)}

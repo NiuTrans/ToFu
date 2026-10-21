@@ -54,15 +54,26 @@
     ]
   },
   "cursor": {
-    "format": "trq2.base64url-json.base64url-hmac-sha256",
-    "currentPrefix": "trq2",
+    "format": "trq3.base64url-position.base64url-hmac-sha256",
+    "currentPrefix": "trq3",
+    "previousPrefix": "trq2",
     "legacyPrefix": "trq1",
     "legacyFormat": "trq1.base64url-json.hmac-sha256",
     "authentication": {
-      "domain": "tofu.tool-result-query/trq2",
+      "domain": "tofu.tool-result-query/trq3",
+      "previousDomain": "tofu.tool-result-query/trq2",
       "framing": "UTF-8 domain, NUL byte, compact UTF-8 JSON binding array in binds order, NUL byte, exact position payload bytes",
-      "payload": "current format carries only position; legacy format carries [binding,position]",
+      "payload": "current format carries packed position; previous format carries JSON position; legacy format carries JSON [binding,position]",
       "encoding": "current payload and 32-byte MAC use canonical unpadded base64url; legacy MAC remains lowercase hexadecimal"
+    },
+    "positionEncoding": {
+      "integer": "canonical unsigned LEB128, at most 64 bits; overlong encodings and trailing bytes refuse",
+      "order": "flags, route length, route indices, fields in declared order",
+      "partialFlag": 1,
+      "byteOffsetFlag": 2,
+      "fields": ["p", "b", "o", "skip", "expiry"],
+      "optionalField": "b",
+      "byteOffset": "native requires the byteOffsetFlag and b; SQL requires both absent"
     },
     "binds": [
       "owner",

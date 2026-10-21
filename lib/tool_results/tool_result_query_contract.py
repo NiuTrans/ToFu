@@ -6,7 +6,7 @@ from lib.tool_results.tool_result_query_generated import CONTRACT
 LIMITS = CONTRACT['limits']
 MEDIA_TYPE = CONTRACT['manifestMediaType']
 SIGNED_CURSOR_PREFIXES = tuple(
-    CONTRACT['cursor'][name] + '.' for name in ('currentPrefix', 'legacyPrefix'))
+    CONTRACT['cursor'][name] + '.' for name in ('currentPrefix', 'previousPrefix', 'legacyPrefix'))
 
 
 def retention_limits():

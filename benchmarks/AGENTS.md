@@ -6,6 +6,12 @@ This directory contains retained, executable measurement contracts. Local run
 outputs and candidate result payloads are reconstructible artifacts and remain
 untracked according to `.gitignore`.
 
+`tool_result_projection.py` measures six fixed native receipts through production
+capture/budget/delivery, with an in-memory retention port. Exact canonical values
+and complete model views gate byte/token accounting. Verify
+`tests/meta/test_tool_result_projection_measure.py`, including deliberately lost
+evidence; the result is a component payload observation, never paid-task savings.
+
 `tofudb_context_progression.py` measures real append/read/checkpoint advancement
 with an independent public-header digest and exact suffix oracle. Keep initial
 certification, later checkpoint writes and appends separate; round zero's appends
