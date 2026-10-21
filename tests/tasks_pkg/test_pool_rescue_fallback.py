@@ -92,7 +92,7 @@ class TestPoolRescue:
             if len(calls) == 1:
                 raise PermissionError_('429-saturated primary, whatever')
             if len(calls) == 2:
-                raise PermissionError_('API HTTP 401: 无效的AppId: 1000000000000000001')
+                raise PermissionError_('API HTTP 401: 无效的AppId: YOUR_API_KEY_HERE')
             return ({'role': 'assistant', 'content': 'rescued'}, 'stop',
                     {'prompt_tokens': 5, 'completion_tokens': 3,
                      '_dispatch': {'model': 'kimi-k3', 'key': 'k9'}})

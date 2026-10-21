@@ -63,7 +63,7 @@ def _benchmark_task(*, arm: str, context_blocks: list[dict]) -> dict:
         agent={
             'name': 'tofu', 'version': 'test', 'commitSha256': 'a' * 64,
         },
-        provider_face='meituan-chat',
+        provider_face='yourprovider-chat',
         provider_slot_id='kimi-slot-fixture',
         thinking='high',
         experiment_arm=arm,

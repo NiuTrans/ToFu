@@ -1,6 +1,6 @@
 """Guards for the tool_calls-finish-WITHOUT-payload defense (2026-08-06 incident).
 
-Incident replay (conv msh3qeplzneph5, task 153fccfc, round 3): the sankuai
+Incident replay (conv msh3qeplzneph5, task 153fccfc, round 3): the example-corp
 gateway closed a kimi-k3 stream CLEANLY — [DONE] received, no transport
 anomaly — reporting ``finish_reason=tool_calls``, yet not a single tool_call
 delta was in the 61 chunks (~150 of 213 completion tokens vanished). Every
@@ -208,7 +208,7 @@ def _usage(cause='gateway_no_payload'):
         '_chunks_received': 61,
         'trace_id': 'M-VOID-TEST',
         'stream_elapsed_ms': 128448,
-        '_dispatch': {'key': 'sankuai_key_1', 'model': 'kimi-k3'},
+        '_dispatch': {'key': 'example_corp_key_1', 'model': 'kimi-k3'},
     }
     if cause is not None:
         u['_tool_calls_void'] = cause

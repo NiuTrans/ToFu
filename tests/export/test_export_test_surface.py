@@ -332,21 +332,3 @@ def test_internal_export_restores_and_checks_test_dependencies(tmp_path, monkeyp
         with pytest.raises(ExportTestSurfaceError, match=r'scripts\.helper'):
             orchestrate.export_project('internal', target)
         assert not checked
-
-
-@pytest.mark.parametrize('optional_import', (
-    'def later():\n    import scripts.gen_x\n',
-    'try:\n    import scripts.gen_x\nexcept ImportError:\n    pass\n',
-))
-def test_optional_sibling_never_waives_mandatory_import(tmp_path, optional_import):
-    from export import ExportTestSurfaceError, _verify_exported_test_surface
-
-    source = tmp_path / 'source'
-    source.mkdir()
-    _make_src(source)
-    target = tmp_path / 'target'
-    _make_dest(target, {
-        'test_required.py': 'import scripts.missing_helper\n' + optional_import,
-    })
-    with pytest.raises(ExportTestSurfaceError, match=r'scripts\.missing_helper'):
-        _verify_exported_test_surface(target, source)

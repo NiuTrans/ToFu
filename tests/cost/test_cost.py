@@ -259,7 +259,7 @@ class NormalizeUsageTest(unittest.TestCase):
         self.assertEqual(cost_mod.normalize_usage(anthropic)['input'], 42)
 
 
-# The exact usage payload the sankuai gateway returned for kimi-k3 on a warm
+# The exact usage payload the example-corp gateway returned for kimi-k3 on a warm
 # (second, byte-identical) request — probed live 2026-07-24. Note the hit is
 # reported as cached_tokens / prompt_tokens_details.cached_tokens /
 # effectiveCachedTokens while the canonical cache_read_tokens is pinned at 0.

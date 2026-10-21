@@ -43,7 +43,7 @@ Gateway-sanitization parity
 ``_sanitize_messages`` (the gateway-blocked-term replacement) is PROVIDER
 GATED inside ``build_body`` exactly as::
 
-    _pid.startswith('sankuai') or (not _pid and 'sankuai' in lib.LLM_BASE_URL)
+    _pid.startswith('example-corp') or (not _pid and 'example-corp' in lib.LLM_BASE_URL)
 
 The chat main loop builds its body with ``provider_id=''`` (orchestrator.py
 :1533) and the pre-built-body dispatch branch never re-runs sanitization, so
@@ -79,8 +79,8 @@ def _gateway_sanitize_enabled(provider_id: str) -> bool:
     never more aggressive than reality.
     """
     _pid = provider_id.lower() if provider_id else ''
-    return (_pid.startswith('sankuai')
-            or (not _pid and 'sankuai' in getattr(_lib, 'LLM_BASE_URL', '')))
+    return (_pid.startswith('example-corp')
+            or (not _pid and 'example-corp' in getattr(_lib, 'LLM_BASE_URL', '')))
 
 
 def apply_wire_sanitize(messages: list, *, conv_id: str = '',

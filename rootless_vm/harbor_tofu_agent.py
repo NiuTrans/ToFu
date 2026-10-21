@@ -400,7 +400,7 @@ def _dispatch_model(
 
     # Tofu's strict_model intentionally permits every physical route with the
     # same logical model id. Benchmarks need a stronger invariant: a request for
-    # the Meituan route must never silently use Huawei/Tencent.
+    # the YourProvider route must never silently use Huawei/Tencent.
     dispatcher = get_dispatcher()
     dispatcher.initialize()
     physical_models = {slot.model for slot in dispatcher.slots}

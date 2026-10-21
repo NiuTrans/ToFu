@@ -201,7 +201,7 @@ def test_carrier_transforms_fire():
 
 
 def test_provider_symmetry_no_gateway_divergence():
-    """provider_id='' (auto-detect) and explicit non-sankuai agree on the
+    """provider_id='' (auto-detect) and explicit non-example-corp agree on the
     carrier transforms — proving only _sanitize_messages is provider-gated."""
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
@@ -221,7 +221,7 @@ def test_wire_preview_uses_gateway_family_and_wire_shape_rules():
         apply_wire_sanitize,
     )
 
-    assert _gateway_sanitize_enabled('sankuai_anthropic') is True
+    assert _gateway_sanitize_enabled('example_corp_anthropic') is True
     source = [
         {'role': 'assistant', 'content': '', 'tool_calls': [{
             'id': '', 'function': {'name': '', 'arguments': {}},

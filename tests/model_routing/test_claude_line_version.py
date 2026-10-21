@@ -100,7 +100,7 @@ def test_claude_line_version_shapes(model, line, expected):
     ('deepseek-v4-flash-0815', (4, 0)),   # snapshot stamp is not a minor version
     ('deepseek-v4-flash-vision-exp', (4, 0)),
     ('deepseek-v3.2', (3, 2)),
-    ('deepseek-v31-meituan', (3, 1)),     # Meituan's spelling of V3.1
+    ('deepseek-v31-yourprovider', (3, 1)),     # YourProvider's spelling of V3.1
     ('deepseek-v3-0324', (3, 0)),
     # generation-less ids: the canonical name or a legacy alias, never a guess
     ('deepseek-flash', None),
@@ -177,7 +177,7 @@ def test_static_context_limit_claude_families(model, expected):
     ('deepseek-v4.1-flash', 384000),        # catalogue identity (2026-09-10)
     ('deepseek-v4-1-flash', 384000),        # wire spelling of the same model
     ('deepseek-v4-flash-huawei', 384000),   # gateway mirror of the same model
-    ('deepseek-v31-meituan', 8192),         # V3.1 does NOT inherit the V4 ceiling
+    ('deepseek-v31-yourprovider', 8192),         # V3.1 does NOT inherit the V4 ceiling
     ('deepseek-reasoner', 65536),
     ('deepseek-r1-0528', 65536),
     ('deepseek-v3.2', 8192),

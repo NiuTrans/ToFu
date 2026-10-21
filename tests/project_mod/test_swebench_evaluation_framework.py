@@ -276,7 +276,7 @@ def test_rootless_qemu_config_uses_custom_vm_environment_and_host_agent(host_tmp
     )
     spec = HarborRunSpec(
         agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
-        models=("deepseek-v4-flash-meituan",),
+        models=("deepseek-v4-flash-yourprovider",),
         backend="rootless-qemu",
         output_root=host_tmp_path / "evals",
         task_ids=("swe-bench/django__django-11099",),
@@ -352,7 +352,7 @@ def test_rootless_qemu_verifier_timeout_multiplier_scales_phase_and_guest(host_t
     )
     spec = HarborRunSpec(
         agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
-        models=("deepseek-v4-flash-meituan",),
+        models=("deepseek-v4-flash-yourprovider",),
         backend="rootless-qemu",
         output_root=tmp_path / "evals",
         task_ids=("swe-bench/django__django-11099",),
@@ -370,7 +370,7 @@ def test_rootless_qemu_verifier_timeout_multiplier_scales_phase_and_guest(host_t
     default_config = build_job_config(
         HarborRunSpec(
             agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
-            models=("deepseek-v4-flash-meituan",),
+            models=("deepseek-v4-flash-yourprovider",),
             backend="rootless-qemu",
             output_root=tmp_path / "evals",
             task_ids=("swe-bench/django__django-11099",),

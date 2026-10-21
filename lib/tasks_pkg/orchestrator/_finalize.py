@@ -179,7 +179,7 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
 
 # ── Suspicious-completion INTERCEPTION (act, not just warn) ───────────────
 #
-# WHY this exists (2026-07-28 09:51–10:45 incident): the sankuai gateway
+# WHY this exists (2026-07-28 09:51–10:45 incident): the example-corp gateway
 # intermittently returned a 29-char canned greeting ("Hi! How can I help you
 # today?") with ``finish_reason=stop`` for every Opus 5 request — 68 times,
 # each carrying a real M-TraceId. Tasks that had just spent N rounds doing real

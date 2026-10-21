@@ -3,8 +3,8 @@
 
 ``buildVendorGroups`` (frontend/src/features/model-catalog/model.ts) used to
 render one row per registry entry, so the same model appeared once per
-supply path: ``kimi-k2.5`` next to ``kimi/kimi-k2.5``, and Meituan-supplied
-re-registrations (``Qwen3_8-27B-Meituan``, ``deepseek-v31-meituan``) next to
+supply path: ``kimi-k2.5`` next to ``kimi/kimi-k2.5``, and YourProvider-supplied
+re-registrations (``Qwen3_8-27B-YourProvider``, ``deepseek-v31-yourprovider``) next to
 the canonical developer rows. The catalog is a read-only model surface, so
 provider namespaces and supply variants now collapse into a single row under
 the model's developer, with the bare canonical id surviving and missing
@@ -104,17 +104,17 @@ const document = {{
     mk('moonshot', 'accounts/fireworks/models/kimi-k2.6', {{
       list_pricing: usd(0.95, 4),
     }}),
-    // Meituan supply suffix collapses into the canonical developer row.
+    // YourProvider supply suffix collapses into the canonical developer row.
     mk('alibaba', 'qwen3.8-27b', {{ list_pricing: usd(0.5, 2) }}),
-    mk('alibaba', 'Qwen3_8-27B-Meituan'),
+    mk('alibaba', 'Qwen3_8-27B-YourProvider'),
     // instruct tag on one twin of an otherwise identical registration is
     // the same snapshot (DashScope bare alias of the instruct id).
     mk('alibaba', 'qwen3-235b-a22b-2507', {{ list_pricing: usd(0.22, 0.88) }}),
     mk('alibaba', 'qwen3-235b-a22b-instruct-2507', {{
       list_pricing: usd(0.22, 0.88),
     }}),
-    // Three-way: FP8-Meituan + meta-llama namespace + bare canonical.
-    mk('meta', 'Llama-4-Maverick-17B-128E-Instruct-FP8-Meituan', {{
+    // Three-way: FP8-YourProvider + meta-llama namespace + bare canonical.
+    mk('meta', 'Llama-4-Maverick-17B-128E-Instruct-FP8-YourProvider', {{
       capabilities: ['text', 'vision'],
     }}),
     mk('meta', 'meta-llama/llama-4-maverick-17b-128e-instruct'),
@@ -122,8 +122,8 @@ const document = {{
       list_pricing: usd(0.2, 0.6),
       capabilities: ['text'],
     }}),
-    // Meituan Scout dropped the instruct tag: still the same model.
-    mk('meta', 'Llama-4-Scout-17B-16E-Meituan', {{ context_window: 64000 }}),
+    // YourProvider Scout dropped the instruct tag: still the same model.
+    mk('meta', 'Llama-4-Scout-17B-16E-YourProvider', {{ context_window: 64000 }}),
     mk('meta', 'llama-4-scout-17b-16e-instruct', {{
       list_pricing: usd(0.2, 0.78),
     }}),
@@ -180,15 +180,15 @@ console.log(JSON.stringify(rows));
         'qwen3.8-27b',
     ]
 
-    # Bare canonical ids survive; namespaced / Meituan twins are gone.
+    # Bare canonical ids survive; namespaced / YourProvider twins are gone.
     for gone in (
         'kimi/kimi-k2.5',
         'accounts/fireworks/models/kimi-k2.6',
-        'Qwen3_8-27B-Meituan',
+        'Qwen3_8-27B-YourProvider',
         'qwen3-235b-a22b-instruct-2507',
-        'Llama-4-Maverick-17B-128E-Instruct-FP8-Meituan',
+        'Llama-4-Maverick-17B-128E-Instruct-FP8-YourProvider',
         'meta-llama/llama-4-maverick-17b-128e-instruct',
-        'Llama-4-Scout-17B-16E-Meituan',
+        'Llama-4-Scout-17B-16E-YourProvider',
     ):
         assert gone not in by_id
 
