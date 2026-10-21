@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.10
+
+- Preserve Bing result destinations encoded with URL-safe Base64, including
+  Unicode and original percent escapes. Only unwrap Bing's tracking endpoint;
+  keep unrelated source paths intact and reject malformed or ambiguous payloads
+  without rewriting their destinations. No additional request is made.
+
 ## 0.12.9
 
 - Let scoped anonymous fetches use their existing total retry allowance for

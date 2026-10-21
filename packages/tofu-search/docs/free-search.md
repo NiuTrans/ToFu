@@ -7,6 +7,27 @@ optional, and deployment resources still belong to that caller. Provider
 documentation can inform local algorithms without making that provider a
 runtime dependency.
 
+## Source URL fidelity
+
+Problem: Bing wraps organic result addresses in URL-safe Base64, while an
+ordinary Base64 decoder can discard `-` and `_` or fail to decode them. Matching
+`/ck/a` anywhere in a path also mistakes unrelated source links for redirects.
+
+Decision: unwrap only the exact `/ck/a` path on the known Bing web hosts or a
+relative link to that endpoint. Decode one `a1`-prefixed payload with the URL-safe
+alphabet and strict UTF-8, once. Preserve the decoded destination's path, query,
+fragment, Unicode and percent escapes. Ambiguous parameters, invalid encodings
+and non-HTTP destinations are dropped. Ordinary source links remain unchanged;
+the fetch layer still owns address admission and redirect checks.
+
+Alternatives rejected: replacing invalid bytes, removing arbitrary payload
+characters, recursively decoding nested links, or applying Bing's syntax to
+other sites can silently change the cited source. The alphabet and endpoint
+boundary are informed by [DDGS's Bing parser](https://github.com/deedy5/ddgs/blob/main/ddgs/engines/bing.py)
+and [SearXNG's Bing parser](https://github.com/searxng/searxng/blob/master/searx/engines/bing.py).
+`tests/test_bing_url_fidelity.py` checks exact source preservation and delivery
+through the public search pipeline. This parser repair adds no network request.
+
 ## Anonymous HTTP protocol compatibility
 
 Problem: an HTML search endpoint can return challenges or timeouts on one

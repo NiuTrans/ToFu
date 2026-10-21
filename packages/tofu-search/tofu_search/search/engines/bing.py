@@ -12,7 +12,7 @@ query-relevant results. We therefore always send an explicit ``mkt`` +
 
 import base64
 import os
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlsplit
 
 from tofu_search.log import get_logger
 from tofu_search.search._common import http_search_get, make_result, soup_of
@@ -54,41 +54,38 @@ def _market_for_query(query):
 
 
 def _bing_decode_url(raw_url):
-    """Decode Bing's /ck/a redirect URL to the real destination.
+    """Unwrap one Bing tracking URL without rewriting a source address.
 
-    Bing encodes the real URL as base64 in the 'u' query parameter with an
-    'a1' prefix.
-
-    Args:
-        raw_url: The href scraped from a result block.
-
-    Returns:
-        The decoded destination URL; the original URL when it is a direct
-        (non-redirect) link; or ``None`` when it is a ``/ck/a`` redirect we
-        failed to decode — so the caller drops it instead of surfacing a
-        useless ``bing.com/ck/a`` link as a result.
+    Only Bing's exact /ck/a endpoint, including relative result links, owns
+    the a1-prefixed base64url payload. Other hosts and paths remain direct
+    links. Malformed or ambiguous wrappers are dropped rather than repaired.
     """
     try:
-        parsed = urlparse(raw_url)
-        if '/ck/a' not in parsed.path:
-            return raw_url  # direct (non-redirect) result URL
-        qs = parse_qs(parsed.query)
-        encoded = qs.get('u', [''])[0]
-        if encoded.startswith('a1'):
-            # Bing uses URL-safe base64 with 'a1' prefix
-            payload = encoded[2:]
-            # Add padding if needed
-            padding = 4 - len(payload) % 4
-            if padding != 4:
-                payload += '=' * padding
-            decoded = base64.b64decode(payload).decode('utf-8', errors='replace')
-            if decoded.startswith('http'):
-                return decoded
-        logger.debug('[Search] Bing redirect not decodable, dropping: %s', raw_url[:80])
+        parsed = urlsplit(raw_url)
+        bing_host = parsed.hostname in ('www.bing.com', 'bing.com', 'cn.bing.com')
+        relative = not parsed.scheme and not parsed.netloc
+        if parsed.path != '/ck/a' or not (bing_host or relative):
+            return raw_url
+        if parsed.scheme not in ('', 'http', 'https'):
+            return None
+        values = parse_qs(parsed.query, keep_blank_values=True).get('u', [])
+        if len(values) != 1 or not values[0].startswith('a1'):
+            return None
+        payload = values[0][2:]
+        decoded = base64.b64decode(
+            payload + '=' * (-len(payload) % 4), altchars=b'-_', validate=True,
+        ).decode('utf-8')
+        # urlsplit strips some controls; never let that silently change the
+        # original destination. Percent escapes remain untouched.
+        if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in decoded):
+            return None
+        target = urlsplit(decoded)
+        if target.scheme in ('http', 'https') and target.hostname:
+            return decoded
+    except (ValueError, UnicodeError):
+        logger.debug('[Search] Bing tracking URL has an invalid payload')
         return None
-    except Exception as _e:
-        logger.debug('[Search] Bing URL decode failed for %s: %s', raw_url[:80], _e)
-        return None
+    return None
 
 
 def _parse_bing(resp):
@@ -101,7 +98,10 @@ def _parse_bing(resp):
             continue
         # Decode Bing redirect to real URL; drop undecodable redirects
         url = _bing_decode_url(a['href'])
-        if not url or not url.startswith('http'):
+        if not url:
+            continue
+        destination = urlsplit(url)
+        if destination.scheme not in ('http', 'https') or not destination.hostname:
             continue
         title = a.get_text(' ', strip=True)
         p = li.select_one('p')
