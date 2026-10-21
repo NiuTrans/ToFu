@@ -182,6 +182,45 @@ def _repeatable_effect(task, tool_name, round_entry):
     return repeatable, effect
 
 
+def _http_exception_kind(exception):
+    """Recognize client transport facts; effect policy alone permits replay.
+
+    Import only on the failure path. Provider classifiers own model-specific
+    retry and prose heuristics, so they cannot grant tool recovery authority.
+    An arbitrary application wrapper never inherits a nested HTTP failure.
+    """
+    import ssl
+    import httpx
+    from requests import exceptions as requests_errors
+    from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
+
+    timeout_types = (httpx.TimeoutException, requests_errors.Timeout)
+    if isinstance(exception, timeout_types):
+        return 'timeout'
+    if not isinstance(exception, (httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError,
+            requests_errors.ConnectionError, requests_errors.ChunkedEncodingError)):
+        return None
+
+    # Requests may wrap a streaming read timeout in ConnectionError, while
+    # HTTPX wraps TLS failures in ConnectError. Inspect typed causes only.
+    # Bounded traversal handles cycles without retaining an exception graph.
+    pending, seen, timed_out = [exception], set(), False
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, BaseException) or id(item) in seen:
+            continue
+        if len(seen) >= 16 or len(item.args) > 16:
+            return None  # Uninspected causes cannot establish transient failure.
+        seen.add(id(item))
+        if isinstance(item, (ssl.SSLError, requests_errors.SSLError)):
+            return None
+        timed_out = timed_out or isinstance(item,
+            (*timeout_types, TimeoutError, ConnectTimeoutError, ReadTimeoutError))
+        pending.extend(item.args)
+        pending.extend((item.__cause__, item.__context__, item.__dict__.get('reason')))
+    return 'timeout' if timed_out else 'connection'
+
+
 def tool_exception_result(task, tool_name, round_entry, exception, *, message=None):
     """Project an already-caught execution error, without dispatch or settlement.
 
@@ -201,6 +240,12 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
             and effect.get('state') in {'entered', 'unknown', 'returned'}):
         return _unknown_effect_error(effect, message)
 
+    http_kind = None
+    if not isinstance(exception, (AbortedError, CancelledError, PermissionError,
+            FileNotFoundError, NotADirectoryError, ConnectionError)):
+        http_kind = _http_exception_kind(exception)
+    if http_kind == 'timeout':
+        return tool_timeout_result(task, tool_name, round_entry, message=message)
     retryable = False
     if isinstance(exception, (AbortedError, CancelledError)):
         code = 'tool_execution_cancelled'
@@ -213,7 +258,7 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
         code = 'tool_resource_missing'
         action = ('Locate the required resource in the current workspace or service, '
                   'or repair the reported environment before another attempt.')
-    elif isinstance(exception, ConnectionError):
+    elif isinstance(exception, ConnectionError) or http_kind == 'connection':
         code = 'tool_connection_failed'
         retryable = repeatable
         action = ('The declared recovery policy permits retry through the normal tool '
@@ -226,7 +271,7 @@ def tool_exception_result(task, tool_name, round_entry, exception, *, message=No
         action = ('Inspect and repair the reported runtime or environment failure, '
                   'or use another available tool; do not blindly repeat the same call.')
     if not isinstance(exception, (AbortedError, CancelledError)):
-        if not repeatable and not isinstance(exception, ConnectionError):
+        if not repeatable and code != 'tool_connection_failed':
             action += ' Verify the prior outcome before repeating the operation.'
         action += ' Continue independent authorized work.'
     return typed_tool_error(code, retryable=retryable, next_action=action,
