@@ -156,6 +156,30 @@ strands evidence behind a signed cursor; exceeding the response budget causes
 the continuation result itself to spill. This can require more pages, but each
 successful page remains usable evidence.
 
+Problem: equally dividing the response budget before observing page sizes
+discarded evidence even when the complete requested batch fit, and halving a
+large requested limit could repeatedly fetch an unchanged short EOF page.
+Decision: each page first fits the whole response allowance; the ordered batch
+then measures its actual model view. If that view fits, every page is retained
+unchanged. Otherwise, small pages keep their full demand and release unused
+space to larger pages through max-min allocation, after framing and failure
+costs. Failures remain unchanged and are not retried for budget fitting. Only
+oversized successful occurrences re-query, concurrently through the same shared
+runner, starting from their already-fetched page. Duplicate occurrences remain
+independent; owner, alias, original cursor, query and selector keep their bindings.
+
+Reduced limits use both the requested limit and observed UTF-8 body bytes or hit
+count. Empty bodies, single codepoints and single hits cannot be shrunk further;
+unfitting metadata returns the existing refusal without repeated queries.
+The source still owns whole codepoints, quotations and signed continuations.
+The complete wrapper is measured again before return, with the existing
+whole-batch refusal if metadata cannot fit. Alternatives rejected: increasing
+the response ceiling consumes more context; fixed per-item shares strand free
+space; locally trimming signed pages loses evidence; collecting maximum raw
+pages before any fitting needlessly increases temporary memory. Verify
+`test_artifact_batch_demand_budget` and `test_artifact_batch_demand_backends`
+for fitting batches, oversubscription, concurrent fitting failures and restart.
+
 Problem: the query handler counted full canonical JSON before the common model
 projection removed replay-only metadata. Sixteen 8-byte reads could issue 64
 queries and all refuse, despite every requested model page fitting its share.

@@ -277,7 +277,7 @@ def test_model_cursor_projection_preserves_owned_source_and_continuation(
     assert model.get('nextCursor') == page['nextCursor']
     if name == 'search_tool_artifact':
         assert len(model['items']) == 1
-        assert _expand_match_groups(model['items']) == page['items']
+        assert _expand_match_groups(model['items'], model['artifactRef']) == page['items']
     assert delivery.evidence['viewCoverage'] == 'complete'
     assert delivery.evidence['retentionCoverage'] == 'complete'
     retained_ref = delivery.evidence['artifactRef']
