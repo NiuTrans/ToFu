@@ -344,7 +344,9 @@ def admit_tool(task, name, args, project_path=None):
             raise ToolAdmissionRefused('Worker tool is outside its original Coordinator capability ceiling', tool_name=name)
         row = owned_workspace(task, binding)
         if project_path is not None and project_path != row['workspace_path']:
-            raise ToolAdmissionRefused('Worker call root differs from its registered isolated workspace', tool_name=name)
+            raise ToolAdmissionRefused(
+                f'Worker call root {project_path!r} differs from its registered isolated '
+                f'workspace {row["workspace_path"]!r}', tool_name=name)
         # Ordinary project, command, browser and MCP owners keep their own
         # admission/approval/teardown. This profile is not a file sandbox claim.
         return None
@@ -369,7 +371,9 @@ def admit_tool(task, name, args, project_path=None):
     row = owned_workspace(task, binding)
     root = row['workspace_path']
     if project_path is not None and project_path != root:
-        raise ToolAdmissionRefused('File call root differs from its durably owned workspace', tool_name=name)
+        raise ToolAdmissionRefused(
+            f'File call root {project_path!r} differs from its durably owned workspace {root!r}',
+            tool_name=name)
     if os.path.realpath(root) != root:
         raise ToolAdmissionRefused('Owned workspace root must not be a symlink alias', tool_name=name)
     if not hasattr(os, 'O_NOFOLLOW') or os.open not in os.supports_dir_fd or os.replace not in os.supports_dir_fd and os.rename not in os.supports_dir_fd:
