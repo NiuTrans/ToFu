@@ -472,6 +472,11 @@ They may use a real browser or an isolated module harness. Tests that rebuild
 deleted classic file graphs, concatenate independently bundled registries, or
 publish private owners onto `window` do not describe the shipped application.
 
+Raw classic-section fixtures inject only runtime imports that the section
+actually references. Manifest bindings marked `type` are compile-time-only and
+must never become browser globals; `tests/meta/test_runtime_import_ports.py`
+exercises that branch directly.
+
 Build toolchain decision: CI previously selected Node 20 while locked Vitest
 required Node 22.12 or a supported newer major. `.node-version` now owns the
 Node line used by repository dependency-install jobs. `package.json` declares
