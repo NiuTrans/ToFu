@@ -610,6 +610,8 @@
   "chat.messagePlaceholder": "何でも質問してください…（Enterで送信）",
   "chat.newConversation": "新しいチャット",
   "chat.scrollToBottom": "最新までスクロール",
+  "collab.openBrain": "プロジェクトブレインを開く",
+  "collab.project": "プロジェクト",
   "commitCard.committedHead": "コミット済み（{n}） — この会話の変更と確認済み",
   "commitCard.heldHead": "保留（{n}） — 未コミット",
   "commitCard.noneClean": "この会話の変更と確認できるファイルはありません。",
@@ -7040,6 +7042,5 @@
   "toolHumanGuidance.repliedInChat": "チャットで回答済み",
   "toolHumanGuidance.replyDrafted": "回答を入力欄に入れました。準備ができたら送信してください",
   "toolHumanGuidance.supersededRow": "未回答 · チャットで直接返信しました",
-  "toolsInv.tool.update_task_progress": "コーディネーターの会話の上にユーザー向けに表示されるタスクの進捗を更新します。",
-  "narrationWell.label": "途中経過メモ {n} 件"
+  "toolsInv.tool.update_task_progress": "コーディネーターの会話の上にユーザー向けに表示されるタスクの進捗を更新します。"
 }

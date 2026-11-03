@@ -610,6 +610,8 @@
   "chat.messagePlaceholder": "Posez votre question… (Enter pour envoyer)",
   "chat.newConversation": "Nouveau chat",
   "chat.scrollToBottom": "Aller au plus récent",
+  "collab.openBrain": "Ouvrir le Cerveau du projet",
+  "collab.project": "Projet",
   "commitCard.committedHead": "Validés ({n}) — attribution prouvée",
   "commitCard.heldHead": "Retenus ({n}) — non validés",
   "commitCard.noneClean": "Aucun fichier n’a pu être attribué avec certitude à cette conversation.",
@@ -7040,6 +7042,5 @@
   "toolHumanGuidance.repliedInChat": "Répondu dans la conversation",
   "toolHumanGuidance.replyDrafted": "Votre réponse est dans la zone de saisie — envoyez-la quand vous êtes prêt",
   "toolHumanGuidance.supersededRow": "Sans réponse · vous avez répondu dans la conversation",
-  "toolsInv.tool.update_task_progress": "Mettre à jour le tableau des tâches affiché à l’utilisateur au-dessus de la conversation du coordinateur.",
-  "narrationWell.label": "Notes intermédiaires : {n}"
+  "toolsInv.tool.update_task_progress": "Mettre à jour le tableau des tâches affiché à l’utilisateur au-dessus de la conversation du coordinateur."
 }

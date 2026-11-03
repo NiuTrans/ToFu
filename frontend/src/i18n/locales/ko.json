@@ -610,6 +610,8 @@
   "chat.messagePlaceholder": "무엇이든 물어보세요… (Enter 키로 전송)",
   "chat.newConversation": "새 채팅",
   "chat.scrollToBottom": "최신 메시지로 스크롤",
+  "collab.openBrain": "프로젝트 브레인 열기",
+  "collab.project": "프로젝트",
   "commitCard.committedHead": "커밋됨({n}) — 이 대화의 파일로 확인됨",
   "commitCard.heldHead": "보류됨({n}) — 커밋 안 됨",
   "commitCard.noneClean": "이 대화의 파일로 확인된 파일이 없습니다.",
@@ -7040,6 +7042,5 @@
   "toolHumanGuidance.repliedInChat": "채팅으로 답변함",
   "toolHumanGuidance.replyDrafted": "답변을 입력창에 넣었습니다. 준비되면 보내세요",
   "toolHumanGuidance.supersededRow": "답변 안 함 · 채팅으로 직접 답했습니다",
-  "toolsInv.tool.update_task_progress": "코디네이터 대화 위에 사용자에게 표시되는 작업 진행 상황을 업데이트합니다.",
-  "narrationWell.label": "진행 메모 {n}개"
+  "toolsInv.tool.update_task_progress": "코디네이터 대화 위에 사용자에게 표시되는 작업 진행 상황을 업데이트합니다."
 }

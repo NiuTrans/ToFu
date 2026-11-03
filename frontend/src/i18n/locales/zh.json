@@ -610,6 +610,8 @@
   "chat.messagePlaceholder": "有什么想问的…（Enter 发送）",
   "chat.newConversation": "新对话",
   "chat.scrollToBottom": "滚动到最新",
+  "collab.openBrain": "打开项目大脑",
+  "collab.project": "项目",
   "commitCard.committedHead": "已提交（{n}）—— 确属本会话",
   "commitCard.heldHead": "已保留（{n}）—— 未提交",
   "commitCard.noneClean": "没有可证明属于本会话的文件。",
@@ -7040,6 +7042,5 @@
   "toolHumanGuidance.repliedInChat": "已在对话中回复",
   "toolHumanGuidance.replyDrafted": "回复已放入输入框，确认后发送",
   "toolHumanGuidance.supersededRow": "未作答 · 你在对话中直接回复了",
-  "toolsInv.tool.update_task_progress": "更新协调者对话上方显示给用户的任务进展。",
-  "narrationWell.label": "{n} 段过程说明"
+  "toolsInv.tool.update_task_progress": "更新协调者对话上方显示给用户的任务进展。"
 }

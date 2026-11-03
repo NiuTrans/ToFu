@@ -610,6 +610,8 @@
   "chat.messagePlaceholder": "Ask me anything… (Enter to send)",
   "chat.newConversation": "New Chat",
   "chat.scrollToBottom": "Scroll to latest",
+  "collab.openBrain": "Open Project Brain",
+  "collab.project": "Project",
   "commitCard.committedHead": "Committed ({n}) — provably yours",
   "commitCard.heldHead": "Held back ({n}) — not committed",
   "commitCard.noneClean": "No files were provably attributable to this conversation.",
@@ -7040,6 +7042,5 @@
   "toolHumanGuidance.repliedInChat": "Replied in chat",
   "toolHumanGuidance.replyDrafted": "Your reply is in the composer — send it when ready",
   "toolHumanGuidance.supersededRow": "Not answered · you replied in chat instead",
-  "toolsInv.tool.update_task_progress": "Update the task board shown to the user above the Coordinator conversation.",
-  "narrationWell.label": "{n} progress note{s}"
+  "toolsInv.tool.update_task_progress": "Update the task board shown to the user above the Coordinator conversation."
 }
