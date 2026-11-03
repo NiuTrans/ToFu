@@ -1331,9 +1331,14 @@ similarly spent one index-range probe per returned event.
 Decision: each search header also carries the union of the same cached-gram
 Bloom summaries used by its chunks, title, and conversation ID. A header whose
 summary cannot contain the query skips its generation's meta scan, including
-when the gram posting is universal or empty. Every surviving candidate retains
-the existing exact title/ID/content checks and cursor behavior. Projection
-format 5 rebuilds the disposable index so no old, incomplete summary is trusted.
+when the gram posting is universal or empty. The shortcut preserves cursor
+ordering: a rebuilt pending conversation that cannot match retains its old
+recency key, so the all-words phase can revisit its new title. A pending
+generation that can match retains its saved body match and exact scan state.
+The legacy walk also bypasses the empty summaries of pre-format-5 headers.
+Every surviving candidate retains the existing exact title/ID/content checks
+and cursor behavior. Projection format 5 rebuilds the disposable index so no
+old, incomplete summary is trusted.
 Filtered event reads retain a sorted per-type buffer and heap-merge it, reusing
 the existing metadata scan page size rather than starting another range scan
 for every selected row. Both changes leave the public results and storage

@@ -437,15 +437,20 @@ impl OpenTurnSearchProjection {
             // non-matching one, so pages stay byte-identical while its meta
             // namespace is never opened. A resumed conversation (matching
             // pending generation) always runs its exact legacy scan.
-            if state
-                .pending
-                .as_ref()
-                .is_none_or(|pending| pending.generation != header.generation)
+            if gram_index_ready
+                && state
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| pending.generation != header.generation)
             {
                 let phase = usize::from(state.phase);
                 if !bloom_might_contain(&header.bloom, &conversation_blooms[phase]) {
-                    state.pending = None;
-                    state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
+                    // A rebuilt pending conversation is already ordered by its
+                    // old recency key for this cursor's second search phase.
+                    let recency = state
+                        .after
+                        .clone()
+                        .unwrap_or_else(|| (header.updated_at_ms, header.conversation_id.clone()));
                     barren += 1;
                     continue;
                 }
@@ -858,6 +863,47 @@ mod tests {
         assert_eq!(second.items[0].match_field, "title");
         assert_eq!(second.items[0].turn_id, None);
         assert_eq!(second.items[0].snippet, "");
+    }
+
+    #[test]
+    fn body_match_after_a_rebuild_does_not_reuse_the_old_body_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), 64 * 1024 * 1024).unwrap();
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "before",
+            100,
+            "unrelated",
+            &rows,
+        );
+        let mut request = request("needle absent");
+        request.limit = 1;
+        let first = projection
+            .search_page_until(&request, None, || false)
+            .unwrap();
+        assert!(first.items.is_empty());
+        let cursor = first.next_cursor.unwrap();
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle absent"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "after",
+            200,
+            "unrelated",
+            &rows,
+        );
+        let second = projection
+            .search_page_until(&request, Some(&cursor), || false)
+            .unwrap();
+        assert_eq!(second.items[0].match_field, "content");
+        assert_eq!(second.items[0].turn_id, Some("turn".into()));
     }
 
     #[test]
