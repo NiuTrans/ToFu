@@ -11,6 +11,7 @@ import ctypes
 from array import array
 from pathlib import Path
 import threading
+from typing import Any
 
 from .native_artifact import seal_token_count_archive
 from .native_token_count_contract import TOKEN_COUNT_SPEC as SPEC
@@ -65,6 +66,10 @@ class NativeTokenCounter:
         self._fault = None
         self._handles = {}
         self._library = None
+        # CDLL functions are configured by the generated ABI specification.
+        self._open: Any = None
+        self._batch: Any = None
+        self._close: Any = None
         self._image = acquire_image()
         try:
             self._library = ctypes.CDLL(f'/proc/self/fd/{self._image.fileno()}')
@@ -130,7 +135,10 @@ class NativeTokenCounter:
             word_format = 'Q' if ctypes.sizeof(ctypes.c_size_t) == 8 else 'I'
             descriptors = array(word_format)
             for pointer, raw in zip(pointers, buffers):
-                descriptors.extend((ctypes.cast(pointer, ctypes.c_void_p).value, len(raw)))
+                address = ctypes.cast(pointer, ctypes.c_void_p).value
+                if address is None:
+                    raise NativeTokenCountError('native token count buffer is unavailable')
+                descriptors.extend((address, len(raw)))
             spans = ctypes.cast(descriptors.buffer_info()[0], ctypes.POINTER(_TextSpan))
             output = array('Q', [0]) * len(texts)
             target = ctypes.cast(output.buffer_info()[0], ctypes.POINTER(ctypes.c_uint64))

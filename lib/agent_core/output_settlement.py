@@ -143,15 +143,16 @@ def seal_output_projection(
                 block.get('type') == 'text' and block.get('text') == old_content
                 for block in segments):
             segments.append({'type': 'text', 'text': old_content, 'deliverable': False})
-        if recorded is None:
+        recorded_block: dict[str, Any] | None = recorded
+        if recorded_block is None:
             used = {block.get('blockId') for block in segments}
             suffix = len(segments)
             while f'text:completion-{suffix}' in used:
                 suffix += 1
-            recorded = {'type': 'text', 'text': final_content,
-                        'blockId': f'text:completion-{suffix}'}
-            segments.append(recorded)
-        recorded.update(terminal=True, deliverable=True)
+            recorded_block = {'type': 'text', 'text': final_content,
+                              'blockId': f'text:completion-{suffix}'}
+            segments.append(recorded_block)
+        recorded_block.update(terminal=True, deliverable=True)
         result['content'] = final_content
     else:
         result.setdefault('content', old_content)

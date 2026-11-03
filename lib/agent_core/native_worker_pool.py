@@ -9,6 +9,8 @@ from collections import OrderedDict
 import json
 import os
 from pathlib import Path
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from lib.agent_core.native_content_contract import NATIVE_WORKER_CONTRACT
 from lib.agent_core.native_process import (
@@ -31,6 +33,8 @@ class _Input:
         encoded=type(raw) is _EncodedObjectFrame
         value=json.loads(raw) if self.first or not encoded else None
         if (self.first or not encoded) and not isinstance(value,dict):
+            raise NativeProcessError('native invocation frame is not an object')
+        if value is None:
             raise NativeProcessError('native invocation frame is not an object')
         if self.first:
             if value.get('type')!='configure' or value.get('owner_user_id')!=lease.worker.owner:
@@ -91,7 +95,7 @@ class Invocation:
 
 class _Worker:
     def __init__(self,pool,key,process,descriptor,owner,budget):
-        self.pool=pool;self.key=key;self.process=process;self.descriptor=descriptor
+        self.pool=pool;self.key=key;self.process: Any = process;self.descriptor=descriptor
         self.owner=owner;self.budget=budget;self.sequence=0;self.current=None
         self.retired=False;self.started=asyncio.get_running_loop().create_future();self.closing=None
         self.closed_frame=asyncio.get_running_loop().create_future()
@@ -140,7 +144,8 @@ class _Worker:
             failure=error;self.retired=True
             if self.process.returncode is None:self.process.kill()
         finally:
-            code=await self.process.wait()
+            wait = cast(Callable[[], Awaitable[int]], self.process.wait)
+            code = await wait()
             if not self.started.done():self.started.set_exception(failure or NativeProcessError('native worker exited before readiness'))
             if self.current is not None and not self.current.done.done():
                 self.current.done.set_result(code if code else 1)
