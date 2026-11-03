@@ -35,6 +35,9 @@ it('renders the human summary first and lists in-progress work before upcoming, 
   expect(fold.querySelector('summary')?.textContent).toBe('coordinatorProgress.finished:{"count":2}');
   expect([...fold.querySelectorAll('strong')].map(node => node.textContent)).toEqual(['Fix the folder dialog', 'Old spike']);
   expect(card.querySelector('time')?.getAttribute('datetime')).toBe(new Date(board.updatedAt).toISOString());
+  // The head is the line a folded card shows: title, state, summary, then the update time.
+  expect([...card.querySelector('summary')!.children].map(node => node.className)).toEqual(['coordinator-progress-title',
+    'coordinator-progress-tally', 'coordinator-progress-summary', 'coordinator-progress-updated']);
   // No session, worker, reference, usage or question vocabulary ever reaches the board.
   expect(card.textContent).not.toMatch(/projectCoordination\.(workList|dependencyGraph|report)|coordinatorBudget|coordinatorPlan/);
 });
@@ -51,6 +54,19 @@ it('reports fold changes and offers only explicit management', () => {
   expect(buttons.map(button => button.textContent)).toEqual(['projectCoordination.controls']);
   buttons[0].click();
   expect(p.manage).toHaveBeenCalledOnce();
+});
+
+it('folds to a head that still states the board, an empty board or an unavailable one', () => {
+  const folded = createCoordinatorProgress({ kind: 'board', board }, ports({ open: false })) as HTMLDetailsElement;
+  expect(folded.open).toBe(false);
+  const head = folded.querySelector('summary')!;
+  expect(head.querySelector('.coordinator-progress-tally')?.textContent).toBe('coordinatorProgress.sidebar.active:{"count":2}');
+  expect(head.querySelector('.coordinator-progress-summary')?.textContent).toBe(board.summary);
+  for (const kind of ['empty', 'unavailable'] as const) {
+    const card = createCoordinatorProgress({ kind }, ports({ open: false })) as HTMLDetailsElement;
+    expect(card.open).toBe(false);
+    expect(card.querySelector('summary > .coordinator-progress-summary')?.textContent).toBe(`coordinatorProgress.${kind}`);
+  }
 });
 
 it('distinguishes an empty board from an unavailable one and retries only on request', () => {

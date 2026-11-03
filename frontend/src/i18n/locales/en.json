@@ -6877,8 +6877,6 @@
   "globalRouter.entryTitle": "Talk to the main coordinator",
   "globalRouter.entryMeta": "Passes project work to project coordinators",
   "globalRouter.headerSubtitle": "Messages from here and channels such as Daxiang reach the main coordinator first: project work goes to that project's coordinator, the rest to worker chats.",
-  "globalRouter.workerModel": "Worker model: {model}",
-  "globalRouter.workerModelDefault": "default model",
   "globalRouter.unavailable": "The main coordinator is unavailable: {error}",
   "routerWorkerModel.label": "Model for worker chats",
   "routerWorkerModel.ownerDefault": "Your default model",

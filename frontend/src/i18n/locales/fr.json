@@ -6877,8 +6877,6 @@
   "globalRouter.entryTitle": "Parler au coordinateur principal",
   "globalRouter.entryMeta": "Transmet le travail des projets à leurs coordinateurs",
   "globalRouter.headerSubtitle": "Les messages envoyés ici et depuis des canaux comme Daxiang arrivent d’abord au coordinateur principal : le travail d’un projet va à son coordinateur, le reste à des conversations d’exécutant.",
-  "globalRouter.workerModel": "Modèle des exécutants : {model}",
-  "globalRouter.workerModelDefault": "modèle par défaut",
   "globalRouter.unavailable": "Le coordinateur principal est indisponible : {error}",
   "routerWorkerModel.label": "Modèle des conversations d’exécutant",
   "routerWorkerModel.ownerDefault": "Votre modèle par défaut",

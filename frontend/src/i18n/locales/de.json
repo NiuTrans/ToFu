@@ -6877,8 +6877,6 @@
   "globalRouter.entryTitle": "Mit dem Hauptkoordinator sprechen",
   "globalRouter.entryMeta": "Leitet Projektarbeit an Projektkoordinatoren weiter",
   "globalRouter.headerSubtitle": "Nachrichten von hier und aus Kanälen wie Daxiang gehen zuerst an den Hauptkoordinator: Projektarbeit an den Koordinator des jeweiligen Projekts, alles andere an Worker-Unterhaltungen.",
-  "globalRouter.workerModel": "Worker-Modell: {model}",
-  "globalRouter.workerModelDefault": "Standardmodell",
   "globalRouter.unavailable": "Der Hauptkoordinator ist nicht verfügbar: {error}",
   "routerWorkerModel.label": "Modell für Worker-Unterhaltungen",
   "routerWorkerModel.ownerDefault": "Ihr Standardmodell",

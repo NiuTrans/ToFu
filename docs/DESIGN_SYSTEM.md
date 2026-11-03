@@ -127,7 +127,7 @@ invisible retry/reload actions to layout or the keyboard focus order.
 | Layout: stack / row / grid / toolbar | `.ui-stack` `.ui-row` `.ui-grid` `.ui-toolbar` (+`--tight/--loose/--between/--wrap`) | ✅ |
 | Button | `createButton` — primary/secondary/ghost/danger × sm/md/lg | ✅ |
 | Icon button | `createIconButton` — aria-label required; `pressed` exposes an on/off toggle through `aria-pressed` | ✅ |
-| Field (label+hint+error) | `createField`, `setFieldError` | ✅ |
+| Field (label+hint+error) | `createField`, `setFieldError`; `size: 'sm'` is the compact inline row (label beside a `--control-h-sm` control, hint/error below) | ✅ |
 | Text input / textarea | `.ui-input` | ✅ |
 | Select | `.ui-select` wrapping native `<select>` | ✅ |
 | Dialog | `createDialog` on native `<dialog>` (focus trap, Esc, backdrop from the platform) | ✅ |

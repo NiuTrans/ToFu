@@ -2,12 +2,14 @@
  * Global Router header and in each Project Router's coordinator surface. The
  * server owns the setting (`/api/v4/router/worker-model`); the choices are the
  * composer model picker's catalog and visibility policy, never a parallel model
- * list. The first choice, "Owner default model", sends `null`. One read when no
- * state is supplied; no polling, timers or writes until the owner chooses.
+ * list. The first choice, "Owner default model", sends `null`. One compact
+ * labelled select: its closed value is the at-a-glance state and its tooltip the
+ * explanation. One read when no state is supplied; no polling, timers or writes
+ * until the owner chooses.
  */
 import type { RouterState } from '../api/router.generated';
 import type { PickerModel } from '../application-shell/model-picker';
-import { createField, setFieldError } from '../ui';
+import { createButton, createField, setFieldError } from '../ui';
 import { t } from '../i18n';
 
 /** The composer picker's catalog and policy, injected by the retained bridge. */
@@ -32,30 +34,31 @@ function failureText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** "Worker model: …" for a stored model ID, '' meaning the owner default. */
-export function workerModelText(model: string, label: (modelId: string) => string): string {
-  return t('globalRouter.workerModel', { model: model ? label(model) : t('globalRouter.workerModelDefault') });
-}
-
 export function createRouterWorkerModel(ports: RouterWorkerModelPorts, path: string, initial?: RouterState) {
   let alive = true, writing = false, optionsKey = '';
   // null until the server answered; '' is the owner default model.
   let current: string | null = initial ? initial.workerModel : null;
-  let readFailure = '';
+  let readFailure = '', writeFailure = '';
   let reading: AbortController | null = null;
 
-  const el = document.createElement('details');
+  const el = document.createElement('div');
   el.className = 'router-worker-model';
-  const summary = document.createElement('summary');
-  summary.className = 'router-worker-model-summary';
-  const field = createField({ label: t('routerWorkerModel.label'), choices: [], hint: t('routerWorkerModel.help') });
-  field.el.classList.add('router-worker-model-field');
+  const field = createField({ label: t('routerWorkerModel.label'), choices: [], size: 'sm' });
   field.el.querySelector('label')?.setAttribute('data-i18n', 'routerWorkerModel.label');
-  field.el.querySelector('.ui-field__hint')?.setAttribute('data-i18n', 'routerWorkerModel.help');
   const select = field.control as HTMLSelectElement;
+  // The explanation is the field's tooltip and the select's accessible description.
+  for (const node of [field.el, select]) {
+    node.dataset.i18nTitle = 'routerWorkerModel.help';
+    node.title = t('routerWorkerModel.help');
+  }
   // Lets a repainting host restore focus to this same control.
   select.dataset.coordinationFocus = 'router-worker-model';
-  el.append(summary, field.el);
+  // A failed read replaces the field: there is no stored value to show or change.
+  const failure = document.createElement('span');
+  failure.className = 'router-worker-model-failure';
+  const retry = createButton({ label: t('projectCoordination.retry'), size: 'sm', variant: 'ghost', onClick: () => read() });
+  retry.dataset.i18n = 'projectCoordination.retry';
+  el.append(field.el, failure, retry);
 
   function choices(): string[] {
     const catalog = ports.catalog;
@@ -69,15 +72,17 @@ export function createRouterWorkerModel(ports: RouterWorkerModelPorts, path: str
 
   function renderOptions() {
     if (!alive) return;
-    const ids = choices();
+    const ids = current === null ? [] : choices();
     const key = JSON.stringify([current, ids]);
     if (key === optionsKey) return;
     optionsKey = key;
-    const ownerDefault = document.createElement('option');
-    ownerDefault.value = '';
-    ownerDefault.dataset.i18n = 'routerWorkerModel.ownerDefault';
-    ownerDefault.textContent = t('routerWorkerModel.ownerDefault');
-    select.replaceChildren(ownerDefault, ...ids.map(id => {
+    // Until the server answers, the disabled select says so instead of claiming the owner default.
+    const firstKey = current === null ? 'common.loading' : 'routerWorkerModel.ownerDefault';
+    const first = document.createElement('option');
+    first.value = '';
+    first.dataset.i18n = firstKey;
+    first.textContent = t(firstKey);
+    select.replaceChildren(first, ...ids.map(id => {
       const option = document.createElement('option');
       option.value = id; option.textContent = ports.catalog.label(id);
       return option;
@@ -87,9 +92,10 @@ export function createRouterWorkerModel(ports: RouterWorkerModelPorts, path: str
 
   function render() {
     if (!alive) return;
-    summary.textContent = readFailure ? t('routerWorkerModel.unavailable', { error: readFailure })
-      : current === null ? t('globalRouter.workerModel', { model: t('common.loading') })
-      : workerModelText(current, ports.catalog.label);
+    failure.textContent = readFailure ? t('routerWorkerModel.unavailable', { error: readFailure }) : '';
+    field.el.hidden = !!readFailure;
+    failure.hidden = retry.hidden = !readFailure;
+    setFieldError(field, writeFailure ? t('routerWorkerModel.failed', { error: writeFailure }) : null);
     renderOptions();
     select.disabled = writing || current === null;
     if (writing) el.setAttribute('aria-busy', 'true');
@@ -119,26 +125,21 @@ export function createRouterWorkerModel(ports: RouterWorkerModelPorts, path: str
     if (!alive || writing || current === null) return;
     const next = select.value || null;
     if ((next ?? '') === current) return;
-    writing = true; setFieldError(field, null); render();
+    writing = true; writeFailure = ''; render();
     try {
       const state = await ports.write(path, next);
       if (alive) current = state.workerModel;
     } catch (error) {
-      if (alive) setFieldError(field, t('routerWorkerModel.failed', { error: failureText(error) }));
+      if (alive) writeFailure = failureText(error);
     } finally {
       writing = false;
       // Re-selects the stored value, so a refused choice never looks applied.
       optionsKey = ''; render();
     }
   });
-  // The catalog loads independently of this control: list its current models when shown.
-  el.addEventListener('toggle', () => {
-    if (!el.open) return;
-    if (readFailure) read();
-    renderOptions();
-  });
+  // The catalog loads independently of this control: list its current models when focused.
   select.addEventListener('focus', renderOptions);
-  // Labels carry data-i18n; only the parameterized summary needs a repaint.
+  // Labels, options and tooltips carry data-i18n; only the parameterized failures need a repaint.
   window.addEventListener('tofu:language-change', render);
 
   if (initial) render();

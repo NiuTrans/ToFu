@@ -54,7 +54,9 @@ export function createProjectCoordinationSurface(ports: {
   let flight: AbortController | null = null;
   // Failed binding demand that recovery signals retry: either shown, or kept stale behind a confirmed binding.
   let bindingFailed = false, bindingStale = false;
-  let signature = '', projectSignature = '', boardOpen = true, finishedOpen = false;
+  // The board starts folded to its one-line head: the sidebar already lists the
+  // Coordinator's work, so the chat keeps its reading space until the owner opens it.
+  let signature = '', projectSignature = '', boardOpen = false, finishedOpen = false;
 
   let rendered = '';
   let creating = false;

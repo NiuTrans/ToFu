@@ -446,12 +446,18 @@ sessions and tells the human what matters.
   `project` hint. GET `/api/v4/project/coordination/progress?path=`
   (owner-scoped `conversations`, passive) returns `progressState`.
 - Browser. `frontend/src/features/coordinator-progress.ts` is the only thing
-  pinned atop the bound Coordinator chat: a collapsible card with the summary,
-  in-progress then upcoming tasks, finished ones folded, the update time and
-  one explicit "Manage work" button for the existing management dialog. No
-  session list, references, graph, usage or report banner remains there. The
-  sidebar entry shows the in-progress count (or "all done") with the summary as
-  its tooltip. A Worker chat keeps one "return to Coordinator" button.
+  pinned atop the bound Coordinator chat: a collapsible card that starts
+  folded to one line (title, in-progress count, summary, update time). Opened,
+  it lists in-progress then upcoming tasks, finished ones folded, and one
+  explicit "Manage work" button for the existing management dialog; the fold
+  state survives live board updates. It starts folded because the sidebar
+  already shows the in-progress count and lists the Coordinator's Worker
+  conversations, so an open board only repeated them in the chat's reading
+  space; removing the board instead would also drop the summary and the
+  in-chat way to management. No session list, references, graph, usage or
+  report banner remains there. The sidebar entry shows the in-progress count
+  (or "all done") with the summary as its tooltip. A Worker chat keeps one
+  "return to Coordinator" button.
 - Questions are chat cards. Follow-ups are never board entries or report
   banners: the Coordinator asks with `ask_human`. `blocking=false` posts the
   card, whose question states the default the Coordinator works on meanwhile,

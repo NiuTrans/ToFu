@@ -1,6 +1,7 @@
 /** Session-free task board pinned atop the bound Coordinator conversation.
  *
- * Renders only the Coordinator-authored board (contract `progressBoard` in
+ * Its head is one line (title, state, summary, update time) that stays
+ * readable while the card is folded. Renders only the Coordinator-authored board (contract `progressBoard` in
  * contracts/project_coordination_v1.schema.json): what the human asked for and
  * how far each task is. Sessions, Workers, references, graphs, usage and
  * questions never appear here; questions are ask_human cards in the chat.
@@ -99,14 +100,18 @@ export function createCoordinatorProgress(view: CoordinatorProgressView, ports: 
 
   const head = document.createElement('summary');
   head.className = 'coordinator-progress-head';
-  const titleRow = document.createElement('span');
-  titleRow.className = 'coordinator-progress-title-row';
   const title = document.createElement('span');
   title.className = 'coordinator-progress-title';
   title.textContent = t('coordinatorProgress.title');
-  titleRow.append(title);
-  head.append(titleRow);
+  head.append(title);
   card.append(head);
+  const headline = (text: string) => {
+    const line = document.createElement('span');
+    line.className = 'coordinator-progress-summary';
+    line.textContent = text;
+    head.append(line);
+    return line;
+  };
 
   const body = document.createElement('div');
   body.className = 'coordinator-progress-body';
@@ -114,35 +119,25 @@ export function createCoordinatorProgress(view: CoordinatorProgressView, ports: 
   actions.className = 'coordinator-progress-actions';
 
   if (view.kind === 'unavailable') {
-    const notice = document.createElement('p');
-    notice.className = 'coordinator-progress-note';
-    notice.setAttribute('role', 'status');
-    notice.textContent = t('coordinatorProgress.unavailable');
-    body.append(notice);
+    headline(t('coordinatorProgress.unavailable')).setAttribute('role', 'status');
     actions.append(createButton({ label: t('projectCoordination.retry'), size: 'sm', variant: 'ghost', onClick: ports.retry }));
   } else if (view.kind === 'empty') {
-    const notice = document.createElement('p');
-    notice.className = 'coordinator-progress-note';
-    notice.textContent = t('coordinatorProgress.empty');
-    body.append(notice);
+    headline(t('coordinatorProgress.empty'));
   } else {
     const { board } = view;
-    const headline = coordinatorProgressHeadline(board);
-    if (headline) {
+    const state = coordinatorProgressHeadline(board);
+    if (state) {
       const tally = document.createElement('span');
       tally.className = 'coordinator-progress-tally';
-      tally.textContent = headline;
-      titleRow.append(tally);
+      tally.textContent = state;
+      head.append(tally);
     }
+    headline(board.summary);
     const updated = document.createElement('time');
     updated.className = 'coordinator-progress-updated';
     updated.dateTime = new Date(board.updatedAt).toISOString();
     updated.textContent = updatedLabel(board.updatedAt, ports.now?.() ?? Date.now());
-    titleRow.append(updated);
-    const summary = document.createElement('span');
-    summary.className = 'coordinator-progress-summary';
-    summary.textContent = board.summary;
-    head.append(summary);
+    head.append(updated);
 
     const open = board.tasks.filter(task => OPEN.has(task.status));
     const finished = board.tasks.filter(task => !OPEN.has(task.status));

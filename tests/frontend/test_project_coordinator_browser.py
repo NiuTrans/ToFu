@@ -94,12 +94,18 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     entry.locator('.coordination-leader').click()
     page.wait_for_function('(id) => window.activeConvId === id', arg=leader)
     expect(board).to_have_attribute('data-state', 'board')
-    assert board.get_attribute('open') is not None
+    # Folded to its one-line head: the sidebar already shows this work, so the chat keeps its space.
+    assert board.get_attribute('open') is None
     page.locator('#projectCoordinatorEntry .coordination-leader:not([data-unread="true"])').wait_for()
     assert reports.read()['unread'] is False and reports.read()['latest']['turnId'] == first_report['turnId']
+    expect(board.locator('.coordinator-progress-tally')).to_have_text('In progress: 1')
     expect(board.locator('.coordinator-progress-summary')).to_have_text(
         'The folder dialog fix is verified; homestay research is underway.')
-    assert board.locator('.coordinator-progress-body > .coordinator-progress-tasks > li').evaluate_all(
+    tasks = board.locator('.coordinator-progress-body > .coordinator-progress-tasks > li')
+    expect(tasks.first).to_be_hidden()
+    board.locator('summary.coordinator-progress-head').click()
+    expect(tasks.first).to_be_visible()
+    assert tasks.evaluate_all(
         '(rows) => rows.map((row) => [row.dataset.status, row.querySelector("strong").textContent])') == [
         ['in_progress', 'Research New Year homestays in Tianyu Creek'], ['pending', 'Summarize the WeChat article']]
     expect(board.locator('.coordinator-progress-finished > summary')).to_have_text('Finished: 1')
@@ -115,17 +121,30 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     expect(workspace.locator('.coordinator-budget')).to_contain_text('Current request usage')
     workspace.get_by_role('button', name='Back to conversation', exact=True).click()
     expect(workspace).to_have_count(0)
+    head = board.locator('summary.coordinator-progress-head')
+    model = strip.locator('.router-worker-model')
+    expect(model.locator('select')).to_be_visible()
     for theme, width in [('tofu', 1440), ('dark', 390), ('light', 320)]:
         page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
         page.set_viewport_size({'width': width, 'height': 960})
         if width < 600:
             page.evaluate('() => { if (!document.getElementById("sidebar").classList.contains("collapsed")) window.toggleSidebar(); }')
             page.wait_for_function('document.getElementById("sidebar").getBoundingClientRect().right <= 1')
-        assert board.evaluate('(el) => el.scrollWidth <= el.clientWidth + 1')
+        if width >= 1024:
+            # The Worker model is one compact row: its label beside the select.
+            label, select = (model.locator(part).bounding_box() for part in ('label', 'select'))
+            assert label['y'] < select['y'] + select['height'] and select['y'] < label['y'] + label['height']
         output = Path(__file__).resolve().parents[2] / 'output/playwright/project-coordinator'
         output.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(output / f'{theme}-{width}.png'), animations='disabled')
-        board.screenshot(path=str(output / f'board-{theme}-{width}.png'), animations='disabled')
+        for state in ('open', 'folded'):
+            if state == 'folded':
+                head.click()
+                expect(tasks.first).to_be_hidden()
+            assert board.evaluate('(el) => el.scrollWidth <= el.clientWidth + 1'), state
+            page.screenshot(path=str(output / f'{theme}-{width}-{state}.png'), animations='disabled')
+            board.screenshot(path=str(output / f'board-{theme}-{width}-{state}.png'), animations='disabled')
+        head.click()
+        expect(tasks.first).to_be_visible()
     page.set_viewport_size({'width': 1440, 'height': 960})
     page.evaluate('() => { if (document.getElementById("sidebar").classList.contains("collapsed")) window.toggleSidebar(); }')
     # A message arriving while the Coordinator chat is open is read on arrival.
@@ -587,6 +606,8 @@ def test_manage_work_reads_server_history_rows(page, monkeypatch, tmp_path, asse
     board = page.locator('#presenceStrip .coordinator-progress')
     board.wait_for(state='visible')
     assert page.locator('#presenceStrip .coordination-task-graph').count() == 0
+    # The folded board opens to its explicit management action.
+    board.locator('summary.coordinator-progress-head').click()
     board.get_by_role('button', name='Manage work', exact=True).click()
     workspace = page.locator('dialog[open]')
     workspace.get_by_role('tab', name='Manage work', exact=True).click()
