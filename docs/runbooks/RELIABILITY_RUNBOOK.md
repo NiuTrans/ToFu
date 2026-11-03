@@ -369,9 +369,20 @@ Supervisor 已加载/磁盘期望的源码指纹，以及 worker 当前/下一�
 `plannedExitCount`；只有前者进入滚动故障窗口。`restartCount` 是升级前后兼容的历史
 混合计数，不能再当 crash 数。clean marker 必须同时匹配 PID、host、worker generation
 时间戳且只能消费一次；手动关机把 durable desired state 改成 stopped，显式 restart
-证书或 manager 在发信号前持久化的 PID 意图会立即恢复。没有该意图的普通 SIGTERM
-进入故障预算，防止外部信号形成无限拉起；旧版本 worker 写下的 `memory_recycle`
-关机标记同样计入。状态还会保留实际恢复 RTO。
+证书会立即恢复，manager 在发信号前持久化的 PID 意图（manual 或 restart）把普通
+SIGTERM 认定为对应的计划内退出。没有该意图的普通 SIGTERM 若晚于该 generation 的
+ready 证书（`workerReadyLoggedAt`），按外部 drain 记为计划内并立即恢复；ready 之前的
+SIGTERM 进入故障预算，防止外部信号对启动中的 worker 形成无限拉起；旧版本 worker 写下的
+`memory_recycle` 关机标记同样计入。`lastWorkerExitAt` 取 clean marker 的时间，没有证书
+时取 manager 发现退出的时间。状态还会保留实际恢复 RTO。
+
+**退出结算。** 问题：reconcile 每个 tick 才判定已消失的 generation，显式 start/stop
+却可能先执行（例如 Supervisor 与 worker 一起被停止，重启后的第一个请求就是 start）；
+直接替换或清除 worker 记录会丢失这次退出，status 继续显示更早的退出。决策：start、
+stop 与 desired=stopped 收尾在替换或清除记录前，先用上述同一套证据结算该 generation
+的退出，恢复策略仍由调用方决定；显式 start 先记账再清空故障预算；仍存活或属于其他
+host 的记录不作判断。不采用“Supervisor 启动时先跑一次 reconcile”：运行中的
+Supervisor 收到的显式 start 同样可能早于下一个 tick。
 `status --json` 中 `ready` 表示 manager 状态与健康探测一致，
 `applicationReachable` 表示通过 PID 身份校验的实际应用端点可达；两者不一致时
 `portDrift` 与 `applicationUrl` 直接指出可用端口和生命周期漂移。`status` 在
