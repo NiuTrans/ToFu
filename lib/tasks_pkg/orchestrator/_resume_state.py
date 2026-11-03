@@ -463,16 +463,19 @@ def apply_resume_state(
     # user turn expands into a different message prefix, defeating cross-turn
     # provider caching as well as semantic continuity.
     if prepared.checkpoint_messages or 'checkpointToolRounds' in cfg:
-        from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
-        from lib.tasks_pkg.message_semantics import has_model_media
+        from lib.tasks_pkg.compaction._resume_projection import (
+            report_compaction_resume, restore_compacted_resume,
+        )
         baseline = original_messages if original_messages is not None else task.get('messages')
         fresh_messages = None
         if (isinstance(baseline, list) and len(messages) >= len(baseline)
-                and messages[:len(baseline)] == baseline
-                and not any(has_model_media(message) for message in messages)):
+                and messages[:len(baseline)] == baseline):
             fresh_messages = messages[len(baseline):]
+        # ``messages`` is the fresh authoritative projection the archive would
+        # replace; retained image bytes must be reproducible from it.
         restored = restore_compacted_resume(
-            task, cfg, prepared.checkpoint_tool_rounds, fresh_messages=fresh_messages)
+            task, cfg, prepared.checkpoint_tool_rounds, fresh_messages=fresh_messages,
+            current_messages=messages)
 
         if task.get('aborted'):
             return
@@ -484,6 +487,7 @@ def apply_resume_state(
             messages[:] = restored
         else:
             messages.extend(copy.deepcopy(prepared.checkpoint_messages))
+        report_compaction_resume(task, cfg, prepared.checkpoint_tool_rounds)
         logger.info(
             '[%s] conv=%s Replayed %d checkpoint message(s) from %d durable '
             'tool round(s)',

@@ -575,8 +575,25 @@ that witness before reading the saved `postMessages`. It then restores managed
 runtime context through the ordinary composer and replays only uncovered tool
 rounds. Full checkpoint records still own display, accounting and execution
 recovery. Missing/legacy/unaccepted archives, edits, permission/model changes,
-steering, media and storage errors retain full canonical replay. No new store
-or transcript authority is introduced.
+steering, unreproducible media and storage errors retain full canonical
+replay. No new store or transcript authority is introduced.
+
+Media does not suppress the witness. Image references in the snapshot
+(`/api/images/`, `tofu-media:`, remote URLs) are resolved again at dispatch;
+captured bytes restore only when `retained_images_reproducible`
+(`lib/tasks_pkg/model_images.py`) proves each payload equals one in the fresh
+authoritative projection or the bytes a source recorded on the same message
+resolves to now for this owner. A deleted or replaced source refuses as
+`media_unavailable`; unprojected attachment refs and provider-native media
+have no such proof and refuse. Problem: users attach a screenshot to most
+requests, so the old blanket media refusal left every accepted archive without
+a witness and each Continue re-summarized the whole replay (one Turn paid three
+summaries for one context). Rejected: a separate media witness digest (pinned
+and unpinned projections of the same source differ, so it would refuse the
+common case) and trusting captured bytes (would resurrect revoked media).
+Each checkpoint resume reports its outcome as the `compaction_resume` event;
+the Turn timeline marks earlier compactions it did not reuse `superseded`
+(`docs/contracts/EVENTS.md`, activity timeline projection).
 
 Resume reads at most eight archive metadata candidates and one matching post
 snapshot, bounded by the existing 8 MiB/16,384-message continuation contract.

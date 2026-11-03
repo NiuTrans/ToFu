@@ -1799,6 +1799,49 @@ export interface CompactionDoneEvent {
   autopilotRunId?: string;
 }
 
+/** A resumed attempt reused or discarded earlier compacted context. */
+export interface CompactionResumeEvent {
+  type: 'compaction_resume';
+  /** conversation id */
+  convId: string;
+  /** true when an accepted archive replaced the replayed history */
+  restored: boolean;
+  /** restored|no_witness|settings_changed|history_changed|progress_changed|media_unavailable|unavailable|ineligible */
+  reason: string;
+  /** earlier attempts of this Turn whose model view the resume replaces */
+  sourceAttemptIds: unknown[];
+  /** epoch seconds */
+  ts: number;
+  /** (restored) owner-scoped archive id that was reused */
+  archiveId?: string;
+  /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
+  executionAtMs?: number;
+  /** Epoch anchor for the producing task execution clock. */
+  executionOriginAtMs?: number;
+  /** Identity of the producing task monotonic clock; never a client clock. */
+  executionClockId?: string;
+  /** Owning executor task id, stamped by delivery. */
+  taskId?: string;
+  /** Owning conversation identity, stamped by task delivery and preserved by push mirrors. */
+  conversationId?: string;
+  /** Producing execution attempt identity; preserves scope through tool dispatch and replay. */
+  attemptId?: string;
+  /** Optional request correlation id, stamped by delivery. */
+  requestId?: string;
+  /** Task-local event sequence, assigned by the runtime. */
+  seq?: number;
+  /** Optional scheduler presentation policy; not execution authority. */
+  flowProjection?: string;
+  /** Optional role of the invocation producing this visible Turn. */
+  turnRole?: string;
+  /** Optional declared presentation side of the invocation. */
+  emits?: string;
+  /** Optional virtual-user presentation identity. */
+  vuMsgId?: string;
+  /** Optional owning Goal run identity. */
+  autopilotRunId?: string;
+}
+
 /** Memory-prefetch pipeline stage update. */
 export interface MemoryPrefetchEvent {
   type: 'memory_prefetch';
@@ -3410,6 +3453,7 @@ export type ContractedWireEvent =
   MessagesSnapshotEvent |
   CompactionEvent |
   CompactionDoneEvent |
+  CompactionResumeEvent |
   MemoryPrefetchEvent |
   PreferencesAppliedEvent |
   PreferenceLearnedEvent |

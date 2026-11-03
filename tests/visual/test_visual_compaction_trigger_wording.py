@@ -120,3 +120,75 @@ def test_visual_compaction_trigger_wording(
         fold.locator('summary').focus()
         page.keyboard.press('Space')
         assert not fold.evaluate('node=>node.open')
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("theme", ["light", "dark", "tofu"])
+@pytest.mark.parametrize("width", [1440, 390])
+def test_visual_superseded_compaction_reads_as_discarded(
+    frontend_visual_page, activity_renderer_bundle, language, theme, width,
+):
+    page = frontend_visual_page
+    page.set_viewport_size({"width": width, "height": 900})
+    labels = json.loads((ROOT / f"frontend/src/i18n/locales/{language}.json").read_text())
+    page.add_script_tag(content=activity_renderer_bundle)
+    page.evaluate(r"""({labels,language,theme}) => {
+      document.documentElement.lang=language;
+      document.documentElement.dataset.theme=theme;
+      document.body.innerHTML='<main id="fixture" class="conversation-surface" style="max-width:800px;width:100%;padding:16px;box-sizing:border-box;margin:auto"></main>';
+      const localizedText=(key,fallback,values={}) => (labels[key]||fallback)
+        .replace(/\{(\w+)\}/g, (match,name)=>values[name]??match);
+      const rows={
+        kept:{status:'succeeded', summary:'Context compacted', summaryKey:'activity.compaction.succeeded'},
+        discarded:{status:'superseded', summary:'Context compaction discarded on resume',
+          summaryKey:'activity.compaction.superseded',
+          detail:'Not reused after the interruption: no reusable checkpoint was recorded.',
+          detailKey:'activity.compaction.supersededDetail',
+          detailArgs:{reason:'no reusable checkpoint was recorded',
+            reasonKey:'activity.compaction.resumeReason.noWitness'}},
+      };
+      for (const [index,[name,extra]] of Object.entries(rows).entries()) {
+        const node=document.createElement('div');
+        node.className='conversation-block conversation-block--activity-event';
+        node.dataset.row=name;
+        document.getElementById('fixture').append(node);
+        const entry={id:`compaction-${index}`, spanId:`compaction-${index}`, seq:index+1,
+          occurredAt:1000+index, kind:'status', severity:'info', count:1,
+          reasonCode:'context_compaction', trigger:'working_set', summaryModel:'glm-5.3-flash',
+          archiveId:`archive-${index}`, tokensBefore:249784, tokensAfter:30628,
+          reductionPercent:88, durationMs:29000, ...extra};
+        ActivityRenderer.renderActivityEventBlock(node, {
+          kind:'activity-event', blockId:entry.id, identitySource:'contract', value:entry, source:entry,
+        }, {localizedText, renderSafeMarkdownHtml:()=>{throw new Error('Plain-text activity only');}});
+      }
+    }""", {"labels": labels, "language": language, "theme": theme})
+
+    kept = page.locator('[data-row="kept"]')
+    discarded = page.locator('[data-row="discarded"]')
+    assert discarded.locator('.activity-event__summary').inner_text() == labels[
+        'activity.compaction.superseded']
+    cause = discarded.locator('.activity-event__body > .activity-event__detail')
+    assert cause.is_visible()
+    assert cause.inner_text() == labels['activity.compaction.supersededDetail'].replace(
+        '{reason}', labels['activity.compaction.resumeReason.noWitness'])
+    assert cause.evaluate('node=>node.scrollWidth<=node.clientWidth+1'), "Cause is clipped"
+    tertiary = page.evaluate("""() => {
+      const probe=document.createElement('span');
+      probe.style.color='var(--text-tertiary)';
+      document.getElementById('fixture').append(probe);
+      const color=getComputedStyle(probe).color; probe.remove(); return color;
+    }""")
+    style = 'node=>{const s=getComputedStyle(node);return [s.color,s.textDecorationLine]}'
+    kept_summary = kept.locator('.activity-event__summary').evaluate(style)
+    discarded_summary = discarded.locator('.activity-event__summary').evaluate(style)
+    assert discarded_summary[0] == tertiary != kept_summary[0], (theme, kept_summary)
+    for value in discarded.locator('.compaction-token-value').all():
+        assert value.evaluate(style) == [tertiary, 'line-through']
+    for value in kept.locator('.compaction-token-value').all():
+        assert value.evaluate(style)[1] == 'none'
+    # The real work stays inspectable.
+    assert discarded.locator('button[data-conversation-action="open-compaction"]').is_visible()
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+    OUT.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(OUT / f"compaction-superseded-{language}-{theme}-{width}.png"),
+                    full_page=True, animations="disabled")

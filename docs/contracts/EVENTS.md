@@ -468,6 +468,25 @@ no start/phase exists; an existing start/phase wins. Legacy events without a
 witness keep conservative placement. Reject inferring boundaries from later
 replay segments or inventing a running phase when no summary call happened.
 
+Problem: an interrupted attempt's accepted compaction kept reading as
+"compacted" after a Continue that could not reuse it replayed the full history
+and compacted again, so one Turn showed two successes for one context.
+Decision: every checkpoint resume emits one `compaction_resume` fact: whether
+an archive was restored (`archiveId`), the closed refusal `reason`, and
+`sourceAttemptIds` (the accepted resume source plus every producer of a
+retained checkpoint round). The fold marks each `succeeded` compaction row of
+those attempts that no longer shapes the context `superseded`: all of them
+when nothing was restored, otherwise those after the restored archive's row
+(a restored suspended checkpoint has no row and is the latest state). Rows keep
+their real time, token accounting and snapshot; the detail names the cause and
+an already superseded row keeps its first cause. Rejected: deleting the row
+(hides real, billed work), inferring the outcome from a later compaction (a
+resume may not compact again, and a restored archive may itself be compacted
+further), and marking every other producer (relayed producers keep their own
+context). Specs: `tests/turn_lifecycle/test_turn_activity_timeline.py`
+(`resume_marks_only`, `resume_report_persists`) and
+`tests/compaction/test_dispatch_context_recovery.py`.
+
 Each entry carries a 0-based `llmRound` display anchor — its own 1-based
 `R{n}` request-tag round minus one when present, else the last model-request
 round tracked as events flow through the fold — so the browser splices every

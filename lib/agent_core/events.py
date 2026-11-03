@@ -264,6 +264,7 @@ class EventType:
     MESSAGES_SNAPSHOT = 'messages_snapshot'
     COMPACTION = 'compaction'
     COMPACTION_DONE = 'compaction_done'
+    COMPACTION_RESUME = 'compaction_resume'
     MEMORY_PREFETCH = 'memory_prefetch'
     PREFERENCES_APPLIED = 'preferences_applied'
     PREFERENCE_LEARNED = 'preference_learned'
@@ -1670,6 +1671,26 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('taskModel', 'str'),
                   FieldSpec('anchorBlockId', 'str'),
                   FieldSpec('anchorPosition', 'str'),
+              )),
+    EventSpec(EventType.COMPACTION_RESUME, _C.CONTEXT,
+              'A resumed attempt reused or discarded earlier compacted context.',
+              fields={
+                  'convId': 'conversation id',
+                  'restored': 'true when an accepted archive replaced the replayed history',
+                  'reason': 'restored|no_witness|settings_changed|history_changed|'
+                            'progress_changed|media_unavailable|unavailable|ineligible',
+                  'sourceAttemptIds': 'earlier attempts of this Turn whose model view the resume replaces',
+                  'archiveId': '(restored) owner-scoped archive id that was reused',
+                  'ts': 'epoch seconds',
+              },
+              schema=(
+                  FieldSpec('convId', 'str', required=True),
+                  FieldSpec('restored', 'bool', required=True),
+                  FieldSpec('reason', 'str', required=True),
+                  FieldSpec('sourceAttemptIds', 'list', required=True),
+                  FieldSpec('ts', 'int', required=True),
+
+                  FieldSpec('archiveId', 'str'),
               )),
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',
