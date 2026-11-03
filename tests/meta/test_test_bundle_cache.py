@@ -12,6 +12,8 @@ from tests import _runtime_sections as rs
 
 pytestmark = pytest.mark.unit
 
+_REAL_ENVIRONMENT_DIGEST = rs._bundle_environment_digest
+
 
 @pytest.fixture
 def fake_bundler(tmp_path, monkeypatch):
@@ -114,6 +116,21 @@ def test_environment_change_rebuilds(fake_bundler, monkeypatch):
     bundle, calls, _source, _state, _out = fake_bundler
     bundle()
     monkeypatch.setattr(rs, '_bundle_environment_digest', lambda: 'env-2')
+    bundle()
+    assert len(calls) == 2
+
+
+def test_harness_adapter_change_rebuilds(fake_bundler, monkeypatch, tmp_path):
+    """The Python adapter composes generated entries outside Rollup's manifest."""
+    bundle, calls, _source, _state, _out = fake_bundler
+    environment_digest = _REAL_ENVIRONMENT_DIGEST
+    adapter = tmp_path / 'adapter.py'
+    adapter.write_text('# revision 1\n', encoding='utf-8')
+    monkeypatch.setattr(rs, '__file__', str(adapter))
+    monkeypatch.setattr(rs, '_bundle_environment_digest', environment_digest)
+    monkeypatch.setattr(rs, '_frontend_source_listing', lambda: b'')
+    bundle()
+    adapter.write_text('# revision 2\n', encoding='utf-8')
     bundle()
     assert len(calls) == 2
 

@@ -949,8 +949,8 @@ budgeted like product latency. Measure with `--durations=40` on the gate and
 - Legacy jsdom modules compile native TypeScript owners at import time.
   `tests/_runtime_sections.py::_run_test_bundler` keeps a cross-process cache
   (default `$TMPDIR/tofu-test-bundle-cache-<uid>`, 7-day eviction) keyed by
-  bundler arguments, checkout root, bundler script, dependency lockfile,
-  tsconfigs and the `frontend/src` file list; a hit additionally requires
+  bundler arguments, checkout root, the Python harness adapter, bundler script,
+  dependency lockfile, tsconfigs and the `frontend/src` file list; a hit additionally requires
   every file Rollup read (`vite_test_bundle.mjs --inputs-manifest`) to hash
   identically and every directory holding one to list identically (a new
   sibling can change resolution). A build is recorded only when all its inputs
