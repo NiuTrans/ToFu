@@ -302,16 +302,26 @@ def _read_trace_rows_uncached(task_id: str) -> list:
     """Read the bounded trace projection from the Sidecar authority."""
     try:
         from lib.storage import get_storage_client
+        from lib.tasks_pkg.request_inspector_history import is_event_page_size_error
 
         out = _TraceRows()
         after = -1
         scanned = 0
+        page_limit = 1000
         client = get_storage_client()
         while True:
-            rows = client.query(
-                'event.list', {'task_id': task_id,
-                               'after_sequence': after, 'limit': 1000,
-                               'payload_types': sorted(_TRACE_PAYLOAD_TYPES)}) or []
+            try:
+                rows = client.query(
+                    'event.list', {'task_id': task_id,
+                                   'after_sequence': after, 'limit': page_limit,
+                                   'payload_types': sorted(_TRACE_PAYLOAD_TYPES)}) or []
+            except Exception as exc:
+                # A deterministic page-size bound: a smaller page at the SAME
+                # cursor reads the same rows; a one-row refusal stays a failure.
+                if is_event_page_size_error(exc) and page_limit > 1:
+                    page_limit = max(1, page_limit // 2)
+                    continue
+                raise
             if not rows:
                 break
             scanned += len(rows)
@@ -329,7 +339,7 @@ def _read_trace_rows_uncached(task_id: str) -> list:
                         'ts_ms': int(row.get('created_at_ms') or 0),
                     })
             after = int(rows[-1].get('sequence', after))
-            if len(rows) < 1000:
+            if len(rows) < page_limit:
                 break
             if scanned >= TRACE_MAX_EVENT_ROWS:
                 latest = client.query('event.latest', {'task_id': task_id, 'metadata_only': True})

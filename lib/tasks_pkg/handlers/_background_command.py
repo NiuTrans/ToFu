@@ -1,10 +1,15 @@
 """Time- or steer-triggered handoff for a locally running ``run_command`` call.
 
-The model-facing protocol stays synchronous: a foreground wait costs no model
-request. After ``AUTO_BACKGROUND_AFTER_S`` of actual subprocess time (clamped
-below the stuck-task reaper), or if an operator steer arrives, the
-already-running command stays on its worker and the current tool call returns
-a provisional result. The authoritative completion follows the standard
+After ``AUTO_BACKGROUND_AFTER_S`` of actual subprocess time (clamped below the
+stuck-task reaper), or if an operator steer of the task's own conversation
+arrives, the already-running command stays on its worker and the current tool
+call returns a provisional result. Every task composition hands off when
+something can collect the result
+(``lib.tasks_pkg.conversation_delivery.completion_delivery``): a root task
+without a saved conversation reads it at its next round boundary
+(``background_commands.take_run_completions``) or with ``poll``, a child
+invocation with ``poll``; a headless request's handed-off command stops when
+its response ends. A conversation task's completion follows the standard
 injection-lane contract (durable authority + volatile twin):
 
   * the durable ``message_queue`` row is the authority — active-turn injection
@@ -38,15 +43,15 @@ from lib.project_mod.foreground_command_slots import (
     register_handoff_control,
     retire_handoff_control,
 )
+from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
 
 logger = get_logger(__name__)
 
 BACKGROUND_COMMAND_MARKER = '[Command moved to background:'
-# An early handoff only bought another model round to keep a prompt cache
-# warm, which owner decision 2026-10-28 forbids; reaper_safe_wait_s keeps this
-# handoff ahead of the reaper's silent-command interrupt. Measured from
+# AUTO_BACKGROUND_AFTER_S (lib/tools/poll.py, owner decision 2026-11-03) is
+# read through this module so a test can shorten it; reaper_safe_wait_s keeps
+# the handoff ahead of the reaper's silent-command interrupt. Measured from
 # process spawn, not handler admission.
-AUTO_BACKGROUND_AFTER_S = 1500.0
 
 # Concurrent tool calls (docs/contracts/TOOL_EXECUTION_POLICY.md, "Concurrent
 # tool rounds") can run several foreground commands in one task. Their task
@@ -169,10 +174,14 @@ class DetachableCommandTask(CommandTaskView):
     """
 
     def __init__(self, parent: dict[str, Any], handoff: CommandHandoffControl | None = None):
+        from lib.tasks_pkg.conversation_delivery import has_no_saved_conversation
         super().__init__(parent)
         self._handoff = handoff
         self._spawned = False
         self._spawned_at: float | None = None
+        # Nothing a request without a saved conversation starts may outlive
+        # its response (docs/contracts/HEADLESS_API.md).
+        self._ends_with_response = has_no_saved_conversation(parent)
 
     @property
     def detached(self) -> bool:
@@ -195,6 +204,13 @@ class DetachableCommandTask(CommandTaskView):
                 return
             dict.__setitem__(self, '_background_detached', True)
             self._detach_from_parent()
+
+    def get(self, key, default=None):
+        if key == 'aborted' and self._ends_with_response and self.detached:
+            from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+            if self._parent.get('status') in TASK_REPLAY_TERMINAL_STATUSES:
+                return True
+        return super().get(key, default)
 
     def __setitem__(self, key, value):
         with self.slot_lock:
@@ -220,12 +236,8 @@ def is_background_command_result(value: Any) -> bool:
 
 def _provisional_result(command: str, command_id: str, *, task: dict[str, Any]) -> str:
     from lib.tasks_pkg.background_commands import background_command_result
-    from lib.tasks_pkg.conversation_delivery import conversation_delivery_available
 
-    return background_command_result(
-        command, command_id, task=task,
-        has_conversation=conversation_delivery_available(task),
-    )
+    return background_command_result(command, command_id, task=task)
 
 
 def _completion_payload(command_id: str, command: str, result: str) -> str:
@@ -237,6 +249,35 @@ def _completion_payload(command_id: str, command: str, result: str) -> str:
         f'{result or f"$ {command}\\n\\n[no result returned]"}\n'
         '</background-command>'
     )
+
+
+def _completion_record(command_id: str, command: str, result: str) -> dict[str, Any]:
+    from lib.background_command_projection import command_result_status
+    return {
+        'commandId': command_id[:128],
+        'status': 'completed',
+        'command': command[:2000],
+        'resultPreview': result[:2000],
+        'resultTruncated': len(result) > 2000,
+
+        **command_result_status(result),
+    }
+
+
+def run_completion_item(command_id: str, command: str, result: str) -> dict[str, Any]:
+    """The round-boundary inbox item for a finished command of a conversation-less run.
+
+    Same carrier and receipt shape as a conversation's volatile twin, without a
+    durable queue row: the command registry is this lane's authority.
+    """
+    return {
+        'value': _completion_payload(command_id, command, result),
+        'mode': 'background-command',
+        'priority': 'next',
+        'commandId': command_id,
+        'command': command,
+        'backgroundCommand': _completion_record(command_id, command, result),
+    }
 
 
 def _delivery_config(config: dict | None) -> dict:
@@ -268,16 +309,7 @@ def _queue_completion(*, task: dict[str, Any], config: dict | None,
 
         owner_user_id = int(task_user_id(task))
         text = _completion_payload(command_id, command, result)
-        from lib.background_command_projection import command_result_status
-        completion = {
-            'commandId': command_id[:128],
-            'status': 'completed',
-            'command': command[:2000],
-            'resultPreview': result[:2000],
-            'resultTruncated': len(result) > 2000,
-
-            **command_result_status(result),
-        }
+        completion = _completion_record(command_id, command, result)
         from lib.background_command_delivery import publish_completion_envelope
         from lib.tasks_pkg.background_commands import (
             freeze_completion_envelope, release_completion_envelope,
@@ -361,16 +393,19 @@ def run_with_steer_handoff(
     command from the outset, so a handoff never leaves stdout/stderr pipes
     without a reader and project-level postprocessing can finish normally.
     """
-    from lib.tasks_pkg.conversation_delivery import conversation_delivery_available
+    from lib.tasks_pkg.conversation_delivery import (
+        completion_conversation_id, completion_delivery)
 
-    conv_id = str(task.get('convId') or '')
-    # Unattended workers, child invocations (which only borrow their parent's
-    # conversation) and tasks without a saved conversation keep every command
-    # in the foreground: nothing could deliver a handed-off result to them.
-    # A steer of a borrowed conversation therefore never moves a worker's
-    # command; a coordinator message waits in the run mailbox instead.
-    if task.get('_unattended') or not conversation_delivery_available(task):
+    # Only a task where nothing could collect a handed-off result (no own
+    # conversation and no live poll control) keeps its commands foreground.
+    if completion_delivery(task) == 'none':
         return execute(task)
+    # Fixed at launch; empty when the launching run itself collects the
+    # result. Only that conversation's own steer moves the command: a child
+    # invocation merely borrows its parent's conversation, so a steer there
+    # never moves a worker's command (a coordinator message waits in the run
+    # mailbox instead).
+    delivery_conv = completion_conversation_id(task)
 
     from lib.tasks_pkg.manager import reaper_safe_wait_s
     handoff_after_s = reaper_safe_wait_s(AUTO_BACKGROUND_AFTER_S)
@@ -415,11 +450,15 @@ def run_with_steer_handoff(
         if detached:
             from lib.tasks_pkg.background_commands import (
                 deliver_completion, finish_handed_off_command,
-                set_handed_off_delivery, wake_completed_background_batch,
+                set_handed_off_delivery, settle_unpublished_handoff,
+                wake_completed_background_batch,
             )
             finish_handed_off_command(
                 command_id=command_id, result=str(result or ''),
                 error=str(error) if error is not None else None)
+            if not delivery_conv:
+                settle_unpublished_handoff(command_id)
+                return
             status = deliver_completion(
                 task=task,
                 config=config,
@@ -429,7 +468,7 @@ def run_with_steer_handoff(
             )
             set_handed_off_delivery(command_id, status)
             if status == 'queued':
-                wake_completed_background_batch(conv_id, task.get('_userId'))
+                wake_completed_background_batch(delivery_conv, task.get('_userId'))
         else:
             done.set()
 
@@ -451,7 +490,8 @@ def run_with_steer_handoff(
         now = time.monotonic()
         timed_handoff = (spawned_at is not None and
                          now - spawned_at >= handoff_after_s)
-        steered = has_pending(conv_id, modes=['user-steer'])
+        steered = bool(delivery_conv) and has_pending(
+            delivery_conv, modes=['user-steer'])
         manually_requested = (handoff is not None and
                               handoff.requested_for(command_task.get('_subprocess_pid')))
         if not timed_handoff and not steered and not manually_requested:
@@ -523,7 +563,7 @@ def run_with_steer_handoff(
             '[BackgroundCommand:%s] %s handed off PID=%s conv=%s',
             command_id, ('operator request' if manually_requested else
                          'elapsed-time' if timed_handoff else 'operator steer'),
-            command_task.get('_subprocess_pid'), conv_id[:8])
+            command_task.get('_subprocess_pid'), delivery_conv[:8])
         if handoff is not None:
             retire_handoff_control(task, handoff)
         if on_handoff is not None:
@@ -539,8 +579,10 @@ def run_with_steer_handoff(
 
 
 __all__ = [
+    'AUTO_BACKGROUND_AFTER_S',
     'BACKGROUND_COMMAND_MARKER',
     'DetachableCommandTask',
     'is_background_command_result',
+    'run_completion_item',
     'run_with_steer_handoff',
 ]

@@ -9,6 +9,7 @@ import asyncio
 import os
 from pathlib import Path
 import threading
+from typing import BinaryIO
 
 from lib.agent_core.native_process import Budget, NativeConfigurationError, _joined
 
@@ -18,6 +19,9 @@ logger = get_logger(__name__)
 
 
 class _NativeImage:
+    def _seal(self) -> BinaryIO:
+        raise NotImplementedError
+
     def __init__(self, *, source: Path, sha256: str, application_version: str, budget: Budget):
         if (not isinstance(source, Path) or not source.is_absolute() or not isinstance(budget, Budget)
                 or not isinstance(sha256, str) or len(sha256) != 64
@@ -27,8 +31,8 @@ class _NativeImage:
         self.sha256, self.application_version = sha256, application_version
         self.budget = budget
         self._loop = None
-        self._image = None
-        self._closing = None
+        self._image: asyncio.Task[BinaryIO] | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._closed = False
 
     def _bind_loop(self):
@@ -60,7 +64,10 @@ class _NativeImage:
         if self._closed or type(binary_bytes) is not int or binary_bytes <= 0:
             raise NativeConfigurationError('shared native image is closed or client bound is invalid')
         self.prepare()
-        image = await asyncio.shield(self._image)
+        acquisition = self._image
+        if acquisition is None:
+            raise NativeConfigurationError('shared native image admission did not start')
+        image = await asyncio.shield(acquisition)
         if self._closed:
             raise NativeConfigurationError('shared native image is closing')
         if os.fstat(image.fileno()).st_size > binary_bytes:

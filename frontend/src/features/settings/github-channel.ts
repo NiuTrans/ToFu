@@ -15,7 +15,7 @@
 import { featureRegistry } from '../../feature-registry';
 import { t } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
-import { createAlert, createButton, createEmptyState, createField, createSpinner } from '../../ui';
+import { createAlert, createButton, createSpinner } from '../../ui';
 import { apiFailure } from '../../api/errors';
 import type { ChannelsEndpoints } from '../../api/endpoint-registry/channels';
 import { CHANNEL_DEFAULT_MODE_BY_KIND, CHANNEL_DEFAULT_REPLY_POLICY } from '../../api/channels.generated';
@@ -23,8 +23,8 @@ import type {
   ChannelThreadView, ConfigurableThreadMode, GitHubAccountView, OutboxItemView, ReplyPolicy,
 } from '../../api/channels.generated';
 import {
-  card, element, facts, feedback, hint, refreshWhileConnecting, routerLink, rowField, runCommand, statusLine,
-  type CommandView,
+  card, cardSection, element, empty, facts, feedback, hint, outboxCard, refreshWhileConnecting, routerLink,
+  rowField, runCommand, selectCell, statusLine, threadRow, threadTable, type CommandView,
 } from './channel-settings-view';
 
 interface GitHubState {
@@ -44,7 +44,6 @@ type CredentialsFacade = { list: () => Promise<unknown> };
 
 const CONFIGURABLE_MODES: ConfigurableThreadMode[] = ['watch', 'mentions', 'ignore'];
 const REPLY_POLICIES: ReplyPolicy[] = ['auto', 'draft', 'never'];
-const DISCARDABLE = new Set(['draft', 'queued', 'failed']);
 const THREAD_PREFIX = 'github:';
 // Contract ThreadKey (GitHub part), accepted in any case: owner/repo#number.
 const THREAD_INPUT = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,9}$/;
@@ -91,6 +90,14 @@ function threadUrl(account: GitHubAccountView, key: string): string {
   return `${account.webBaseUrl}/${repository}/issues/${number}`;
 }
 
+function externalLink(className: string, text: string, href: string): HTMLAnchorElement {
+  const link = element('a', className, text);
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+
 function commandView(current: number): CommandView {
   return {
     isCurrent: () => current === generation,
@@ -109,8 +116,8 @@ function pollingText(account: GitHubAccountView): string {
 
 function renderAccount(state: GitHubState, view: CommandView): HTMLElement {
   const { account } = state;
-  const section = card(t('settings.github.status'));
-  section.appendChild(statusLine(account, t(`settings.github.state.${account.status.state}` as const)));
+  const section = card(t('settings.github.status'),
+                       statusLine(account, t(`settings.github.state.${account.status.state}` as const)));
   const identity = account.identity;
   const credential = account.credential;
   const rows: Array<[string, string | Node]> = [
@@ -138,8 +145,9 @@ function renderAccount(state: GitHubState, view: CommandView): HTMLElement {
     label: t('settings.github.refresh'), variant: 'ghost',
     onClick: () => { void view.reload(); },
   }));
-  section.appendChild(actions);
-  if (!credential) section.appendChild(hint(t('settings.github.needsToken')));
+  const footer = cardSection(actions);
+  if (!credential) footer.appendChild(hint(t('settings.github.needsToken')));
+  section.appendChild(footer);
   return section;
 }
 
@@ -147,18 +155,16 @@ function renderToken(state: GitHubState, view: CommandView): HTMLElement {
   const { account } = state;
   const section = card(t('settings.github.token'));
   const help = hint(t('settings.github.tokenHint'));
-  const create = element('a', 'channel-link', t('settings.github.tokenCreate'));
-  create.href = `${account.webBaseUrl}${NEW_TOKEN_PATH}`;
-  create.target = '_blank';
-  create.rel = 'noopener noreferrer';
-  help.append(' ', create);
+  help.append(' ', externalLink('channel-link', t('settings.github.tokenCreate'),
+                                `${account.webBaseUrl}${NEW_TOKEN_PATH}`));
   section.appendChild(help);
   // A token is the only missing piece of a disabled account, so adding one also enables it.
   const enable = account.enabled ? {} : { enabled: true };
   // A 400 refuses the token itself (its form, GitHub's verdict or its scope); other failures are not about it.
   const tokenFailure = (error: unknown) => (apiFailure(error).status === 400
     ? t('settings.github.tokenFailed', { error: errorText(error) }) : view.failure(error));
-  const secret = element('input', 'ui-input');
+  const tokenField = rowField({ label: t('settings.github.tokenInput') });
+  const secret = tokenField.control as HTMLInputElement;
   secret.type = 'password';
   secret.autocomplete = 'off';
   secret.spellcheck = false;
@@ -179,7 +185,7 @@ function renderToken(state: GitHubState, view: CommandView): HTMLElement {
   secret.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !save.disabled) save.click();
   });
-  tokenRow.append(rowField({ label: t('settings.github.tokenInput'), control: secret }).el, save);
+  tokenRow.append(tokenField.el, save);
   if (account.credential) {
     const remove = createButton({
       label: t('settings.github.tokenRemove'), variant: 'danger',
@@ -189,7 +195,7 @@ function renderToken(state: GitHubState, view: CommandView): HTMLElement {
     });
     tokenRow.appendChild(remove);
   }
-  section.appendChild(tokenRow);
+  const credentials = cardSection(tokenRow);
   if (state.vaultEntries.length) {
     const entryRow = element('div', 'channel-actions');
     const entry = rowField({
@@ -205,14 +211,18 @@ function renderToken(state: GitHubState, view: CommandView): HTMLElement {
       },
     });
     entryRow.append(entry.el, use);
-    section.appendChild(entryRow);
+    credentials.appendChild(entryRow);
   }
+  section.appendChild(credentials);
   const enterprise = element('details', 'channel-advanced');
   enterprise.open = account.apiBaseUrl !== GITHUB_COM_API;
   enterprise.appendChild(element('summary', '', t('settings.github.enterprise')));
   const baseRow = element('div', 'channel-actions');
-  const base = rowField({ label: t('settings.github.apiBase'), value: account.apiBaseUrl,
-    hint: t('settings.github.apiBaseHint') });
+  const base = rowField({ label: t('settings.github.apiBase'), value: account.apiBaseUrl });
+  // The hint sits under the row: inside the field it would push the field's bottom below its button.
+  const baseHint = hint(t('settings.github.apiBaseHint'));
+  baseHint.id = `${base.control.id}-hint`;
+  base.control.setAttribute('aria-describedby', baseHint.id);
   const saveBase = createButton({
     label: t('settings.github.apiBaseSave'), disabled: account.enabled,
     onClick: () => {
@@ -221,53 +231,34 @@ function renderToken(state: GitHubState, view: CommandView): HTMLElement {
     },
   });
   baseRow.append(base.el, saveBase);
-  enterprise.appendChild(baseRow);
+  enterprise.append(baseRow, baseHint);
   section.appendChild(enterprise);
   return section;
 }
 
 function renderThread(state: GitHubState, thread: ChannelThreadView, view: CommandView): HTMLElement {
-  const row = element('div', 'channel-row');
-  const title = element('div', 'channel-row-title');
-  const link = element('a', 'channel-key', thread.key);
-  link.href = threadUrl(state.account, thread.key);
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  title.append(element('div', '', thread.title || thread.key), link);
-  row.appendChild(title);
-  const mode = createField({
-    label: t('settings.github.column.mode'), value: thread.modeOverride ?? '',
-    choices: [{ value: '', label: t('settings.github.default', { value: modeLabel(CHANNEL_DEFAULT_MODE_BY_KIND.issue) }) },
-              ...CONFIGURABLE_MODES.map((value) => ({ value, label: modeLabel(value) }))],
-  });
-  const modeSelect = mode.control as HTMLSelectElement;
-  modeSelect.addEventListener('change', () => {
-    const value = modeSelect.value as ConfigurableThreadMode | '';
-    void runCommand(view, modeSelect, () => channelsApi().updateGitHubThread(thread.key, { mode: value || null }));
-  });
-  row.appendChild(mode.el);
-  const reply = createField({
-    label: t('settings.github.column.reply'), value: thread.replyPolicyOverride ?? '',
-    choices: [{ value: '', label: t('settings.github.default', { value: replyLabel(CHANNEL_DEFAULT_REPLY_POLICY) }) },
-              ...REPLY_POLICIES.map((value) => ({ value, label: replyLabel(value) }))],
-  });
-  const replySelect = reply.control as HTMLSelectElement;
-  replySelect.addEventListener('change', () => {
-    const value = replySelect.value as ReplyPolicy | '';
-    void runCommand(view, replySelect,
-                    () => channelsApi().updateGitHubThread(thread.key, { replyPolicy: value || null }));
-  });
-  row.appendChild(reply.el);
-  return row;
+  const mode = selectCell(t('settings.github.column.mode'), thread.modeOverride ?? '',
+    [{ value: '', label: t('settings.github.default', { value: modeLabel(CHANNEL_DEFAULT_MODE_BY_KIND.issue) }) },
+     ...CONFIGURABLE_MODES.map((value) => ({ value, label: modeLabel(value) }))],
+    (select) => {
+      const value = select.value as ConfigurableThreadMode | '';
+      void runCommand(view, select, () => channelsApi().updateGitHubThread(thread.key, { mode: value || null }));
+    });
+  const reply = selectCell(t('settings.github.column.reply'), thread.replyPolicyOverride ?? '',
+    [{ value: '', label: t('settings.github.default', { value: replyLabel(CHANNEL_DEFAULT_REPLY_POLICY) }) },
+     ...REPLY_POLICIES.map((value) => ({ value, label: replyLabel(value) }))],
+    (select) => {
+      const value = select.value as ReplyPolicy | '';
+      void runCommand(view, select,
+                      () => channelsApi().updateGitHubThread(thread.key, { replyPolicy: value || null }));
+    });
+  const link = externalLink('channel-key', thread.key, threadUrl(state.account, thread.key));
+  return threadRow(thread.title || thread.key, link, mode, reply);
 }
 
 function renderThreads(state: GitHubState, view: CommandView, current: number): HTMLElement {
   const section = card(t('settings.github.threads'));
   section.appendChild(hint(t('settings.github.threadsHint')));
-  const repositories = [...new Set(state.threads.map((thread) => thread.key.slice(THREAD_PREFIX.length).split('#')[0]))];
-  if (repositories.length) {
-    section.appendChild(facts([[t('settings.github.repositories'), repositories.join(', ')]]));
-  }
   const watchRow = element('div', 'channel-actions');
   const target = rowField({ label: t('settings.github.watchInput') });
   const add = createButton({
@@ -282,18 +273,22 @@ function renderThreads(state: GitHubState, view: CommandView, current: number): 
     },
   });
   watchRow.append(target.el, add);
-  section.appendChild(watchRow);
+  section.appendChild(cardSection(watchRow));
   if (!state.threads.length) {
-    section.appendChild(createEmptyState({ title: t('settings.github.threadsEmpty') }));
+    section.appendChild(empty(t('settings.github.threadsEmpty')));
     return section;
   }
-  const list = element('div', 'channel-threads');
-  for (const thread of state.threads) list.appendChild(renderThread(state, thread, view));
-  section.appendChild(list);
+  const repositories = [...new Set(state.threads.map((thread) => thread.key.slice(THREAD_PREFIX.length).split('#')[0]))];
+  section.appendChild(facts([[t('settings.github.repositories'), repositories.join(', ')]]));
+  section.appendChild(threadTable(
+    { thread: t('settings.github.column.thread'), mode: t('settings.github.column.mode'),
+      reply: t('settings.github.column.reply') },
+    state.threads.map((thread) => renderThread(state, thread, view)),
+  ));
   if (state.nextCursor) {
     const cursor = state.nextCursor;
     const more = createButton({
-      label: t('settings.github.loadMore'), variant: 'ghost',
+      label: t('settings.github.loadMore'), variant: 'ghost', size: 'sm',
       onClick: () => {
         more.disabled = true;
         void channelsApi().githubThreads(cursor, scope?.signal).then((page) => {
@@ -313,41 +308,6 @@ function renderThreads(state: GitHubState, view: CommandView, current: number): 
   return section;
 }
 
-function renderOutbox(state: GitHubState, view: CommandView): HTMLElement {
-  const section = card(t('settings.github.outbox'));
-  if (!state.outbox.length) {
-    section.appendChild(createEmptyState({ title: t('settings.github.outboxEmpty') }));
-    return section;
-  }
-  for (const item of state.outbox) {
-    const row = element('div', 'channel-outbox-item');
-    row.appendChild(facts([
-      [t('settings.github.status'), t(`settings.github.outboxState.${item.state}` as const)
-        + (item.error ? ` — ${item.error}` : '')],
-      [t('settings.github.column.thread'), `${item.threadTitle || item.thread} (${item.thread})`],
-    ]));
-    row.appendChild(element('div', 'channel-outbox-text', item.text));
-    const actions = element('div', 'channel-actions');
-    if (item.state === 'draft') {
-      const approve = createButton({
-        label: t('settings.github.approve'), variant: 'primary', size: 'sm',
-        onClick: () => { void runCommand(view, approve, () => channelsApi().approveOutbox(item.id)); },
-      });
-      actions.appendChild(approve);
-    }
-    if (DISCARDABLE.has(item.state)) {
-      const discard = createButton({
-        label: t('settings.github.discard'), variant: 'danger', size: 'sm',
-        onClick: () => { void runCommand(view, discard, () => channelsApi().discardOutbox(item.id)); },
-      });
-      actions.appendChild(discard);
-    }
-    row.appendChild(actions);
-    section.appendChild(row);
-  }
-  return section;
-}
-
 function render(state: GitHubState, current: number): void {
   const root = document.getElementById('githubChannelRoot');
   if (!root || current !== generation) return;
@@ -357,7 +317,11 @@ function render(state: GitHubState, current: number): void {
     renderAccount(state, view),
     renderToken(state, view),
     renderThreads(state, view, current),
-    renderOutbox(state, view),
+    outboxCard(state.outbox, {
+      title: t('settings.github.outbox'), empty: t('settings.github.outboxEmpty'),
+      approve: t('settings.github.approve'), discard: t('settings.github.discard'),
+      state: (value) => t(`settings.github.outboxState.${value}` as const),
+    }, view, { approve: (id) => channelsApi().approveOutbox(id), discard: (id) => channelsApi().discardOutbox(id) }),
   );
   if (scope) {
     refreshWhileConnecting(scope, state.account, (signal) => channelsApi().githubAccount(signal),
@@ -370,13 +334,11 @@ async function load(current: number): Promise<void> {
   try {
     const api = channelsApi();
     const [account, page, outbox, vaultEntries] = await Promise.all([
-      api.githubAccount(signal), api.githubThreads('', signal), api.outbox(signal), vaultEntryNames(),
+      api.githubAccount(signal), api.githubThreads('', signal), api.outbox('github', signal), vaultEntryNames(),
     ]);
     if (current !== generation) return;
-    render({
-      account, threads: page.items, nextCursor: page.nextCursor, vaultEntries,
-      outbox: outbox.items.filter((item) => item.thread.startsWith(THREAD_PREFIX)),
-    }, current);
+    render({ account, threads: page.items, nextCursor: page.nextCursor, vaultEntries, outbox: outbox.items },
+           current);
   } catch (error) {
     const root = document.getElementById('githubChannelRoot');
     if (!root || current !== generation || signal?.aborted) return;

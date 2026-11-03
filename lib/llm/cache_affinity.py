@@ -52,6 +52,18 @@ CACHE_AFFINITY_HEADER_CARRIERS = {
     'cache_affinity_mt_session_id': 'Mt-Session-Id',
 }
 
+#: Carriers whose hop picks the upstream cache domain from the lineage key
+#: alone, whatever credential Tofu sent. FRIDAY's account pool does not depend
+#: on the caller's AppId: on 2026-11-03 Claude rounds sent right after a
+#: rebind to a second AppId read the entry the first AppId wrote, and back.
+CACHE_DOMAIN_CARRIERS = frozenset({'mt-session-id'})
+
+
+def affinity_selects_cache_domain(evidence: str) -> bool:
+    """Whether ``cache_affinity_evidence`` names a domain-selecting carrier."""
+    slots = evidence.split('@', 1)[0].split(',') if evidence else ()
+    return any(slot.lower() in CACHE_DOMAIN_CARRIERS for slot in slots)
+
 
 def cache_affinity_key(body: Mapping) -> str:
     """Return the request lineage's stable key, or '' when it has no lineage.

@@ -87,6 +87,12 @@ def test_account_threads_and_outbox_round_trip(app):
         listing = (await (await client.get('/api/v4/channels/outbox', headers=headers)).get_json())['data']
         _validate(listing, 'OutboxPage')
         assert [item['state'] for item in listing['items']] == ['draft']
+        # Each channel's Settings tab lists only its own items, like its thread page.
+        dx_only = await client.get('/api/v4/channels/outbox?channel=dx', headers=headers)
+        assert [item['id'] for item in (await dx_only.get_json())['data']['items']] == [draft.id]
+        github_only = await client.get('/api/v4/channels/outbox?channel=github', headers=headers)
+        assert (await github_only.get_json())['data']['items'] == []
+        assert (await client.get('/api/v4/channels/outbox?channel=mail', headers=headers)).status_code == 400
         # Another owner cannot see or decide this owner's items.
         other = {'X-Test-Owner': str(OWNER + 1)}
         assert (await (await client.get('/api/v4/channels/outbox', headers=other)).get_json())['data']['items'] == []

@@ -895,8 +895,9 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                 #   KNOWN reset (often hours/days). A bare "waiting for the
                 #   model" would mislabel it as an imminent-recovery stall.
                 _detail_key = 'stream.phase.waitingQuotaReset'
-                _detail = (f'{_label} subscription quota exhausted — waiting '
-                           f'for the usage window to reset (already {_secs}s)…')
+                _detail = (f'{_label} subscription quota exhausted — retrying '
+                           f'automatically while waiting for the usage window to reset '
+                           f'(already {_secs}s)…')
                 _args = {'model': _label, 'elapsed': _secs}
             else:
                 _detail_key = 'stream.phase.waitingForResponse'

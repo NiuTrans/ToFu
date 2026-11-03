@@ -35,6 +35,8 @@ ordinary interactive admission (user supremacy); the Settings card surfaces
 the override-vs-stop conflict. Optional background work may enter
 ``strict_billing_stop_admission()`` so a fresh recorded stop defeats a stale
 manual ON for that request only and cannot be promoted as last resort.
+A planner choosing among credentials for such work reads the same verdict
+before minting a slot through ``is_key_refused_for_optional_work``.
 
 Namespace fold (account/face separation, charter #23):
   History may have been recorded under an absorbed duplicate face CARD
@@ -146,6 +148,7 @@ from lib.key_stats._enable import (
     _rank_for_last_resort_unlocked,
     _raw_enabled_unlocked,
     is_key_enabled,
+    is_key_refused_for_optional_work,
     key_admission_batch,
 )
 
@@ -167,6 +170,7 @@ __all__ = [
     'get_today_stats',
     'get_all_stats',
     'is_key_enabled',
+    'is_key_refused_for_optional_work',
     'key_admission_batch',
     'strict_billing_stop_admission',
     'is_strict_billing_stop_admission',

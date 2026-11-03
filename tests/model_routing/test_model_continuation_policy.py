@@ -165,7 +165,8 @@ def test_same_opus_effort_change_preserves_signed_prefix_and_tool_latch(replay_s
     restored, covered = replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], cfg,
                                               conversation_id='c', user_id=1)
     assert covered == 2
-    assert restored == messages
+    assert restored == messages[:-1] + [
+        {**messages[-1], '_reasoning_continuity': 'completed_turn'}]
     assert cfg['_modelReplayStatus'] == ('restored' if depth == 'medium' else 'restored_effort')
     assert cfg['_modelReplayToolLatch'] == {'programmaticCalling': 'on'}
     restored[-1]['_anthropic_content_blocks'][0]['signature'] = 'mutated'

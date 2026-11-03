@@ -5,7 +5,7 @@ callbacks and cleanup. No counter, account mirror, backend, routing or retry.
 """
 from dataclasses import dataclass, field, replace
 from collections.abc import Mapping as Mapping
-from typing import Protocol
+from typing import Any, Protocol
 import asyncio
 import threading
 import time
@@ -124,8 +124,8 @@ class ModelControl:
         self.next_ordinal = 1
         self.reserve_entered = False
         self.failure = None
-        self.counter_policy = None
-        self.settlement = None
+        self.counter_policy: dict[str, Any] | None = None
+        self.settlement: ModelSettlement | None = None
 
     async def handle(self, value, process, *, closing=False):
         required = {'version','type','request_id','owner_user_id','task_id','attempt_ordinal','action',
@@ -200,7 +200,7 @@ class ModelControl:
             elif action == 'dispatch' and isinstance(result, ModelDispatch):
                 headers = result.values()
             elif action == 'settle' and isinstance(result,ModelPricing):
-                if not self.pricing or self.settlement.unsent:
+                if not self.pricing or self.settlement is None or self.settlement.unsent:
                     raise TypeError('native pricing requires explicit sent settlement')
                 try: price=result.values()
                 except (ValueError,TypeError,OverflowError) as error:
@@ -217,7 +217,7 @@ class ModelControl:
             if self.failure is None:
                 self.failure = error
         if expires is None or time.monotonic_ns() < expires:
-            reply = dict(version=self.client.protocol_version,type='model_decision',request_id=value['request_id'],accepted=accepted)
+            reply: dict[str, Any] = dict(version=self.client.protocol_version,type='model_decision',request_id=value['request_id'],accepted=accepted)
             if accepted and action == 'reserve':
                 reply['output_tokens'] = output
             if accepted and action == 'dispatch' and headers is not None:

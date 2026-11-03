@@ -7,7 +7,10 @@ fixed at launch by ``lib.tasks_pkg.conversation_delivery``: a child invocation
 runs under its parent's conversation id, but its commands publish nowhere.
 Headless and child commands retain queryable results until completed-history
 eviction or process exit; running entries are never evicted. Controls are
-scoped to their owner.
+scoped to their owner. A root task without a saved conversation reads its own
+finished commands at its next round boundary (``take_run_completions``): the
+registry entry is that lane's authority, each result is presented once, and
+one the launching task already read with ``poll`` is not presented again.
 A failed publication stays ``failed`` and retries with backoff. It settles as
 ``undeliverable`` (one WARNING, no restart record) only once the authority
 confirms its owner conversation absent and no live flow can still create it
@@ -222,16 +225,17 @@ class BackgroundCommandTask(dict):
                 if key in config}
 
 def background_command_result(command: str, command_id: str, *,
-                              task: dict[str, Any],
-                              has_conversation: bool = True) -> str:
+                              task: dict[str, Any]) -> str:
     from lib.tools.background_guidance import background_command_guidance
 
-    from lib.tasks_pkg.conversation_delivery import storage_free_runtime
+    from lib.tasks_pkg.conversation_delivery import (
+        completion_delivery, has_no_saved_conversation, storage_free_runtime)
 
     guidance = background_command_guidance(
         authority_catalog=task.get('_executable_tool_catalog'),
-        has_conversation=has_conversation,
+        delivery=completion_delivery(task),
         outlives_run=storage_free_runtime(task),
+        ends_with_response=has_no_saved_conversation(task),
     )
     return (f'$ {command}\n\n[Command moved to background: {command_id}. '
             f'{guidance}]')
@@ -367,6 +371,7 @@ def register_handed_off_command(*, command_id: str, task: dict[str, Any],
     backgrounded command, its already-running shell has no restart record.
     """
     from lib.tasks_pkg.conversation_delivery import completion_conversation_id
+    conv_id = completion_conversation_id(task)
     with _lock:
         spawned_at = getattr(task, 'spawned_at', None)
         elapsed = max(0.0, time.monotonic() - spawned_at) if spawned_at else 0.0
@@ -375,12 +380,15 @@ def register_handed_off_command(*, command_id: str, task: dict[str, Any],
             'task': task,
             'launch_task_id': str(task.get('id') or ''),
             'user_id': task.get('_userId'),
-            'conv_id': completion_conversation_id(task),
+            'conv_id': conv_id,
             'origin_conv_id': str(task.get('convId') or ''),
             'state': {
                 'command': command, 'result': None, 'error': None,
                 'finished': False, 'started_at': time.time() - elapsed,
-                'finished_at': None, 'delivery_status': 'pending',
+                'finished_at': None,
+                # Without a receiving conversation the launching run collects
+                # it (take_run_completions or poll); nothing is published.
+                'delivery_status': 'pending' if conv_id else 'not_applicable',
             },
         }
     return True
@@ -410,6 +418,62 @@ def set_handed_off_delivery(command_id: str, status: str) -> None:
         if entry is not None:
             entry['state']['delivery_status'] = status
             _prune_finished()
+
+
+def settle_unpublished_handoff(command_id: str) -> None:
+    """Close a finished handoff that no conversation receives; its run reads it."""
+    with _lock:
+        entry = _registry.get(command_id)
+        launch_task_id = '' if entry is None else entry.get('launch_task_id') or ''
+        _prune_finished()
+    _note_unpublished(command_id, launch_task_id)
+
+
+def _awaits_run_delivery(entry: dict, task_id: str, user_id: Any) -> bool:
+    """With _lock held: a finished result of this run no conversation receives."""
+    state = entry['state']
+    return (bool(task_id) and entry.get('launch_task_id') == task_id
+            and _owned(entry, user_id) and entry['done'].is_set()
+            and state.get('delivery_status') == 'not_applicable'
+            and not state.get('run_result_seen'))
+
+
+def take_run_completions(*, task_id: str, user_id: Any) -> list[dict[str, Any]]:
+    """Inbox items for this run's finished commands that no conversation receives.
+
+    The launching root task calls this at its round boundary: each result is
+    returned once and never after ``poll`` showed it to that task. A result
+    finishing after the run returned stays readable with ``poll`` only.
+    """
+    from lib.tasks_pkg.handlers._background_command import run_completion_item
+    finished = []
+    with _lock:
+        for command_id, entry in _registry.items():
+            if _awaits_run_delivery(entry, task_id, user_id):
+                entry['state']['run_result_seen'] = True
+                finished.append((entry['state']['finished_at'], command_id,
+                                 entry['state']['command'],
+                                 entry['state']['result'] or ''))
+    return [run_completion_item(command_id, command, result)
+            for _, command_id, command, result in sorted(finished)]
+
+
+def has_run_completions(*, task_id: str, user_id: Any,
+                        excluding: frozenset[str] = frozenset()) -> bool:
+    """Whether ``take_run_completions`` would return an item now (no consumption)."""
+    with _lock:
+        return any(_awaits_run_delivery(entry, task_id, user_id)
+                   for command_id, entry in _registry.items()
+                   if command_id not in excluding)
+
+
+def note_run_result_seen(command_id: str, *, task_id: str) -> None:
+    """The launching task read this finished result with ``poll``; skip its injection."""
+    with _lock:
+        entry = _registry.get(command_id)
+        if (entry is not None and task_id and entry.get('launch_task_id') == task_id
+                and entry['done'].is_set()):
+            entry['state']['run_result_seen'] = True
 
 
 def _prune_finished() -> None:
@@ -442,6 +506,7 @@ def _snapshot(command_id: str, entry: dict) -> dict[str, Any]:
     return {
         'command_id': command_id, 'command': state['command'],
         'conv_id': entry.get('origin_conv_id', entry.get('conv_id', '')),
+        'launch_task_id': entry.get('launch_task_id', ''),
         'status': 'completed' if finished else 'running',
         'result': state['result'] if finished else None,
         'error': state['error'], 'started_at': state['started_at'],

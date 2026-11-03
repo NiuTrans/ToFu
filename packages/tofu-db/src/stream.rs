@@ -158,6 +158,15 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// A deterministic byte bound that a smaller selection can satisfy; bare
+/// `InvalidInput` would reach the wire as an opaque protocol error.
+fn payload_too_large(message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("storage_payload_too_large: {message}"),
+    )
+}
+
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, message)
 }
@@ -658,7 +667,7 @@ pub(crate) fn read_persisted_positions(
             selected_bytes = selected_bytes
                 .checked_add(event.encoded_len())
                 .filter(|bytes| *bytes <= MAX_STREAM_READ_BYTES)
-                .ok_or_else(|| invalid_input("stream point-read exceeds 8 MiB"))?;
+                .ok_or_else(|| payload_too_large("stream point-read exceeds 8 MiB"))?;
             selected.insert(*position, event);
         }
     }
@@ -1333,7 +1342,7 @@ impl StreamCatalog {
                     selected_bytes = selected_bytes
                         .checked_add(event.encoded_len())
                         .filter(|bytes| *bytes <= MAX_STREAM_READ_BYTES)
-                        .ok_or_else(|| invalid_input("stream point-read exceeds 8 MiB"))?;
+                        .ok_or_else(|| payload_too_large("stream point-read exceeds 8 MiB"))?;
                     selected.insert(*position, event);
                 }
             }

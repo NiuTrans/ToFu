@@ -20,12 +20,19 @@ def is_event_page_size_error(exc):
     """Size rejection from event.list, never generic pressure or corruption.
 
     Native dispatch intentionally omits internal error text. Its deterministic
-    materialized-page rejection therefore uses the public payload-size code.
-    Retain the specific-text legacy path for older SQL/native peers.
+    stream-read bound (stored bytes of the selected events) therefore uses the
+    public payload-size code. Engines built before that classification report
+    the same bound as an unclassified ``database_protocol_error`` whose
+    sanitized message is only its code; a protocol failure carrying client or
+    fence text is not this refusal. Callers retry only multi-row pages, so a
+    genuine refusal still fails at one row. Retain the specific-text legacy
+    path for older SQL/native peers.
     """
     code = getattr(exc, "code", "")
-    return code == "storage_payload_too_large" or (
-        code == "database_unavailable" and "event page exceeds 8 MiB" in str(exc)
+    return (
+        code == "storage_payload_too_large"
+        or (code == "database_protocol_error" and str(exc) == code)
+        or (code == "database_unavailable" and "event page exceeds 8 MiB" in str(exc))
     )
 
 

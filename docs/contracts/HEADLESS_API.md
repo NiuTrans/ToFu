@@ -235,8 +235,10 @@ Durable UI conversations keep their fail-closed declaration boundary.
 compatible agent paths create their task with `saved_conversation=False`, so
 nothing the model starts may outlive the response:
 
-- shell commands always run in the foreground to completion; there is no
-  elapsed-time, steer or owner-requested handoff;
+- a shell command still running after `AUTO_BACKGROUND_AFTER_S` (120 s) moves
+  to the background and returns a `bg_*` handle; its result reaches the model
+  at the next round boundary and `poll` waits for it. A handed-off command
+  still running when the response ends is stopped;
 - `run_command(background=true)`, `timer_create` and an agent
   `schedule_create` targeting `current` or the request's own label are refused
   before anything runs, with a typed `no_saved_conversation` tool error whose
@@ -264,10 +266,10 @@ nothing the model starts may outlive the response:
   in an existing conversation), the task's isolated-workspace
   `integration_checkpoint`/`integration_submit`, and reads of other owned
   conversations. The `run_command`
-  description and its `background` parameter state that nothing moves to the
-  background; `poll` describes only tasks in other conversations; `kill`, which
-  could stop nothing here, is not offered; and the agent-schedule target hint
-  omits `current`.
+  description states the handoff and where its result arrives, and its
+  `background` parameter that it is unavailable; `poll` describes only `bg_*`
+  command handles and tasks in other conversations, `kill` only `bg_*` command
+  handles; and the agent-schedule target hint omits `current`.
 
 Decision record. Problem: the task ran under a label that is never created,
 yet commands were handed to the background after 60 s and the model was told
@@ -285,6 +287,24 @@ stops calling tools, orphaning the process and its result). Direct relays
 (`/api/v1/chat/stream-direct`, and compatible requests that declare `tools`)
 execute no server tool, so they never reach a deferred lane. Specs:
 `tests/api/test_headless_no_saved_conversation.py`.
+
+Handoff decision record (owner decision 2026-11-03). Problem: keeping every
+command in the foreground let one command (a server started without
+detaching, an interactive program, a hung build) hold the request until its
+deadline, with no way for the model to inspect, stop or work around it.
+Decision: a request's task hands off after `AUTO_BACKGROUND_AFTER_S` like every
+other composition (`completion_delivery` returns `run`). The command registry
+is the result lane: `background_commands.take_run_completions` injects a
+finished result once at the task's next round boundary, never after `poll`
+already showed it, and a blocking `poll` also returns when another of the
+task's commands finishes. `poll` and `kill` are offered for `bg_*` handles, and
+a handed-off command reads as aborted once its task is terminal, so it stops
+when the response ends. Explicit `background=true` stays refused: a command
+the model detaches on purpose is meant to outlive the response. Alternatives
+rejected: keeping the foreground (the problem above); a per-command timeout
+(destroys running work; models cannot predict durations); publishing into a
+synthetic conversation row (the label owns no row, and inventing one weakens
+ownership). Specs: `tests/api/test_headless_no_saved_conversation.py`.
 
 Sub-agent decision record. Problem: `spawn_agents` stayed offered, so the
 request received a launch receipt promising that completions "arrive

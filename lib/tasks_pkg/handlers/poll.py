@@ -82,10 +82,19 @@ def _coerce_wait_s(fn_args: dict) -> float:
     return min(_poll_wait_cap_s(), requested) if requested else 0.0
 
 
-def _wait_interruption(task: dict, runtime_context=None):
-    """Return a predicate naming why a blocking wait must end now, or ''."""
-    from lib.tasks_pkg.conversation_delivery import completion_conversation_id
+def _wait_interruption(task: dict, polled=(), runtime_context=None):
+    """Return a predicate naming why a blocking wait must end now, or ''.
+
+    A root task without its own conversation is interrupted by another of its
+    commands finishing (delivered at its next round boundary); the polled
+    handles themselves end the wait with their own result instead.
+    """
+    from lib.tasks_pkg.conversation_delivery import (
+        completion_conversation_id, completion_delivery)
     conv_id = completion_conversation_id(task)
+    run_lane = not conv_id and completion_delivery(task) == 'run'
+    task_id = str(task.get('id') or '')
+    polled = frozenset(polled)
 
     def interrupted() -> str:
         if task.get('aborted'):
@@ -95,6 +104,11 @@ def _wait_interruption(task: dict, runtime_context=None):
         if conv_id:
             from lib.agent_inbox import has_pending
             if has_pending(conv_id, modes=_PENDING_INPUT_MODES):
+                return 'pending_input'
+        if run_lane:
+            from lib.tasks_pkg.background_commands import has_run_completions
+            if has_run_completions(task_id=task_id, user_id=task.get('_userId'),
+                                   excluding=polled):
                 return 'pending_input'
         return ''
     return interrupted
@@ -258,7 +272,7 @@ def _await_commands(ids: list[str], user_id: Any, deadline: float,
 
 
 def _format_command_section(info: dict, *, waited: bool,
-                            automatic_delivery: bool, ended_by: str = '') -> str:
+                            delivery: str, ended_by: str = '') -> str:
     command_id = info['command_id']
     if info['status'] == 'completed':
         result_text = info['result'] or '(no output)'
@@ -274,7 +288,7 @@ def _format_command_section(info: dict, *, waited: bool,
     elif waited:
         from lib.tools.background_guidance import background_wait_cap_advice
         text += '\n\nWait cap reached. ' + background_wait_cap_advice(
-            command_id, automatic_delivery=automatic_delivery)
+            command_id, delivery=delivery)
     return text
 
 
@@ -385,7 +399,7 @@ def _handle_poll(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
         return tc_id, refusal, False
 
     deadline = time.monotonic() + wait_s
-    interrupted = _wait_interruption(task, runtime_context)
+    interrupted = _wait_interruption(task, ids, runtime_context)
     sections: list[str] = []
     unknown: list[str] = []
     swarm_wait: list[str] = []
@@ -407,10 +421,14 @@ def _handle_poll(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
                     handle_id, user_id, deadline, interrupted, scope)
             else:
                 info, ended_by = command_snapshots[handle_id], batch_ended_by
-            from lib.tasks_pkg.conversation_delivery import completion_reaches
+            from lib.tasks_pkg.conversation_delivery import polled_command_delivery
+            shown = info or payload
+            if shown.get('status') == 'completed':
+                from lib.tasks_pkg.background_commands import note_run_result_seen
+                note_run_result_seen(handle_id, task_id=str(task.get('id') or ''))
             sections.append(_format_command_section(
-                info or payload, waited=wait_s > 0 and time.monotonic() >= deadline,
-                automatic_delivery=completion_reaches(task, info or payload),
+                shown, waited=wait_s > 0 and time.monotonic() >= deadline,
+                delivery=polled_command_delivery(task, shown),
                 ended_by=ended_by))
         elif kind == 'swarm':
             if wait_s > 0 and time.monotonic() < deadline:

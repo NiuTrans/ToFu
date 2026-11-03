@@ -17,8 +17,10 @@ export interface ApplicationInteractionPorts {
 export function installApplicationInteractions(ports: ApplicationInteractionPorts): () => void {
   const scope = createLifecycleScope(ports.window), document = ports.document;
   try {
-    const list = document.getElementById('convList');
-    if (list) installSidebarInteractions(scope, ports.window, list, ports.sidebar);
+    const sidebar = document.getElementById('sidebarBody')
+      || document.querySelector('.coordination-conversation-column')
+      || document.getElementById('convList');
+    if (sidebar) installSidebarInteractions(scope, ports.window, sidebar as HTMLElement, ports.sidebar);
     ports.initializeFolders();
     const input = document.getElementById('userInput') as HTMLTextAreaElement | null;
     if (input) installComposerInput(scope, input, ports.composer);

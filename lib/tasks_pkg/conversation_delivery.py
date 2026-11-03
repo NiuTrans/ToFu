@@ -21,9 +21,9 @@ A child invocation (swarm worker, orchestration step, approval delegate)
 carries its parent's ``convId`` as execution identity but owns no turn in that
 conversation. A deferred completion published there would inject the child's
 result into, and wake, the parent's transcript, so a child has no conversation
-delivery: its commands never hand off, and an explicit background command is
-read with ``poll`` (docs/modules/task_engine.md, "Background command delivery
-owner"). A timer continuation or a ``current`` agent schedule would start a
+delivery: a handed-off or explicit background command is read with ``poll``
+(docs/modules/task_engine.md, "Background command delivery owner"). A timer
+continuation or a ``current`` agent schedule would start a
 turn there that nobody in that conversation asked for, so a child, like a task
 without a conversation, is refused both. A headless request cannot host a
 sub-agent either: child lineage registers in, and reports into, a saved
@@ -32,15 +32,22 @@ conversation.
 A storage-free runtime task (``tofu-agent run``/``serve`` and the embedded
 ``AgentRuntime``; config ``_storageFreeRuntime``) also runs under a job label
 that no store holds, so nothing can publish a completion into it after its
-tool call returns. Unlike a headless request it keeps explicit background
-commands: they are pull-only, read with ``poll`` like a child's, and a command
-still running when the run returns keeps running in its own session — a
-service started in a sandbox container must outlive the agent that started it
-(docs/DEVELOPER_RUNTIME.md, "Background commands").
+run returns. Unlike a headless request it keeps explicit background commands,
+and a command still running when the run returns keeps running in its own
+session — a service started in a sandbox container must outlive the agent that
+started it (docs/DEVELOPER_RUNTIME.md, "Background commands").
 
-Entry points: :func:`conversation_delivery_available` (handoff and receipt
-policy), :func:`completion_conversation_id` (the conversation a background
-command, timer or ``current`` schedule delivers into),
+Every composition hands a foreground command off after
+``lib.tools.poll.AUTO_BACKGROUND_AFTER_S`` when something can collect its
+result (:func:`completion_delivery`): a root task without a conversation reads
+its own finished commands at the next round boundary
+(``background_commands.take_run_completions``) and with ``poll``; a headless
+request's handed-off commands stop when its response ends.
+
+Entry points: :func:`conversation_delivery_available` (receipt policy),
+:func:`completion_delivery` (handoff and receipt policy),
+:func:`completion_conversation_id` (the conversation a background command,
+timer or ``current`` schedule delivers into),
 :func:`deferred_completion_refusal` (handler admission).
 """
 
@@ -79,6 +86,36 @@ def conversation_delivery_available(task: Mapping[str, Any]) -> bool:
 def completion_conversation_id(task: Mapping[str, Any]) -> str:
     """The conversation that receives this task's deferred completions, or ''."""
     return str(task.get('convId') or '') if conversation_delivery_available(task) else ''
+
+
+def completion_delivery(task: Mapping[str, Any]) -> str:
+    """How a background command's completion reaches the task that launched it.
+
+    ``conversation``: published into the task's own conversation (durable
+    receipt, next-round injection, one collective wake). ``run``: a root task
+    without such a conversation reads it at its next round boundary while the
+    run continues, and ``poll`` waits for it. ``poll``: a child invocation
+    drains no inbox and collects it with ``poll`` only. ``none``: no live
+    control can collect it, so its commands never leave the foreground.
+    """
+    if conversation_delivery_available(task):
+        return 'conversation'
+    from lib.tools.background_guidance import result_controls
+    if 'poll' not in result_controls(task.get('_executable_tool_catalog')):
+        return 'none'
+    from lib.tasks_pkg.invocation import is_child_invocation
+    return 'poll' if is_child_invocation(task) else 'run'
+
+
+def polled_command_delivery(task: Mapping[str, Any], command: Mapping[str, Any]) -> str:
+    """The delivery a polled command's completion has toward the polling task."""
+    if completion_reaches(task, command):
+        return 'conversation'
+    if (command.get('delivery_status') == 'not_applicable'
+            and command.get('launch_task_id') == str(task.get('id') or '')
+            and completion_delivery(task) == 'run'):
+        return 'run'
+    return 'poll'
 
 
 def completion_reaches(task: Mapping[str, Any], command: Mapping[str, Any]) -> bool:
@@ -130,13 +167,16 @@ def _headless_refusal(task: Mapping[str, Any], fn_name: str,
             next_action=('Do the work directly in this request with your own '
                          'tools; nothing started here may outlive the response.'))
     if fn_name == 'run_command' and fn_args.get('background'):
+        from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
         return _refusal(
             _HEADLESS,
-            subject="a background command's completion could never be delivered",
+            subject='a background command would outlive the response',
             outcome='No command ran.',
-            next_action=('Run it again without `background`; it then runs in '
-                         'the foreground until it finishes and returns its '
-                         'result in this request.'))
+            next_action=('Run it again without `background`; its result returns '
+                         'in this request. A command still running after '
+                         f'{AUTO_BACKGROUND_AFTER_S} s returns a `bg_*` handle '
+                         'that `poll` waits on, and it is stopped when the '
+                         'response ends.'))
     if fn_name == 'timer_create':
         return _refusal(
             _HEADLESS,
@@ -213,10 +253,12 @@ def deferred_completion_refusal(task: Mapping[str, Any], fn_name: str,
 __all__ = [
     'NO_SAVED_CONVERSATION',
     'completion_conversation_id',
+    'completion_delivery',
     'completion_reaches',
     'conversation_delivery_available',
     'deferred_completion_refusal',
     'has_no_saved_conversation',
     'mark_no_saved_conversation',
+    'polled_command_delivery',
     'storage_free_runtime',
 ]

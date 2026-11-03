@@ -4,7 +4,8 @@
 marker. Transient tasks carry ``_inline_messages``/``_transientRuntime`` too,
 but a root task that owns its saved conversation keeps its lanes, and
 ordinary conversations keep their full tool surface. A storage-free runtime
-run keeps explicit background commands with pull-only completions. Child invocations and
+run keeps explicit background commands and reads their completions at its next
+round boundary or with ``poll``. Child invocations and
 tasks without a conversation are specified in
 ``tests/tasks_pkg/test_deferred_lane_owner.py``; the headless side end to end
 in ``tests/api/test_headless_no_saved_conversation.py``.
@@ -17,6 +18,7 @@ import json
 import pytest
 
 from lib.tasks_pkg.conversation_delivery import (
+    completion_delivery,
     conversation_delivery_available,
     deferred_completion_refusal,
     has_no_saved_conversation,
@@ -117,7 +119,8 @@ def test_transient_root_explicit_background_still_promises_conversation_delivery
     assert 'will be shown in the conversation' in content
 
 
-def test_storage_free_run_is_pull_only_but_keeps_background_commands(created, monkeypatch):
+def test_storage_free_run_reads_its_own_completions_and_keeps_background_commands(
+        created, monkeypatch):
     run = created('agent-job-label', config={'_storageFreeRuntime': True})
     assert not has_no_saved_conversation(run)
     assert not conversation_delivery_available(run)
@@ -127,6 +130,7 @@ def test_storage_free_run_is_pull_only_but_keeps_background_commands(created, mo
     from lib.tasks_pkg.handlers import code_exec
     from lib.tools.poll import KILL_TOOL, POLL_TOOL
     run['_executable_tool_catalog'] = [POLL_TOOL, KILL_TOOL]
+    assert completion_delivery(run) == 'run'
     started = []
     monkeypatch.setattr('lib.tasks_pkg.background_commands.start_background_command',
                         lambda **kwargs: started.append(kwargs) or 'bg_run')
@@ -137,7 +141,8 @@ def test_storage_free_run_is_pull_only_but_keeps_background_commands(created, mo
     assert len(started) == 1 and started[0]['task'] is run
     assert 'shown in the conversation' not in content
     assert 'end this turn' not in content
-    assert 'Nothing delivers its completion to this run' in content
+    assert 'reaches your next step once it finishes' in content
+    assert 'nothing delivers it after this run returns' in content
     assert 'keeps running' in content
     assert 'kill' in content
 
@@ -169,7 +174,7 @@ def test_ordinary_conversation_surface_is_unchanged():
     assert catalog['schedule_create'] == SCHEDULE_TOOL_CREATE['function']
 
 
-def test_storage_free_surface_offers_pull_only_controls():
+def test_storage_free_surface_describes_round_boundary_delivery():
     from lib.tasks_pkg.model_config import _assemble_tool_list
 
     cfg = {'userId': OWNER, 'model': 'test', 'plugins': [], 'mcpEnabled': False,
@@ -184,23 +189,33 @@ def test_storage_free_surface_offers_pull_only_controls():
     assert 'poll' in catalog and 'kill' in catalog
     command = catalog['run_command']
     assert 'arrive automatically' not in command['description']
-    assert 'Nothing delivers its completion to this task automatically' in (
-        command['parameters']['properties']['background']['description'])
+    assert ('returns a `bg_*` handle; its result reaches your next step once it '
+            'finishes, or `poll` waits for it.') in command['description']
+    assert command['parameters']['properties']['background']['description'].startswith(
+        'Start in background and return a command_id handle. Its result reaches '
+        'your next step once it finishes; nothing delivers it after this run returns.')
+    assert 'reach your next step while this run continues' in catalog['poll']['description']
     for name in ('poll', 'kill'):
         assert 'delivered automatically' not in catalog[name]['description']
 
 
-def test_headless_surface_withholds_timers_and_describes_foreground_commands():
+def test_headless_surface_withholds_timers_and_hands_off_long_commands():
     from lib.tools.code_exec import CODE_EXEC_TOOL
+    from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
 
     catalog, wire, contracts = _surface(conv_id='', no_saved_conversation=True)
     assert 'timer_create' not in catalog
     assert 'timer_create' not in {tool['function']['name'] for tool in wire or []}
     command = catalog['run_command']
     background = command['parameters']['properties']['background']
-    assert 'no saved conversation' in command['description']
+    # A long foreground command still returns control to the model; its result
+    # reaches the next round or `poll`, and it stops when the response ends.
+    assert (f'A command still running after {AUTO_BACKGROUND_AFTER_S} s moves to the '
+            'background and returns a `bg_*` handle') in command['description']
     assert 'arrive automatically' not in command['description']
     assert background['description'].startswith('Unavailable')
+    assert 'no saved conversation' in background['description']
+    assert 'stopped when the response ends' in background['description']
     # Prose only: validation keeps accepting the argument so the handler can
     # answer with its typed refusal and next action.
     assert {key: value for key, value in background.items() if key != 'description'} == {
@@ -208,12 +223,13 @@ def test_headless_surface_withholds_timers_and_describes_foreground_commands():
             'properties']['background'].items() if key != 'description'}
     target = catalog['schedule_create']['parameters']['properties']['target_conv_id']
     assert 'current' in target['description'] and 'unavailable' in target['description']
-    # No command or sub-agent handle can exist here; kill would stop nothing.
-    text = json.dumps(catalog['poll'])
-    assert 'bg_*' not in text and 'delivered automatically' not in text
-    assert 'swarm' not in text and 'spawn_agents' not in text
-    assert catalog['poll']['parameters']['properties']['id']['description'].startswith('One handle: a task id.')
-    assert 'kill' not in catalog
+    # A handed-off command handle can exist here; a sub-agent handle cannot.
+    for name in ('poll', 'kill'):
+        text = json.dumps(catalog[name])
+        assert 'bg_*' in text and 'delivered automatically' not in text
+        assert 'swarm' not in text and 'spawn_agents' not in text
+    assert catalog['poll']['parameters']['properties']['id']['description'].startswith(
+        'One handle: a bg_* command id or a task id.')
     assert not {'spawn_agents', 'get_agent_result', 'send_agent_message', 'get_agent_messages',
                 'set_approval_delegate'} & set(catalog)
     # Tool-search documents are compiled from the same projected catalog.

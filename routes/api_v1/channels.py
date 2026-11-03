@@ -10,7 +10,7 @@ Routes (projected onto ``/api/v4`` with the v4 envelope):
   PUT  /api/v1/channels/github                    — enable/disable, token or vault entry, API base
   GET  /api/v1/channels/github/threads            — GitHub issue/PR thread page
   PUT  /api/v1/channels/github/threads/<path:key> — set a GitHub thread's mode / reply policy
-  GET  /api/v1/channels/outbox                    — active outbox items (drafts, queue, failures)
+  GET  /api/v1/channels/outbox[?channel=dx|github] — active outbox items (drafts, queue, failures)
   POST /api/v1/channels/outbox/<item_id>/approve  — approve a draft
   POST /api/v1/channels/outbox/<item_id>/discard  — discard a draft/queued/failed item
 
@@ -210,10 +210,13 @@ async def update_github_thread_v1(thread_key):
 @api_v1_channels_bp.route('/api/v1/channels/outbox', methods=['GET'])
 @require_scope('conversations')
 @api_meta(summary='List active channel outbox items (drafts, queue, unknown, failed)',
-          tags=['channels'], scope='conversations', responses=_responses('OutboxPage', 'Outbox'))
+          tags=['channels'], scope='conversations', responses=_responses('OutboxPage', 'Outbox'),
+          parameters=[{'name': 'channel', 'in': 'query', 'required': False,
+                       'schema': schema_definition(_contract(), 'Channel')}])
 async def list_channel_outbox_v1():
     from lib.channels import service
-    return await _call(service.outbox_page, request_user_id())
+    channel = request.args.get('channel') or None
+    return await _call(service.outbox_page, request_user_id(), channel=channel)
 
 
 @api_v1_channels_bp.route('/api/v1/channels/outbox/<item_id>/approve', methods=['POST'])

@@ -55,9 +55,11 @@ def runtime(context, monkeypatch):
             state.attempts['worker-attempt'] = {'conversationId': conv, 'turnId': 'worker-turn',
                 'attemptId': 'worker-attempt', 'taskId': 'worker-task', 'status': 'running'}
             return SimpleNamespace(value={})
+    attempt_get = lambda attempt, **kw: deepcopy(state.attempts.get(attempt))
+    c.repo.attempt_get = attempt_get
     state.service = ProjectDispatchService(c.repo, commands=Commands(),
         turn_get=lambda conv, turn, **kw: deepcopy(state.turns.get(turn)),
-        attempt_get=lambda attempt, **kw: deepcopy(state.attempts.get(attempt)))
+        attempt_get=attempt_get)
     monkeypatch.setattr(service, 'ProjectDispatchService', lambda repo: state.service)
     state.task = {'id': 'coordinator-task', 'convId': 'coordinator', '_userId': 7,
                   '_principalContext': c.principal.to_payload(), 'config': {'projectPath': '/project'}}

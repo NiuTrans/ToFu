@@ -13,7 +13,7 @@ test.after(() => fs.rmSync(temp, { recursive: true, force: true }));
 const drain = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
 function fixture() {
-  const dom = new JSDOM('<body><div id="convList"></div><textarea id="userInput"></textarea><div id="dropOverlay">'
+  const dom = new JSDOM('<body><div id="sidebarBody"><div id="convList"></div></div><textarea id="userInput"></textarea><div id="dropOverlay">'
     + '<span class="drop-text"></span><span class="drop-hint"></span></div><div id="settingsModal"></div>'
     + '<div id="sidebarSearchWrapper" style="display:none"></div><div id="applyModal"></div><div id="previewModal"></div>'
     + '<div class="chat-wrapper"><div id="chatContainer"></div><div class="input-area"></div></div></body>');
@@ -108,7 +108,7 @@ test('a search body hit row opens its matching Turn; rows without a valid Turn o
 });
 
 test('row actions never navigate; clipboard remains in the gesture and only one feedback timer is retained', async () => {
-  const f = fixture(), list = f.d.getElementById('convList'), copied = [];
+  const f = fixture(), list = f.d.getElementById('convList'), copied = [], groupedHost = f.d.getElementById('sidebarBody');
   let gesture = false; f.ports.sidebar.copy = async id => { assert.ok(gesture); copied.push(id); };
   list.innerHTML = '<div class="conv-item" data-conv-id="a">' + ['dup', 'delete', 'rename', 'ref', 'folder-assign', 'copy-id']
     .map(name => `<button class="conv-${name}" data-conv-id="a" data-conv-title="Title">${name}</button>`).join('') + '</div>';
@@ -117,7 +117,13 @@ test('row actions never navigate; clipboard remains in the gesture and only one 
   await drain(); assert.deepEqual(copied, ['a']); assert.equal(f.calls.filter(c => c[0] === 'activate').length, 0);
   const copy = list.querySelector('.conv-copy-id'); assert.equal(copy.textContent, '✓');
   gesture = true; f.fire(copy, 'click'); gesture = false; await drain(); assert.equal(f.timers.size, 1);
-  f.tick(1200); assert.equal(copy.textContent, 'copy-id'); dispose(); assert.equal(f.timers.size, 0); f.dom.window.close();
+  f.tick(1200); assert.equal(copy.textContent, 'copy-id');
+  list.insertAdjacentHTML('afterend', '<section class="coordination-conversation-column"><div class="conv-item" data-conv-id="worker-1"><button class="conv-copy-id" data-conv-id="worker-1">copy</button></div></section>');
+  const groupedCopy = groupedHost.lastElementChild.querySelector('.conv-copy-id');
+  gesture = true; f.fire(groupedCopy, 'click'); gesture = false; await drain();
+  assert.deepEqual(copied, ['a', 'a', 'worker-1']); assert.equal(groupedCopy.textContent, '✓');
+  assert.equal(f.calls.filter(c => c[0] === 'activate').length, 0);
+  dispose(); assert.equal(f.timers.size, 0); f.dom.window.close();
 });
 
 test('typing/scroll bursts get one frame each; unchanged height notifications do no repaint and dispose restores geometry', () => {
@@ -198,6 +204,22 @@ test('Escape uses one winning shell target; settings backdrop ignores inner cont
   const settings = f.d.getElementById('settingsModal'); settings.innerHTML = '<button>inside</button>';
   const before = f.calls.length; f.fire(settings.firstChild, 'click'); assert.equal(f.calls.length, before);
   f.fire(settings, 'click'); assert.equal(f.calls.at(-1)[0], 'closeSettings'); dispose(); f.dom.window.close();
+});
+
+test('an open native dialog owns Escape: the shell neither closes the overlay under it nor cancels its close request', () => {
+  const f = fixture(), dispose = installApplicationInteractions(f.ports);
+  f.d.getElementById('settingsModal').classList.add('open');
+  f.d.getElementById('sidebarSearchWrapper').style.display = '';
+  const dialog = f.d.createElement('dialog'); dialog.setAttribute('open', ''); dialog.innerHTML = '<button>cancel</button>';
+  f.d.body.append(dialog);
+  const before = f.calls.length;
+  for (const target of [dialog.firstChild, f.d.body]) {
+    assert.equal(f.fire(target, 'keydown', { key: 'Escape' }).defaultPrevented, false);
+  }
+  assert.equal(f.calls.length, before);
+  dialog.remove(); f.d.getElementById('sidebarSearchWrapper').style.display = 'none';
+  assert.equal(f.fire(f.d, 'keydown', { key: 'Escape' }).defaultPrevented, true);
+  assert.equal(f.calls.at(-1)[0], 'closeSettings'); dispose(); f.dom.window.close();
 });
 
 test('viewport resize bursts and orientation retries are bounded; invalid metrics cannot collapse the page', () => {

@@ -283,6 +283,26 @@ Opus effort witness keeps them). Specs:
 `tests/model_routing/test_model_continuation_policy.py`,
 `tests/project_mod/test_coordinator_replay_policy.py`.
 
+**Settled reasoning on restore — Problem:** a checkpoint keeps its publishing
+Turn's rounds exactly as sent live, without the settled-Turn mark that a cold
+rebuild derives from `_turnStatus`. The next Turn restored that signed Claude
+reasoning as active, so when the dispatcher picked Chat Completions or Responses
+after restoration, request preparation refused with
+`mandatory_continuity_unrepresentable` before dispatch. A failed Turn never
+publishes, so every later Turn restored the same checkpoint and failed too.
+**Decision:** `restore_prefix` marks each restored assistant row that carries
+signed reasoning as a completed Turn (`_reasoning_continuity: completed_turn`),
+the same authority as the cold rebuild: restore covers only settled Turns, since
+resume data and resume targets refuse first. Another protocol then omits that
+historical thinking as a counted loss, while Anthropic replays every block
+unchanged. The stored checkpoint is not modified. **Rejected:** stamping the mark
+at publication (existing checkpoints would stay broken, and a failing
+conversation never publishes again); treating unmarked thinking as optional in
+the converter (live signed reasoning of an active Turn would be dropped); a
+portable restore whenever the protocol might change (the destination is unknown
+at restore time, and same-protocol replay would lose its signatures and cache).
+Spec: `tests/conversation/test_completed_turn_reasoning.py`.
+
 L1 receives an API-form working projection and replaces only cold tool/image bulk; it performs no conversation read, projection update or change notification.
 Completed ordinary chat turns publish this bounded view through the owner-scoped durable continuation repository. The next turn validates it and transforms only uncovered Turns; restarts/cache eviction do not resurrect summarized history. Missing/invalid checkpoints rebuild unchanged Turns and pass fresh admission.
 **Continuation boundary:** display updates previously invalidated summaries, while shared eligibility wrongly blocked completed Continue publication. Decision: semantic proof v2 preserves typed content/tool/Attempt/policy/media fences; Continue proves its input baseline, retains fresh suffixes, and publishes only verified complete model content. Rejected: weaker witnesses, history deletion or higher thresholds. Old proofs rebuild once with explicit reasons. Details: `contracts/model_context_v1.schema.json` and [storage operations](STORAGE_OPERATIONS.md#model-context-semantic-version).

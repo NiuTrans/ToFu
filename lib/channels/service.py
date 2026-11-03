@@ -249,10 +249,13 @@ def _titles(store: ChannelStore, items: list[OutboxItem]) -> dict[str, str]:
     return titles
 
 
-def outbox_page(owner: int, *, thread: str | None = None,
+def outbox_page(owner: int, *, thread: str | None = None, channel: str | None = None,
                 store: ChannelStore | None = None) -> dict[str, Any]:
+    """Active outbox items, optionally of one ``thread`` or one ``channel``."""
     store = _store(owner, store)
-    items = store.active_outbox(str(ThreadKey.parse(thread)) if thread else None)
+    if channel is not None and channel not in CHANNELS:
+        raise ChannelError('invalid_channel', f'channel must be one of {list(CHANNELS)}')
+    items = store.active_outbox(str(ThreadKey.parse(thread)) if thread else None, channel=channel)
     titles = _titles(store, items)
     return {'items': [item.view(titles[item.thread]) for item in items]}
 

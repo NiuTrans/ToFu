@@ -75,6 +75,27 @@ function text(): string {
   return document.getElementById('dxChannelRoot')!.textContent ?? '';
 }
 
+function card(index: number): HTMLElement {
+  return document.querySelectorAll<HTMLElement>('#dxChannelRoot .channel-card')[index];
+}
+
+/** jsdom lacks the native modal: showModal refuses a detached dialog and close fires `close`, as in browsers. */
+function emulateNativeModal(): () => void {
+  const proto = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+  const saved = { showModal: proto.showModal, close: proto.close };
+  proto.showModal = function showModal(this: HTMLDialogElement) {
+    if (!this.isConnected) throw new DOMException('The element is not in a Document.', 'InvalidStateError');
+    this.setAttribute('open', '');
+  };
+  proto.close = function close(this: HTMLDialogElement, result?: string) {
+    if (!this.open) return;
+    this.removeAttribute('open');
+    this.returnValue = result ?? '';
+    this.dispatchEvent(new Event('close'));
+  };
+  return () => Object.assign(proto, saved);
+}
+
 describe('大象 settings tab', () => {
   beforeEach(() => {
     document.body.innerHTML = '<div id="settingsTab_dx"><div id="dxChannelRoot"></div></div>';
@@ -87,10 +108,15 @@ describe('大象 settings tab', () => {
     populateDxTab();
     await settle();
     const text = document.getElementById('dxChannelRoot')!.textContent ?? '';
-    expect(text).toContain('settings.dx.state.connected');
+    expect(card(0).querySelector('.channel-card-head .channel-status')!.textContent)
+      .toBe('settings.dx.state.connected');
     expect(text).toContain('Owner (owner) · 1001');
-    expect(text).toContain('Tofu Router (dx:gid:900)');
+    const chosen = card(1).querySelector<HTMLElement>('.channel-card-head .channel-chip')!;
+    expect(chosen.textContent).toBe('Tofu Router');
+    expect(chosen.title).toBe('Tofu Router (dx:gid:900)');
+    expect(button('settings.dx.commandChatUse').disabled).toBe(true);  // the current choice is already set
     expect(text).toContain('[Tofu 代发] hello');
+    expect(api.outbox).toHaveBeenCalledWith('dx', expect.anything());
     expect(findButton('settings.dx.commandChatCreate')).toBeUndefined();  // already chosen
     expect(text).not.toContain('router-conv');
     button('settings.channels.routerOpen').click();
@@ -160,6 +186,59 @@ describe('大象 settings tab', () => {
       expect(api.dxAccount).toHaveBeenCalledTimes(reads);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('confirms and creates the Tofu Router group through a dialog it mounts itself', async () => {
+    const restore = emulateNativeModal();
+    try {
+      const api = fakeApi(account({ commandChat: null }));
+      runtime.Api = { channels: api };
+      populateDxTab();
+      await settle();
+      expect(card(1).querySelector('.channel-card-head .channel-chip')!.textContent)
+        .toBe('settings.dx.commandChatNone');
+      button('settings.dx.commandChatCreate').click();
+      const dialog = document.querySelector('dialog')!;
+      expect(dialog.open).toBe(true);
+      expect(dialog.textContent).toContain('settings.dx.commandChatCreateConfirm');
+      [...dialog.querySelectorAll('button')].find((node) => node.textContent === 'common.cancel')!.click();
+      await settle();
+      expect(document.querySelector('dialog')).toBeNull();
+      expect(api.createDxCommandChat).not.toHaveBeenCalled();
+
+      api.dxAccount.mockResolvedValue(account());
+      button('settings.dx.commandChatCreate').click();
+      [...document.querySelector('dialog')!.querySelectorAll('button')]
+        .find((node) => node.textContent === 'settings.dx.commandChatCreate')!.click();
+      await settle();
+      expect(api.createDxCommandChat).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('dialog')).toBeNull();
+      expect(api.dxAccount).toHaveBeenCalledTimes(2);
+      expect(findButton('settings.dx.commandChatCreate')).toBeUndefined();
+      expect(card(1).querySelector('.channel-card-head .channel-chip')!.textContent).toBe('Tofu Router');
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps a failed group creation beside its button', async () => {
+    const restore = emulateNativeModal();
+    try {
+      const api = fakeApi(account({ commandChat: null }));
+      api.createDxCommandChat.mockRejectedValueOnce(new Error('group_http_failed'));
+      runtime.Api = { channels: api };
+      populateDxTab();
+      await settle();
+      button('settings.dx.commandChatCreate').click();
+      [...document.querySelector('dialog')!.querySelectorAll('button')]
+        .find((node) => node.textContent === 'settings.dx.commandChatCreate')!.click();
+      await settle();
+      const alert = card(1).querySelector('.channel-feedback')!;
+      expect(alert.textContent).toContain('settings.dx.actionFailed:{"error":"group_http_failed"}');
+      expect(button('settings.dx.commandChatCreate').disabled).toBe(false);
+    } finally {
+      restore();
     }
   });
 

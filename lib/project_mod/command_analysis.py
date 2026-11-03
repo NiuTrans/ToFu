@@ -1326,8 +1326,11 @@ def harden_git_inspections(command):
         if hardened is not None and hardened != segment:
             replacements.append((start, end, hardened))
     for start, end, hardened in reversed(replacements):
-        command = command[:start] + ' ' + hardened + ' ' + command[end:]
-    return command.strip() if replacements else command
+        # Pad only against neighbouring bytes: the command's own edge blanks
+        # can be syntax (`$( (` is a subshell, `$((` arithmetic; `a\ `).
+        command = (command[:start] + (' ' if start else '') + hardened
+                   + (' ' if end < len(command) else '') + command[end:])
+    return command
 
 
 # Best-effort undo/snapshot fast path, NOT proof of read-only execution.

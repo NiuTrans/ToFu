@@ -1,7 +1,7 @@
 /**
  * 大象 (Daxiang) channel Settings tab: account status and enable/disable,
  * command chat selection or creation, thread modes/reply policies and the
- * outbox drafts awaiting the owner's decision (docs/CHANNELS.md).
+ * 大象 outbox drafts awaiting the owner's decision (docs/CHANNELS.md).
  * Entry points: populateDxTab / destroyDxTab, registered as the independent
  * Settings panel `dx` (`_populateDxTab` / `_destroyDxTab`).
  * Dependencies: the `Api.channels` endpoint facade (generated wire DTOs), the
@@ -12,15 +12,15 @@
 import { featureRegistry } from '../../feature-registry';
 import { t } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
-import { createAlert, createButton, createDialog, createEmptyState, createField, createSpinner } from '../../ui';
+import { createAlert, createButton, createDialog, createSpinner } from '../../ui';
 import type { ChannelsEndpoints } from '../../api/endpoint-registry/channels';
 import { CHANNEL_DEFAULT_MODE_BY_KIND, CHANNEL_DEFAULT_REPLY_POLICY } from '../../api/channels.generated';
 import type {
   ChannelAccountView, ChannelThreadView, ConfigurableThreadMode, OutboxItemView, ReplyPolicy, ThreadMode,
 } from '../../api/channels.generated';
 import {
-  card, element, facts, feedback, hint, refreshWhileConnecting, routerLink, rowField, runCommand, statusLine,
-  type CommandView,
+  card, cardSection, chip, element, empty, facts, feedback, hint, outboxCard, refreshWhileConnecting, routerLink,
+  rowField, runCommand, selectCell, staticCell, statusLine, threadRow, threadTable, type CommandView,
 } from './channel-settings-view';
 
 interface DxState {
@@ -37,7 +37,6 @@ type DxBridge = {
 
 const CONFIGURABLE_MODES: ConfigurableThreadMode[] = ['watch', 'mentions', 'ignore'];
 const REPLY_POLICIES: ReplyPolicy[] = ['auto', 'draft', 'never'];
-const DISCARDABLE = new Set(['draft', 'queued', 'failed']);
 
 let scope: LifecycleScope | null = null;
 let generation = 0;
@@ -65,6 +64,10 @@ function defaultMode(thread: ChannelThreadView): ThreadMode {
   return CHANNEL_DEFAULT_MODE_BY_KIND[thread.kind];
 }
 
+function threadName(thread: ChannelThreadView): string {
+  return `${thread.title || thread.key} (${thread.key})`;
+}
+
 function commandView(current: number): CommandView {
   return {
     isCurrent: () => current === generation,
@@ -76,8 +79,11 @@ function commandView(current: number): CommandView {
 
 function renderAccount(state: DxState, view: CommandView): HTMLElement {
   const { account } = state;
-  const section = card(t('settings.dx.status'));
-  section.appendChild(statusLine(account, t(`settings.dx.state.${account.status.state}` as const)));
+  const section = card(t('settings.dx.status'),
+                       statusLine(account, t(`settings.dx.state.${account.status.state}` as const)));
+  if (!account.skillInstalled) {
+    section.appendChild(createAlert({ variant: 'warning', title: t('settings.dx.skillMissing') }).el);
+  }
   const identity = account.identity;
   section.appendChild(facts([
     [t('settings.dx.account'), identity ? `${identity.name || identity.mis} (${identity.mis}) · ${identity.uid}`
@@ -85,9 +91,6 @@ function renderAccount(state: DxState, view: CommandView): HTMLElement {
     [t('settings.dx.router'), routerLink(account.routerConversationId, t('settings.channels.routerOpen'),
                                          t('settings.dx.routerMissing'))],
   ]));
-  if (!account.skillInstalled) {
-    section.appendChild(createAlert({ variant: 'warning', title: t('settings.dx.skillMissing') }).el);
-  }
   const actions = element('div', 'channel-actions');
   const toggle = createButton({
     label: account.enabled ? t('settings.dx.disable') : t('settings.dx.enable'),
@@ -99,106 +102,105 @@ function renderAccount(state: DxState, view: CommandView): HTMLElement {
     label: t('settings.dx.refresh'), variant: 'ghost',
     onClick: () => { void view.reload(); },
   }));
-  section.appendChild(actions);
-  if (!account.enabled && account.skillInstalled) section.appendChild(hint(t('settings.dx.enableHint')));
+  const footer = cardSection(actions);
+  if (!account.enabled && account.skillInstalled) footer.appendChild(hint(t('settings.dx.enableHint')));
+  section.appendChild(footer);
   return section;
+}
+
+function confirmCreate(): Promise<string | null> {
+  return createDialog({
+    title: t('settings.dx.commandChatCreate'), body: t('settings.dx.commandChatCreateConfirm'),
+    actions: [{ id: 'cancel', label: t('common.cancel') },
+              { id: 'create', label: t('settings.dx.commandChatCreate'), variant: 'primary' }],
+  }).open();
 }
 
 function renderCommandChat(state: DxState, view: CommandView): HTMLElement {
   const { account, threads } = state;
-  const section = card(t('settings.dx.commandChat'));
-  const selected = threads.find((thread) => thread.key === account.commandChat);
-  section.appendChild(facts([[t('settings.dx.commandChat'), account.commandChat
-    ? `${selected?.title || account.commandChat} (${account.commandChat})` : t('settings.dx.commandChatNone')]]));
+  const chosen = account.commandChat;
+  const selected = threads.find((thread) => thread.key === chosen);
+  const current = chosen
+    ? chip(selected?.title || chosen, 'ok')
+    : chip(t('settings.dx.commandChatNone'), 'idle');
+  if (chosen) current.title = selected ? threadName(selected) : chosen;
+  const section = card(t('settings.dx.commandChat'), current);
   section.appendChild(hint(t('settings.dx.commandChatHint')));
   if (!account.enabled || !account.identity) {
     section.appendChild(hint(t('settings.dx.commandChatNeedsAccount')));
     return section;
   }
   const choices = threads.filter((thread) => thread.kind !== 'pid')
-    .map((thread) => ({ value: thread.key, label: `${thread.title || thread.key} (${thread.key})` }));
-  const actions = element('div', 'channel-actions');
+    .map((thread) => ({ value: thread.key, label: threadName(thread) }));
   if (choices.length) {
-    const field = rowField({ label: t('settings.dx.column.thread'), choices,
-      value: account.commandChat ?? choices[0].value });
+    const field = rowField({ label: t('settings.dx.column.thread'), choices, value: chosen ?? choices[0].value });
+    const select = field.control as HTMLSelectElement;
     const use = createButton({
       label: t('settings.dx.commandChatUse'),
+      disabled: select.value === chosen,
       onClick: () => {
-        const value = (field.control as HTMLSelectElement).value;
+        const value = select.value;
         void runCommand(view, use, () => channelsApi().updateDxAccount({ commandChat: value }));
       },
     });
-    actions.append(field.el, use);
+    select.addEventListener('change', () => { use.disabled = select.value === chosen; });
+    const row = element('div', 'channel-actions');
+    row.append(field.el, use);
+    section.appendChild(cardSection(row));
   }
-  if (!account.commandChat) {
+  if (!chosen) {
     const create = createButton({
       label: t('settings.dx.commandChatCreate'), variant: 'primary',
       onClick: () => {
-        const dialog = createDialog({
-          title: t('settings.dx.commandChatCreate'), body: t('settings.dx.commandChatCreateConfirm'),
-          actions: [{ id: 'cancel', label: t('common.cancel') },
-                    { id: 'create', label: t('settings.dx.commandChatCreate'), variant: 'primary' }],
-        });
-        void dialog.open().then((choice) => {
+        void confirmCreate().then((choice) => {
           if (choice === 'create' && view.isCurrent()) {
             void runCommand(view, create, () => channelsApi().createDxCommandChat());
           }
         });
       },
     });
-    actions.appendChild(create);
+    const row = element('div', 'channel-actions');
+    row.appendChild(create);
+    section.appendChild(cardSection(row));
   }
-  if (actions.childElementCount) section.appendChild(actions);
   return section;
 }
 
 function renderThread(thread: ChannelThreadView, view: CommandView): HTMLElement {
-  const row = element('div', 'channel-row');
-  const title = element('div', 'channel-row-title');
-  title.append(element('div', '', thread.title || thread.key), element('div', 'channel-key', thread.key));
-  row.appendChild(title);
-  if (thread.isCommandChat) {
-    row.appendChild(facts([[t('settings.dx.column.mode'), modeLabel('command')]]));
-  } else {
-    const mode = createField({
-      label: t('settings.dx.column.mode'), value: thread.modeOverride ?? '',
-      choices: [{ value: '', label: t('settings.dx.default', { value: modeLabel(defaultMode(thread)) }) },
-                ...CONFIGURABLE_MODES.map((value) => ({ value, label: modeLabel(value) }))],
+  const modeColumn = t('settings.dx.column.mode');
+  const mode = thread.isCommandChat
+    ? staticCell(modeColumn, modeLabel('command'))
+    : selectCell(modeColumn, thread.modeOverride ?? '',
+                 [{ value: '', label: t('settings.dx.default', { value: modeLabel(defaultMode(thread)) }) },
+                  ...CONFIGURABLE_MODES.map((value) => ({ value, label: modeLabel(value) }))],
+                 (select) => {
+                   const value = select.value as ConfigurableThreadMode | '';
+                   void runCommand(view, select, () => channelsApi().updateDxThread(thread.key, { mode: value || null }));
+                 });
+  const reply = selectCell(t('settings.dx.column.reply'), thread.replyPolicyOverride ?? '',
+    [{ value: '', label: t('settings.dx.default', { value: replyLabel(CHANNEL_DEFAULT_REPLY_POLICY) }) },
+     ...REPLY_POLICIES.map((value) => ({ value, label: replyLabel(value) }))],
+    (select) => {
+      const value = select.value as ReplyPolicy | '';
+      void runCommand(view, select, () => channelsApi().updateDxThread(thread.key, { replyPolicy: value || null }));
     });
-    const select = mode.control as HTMLSelectElement;
-    select.addEventListener('change', () => {
-      const value = select.value as ConfigurableThreadMode | '';
-      void runCommand(view, select, () => channelsApi().updateDxThread(thread.key, { mode: value || null }));
-    });
-    row.appendChild(mode.el);
-  }
-  const reply = createField({
-    label: t('settings.dx.column.reply'), value: thread.replyPolicyOverride ?? '',
-    choices: [{ value: '', label: t('settings.dx.default', { value: replyLabel(CHANNEL_DEFAULT_REPLY_POLICY) }) },
-              ...REPLY_POLICIES.map((value) => ({ value, label: replyLabel(value) }))],
-  });
-  const select = reply.control as HTMLSelectElement;
-  select.addEventListener('change', () => {
-    const value = select.value as ReplyPolicy | '';
-    void runCommand(view, select, () => channelsApi().updateDxThread(thread.key, { replyPolicy: value || null }));
-  });
-  row.appendChild(reply.el);
-  return row;
+  return threadRow(thread.title || thread.key, thread.key, mode, reply);
 }
 
 function renderThreads(state: DxState, view: CommandView, current: number): HTMLElement {
   const section = card(t('settings.dx.threads'));
   if (!state.threads.length) {
-    section.appendChild(createEmptyState({ title: t('settings.dx.threadsEmpty') }));
+    section.appendChild(empty(t('settings.dx.threadsEmpty')));
     return section;
   }
-  const list = element('div', 'channel-threads');
-  for (const thread of state.threads) list.appendChild(renderThread(thread, view));
-  section.appendChild(list);
+  section.appendChild(threadTable(
+    { thread: t('settings.dx.column.thread'), mode: t('settings.dx.column.mode'), reply: t('settings.dx.column.reply') },
+    state.threads.map((thread) => renderThread(thread, view)),
+  ));
   if (state.nextCursor) {
     const cursor = state.nextCursor;
     const more = createButton({
-      label: t('settings.dx.loadMore'), variant: 'ghost',
+      label: t('settings.dx.loadMore'), variant: 'ghost', size: 'sm',
       onClick: () => {
         more.disabled = true;
         void channelsApi().dxThreads(cursor, scope?.signal).then((page) => {
@@ -218,41 +220,6 @@ function renderThreads(state: DxState, view: CommandView, current: number): HTML
   return section;
 }
 
-function renderOutbox(state: DxState, view: CommandView): HTMLElement {
-  const section = card(t('settings.dx.outbox'));
-  if (!state.outbox.length) {
-    section.appendChild(createEmptyState({ title: t('settings.dx.outboxEmpty') }));
-    return section;
-  }
-  for (const item of state.outbox) {
-    const row = element('div', 'channel-outbox-item');
-    row.appendChild(facts([
-      [t('settings.dx.status'), t(`settings.dx.outboxState.${item.state}` as const)
-        + (item.error ? ` — ${item.error}` : '')],
-      [t('settings.dx.column.thread'), `${item.threadTitle || item.thread} (${item.thread})`],
-    ]));
-    row.appendChild(element('div', 'channel-outbox-text', item.text));
-    const actions = element('div', 'channel-actions');
-    if (item.state === 'draft') {
-      const approve = createButton({
-        label: t('settings.dx.approve'), variant: 'primary', size: 'sm',
-        onClick: () => { void runCommand(view, approve, () => channelsApi().approveOutbox(item.id)); },
-      });
-      actions.appendChild(approve);
-    }
-    if (DISCARDABLE.has(item.state)) {
-      const discard = createButton({
-        label: t('settings.dx.discard'), variant: 'danger', size: 'sm',
-        onClick: () => { void runCommand(view, discard, () => channelsApi().discardOutbox(item.id)); },
-      });
-      actions.appendChild(discard);
-    }
-    row.appendChild(actions);
-    section.appendChild(row);
-  }
-  return section;
-}
-
 function render(state: DxState, current: number): void {
   const root = document.getElementById('dxChannelRoot');
   if (!root || current !== generation) return;
@@ -262,7 +229,11 @@ function render(state: DxState, current: number): void {
     renderAccount(state, view),
     renderCommandChat(state, view),
     renderThreads(state, view, current),
-    renderOutbox(state, view),
+    outboxCard(state.outbox, {
+      title: t('settings.dx.outbox'), empty: t('settings.dx.outboxEmpty'),
+      approve: t('settings.dx.approve'), discard: t('settings.dx.discard'),
+      state: (value) => t(`settings.dx.outboxState.${value}` as const),
+    }, view, { approve: (id) => channelsApi().approveOutbox(id), discard: (id) => channelsApi().discardOutbox(id) }),
   );
   if (scope) {
     refreshWhileConnecting(scope, state.account, (signal) => channelsApi().dxAccount(signal),
@@ -275,7 +246,7 @@ async function load(current: number): Promise<void> {
   try {
     const api = channelsApi();
     const [account, page, outbox] = await Promise.all([
-      api.dxAccount(signal), api.dxThreads('', signal), api.outbox(signal),
+      api.dxAccount(signal), api.dxThreads('', signal), api.outbox('dx', signal),
     ]);
     if (current !== generation) return;
     render({ account, threads: page.items, nextCursor: page.nextCursor, outbox: outbox.items }, current);

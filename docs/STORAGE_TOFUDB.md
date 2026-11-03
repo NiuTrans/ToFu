@@ -1331,9 +1331,15 @@ similarly spent one index-range probe per returned event.
 Decision: each search header also carries the union of the same cached-gram
 Bloom summaries used by its chunks, title, and conversation ID. A header whose
 summary cannot contain the query skips its generation's meta scan, including
-when the gram posting is universal or empty. Every surviving candidate retains
-the existing exact title/ID/content checks and cursor behavior. Projection
-format 5 rebuilds the disposable index so no old, incomplete summary is trusted.
+when the gram posting is universal or empty. Filtering requires a READY index,
+so legacy empty summaries never suppress matches. Each header also records its
+exact metadata count: a skipped generation charges that count to the existing
+chunk-scan budget, preserving page boundaries without reading metadata. When
+a pending header's recency key has moved, its active-header row resolves the
+new generation and restarts its body scan; an empty partial continuation page
+remains valid. Every surviving candidate retains exact title/ID/content
+checks and cursor behavior. Projection format 6 rebuilds the disposable index
+so old headers without these summaries and counts are never trusted.
 Filtered event reads retain a sorted per-type buffer and heap-merge it, reusing
 the existing metadata scan page size rather than starting another range scan
 for every selected row. Both changes leave the public results and storage

@@ -504,7 +504,7 @@
  },
  {
   "function": {
-   "description": "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. Execution may move to the background on new messages; results arrive automatically. Avoid waiting for stdin.\n\nFresh subprocess; no persistent shell or environment changes. Prefer absolute paths and `working_dir` over `cd`.\n\nUse `read_files`, `search_files`, `find_files`, `edit_file`, `write_file` for repository data. Filesystem grep uses a bounded FUSE-safe engine or returns a `search_files` translation; filtering command output is allowed. `browser_download_url_to_server` handles authenticated browser downloads. Text helpers: `sd`, `mlr`, `goawk`.\n\nNever use a shell no-op as a placeholder (`true`, `:`, `exit 0`); repetition is a tool loop.",
+   "description": "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. A command still running after 120 s, or when a new message arrives, moves to the background and returns a `bg_*` handle; results arrive automatically. Avoid waiting for stdin.\n\nFresh subprocess; no persistent shell or environment changes. Prefer absolute paths and `working_dir` over `cd`.\n\nUse `read_files`, `search_files`, `find_files`, `edit_file`, `write_file` for repository data. Filesystem grep uses a bounded FUSE-safe engine or returns a `search_files` translation; filtering command output is allowed. `browser_download_url_to_server` handles authenticated browser downloads. Text helpers: `sd`, `mlr`, `goawk`.\n\nNever use a shell no-op as a placeholder (`true`, `:`, `exit 0`); repetition is a tool loop.",
    "name": "run_command",
    "parameters": {
     "properties": {
@@ -5021,7 +5021,7 @@
  },
  {
   "function": {
-   "description": "Check or wait on background work: background shell commands (bg_* handles from run_command background=true), swarm sub-agents from spawn_agents, or tasks running in other conversations. With no id, returns a snapshot of everything currently running. With an id, returns that handle's status — and its full result once finished. Set wait_s to block until completion: the wait returns as soon as the handle finishes, new input arrives for this turn, or the task is stopped, so a long wait costs no extra model requests (capped at 1500 s = 25 minutes; on cap returns the running snapshot — call again to keep waiting). Background command completions are also delivered automatically, so only wait when there is nothing else to do.",
+   "description": "Check or wait on background work: background shell commands (bg_* handles from run_command), swarm sub-agents from spawn_agents, or tasks running in other conversations. With no id, returns a snapshot of everything currently running. With an id, returns that handle's status — and its full result once finished. Set wait_s to block until completion: the wait returns as soon as the handle finishes, new input arrives for this turn, or the task is stopped, so a long wait costs no extra model requests (capped at 1500 s = 25 minutes; on cap returns the running snapshot — call again to keep waiting). Background command completions are also delivered automatically, so only wait when there is nothing else to do.",
    "name": "poll",
    "parameters": {
     "properties": {

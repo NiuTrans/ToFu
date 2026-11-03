@@ -61,7 +61,12 @@ def _extract_latest_user_text(cfg) -> str:
 
 
 def _memory_scope(cfg):
-    """``(memory_enabled, project_path, project_enabled)`` of a chat-mode cfg."""
+    """``(memory_enabled, project_path, project_enabled)`` of a chat-mode cfg.
+
+    ``project_path`` is the task's execution root: tools run and project
+    dispatch admits calls there, so an isolated task keeps its own checkout.
+    Memory consumers map it to ``canonicalProjectPath`` themselves.
+    """
     project_path = cfg.get('projectPath', '')
     project_enabled = bool(project_path)
     if not project_enabled:

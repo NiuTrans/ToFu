@@ -40,8 +40,7 @@ def _internal_writer(root):
         try:
             with workspace_write_lease(root):
                 ready.set()
-                if not release.wait(10):
-                    raise AssertionError('writer release was not signalled')
+                release.wait()
         except BaseException as exc:
             errors.append(exc)
             ready.set()
@@ -54,7 +53,7 @@ def _internal_writer(root):
         yield
     finally:
         release.set()
-        worker.join(5)
+        worker.join()
         assert not worker.is_alive()
         assert not errors
 

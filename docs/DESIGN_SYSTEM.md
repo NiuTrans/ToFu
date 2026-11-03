@@ -132,7 +132,7 @@ invisible retry/reload actions to layout or the keyboard focus order.
 | Field (label+hint+error) | `createField`, `setFieldError` | ✅ |
 | Text input / textarea | `.ui-input` | ✅ |
 | Select | `.ui-select` wrapping native `<select>` | ✅ |
-| Dialog | `createDialog` on native `<dialog>` (focus trap, Esc, backdrop from the platform) | ✅ |
+| Dialog | `createDialog` on native `<dialog>` (focus trap, Esc, backdrop from the platform); `open()` mounts a detached dialog on `<body>` until it closes | ✅ |
 | Drawer | `createDrawer` — right-docked `<dialog>` variant | ✅ |
 | Card / badge | `.ui-card`, `.ui-badge` (+feedback variants) | ✅ |
 | Checkbox / radio / switch | `createChoice` on native inputs | ✅ |
@@ -178,6 +178,16 @@ Problem: a generic cold/hairline dialog did not match the established CO-PILOT
 workbench. Decision: extend the existing factory/kit with semantic tokens.
 Rejected: adding legacy `.modal` classes or feature-level `.ui-*` overrides
 would duplicate chrome authority and couple native dialogs to legacy skins.
+
+An open native `<dialog>` owns Escape. Problem: the document-level shell
+shortcuts (`application-shell/interactions/shortcuts.ts`) closed the Settings
+overlay underneath and `preventDefault()`ed the keydown, which cancels the
+dialog's platform close request and strands it on screen. Decision: the shell
+handles no Escape while any `dialog[open]` exists; every dialog owner opens
+with `showModal()`, so an open dialog is always the topmost layer. Rejected:
+stopping propagation inside each dialog misses keydowns targeted at `<body>`
+(Chromium's modal focus cycle can land there) and must be repeated by every
+dialog owner.
 
 ### Settings status colors
 

@@ -176,7 +176,8 @@ def test_conversationless_root_prose_never_promises_automatic_delivery():
     command = catalog['run_command']
     background = command['parameters']['properties']['background']['description']
     assert 'results arrive automatically' not in command['description']
-    assert 'Nothing delivers its completion to this task automatically' in background
+    assert 'its result reaches your next step once it finishes' in command['description']
+    assert 'nothing delivers it after this run returns' in background
     assert 'delivered automatically' not in catalog['poll']['description']
     assert 'bg_*' in catalog['poll']['description']
     assert 'timer_create' not in catalog
@@ -202,8 +203,12 @@ def test_conversation_owner_root_surface_is_canonical():
 def test_control_advice_states_delivery_from_the_callers_fact():
     from lib.tools.background_guidance import background_command_guidance
 
-    unowned = background_command_guidance(authority_catalog=[], has_conversation=False)
-    owned = background_command_guidance(authority_catalog=[], has_conversation=True)
+    unowned = background_command_guidance(authority_catalog=[], delivery='poll')
+    owned = background_command_guidance(authority_catalog=[], delivery='conversation')
+    run = background_command_guidance(authority_catalog=[POLL_TOOL, KILL_TOOL],
+                                      delivery='run')
     assert 'automatic' not in unowned and 'when available' not in unowned
     assert 'parent or operator' in unowned
     assert 'delivered automatically' in owned and 'when available' not in owned
+    assert 'reaches your next step once it finishes' in run and 'automatic' not in run
+    assert 'nothing delivers it after this run returns' in run

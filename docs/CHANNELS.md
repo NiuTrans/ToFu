@@ -181,13 +181,21 @@ timestamps (equal milliseconds reorder a thread).
 - **Bridge** (`lib/channels/dx/bridge.mjs`, spawned from `PinnedHelperSource`):
   one Node process per account. It logs in with the engine's own
   `DxWebSdkRuntime`, attaches persistent handlers for `IM_message`,
-  `PUB_MESSAGE`, `KickOff` and `ConnStatusChange`, writes JSON-lines (`status`,
+  `PUB_MESSAGE`, `KickOff`, `KickOffWithSameDeviceId` and `ConnStatusChange`,
+  writes JSON-lines (`status`,
   `message`, `response`) to stdout and executes JSON-lines commands from stdin
   (`whoami`, `send_text`, `send_markdown`, `reply_message`, `history`,
   `sessions`, `create_group`), each answered with its request ID. It decodes
   quote parts so reply facts survive, flags its own sends, and exits on
-  disconnect (3), kick-off (43) or a closed stdin (0). It holds no policy and
-  no durable state. One-shot mode (`--command whoami|create_group`) serves
+  disconnect (3), kick-off (43) or a closed stdin (0). Disconnect is the SDK's
+  own `CONSTANT.LOGIN_STATUS.DISCONNECTED`: the SDK reports every channel loss
+  (heartbeat degrade, authentication timeout or failure, kick-off) with that
+  status and, with `autoConnect` off, never reconnects, so a bridge that missed
+  it would stay alive and deaf. A kick-off reports `DISCONNECTED` first and its
+  kick event in the same synchronous dispatch, so the disconnect exit is
+  deferred one turn and the kick decides; an SDK without `LOGIN_STATUS` fails
+  the session (4) rather than run unable to notice a loss. It holds no policy
+  and no durable state. One-shot mode (`--command whoami|create_group`) serves
   enable and command-chat creation.
 - **Adapter** (`lib/channels/dx/adapter.py`): normalization of live pushes and
   history rows (server time from the snowflake ID), reconnect catch-up,
@@ -410,10 +418,15 @@ credential vault.
   `GET|PUT /api/v4/channels/github` (status, token or vault entry, API base),
   `GET /api/v4/channels/github/threads`, `PUT /api/v4/channels/github/threads/{key}`
   (URL-encoded key),
-  `GET /api/v4/channels/outbox`, `POST /api/v4/channels/outbox/{id}/approve|discard`.
+  `GET /api/v4/channels/outbox[?channel=dx|github]` (all channels, or one),
+  `POST /api/v4/channels/outbox/{id}/approve|discard`.
 - Browser: Settings → 大象 (`frontend/src/features/settings/dx-channel.ts`,
   markup `frontend/src/settings-panels/dx.html`) and Settings → GitHub
   (`github-channel.ts`, `settings-panels/github.html`), facade `Api.channels`.
+  Both tabs share one presentation (`channel-settings-view.ts`, styles
+  `frontend/src/styles/settings/13-dx-channel.css`): a status card, the
+  channel's own cards, a thread table with one column header row, and the
+  outbox of that channel only (`?channel=`).
 
 ## Verification
 
