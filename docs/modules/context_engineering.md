@@ -148,7 +148,11 @@ CRUD and merge use those roots; file execution stays in the isolated checkout. L
 without the canonical mapping retain their `projectPath` / `projectPaths` behavior. Existing
 memories stranded in an old worker checkout remain there; recreating their verified lesson through
 the supported `create_memory` tool writes the canonical store, with no database or file migration.
-Specification: `tests/memory/test_memory_canonical_workspace.py`.
+The mapping belongs to those memory consumers (`handlers/memory.py`, `memory_prefetch_corpus_roots`),
+never to the task's resolved `project_path`: that is the execution root every tool call runs in and
+project dispatch admits against the Worker's registered workspace, so a canonical value there refuses
+every Worker call. Specification: `tests/memory/test_memory_canonical_workspace.py` and
+`test_bound_worker_root_loop_runs_tools_in_its_registered_workspace`.
 
 Memory retrieval is precision-first and bounded: metadata-only prefetch hydrates selected evidence only, explicit search streams one 2,000-character body prefix at a time, and BM25 retains query-term statistics rather than corpus tokens. Stored memories, My Context facts,
 and session context stay distinct. After a clean interactive turn, one bounded

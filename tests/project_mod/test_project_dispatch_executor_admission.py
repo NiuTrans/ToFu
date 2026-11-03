@@ -8,6 +8,7 @@ One admission validates its grant once and decides from that validated row; the
 decision table per authority fault is the one a second validation gave.
 """
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -264,3 +265,51 @@ def test_one_decision_reads_one_validation_and_its_executor(dispatch, monkeypatc
     assert counts == validation + Counter(attempt_get=1)
     assert len(decided) == 1
     assert repository.validate(carrier) == decided[0] == repository.read(carrier['assignmentId'])
+
+
+def test_bound_worker_root_loop_runs_tools_in_its_registered_workspace(runtime, monkeypatch, tmp_path):
+    """A bound Worker executes in its isolated checkout beside shared-checkout runtime roots.
+
+    Binding moves ``projectPath`` to the registered checkout and keeps
+    ``canonicalProjectPath`` as the project's identity; runtime roots such as
+    ``.eval-runs`` stay in the shared checkout. Every tool call is admitted against
+    the path the root loop resolves, so a relative read and a command without a
+    working directory must both run in the Worker's own checkout.
+    """
+    from lib.project_mod import tools
+    from lib.project_mod.config import _make_root_state, build_root_policy
+    from lib.tasks_pkg.model_config import _resolve_model_config
+
+    task, _row = _worker_task(runtime)
+    config = task['config']
+    canonical = config['canonicalProjectPath']
+    workspace = (tmp_path / 'worker-checkout').resolve()
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('worker copy\n')
+    shared = build_root_policy(canonical)
+    policy = {'primaryPath': str(workspace), 'roots': {
+        label: {**state, 'path': str(workspace)} for label, state in shared['roots'].items()}}
+    runtime_roots = [str(Path(canonical) / name) for name in ('.eval-runs', 'abtest_workdir')]
+    for root in runtime_roots:
+        policy['roots'][Path(root).name] = _make_root_state(root)
+    config.update(projectPath=str(workspace), canonicalProjectPaths=[],
+                  workspaceRuntimeRoots=runtime_roots)
+    task['_workspaceRootPolicy'] = policy
+    task['_workspaceDelivery'] = {'repositories': [{
+        'canonicalRoot': str(Path(canonical).resolve()), 'workspacePath': str(workspace),
+        'workId': task['id']}]}
+    monkeypatch.setattr('lib.integration_state_repository.find_workspace',
+                        lambda root, task_id, user_id: {
+                            'user_id': user_id, 'task_id': task_id, 'project_root': root,
+                            'state': 'active', 'workspace_path': str(workspace)})
+
+    project_path = _resolve_model_config(config, task['id'])['project_path']
+
+    call = {'conv_id': task['convId'], 'task_id': task['id'], 'task': task}
+    assert 'worker copy' in tools.execute_tool('read_files', {'path': 'notes.txt'}, project_path, **call)
+    assert str(workspace) in tools.execute_tool('run_command', {'command': 'pwd'}, project_path, **call)
+    assert project_path == str(workspace)
+    # The shared checkout stays outside the Worker's authority, and the refusal names both roots.
+    with pytest.raises(ToolAdmissionRefused) as refused:
+        tools.execute_tool('read_files', {'path': 'notes.txt'}, canonical, **call)
+    assert repr(canonical) in str(refused.value) and repr(str(workspace)) in str(refused.value)

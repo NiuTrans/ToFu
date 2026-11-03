@@ -55,6 +55,7 @@ def test_memory_prefetch_uses_the_same_canonical_roots():
     }
     enabled, project_path, project_enabled = _memory_scope(cfg)
 
-    assert enabled and project_enabled and project_path == '/canonical'
+    # Execution stays in the isolated checkout; only memory maps to the project.
+    assert enabled and project_enabled and project_path == '/worker'
     assert memory_prefetch_corpus_roots(cfg, project_path, project_enabled) == (
         '/canonical', ['/extra-canonical'])

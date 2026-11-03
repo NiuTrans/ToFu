@@ -21,9 +21,12 @@ logger = get_logger(__name__)
 
 
 def memory_prefetch_corpus_roots(cfg, project_path, project_enabled):
-    """The primary and extra roots whose memory corpus the prefetch ranks."""
+    """The primary and extra roots whose memory corpus the prefetch ranks.
+
+    Memories belong to the canonical project, never a task-owned checkout.
+    """
     paths = cfg.get('canonicalProjectPaths') or cfg.get('projectPaths') or []
-    primary = project_path if project_enabled else None
+    primary = (cfg.get('canonicalProjectPath') or project_path) if project_enabled else None
     extras = [p for p in paths if p and p != primary] if primary else []
     return primary, extras
 
