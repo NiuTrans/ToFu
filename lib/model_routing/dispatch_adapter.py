@@ -14,6 +14,7 @@ from lib.llm_dispatch.ephemeral import (
     prepare_ephemeral_slot,
     publish_ephemeral_slots,
 )
+from lib.llm_dispatch.slot import key_stats_namespace
 from lib.provider.provider_headers import sanitise_extra_headers
 
 from .credential_envelope import decode_credential_envelope
@@ -84,6 +85,20 @@ def candidate_route_identity(candidate: RouteCandidate, revision: int) -> dict:
         'connectionId': candidate.connection['connection_id'],
         'credentialId': candidate.credential['credential_id'],
     }
+
+
+def candidate_key_stats_identity(candidate: RouteCandidate,
+                                 boundary: OwnerBoundary) -> tuple[str, str, str]:
+    """``(namespace, key name, model)`` the slot minted for *candidate* reports.
+
+    Equal to that slot's ``key_stats_provider_id()``, ``key_stats_key_name()``
+    and wire ``model`` (see ``_prepare_and_publish_group`` and
+    ``prepare_ephemeral_slot``), so a planner reads the billing stops and
+    overrides that dispatch admission reads for it.
+    """
+    return (key_stats_namespace(boundary.owner_user_id, candidate.provider_id),
+            candidate.credential['credential_id'],
+            candidate.deployment['wire_model_id'].strip())
 
 
 def issued_route_identity(candidate: RouteCandidate, boundary: OwnerBoundary, revision: int) -> dict:

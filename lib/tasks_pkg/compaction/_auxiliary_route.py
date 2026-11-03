@@ -3,7 +3,9 @@
 The shared compiler owns eligibility. AA/declarations/reference cost rank usable
 routes, never authorize them. Billing class orders them first: organization-billed
 paid APIs, then the owner's own subscription/OAuth/local resources. Discovery is
-secret-free; dispatch binds one witness.
+secret-free; dispatch binds one witness. The route is optional work: selection
+skips credentials its strict billing-stop admission refuses, and its dispatch
+runs under that admission (``SummaryTransport``).
 """
 from lib.tasks_pkg.compaction._summary_routing import (
     _number, _tokens, _project_cost, _project_route_cost)
@@ -88,8 +90,11 @@ def select_auxiliary_route(result, profiles, *, owner, tenant, input_tokens,
     from lib.tasks_pkg.compaction._summary_routing import _bucket_aa
 
     from lib.model_routing.health import existing_owner_health_registry
+    from lib.model_routing.dispatch_adapter import candidate_key_stats_identity
+    from lib.key_stats import is_key_refused_for_optional_work, key_admission_batch
 
-    authority = ModelRoutingRepository().get(OwnerBoundary.create(owner, tenant))
+    boundary = OwnerBoundary.create(owner, tenant)
+    authority = ModelRoutingRepository().get(boundary)
     compiler = RouteCandidateCompiler(authority.document)
     # Learned credential outages are owner facts that remove cooled candidates
     # after ranking; parent witnesses stay health-blind (identity, not availability).
@@ -206,11 +211,17 @@ def select_auxiliary_route(result, profiles, *, owner, tenant, input_tokens,
         result['reason'] = 'no_qualified_authorized_auxiliary_route'
         return result
     leader = min(candidates, key=lambda row: row[0])
-    usable = [row for row in candidates
-              if health is None or not health.candidate_state(row[1])[0]]
+    # A recorded billing stop (402 key-wide, quota per wire model) or explicit
+    # disable in key-stats is refused by the dispatch admission whatever the
+    # plan says; reading it here keeps every later compaction off a dead route.
+    with key_admission_batch():
+        usable = [row for row in candidates
+                  if (health is None or not health.candidate_state(row[1])[0])
+                  and not is_key_refused_for_optional_work(
+                      *candidate_key_stats_identity(row[1], boundary))]
     if leader not in usable:
-        # Learned cooldown changes the plan, never the request identity: an
-        # unchanged failed request must keep its SummaryBudget key and bound.
+        # A learned cooldown or billing stop changes the plan, never the request
+        # identity: an unchanged failed request keeps its SummaryBudget key and bound.
         _, lead, lead_cost, _, _, lead_identity, _, lead_capacity = leader
         result['_requestRoute'] = {
             'requestOwned': True, 'modelId': lead.model['model_id'],
@@ -264,10 +275,12 @@ def _dispose_owned_auxiliary_group(group):
 def mint_auxiliary_route(route, *, owner, tenant, lifecycle):
     """Bind the discovery witness before resolving any credential plaintext.
 
-    Selection alone consults learned owner health. A credential cooled by a
-    concurrent request after selection is still minted and tried (dispatch
-    demotes, never strands it); a second health filter here turned that race
-    into a route-changed failure instead of the plan's own typed outcome.
+    Selection alone consults learned owner health and key-stats. A credential
+    cooled by a concurrent request after selection is still minted and tried
+    (dispatch demotes, never strands it); a second health filter here turned
+    that race into a route-changed failure instead of the plan's own typed
+    outcome. A billing stop recorded after selection is refused by the strict
+    dispatch admission before any upstream request.
     """
     from lib.model_routing import NativeModelSelection, RoutePolicy
     from lib.model_routing.domain import ProviderOfferingRef

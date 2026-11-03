@@ -391,6 +391,35 @@ failures=4, 2400 s); filtering health again at mint (the race raised `planned
 route changed` outside outage handling and failed the summary); catching that
 error and reselecting (more machinery than trusting the selected plan).
 
+**Recorded billing stops (2026-11-03).** Problem: a paid auxiliary route whose
+account ran out of credit answered HTTP 402. Dispatch recorded the key-wide stop
+in key-stats (`docs/modules/auth_providers_billing.md`, daily key health), but
+`select_auxiliary_route` read only learned route health, and ordinary admission
+promoted the sole stopped credential as last resort. Every later compaction
+ranked the same dead route first and paid nothing for another 402, ending
+`summary_dispatch_failed` with 0% reduction (163 402s across 9 tasks in one
+day) while the task's own route stayed healthy. Decision: an owner-wide
+auxiliary summary is optional work. Selection drops a candidate when
+`lib.key_stats.is_key_refused_for_optional_work` refuses its minted slot's
+identity (`candidate_key_stats_identity`: owner+Provider namespace,
+Credential, Deployment wire model): a key-wide stop, a stop for that wire
+model, or an explicit user disable. A stop recorded this day beats a manual ON,
+as strict admission requires; an explicit re-enable clears it and the route
+returns. `SummaryTransport` dispatches every request-owned route under
+`strict_billing_stop_admission()`, so a stop recorded between selection and
+mint is refused before ingress instead of promoted; the task's own route keeps
+attended user-supremacy admission. As with cooldowns the plan changes and the
+request identity stays the health-blind leader, so the failed request is never
+re-bought; a later compaction over new source routes around the stop. A
+wholly stopped supply leaves the authorized main route as the only summary
+route, under the existing rules. Rejected: copying 402 into
+`owner_health_registry` (a second billing authority with a TTL that would
+re-try a dead account every cooldown and ignore an explicit re-enable); a
+per-summary 402 retry/fallback ladder (each later compaction would still pay
+one failed attempt first); reading key-stats again at mint (the same race the
+cooldown record rejects, now covered by strict dispatch admission). Spec:
+`tests/compaction/test_summary_billing_stop.py`.
+
 These controls assume host-local source availability can change after discovery;
 remove them only when the common auxiliary dispatch owner provides equivalent
 whole-attempt ingress, exact-source, quote and joined-cleanup guarantees. All
@@ -404,6 +433,7 @@ speed/fidelity result is implied. Specs:
 `tests/compaction/test_auxiliary_offering_cost.py`,
 `tests/compaction/test_summary_routing.py`,
 `tests/compaction/test_summary_completion_policy.py`,
+`tests/compaction/test_summary_billing_stop.py`,
 `tests/compaction/test_compaction_receipt_contract.py`.
 
 ## Route-budget model knowledge
