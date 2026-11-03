@@ -383,6 +383,11 @@ removed.
 The AST census must fail when Git cannot enumerate tracked files; an empty
 result from a failed subprocess is never a clean audit. Event vocabulary scans
 read retained sources directly, without compiling browser test adapters.
+The native-fetch ownership guard reads those authored sections and parses
+TypeScript through its AST. A typed `fetch` port or receiver-qualified call is
+not a browser-global fetch; injected test graphs are not additional transport
+owners. Global `fetch(url)` and `window.fetch(url)` remain violations outside
+the transport and locale owners, with executable positive and negative controls.
 The syntax smoke census includes tracked and non-ignored untracked Python
 files through NUL-delimited Git enumeration, preserving its scratch-directory
 exclusions and skipping deleted paths. It compiles source bytes in memory:
@@ -466,6 +471,11 @@ Frontend tests exercise the Vite/ESM sources and generated delivery graph.
 They may use a real browser or an isolated module harness. Tests that rebuild
 deleted classic file graphs, concatenate independently bundled registries, or
 publish private owners onto `window` do not describe the shipped application.
+
+Raw classic-section fixtures inject only runtime imports that the section
+actually references. Manifest bindings marked `type` are compile-time-only and
+must never become browser globals; `tests/meta/test_runtime_import_ports.py`
+exercises that branch directly.
 
 Build toolchain decision: CI previously selected Node 20 while locked Vitest
 required Node 22.12 or a supported newer major. `.node-version` now owns the
@@ -944,8 +954,8 @@ budgeted like product latency. Measure with `--durations=40` on the gate and
 - Legacy jsdom modules compile native TypeScript owners at import time.
   `tests/_runtime_sections.py::_run_test_bundler` keeps a cross-process cache
   (default `$TMPDIR/tofu-test-bundle-cache-<uid>`, 7-day eviction) keyed by
-  bundler arguments, checkout root, bundler script, dependency lockfile,
-  tsconfigs and the `frontend/src` file list; a hit additionally requires
+  bundler arguments, checkout root, the Python harness adapter, bundler script,
+  dependency lockfile, tsconfigs and the `frontend/src` file list; a hit additionally requires
   every file Rollup read (`vite_test_bundle.mjs --inputs-manifest`) to hash
   identically and every directory holding one to list identically (a new
   sibling can change resolution). A build is recorded only when all its inputs

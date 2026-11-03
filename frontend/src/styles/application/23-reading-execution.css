@@ -70,6 +70,14 @@
   gap: var(--space-2);
 }
 
+.ptool-cmd-verdict:has(.ptool-spinner) {
+  overflow: clip;
+}
+
+.ptool-cmd-verdict .ptool-spinner {
+  box-sizing: border-box;
+}
+
 .ptool-cmd-block .ptool-cmd-verdict .ptool-cmd-status {
   margin: 0;
   padding: var(--space-1) var(--space-2);

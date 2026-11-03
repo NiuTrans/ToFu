@@ -57,6 +57,7 @@ const win = dom.window;
 global.window = win;
 global.document = win.document;
 global.console = console;
+global.HTMLElement = win.HTMLElement;
 if (typeof win.CSS === 'undefined') win.CSS = { escape: (s) => s };
 global.CSS = win.CSS;
 win.localStorage.setItem('tofu_segment_timeline', '0');

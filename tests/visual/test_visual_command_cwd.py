@@ -16,7 +16,7 @@ def test_command_directory_is_inside_code_tray(browser, tmp_path, width, theme):
     page = context.new_page()
     try:
         page.set_content(f'''<!doctype html><html data-theme="{theme}"><body>
-          <main style="max-width:100%;padding:12px"><div id="cards"></div></main>
+          <main class="conversation-surface" style="max-width:100%;padding:12px"><div id="cards"></div></main>
           </body></html>''')
         page.add_style_tag(path=str(ROOT / 'static/styles.css'))
         page.add_script_tag(path=native_module_path(
@@ -41,6 +41,8 @@ def test_command_directory_is_inside_code_tray(browser, tmp_path, width, theme):
         assert blocks.count() == 3
         for index in (0, 1):
             block = blocks.nth(index)
+            assert not block.locator('.ptool-cmd-code .ptool-cmd-cwd').is_visible()
+            block.evaluate('(el) => el.classList.add("cmd-open")')
             assert block.locator('.ptool-cmd-code .ptool-cmd-cwd').is_visible()
             assert block.locator('.ptool-cmd-code').inner_text().endswith('$ npm test')
             assert block.locator('.ptool-cmd-reason').count() == 0

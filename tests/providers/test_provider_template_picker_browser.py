@@ -17,19 +17,14 @@ sys.path.insert(0, str(ROOT))
 
 
 class ProviderTemplatePickerBrowser(unittest.TestCase):
+    @pytest.fixture(autouse=True)
+    def picker_browser(self, browser):
+        self.browser = browser
+        print(f'Chromium {browser.version}; authored rows={len(self.catalog)}; '
+              f'screenshots: {self.artifacts}', flush=True)
+
     @classmethod
     def setUpClass(cls):
-        from chromium_env import ensure_chromium_env
-        from playwright.sync_api import sync_playwright
-        ensure_chromium_env()
-        cls.pw = sync_playwright().start()
-        try:
-            cls.browser = cls.pw.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
-        except Exception:
-            cls.pw.stop()
-            raise
-        cls.addClassCleanup(cls.pw.stop)
-        cls.addClassCleanup(cls.browser.close)
         cls.artifacts = Path(tempfile.mkdtemp(prefix='tofu-provider-picker-browser-'))
         # Read authored JSON directly: never import the live feed or contact providers.
         catalog = {}
@@ -44,7 +39,6 @@ class ProviderTemplatePickerBrowser(unittest.TestCase):
         cls.css += '\n' + (ROOT / 'frontend/src/styles/settings/06-model-routing-v2.css').read_text()
         cls.script = subprocess.check_output(['node', '-e', "const ts=require('typescript'),fs=require('fs');process.stdout.write(ts.transpileModule(fs.readFileSync('frontend/src/features/settings/provider-template-picker.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)"], cwd=ROOT, text=True)
         cls.icons_script = subprocess.check_output(['node', '-e', "const ts=require('typescript'),fs=require('fs');process.stdout.write(ts.transpileModule(fs.readFileSync('frontend/src/core/model-brand-icons.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)"], cwd=ROOT, text=True)
-        print(f'Chromium {cls.browser.version}; authored rows={len(cls.catalog)}; screenshots: {cls.artifacts}', flush=True)
 
     def open_surface(self, width=1100, theme='tofu', lang='en'):
         context = self.browser.new_context(viewport={'width': width, 'height': 820},

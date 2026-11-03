@@ -39,19 +39,20 @@ def test_office_floor_proposals_budget_render_in_fixture_preview(page):
                 time.sleep(0.5)
         else:
             raise AssertionError('preview server did not come up')
-        page.wait_for_selector('.evo-gate-button', state='visible',
+        page.wait_for_selector('[data-hud="menu"]', state='visible',
                                timeout=15000)
-        gate = page.locator('.evo-gate-button')
-        assert '2' in gate.text_content()
-        assert page.locator('.evo-budget').count() == 1
-        assert page.locator('.evo-budget-bar').count() == 1
-        gate.click()
+        assert page.locator('[data-hud="menu"] .evo-hud-badge').text_content() == '2'
+        assert page.locator('[data-meter="tokens"]').count() == 1
+        assert page.locator('[data-meter="calls"]').count() == 1
+        page.locator('[data-hud="menu"]').click()
         page.wait_for_selector('.evo-proposal-row', timeout=5000)
         assert page.locator('.evo-proposal-row').count() == 2
         assert page.locator(
             '[data-studio-action="proposal-enable"]').count() == 2
+        assert page.locator(
+            '[data-studio-action="proposal-reject"]').count() == 2
         page.keyboard.press('Escape')
-        page.locator('.evo-floor-button').click()
+        page.locator('[data-hud="menu"]').click()
         page.wait_for_selector('.evo-floor-row', timeout=5000)
         kinds = page.eval_on_selector_all(
             '.evo-floor-row', 'rows => rows.map(r => r.dataset.kind)')

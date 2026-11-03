@@ -10,6 +10,8 @@ pytestmark = pytest.mark.visual
 def test_compaction_progress_and_archive_failure_are_visible(page, width):
     from playwright.sync_api import expect
     page.set_viewport_size({'width': width, 'height': 800})
+    page.set_content('<!doctype html><html data-theme="light"><body>'
+        '<main class="conversation-surface" style="width:100%"></main></body></html>')
     page.add_script_tag(path=native_module_path('.native/continue-activity-anchor.js',
         ROOT / 'frontend/src/conversation/presentation/activity-anchor.ts'))
     page.add_script_tag(path=native_module_path('.native/continue-activity-renderer.js',
@@ -26,8 +28,8 @@ def test_compaction_progress_and_archive_failure_are_visible(page, width):
     timeline = fold_activity_timeline(None, start, task)
     render = """entries => {
       let host = document.querySelector('#compaction-regression');
-      if (!host) {host = document.createElement('main'); host.id = 'compaction-regression';
-        document.body.append(host);}
+      if (!host) {host = document.createElement('section'); host.id = 'compaction-regression';
+        host.style.width = '100%'; document.querySelector('.conversation-surface').append(host);}
       host.replaceChildren();
       for (const entry of entries) {
         if (!activityEntryIsVisible(entry)) continue;
@@ -49,3 +51,4 @@ def test_compaction_progress_and_archive_failure_are_visible(page, width):
     expect(host.get_by_text('Compressing earlier context to fit the window…')).to_have_count(0)
     expect(host.locator('[data-conversation-action="open-compaction"]')).to_have_count(0)
     expect(host.locator('.activity-event')).to_have_count(1)
+    expect(host.locator('.activity-event')).to_have_attribute('open', '')

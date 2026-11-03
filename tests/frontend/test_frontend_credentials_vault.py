@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 
 from tests._jsdom import require_node_modules, run_harness
-from tests._runtime_sections import runtime_section_path
+from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
@@ -264,7 +264,33 @@ def test_vite_credentials_vault_matches_privacy_contract(tmp_path):
     )
 
 
+_CLOSE_SETTINGS_BODY = r'''
+const { setup } = require(process.env.JSDOM_HARNESS);
+const { check, report } = setup({
+  root: process.argv[3],
+  html: '<!DOCTYPE html><body><div id="settingsModal" class="open"></div></body>',
+  targets: [process.argv[2]],
+});
+const cleanups = [];
+for (const name of ['_destroyCredentialsVault', '_destroySpeechTab',
+                    '_destroyAuthSources']) {
+  globalThis.featureRegistry[name] = () => cleanups.push(name);
+}
+closeSettings();
+check('credential_cleanup_runs', cleanups.includes('_destroyCredentialsVault'));
+check('other_cleanup_preserved', cleanups.includes('_destroySpeechTab')
+      && cleanups.includes('_destroyAuthSources'));
+check('settings_closed', !document.getElementById('settingsModal').classList.contains('open'));
+report();
+'''
+
+
 def test_settings_close_wipes_revealed_credentials():
-    source = SAVE_EXPORT_TS.read_text()
-    assert "'_destroySpeechTab', '_destroyCredentialsVault', '_destroyAuthSources'," in source
-    assert "if (typeof cleanup === 'function') (cleanup as () => void)();" in source
+    built = native_module_path(
+        'settings-save-export-close.js', SAVE_EXPORT_TS)
+    run_harness(
+        target_js=built,
+        body_js=_CLOSE_SETTINGS_BODY,
+        expect_pass=3,
+        label='settings close credential cleanup',
+    )

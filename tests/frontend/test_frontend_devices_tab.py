@@ -31,6 +31,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 DEVICES_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings/devices.ts'
 SETTINGS_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings.ts'
 ESBUILD = Path(PROJECT_ROOT) / 'scripts' / 'vite_test_bundle.mjs'
+CORE_PANEL = Path(PROJECT_ROOT) / 'frontend/src/features/settings/core-panel.ts'
+DESKTOP_ENDPOINTS = Path(PROJECT_ROOT) / 'frontend/src/api/endpoint-registry/desktop.ts'
 
 
 def _read(path):
@@ -67,13 +69,13 @@ def test_devices_js_in_bundle_list():
 
 
 def test_switch_hook_delegates():
-    src = _read(os.path.join(JS_DIR, 'settings', 'core_panel.js'))
-    assert "tabId === 'devices'" in src and '_populateDevicesTab()' in src, (
-        'core_panel.switchSettingsTab 缺 devices 填充钩子 —— 切到页签白屏')
+    src = _read(CORE_PANEL)
+    assert "tabId === 'devices'" in src and 'bridge._populateDevicesTab();' in src, (
+        'core-panel.switchSettingsTab 缺 devices 填充钩子 —— 切到页签白屏')
 
 
 def test_api_domain_keeps_inventory_and_revoke_endpoints():
-    src = _read(os.path.join(JS_DIR, 'api.js'))
+    src = _read(DESKTOP_ENDPOINTS)
     assert "get('/api/v4/desktop/devices'" in src
     assert '/api/v4/desktop/token/${encodeURIComponent(keyId)}' in src, (
         'Api.desktop 缺授权撤销端点')
@@ -296,12 +298,16 @@ def test_neuter_hook_means_blank_tab():
     output = run_harness(
         target_js=owner,
         body_js=_NEUTER_HOOK_BODY.replace(
-            'window._populateDevicesTab = global._populateDevicesTab = () => {',
+            "switchSettingsTab('devices');",
             'delete featureRegistry._populateDevicesTab;\n'
-            'window._populateDevicesTab = global._populateDevicesTab = () => {',
+            'delete window._populateDevicesTab; delete global._populateDevicesTab;\n'
+            'if (featureRegistry._populateDevicesTab !== undefined) '
+            '  throw new Error("Devices registry fallback was not removed");\n'
+            "switchSettingsTab('devices');",
         ).replace("check('hook_fills_tab',", "check('neuter_tab_stays_blank',")
         .replace("=== 'POPULATED'", "!== 'POPULATED'"),
         min_pass=1,
         label='devices hook removed',
     )
     assert 'PASS neuter_tab_stays_blank' in output
+

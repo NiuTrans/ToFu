@@ -302,10 +302,11 @@ def test_large_jump_list_native_focus_and_busy_context(browser, bar_html):
     assert page.evaluate("(()=>{const a=document.activeElement.getBoundingClientRect(),p=document.querySelector('.turn-jump-panel').getBoundingClientRect();return a.top>=p.top&&a.bottom<=p.bottom})()")
     page.keyboard.press('Escape')
     page.locator('#contextHealthBar').click()
-    assert page.locator('.ctx-pop-compact').is_disabled()
-    assert page.locator('.ctx-pop-history').evaluate('e=>e===document.activeElement')
-    page.keyboard.press('Tab')
-    page.keyboard.press('Tab')
+    assert not page.locator('.ctx-pop-compact').is_disabled()
+    assert page.locator('.ctx-pop-compact').inner_text() == 'Compact at the next model call'
+    assert page.locator('.ctx-pop-compact').evaluate('e=>e===document.activeElement')
+    for _ in range(3):
+        page.keyboard.press('Tab')
     assert page.locator('#ctxBarPopover').count() == 0
     assert page.locator('.turn-nav-step[data-direction="previous"]').evaluate('e=>e===document.activeElement')
     context.close()

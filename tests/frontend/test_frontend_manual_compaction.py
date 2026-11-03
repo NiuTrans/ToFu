@@ -146,6 +146,56 @@ _CTXBAR_HARNESS = _CTXBAR_HARNESS.replace(
     "window.flashGaugeForArchive = (id) => { flashed = id; };")
 
 
+_CONTEXT_METER_DOM_PORTS = r"""
+// The materialized typed meter reads real DOM ownership and composition APIs.
+// Extend these minimal fixture nodes without replacing the production meter.
+const contextDocument = global.document;
+contextDocument.defaultView = global;
+contextDocument.activeElement = null;
+global.innerWidth = 1280;
+global.innerHeight = 800;
+function withMeterDomPorts(el) {
+  if (!el) return el;
+  el.ownerDocument = contextDocument;
+  el.append = function(...children) {
+    children.forEach(child => {
+      if (this.id === 'ctxLiveSummary'
+          && child.className === 'ctx-live-summary-body') this._body = child;
+      this.appendChild(child);
+    });
+  };
+  el._children = [];
+  el.after = function() {};
+  el.insertBefore = function(child) { return this.appendChild(child); };
+  el.replaceChildren = function() { this._children = []; };
+  el.querySelector = function() { return null; };
+  el.focus = function() {};
+  el.getClientRects = function() { return [{}]; };
+  el.closest = function() { return null; };
+  el.contains = function() { return false; };
+  const bounds = el.getBoundingClientRect;
+  el.getBoundingClientRect = function() {
+    return Object.assign(bounds.call(this), { width: 100, height: 20 });
+  };
+  const setStyle = el.style && el.style.setProperty || function() {};
+  el.style = el.style || {};
+  el.style.setProperty = function(key, value) { this[key] = value; setStyle.call(this, key, value); };
+  el.style.getPropertyValue = function(key) { return this[key]; };
+  return el;
+}
+withMeterDomPorts(contextDocument.body);
+const createMeterNode = contextDocument.createElement;
+contextDocument.createElement = function() {
+  return withMeterDomPorts(createMeterNode.call(this));
+};
+const findMeterNode = contextDocument.getElementById;
+contextDocument.getElementById = function(id) {
+  return withMeterDomPorts(findMeterNode.call(this, id));
+};
+withMeterDomPorts(contextDocument.body);
+"""
+
+
 def _run(harness_src: str, js_path: str, tmp_name: str):
     harness = os.path.join(HERE, tmp_name)
     # createContextMeter obtains its document from the host after its TS
@@ -160,7 +210,9 @@ def _run(harness_src: str, js_path: str, tmp_name: str):
         '    let outcome = null;\n    _manualCompactionId = convId;',
     )
     with open(harness, 'w') as f:
-        f.write(harness_src)
+        f.write(harness_src.replace(
+            'eval(fs.readFileSync(process.argv[2]',
+            _CONTEXT_METER_DOM_PORTS + '\neval(fs.readFileSync(process.argv[2]'))
     try:
         return subprocess.run(['node', harness, js_path],
                               capture_output=True, text=True, timeout=60)
@@ -267,14 +319,13 @@ _GAUGE_BEHAVIOR_HARNESS = r"""
 const fs = require('fs');
 global.window = global;
 const LIMIT = 200000;
-// A capturing element: records --ctx-arc-pct writes + dataset so we can read
-// back the rendered fill level after updateContextBar().
+// A capturing element records the typed meter's --ctx-fill writes.
 let ARC_PCT = null;
 function _mkEl() {
   const el = {
     _children: [], classList: { add(){}, remove(){}, toggle(){} },
     dataset: {}, attributes: {},
-    style: { setProperty(k,v){ if (k === '--ctx-arc-pct') ARC_PCT = v; } },
+    style: { setProperty(k,v){ if (k === '--ctx-fill') ARC_PCT = v; } },
     setAttribute(k,v){ this.attributes[k]=v; }, getAttribute(k){ return this.attributes[k]; },
     appendChild(c){ this._children.push(c); return c; },
     prepend(c){ this._children.unshift(c); return c; },
@@ -325,7 +376,7 @@ global.ConversationTurnRead = {
 eval(fs.readFileSync(process.argv[2],'utf8'));   // context-bar.js
 const out=[];
 function check(n,c){out.push((c?'PASS ':'FAIL ')+n);}
-// Recover the `used` token count the bar rendered from the --ctx-arc-pct write.
+// Recover the `used` token count from the typed meter's public CSS fill.
 function renderedUsed(){ ARC_PCT=null; window.updateContextBar();
   return ARC_PCT==null ? null : Math.round(parseFloat(ARC_PCT)/100*LIMIT); }
 
@@ -495,11 +546,12 @@ def test_gauge_legacy_path_neuter(tmp_path):
         ("        const n = typeof agentApiRoundCount === 'function'\n"
          '          ? agentApiRoundCount(m.apiRounds)\n'
          '          : (Array.isArray(m.apiRounds) && m.apiRounds.length) || 1;  // NEUTER\n'
-         '        if (t > 0 && n > 0) return n > 1 ? Math.round(t / n) : t;'), 1)
+         '        if (t > 0) return n > 1 ? Math.round(t / n) : t;'), 1)
     assert neutered != src
+    harness = _GAUGE_LEGACY_HARNESS
     nfile = tmp_path / 'context-bar-legacy-neutered.js'
     nfile.write_text(neutered, encoding='utf-8')
-    proc = _run(_GAUGE_LEGACY_HARNESS, str(nfile), '_gauge_legacy_neuter_harness.js')
+    proc = _run(harness, str(nfile), '_gauge_legacy_neuter_harness.js')
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     assert 'FAIL accumulated_bill_without_round_count_is_not_a_prompt_size' in output, (
@@ -545,7 +597,10 @@ global.document = {
   getElementById(sel){ return sel === 'convStatusStrip' ? STRIP : null; },
   querySelector(sel){ return sel === '.chat-wrapper' ? WRAPPER : null; },
   createElement(){ return _mkEl('div'); },
-  body: { appendChild(c){ if (c && c.id === 'ctxLiveSummary') LIVE = c; return c; } },
+  body: {
+    appendChild(c){ if (c && c.id === 'ctxLiveSummary') LIVE = c; return c; },
+    append(c){ return this.appendChild(c); },
+  },
   addEventListener(){}, removeEventListener(){}, readyState:'complete',
 };
 global.requestAnimationFrame = (fn) => { fn(); return 0; };
@@ -777,15 +832,14 @@ def test_manual_compaction_single_toast_neuter(tmp_path):
     ('running' + 'nothing'), exactly the contradictory-stack bug. Proves the
     single-toast contract is load-bearing."""
     src = open(os.path.join(JS_DIR, 'context-bar.js'), encoding='utf-8').read()
-    # Inject a running toast right after the idle-guard early return, mimicking
-    # the old bug. Anchor on the _setCompacting(true) line the fix introduced.
-    anchor = "    let outcome = null;\n    _setCompacting(true);"
+    # Inject a running toast before the current in-flight state update.
+    anchor = "    let outcome = null;\n    _manualCompactionId = convId;\n    _doUpdate();"
     assert anchor in src, 'single-toast fix anchor not found (fix regressed?)'
     neutered = src.replace(
         anchor,
         "    let outcome = null;\n"
         "    if (typeof showToast === 'function') showToast(_tt('compactNow.running','running'), 'info');  // NEUTER\n"
-        "    _setCompacting(true);", 1)
+        "    _manualCompactionId = convId;\n    _doUpdate();", 1)
     assert neutered != src
     nfile = tmp_path / 'context-bar-toast-neutered.js'
     nfile.write_text(neutered, encoding='utf-8')

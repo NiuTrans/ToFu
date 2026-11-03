@@ -136,6 +136,7 @@ function buildActivityEventRow(
   previousOpen?: boolean,
   turn?: ConversationTurnViewModel,
   previousCompactionOpen?: boolean,
+  previousCompactionFailed?: boolean,
 ): HTMLElement {
   const isCompaction = ['context_compaction', 'compacting'].includes(entry.reasonCode ?? '');
   const row = document.createElement(terminalError || isCompaction ? 'details' : 'div');
@@ -145,8 +146,11 @@ function buildActivityEventRow(
     + (isCompaction ? ' activity-event--compaction activity-event__compaction-details' : '')
     + (terminalError ? ' activity-event--terminal-error' : '');
   if (row.tagName === 'DETAILS') {
+    const failed = entry.status === 'failed' || entry.severity === 'error';
+    const compactionOpen = failed && previousCompactionFailed === false
+      ? true : previousCompactionOpen ?? failed;
     (row as HTMLDetailsElement).open = terminalError
-      ? previousOpen ?? true : previousCompactionOpen ?? false;
+      ? previousOpen ?? true : compactionOpen;
   }
   row.dataset.activityId = entry.id;
   row.dataset.activitySpanId = entry.spanId;
@@ -532,6 +536,8 @@ export function renderActivityEventBlock(
       previousDetails?.open,
       turn,
       previousCompactionDetails?.open,
+      previousCompactionDetails?.classList.contains('activity-event--failed')
+        || previousCompactionDetails?.classList.contains('activity-event--error'),
     ),
   );
 
