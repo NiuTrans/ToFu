@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "Fragen Sie mich etwas… (Enter zum Senden)",
   "chat.newConversation": "Neuer Chat",
   "chat.scrollToBottom": "Zum Neuesten scrollen",
-  "collab.openBrain": "Projektgehirn öffnen",
-  "collab.project": "Projekt",
   "commitCard.committedHead": "Committet ({n}) — nachweislich aus dieser Unterhaltung",
   "commitCard.heldHead": "Zurückgehalten ({n}) — nicht committet",
   "commitCard.noneClean": "Keine Dateien ließen sich nachweislich dieser Unterhaltung zuordnen.",

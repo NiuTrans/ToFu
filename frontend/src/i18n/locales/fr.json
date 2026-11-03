@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "Posez votre question… (Enter pour envoyer)",
   "chat.newConversation": "Nouveau chat",
   "chat.scrollToBottom": "Aller au plus récent",
-  "collab.openBrain": "Ouvrir le Cerveau du projet",
-  "collab.project": "Projet",
   "commitCard.committedHead": "Validés ({n}) — attribution prouvée",
   "commitCard.heldHead": "Retenus ({n}) — non validés",
   "commitCard.noneClean": "Aucun fichier n’a pu être attribué avec certitude à cette conversation.",

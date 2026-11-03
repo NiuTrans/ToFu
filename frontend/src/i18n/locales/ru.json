@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "Спросите что угодно… (Enter — отправить)",
   "chat.newConversation": "Новый чат",
   "chat.scrollToBottom": "К последним сообщениям",
-  "collab.openBrain": "Открыть Мозг проекта",
-  "collab.project": "Проект",
   "commitCard.committedHead": "Включено в коммит ({n}) — достоверно из этого чата",
   "commitCard.heldHead": "Отложено ({n}) — не включено в коммит",
   "commitCard.noneClean": "Нет файлов, которые можно достоверно отнести к этому чату.",

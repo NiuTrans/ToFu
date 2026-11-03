@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "何でも質問してください…（Enterで送信）",
   "chat.newConversation": "新しいチャット",
   "chat.scrollToBottom": "最新までスクロール",
-  "collab.openBrain": "プロジェクトブレインを開く",
-  "collab.project": "プロジェクト",
   "commitCard.committedHead": "コミット済み（{n}） — この会話の変更と確認済み",
   "commitCard.heldHead": "保留（{n}） — 未コミット",
   "commitCard.noneClean": "この会話の変更と確認できるファイルはありません。",
