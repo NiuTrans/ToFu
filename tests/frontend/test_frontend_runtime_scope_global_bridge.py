@@ -68,16 +68,13 @@ def _main_asset() -> Path:
 
 _LOADER = r"""
 import { readFileSync } from 'node:fs';
-import { registerHooks } from 'node:module';
-registerHooks({
-  load(url, context, nextLoad) {
+export function load(url, context, nextLoad) {
     if (url.includes('/static/vite/assets/') && url.endsWith('.js')) {
       return {format:'module', source:readFileSync(new URL(url), 'utf8'),
         shortCircuit:true};
     }
     return nextLoad(url, context);
-  },
-});
+}
 """
 
 
@@ -107,6 +104,10 @@ global.ResizeObserver = win.ResizeObserver = class {
   observe() {} unobserve() {} disconnect() {}
 };
 global.requestIdleCallback = win.requestIdleCallback = () => 0;
+win.t = global.t = (key, fallback) => fallback || key;
+win.flashGaugeForArchive = global.flashGaugeForArchive = () => {};
+win.saveConversationStateToStorage = global.saveConversationStateToStorage = () => {};
+win.openOrchestration = global.openOrchestration = () => {};
 global.requestAnimationFrame = win.requestAnimationFrame = () => 0;
 global.localStorage = win.localStorage;
 global.sessionStorage = win.sessionStorage;
@@ -152,7 +153,7 @@ def test_built_runtime_imports_without_undefined_retired_owner():
     try:
         result = subprocess.run(
             [
-                shutil.which("node"), "--import", str(loader), str(harness),
+                shutil.which("node"), "--experimental-loader", str(loader), str(harness),
                 str(_main_asset()), str(ROOT),
             ],
             cwd=ROOT,

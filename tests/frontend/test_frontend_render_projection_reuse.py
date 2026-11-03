@@ -175,7 +175,7 @@ const skipped = !surface.root.querySelector('[data-block-id="text:terminal"]');
 const vm3 = feature.selectConversationViewModel(
   makeState(turn(2, 'two', segments('two'))), {});
 surface.render(vm3);
-const healed = surface.root.querySelector('[data-block-id="text:terminal"]').textContent;
+const healed = surface.root.querySelector('[data-block-id="text:terminal"] .md-content').textContent;
 surface.dispose();
 dom.window.close();
 console.log(JSON.stringify({skipped, healed}));
