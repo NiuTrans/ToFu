@@ -38,6 +38,28 @@ function render(
 }
 
 describe('clickable compact compression receipts', () => {
+  it('opens a newly failed receipt but preserves the reader closing it', () => {
+    const { dom, node, update } = render({ status: 'running', archiveId: undefined });
+    try {
+      expect(node.querySelector<HTMLDetailsElement>('details')!.open).toBe(false);
+      update({ status: 'failed', severity: 'warning' });
+      const details = node.querySelector<HTMLDetailsElement>('details')!;
+      expect(details.open).toBe(true);
+      details.open = false;
+      update({ summary: 'Could not save compacted context; original context retained.' });
+      expect(details.open).toBe(false);
+    } finally { dom.window.close(); }
+  });
+  it('exposes a failed archive without requiring a diagnostic disclosure', () => {
+    const { dom, node } = render({
+      status: 'failed', severity: 'warning', archiveId: undefined,
+      summary: 'Could not save compacted context; original context retained.',
+    });
+    try {
+      expect(node.querySelector<HTMLDetailsElement>('details')?.open).toBe(true);
+      expect(node.querySelector('[data-conversation-action="open-compaction"]')).toBeNull();
+    } finally { dom.window.close(); }
+  });
   it('puts the recorded model beside the status and opens the receipt without a Details label', () => {
     const { dom, node } = render({ summaryModel: 'Luna', summarySelectedModel: 'chosen-Luna',
       taskModel: 'Sol', tokensBefore: 100000, tokensAfter: 15000, trigger: 'working_set' });
