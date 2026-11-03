@@ -5,11 +5,17 @@ Captured child-owned contexts preserve originating authority across deferral.
 Root FIFO acceptance may explicitly transfer it with accepted_publication_context.
 Storage transactions still require their own attempt/CAS fence.
 """
+from __future__ import annotations
+
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar, copy_context
 import threading
+from typing import TYPE_CHECKING
 
-_publication_scope = ContextVar('child_publication_scope', default=())
+if TYPE_CHECKING:
+    _publication_scope: ContextVar[tuple[ChildPublicationFence, ...]]
+else:
+    _publication_scope = ContextVar('child_publication_scope', default=())
 
 
 class ChildPublicationRevoked(RuntimeError):

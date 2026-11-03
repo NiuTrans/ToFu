@@ -76,8 +76,10 @@ class TerminalDelivery:
                 self._delivering = False
 
 
-def bind_terminal_delivery(task: dict, receiver: Callable[[dict], object], *,
-                           persistence_preparer=None) -> None:
+def bind_terminal_delivery(
+    task: dict, receiver: Callable[[dict], object], *,
+    persistence_preparer: Callable[[dict, str, int], dict] | None = None,
+) -> None:
     """Bind server-owned authority once; config cannot install a receiver."""
     if not task.get('id') or type(task.get('_userId')) is not int or task['_userId'] < 1:
         raise ValueError('terminal delivery requires owned task identity')

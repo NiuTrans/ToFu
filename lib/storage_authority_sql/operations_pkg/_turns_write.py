@@ -1243,6 +1243,8 @@ def _turn_attempt_create(session: Session, payload: Mapping[str, Any]) -> Any:
             "WHERE conversation_id=? AND turn_id=?",
             (conv_id, turn_id),
         )
+        if attempt_count_row is None:
+            raise StorageError("database_integrity", "Attempt count is unavailable")
         attempt_count = int(attempt_count_row["attempt_count"] or 0)
         if attempt_count <= 1:
             # Freeze the first settled owner's identity before

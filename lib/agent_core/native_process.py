@@ -19,7 +19,7 @@ import sys
 import time
 import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from lib.identity import PrincipalContext
 
@@ -190,7 +190,8 @@ class _ApprovalControl:
                 await _joined(callback)
                 decision = 'denied'
             except asyncio.CancelledError:
-                if callback.cancelled() and not asyncio.current_task().cancelling():
+                owner_task = asyncio.current_task()
+                if callback.cancelled() and owner_task is not None and not owner_task.cancelling():
                     raise NativeProcessError('native approval policy cancelled itself')
                 cancelled = True
                 request.cancelled.set()
@@ -467,7 +468,9 @@ def reconciled_tool_observations(state: Mapping[str, Any], result) -> list[dict]
 class _CheckpointControl:
     def __init__(self, rounds, policy, epoch):
         self.rounds, self.policy, self.epoch = rounds, policy, epoch
-        self.model = None
+        self.policy: Any = policy
+        from lib.agent_core.native_model_control import ModelControl
+        self.model: ModelControl | None = None
         self.priced = False
         self.tree_usage = False
         self.actor_usage = False
@@ -480,7 +483,7 @@ class _CheckpointControl:
         self.pending_round = None
         self.recovery_digest = None
 
-    def state_identity(self, state):
+    def state_identity(self, state: object) -> None:
         if (not isinstance(state, Mapping) or state.get('format') != 'tofu.native-agent-checkpoint/v1'
                 or type(state.get('owner_user_id')) is not int
                 or state['owner_user_id'] != self.rounds.client.principal.require_owner(context='native checkpoint')
@@ -558,27 +561,36 @@ class _CheckpointControl:
             async def invoke():
                 candidate = request
                 if self.model is not None and action in {'pending', 'complete'}:
+                    state = candidate.state
+                    if state is None:
+                        raise NativeProcessError('native completion requires checkpoint state')
                     from dataclasses import replace
-                    if 'shared_model_account' in request.state or 'model_account' in request.state:
+                    if 'shared_model_account' in state or 'model_account' in state:
                         raise NativeProcessError('native completion cannot invent shared account state')
                     captured = await self.model.capture_checkpoint(request)
                     self.account_identity(captured)
                     if 'root_tokens' in captured and not self.tree_usage:
                         raise NativeProcessError('tree checkpoint requires explicit tree usage admission')
-                    candidate = replace(request,state=dict(request.state,shared_model_account=captured))
+                    candidate = replace(request,state=dict(state,shared_model_account=captured))
                     if self.priced:
-                        if 'host_fee_projection' in request.state:
+                        if 'host_fee_projection' in state:
                             raise NativeProcessError('native completion cannot invent fee state')
                         fees = rounds.policy.capture_fee_checkpoint(request,candidate.state)
                         if not isinstance(fees, Mapping):
                             raise NativeProcessError('native fee capture must return a mapping')
                         if fees.get('child_rounds') and not self.tree_usage:
                             raise NativeProcessError('child fee checkpoint requires tree usage admission')
-                        candidate = replace(candidate,state=dict(candidate.state,host_fee_projection=fees))
+                        candidate_state = candidate.state
+                        if candidate_state is None:
+                            raise NativeProcessError('native fee checkpoint requires state')
+                        candidate = replace(candidate,state=dict(candidate_state,host_fee_projection=fees))
                     rounds.client._encode(dict(version=rounds.client.protocol_version,
                         type='checkpoint_decision',request_id=rounds.task_id+'-checkpoint-load-0',
                         accepted=True,disposition='continue',state=candidate.state),rounds.client.budget.frame_bytes)
-                result = await getattr(self.policy, action)(candidate)
+                callback = getattr(self.policy, action, None)
+                if not callable(callback):
+                    raise NativeProcessError('native checkpoint callback is missing')
+                result: Any = await cast(Callable[[CheckpointRequest], Awaitable[Any]], callback)(candidate)
                 if action == 'load' and result is not None:
                     self.state_identity(result)
                     if 'tools_pending' in result and (result['tools_pending'] is not True or not self.pending_tools):
@@ -623,6 +635,8 @@ class _CheckpointControl:
                 if result is not None: raise TypeError('native pending checkpoint must return None')
                 self.pending_round = number
             elif action == 'reconcile':
+                if state is None:
+                    raise NativeProcessError('native tool reconciliation requires state')
                 if checkpoint_state_digest(state) != self.recovery_digest:
                     raise NativeProcessError('native reconciler changed its restored state')
                 observations = reconciled_tool_observations(state, result)
@@ -1272,7 +1286,8 @@ class NativeProcessClient:
         self._closing: asyncio.Task | None = None
         self._closed = False
         self._archive_version = None
-        self._shared_image = None
+        from lib.agent_core.native_image import _NativeImage
+        self._shared_image: _NativeImage | None = None
         self._worker_pool = None
 
     @classmethod
@@ -1374,8 +1389,12 @@ class NativeProcessClient:
             count = 0
             while True:
                 if rounds is None and terminal is None and text is None and approvals is None and model is None:
+                    if process.stdout is None:
+                        raise NativeProcessError('native shutdown output is unavailable')
                     chunk = await process.stdout.read(4096)
                 else:
+                    if process.stdout is None:
+                        raise NativeProcessError('native shutdown output is unavailable')
                     chunk = await process.stdout.readline()
                 if not chunk:
                     return
@@ -1635,6 +1654,8 @@ class NativeProcessClient:
         )
         shared = config.get('checkpoint_shared_account') is True
         if model is not None and checkpoint_policy is not None:
+            if rounds is None or rounds.checkpoint is None:
+                raise NativeConfigurationError('shared checkpoint requires round control')
             if (not shared or not all(callable(getattr(model_policy,name,None)) for name in ('capture_checkpoint','restore_checkpoint'))
                     or not isinstance(config.get('template'),dict) or not isinstance(config['template'].get('model'),str)):
                 raise NativeConfigurationError('shared checkpoint requires explicit account capture/recovery')
@@ -1711,7 +1732,7 @@ class NativeProcessClient:
         self._runs[task] = asyncio.get_running_loop().create_future()
         process = None
         spawn = None
-        stop_subscription = stop_signal.subscribe_async() if stop_signal is not None else None
+        stop_subscription: Any = stop_signal.subscribe_async() if stop_signal is not None else None
         stop_watcher = None
         tool_callbacks = None
         try:
@@ -1753,13 +1774,17 @@ class NativeProcessClient:
                 # Enter native terminal settlement with no dispatch authority;
                 # never fabricate a host terminal candidate before acquisition.
                 raw = self._encode(dict(config,cancel_requested=True),self.budget.configuration_bytes)
+            if process.stdin is None:
+                raise NativeProcessError('native process input is unavailable')
             process.stdin.write(raw)
             await process.stdin.drain()
             if stop_subscription is not None and not pre_stopped:
                 owner_task=asyncio.current_task()
                 async def observe_stop():
-                    await stop_subscription.future
-                    owner_task.cancel()
+                    future = stop_subscription.future
+                    await future
+                    if owner_task is not None:
+                        owner_task.cancel()
                 stop_watcher=asyncio.create_task(observe_stop())
             from lib.agent_core.native_tool_control import NativeToolControl
             tool_callbacks = NativeToolControl(self, process, config, handlers, approvals)

@@ -353,18 +353,24 @@ class PushHub:
         self._register_subscription(channel, task_id)
 
     def unsubscribe(self, client: 'PushClient', channel: str, task_id: str = '*'):
+        emptied = False
         with self._lock:
             # ``defaultdict`` indexing an unknown unsubscribe used to CREATE a
             # permanent empty tombstone. Read with .get(), and eagerly prune
             # both levels when the last real subscriber leaves.
             channel_subs: dict[str, set] | None = self._subscriptions.get(channel)
-            task_clients = channel_subs.get(task_id) if channel_subs else None
+            if channel_subs is None:
+                task_clients = None
+            else:
+                task_clients = channel_subs.get(task_id)
             if task_clients is None:
                 emptied = False
             else:
                 task_clients.discard(client)
                 emptied = not task_clients
                 if emptied:
+                    if channel_subs is None:
+                        raise RuntimeError('push subscription channel disappeared')
                     channel_subs.pop(task_id, None)
                     if not channel_subs:
                         self._subscriptions.pop(channel, None)

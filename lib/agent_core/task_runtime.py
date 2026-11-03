@@ -814,7 +814,7 @@ class TaskRuntime:
             retained_sizes, retained_bytes = self._reconcile_event_retention(
                 task, events)
             try:
-                hinted_next_seq = int(task.get('_eventNextSeq'))
+                hinted_next_seq = int(task.get('_eventNextSeq') or 0)
             except (TypeError, ValueError, OverflowError, RecursionError) as exc:
                 logger.debug('[TaskRuntime:%s] invalid next event sequence '
                              'task=%s: %s', self.kind, task_id[:8], exc)
@@ -1068,6 +1068,8 @@ class TaskRuntime:
 
         def commit():
             nonlocal completion
+            if commit_result is None:
+                raise TypeError('commit_result must be callable')
             completion = commit_result()
             if not isinstance(completion, TaskCompletion):
                 raise TypeError('commit_result must return TaskCompletion')

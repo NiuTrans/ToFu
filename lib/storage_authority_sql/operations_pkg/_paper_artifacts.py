@@ -194,6 +194,8 @@ def _paper_artifact_append(session, payload):
 
 def _chunk_bytes(session, key, sequence):
     chunk = _get(session, _CHUNK, f'{key}:{sequence}')
+    if chunk is None:
+        raise StorageError('database_integrity', 'Retained paper artifact chunk is missing or corrupt')
     try:
         data = base64.b64decode(chunk['data'], validate=True)
         if hashlib.sha256(data).hexdigest() != chunk['sha256']:
