@@ -7040,5 +7040,6 @@
   "toolHumanGuidance.repliedInChat": "已在对话中回复",
   "toolHumanGuidance.replyDrafted": "回复已放入输入框，确认后发送",
   "toolHumanGuidance.supersededRow": "未作答 · 你在对话中直接回复了",
-  "toolsInv.tool.update_task_progress": "更新协调者对话上方显示给用户的任务进展。"
+  "toolsInv.tool.update_task_progress": "更新协调者对话上方显示给用户的任务进展。",
+  "narrationWell.label": "{n} 段过程说明"
 }

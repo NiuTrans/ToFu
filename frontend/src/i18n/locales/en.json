@@ -7040,5 +7040,6 @@
   "toolHumanGuidance.repliedInChat": "Replied in chat",
   "toolHumanGuidance.replyDrafted": "Your reply is in the composer — send it when ready",
   "toolHumanGuidance.supersededRow": "Not answered · you replied in chat instead",
-  "toolsInv.tool.update_task_progress": "Update the task board shown to the user above the Coordinator conversation."
+  "toolsInv.tool.update_task_progress": "Update the task board shown to the user above the Coordinator conversation.",
+  "narrationWell.label": "{n} progress note{s}"
 }

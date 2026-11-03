@@ -7040,5 +7040,6 @@
   "toolHumanGuidance.repliedInChat": "チャットで回答済み",
   "toolHumanGuidance.replyDrafted": "回答を入力欄に入れました。準備ができたら送信してください",
   "toolHumanGuidance.supersededRow": "未回答 · チャットで直接返信しました",
-  "toolsInv.tool.update_task_progress": "コーディネーターの会話の上にユーザー向けに表示されるタスクの進捗を更新します。"
+  "toolsInv.tool.update_task_progress": "コーディネーターの会話の上にユーザー向けに表示されるタスクの進捗を更新します。",
+  "narrationWell.label": "途中経過メモ {n} 件"
 }

@@ -7040,5 +7040,6 @@
   "toolHumanGuidance.repliedInChat": "Ответ дан в чате",
   "toolHumanGuidance.replyDrafted": "Ответ добавлен в поле ввода — отправьте, когда будете готовы",
   "toolHumanGuidance.supersededRow": "Без ответа · вы ответили в чате",
-  "toolsInv.tool.update_task_progress": "Обновление списка задач, который пользователь видит над чатом координатора."
+  "toolsInv.tool.update_task_progress": "Обновление списка задач, который пользователь видит над чатом координатора.",
+  "narrationWell.label": "Промежуточные заметки: {n}"
 }

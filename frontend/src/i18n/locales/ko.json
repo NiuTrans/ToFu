@@ -7040,5 +7040,6 @@
   "toolHumanGuidance.repliedInChat": "채팅으로 답변함",
   "toolHumanGuidance.replyDrafted": "답변을 입력창에 넣었습니다. 준비되면 보내세요",
   "toolHumanGuidance.supersededRow": "답변 안 함 · 채팅으로 직접 답했습니다",
-  "toolsInv.tool.update_task_progress": "코디네이터 대화 위에 사용자에게 표시되는 작업 진행 상황을 업데이트합니다."
+  "toolsInv.tool.update_task_progress": "코디네이터 대화 위에 사용자에게 표시되는 작업 진행 상황을 업데이트합니다.",
+  "narrationWell.label": "진행 메모 {n}개"
 }
