@@ -5018,6 +5018,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ {model} 的当前路由暂无可用网关渠道，正在尝试其他路由或等待恢复（第 {attempt} 次）：{message}",
   "stream.phase.subscriptionQuotaReached": "⛔ 模型 {model} 订阅额度已用尽（按周期重置，常需数小时/数天），不会自动恢复 — 请切换模型或等待额度重置…（第 {attempt} 次）",
   "stream.phase.retrying": "正在重试…",
+  "stream.phase.runningTools": "正在执行 {tools}…",
+  "stream.phase.runningToolIntent": "正在执行 {tool}：{intent}",
   "stream.phase.semanticProgressTimeoutRetry": "{model} 连续 {elapsed}s 没有新的推理、正文或工具进展（请求已运行 {requestElapsed}s），系统正避开当前接入槽重试（{attempt}/{max}）…",
   "stream.phase.sendingRequest": "正在发送请求，等待服务器受理…",
   "stream.phase.startupConfig": "正在解析模型与工作区设置…",

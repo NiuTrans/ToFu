@@ -5018,6 +5018,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ Auf dieser Route bedient derzeit kein Gateway-Kanal {model} — andere Routen werden versucht oder es wird auf Wiederherstellung gewartet (Versuch {attempt}): {message}",
   "stream.phase.subscriptionQuotaReached": "⛔ Abonnementkontingent für Modell {model} ist aufgebraucht (wird in festen Zeiträumen zurückgesetzt, oft nach Stunden/Tagen) — keine automatische Wiederherstellung; wechseln Sie das Modell oder warten Sie auf das Zurücksetzen… (Versuch {attempt})",
   "stream.phase.retrying": "Neuer Versuch…",
+  "stream.phase.runningTools": "{tools} wird ausgeführt…",
+  "stream.phase.runningToolIntent": "{tool} wird ausgeführt: {intent}",
   "stream.phase.semanticProgressTimeoutRetry": "{model} zeigt seit {elapsed} s keinen Fortschritt bei Denkprozess, Antworttext oder Tool-Aufrufen (Anfrage läuft seit {requestElapsed} s). Neuer Versuch über einen anderen Slot ({attempt}/{max})…",
   "stream.phase.sendingRequest": "Nachricht wird an den Server gesendet…",
   "stream.phase.startupConfig": "Modell- und Arbeitsbereichseinstellungen werden ermittelt…",

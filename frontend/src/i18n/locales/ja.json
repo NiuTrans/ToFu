@@ -5018,6 +5018,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ このルートでは現在{model}を提供するゲートウェイチャネルがありません — 他のルートを試すか、回復を待っています（{attempt}回目）：{message}",
   "stream.phase.subscriptionQuotaReached": "⛔ モデル{model}のサブスクリプションのクォータを使い切りました（一定期間ごとにリセットされ、多くの場合数時間〜数日かかります）。自動では回復しません — モデルを切り替えるか、リセットを待ってください…（{attempt}回目）",
   "stream.phase.retrying": "再試行しています…",
+  "stream.phase.runningTools": "{tools} を実行中…",
+  "stream.phase.runningToolIntent": "{tool} を実行中：{intent}",
   "stream.phase.semanticProgressTimeoutRetry": "{model}で{elapsed}秒間、推論・応答テキスト・ツールの新しい進捗がありません（リクエスト経過時間{requestElapsed}秒）。現在のスロットを避けて再試行しています（{attempt}/{max}）…",
   "stream.phase.sendingRequest": "メッセージをサーバーに送信しています…",
   "stream.phase.startupConfig": "モデルとワークスペースの設定を確認しています…",

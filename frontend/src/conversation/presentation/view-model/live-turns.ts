@@ -1,9 +1,11 @@
 /**
- * Live-attempt, waiting-placeholder and concluded goal-run presentation. Reads
- * authoritative state and explicit local display ports.
- * Entry: liveAttemptPresentation, waitingPlaceholderRedundant,
- * selectAutopilotRunNotices.
- * Dependencies: conversation-sync.generated, turn-store, transient-turn, types. */
+ * Live-attempt, projected live activity, waiting-placeholder and concluded
+ * goal-run presentation. Reads authoritative state and explicit local display
+ * ports.
+ * Entry: liveAttemptPresentation, projectLiveActivity,
+ * waitingPlaceholderRedundant, selectAutopilotRunNotices.
+ * Dependencies: conversation-sync.generated, turn-store, transient-turn, types,
+ * round-outline (action state) and tool-summary-identity. */
 import {
   type TurnModelRoute,
   type TurnRecord,
@@ -24,6 +26,8 @@ import {
 } from './types';
 
 import { normalizeSwarmAgent, mergeSwarmAgentCards, swarmLaunchReceipt, swarmRoundIsActive } from '../swarm-agent-presentation';
+import { toolBlockActivityState } from '../round-outline';
+import { toolSummaryIdentity } from '../tool-summary-identity';
 
 import { goalRunAffiliations } from '../goal-run-affiliation';
 
@@ -176,24 +180,81 @@ export function liveAttemptPresentation(
   };
 }
 
+/** The default "waiting" fallback: no phase frame says what the attempt does. */
+function isBareWaiting(liveStatus: TransientTurnPresentation): boolean {
+  return liveStatus.phase === 'waiting'
+    && (!liveStatus.detailKey
+      || liveStatus.detailKey === 'stream.phase.waitingWorkerStatus')
+    && !liveStatus.detail && !liveStatus.model
+    && !liveStatus.toolContext && !liveStatus.tools?.length;
+}
+
+type ToolActionBlock = Extract<ConversationBlockViewModel, { kind: 'tool' | 'program' }>;
+
+function toolStartedAt(block: ToolActionBlock): number | undefined {
+  const round = block.round as UnknownRecord | undefined;
+  const value = Number(round?.tStart ?? (block.source as UnknownRecord).tStart);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 /**
- * True when the live-status row is the bare default "waiting" placeholder
- * (no phase frame has arrived from the attempt) AND a thinking/answer block
- * is still streaming at the turn tail — in that state the streaming block
- * itself is the honest live surface, so the placeholder is pure noise.
+ * Fill the live row from the running Turn's own projection where its phase
+ * frame says less. Semantic deltas clear the phase and one `tool_exec` frame
+ * covers a whole batch, while a grouped reply renders reasoning above its tool
+ * panel and receipts below its prose, so this row is often the only live
+ * surface in view (rationale: docs/RENDER_CONTRACT.md). Calls this projection
+ * marks active name the work and carry the earliest backend start for elapsed
+ * time; unsettled reasoning reads as the client-derived `thinking_active`.
+ * Every other reported phase stays as sent.
+ */
+export function projectLiveActivity(
+  liveStatus: TransientTurnPresentation,
+  blocks: ReadonlyArray<ConversationBlockViewModel>,
+): void {
+  if (liveStatus.goalProgress) return;
+  const bare = isBareWaiting(liveStatus);
+  if (bare || liveStatus.phase === 'tool_exec') {
+    const active = blocks.filter((block): block is ToolActionBlock => (
+      (block.kind === 'tool' || block.kind === 'program')
+      && toolBlockActivityState(block) === 'active'));
+    const identities = active.map(toolSummaryIdentity);
+    const names = [...new Set(identities.map(identity => identity.name).filter(Boolean))];
+    if (names.length) {
+      const only = identities.length === 1 ? identities[0]! : null;
+      const intent = only ? (only.intent !== only.name ? only.intent : only.target) : '';
+      liveStatus.phase = 'tool_exec';
+      liveStatus.tools = names;
+      liveStatus.detailKey = intent ? 'stream.phase.runningToolIntent' : 'stream.phase.runningTools';
+      liveStatus.detailArgs = intent ? { tool: names[0]!, intent } : { tools: names.join(', ') };
+      const starts = active.map(toolStartedAt).filter((value): value is number => value != null);
+      if (starts.length) liveStatus.startedAt = Math.min(...starts);
+      return;
+    }
+  }
+  if (bare && blocks.some(block => block.kind === 'thinking' && !block.terminal)) {
+    liveStatus.phase = 'thinking_active';
+    delete liveStatus.detailKey;
+  }
+}
+
+/**
+ * True when the row would only restate a streaming block rendered directly
+ * above it: a bare "waiting" placeholder under a still-streaming answer tail,
+ * or projected reasoning status when the reasoning disclosure is the reply's
+ * last part (no call or prose renders between them).
  */
 export function waitingPlaceholderRedundant(
   liveStatus: TransientTurnPresentation,
   blocks: ReadonlyArray<ConversationBlockViewModel>,
 ): boolean {
-  const isBareWaiting = liveStatus.phase === 'waiting'
-    && (!liveStatus.detailKey
-      || liveStatus.detailKey === 'stream.phase.waitingWorkerStatus');
-  if (!isBareWaiting || liveStatus.goalProgress) return false;
-  if (liveStatus.detail || liveStatus.model
-      || liveStatus.toolContext || liveStatus.tools?.length) return false;
+  if (liveStatus.goalProgress) return false;
   const tail = blocks[blocks.length - 1];
   if (!tail) return false;
+  if (liveStatus.phase === 'thinking_active') {
+    return tail.kind === 'thinking' && !blocks.some(block => (
+      block.kind === 'tool' || block.kind === 'program' || block.kind === 'text'));
+  }
+  if (!isBareWaiting(liveStatus)) return false;
   if (tail.kind !== 'thinking' && tail.kind !== 'text') return false;
   return !tail.terminal;
 }

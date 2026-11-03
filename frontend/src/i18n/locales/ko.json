@@ -5018,6 +5018,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ 현재 라우트에서 {model} 모델을 제공하는 게이트웨이 채널이 없습니다 — 다른 라우트를 시도하거나 복구를 기다리는 중({attempt}번째 시도): {message}",
   "stream.phase.subscriptionQuotaReached": "⛔ {model} 모델의 구독 할당량이 소진되었습니다(고정 주기로 초기화되며 보통 몇 시간~며칠 소요) — 자동으로 복구되지 않으니 모델을 전환하거나 초기화를 기다리세요…({attempt}번째 시도)",
   "stream.phase.retrying": "다시 시도 중…",
+  "stream.phase.runningTools": "{tools} 실행 중…",
+  "stream.phase.runningToolIntent": "{tool} 실행 중: {intent}",
   "stream.phase.semanticProgressTimeoutRetry": "{model}에서 {elapsed}초 동안 새로운 추론, 응답 텍스트 또는 도구 진행이 없었습니다(요청 경과 시간 {requestElapsed}초). 현재 슬롯을 피해 다시 시도하는 중({attempt}/{max})…",
   "stream.phase.sendingRequest": "서버로 메시지를 보내는 중…",
   "stream.phase.startupConfig": "모델 및 작업 영역 설정을 확인하는 중…",

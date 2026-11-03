@@ -5018,6 +5018,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ Aucun canal de passerelle ne dessert actuellement {model} sur cette route — essai d’autres routes ou attente du rétablissement (tentative {attempt}) : {message}",
   "stream.phase.subscriptionQuotaReached": "⛔ Quota d’abonnement épuisé pour {model} (réinitialisé sur une période fixe, souvent plusieurs heures ou jours) — pas de rétablissement automatique ; changez de modèle ou attendez la réinitialisation… (tentative {attempt})",
   "stream.phase.retrying": "Nouvelle tentative…",
+  "stream.phase.runningTools": "Exécution de {tools}…",
+  "stream.phase.runningToolIntent": "Exécution de {tool} : {intent}",
   "stream.phase.semanticProgressTimeoutRetry": "{model} n’a produit aucun nouveau raisonnement, texte ni appel d’outil depuis {elapsed} s (requête en cours depuis {requestElapsed} s). Nouvelle tentative sur un autre emplacement ({attempt}/{max})…",
   "stream.phase.sendingRequest": "Envoi de votre message au serveur…",
   "stream.phase.startupConfig": "Résolution des paramètres du modèle et de l’espace de travail…",

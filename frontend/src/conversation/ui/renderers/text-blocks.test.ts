@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationTurnViewModel } from '../../presentation/conversation-view-model';
-import type { TextBlockViewModel, ThinkingBlockViewModel } from '../../presentation/view-model/types';
+import type { LiveStatusBlockViewModel, TextBlockViewModel, ThinkingBlockViewModel } from '../../presentation/view-model/types';
 import type { ClassicConversationRendererPorts } from './ports';
-import { renderTextBlock, renderThinkingBlock } from './text-blocks';
+import { renderLiveStatusBlock, renderTextBlock, renderThinkingBlock } from './text-blocks';
 
 afterEach(() => document.body.replaceChildren());
 function fixture(overrides: Partial<TextBlockViewModel> = {}) {
@@ -81,6 +81,39 @@ describe('message translation attribution', () => {
     const { node } = fixture({ translatedMarkdown: undefined });
     expect(node.querySelector('.bilingual-model')).toBeNull();
     expect(node.querySelector('details')).toBeNull();
+  });
+});
+
+describe('live status elapsed clock', () => {
+  afterEach(() => vi.useRealTimers());
+  it('ticks from the backend call start outside the announced phase text', () => {
+    vi.useFakeTimers({ now: 1_793_693_000_000 + 125_000, toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const node = document.createElement('div');
+    node.className = 'conversation-block conversation-block--live-status';
+    document.body.appendChild(node);
+    const catalog: Record<string, string> = { 'stream.phase.runningToolIntent': 'Running {tool}: {intent}' };
+    const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text,
+      localizedText: (key, fallback, values) => (catalog[key] ?? fallback)
+        .replace(/\{(\w+)\}/g, (_, name: string) => String(values?.[name] ?? '')) };
+    const block = (value: Partial<LiveStatusBlockViewModel['value']>): LiveStatusBlockViewModel => ({
+      kind: 'live-status', blockId: 'live-status', source: {}, identitySource: 'contract',
+      value: { kind: 'attempt', phase: 'tool_exec', label: '', detail: '', tools: ['run_command'],
+        detailKey: 'stream.phase.runningToolIntent',
+        detailArgs: { tool: 'run_command', intent: 'Run the slides tests' }, ...value },
+    });
+    renderLiveStatusBlock(node, block({ startedAt: 1_793_693_000_000 }), ports);
+    const clock = node.querySelector<HTMLElement>('.stream-phase-elapsed')!;
+    expect(node.querySelector('.stream-phase-text')?.firstChild?.textContent)
+      .toBe('Running run_command: Run the slides tests');
+    expect(clock.textContent).toBe('02:05');
+    expect(clock.getAttribute('aria-hidden')).toBe('true');
+    expect(node.getAttribute('aria-live')).toBe('polite');
+    vi.advanceTimersByTime(2_000);
+    expect(clock.textContent).toBe('02:07');
+    renderLiveStatusBlock(node, block({ phase: 'thinking_active', tools: undefined,
+      detailKey: undefined, detailArgs: undefined }), ports);
+    expect(node.querySelector('.stream-phase-elapsed')).toBeNull();
+    expect(node.querySelector('.stream-phase-text')?.textContent).toBe('Thinking…');
   });
 });
 

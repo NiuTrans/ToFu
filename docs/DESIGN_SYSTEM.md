@@ -71,8 +71,10 @@ error `#e4a193`. Light/paper palettes remain independent. The V5 sizing (18px
 rows, two-line 64px headers, 960px measure) is superseded by compact action
 reading. `23-reading-tool-summary.css` owns the shared one-line action row
 and the reasoning fold; existing specialized sheets own evidence bodies.
-`ui/tool-summary.ts` places exact identity right after the native intent and
-keeps the full intent as its tooltip, including lazy hydration;
+`ui/tool-summary.ts` places exact identity (projected by
+`presentation/tool-summary-identity.ts`, which the live-status row shares)
+right after the native intent and keeps the full intent as its tooltip,
+including lazy hydration;
 `ui/round-outline.ts` owns only reader expansion/search over the immutable
 ordered projection. Rationale is in
 [RENDER_CONTRACT.md](RENDER_CONTRACT.md#compact-action-reading-2026-10-27).

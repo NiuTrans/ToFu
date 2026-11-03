@@ -5018,6 +5018,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ No gateway channel currently serves {model} on this route — trying other routes or waiting for it to recover (attempt {attempt}): {message}",
   "stream.phase.subscriptionQuotaReached": "⛔ Model {model} subscription quota is exhausted (resets on a fixed window, often hours/days) — will NOT auto-recover; switch model or wait for the reset… (attempt {attempt})",
   "stream.phase.retrying": "Retrying…",
+  "stream.phase.runningTools": "Running {tools}…",
+  "stream.phase.runningToolIntent": "Running {tool}: {intent}",
   "stream.phase.semanticProgressTimeoutRetry": "{model} made no new reasoning, assistant-text, or tool progress for {elapsed}s (request elapsed {requestElapsed}s). Retrying away from the current slot ({attempt}/{max})…",
   "stream.phase.sendingRequest": "Sending your message to the server…",
   "stream.phase.startupConfig": "Resolving model and workspace settings…",

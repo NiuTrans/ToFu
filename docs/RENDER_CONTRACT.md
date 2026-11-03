@@ -1114,12 +1114,36 @@ evidence only: it never repopulates live phase state or renders as a chat
 timeline row.
 
 A running Turn with no live phase does not prove worker startup or transport
-recovery: older snapshots omit phases and semantic deltas clear them. Its
-fallback says “Waiting for an execution status update…”, never claims a
-resynchronization, and never uses `workerStarting`; that label requires an
-explicit worker-entry phase. A streaming text/thinking tail suppresses the
-empty-phase placeholder. Pending task binding still distinguishes scheduler
-preparation from executor queue residence.
+recovery: older snapshots omit phases and semantic deltas clear them. The row
+first reports the Turn's own projected activity (`projectLiveActivity` in
+`presentation/view-model/live-turns.ts`). Calls that the projection marks
+active read “Running {tool}: {intent}” (or the active tool list) with an
+elapsed clock from the earliest backend `tStart`; this also decorates a
+`tool_exec` frame, which is sent once per batch and goes stale as parallel calls
+finish. Unsettled reasoning reads as the client-derived `thinking_active`.
+Only without such evidence does the fallback say “Waiting for an execution
+status update…”; it never claims a resynchronization and never uses
+`workerStarting`, which requires an explicit worker-entry phase. Every other
+reported phase is shown as sent. The row is omitted only when it would restate
+the streaming block directly above it: an answer tail under the bare fallback,
+or reasoning that is the reply's last part. Pending task binding still
+distinguishes scheduler preparation from executor queue residence.
+
+**Problem (owner report 2026-11-03):** a 435-round slides reply showed only
+“Waiting for an execution status update…” under its failed work-unit card and
+file receipt for minutes at a time while it reasoned and ran commands, so the
+owner read it as stuck. A grouped reply renders reasoning above the tool panel
+and receipts below the prose, so the streaming block that the old tail-only
+rule relied on was far out of view, and one `tool_exec` frame said nothing
+about how long a call had run. **Decision:** project the Turn's own active
+calls and unsettled reasoning into the row, with elapsed time from the backend
+`tStart`; the clock is `aria-hidden` so the polite live region announces phase
+changes, not seconds. **Alternatives rejected:** a backend heartbeat phase adds
+event traffic to restate facts the projection already carries; hiding the row
+whenever any block streams leaves a long reply with no live surface in view; a
+client stopwatch restarts on every reload, unlike the backend `tStart`.
+Specs: `presentation/view-model/live-turns.test.ts` and
+`ui/renderers/text-blocks.test.ts`.
 
 `llm_thinking` denotes an opened model-generation round, not evidence of
 reasoning-channel output. Its live row preserves localized `detailKey` and

@@ -43,6 +43,7 @@ import {
 } from './view-model/turn-metadata';
 import {
   liveAttemptPresentation,
+  projectLiveActivity,
   selectGoalProgress,
   waitingPlaceholderRedundant,
   selectAutopilotRunNotices,
@@ -482,14 +483,13 @@ function composeSelection(
             delete liveStatus.tools;
             delete liveStatus.toolContext;
             delete liveStatus.toolContextTools;
+          } else {
+            projectLiveActivity(liveStatus, blocks);
           }
-          /* The bare default 'waiting' placeholder means "no phase frame
-           * has arrived". While a thinking or answer block is still
-           * streaming at the tail, that block IS the live status — the
-           * placeholder beneath it only restates a stall that is not
-           * happening. Real phases (waiting_model / retrying / tool_exec /…)
-           * carry detail/tools/model and never match; the wedge override
-           * above must always render. */
+          /* A row that only restates the streaming block directly above it
+           * is noise. Real phases (waiting_model / retrying / tool_exec /…)
+           * and projected calls never match; the wedge override above must
+           * always render. */
           if (!waitingPlaceholderRedundant(liveStatus, blocks)) {
             blocks.push({
               blockId: 'live-status',
