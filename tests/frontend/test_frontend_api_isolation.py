@@ -89,17 +89,18 @@ _VARIABLE_FETCH_RE = re.compile(r"\bfetch\s*\(\s*(?![)'\"`])")
 _NATIVE_FETCH_SCANNER = r'''
 const ts = require('typescript');
 const sources = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const trees = new Map(Object.entries(sources).map(([name, source]) => [name,
+  ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true,
+    name.endsWith('.ts') ? ts.ScriptKind.TS : ts.ScriptKind.JS)]));
+const options = { allowJs: true, noLib: true, noResolve: true,
+  target: ts.ScriptTarget.Latest };
+const host = ts.createCompilerHost(options);
+host.fileExists = file => trees.has(file);
+host.readFile = file => sources[file];
+host.getSourceFile = file => trees.get(file);
+const checker = ts.createProgram([...trees.keys()], options, host).getTypeChecker();
 const result = {};
-for (const [name, source] of Object.entries(sources)) {
-  const kind = name.endsWith('.ts') ? ts.ScriptKind.TS : ts.ScriptKind.JS;
-  const tree = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, kind);
-  const options = { allowJs: true, noLib: true, noResolve: true,
-    target: ts.ScriptTarget.Latest };
-  const host = ts.createCompilerHost(options);
-  host.fileExists = file => file === name;
-  host.readFile = file => file === name ? source : undefined;
-  host.getSourceFile = file => file === name ? tree : undefined;
-  const checker = ts.createProgram([name], options, host).getTypeChecker();
+for (const name of trees.keys()) {
   let count = 0;
   function visit(node) {
     if (!ts.isCallExpression(node)) {
@@ -127,7 +128,7 @@ for (const [name, source] of Object.entries(sources)) {
     }
     ts.forEachChild(node, visit);
   }
-  visit(tree);
+  visit(trees.get(name));
   result[name] = count;
 }
 process.stdout.write(JSON.stringify(result));
