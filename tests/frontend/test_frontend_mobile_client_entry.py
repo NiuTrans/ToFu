@@ -1,188 +1,122 @@
-"""Frontend test — the config-gated mobile-client download card.
+"""The Settings mobile-client card follows the public health projection."""
 
-The Settings › General › About & Update card renders ONLY when
-``GET /api/health`` returns a ``mobile_client_url`` (set via the
-``TOFU_MOBILE_CLIENT_URL`` env var). Absent → the card stays hidden, so no
-dead button ever ships before a release APK exists.
-
-The Android row carries a version badge fed by ``mobile_client_version``
-(backend ``MOBILE_CLIENT_VERSION``, pinned to the Gradle ``versionName`` by
-tests/server/test_mobile_client_apk_url.py). The iOS row is an inert "coming soon"
-until ``ios_client_url`` (TOFU_IOS_CLIENT_URL) ships a real link — then it
-flips into an active download and the badge hides.
-
-This drives the REAL shipped render logic from ``settings/core_panel.js`` under
-jsdom (extraction-and-eval, matching the project's other frontend tests), with
-a fake health payload. A neuter (removing the ``if (url)`` gate) must make the
-absent-URL case wrongly render — proving the gate is load-bearing.
-"""
-
+import json
+import os
+from pathlib import Path
+import tempfile
 import shutil
 import subprocess
-import textwrap
-from pathlib import Path
 
 import pytest
+
 from tests._jsdom import require_node_modules
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-# The mobile download card logic lives in the typed settings owner. The
-# extraction below slices the shipped render block straight from that owner,
-# keeping the literal-anchored drift tracking the retired classic section had.
-CORE_PANEL = ROOT / 'frontend/src/features/settings/core-panel.ts'
+ROOT = Path(__file__).resolve().parents[2]
+CLIENT_DOWNLOADS = ROOT / 'frontend/src/features/settings/client-downloads.ts'
 
 
 def _node() -> str:
-    exe = shutil.which("node")
     require_node_modules('jsdom')
-    return exe
+    return shutil.which('node')
 
 
-def _extract_render_snippet() -> str:
-    """Pull the mobile-card render block out of openSettings().
-
-    We isolate just the health-callback body so the harness can run it without
-    booting the whole settings panel. Kept as a literal-anchored slice so it
-    tracks the real file (a drift in the source breaks the anchors → test fails
-    loudly rather than silently testing stale code).
-    """
-    src = CORE_PANEL.read_text(encoding="utf-8")
-    start = src.index("const mcCard = document.getElementById('settingsMobileCard');")
-    end = src.index("mcCard.style.display = 'none';", start)
-    end = src.index("}", end)  # close the else
-    end = src.index("}", end + 1)  # close the if (mcCard)
-    return src[start : end + 1]
-
-
-HARNESS = textwrap.dedent("""
-    const {{ JSDOM }} = require('jsdom');
+def _run(mutate: bool = False) -> dict:
+    entry = (
+        f"import {{connectFeatureRuntime}} from {str(ROOT / 'frontend/src/feature-registry.ts')!r};\n"
+        f"import {{renderSettingsClientInfo}} from {str(CLIENT_DOWNLOADS)!r};\n"
+        "connectFeatureRuntime(name => window[name], (name, value) => { window[name] = value; });\n"
+        "globalThis.renderSettingsClientInfo = renderSettingsClientInfo;"
+    )
+    with compiled_typescript(
+        CLIENT_DOWNLOADS, contents=entry,
+        expose_feature_registry_to_window=True,
+    ) as built:
+        source = Path(built).read_text(encoding='utf-8')
+        if mutate:
+            original = source
+            source = source.replace(
+                'data?.mobile_client_url ? "" : "none"', '""')
+            assert source != original, 'mobile visibility gate anchor not found'
+        script = r'''
+const {JSDOM} = require('jsdom');
+const results = [];
+const payloads = [
+  {mobile_client_url: 'https://x/y.apk', mobile_client_version: '0.1.16'},
+  {mobile_client_url: 'https://x/y.apk'},
+  {mobile_client_url: 'https://x/y.apk', ios_client_url: 'https://testflight.apple.com/join/abc'},
+  {},
+];
+(async () => {
+  for (const payload of payloads) {
     const dom = new JSDOM(`<!DOCTYPE html><body>
       <div id="settingsMobileCard" style="display:none">
-        <a id="settingsMobileAndroid" href="#"></a>
+        <a id="settingsMobileAndroid"></a>
         <span id="settingsMobileAndroidVersion"></span>
         <a id="settingsMobileIos" class="stg-mobile-row-soon"></a>
         <span id="settingsMobileIosBadge"></span>
-      </div>
-    </body>`);
+      </div></body>`);
+    global.window = dom.window;
     global.document = dom.window.document;
-    // The typed-owner snippet uses `instanceof HTMLAnchorElement`; expose the
-    // jsdom constructors as globals so those guards resolve in node.
-    for (const name of ['HTMLElement', 'HTMLAnchorElement', 'HTMLInputElement',
-                        'HTMLSpanElement']) {{
-      global[name] = dom.window[name];
-    }}
-
-    function runWith(d) {{
-      // Reset the card to its default hidden state before each run. The
-      // extracted snippet declares its OWN `const mcCard`, so we don't pre-declare.
-      const _card = document.getElementById('settingsMobileCard');
-      _card.style.display = 'none';
-      const _a = document.getElementById('settingsMobileAndroid');
-      _a.setAttribute('href', '#');
-      const _v = document.getElementById('settingsMobileAndroidVersion');
-      _v.textContent = ''; _v.style.display = '';
-      const _ios = document.getElementById('settingsMobileIos');
-      _ios.removeAttribute('href'); _ios.removeAttribute('target');
-      _ios.classList.add('stg-mobile-row-soon');
-      document.getElementById('settingsMobileIosBadge').style.display = '';
-      // ---- BEGIN extracted shipped snippet ----
-      {snippet}
-      // ---- END extracted shipped snippet ----
-      return {{
-        card: document.getElementById('settingsMobileCard'),
-        android: document.getElementById('settingsMobileAndroid'),
-        version: document.getElementById('settingsMobileAndroidVersion'),
-        ios: document.getElementById('settingsMobileIos'),
-        iosBadge: document.getElementById('settingsMobileIosBadge'),
-      }};
-    }}
-
-    // Case 1: URL + version present → card visible, Android href + badge set,
-    // iOS stays inert without an ios_client_url.
-    let r1 = runWith({{
-      version: '1.0',
-      mobile_client_url: 'https://github.com/x/y/releases/latest/download/tofu-android.apk',
-      mobile_client_version: '0.1.16',
-    }});
-    const shown = r1.card.style.display !== 'none';
-    const hasHref = r1.android.getAttribute('href')
-      === 'https://github.com/x/y/releases/latest/download/tofu-android.apk';
-    const badgeShown = r1.version.textContent === 'v0.1.16'
-      && r1.version.style.display !== 'none';
-    const iosInert = r1.ios.classList.contains('stg-mobile-row-soon')
-      && !r1.ios.getAttribute('href')
-      && r1.iosBadge.style.display !== 'none';
-
-    // Case 2: version absent → badge hides rather than rendering a bare "v".
-    let r2 = runWith({{ version: '1.0', mobile_client_url: 'https://x/y.apk' }});
-    const badgeHidden = r2.version.textContent === ''
-      && r2.version.style.display === 'none';
-
-    // Case 3: ios_client_url present → iOS row activates, badge hides.
-    let r3 = runWith({{
-      version: '1.0',
-      mobile_client_url: 'https://x/y.apk',
-      ios_client_url: 'https://testflight.apple.com/join/abc',
-    }});
-    const iosActive = r3.ios.getAttribute('href') === 'https://testflight.apple.com/join/abc'
-      && r3.ios.getAttribute('target') === '_blank'
-      && !r3.ios.classList.contains('stg-mobile-row-soon')
-      && r3.iosBadge.style.display === 'none';
-
-    // Case 4: URL absent → whole card stays hidden.
-    let r4 = runWith({{ version: '1.0' }});
-    const hidden = r4.card.style.display === 'none';
-
-    console.log(JSON.stringify({{ shown, hasHref, badgeShown, iosInert, badgeHidden, iosActive, hidden }}));
-""")
-
-
-def _run(snippet: str) -> dict:
-    import json
-
-    script = HARNESS.format(snippet=snippet)
-    proc = subprocess.run(
-        [_node(), "-e", script],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, f"node failed: {proc.stderr}"
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+    global.HTMLAnchorElement = window.HTMLAnchorElement;
+    global.HTMLElement = window.HTMLElement;
+    window.Api = {health: {info: async () => payload}};
+    eval(SOURCE);
+    await globalThis.renderSettingsClientInfo({
+      isCurrent: () => true, scope: {signal: undefined},
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    results.push({
+      display: document.getElementById('settingsMobileCard').style.display,
+      android: document.getElementById('settingsMobileAndroid').getAttribute('href'),
+      version: document.getElementById('settingsMobileAndroidVersion').textContent,
+      versionDisplay: document.getElementById('settingsMobileAndroidVersion').style.display,
+      ios: document.getElementById('settingsMobileIos').getAttribute('href'),
+      iosTarget: document.getElementById('settingsMobileIos').getAttribute('target'),
+      iosSoon: document.getElementById('settingsMobileIos').classList.contains('stg-mobile-row-soon'),
+      iosBadge: document.getElementById('settingsMobileIosBadge').style.display,
+    });
+    window.close();
+  }
+  console.log(JSON.stringify(results));
+})().catch(error => { console.error(error); process.exit(1); });
+'''.replace('SOURCE', json.dumps(source))
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.cjs', encoding='utf-8', delete=False,
+            dir=ROOT / 'tests' / 'frontend',
+        ) as handle:
+            handle.write(script)
+            harness = handle.name
+        try:
+            completed = subprocess.run(
+                [_node(), harness], cwd=ROOT,
+                capture_output=True, text=True,
+            )
+        finally:
+            os.unlink(harness)
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
 def test_mobile_client_card_renders_only_when_url_present():
-    out = _run(_extract_render_snippet())
-    assert out["shown"] is True, "card must be visible when URL present"
-    assert out["hasHref"] is True, "Android row href must be the release URL"
-    assert out["badgeShown"] is True, (
-        "Android version badge must render v<mobile_client_version>"
-    )
-    assert out["badgeHidden"] is True, (
-        "no mobile_client_version → badge hides (no bare 'v' left behind)"
-    )
-    assert out["iosInert"] is True, (
-        "iOS row must stay an inert coming-soon without ios_client_url"
-    )
-    assert out["iosActive"] is True, (
-        "ios_client_url set → iOS row flips into an active download, badge hides"
-    )
-    assert out["hidden"] is True, "card must stay hidden when URL absent"
+    ready, without_version, ios_ready, absent = _run()
+    assert ready['display'] != 'none'
+    assert ready['android'] == 'https://x/y.apk'
+    assert ready['version'] == 'v0.1.16'
+    assert ready['versionDisplay'] != 'none'
+    assert ready['iosSoon'] is True
+    assert ready['ios'] is None
+    assert without_version['version'] == ''
+    assert without_version['versionDisplay'] == 'none'
+    assert ios_ready['ios'] == 'https://testflight.apple.com/join/abc'
+    assert ios_ready['iosTarget'] == '_blank'
+    assert ios_ready['iosSoon'] is False
+    assert ios_ready['iosBadge'] == 'none'
+    assert absent['display'] == 'none'
 
 
 def test_NC_gate_removed_leaks_dead_card():
-    """Neuter: drop the `if (url)` gate → absent-URL case wrongly renders."""
-    snippet = _extract_render_snippet()
-    # Poison: force the render branch regardless of url (the exact defect the
-    # gate prevents — a dead card when no APK URL is configured).
-    neutered = snippet.replace(
-        "const url = d && d.mobile_client_url;", "const url = 'https://DEAD-CARD';"
-    )
-    out = _run(neutered)
-    # With the gate neutered, the absent-URL case is no longer hidden.
-    assert out["hidden"] is False, (
-        "NEUTER must leak: without the url gate the card renders even when "
-        "the server exposes no mobile_client_url"
-    )
+    *_, absent = _run(mutate=True)
+    assert absent['display'] != 'none'

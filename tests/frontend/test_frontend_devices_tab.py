@@ -307,3 +307,4 @@ def test_neuter_hook_means_blank_tab():
         label='devices hook removed',
     )
     assert 'PASS neuter_tab_stays_blank' in output
+

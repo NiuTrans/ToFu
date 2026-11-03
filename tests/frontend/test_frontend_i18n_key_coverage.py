@@ -287,7 +287,7 @@ def test_scanner_sees_the_known_keys():
     # (The earlier canaries actResume/actDefer/deferReasonPrompt/laneDeferred
     # were removed along with the resume/defer board actions; using live keys
     # keeps the sanity floor meaningful.)
-    for key in ('projectBrain.actBlock', 'projectBrain.actReopen'):
+    for key in ('projectBrain.activeWork', 'projectBrain.activityEmpty'):
         assert key in all_keys, (
             f'{key} not discovered by the scanner — the extraction regex or '
             'the dynamic-prefix filter is too aggressive.'
