@@ -303,8 +303,9 @@ and re-billed the cached history (detector signature: first-round
 Unsigned gateway reasoning still uses the flat projection; build_body strips
 it for Claude and warns only when the newest assistant turn was unsigned
 (fresh evidence), logging the per-round re-strip of history at DEBUG. Cross-protocol
-replay keeps the existing rule: a settled Turn may omit historical thinking,
-while active signed thinking stays mandatory; native `text`/`tool_use` are
+replay keeps the existing rule: a settled Turn, rebuilt or restored from a
+checkpoint ([settled reasoning on restore](../CONTEXT_COMPACTION.md)), may omit
+historical thinking, while active signed thinking stays mandatory; native `text`/`tool_use` are
 represented by the canonical projection. Live probe on 2026-10-23
 (`your-llm-gateway.example.com/v1/anthropic`, `kunlunbedrock.claude-opus-5.5-m17`): the
 gateway returns signature-only blocks by default, readable text with
