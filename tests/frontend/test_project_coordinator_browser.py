@@ -259,6 +259,14 @@ def test_coordinator_conversations_are_contained_in_a_collapsible_sidebar_group(
                                 'projectionRevision': source['projectionRevision']},
         'brief': 'Legacy sidebar work', 'model': 'sidebar-model', 'budget': {}},
         PrincipalContext.user(subject_id='user:1', owner_user_id=1, scopes=['chat']), 'sidebar-legacy-' + suffix)
+    def _debug_flags(route):
+        response = route.fetch()
+        body = response.json()
+        body.get('data', body)['feature_flags'] = {
+            'debug_mode': True, 'optimizer_enabled': True}
+        route.fulfill(response=response, json=body)
+
+    page.route('**/api/v*/server-config**', _debug_flags)
     page.evaluate('localStorage.setItem("tofu_ui_lang", "en")')
     page.reload()
     _dismiss_onboarding_modals(page)
@@ -284,6 +292,17 @@ def test_coordinator_conversations_are_contained_in_a_collapsible_sidebar_group(
     expect(body).to_contain_text('Legacy delegated worker')
     expect(body).to_contain_text('Empty delegated shell')
     expect(body).to_contain_text('Done')
+    worker_row = body.locator(f'.conv-item[data-conv-id="{legacy}"]')
+    copy_id = worker_row.locator('.conv-copy-id')
+    expect(copy_id).to_have_attribute('data-conv-id', legacy)
+    worker_row.hover()
+    expect(copy_id).to_be_visible()
+    active_before_copy = page.evaluate('window.activeConvId')
+    page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
+    page.evaluate('navigator.clipboard.writeText("")')
+    copy_id.click()
+    page.wait_for_function('(id) => navigator.clipboard.readText().then(text => text === id)', arg=legacy)
+    assert page.evaluate('window.activeConvId') == active_before_copy
     assert page.evaluate('(id) => localStorage.getItem(`tofu.coordinator.conversations.expanded.${id}`)', arg=leader) == 'true'
     output = Path(__file__).resolve().parents[2] / 'output/playwright/coordinator-sidebar'
     output.mkdir(parents=True, exist_ok=True)

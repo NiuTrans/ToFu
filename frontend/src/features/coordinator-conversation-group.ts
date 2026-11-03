@@ -123,7 +123,7 @@ export function createCoordinatorConversationGroup(ports: CoordinatorConversatio
       const conversation = rows.find(item => item.id === row.dataset.convId)!;
       row.tabIndex = 0; row.setAttribute('role', 'button');
       row.classList.toggle('active', row.dataset.convId === activeId);
-      row.querySelector('.conv-actions')?.remove();
+      row.querySelectorAll('.conv-actions > :not(.conv-copy-id)').forEach(action => action.remove());
       row.querySelector('.conv-coordinator-badge')?.remove();
       const date = row.querySelector('.conv-date');
       if (date) {
@@ -139,9 +139,12 @@ export function createCoordinatorConversationGroup(ports: CoordinatorConversatio
         date.replaceChildren(time, ...(statusLabel ? [statusLabel] : []));
       }
       const open = () => { ports.open(row.dataset.convId!); ports.refreshActive?.(); };
-      row.addEventListener('click', open);
+      row.addEventListener('click', event => {
+        if ((event.target as Element).closest('.conv-actions')) return;
+        open();
+      });
       row.addEventListener('keydown', event => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
+        if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
         event.preventDefault(); open();
       });
     });
@@ -258,11 +261,13 @@ export function createCoordinatorConversationGroups(ports: {
     const row = document.createElement('div');
     row.className = 'coordinator-history-entry';
     row.addEventListener('click', event => {
+      if ((event.target as Element).closest('.conv-actions')) return;
       if ((event.target as Element).closest('.conv-item')) open(id);
     });
     row.addEventListener('keydown', event => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
-      if (!(event.target as Element).closest('.conv-item')) return;
+      const item = (event.target as Element).closest('.conv-item');
+      if (!item || event.target !== item) return;
       event.preventDefault(); open(id);
     });
     ports.listHost.before(row);
@@ -276,7 +281,7 @@ export function createCoordinatorConversationGroups(ports: {
       row.innerHTML = html; record.rowHtml = html;
       const item = row.querySelector<HTMLElement>('.conv-item');
       if (item) {
-        item.querySelector('.conv-actions')?.remove();
+        item.querySelectorAll('.conv-actions > :not(.conv-copy-id)').forEach(action => action.remove());
         item.querySelector('.conv-coordinator-badge')?.remove();
         item.tabIndex = 0; item.setAttribute('role', 'button');
         if (focused) item.focus({ preventScroll: true });
