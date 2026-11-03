@@ -287,3 +287,45 @@ def test_live_pushes_never_advance_the_catch_up_frontier(channel, dispatch, monk
     adapter.tick()
     adapter.stop(1)
     assert channel.account('dx')['frontierAtMs'] == 1_761_000_100_000
+
+
+def test_whoami_binds_the_account_the_launcher_logged_in_as(monkeypatch):
+    from lib.channels.dx import adapter as module
+    from lib.channels.dx.login import LoginSession
+    from lib.channels.model import ChannelError
+    answers = iter([{'uid': '3003', 'mis': 'Alice', 'name': 'Alice'}, {'uid': '3003', 'name': 'Alice'},
+                    {'uid': '4004', 'mis': 'bob'}])
+    calls = []
+    monkeypatch.setattr(module, '_one_shot', lambda owner, session, *extra: calls.append((session.mis, extra))
+                        or next(answers))
+    session = LoginSession('alice', {})
+    assert module.resolve_identity(OWNER, session) == {'uid': '3003', 'mis': 'alice', 'name': 'Alice'}
+    assert module.resolve_identity(OWNER, session)['mis'] == 'alice'
+    with pytest.raises(ChannelError) as raised:
+        module.resolve_identity(OWNER, session)
+    assert raised.value.code == 'identity_mismatch'
+    assert calls == [('alice', ('--command', 'whoami'))] * 3
+
+
+def test_a_refused_launch_reports_the_sso_adapter_envelope(monkeypatch, tmp_path):
+    import subprocess
+    from lib.channels.dx import adapter as module
+    from lib.channels.dx.login import LoginSession
+    from lib.channels.model import ChannelError
+    spec = module.LaunchSpec(skill_dir=str(tmp_path), launcher=str(tmp_path / 'dx-tofu.sh'),
+                             engine_dir=str(tmp_path / 'engine'))
+    monkeypatch.setattr(module, 'launch_spec', lambda owner: spec)
+    monkeypatch.setattr(module.LaunchSpec, 'installed', property(lambda self: True))
+    envelope = json.dumps({'ok': False, 'error_code': 'SSO_LOGIN_NOT_APPROVED', 'error': '用户未批准登录'},
+                          ensure_ascii=False)
+    seen = {}
+
+    def run(argv, *, env, **options):
+        seen['env'] = env
+        return subprocess.CompletedProcess(argv, 42, b'', f'node noise\n{envelope}\n'.encode())
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    with pytest.raises(ChannelError) as raised:
+        module.resolve_identity(OWNER, LoginSession('alice', {'MTSSO_MIS': 'alice'}))
+    assert raised.value.code == 'needs_login'
+    assert str(raised.value) == 'SSO_LOGIN_NOT_APPROVED: 用户未批准登录'
+    assert seen['env'] == {'MTSSO_MIS': 'alice'}

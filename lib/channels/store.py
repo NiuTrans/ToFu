@@ -159,8 +159,12 @@ class ChannelStore:
         return self._update(self._account_key(channel), apply)
 
     def set_status(self, channel: str, state: str, detail: str = '', *,
-                   connected_at_ms: int | None = None) -> dict[str, Any]:
+                   connected_at_ms: int | None = None,
+                   when: Callable[[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
+        """Record a status; ``when`` (atomic with the write) may refuse a stale writer."""
         def change(account):
+            if when is not None and not when(account):
+                return account
             status = dict(account.get('status') or {})
             if (status.get('state') == state and status.get('detail') == detail
                     and connected_at_ms is None):

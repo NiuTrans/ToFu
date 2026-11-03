@@ -9,7 +9,7 @@
  * account re-read while a session is connecting (a session reports each
  * transition once and nothing pushes it to the tab), and the Global Router link.
  * Entry points: element, card, cardSection, facts, hint, empty, chip, rowField,
- * statusLine, isConnecting, feedback, runCommand, refreshWhileConnecting,
+ * statusLine, isConnecting, feedback, clearFeedback, runCommand, refreshWhileConnecting,
  * routerLink, threadTable, threadRow, selectCell, staticCell, outboxCard.
  * Dependencies: tofu-ui factories, the opening tab's lifecycle scope and the
  * runtime `closeSettings` / `loadConversation` bindings.
@@ -22,9 +22,11 @@ import type { AccountState, OutboxItemView, OutboxState } from '../../api/channe
 export type Tone = 'ok' | 'busy' | 'idle' | 'bad';
 
 const STATE_TONE: Record<AccountState, Tone> = {
-  connected: 'ok', starting: 'busy', disconnected: 'busy', disabled: 'idle',
+  connected: 'ok', starting: 'busy', authorizing: 'busy', disconnected: 'busy', disabled: 'idle',
   needs_login: 'bad', kicked: 'bad', error: 'bad',
 };
+// States an enabled account leaves by itself, so the tab keeps re-reading it.
+const CONNECTING_STATES = new Set<AccountState>(['starting', 'authorizing', 'disconnected']);
 const OUTBOX_TONE: Record<OutboxState, Tone> = {
   draft: 'busy', queued: 'idle', sending: 'busy', unknown: 'busy', failed: 'bad', sent: 'ok', discarded: 'idle',
 };
@@ -117,7 +119,7 @@ export function rowField(options: FieldOptions): FieldHandle {
 }
 
 export function isConnecting(account: StatusAccount): boolean {
-  return account.enabled && (account.status.state === 'starting' || account.status.state === 'disconnected');
+  return account.enabled && CONNECTING_STATES.has(account.status.state);
 }
 
 function quietSpinner(): HTMLElement {
@@ -143,7 +145,7 @@ export function statusLine(account: StatusAccount, label: string): HTMLElement {
   return line;
 }
 
-function clearFeedback(anchor: Element): void {
+export function clearFeedback(anchor: Element): void {
   anchor.closest('.channel-card')?.querySelectorAll('.channel-feedback').forEach((node) => node.remove());
 }
 
