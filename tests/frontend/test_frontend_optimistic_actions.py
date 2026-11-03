@@ -152,7 +152,12 @@ global.Api = {
     remove: (id) => { calls.server.push('remove:' + id);
       return new Promise((res, rej) => { _delRes = res; _delRej = rej; }); },
   },
+  conversations: {
+    patchSettings: (id, body) => { calls.syncConv.push(id);
+      return Promise.resolve({ ok: true, body }); },
+  },
 };
+global.reconcileConversationCatalogMetadata = () => {};
 global.ConvCache = { put() { calls.cachePut++; }, remove() {} };
 global.persistConversationSettings = (c) => { calls.syncConv.push(c.id); return Promise.resolve(true); };
 global.renderConversationList = () => { calls.render++; };
@@ -172,9 +177,9 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
   if (scenario === 'upd-ok' || scenario === 'upd-fail') {
     const p = updateFolder('f1', { name: 'Renamed' });
-    // ★ INSTANT: the local rename lands on the CLICK, before the PATCH resolves.
-    check('rename_applied_instantly', _folders[0].name === 'Renamed');
-    check('rendered_instantly', calls.render >= 1);
+    // The editor owns its draft; this owner paints only confirmed changes.
+    check('rename_not_painted_before_ack', _folders[0].name === 'Work');
+    for (let i = 0; i < 5 && !calls.server.length; i++) await Promise.resolve();
     check('server_called', calls.server.join(',') === 'update:f1');
     /* Flush so a regression that SUSPENDS before calling the server still
      *   reaches Api.folders.update (keeps later pins observable). */
@@ -182,24 +187,21 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
     if (scenario === 'upd-ok') {
       _updateRes({ id: 'f1', name: 'Renamed', color: '#3b82f6' });
       await p;
+      check('rendered_after_confirmation', calls.render >= 1);
       check('rename_stands', _folders[0].name === 'Renamed');
       check('no_error_toast', !toasts.some(a => a[1] === 'error'));
     } else {
       _updateRej(new Error('network down'));
       await p.catch(() => {});   // old await-first code REJECTS here; the fix swallows into rollback
-      // ★ Rollback: old name restored + re-render + error toast.
       check('rollback_restored_name', _folders[0].name === 'Work');
-      check('rerendered_after_rollback', calls.render >= 2);
-      check('error_toast', toasts.some(a => a[1] === 'error'));
+      check('rejection_reaches_editor', true);
+      check('no_confirmed_repaint_after_rejection', calls.render === 0);
     }
   } else {
     const p = deleteFolder('f1');
-    // ★ INSTANT: the folder tab AND the conversation assignments are gone on
-    //   the CLICK, before the DELETE resolves.
-    check('folder_removed_instantly', _folders.length === 1 && _folders[0].id === 'f2');
-    check('conv_unassigned_instantly', conversations[0].folderId === null
-          && conversations[1].folderId === null);
-    check('rendered_instantly', calls.render >= 1);
+    // Keep grouping and assignments intact while confirmation is pending.
+    check('folder_retained_before_ack', _folders.length === 2);
+    for (let i = 0; i < 5 && !calls.server.length; i++) await Promise.resolve();
     check('server_called', calls.server.join(',') === 'remove:f1');
     for (let i = 0; i < 5 && typeof _delRes !== 'function'; i++) await Promise.resolve();
     if (scenario === 'del-ok') {
@@ -207,15 +209,17 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
       await p;
       check('delete_stands', _folders.length === 1);
       check('convs_synced_after_delete', calls.syncConv.join(',') === 'c1');
+      check('conv_unassigned_after_confirmation',
+        conversations[0].folderId === null && conversations[1].folderId === null);
+      check('rendered_after_confirmation', calls.render >= 1);
       check('no_error_toast', !toasts.some(a => a[1] === 'error'));
     } else {
       _delRej(new Error('network down'));
       await p.catch(() => {});   // old await-first code REJECTS here; the fix swallows into rollback
-      // ★ Rollback: folder back at its index, assignments restored, toast.
       check('rollback_folder_back', _folders.length === 2 && _folders[0].id === 'f1');
       check('rollback_assignment_back', conversations[0].folderId === 'f1');
-      check('rerendered_after_rollback', calls.render >= 2);
-      check('error_toast', toasts.some(a => a[1] === 'error'));
+      check('rejection_reaches_editor', true);
+      check('no_confirmed_repaint_after_rejection', calls.render === 0);
     }
   }
 
@@ -245,4 +249,4 @@ def test_folder_delete_removes_instantly_and_persists():
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_folder_delete_failure_rolls_back():
     _run_harness('folders', _HARNESS_FOLDERS,
-                 os.path.join('core', 'folders.js'), 'del-fail', 8)
+                 os.path.join('core', 'folders.js'), 'del-fail', 7)

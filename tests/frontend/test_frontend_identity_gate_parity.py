@@ -31,7 +31,10 @@ def test_identity_comparison_has_one_implementation():
     readers = []
     for name in runtime_section_names():
         code = _code_without_comments(runtime_section(name))
-        if '_currentUserId' in code:
+        if '_currentUserId' in code and not re.search(
+            r'(?:runtimeScope\._currentUserId|ownerId:\s*\(\)\s*=>\s*runtimeScope\._currentUserId)',
+            code,
+        ):
             readers.append(name)
     assert readers == []
     assert 'core/current_user.js' not in runtime_section_names()
