@@ -1,12 +1,14 @@
 /* ── Left pane: the shared folder browser fills the column ── */
 .pm-browser-pane { display: flex; min-width: 0; min-height: 0; }
 /* Rail cards are hairline outside Tofu and ink-framed in it; frame the
-   browser card (10-project-browser.css) the same way. */
-.pm-browser-pane .folder-browser {
-  flex: 1;
-  --folder-browser-frame: var(--control-edge-inset) solid var(--border);
+   browser card (10-project-browser.css) the same way in both rail hosts. */
+.pm-browser-pane .folder-browser { flex: 1; }
+.pm-browser-pane .folder-browser,
+.folder-settings-workbench .folder-browser {
+  --folder-browser-frame: var(--control-edge-inset) solid var(--project-line);
 }
-[data-theme="tofu"] .pm-browser-pane .folder-browser {
+[data-theme="tofu"] .pm-browser-pane .folder-browser,
+[data-theme="tofu"] .folder-settings-workbench .folder-browser {
   --folder-browser-frame: var(--project-panel-width) solid var(--project-ink);
   --folder-browser-shadow: var(--clay-sm);
 }
@@ -76,15 +78,69 @@
   box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 .mp-add-row .mp-path-input::placeholder { font-family: inherit; color: var(--text-tertiary); }
-/* Tofu: match the input's box model to the neo-brutalist Add button so the pair reads as one unit */
-[data-theme="tofu"] .mp-add-row .mp-path-input {
-  border: var(--project-panel-width) solid var(--project-ink);
-  border-radius:var(--radius-sm);
-  background: var(--project-surface);
+
+/* ── Shared workspace rail (features/project/workspace-rail): the Co-Pilot
+   modal and sidebar folder settings mount the same markup, so these rules
+   carry no host selector. ── */
+/* Host-independent context. The Co-Pilot .modal and the kit project dialog
+   differ in palette, typeface and line height, so the rail fixes its own: the
+   UI face and --project-* roles of the shared folder browser (mapped exactly
+   as dialog.ui-dialog--project maps them in 30-ui-kit.css), with the
+   Co-Pilot's original type metrics. Proven by
+   tests/visual/test_visual_project_rail_parity.py. */
+.pm-rail {
+  --text-primary: var(--project-ink);
+  --text-secondary: var(--project-muted);
+  --text-tertiary: var(--project-muted);
+  --bg-primary: var(--project-panel);
+  --bg-secondary: var(--project-surface);
+  --bg-tertiary: var(--project-band);
+  --border: var(--project-line);
+  --accent: var(--project-accent);
+  --accent-hover: var(--project-accent-hover);
+  --text-on-accent: var(--project-on-accent);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xl);
+  line-height: normal;
 }
-[data-theme="tofu"] .mp-add-row .mp-path-input:focus {
-  border-color: var(--project-ink);
-  box-shadow:var(--clay-sm);
+.pm-rail ol.mp-folder-list { list-style: none; padding: 0; }
+/* Rail-owned Add control: the legacy .btn rules are .modal-scoped and kit
+   buttons take the project dialog's overrides, so neither renders alike in
+   both hosts. Tofu draws its block look in 12-tofu-theme-project-controls.css. */
+.mp-add-row .mp-add-btn {
+  flex-shrink: 0;
+  padding: calc(var(--space-1) + var(--control-edge-inset)) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  line-height: normal;
+  cursor: pointer;
+}
+.mp-add-row .mp-add-btn:hover { background: var(--accent-hover); }
+.mp-add-row .mp-add-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.mp-add-error {
+  margin: 0 0 var(--space-2);
+  color: var(--error-text);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.mp-add-error[hidden] { display: none; }
+/* The drag grip is also the keyboard reorder handle: a bare button. */
+.mp-row .mp-row-grip { padding: 0; border: 0; background: none; cursor: grab; }
+.mp-row .mp-row-grip:focus-visible,
+.mp-row .mp-row-lock:focus-visible,
+.mp-row .mp-row-remove:focus-visible { outline: none; box-shadow: var(--focus-ring); opacity: 1; }
+/* Announcements stay readable to assistive technology without taking space. */
+.pm-rail-status {
+  position: absolute;
+  width: var(--control-edge-inset); height: var(--control-edge-inset);
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
 
 /* legacy compat — older .project-path-row markup */

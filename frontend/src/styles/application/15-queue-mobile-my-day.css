@@ -899,12 +899,13 @@
   /* Single column; JS toggles which pane is visible via data-pm-view */
   .pm-body{display:flex;flex-direction:column;grid-template-columns:none;grid-template-rows:none;
     gap:0;padding:var(--space-3) 14px;min-height:0;overflow:hidden}
-  .pm-browser-pane,.pm-rail{flex:1 1 auto;min-height:0}
+  /* Scoped to the Co-Pilot: folder settings owns its own narrow rail layout. */
+  .pm-workbench .pm-browser-pane,.pm-workbench .pm-rail{flex:1 1 auto;min-height:0}
   .pm-workbench[data-pm-view="browse"] .pm-rail{display:none}
   .pm-workbench[data-pm-view="workspace"] .pm-browser-pane{display:none}
-  .pm-rail{gap:var(--space-3)}
-  .pm-rail-workspace{max-height:none;flex:1 1 auto}
-  .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
+  .pm-workbench .pm-rail{gap:var(--space-3)}
+  .pm-workbench .pm-rail-workspace{max-height:none;flex:1 1 auto}
+  .pm-workbench .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
   .pm-workbench .modal-actions{padding:var(--space-3) 14px}
   .pm-workbench #projectModalStatus:not(:empty){margin:0 14px}
 

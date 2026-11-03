@@ -421,13 +421,14 @@ def test_generic_tofu_modal_input_still_gets_theme(css_text):
 
 # NOTE: the shipped bleed selector also carries `:not(.recent-search-input)`
 # (see tests/search/test_recent_search_tofu_specificity.py), `:not(.settings-panel)`
-# (2026-09-04 Settings soft redesign) and `:not(.folder-browser-input)` (the
-# shared folder browser). This neuter removes ONLY the `:not(.memory-modal)`
-# carve-out (its purpose) and preserves the others, so it stays surgical.
+# (2026-09-04 Settings soft redesign) and `:not(.folder-browser-input,
+# .mp-path-input)` (the shared folder browser and workspace rail). This neuter
+# removes ONLY the `:not(.memory-modal)` carve-out (its purpose) and preserves
+# the others, so it stays surgical.
 _NC1_FIND = ('[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-             'input:not(.recent-search-input):not(.folder-browser-input){')
+             'input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){')
 _NC1_REPL = ('[data-theme="tofu"] .modal:not(.settings-panel) '
-             'input:not(.recent-search-input):not(.folder-browser-input){')
+             'input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){')
 
 
 def test_nc1_reverting_exclusion_reintroduces_bleed(css_text):

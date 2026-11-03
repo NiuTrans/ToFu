@@ -843,14 +843,11 @@ var LocalControlShellState = Object.freeze({
         # through one frozen service object. Raw-section jsdom fixtures need
         # those same ports ahead of the authored section; a snapshot of
         # projectState would hide the conversation-switch class this boundary
-        # is meant to protect.
+        # is meant to protect. The shared workspace rail and the bundle's other
+        # manifest moduleImports arrive through _compose_import_ports.
         coordinator = Path(native_module_path(
             '.native/project-browse-coordinator.js',
             ROOT / 'frontend/src/core/project-browse-coordinator.ts',
-        ))
-        assets = Path(native_module_path(
-            '.native/project-presentation-assets.js',
-            ROOT / 'frontend/src/features/project/presentation-assets.ts',
         ))
         folder_browser = Path(native_module_path(
             '.native/project-folder-browser.js',
@@ -892,7 +889,6 @@ var ProjectPresentationShellState = Object.freeze({
 '''
         body = (
             coordinator.read_text(encoding='utf-8')
-            + assets.read_text(encoding='utf-8')
             + folder_browser.read_text(encoding='utf-8')
             + state_port
             + body

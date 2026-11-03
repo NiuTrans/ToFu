@@ -64,7 +64,7 @@ def test_name_only_creation_failed_submit_retry_and_pending_path(page, monkeypat
     page.locator(f'.folder-tab[data-folder-id="{folder["id"]}"]').dblclick()
     dialog = _dialog(page)
     root = tmp_path / 'workspace'; root.mkdir()
-    dialog.locator('.folder-settings-path-field input').fill(str(root))
+    dialog.locator('.mp-path-input').fill(str(root))
     # Save must stage typed text even without clicking Add.
     _save(dialog).click()
     page.wait_for_function("!document.querySelector('dialog:modal')")
@@ -80,10 +80,10 @@ def test_folder_defaults_first_send_readonly_and_existing_chat_isolation(page, m
     reference = tmp_path / 'reference'; reference.mkdir()
     dialog = _open_create(page)
     _name(dialog).fill('Workspace inheritance')
-    field = dialog.locator('.folder-settings-path-field input')
+    field = dialog.locator('.mp-path-input')
     field.fill(str(root)); field.press('Enter')
     field.fill(str(reference)); field.press('Enter')
-    dialog.locator('.folder-settings-root').nth(1).locator('[data-action="readonly"]').click()
+    dialog.locator('.mp-row').nth(1).locator('.mp-row-lock').click()
     _save(dialog).click()
     page.wait_for_function("!document.querySelector('dialog:modal')")
     folder = next(row for row in _list(page) if row['name'] == 'Workspace inheritance')
@@ -102,7 +102,7 @@ def test_folder_defaults_first_send_readonly_and_existing_chat_isolation(page, m
     assert captured['readOnlyPaths'] == [str(reference)]
     page.locator(f'.folder-tab[data-folder-id="{folder["id"]}"]').dblclick()
     dialog = _dialog(page)
-    for _ in range(2): dialog.locator('.folder-settings-root').first.locator('[data-action="remove"]').click()
+    for _ in range(2): dialog.locator('.mp-row').first.locator('.mp-row-remove').click()
     _save(dialog).click(); page.wait_for_function("!document.querySelector('dialog:modal')")
     after = page.evaluate("() => { const c = window.conversations.find(c => c.id === window.activeConvId); return {projectPaths:c.projectPaths,readOnlyPaths:c.readOnlyPaths}; }")
     assert after['projectPaths'] == captured['projectPaths'] and after['readOnlyPaths'] == captured['readOnlyPaths']
@@ -123,19 +123,19 @@ def test_folder_settings_theme_focus_and_narrow_layout(page, theme, width, asser
     page.set_viewport_size({'width': width, 'height': 900})
     _name(dialog).fill('Example workspace')
 
-    path = dialog.locator('.folder-settings-path-field input')
+    path = dialog.locator('.mp-path-input')
     path.fill('/workspace/primary/shared'); path.press('Enter')
     path.fill('/workspace/reference/shared'); path.press('Enter')
-    dialog.locator('.folder-settings-root').nth(1).locator('[data-action="readonly"]').click()
-    cards = dialog.locator('.folder-settings-recent-list button[data-path]')
+    dialog.locator('.mp-row').nth(1).locator('.mp-row-lock').click()
+    cards = dialog.locator('.recent-paths-list .recent-path-item')
     cards.first.wait_for(state='visible')
     assert cards.count() == 4
     assert cards.first.get_attribute('aria-label') == recent_paths[0]
-    assert cards.first.locator('.folder-settings-recent-name').inner_text() == 'tofu'
-    assert cards.first.locator('.folder-settings-recent-path').evaluate('(el) => getComputedStyle(el).whiteSpace') == 'nowrap'
+    assert cards.first.locator('.recent-path-name').inner_text() == 'tofu'
+    assert cards.first.locator('.recent-path-full').evaluate('(el) => getComputedStyle(el).whiteSpace') == 'nowrap'
     layout = dialog.evaluate('''(d) => {
       const browser = d.querySelector('.folder-browser').getBoundingClientRect();
-      const rail = d.querySelector('.folder-settings-rail').getBoundingClientRect();
+      const rail = d.querySelector('.folder-settings-workbench .pm-rail').getBoundingClientRect();
       const save = d.querySelector('button[type=submit]').getBoundingClientRect();
       return { sideBySide: rail.left >= browser.right, saveTop: save.top, saveBottom: save.bottom,
         border: parseFloat(getComputedStyle(d).borderTopWidth), background: getComputedStyle(d).backgroundColor };
@@ -176,7 +176,7 @@ def test_directory_browser_selects_acknowledged_directory_without_binding_active
     assert use.is_enabled()
     use.click()
     assert use.is_disabled()
-    assert dialog.locator('.folder-settings-root').first.get_attribute('data-path') == str(directory)
+    assert dialog.locator('.mp-row').first.get_attribute('data-path') == str(directory)
     assert _list(page) == []  # selection is a local editor choice, not a write
     _save(dialog).click(); page.wait_for_function("!document.querySelector('dialog:modal')")
     assert _list(page)[0]['projectPaths'] == [str(directory)]

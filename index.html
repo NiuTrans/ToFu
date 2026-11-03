@@ -1224,34 +1224,8 @@
         <div id="remoteDevicesSection" class="remote-devices-section" style="display:none"></div>
       </div>
 
-      <!-- RIGHT RAIL: workspace folders + recent -->
-      <div class="pm-rail">
-        <div class="pm-rail-card pm-rail-workspace">
-          <div class="pm-section-label"><span data-i18n="pm.workspace">Workspace</span><span class="pm-count" id="mpFolderCount"></span></div>
-          <div class="mp-add-row">
-            <input type="text" id="mpPathInput" class="mp-path-input" placeholder="Paste or type a path…" data-i18n-placeholder="pm.pathPh" data-tofu-action-keydown="if(event.key==='Enter'){event.preventDefault();mpAddFolder();}">
-            <button class="btn btn-sm btn-primary" data-tofu-action="mpAddFolder()" data-i18n="pm.add">Add</button>
-          </div>
-          <div class="mp-folder-list" id="mpFolderTags"></div>
-        </div>
-
-        <div id="recentProjectPaths" class="pm-rail-card recent-paths" hidden>
-          <div class="pm-section-label">
-            <span data-i18n="pm.recent">Recent</span>
-            <span class="pm-count" id="recentCount"></span>
-            <button class="recent-paths-clear" data-tofu-action="clearRecentProjects()" title="Clear all" data-i18n-title="pm.recentClearAll">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-            </button>
-          </div>
-          <div class="recent-search">
-            <input type="text" id="recentSearchInput" class="recent-search-input" placeholder="Search recent…" data-i18n-placeholder="pm.recentSearchPlaceholder" autocomplete="off" spellcheck="false" data-tofu-action-input="_filterRecentProjects(this.value)" data-tofu-action-keydown="if(event.key==='Escape'){event.preventDefault();_clearRecentSearch();}">
-            <button class="recent-search-clear" id="recentSearchClear" data-tofu-action="_clearRecentSearch()" title="Clear search" data-i18n-title="pm.recentClearSearch" hidden>
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-          </div>
-          <div class="recent-paths-list" id="recentPathsList"></div>
-        </div>
-      </div>
+      <!-- RIGHT RAIL: the shared workspace rail (features/project/workspace-rail)
+           mounts here on first open, the same rail sidebar folder settings uses. -->
     </div>
 
     <div id="projectModalStatus"></div>

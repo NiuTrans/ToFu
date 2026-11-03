@@ -55,8 +55,8 @@ def test_workspace_declares_one_closed_dependency_surface():
         'frontend/src/features/project/folder-browser.ts': (
             'createFolderBrowser',
         ),
-        'frontend/src/features/project/presentation-assets.ts': (
-            'PROJECT_PRESENTATION_ASSETS',
+        'frontend/src/features/project/workspace-rail.ts': (
+            'createWorkspaceRail',
         ),
     }
     assert services == {
