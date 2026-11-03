@@ -138,6 +138,7 @@ struct Header {
     source_incomplete: bool,
     // Derived from exact generation accounting on decode, never persisted.
     has_chunks: bool,
+    chunk_count: u64,
     bloom: [u8; BLOOM_BYTES],
 }
 
@@ -148,6 +149,7 @@ struct Build {
     generation_bytes: u64,
     title: String,
     source_incomplete: bool,
+    chunk_count: u64,
     bloom: [u8; BLOOM_BYTES],
 }
 
@@ -411,6 +413,7 @@ fn encode_header(header: &Header) -> io::Result<Vec<u8>> {
     push_string(&mut output, &header.generation)?;
     push_string(&mut output, &header.title)?;
     output.push(u8::from(header.source_incomplete));
+    output.extend_from_slice(&header.chunk_count.to_be_bytes());
     output.extend_from_slice(&header.bloom);
     Ok(output)
 }
@@ -443,6 +446,7 @@ fn decode_header(mut input: &[u8]) -> io::Result<Header> {
         _ => return Err(invalid_data("invalid search source coverage")),
     };
     input = &input[1..];
+    let chunk_count = take_u64(&mut input)?;
     if input.len() < BLOOM_BYTES {
         return Err(invalid_data("search conversation bloom is truncated"));
     }
@@ -460,6 +464,7 @@ fn decode_header(mut input: &[u8]) -> io::Result<Header> {
         title,
         source_incomplete,
         has_chunks: chunk_bytes != 0,
+        chunk_count,
         bloom,
     })
 }
@@ -473,6 +478,7 @@ fn encode_build(build: &Build) -> io::Result<Vec<u8>> {
         title: build.title.clone(),
         source_incomplete: build.source_incomplete,
         has_chunks: false, // Encoding only; derived when the header is read.
+        chunk_count: build.chunk_count,
         bloom: build.bloom,
     })
 }
@@ -486,6 +492,7 @@ fn decode_build(input: &[u8]) -> io::Result<Build> {
         generation_bytes: header.generation_bytes,
         title: header.title,
         source_incomplete: header.source_incomplete,
+        chunk_count: header.chunk_count,
         bloom: header.bloom,
     })
 }
@@ -1383,6 +1390,7 @@ impl OpenTurnSearchProjection {
             generation_bytes: 0,
             title: String::new(),
             source_incomplete: false,
+            chunk_count: 0,
             bloom: [0; BLOOM_BYTES],
         };
         bloom_add(&mut build.bloom, &conversation_id.to_lowercase());
@@ -1449,6 +1457,10 @@ impl OpenTurnSearchProjection {
         }
         let mut gram_delta = 0i64;
         let mut added_bytes = 0u64;
+        build.chunk_count = build
+            .chunk_count
+            .checked_add(documents.len() as u64)
+            .ok_or_else(|| invalid_data("search chunk count overflow"))?;
         for document in documents {
             check_search_stop(&self.stop)?;
             validate_identity(&document.turn_id, "invalid search turn ID", MAX_ID_BYTES)?;
@@ -1685,6 +1697,7 @@ impl OpenTurnSearchProjection {
             title: build.title.clone(),
             source_incomplete: build.source_incomplete,
             has_chunks: false, // Encoding only; derived when the header is read.
+            chunk_count: build.chunk_count,
             bloom: build.bloom,
         };
         let new_header_key = header_key(&transaction, build.updated_at_ms, conversation_id)?;

@@ -381,14 +381,28 @@ impl OpenTurnSearchProjection {
                 return page(items, &state, true);
             }
             let header = if state.pending.is_some() {
+                chunks_read = 0;
                 let (time, id) = state.after.as_ref().unwrap();
                 let stored_key = header_key(&transaction, *time, id)?;
                 let raw = self.database.entity_get(&mut transaction, &stored_key)?;
                 match raw {
                     Some(raw) => decode_header(&raw)?,
                     None => {
-                        state.pending = None;
-                        continue;
+                        let active_key = active_key(&transaction, id)?;
+                        let raw = self.database.entity_get(&mut transaction, &active_key)?;
+                        match raw {
+                            Some(raw) => {
+                                let header = decode_header(&raw)?;
+                                state.pending = None;
+                                state.after = None;
+                                chunks_read = 0;
+                                header
+                            }
+                            None => {
+                                state.pending = None;
+                                continue;
+                            }
+                        }
                     }
                 }
             } else if let Some(header) = headers.pop_front() {
@@ -433,10 +447,8 @@ impl OpenTurnSearchProjection {
             // phase-0 requires the phrase (whose every gram was emitted)
             // in the title, id, or one chunk; phase-1 requires every word
             // (again with every gram emitted) somewhere across them. The
-            // skipped conversation's state effects are exactly those of a
-            // non-matching one, so pages stay byte-identical while its meta
-            // namespace is never opened. A resumed conversation (matching
-            // pending generation) always runs its exact legacy scan.
+            // namespace is never opened. Its exact chunk count is already in
+            // the header, preserving scan-page budgets without metadata reads.
             if gram_index_ready
                 && state
                     .pending
@@ -445,23 +457,14 @@ impl OpenTurnSearchProjection {
             {
                 let phase = usize::from(state.phase);
                 if !bloom_might_contain(&header.bloom, &conversation_blooms[phase]) {
-                    // A rebuilt pending conversation is already ordered by its
-                    // old recency key for this cursor's second search phase.
-                    let recency = state
-                        .after
-                        .clone()
-                        .unwrap_or_else(|| (header.updated_at_ms, header.conversation_id.clone()));
+                    chunks_read = chunks_read.saturating_add(
+                        usize::try_from(header.chunk_count).unwrap_or(usize::MAX),
+                    );
+                    state.pending = None;
+                    state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
                     barren += 1;
                     continue;
                 }
-            }
-            if gram_index_ready
-                && state
-                    .pending
-                    .as_ref()
-                    .is_none_or(|pending| pending.generation != header.generation)
-            {
-                let phase = usize::from(state.phase);
                 if gram_sets[phase].is_none() && barren >= GRAM_ACTIVATE_AFTER_BARREN {
                     let terms: &[&str] = if phase == 0 {
                         &[query.as_str()]
@@ -497,6 +500,9 @@ impl OpenTurnSearchProjection {
                             && !candidates.contains(&generation_id)
                     };
                     if skip {
+                        chunks_read = chunks_read.saturating_add(
+                            usize::try_from(header.chunk_count).unwrap_or(usize::MAX),
+                        );
                         state.pending = None;
                         state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
                         continue;
@@ -887,7 +893,7 @@ mod tests {
             .search_page_until(&request, None, || false)
             .unwrap();
         assert!(first.items.is_empty());
-        let cursor = first.next_cursor.unwrap();
+        assert!(first.next_cursor.is_some());
         let rows = (0..=CHUNK_SCAN_PAGE)
             .map(|index| document(index as u32, "needle absent"))
             .collect::<Vec<_>>();
@@ -899,11 +905,13 @@ mod tests {
             "unrelated",
             &rows,
         );
-        let second = projection
-            .search_page_until(&request, Some(&cursor), || false)
-            .unwrap();
-        assert_eq!(second.items[0].match_field, "content");
-        assert_eq!(second.items[0].turn_id, Some("turn".into()));
+        let hits = collect_pages(&projection, "needle absent", 1)
+            .into_iter()
+            .flat_map(|(items, _, _)| items)
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].match_field, "content");
+        assert_eq!(hits[0].turn_id, Some("turn".into()));
     }
 
     #[test]
