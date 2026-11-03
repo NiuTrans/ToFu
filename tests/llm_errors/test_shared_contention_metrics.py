@@ -78,6 +78,13 @@ class TestContentionClassification:
         assert e.is_quota is False
         assert e.is_gateway is False
 
+    def test_moonshot_project_rpm_body_is_contention(self):
+        e = _classify(MOONSHOT_BODY.replace('TPM', 'RPM'))
+        assert e.is_shared_contention is True
+        assert e.is_quota is False
+        assert e.is_subscription_quota is False
+        assert e.is_gateway is False
+
     def test_generic_429_is_not_contention(self):
         e = _classify('API HTTP 429: rate limit exceeded, slow down')
         assert e.is_shared_contention is False

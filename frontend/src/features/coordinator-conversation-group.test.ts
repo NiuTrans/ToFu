@@ -19,7 +19,7 @@ function fixture() {
     { id: 'ordinary', title: 'Owner conversation', _serverTurnCount: 1 },
     { id: 'owner-worker-like', title: 'worker-title only', _serverTurnCount: 1 },
   ];
-  const renderRow = vi.fn((conversation: { id: string }) => `<div class="conv-item" data-conv-id="${conversation.id}">${conversation.id}</div>`);
+  const renderRow = vi.fn((conversation: { id: string }) => `<div class="conv-item" data-conv-id="${conversation.id}">${conversation.id}<div class="conv-actions"><button class="conv-copy-id" data-conv-id="${conversation.id}">copy</button><button class="conv-rename" data-conv-id="${conversation.id}">rename</button></div></div>`);
   const open = vi.fn();
   const refresh = vi.fn();
   const group = createCoordinatorConversationGroup({
@@ -58,6 +58,11 @@ it('is collapsed by default, preserves coordinator provenance, and opens all chi
   expect(children.map(row => row.getAttribute('data-conv-id'))).toEqual(['worker-new', 'worker-empty', 'worker-old']);
   (children[1] as HTMLElement).click();
   expect(f.open).toHaveBeenCalledWith('worker-empty');
+  const copy = children[1].querySelector<HTMLButtonElement>('.conv-copy-id')!;
+  expect(copy.dataset.convId).toBe('worker-empty');
+  expect(children[1].querySelector('.conv-rename')).toBeNull();
+  copy.click();
+  expect(f.open).toHaveBeenCalledTimes(1);
   f.group.destroy();
 });
 
@@ -232,7 +237,7 @@ function sidebar(initial: { pinned?: string; settled?: boolean; view?: string[] 
     rows: () => rows,
     readPage: vi.fn(async () => ({ conversations: [], nextCursor: null, coverage: 'complete' as const })),
     open, activeConversationId: () => active,
-    renderRow: row => `<div class="conv-item" data-conv-id="${row.id}"><span class="conv-title">${row.title}</span><div class="conv-actions"></div></div>`,
+    renderRow: row => `<div class="conv-item" data-conv-id="${row.id}"><span class="conv-title">${row.title}</span><div class="conv-actions"><button class="conv-copy-id" data-conv-id="${row.id}">copy</button><button class="conv-rename" data-conv-id="${row.id}">rename</button></div></div>`,
   });
   const refresh = () => groups.refresh(rows.filter(row => state.view.includes(row.id)));
   const historyRows = () => [...document.querySelectorAll<HTMLElement>('.coordinator-history-entry .conv-item')].map(row => row.dataset.convId);
@@ -295,15 +300,20 @@ it('reserves pinned ids, keeps a replaced Coordinator row current, and opens it'
   f.refresh();
   expect(f.historyRows()).toEqual(['replaced']);
   const row = () => document.querySelector<HTMLElement>('.coordinator-history-entry .conv-item')!;
-  expect(row().querySelector('.conv-actions')).toBeNull();
+  expect(row().querySelector<HTMLButtonElement>('.conv-copy-id')!.dataset.convId).toBe('replaced');
+  expect(row().querySelector('.conv-rename')).toBeNull();
   expect(row().getAttribute('role')).toBe('button');
   f.rows.find(item => item.id === 'replaced')!.title = 'Renamed coordinator';
   f.setActive('replaced');
   f.refresh();
-  expect(row().textContent).toBe('Renamed coordinator');
+  expect(row().querySelector('.conv-title')!.textContent).toBe('Renamed coordinator');
   expect(row().classList.contains('active')).toBe(true);
   row().querySelector<HTMLElement>('.conv-title')!.click();
   expect(f.open).toHaveBeenCalledWith('replaced');
+  const copy = row().querySelector<HTMLButtonElement>('.conv-copy-id')!;
+  copy.click();
+  copy.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  expect(f.open).toHaveBeenCalledTimes(1);
   row().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   expect(f.open).toHaveBeenCalledTimes(2);
   f.groups.destroy();
