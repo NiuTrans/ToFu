@@ -187,6 +187,9 @@ Specs: `tests/compaction/test_l1_sent_step_admission.py` and `tests/cache/test_c
 
 **Alternatives rejected:** declaring `chat_cache_breakpoints: supported` on every Claude face. The feature is bound to the OpenAI wire, so no declaration can enable it on the Anthropic wire, and a missing declaration must not cost the whole cache.
 
+
+**Detection (2026-11-04):** Claude caches only at explicit markers, so a follow-up Claude round whose prompt reaches the largest documented minimum cacheable length (`MIN_CACHEABLE_PROMPT_TOKENS`, 4,096) and reads and writes 0 paid the base input rate for its whole prompt. Such a round is recorded in the `uncached` bucket instead of `no_break`, and `[CacheTrack] … UNCACHED` names the side from the wire-marker count: 0 markers implicates the client's breakpoints, one or more the gateway or route. `scripts/cache_waste_report.py` prints the count next to the zero-readback rounds. The detector still returns no break, so the round's `cacheBreak` and the cost popover are unchanged. Specs: `tests/cache/test_cache_verdict_uncached_bucket.py`, `tests/cache/test_cache_waste_report.py`. **Alternatives rejected:** a confirmed break (the round lost no previous read, and without wire markers no culprit can be named); counting the first round of a thread (an OpenAI-compatible gateway may meter only reads, which reports a cold first write as 0); every model family (automatically caching providers report 0 on legitimately cold prompts).
+
 ### 11. Cache-break attribution corrections
 
 **Problem (2026-11-03, 578 Claude rounds 19:49 to 20:42):** three classifier gaps misplaced cache spend.

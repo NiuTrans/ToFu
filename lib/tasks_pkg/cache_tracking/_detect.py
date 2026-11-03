@@ -14,8 +14,9 @@ import re
 import time
 from typing import Any
 
-from lib.cost import normalize_usage, observed_cache_read
+from lib.cost import normalize_usage, observed_cache_read, split_input_tokens
 from lib.log import get_logger
+from lib.model_info import is_claude
 from lib.tasks_pkg.cache_tracking._state import (
     CacheState,
     _cache_lock,
@@ -52,10 +53,12 @@ from lib.tasks_pkg.cache_tracking._policy import (
     BUCKET_BODY_CHANGE as BUCKET_BODY_CHANGE,
     BUCKET_NO_BREAK as BUCKET_NO_BREAK,
     BUCKET_INDETERMINATE as BUCKET_INDETERMINATE,
+    BUCKET_UNCACHED as BUCKET_UNCACHED,
     BUCKET_OTHER as BUCKET_OTHER,
     _classify_break as _classify_break,
     _resolve_break_cause as _resolve_break_cause,
     classify_verdict as classify_verdict,
+    uncached_round,
 )
 from lib.tasks_pkg.cache_tracking._wire import (
     _wire_evidence_from_usage, _detect_namespace_switch,
@@ -558,6 +561,31 @@ def _report_indeterminate_round(conv_id, prev, *, cache_write, elapsed,
             'cache.')}
 
 
+def _report_uncached_round(conv_id, prev, *, prompt_tokens, markers) -> dict:
+    """Log a cacheable Claude round with no cache activity and return its
+    ``uncached`` ledger record, naming which side the wire markers implicate."""
+    count = markers.get('count') if isinstance(markers, dict) else None
+    if count == 0:
+        evidence = ('no cache_control marker reached the wire, so the client '
+                    'never asked for caching (a client-side breakpoint '
+                    'regression)')
+    elif isinstance(count, int) and count > 0:
+        evidence = (f'{count} cache_control marker(s) were on the wire, so the '
+                    'gateway dropped them, does not cache this route, or does '
+                    'not report cache usage')
+    else:
+        evidence = ('wire markers were not captured, so the client and '
+                    'provider sides cannot be told apart')
+    logger.warning(
+        '[CacheTrack] conv=%s call=%d UNCACHED: input=%d cache_read=0 '
+        'cache_write=0 — %s. Counted as uncached, NOT as no_break.',
+        conv_id[:8], prev.call_count, prompt_tokens, evidence)
+    return {'uncached': (
+        'the provider reported no cache read and no cache write on a '
+        f'cacheable prompt ({prompt_tokens} input tokens), so the whole prompt '
+        f'was billed at the uncached input rate: {evidence}.')}
+
+
 def detect_cache_break(
     conv_id: str,
     messages: list,
@@ -964,6 +992,16 @@ def detect_cache_break(
                 was_compaction=_was_compaction,
                 advertised_rewrite=_advertised_rewrite,
                 expected_rewrite_index=_expected_rewrite_index))
+        # A cacheable Claude round with no cache activity at all paid the base
+        # input rate for its whole prompt. Like the indeterminate case it is a
+        # ledger fact, not a confirmed break: the return value stays None.
+        _prompt_tokens = split_input_tokens(usage)[1]
+        if uncached_round(claude=is_claude(model), call_count=prev.call_count,
+                          cache_read=cache_read, cache_write=cache_write,
+                          prompt_tokens=_prompt_tokens):
+            return _finish(None, record_as=_report_uncached_round(
+                conv_id, prev, prompt_tokens=_prompt_tokens,
+                markers=_wire_evidence.markers))
         _finish(None)
 
     return None
