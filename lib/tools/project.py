@@ -3,6 +3,8 @@
 import copy
 import os
 
+from lib.tools.background_guidance import RUN_COMMAND_HANDOFF, RUN_COMMAND_STOP
+
 PROJECT_TOOL_SEARCH_FILES = {
     "type": "function",
     "function": {
@@ -515,8 +517,8 @@ PROJECT_TOOL_RUN_COMMAND = {
         "name": "run_command",
         "description": (
             "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. "
-            "NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. "
-            "Execution may move to the background on new messages; results arrive automatically. "
+            f"NO timeout: {RUN_COMMAND_STOP} "
+            f"{RUN_COMMAND_HANDOFF}"
             "Avoid waiting for stdin.\n\n"
             "Fresh subprocess; no persistent shell or environment changes. "
             "Prefer absolute paths and `working_dir` over `cd`.\n\n"

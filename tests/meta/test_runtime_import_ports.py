@@ -24,6 +24,18 @@ def test_section_composition_injects_free_ports_and_preserves_body(tmp_path, mon
     assert result == (owner.read_text() if needed else '') + body
 
 
+def test_section_composition_excludes_type_only_bindings(tmp_path, monkeypatch):
+    """A manifest's TypeScript-only import cannot become a browser global."""
+    owner = tmp_path / 'owner.js'
+    monkeypatch.setattr(runtime, '_section_import_ports', lambda _name: (
+        ((('type ContextSnapshot', 'ContextSnapshot'),), owner),
+    ))
+    monkeypatch.setattr(runtime, '_import_port_path', lambda module: str(module))
+    result = runtime._compose_import_ports(
+        'fixture.js', 'ContextSnapshot;')
+    assert result == 'ContextSnapshot;'
+
+
 def test_section_service_uses_its_factory_even_when_only_service_is_referenced(tmp_path, monkeypatch):
     owner = tmp_path / 'owner.js'
     owner.write_text('globalThis.createService = () => ({});\n')

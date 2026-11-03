@@ -15,6 +15,7 @@ import json
 import re
 import time
 from collections.abc import Mapping
+from typing import Any, NoReturn
 
 import orjson
 
@@ -34,7 +35,7 @@ def _now_ms():
     return int(time.time() * 1000)
 
 
-def _error(kind, message):
+def _error(kind: str, message: str) -> NoReturn:
     raise StorageError(kind, message)
 
 
@@ -58,7 +59,7 @@ def _invalid_chunk_constant(value):
     raise ValueError('Invalid retained chunk JSON constant')
 
 
-def _get(session, namespace, key):
+def _get(session, namespace: str, key: str) -> dict[str, Any] | None:
     row = session.fetch_one('SELECT value_json FROM storage_records WHERE namespace = ? AND record_key = ?',
                             (namespace, key))
     if row is None:
@@ -72,10 +73,11 @@ def _get(session, namespace, key):
             if namespace == _CHUNK else orjson.loads(encoded))
         if not isinstance(result, dict):
             raise ValueError('not a document')
+        document: dict[str, Any] = dict(result)
         if namespace == _CHUNK and (set(result) != {'data', 'sha256'}
                 or not all(isinstance(value, str) for value in result.values())):
             raise ValueError('invalid chunk shape')
-        return result
+        return document
     except (ValueError, TypeError) as exc:
         raise StorageError('database_integrity', 'Invalid retained paper artifact') from exc
 
@@ -106,7 +108,7 @@ def _parts(receipt):
             for artifact in receipt['artifacts'] for offset in range(0, int(artifact['size_bytes']), size)]
 
 
-def _metadata(session, key):
+def _metadata(session, key: str) -> dict[str, Any]:
     value = _get(session, _META, key)
     if value is None:
         _error('database_not_found', 'Retained paper build is unavailable')
@@ -154,6 +156,8 @@ def _paper_artifact_prepare(session, payload):
             _error('database_conflict', 'An immutable paper build cannot be replaced')
         return {'next_sequence': existing['next_sequence'], 'state': existing['state']}
     ledger = _get(session, _LEDGER, 'capacity') or {'records': {}}
+    if not isinstance(ledger.get('records'), dict):
+        _error('database_integrity', 'Invalid retained paper artifact ledger')
     reserved = payload_bytes + receipt_bytes
     ledger['records'][key] = reserved
     _put(session, _LEDGER, 'capacity', ledger)
@@ -190,6 +194,8 @@ def _paper_artifact_append(session, payload):
 
 def _chunk_bytes(session, key, sequence):
     chunk = _get(session, _CHUNK, f'{key}:{sequence}')
+    if chunk is None:
+        raise StorageError('database_integrity', 'Retained paper artifact chunk is missing or corrupt')
     try:
         data = base64.b64decode(chunk['data'], validate=True)
         if hashlib.sha256(data).hexdigest() != chunk['sha256']:
@@ -207,13 +213,16 @@ def _paper_artifact_seal(session, payload):
     parts = _parts(value['receipt'])
     if value['next_sequence'] != len(parts):
         _error('database_conflict', 'Paper artifact upload is incomplete')
-    hashes = {row['name']: hashlib.sha256() for row in value['receipt']['artifacts']}
+    receipt = value['receipt']
+    if not isinstance(receipt, Mapping):
+        _error('database_conflict', 'Paper artifact receipt is invalid')
+    hashes = {row['name']: hashlib.sha256() for row in receipt['artifacts']}
     for sequence, (name, _, size) in enumerate(parts):
         data = _chunk_bytes(session, key, sequence)
         if len(data) != size:
             _error('database_integrity', 'Retained artifact size changed')
         hashes[name].update(data)
-    if any(hashes[row['name']].hexdigest() != row['sha256'] for row in value['receipt']['artifacts']):
+    if any(hashes[row['name']].hexdigest() != row['sha256'] for row in receipt['artifacts']):
         _error('database_integrity', 'Retained artifact digest differs from the build receipt')
     value['state'] = 'sealed'
     _put(session, _META, key, value)

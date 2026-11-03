@@ -246,6 +246,19 @@ merge staged, never a HEAD whose index reverts it. Overlapping lines, staged cha
 file in the way, a type clash or an operation in progress refuse before anything is written. It
 then runs `git worktree remove` (never forced) and `git branch -d`.
 
+A task-input snapshot is the immutable input tree captured by `create_task_workspace` when the
+selected branch has uncommitted or untracked context. Its exact commit SHA is retained under
+`refs/tofu/inputs/u<owner>/<task>` (and in the workspace origin's `inputBaseSha`); clean inputs
+reuse the selected branch commit instead of creating a snapshot. Before computing a merge,
+`git_land` intersects `<current>..<branch>` with those exact ref targets and refuses if any are
+present. It names each snapshot and its carried files, and requires a fresh worktree from the
+shared checkout's current branch followed by cherry-picking only the worker's own commits.
+Author/message similarity is deliberately not evidence: ordinary lookalike commits land as before.
+Snapshots whose input refs were removed cannot be identified exactly and are not guessed at.
+Alternatives rejected: a fixed trailer would not mark existing snapshots; metadata heuristics can
+refuse legitimate work or miss snapshots; ignoring the base makes another writer's borrowed input
+part of the worker's publication. Specification: `tests/project_mod/test_git_land_script.py`.
+
 Problem: compact generated i18n catalogs conflict even when their authored locales merge cleanly;
 binary previews cannot be text-merged. Treating either as independent authored bytes strands
 verified work and demands an unnecessary repair turn. Decision: when every conflict is a known

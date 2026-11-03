@@ -1606,6 +1606,7 @@ class LifecycleManager:
         pid: int | None,
         marker_key: str,
         recovery_source: str = '',
+        exited_at: float | None = None,
     ) -> bool:
         """Consume one controlled exit without spending crash-loop budget."""
         if marker_key and marker_key == self._state.get(
@@ -1615,7 +1616,7 @@ class LifecycleManager:
         now = _now()
         self._state['plannedExitCount'] = int(
             self._state.get('plannedExitCount') or 0) + 1
-        self._state['lastWorkerExitAt'] = now
+        self._state['lastWorkerExitAt'] = now if exited_at is None else exited_at
         self._state['lastWorkerExitKind'] = 'planned'
         self._state['lastWorkerExitReason'] = reason
         self._state['lastConsumedExitMarker'] = marker_key
@@ -1662,15 +1663,101 @@ class LifecycleManager:
             return
         reap_exited_child(worker.get('pid'), worker.get('processStartTime'))
 
-    def _forget_worker(self) -> None:
-        """Clear a worker record whose exit no accounting path consumed."""
-        retired = dict(self._state.get('worker') or {})
-        self._state['worker'] = {}
-        self._release_worker_leases()
-        if retired.get('pid'):
-            self._log_worker_exit(
-                retired, self._worker_exit_observation(retired), logging.INFO)
-            self._reap_retired_worker(retired)
+    def _departed_worker_exit(self) -> dict[str, Any]:
+        """Classify how the remembered generation exited once it is gone.
+
+        Evidence: a fresh PID-bound clean marker, the manager's own PID intent
+        persisted before it signalled, and the generation's ready certificate.
+        ``planned`` names the reason, consumed marker, certificate time and
+        the recovery that reason implies; ``failure`` carries the marker's
+        classification when one exists, else the failure accounting
+        classifies the remaining evidence.
+        """
+        clean_exit = self._clean_exit_marker_for_remembered_worker()
+        if not clean_exit or clean_exit.get('alreadyConsumed'):
+            return {'kind': 'failure'}
+        reason = str(clean_exit['reason'])
+        pid = int(clean_exit['pid'])
+        clean_ts = float(clean_exit['cleanTs'])
+        pending_intent = self._pending_exit_intent_for_worker(pid, clean_ts)
+        if reason == 'signal' and pending_intent:
+            reason = str(pending_intent['reason'])
+        planned = {
+            'kind': 'planned',
+            'reason': reason,
+            'pid': pid,
+            'markerKey': str(clean_exit['markerKey']),
+            'exitedAt': clean_ts,
+        }
+        if reason == 'manual':
+            return {**planned, 'recoverySource': ''}
+        if reason == 'restart':
+            return {**planned, 'recoverySource': (
+                str(pending_intent.get('recoverySource') or '')
+                or 'clean-restart-recovery')}
+        # Generic SIGTERM proves a graceful drain, not who intended
+        # it. A manager-authored PID intent or explicit restart marker
+        # already bypassed accounting above. A signal that arrives
+        # after THIS generation reached readiness is an external drain
+        # of a healthy worker, not a crash: restart it without
+        # spending crash-loop budget, because on this host a single
+        # boot can take 500-1000 s and must not be pushed toward the
+        # terminal crashloop latch by an operator/agent restart.
+        # Memory recycle still spends budget so a leak/recycle loop
+        # cannot run forever.
+        ready_logged = float(self._state.get('workerReadyLoggedAt') or 0.0)
+        if reason == 'signal' and 0.0 < ready_logged <= clean_ts + 1.0:
+            return {**planned, 'recoverySource': 'external-drain-recovery'}
+        if reason == 'signal':
+            return {
+                'kind': 'failure',
+                'exitedAt': clean_ts,
+                'exitCause': 'unintended_signal',
+                'failureReason': (
+                    f'worker exited after unplanned graceful signal pid {pid}'),
+            }
+        return {
+            'kind': 'failure',
+            'exitedAt': clean_ts,
+            'exitCause': 'memory_recycle',
+            'failureReason': f'worker requested graceful memory recycle pid {pid}',
+        }
+
+    def _settle_departed_worker(self) -> None:
+        """Record a gone generation's exit before anything retires its record.
+
+        Reconciliation records an exit within one monitor tick, but an
+        explicit start or stop can run first, e.g. as the first request to a
+        Supervisor that was down when its worker exited. Replacing or clearing
+        the record there loses the exit and status keeps an older one, so
+        every retirement records the same classified exit first; recovery
+        stays with the caller. Live, foreign-host and settled records are
+        left alone.
+        """
+        worker = self._state.get('worker') or {}
+        if (not isinstance(worker.get('pid'), int)
+                or (worker.get('host') or _hostname()) != _hostname()
+                or self._launcher_is_alive()):
+            return
+        logger.info(
+            'worker pid=%s exited while unobserved; recording its exit before '
+            'the record is retired', worker['pid'])
+        departed = self._departed_worker_exit()
+        if departed['kind'] == 'planned':
+            self._record_planned_exit(
+                departed['reason'],
+                pid=departed['pid'],
+                marker_key=departed['markerKey'],
+                exited_at=departed['exitedAt'],
+            )
+            return
+        *_, retired_worker = self._account_worker_failure(
+            exit_cause=departed.get('exitCause'),
+            failure_reason=departed.get('failureReason'),
+            exited_at=departed.get('exitedAt'),
+        )
+        self._save()
+        self._reap_retired_worker(retired_worker)
 
     @staticmethod
     def _log_worker_exit(worker: dict[str, Any], observation: dict[str, Any],
@@ -2678,8 +2765,9 @@ class LifecycleManager:
             self._worker_runtime_lock_fds = list(runtime.lease_fds)
         unrecorded, self._worker_process = self._worker_process, proc
         if unrecorded is not None:
-            # An explicit start can outrun the reconcile tick that would have
-            # recorded the previous generation's exit.
+            # Settlement reaps this image's child together with its record;
+            # a child still referenced here left the record unsettled, e.g.
+            # when adopting another live worker replaced it.
             returncode = unrecorded.poll()
             logger.warning(
                 'worker pid=%s (%s) was replaced by generation pid=%s before '
@@ -2780,6 +2868,7 @@ class LifecycleManager:
                         'launcherPid': None, 'message': self._state['lastError'],
                         **self.status()}
             self._state['desired'] = 'running'
+            self._settle_departed_worker()
             if explicit:
                 self._clear_failure_budget()
             if self._launcher_is_alive():
@@ -2897,6 +2986,8 @@ class LifecycleManager:
                 self._remember_worker(status)
                 planned_reason = (
                     'restart' if keep_desired_running else 'manual')
+            else:
+                self._settle_departed_worker()
             self._state['desired'] = 'running' if keep_desired_running else 'stopped'
             self._state['launchSource'] = source
             self._state['pendingWorkerExitIntent'] = ({
@@ -2929,8 +3020,6 @@ class LifecycleManager:
                         recovery_source=(
                             'manager-restart' if keep_desired_running else ''),
                     )
-                else:
-                    self._forget_worker()
                 self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
                 self._state['lastError'] = ''
@@ -3062,6 +3151,15 @@ class LifecycleManager:
                 # A worker surviving a manager crash after stop was persisted is
                 # completed here. Unknown identity fails closed in _terminate.
                 if status.get('running'):
+                    # As in stop(), the PID intent precedes the signal, so
+                    # the settlement below records a manual stop.
+                    self._state['pendingWorkerExitIntent'] = {
+                        'pid': status.get('pid'),
+                        'host': _hostname(),
+                        'reason': 'manual',
+                        'requestedAt': _now(),
+                        'recoverySource': '',
+                    }
                     self._set_observed('stopping')
                     self._save()
                     ok, _, error = self._terminate(status)
@@ -3069,13 +3167,13 @@ class LifecycleManager:
                         self._set_observed('conflict', error)
                         self._save()
                         return
+                self._settle_departed_worker()
                 try:
                     self._native_storage.stop()
                 except Exception as exc:
                     self._set_observed('conflict', f'native storage shutdown incomplete: {exc}')
                     self._save()
                     return
-                self._forget_worker()
                 self._state['pendingWorkerExitIntent'] = {}
                 self._state['storageBlocker'] = {}
                 self._set_observed('stopped')
@@ -3243,98 +3341,43 @@ class LifecycleManager:
                 self._spawn(pending_recovery)
                 return
 
-            clean_exit = self._clean_exit_marker_for_remembered_worker()
-            if clean_exit and not clean_exit.get('alreadyConsumed'):
-                reason = str(clean_exit['reason'])
-                pid = int(clean_exit['pid'])
-                marker_key = str(clean_exit['markerKey'])
-                pending_intent = self._pending_exit_intent_for_worker(
-                    pid, float(clean_exit['cleanTs']))
-                if (reason == 'signal'
-                        and pending_intent.get('reason') == 'restart'):
-                    reason = 'restart'
+            departed = self._departed_worker_exit()
+            if departed['kind'] == 'planned':
+                reason = departed['reason']
+                recovery_source = departed['recoverySource']
                 if reason == 'manual':
                     self._state['desired'] = 'stopped'
-                    self._record_planned_exit(
-                        reason,
-                        pid=pid,
-                        marker_key=marker_key,
-                    )
+                self._record_planned_exit(
+                    reason,
+                    pid=departed['pid'],
+                    marker_key=departed['markerKey'],
+                    recovery_source=recovery_source,
+                    exited_at=departed['exitedAt'],
+                )
+                if reason == 'manual':
                     self._state['storageBlocker'] = {}
                     self._set_observed('stopped')
                     self._state['lastError'] = ''
                     self._save()
                     return
-                if reason == 'restart':
-                    recovery_source = (
-                        str(pending_intent.get('recoverySource') or '')
-                        or 'clean-restart-recovery')
-                    self._record_planned_exit(
-                        reason,
-                        pid=pid,
-                        marker_key=marker_key,
-                        recovery_source=recovery_source,
-                    )
-                    storage_lease = self._wait_for_stopped_sidecar_release()
-                    if self._storage_lease_blocks_worker(storage_lease):
-                        self._defer_for_storage_lease(
-                            storage_lease, resume_source=recovery_source)
-                    else:
-                        self._spawn(recovery_source)
-                    return
-                # Generic SIGTERM proves a graceful drain, not who intended
-                # it. A manager-authored PID intent or explicit restart marker
-                # already bypassed accounting above. A signal that arrives
-                # after THIS generation reached readiness is an external drain
-                # of a healthy worker, not a crash: restart it without
-                # spending crash-loop budget, because on this host a single
-                # boot can take 500-1000 s and must not be pushed toward the
-                # terminal crashloop latch by an operator/agent restart.
-                # Memory recycle still spends budget so a leak/recycle loop
-                # cannot run forever.
-                ready_logged = float(
-                    self._state.get('workerReadyLoggedAt') or 0.0)
-                if (reason == 'signal' and ready_logged > 0.0
-                        and ready_logged <= float(clean_exit['cleanTs']) + 1.0):
-                    self._record_planned_exit(
-                        'signal',
-                        pid=pid,
-                        marker_key=marker_key,
-                        recovery_source='external-drain-recovery',
-                    )
-                    storage_lease = self._wait_for_stopped_sidecar_release()
-                    if self._storage_lease_blocks_worker(storage_lease):
-                        self._defer_for_storage_lease(
-                            storage_lease,
-                            resume_source='external-drain-recovery')
-                    else:
-                        self._spawn('external-drain-recovery')
-                    return
-                exit_cause = (
-                    'unintended_signal' if reason == 'signal' else
-                    'memory_recycle')
-                self._state['lastError'] = (
-                    f'worker exited after unplanned graceful signal pid {pid}'
-                    if reason == 'signal' else
-                    f'worker requested graceful memory recycle pid {pid}')
-                self._record_failure(
-                    exit_cause=exit_cause,
-                    failure_reason=self._state['lastError'],
-                )
-                if self._state.get('observed') == 'crashloop':
-                    return
-                if self._launcher_is_alive():
-                    return
                 storage_lease = self._wait_for_stopped_sidecar_release()
                 if self._storage_lease_blocks_worker(storage_lease):
                     self._defer_for_storage_lease(
-                        storage_lease, resume_source='automatic-recovery')
+                        storage_lease, resume_source=recovery_source)
+                else:
+                    self._spawn(recovery_source)
                 return
+            if departed.get('failureReason'):
+                self._state['lastError'] = departed['failureReason']
 
             # Count the worker generation before waiting for its orphaned child
             # Sidecar lease.  The old order treated a real crash as mere storage
             # maintenance, then erased the failure budget when the lease fell.
-            self._record_failure()
+            self._record_failure(
+                exit_cause=departed.get('exitCause'),
+                failure_reason=departed.get('failureReason'),
+                exited_at=departed.get('exitedAt'),
+            )
             if self._state.get('observed') == 'crashloop':
                 return
             if self._launcher_is_alive():
@@ -3349,6 +3392,7 @@ class LifecycleManager:
         *,
         exit_cause: str | None = None,
         failure_reason: str | None = None,
+        exited_at: float | None = None,
     ) -> None:
         # A crash-loop is a latched operator boundary. Reconciliation keeps
         # observing the absent worker every monitor interval, but that is not
@@ -3373,6 +3417,38 @@ class LifecycleManager:
                 return
             self._spawn('automatic-recovery')
             return
+        now, recent_failures, failures, retired_worker = (
+            self._account_worker_failure(
+                exit_cause=exit_cause,
+                failure_reason=failure_reason,
+                exited_at=exited_at,
+            ))
+        if recent_failures >= self.max_failures:
+            self._set_observed('crashloop',
+                               f'worker failed {recent_failures} times in '
+                               f'{self.failure_window:.0f}s; recovery paused')
+            self._state['nextRetryAt'] = 0.0
+            self._save()
+            self._reap_retired_worker(retired_worker)
+            logger.error(
+                'worker recovery paused after %d failures in %.0fs; explicit '
+                'start/restart is required to reset the crash-loop budget',
+                recent_failures, self.failure_window)
+            return
+        delay = min(60.0, float(2 ** max(failures, recent_failures)))
+        self._state['nextRetryAt'] = now + delay
+        self._set_observed('starting', f'worker exited; retrying in {delay:.0f}s')
+        self._save()
+        self._reap_retired_worker(retired_worker)
+
+    def _account_worker_failure(
+        self,
+        *,
+        exit_cause: str | None,
+        failure_reason: str | None,
+        exited_at: float | None,
+    ) -> tuple[float, int, int, dict[str, Any]]:
+        """Record one failed generation's exit; retry policy stays with callers."""
         now = _now()
         history = self._recent_failure_times(now)
         history.append(now)
@@ -3417,7 +3493,7 @@ class LifecycleManager:
         self._state['lastFailureAt'] = now
         self._state['lastFailureReason'] = classified_failure_reason
         self._state['lastExitCause'] = classified_exit_cause
-        self._state['lastWorkerExitAt'] = now
+        self._state['lastWorkerExitAt'] = now if exited_at is None else exited_at
         self._state['lastWorkerExitKind'] = 'failure'
         self._state['lastWorkerExitReason'] = classified_exit_cause
         self._state['lastCgroupOomDelta'] = oom_delta
@@ -3434,20 +3510,4 @@ class LifecycleManager:
             recent_failures, self.max_failures, self.failure_window,
             failures, classified_exit_cause, classified_failure_reason)
         self._log_worker_exit(retired_worker, process_exit, logging.WARNING)
-        if recent_failures >= self.max_failures:
-            self._set_observed('crashloop',
-                               f'worker failed {recent_failures} times in '
-                               f'{self.failure_window:.0f}s; recovery paused')
-            self._state['nextRetryAt'] = 0.0
-            self._save()
-            self._reap_retired_worker(retired_worker)
-            logger.error(
-                'worker recovery paused after %d failures in %.0fs; explicit '
-                'start/restart is required to reset the crash-loop budget',
-                recent_failures, self.failure_window)
-            return
-        delay = min(60.0, float(2 ** max(failures, recent_failures)))
-        self._state['nextRetryAt'] = now + delay
-        self._set_observed('starting', f'worker exited; retrying in {delay:.0f}s')
-        self._save()
-        self._reap_retired_worker(retired_worker)
+        return now, recent_failures, failures, retired_worker

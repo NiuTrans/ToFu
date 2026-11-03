@@ -20,8 +20,8 @@ from lib.tasks_pkg.wire_fingerprint import (
 
 logger = get_logger(__name__)
 _NON_MESSAGE_WIRE_CULPRITS = (
-    '<hoisted>', '<bytes>system', '<bytes>tools', '<breakpoint-lost>',
-    '<ttl-flip>', '<mid-out-of-window>',
+    '<hoisted>', '<bytes>system', '<bytes>tools', '<bytes>controls',
+    '<breakpoint-lost>', '<ttl-flip>', '<mid-out-of-window>',
 )
 
 
@@ -83,6 +83,20 @@ def _detect_namespace_switch(
     namespace_switch = diff_routing(
         previous_state.wire_routing, current_routing)
     namespace_verified_same = not namespace_switch
+    affinity = current_routing.get('affinity', '')
+    if '<ns>key' in namespace_switch and affinity and affinity == (
+            previous_state.wire_routing.get('affinity', '')):
+        from lib.llm.cache_affinity import affinity_selects_cache_domain
+        if affinity_selects_cache_domain(affinity):
+            # The hop behind this carrier picks the cache domain from the
+            # unchanged lineage key, so the credential is not the namespace.
+            namespace_switch = [
+                change for change in namespace_switch if change != '<ns>key']
+            logger.info(
+                '[CacheTrack] conv=%s call=%d API key changed under cache '
+                'affinity carrier %s; that hop picks the cache domain, so '
+                'the key is not a cache namespace switch.',
+                conv_id[:8], previous_state.call_count + 1, affinity)
     if namespace_switch:
         # Failover rotation changes the key on purpose, and the other key's
         # namespace is often still warm. The cache outcome below warns only
@@ -296,6 +310,26 @@ def compare_wire_evidence(
             from lib.tasks_pkg.wire_fingerprint import diff_byte_region
             _region_culprits = diff_byte_region(
                 prev.wire_region, evidence.region)
+            if '<bytes>controls' in _region_culprits:
+                # A control change is evidence only when the read fell short
+                # of the prefix the previous round left cached: an
+                # equivalent value (explicit default effort, a thinking field
+                # the model does not render) invalidates nothing.
+                _region_culprits.remove('<bytes>controls')
+                _cached_prefix = (prev.last_cache_read_tokens
+                                  + prev.last_cache_write_tokens)
+                if (cache_read < _cached_prefix * 0.95
+                        and _cached_prefix - cache_read
+                        >= _MIN_CACHE_MISS_TOKENS):
+                    _wire_culprits.append('<bytes>controls')
+                    logger.warning(
+                        '[CacheTrack] conv=%s call=%d ⚠ CACHE CONTROLS '
+                        'CHANGED: speed / tool_choice / thinking / effort '
+                        'differ from last round and the read (%d) fell '
+                        'short of the cached prefix (%d); these controls '
+                        'invalidate cached message blocks.',
+                        conv_id[:8], prev.call_count + 1, cache_read,
+                        _cached_prefix)
             if _region_culprits:
                 _wire_culprits.extend(_region_culprits)
                 _canonical_region_changed = any(

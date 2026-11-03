@@ -2839,8 +2839,8 @@ def assert_registered_event_types(events: Any, *, consumer: str) -> None:
     for row in events or []:
         if not isinstance(row, dict):
             continue
-        payload = row.get('payload') if isinstance(
-            row.get('payload'), dict) else row
+        raw_payload = row.get('payload')
+        payload = raw_payload if isinstance(raw_payload, dict) else row
         type_ = payload.get('type')
         if isinstance(type_, str) and type_ not in _BY_TYPE:
             unknown.add(type_)

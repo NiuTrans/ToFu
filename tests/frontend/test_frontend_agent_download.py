@@ -3,8 +3,9 @@
 The remote branch offers one personalized EXE as its primary action. Server
 address and credential live inside it, so there is no archive, sidecar,
 numbered setup flow, pairing control, copied token, or native paste step. The
-full desktop app remains a collapsed secondary choice. A stale/missing agent
-artifact shows an honest preparation state and never exposes the bare EXE.
+full desktop app lives in Settings → About & Update, not in this control panel.
+A missing agent artifact points to the releases page and never exposes the
+personalized EXE.
 
 The suite also pins the local-source role layout, public/proxied hosts, the
 loopback-bind warning, awaiting state, and poll-render state preservation.
@@ -92,20 +93,15 @@ check('remote_direct_run_note', html1.includes('下载后直接运行即可'));
 check('remote_no_zip', !/ZIP|解压|两个文件/.test(html1));
 check('remote_no_numbered_setup', !/[①②③]/.test(html1));
 check('remote_no_pair_button', !html1.includes('lcPairBtn'));
-check('remote_full_secondary_toggle', html1.includes('下载完整桌面版'));
-check('remote_full_collapsed',
-  html1.includes('<details class="lc-details"><summary>') &&
-  !html1.includes('<details class="lc-details" open'));
-check('remote_full_link_present', html1.includes('Tofu-Setup-0.16.0-win64.exe'));
-check('remote_installer_before_full',
-  html1.indexOf('lcAgentInstallerBtn') < html1.indexOf('Tofu-Setup'));
+check('remote_full_not_duplicated', !html1.includes('Tofu-Setup-0.16.0-win64.exe'));
+check('remote_agent_only', html1.includes('lcAgentInstallerBtn'));
 check('remote_no_connect_line', !html1.includes('lcMintBtn') &&
   !html1.includes('连接行'));
-check('remote_escape_hatch_once',
-  (html1.match(/查看全部下载/g) || []).length === 1);
+check('remote_no_releases_escape_when_ready',
+  !html1.includes('查看全部下载'));
 check('remote_no_pairing_vocabulary', !html1.includes('配对码'));
 
-// ── 1b. stale installer ⇒ honest preparation state ──
+// ── 1b. unavailable installer ⇒ releases-page fallback, never the bare EXE ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
@@ -113,26 +109,28 @@ _lcRenderDesktop({ connected: false, setup_state: 'remote',
   agent_installer_ready: false,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 const html1b = document.getElementById('lcDesktopSetup').innerHTML;
-check('stale_rebuilding_note', html1b.includes('后台准备'));
+check('stale_unavailable_note', html1b.includes('目前没有兼容的受控端安装包'));
+check('stale_releases_fallback', html1b.includes('发布页面'));
 check('stale_no_bare_exe', !html1b.includes('TofuRemote-Setup-0.16.0-win64.exe'));
 check('stale_no_installer_button', !html1b.includes('lcAgentInstallerBtn'));
 check('stale_no_manual_pairing', !html1b.includes('lcMintBtn'));
 
-// ── 2. remote WITHOUT agent artifact ⇒ full fallback, no dead end ──
+// ── 2. remote WITHOUT agent artifact ⇒ release fallback, no dead end ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
   downloads: [FULL], agent_downloads: [] }, null);
 const html2 = document.getElementById('lcDesktopSetup').innerHTML;
-check('fallback_preparing_primary', html2.includes('后台准备'));
-check('fallback_full_link_secondary', html2.includes('Tofu-Setup-0.16.0-win64.exe'));
+check('fallback_unavailable_primary', html2.includes('目前没有兼容的受控端安装包'));
+check('fallback_no_full_desktop', !html2.includes('Tofu-Setup-0.16.0-win64.exe'));
+check('fallback_releases_link', html2.includes('发布页面'));
 check('fallback_no_installer_button', !html2.includes('lcAgentInstallerBtn'));
 check('fallback_no_pair_button', !html2.includes('lcPairBtn'));
 check('fallback_no_connect_line', !html2.includes('lcMintBtn'));
 check('fallback_no_pairing_copy', !html2.includes('配对码'));
 
-// ── 3. local_source ⇒ BOTH installs role-labeled, installer in agent card ──
+// ── 3. local_source ⇒ the agent stays in its role card ──
 const LOCAL_SRC = { connected: false, setup_state: 'local_source',
   visitor_os: 'windows',
   download_url: 'https://github.com/x/y/releases/latest',
@@ -141,25 +139,23 @@ const LOCAL_SRC = { connected: false, setup_state: 'local_source',
   downloads: [FULL], agent_downloads: [AGENT] };
 _lcRenderDesktop(LOCAL_SRC, null);
 const html3 = document.getElementById('lcDesktopSetup').innerHTML;
-check('local_source_full_link', html3.includes('Tofu-Setup-0.16.0-win64.exe'));
+check('local_source_no_full_link', !html3.includes('Tofu-Setup-0.16.0-win64.exe'));
 check('local_source_installer_button', html3.includes('lcAgentInstallerBtn'));
 check('local_source_installer_in_agent_role',
-  html3.indexOf('lcAgentInstallerBtn') < html3.indexOf('完整桌面版'));
+  html3.indexOf('lcAgentInstallerBtn') > html3.indexOf('lc-role-primary'));
 check('local_source_no_pair_button', !html3.includes('lcPairBtn'));
 check('local_source_no_connect_line', !html3.includes('lcMintBtn'));
 check('local_source_primary_accent', html3.includes('lc-role-primary'));
-check('local_source_role_notes',
-  html3.includes('另一台电脑访问') && html3.includes('服务器本机'));
+check('local_source_role_notes', html3.includes('另一台电脑访问'));
 check('local_source_one_step',
   (html3.match(/lc-step/g) || []).length === 1);
 
 // ── 4. unchanged poll beat PRESERVES user interaction state ──
-// (Every 3s repaint used to rewrite innerHTML and collapse open details.)
-const box = document.querySelector('#lcDesktopSetup details');
-box.open = true;
-_lcRenderDesktop(LOCAL_SRC, null);   // identical payload — a poll beat
-const box2 = document.querySelector('#lcDesktopSetup details');
-check('rerender_preserves_open_details', box2 === box && box2.open === true);
+const setup = document.getElementById('lcDesktopSetup');
+setup.querySelector('.lc-role').open = true;
+_lcRenderDesktop(LOCAL_SRC, null);
+check('rerender_preserves_open_details',
+  document.querySelector('#lcDesktopSetup .lc-role').open === true);
 // …but a CHANGED payload still re-renders (the poll's whole point).
 _lcRenderDesktop({ connected: true, setup_state: 'connected',
   downloads: [FULL], agent_downloads: [AGENT] }, null);

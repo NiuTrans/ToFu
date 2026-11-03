@@ -14157,7 +14157,7 @@ button.recent-path-item:focus-visible { outline: none; box-shadow: var(--focus-r
   --thinking-text:#7E4A1E;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
-  --error-text:#B05B48;
+  --error-text:#9E4838;
   /* Status chips (tofu) — same contract as the dark block in
      01-shell-navigation.css; values use the warm kinako/matcha/azuki casts. */
   --chip-ok-color:#5E8A50;
@@ -27087,6 +27087,14 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
+}
+
+.ptool-cmd-verdict:has(.ptool-spinner) {
+  overflow: clip;
+}
+
+.ptool-cmd-verdict .ptool-spinner {
+  box-sizing: border-box;
 }
 
 .ptool-cmd-block .ptool-cmd-verdict .ptool-cmd-status {

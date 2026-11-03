@@ -104,7 +104,7 @@ const SNAPSHOTS = {
 global._evolutionRunsApi = {
   createRun: async (body, key) => {
     calls.start.push({ body, key });
-    return { run: { task_id: 'research_t1', status: 'executing' } };
+    return { run: { run_id: 'run-t1', task_id: 'research_t1', status: 'executing' } };
   },
 };
 global.Api = {
@@ -170,9 +170,16 @@ def _run(scenario):
         with open(harness, 'w', encoding='utf-8') as f:
             f.write(_HARNESS)
         with compiled_typescript(
+            RESEARCH_RUNTIME_TS, expose_feature_registry_to_window=True,
+        ) as runtime, compiled_typescript(
             RESEARCH_VIEW_TS, expose_feature_registry_to_window=True,
-        ) as built:
-            r = subprocess.run(['node', harness, ROOT, scenario, built],
+        ) as view:
+            combined = os.path.join(temp_dir, 'research-entry-runtime.js')
+            with open(combined, 'w', encoding='utf-8') as output:
+                for source in (runtime, view):
+                    with open(source, encoding='utf-8') as handle:
+                        output.write(handle.read() + '\n')
+            r = subprocess.run(['node', harness, ROOT, scenario, combined],
                                capture_output=True, text=True, timeout=90)
         if r.returncode != 0:
             pytest.fail(f'harness failed ({scenario}):\n{r.stdout}\n{r.stderr}')

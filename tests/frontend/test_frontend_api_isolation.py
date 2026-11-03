@@ -43,11 +43,18 @@ Adding a new endpoint
 from __future__ import annotations
 
 import os
+import json
 import re
+import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_section, runtime_section_names
+from tests._jsdom import require_node_modules
+from tests._runtime_sections import (
+    runtime_section,
+    runtime_section_names,
+    shipped_source_text,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -78,7 +85,54 @@ ALLOWED_FILES: frozenset[str] = frozenset()
 # variable or expression URL (fetch(url) / fetch(startUrl) / fetch(apiUrl(u)) /
 # fetch(_logCleanApiUrl('/api/...'))). These bypass the inline-string ratchet
 # yet still hit the backend directly.
-_VARIABLE_FETCH_RE = re.compile(r"\bfetch\(\s*(?![)'\"`])")
+_VARIABLE_FETCH_RE = re.compile(r"\bfetch\s*\(\s*(?![)'\"`])")
+_NATIVE_FETCH_SCANNER = r'''
+const ts = require('typescript');
+const sources = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const trees = new Map(Object.entries(sources).map(([name, source]) => [name,
+  ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true,
+    name.endsWith('.ts') ? ts.ScriptKind.TS : ts.ScriptKind.JS)]));
+const options = { allowJs: true, noLib: true, noResolve: true,
+  target: ts.ScriptTarget.Latest };
+const host = ts.createCompilerHost(options);
+host.fileExists = file => trees.has(file);
+host.readFile = file => sources[file];
+host.getSourceFile = file => trees.get(file);
+const checker = ts.createProgram([...trees.keys()], options, host).getTypeChecker();
+const result = {};
+for (const name of trees.keys()) {
+  let count = 0;
+  function visit(node) {
+    if (!ts.isCallExpression(node)) {
+      ts.forEachChild(node, visit);
+      return;
+    }
+    const callee = node.expression;
+    let nativeFetch = ts.isIdentifier(callee) && callee.text === 'fetch';
+    if (ts.isPropertyAccessExpression(callee)
+        && ts.isIdentifier(callee.name) && callee.name.text === 'fetch') {
+      const symbol = checker.getSymbolAtLocation(callee.name);
+      const declarations = symbol?.getDeclarations() || [];
+      nativeFetch = declarations.length === 0;
+    }
+    if (nativeFetch) {
+      const symbol = checker.getSymbolAtLocation(
+        ts.isIdentifier(callee) ? callee : callee.name);
+      const declarations = symbol?.getDeclarations() || [];
+      const injected = declarations.some(declaration =>
+        (ts.isParameter(declaration) && !!declaration.type)
+        || (ts.isVariableDeclaration(declaration) && !!declaration.type)
+        || ts.isImportSpecifier(declaration));
+      const argument = node.arguments[0];
+      if (!injected && argument && !ts.isStringLiteralLike(argument)) count++;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(trees.get(name));
+  result[name] = count;
+}
+process.stdout.write(JSON.stringify(result));
+'''
 
 # Documented, LEGITIMATE variable-URL fetches that are NOT Tofu /api/* business
 # calls — the only permitted carve-outs. Keyed by posix relpath under static/js.
@@ -143,18 +197,27 @@ def _strip_comments(src: str) -> str:
     return strip_comments(src, lang='js', inline=True)
 
 
+def _scan_native_fetches(sources: dict[str, str]) -> dict[str, int]:
+    """Use the TypeScript AST to exclude typed ports and receiver methods."""
+    require_node_modules('typescript')
+    completed = subprocess.run(
+        ['node', '-e', _NATIVE_FETCH_SCANNER],
+        input=json.dumps(sources), text=True, capture_output=True, check=True,
+    )
+    return json.loads(completed.stdout)
+
+
 def _scan_variable_fetches() -> dict[str, int]:
-    """Count fetch() calls with a variable/expression URL per file (comments
-    stripped). Same walk + skip rules as _scan_all()."""
-    out: dict[str, int] = {}
-    for rel in runtime_section_names():
-        if rel in ALLOWED_FILES:
-            continue
-        content = runtime_section(rel)
-        c = len(_VARIABLE_FETCH_RE.findall(_strip_comments(content)))
-        if c > 0:
-            out[rel] = c
-    return out
+    """Scan authored sections, without the harness's injected owner graphs."""
+    sources = {
+        rel: _strip_comments(
+            shipped_source_text(f'frontend/src/runtime/sections/{rel}'))
+        for rel in runtime_section_names() if rel not in ALLOWED_FILES
+    }
+    return {
+        rel: count for rel, count in _scan_native_fetches(sources).items()
+        if count > 0
+    }
 
 
 def _scan_all() -> dict[str, int]:
@@ -163,7 +226,8 @@ def _scan_all() -> dict[str, int]:
     for rel in runtime_section_names():
         if rel in ALLOWED_FILES:
             continue
-        c = len(_LEGACY_FETCH_RE.findall(_strip_comments(runtime_section(rel))))
+        c = len(_LEGACY_FETCH_RE.findall(_strip_comments(
+            shipped_source_text(f'frontend/src/runtime/sections/{rel}'))))
         if c > 0:
             out[rel] = c
     return out
@@ -181,31 +245,23 @@ def test_api_js_exists():
 
 def test_vite_transport_is_the_only_native_fetch_owner():
     """Backend HTTP has one owner; hashed locale data has one asset loader."""
-    actual = {}
-    fetch_owner_sources = {}
+    sources = {}
     for root, _dirs, files in os.walk(FRONTEND_DIR):
         for name in files:
-            if not name.endswith('.ts'):
-                continue
-            path = os.path.join(root, name)
-            with open(path, encoding='utf-8') as fh:
-                source = _strip_comments(fh.read())
-            count = len(re.findall(r'\bfetch\s*\(', source))
-            if count:
-                relative_path = os.path.relpath(
-                    path, FRONTEND_DIR).replace(os.sep, '/')
-                actual[relative_path] = count
-                fetch_owner_sources[relative_path] = source
+            if name.endswith('.ts'):
+                path = os.path.join(root, name)
+                with open(path, encoding='utf-8') as fh:
+                    sources[os.path.relpath(path, FRONTEND_DIR).replace(os.sep, '/')] = fh.read()
+    actual = {path: count for path, count in _scan_native_fetches(sources).items() if count}
     assert actual == {'api/transport.ts': 1, 'i18n/index.ts': 1}, (
         'native backend calls must use api/transport.ts and static locale data '
         f'must use only i18n/index.ts; fetch owners were {actual}'
     )
-    with open(NATIVE_TRANSPORT, encoding='utf-8') as fh:
-        transport = _strip_comments(fh.read())
+    transport = _strip_comments(sources['api/transport.ts'])
     assert "headers['X-Request-ID']" in transport
     assert "headers['X-Tofu-Affinity-Key']" in transport
-    locale_loader = fetch_owner_sources['i18n/index.ts']
-    assert 'fetch(localeUrls[language]' in locale_loader
+    locale_loader = _strip_comments(sources['i18n/index.ts'])
+    assert 'fetch(descriptors.get(language)!.catalogUrl' in locale_loader
     assert '/api/' not in locale_loader
 
 
@@ -244,6 +300,34 @@ def test_legacy_fetch_count_only_decreases():
             'Frontend legacy fetch count increased — new direct calls to /api/* '
             'must instead go through the owned frontend transport:\n' + msg
         )
+
+
+def test_fetch_scanner_distinguishes_native_calls_from_injected_ports():
+    """The guard must keep detecting global fetches without flagging ports."""
+    actual = _scan_native_fetches({
+        'native.ts': 'fetch(startUrl); window.fetch(url);',
+        'receivers.ts': 'declare const ports: { fetch(id: string): Promise<void> }; '
+            + 'ports.fetch(id); await fetch(url);',
+        'no-argument.ts': (
+            'declare const ports: { fetch(id: string): Promise<void> }; '
+            + 'ports.fetch(id); fetch();'),
+        'callback.ts': (
+            'async function loadConfirmed(fetch: () => Promise<Row[]>) { await fetch(); }'),
+        'interface.ts': (
+            'interface Row { id: string }; '
+            'function resolveMissing(id: string, ports: { fetch(id: string): Promise<Row> }) '
+            '{ return ports.fetch(id); }'),
+        'typed-receiver.ts': (
+            'declare const ports: { fetch(id: string): Promise<void> }; ports.fetch(url);'),
+        'untyped.js': 'function read(fetch) { return fetch(url); }',
+        'scoped.ts': 'function port(fetch: () => Promise<void>) { fetch(); } '
+          + 'function native() { fetch(url); }',
+    })
+    assert actual == {
+        'native.ts': 2, 'receivers.ts': 1, 'no-argument.ts': 0,
+        'callback.ts': 0, 'interface.ts': 0, 'typed-receiver.ts': 0,
+        'untyped.js': 1, 'scoped.ts': 1,
+    }
 
 
 def test_no_variable_url_api_fetches():

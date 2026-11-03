@@ -35,6 +35,7 @@ const ProjectPresentationShellState={activeConversationId:'c',projectState:state
  readOnlyPaths:[...(data.readOnly?[data.path]:[]),...(data.extraRoots||[]).filter(r=>r.readOnly).map(r=>r.path)]})};
 let _mpFolders=['/new','/new-ref'],_mpReadOnly=new Set(['/new-ref']);
 const _saveConvProjectPath=(path,extraRoots,readonly)=>saved.push({path,extraRoots,readonly});
+const _projectFolderBrowserHandle = null;
 const closeProjectModal=()=>{},onProjectAttached=()=>{},onProjectCleared=()=>{},
  debugLog=()=>{},_applyProjectData=()=>{},_updateProjectUI=()=>{},escapeHtml=x=>x;
 const document={getElementById:()=>({classList:{add(){}},innerHTML:''})};

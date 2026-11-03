@@ -585,7 +585,8 @@ def test_final_openai_tool_text_parts_preserve_exact_coverage(runtime, provider,
     content = [{'type': 'text', 'text': original, 'cache_control': {'type': 'ephemeral'}}]
     if projection == 'plain_text_parts':
         content[0].pop('cache_control')
-        monkeypatch.setattr('lib.llm.cache._gateway_honors_cache_markers', lambda model: True)
+        monkeypatch.setattr('lib.llm.cache._gateway_honors_cache_markers',
+                            lambda model, **_: True)
     elif projection == 'split_text':
         content = [{'type': 'text', 'text': original[:100], 'cache_control': {'type': 'ephemeral'}},
                    {'type': 'text', 'text': original[100:]}]

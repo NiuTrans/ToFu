@@ -785,8 +785,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         return tc_id, redirected.tool_content, False
     # Explicit mode uses the same durable completion lane as steer handoff.
     if fn_args.get('background'):
-        from lib.tasks_pkg.conversation_delivery import (
-            conversation_delivery_available, deferred_completion_refusal)
+        from lib.tasks_pkg.conversation_delivery import deferred_completion_refusal
         refusal = deferred_completion_refusal(task, fn_name, fn_args)
         if refusal:
             meta = {'toolName': 'code_exec', 'command': cmd, 'output': refusal,
@@ -812,10 +811,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             ),
             credentials=fn_args.get('credentials'),
         )
-        tool_content = background_command_result(
-            cmd, bg_cmd_id, task=task,
-            has_conversation=conversation_delivery_available(task),
-        )
+        tool_content = background_command_result(cmd, bg_cmd_id, task=task)
         meta = {
             'toolName': 'code_exec', 'command': cmd,
             'output': tool_content, 'exitCode': 'background',
@@ -991,6 +987,8 @@ def _handle_check_background(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
         return tc_id, tool_content, False
 
     if info['status'] == 'completed':
+        from lib.tasks_pkg.background_commands import note_run_result_seen
+        note_run_result_seen(command_id, task_id=str(task.get('id') or ''))
         result_text = info['result'] or '(no output)'
         tool_content = (
             f'Background command {command_id} completed '
@@ -1002,14 +1000,14 @@ def _handle_check_background(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
             f'(elapsed {info["elapsed_s"]}s). Command: {info["command"][:200]}'
         )
         if wait_s:
-            from lib.tasks_pkg.conversation_delivery import completion_reaches
+            from lib.tasks_pkg.conversation_delivery import polled_command_delivery
             from lib.tools.background_guidance import background_wait_cap_advice
             waited = min(wait_s, WAIT_BACKGROUND_COMMAND_MAX_S)
             clamp = (f' (wait_s clamped to {WAIT_BACKGROUND_COMMAND_MAX_S:g}s)'
                      if wait_s > WAIT_BACKGROUND_COMMAND_MAX_S else '')
             tool_content += (
                 f'\n\nWaited {waited:g}s{clamp}. ' + background_wait_cap_advice(
-                    command_id, automatic_delivery=completion_reaches(task, info)))
+                    command_id, delivery=polled_command_delivery(task, info)))
 
     meta = _build_simple_meta(
         fn_name, tool_content, source='BackgroundCommand',

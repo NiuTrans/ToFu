@@ -83,6 +83,52 @@ def state(repo: Path) -> tuple:
             files, git(repo, 'worktree', 'list', '--porcelain'))
 
 
+def _snapshot_branch(shared: Path, tmp_path: Path, name: str) -> tuple[str, str]:
+    input_worktree = tmp_path / f'{name}-input'
+    git(shared, 'worktree', 'add', '-q', '--detach', str(input_worktree))
+    (input_worktree / 'foreign.txt').write_text('another writer\n')
+    git(input_worktree, 'add', 'foreign.txt')
+    tree = git(input_worktree, 'write-tree').strip()
+    snapshot = git(input_worktree, 'commit-tree', tree, '-p', rev(shared),
+                   '-m', 'Tofu checkpoint: example input').strip()
+    git(shared, 'branch', name, snapshot)
+    return snapshot, str(tmp_path / f'{name}-worktree')
+
+
+def test_task_input_snapshot_refuses_before_landing(shared, tmp_path):
+    snapshot, worktree = _snapshot_branch(shared, tmp_path, 'snapshot-based')
+    git(shared, 'update-ref', 'refs/tofu/inputs/u1/example', snapshot)
+    git(shared, 'worktree', 'add', '-q', '-b', 'snapshot-based-work', worktree,
+        'snapshot-based')
+    (Path(worktree) / 'own.txt').write_text('my work\n')
+    commit_all(Path(worktree), 'own work')
+    before = state(shared)
+
+    with pytest.raises(land.Refused, match='task-input snapshot') as refused:
+        land.land('snapshot-based-work', cwd=shared)
+
+    assert snapshot in refused.value.reason
+    assert any('foreign.txt' in path for path in refused.value.paths)
+    assert 'fresh worktree' in refused.value.advice
+    assert str(shared) in refused.value.advice and 'refs/heads/main' in refused.value.advice
+    assert 'cherry-pick only your own commits' in refused.value.advice
+    assert state(shared) == before
+    assert Path(worktree).exists()
+
+
+def test_snapshot_identification_uses_the_input_ref_not_commit_metadata(shared, tmp_path):
+    _snapshot, worktree = _snapshot_branch(shared, tmp_path, 'lookalike')
+    git(shared, 'worktree', 'add', '-q', '-b', 'lookalike-work', worktree, 'lookalike')
+    (Path(worktree) / 'own.txt').write_text('my work\n')
+    commit_all(Path(worktree), 'own work')
+
+    result = land.land('lookalike-work', cwd=shared)
+
+    assert result['status'] == 'landed'
+    assert (shared / 'foreign.txt').read_text() == 'another writer\n'
+    assert (shared / 'own.txt').read_text() == 'my work\n'
+
+
 def test_concurrent_uncommitted_edit_is_carried_forward(shared, feature):
     replace_line(feature / 'notes.txt', 2, 'line 2 from the branch')
     (feature / 'added.txt').write_text('new\n')

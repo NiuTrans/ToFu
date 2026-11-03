@@ -26,8 +26,16 @@ export class BrowserlessDxRuntime {
     this.handlers = handlers;
     const emit = (event, payload) => { for (const h of handlers.get(event) ?? []) h(payload); };
     this.emit = emit;
+    // The real SDK's LOGIN_STATUS values; its ConnStatusChange carries (status, reason),
+    // which the engine fans out as one [status, reason] array.
+    const LOGIN_STATUS = { ERROR: -1, CONNECTING: 1, CONNECTED: 2, AUTHENTICATING: 5, AUTHENTICATED: 6,
+                           DISCONNECTING: 7, DISCONNECTED: 8, TERMINATED: 9, AUTHENTICATE_TIMEOUT: 10 };
+    const constants = { MESSAGE_EVENT: { IM_MESSAGE: 'IM_message', PUB_MESSAGE: 'PUB_MESSAGE' } };
+    if (MODE !== 'no-login-status') constants.LOGIN_STATUS = LOGIN_STATUS;
+    // A kick reports DISCONNECTED('terminated') first, then its kick event in the same call.
+    const kick = (event) => { emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'terminated']); emit(event, {}); };
     this.webSdkRuntime = {
-      instance: { CONSTANT: { MESSAGE_EVENT: { IM_MESSAGE: 'IM_message', PUB_MESSAGE: 'PUB_MESSAGE' } } },
+      instance: { CONSTANT: constants },
       async login() {
         // Messages arrive with no command in flight: only persistent handlers see them.
         setTimeout(() => emit('IM_message', { mid: { low: 1, high: 2, toString() { return '7000000000000000001'; } },
@@ -38,8 +46,13 @@ export class BrowserlessDxRuntime {
         setTimeout(() => emit('IM_message', { mid: '7000000000000000003', from: '2002', gid: '500', type: 20,
                                               message: { searchText: 'quoted', quoted: JSON.stringify([
                                                 { message: JSON.stringify({ mid: '6999', fromUid: '1001' }) }]) } }), 90);
-        if (MODE === 'kick') setTimeout(() => emit('KickOff', {}), 150);
-        if (MODE === 'drop') setTimeout(() => emit('ConnStatusChange', { status: -1 }), 150);
+        if (MODE === 'kick') setTimeout(() => kick('KickOff'), 150);
+        if (MODE === 'kick-same-device') setTimeout(() => kick('KickOffWithSameDeviceId'), 150);
+        if (MODE === 'drop') setTimeout(() => {
+          // Transitional statuses keep the session; only DISCONNECTED ends the channel.
+          emit('ConnStatusChange', [LOGIN_STATUS.CONNECTING, 'connecting']);
+          emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'disconnected']);
+        }, 150);
         return { credentials: { uid: '1001' }, events: ['AuthSuccess'] };
       },
       addEventHandler(event, handler) {
@@ -123,7 +136,13 @@ def test_persistent_handlers_commands_and_clean_stop(engine):
     assert bridge.returncode == 0  # closing stdin is the stop signal
 
 
-@pytest.mark.parametrize('mode, status, code', [('kick', 'kicked', 43), ('drop', 'disconnected', 3)])
+@pytest.mark.parametrize('mode, status, code', [
+    ('kick', 'kicked', 43),
+    ('kick-same-device', 'kicked', 43),
+    ('drop', 'disconnected', 3),
+    # Without the SDK's own status vocabulary a lost channel would go unnoticed.
+    ('no-login-status', 'failed', 4),
+])
 def test_kickoff_and_disconnect_exit_with_their_status(engine, mode, status, code):
     bridge = _bridge(engine, mode)
     events = _events(bridge, 10)

@@ -127,6 +127,30 @@ def _is_ancestor(top: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def _refuse_task_input_snapshots(top: Path, branch_ref: str, source: str) -> None:
+    """A platform input is borrowed context, never a worker's merge parent."""
+    inputs = _git(top, 'for-each-ref', '--format=%(objectname)',
+                  'refs/tofu/inputs/').stdout.split()
+    if not inputs:
+        return
+    snapshots = set(inputs).intersection(
+        _git(top, 'rev-list', f'{branch_ref}..{source}').stdout.split())
+    if not snapshots:
+        return
+    paths = []
+    for snapshot in sorted(snapshots):
+        carried = _git(top, 'diff-tree', '--root', '--no-commit-id', '--name-only',
+                       '-r', '-z', snapshot).stdout.split('\0')
+        paths.extend(f'{snapshot}: {path}' for path in carried if path)
+    branch = branch_ref.removeprefix('refs/heads/')
+    raise Refused(
+        'the landing range contains a task-input snapshot commit: '
+        + ', '.join(sorted(snapshots)), paths,
+        f'Create a fresh worktree from the shared checkout {top} at its current branch '
+        f'{branch} ({branch_ref}), then cherry-pick only your own commits onto a new '
+        'branch and land that branch. Do not start from the task workspace\'s HEAD.')
+
+
 def _git_paths(top: Path, *names: str) -> list[Path]:
     arguments = [part for name in names for part in ('--git-path', name)]
     return [top / line for line in _git(top, 'rev-parse', *arguments).stdout.splitlines()]
@@ -595,6 +619,7 @@ def land(branch: str, *, into: str | None = None, keep: bool = False,
         if _is_ancestor(top, source, head):
             result['status'] = 'already-merged'
             break
+        _refuse_task_input_snapshots(top, branch_ref, source)
         if merged_for != head:
             tree, regenerated = _merge_tree(top, head, source)
         merged_for = head

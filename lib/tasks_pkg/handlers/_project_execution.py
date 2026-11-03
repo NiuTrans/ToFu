@@ -38,7 +38,6 @@ def execute_local_project_tool(task, cfg, fn_name, tc_id, fn_args, rn,
                                file_source_capture, read_observations):
     """Execute already-admitted arguments without settling their tool round."""
     from lib.project_mod import execute_tool
-    from lib.tasks_pkg.conversation_delivery import conversation_delivery_available
 
     recorded_file_changes = []
 
@@ -145,7 +144,6 @@ def execute_local_project_tool(task, cfg, fn_name, tc_id, fn_args, rn,
             tool_content = background_command_result(
                 str(background_args.get('command') or ''), command_id,
                 task=task,
-                has_conversation=conversation_delivery_available(task),
             )
             return LocalProjectResult(tool_content, command_id)
         if fn_name == 'run_command':

@@ -291,12 +291,19 @@ Model-access durability does not imply task durability.
 
 ### Background commands
 
-A runtime task's job label is not a saved application conversation, so command
-completions are **pull-only**. When shell or base tools are enabled, `poll` and
-`kill` stay available: `poll(id=..., wait_s=...)` returns status or the terminal
-result, and `kill` stops an owned command. A command still running when its run
-returns continues in its own process session; closing or terminating the
-runtime does not provide a portable service-lifetime guarantee. Result handles
+A runtime task's job label is not a saved application conversation, so no
+conversation receives command completions; the run that launched a command
+reads it. When shell or base tools are enabled, `poll` and `kill` stay
+available. A command still running after `AUTO_BACKGROUND_AFTER_S` (120 s)
+moves to the background and returns a `bg_*` handle, like an explicit
+`background=true` command. A finished command's result is injected at the
+run's next round boundary, once, and not after `poll` already showed it;
+`poll(id=..., wait_s=...)` returns status or the terminal result, and a
+blocking wait also returns when another of the run's commands finishes. `kill`
+stops an owned command. A command still running when its run returns
+continues in its own process session and nothing delivers its result after
+that; closing or terminating the runtime does not provide a portable
+service-lifetime guarantee ([handoff decision](LLM_COST_OPTIMIZATION.md#long-waits-and-the-conversation-tail-ttl)). Result handles
 and delivery state are process-local; a runtime restart cannot recover them.
 These controls do not imply durable task/event replay, conversation delivery,
 or storage-backed sub-agent lineage. The full application retains its
@@ -304,8 +311,8 @@ saved-conversation completion delivery and restart recovery.
 
 This differs from a full-server API request created with
 `saved_conversation=False`: that response-scoped request refuses explicit
-background commands because it cannot offer a later turn to collect their
-results. See [No saved conversation](contracts/HEADLESS_API.md#no-saved-conversation).
+background commands and stops its handed-off commands when the response ends,
+because nothing it starts may outlive the response. See [No saved conversation](contracts/HEADLESS_API.md#no-saved-conversation).
 
 ### Workspace confinement and the local operator
 

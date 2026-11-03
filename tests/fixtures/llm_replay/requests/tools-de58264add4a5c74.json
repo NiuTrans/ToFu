@@ -219,6 +219,608 @@
  },
  {
   "function": {
+   "description": "Search project file content and return paths, line numbers, and matches. Prefer this over shell grep/rg: a persistent file index plus ripgrep over exact candidates avoids recursive walks on huge/network (FUSE) trees, includes hidden files, skips ignored paths unless `path` is inside one, and is case-insensitive by default. Prefer short literal keywords; regex uses Rust/ripgrep syntax (`A|B`, `\\.` for a literal dot, per-line `^`/`$`), not GNU BRE. `path` is one relative path or project root. For independent roots/patterns use one `searches` batch; every operation runs and avoids sequential model rounds.",
+   "name": "search_files",
+   "parameters": {
+    "properties": {
+     "context_lines": {
+      "description": "Lines before/after each match. Default 0, max 10; use 3-5 to avoid a follow-up read.",
+      "type": "integer"
+     },
+     "count_only": {
+      "description": "Return the full matching-line count only; `max_results` is ignored in count_only mode.",
+      "type": "boolean"
+     },
+     "from_line": {
+      "description": "Only report matches on lines ≥ N (per-file floor for paging).",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "include": {
+      "description": "Optional file glob such as `*.py`.",
+      "type": "string"
+     },
+     "max_results": {
+      "description": "Matching-line cap, default 50; use 5-20 for samples/existence checks.",
+      "type": "integer"
+     },
+     "path": {
+      "description": "One relative path; omit for project root.",
+      "type": "string"
+     },
+     "pattern": {
+      "description": "Short literal substring preferred; Rust/ripgrep regex is supported.",
+      "type": "string"
+     },
+     "searches": {
+      "description": "Batch operations; all entries execute. Faster than separate calls.",
+      "items": {
+       "properties": {
+        "context_lines": {
+         "description": "Context lines (optional)",
+         "type": "integer"
+        },
+        "count_only": {
+         "description": "Count only mode (optional)",
+         "type": "boolean"
+        },
+        "from_line": {
+         "description": "Per-file line floor (optional)",
+         "minimum": 1,
+         "type": "integer"
+        },
+        "include": {
+         "description": "File glob filter (optional)",
+         "type": "string"
+        },
+        "max_results": {
+         "description": "Max results per search (optional)",
+         "type": "integer"
+        },
+        "path": {
+         "description": "Relative path to search in (optional)",
+         "type": "string"
+        },
+        "pattern": {
+         "description": "Search pattern",
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Find files by name pattern (glob) in the project. Useful for discovering test files, configs, etc.\n\n**Prefer this over ``run_command find``** — find_files is served from a persistent project file index (near-instant even on huge or network-mounted trees), supports ``max_results``, includes hidden files, and auto-filters ignored paths (node_modules, .venv, .gitignore matches, etc.) unless ``path`` points inside one.\n\nFor MULTIPLE searches, provide a 'searches' array — each entry has the same fields as the top-level parameters. Batch mode cuts round trips.",
+   "name": "find_files",
+   "parameters": {
+    "properties": {
+     "max_results": {
+      "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample.",
+      "type": "integer"
+     },
+     "path": {
+      "description": "Relative path to search in (optional)",
+      "type": "string"
+     },
+     "pattern": {
+      "description": "File name glob pattern, e.g. '*.test.py', 'Dockerfile', '*.config.*'",
+      "type": "string"
+     },
+     "searches": {
+      "description": "Array of find operations. All entries execute with the same fields as the top-level parameters. Faster than separate find_files calls.",
+      "items": {
+       "properties": {
+        "max_results": {
+         "description": "Max results per search (optional)",
+         "type": "integer"
+        },
+        "path": {
+         "description": "Relative path to search in (optional)",
+         "type": "string"
+        },
+        "pattern": {
+         "description": "File name glob pattern",
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Return a compact structural outline of the project: which source files define which functions/classes/methods, ranked by how often other files reference them. Use this FIRST when you need to orient in an unfamiliar area — it is much cheaper than repeated ls/grep rounds. The map contains ONLY definition lines (signature + 1-based line number), never bodies; hand its paths and line numbers to read_files to see the actual code. Read-only, makes no changes.\n\nFilters: `path` scopes the map to one subdirectory (e.g. \"lib/storage\"); `focus` keeps only files whose path contains the given text. Returns all definitions in the selected scope; shared L0 handles long results without producer truncation.\n\nBoth filters are optional: call with `{}` to map the whole project.",
+   "name": "repo_map",
+   "parameters": {
+    "properties": {
+     "focus": {
+      "description": "Case-insensitive substring filter on file paths (e.g. \"storage\" or \"_test.py\"). Optional.",
+      "type": "string"
+     },
+     "path": {
+      "description": "Project-relative subdirectory to map (default: whole project). Use this on huge repos to zoom in.",
+      "type": "string"
+     }
+    },
+    "required": [],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Create or replace one whole file, or append to its end. For new files/major rewrites; use edit_file for mid-file changes. Set append=true to append to the end (a missing file is created): send only the new bytes, no read or anchor needed. Read an existing file first and supply its complete replacement—omitted lines are deleted. Relative paths use the current project. An absolute path outside registered roots needs allow_outside_workspace=true after the user confirms it (the containing directory then registers as a new root); system paths (/etc, /usr, $HOME itself) are refused outright. Give exactly one source: content (an empty string creates an empty file) or content_ref to reuse all/a slice of a previous tool result.",
+   "name": "write_file",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "allow_outside_workspace": {
+      "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused with an error naming this flag.",
+      "type": "boolean"
+     },
+     "append": {
+      "description": "Append content to the end of the file instead of replacing it. Default false.",
+      "type": "boolean"
+     },
+     "content": {
+      "description": "Complete replacement; may be empty.",
+      "type": "string"
+     },
+     "content_ref": {
+      "description": "Reuse prior tool output without regenerating it.",
+      "properties": {
+       "end": {
+        "description": "Exclusive end; default content end.",
+        "type": "integer"
+       },
+       "start": {
+        "description": "First character; default 0.",
+        "type": "integer"
+       },
+       "tool_round": {
+        "description": "Prior roundNum.",
+        "type": "integer"
+       }
+      },
+      "required": [
+       "tool_round"
+      ],
+      "type": "object"
+     },
+     "description": {
+      "description": "Optional pre-write caption shown before execution. Omit it to use the file-path label.",
+      "type": "string"
+     },
+     "path": {
+      "description": "Project-relative or allowed absolute file path.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "path"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Apply ordered anchored edits; read/write targets in an earlier round. Prefer replace, including additions: content is the complete desired replacement, including retained anchor text and all line breaks. After A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"A\\nB\"}`; before A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"B\\nA\"}`. For insert_after/insert_before, content is only new text; the anchor stays automatically. Append at end-of-file with write_file(append=true). Name the batch's file once in `path` and leave each edit's own `path` out; set an edit's `path` only to target a different file. Anchors match exactly once; replace_all permits multiple matches only for replace. Later edits see earlier changes. Atomic preflight defaults true: any validation failure writes nothing. With atomic=false, one failure neither rolls back nor stops the others. I/O failures may leave partial writes.",
+   "name": "edit_file",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "allow_outside_workspace": {
+      "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused.",
+      "type": "boolean"
+     },
+     "atomic": {
+      "default": true,
+      "description": "Preflight all edits before writing. False permits partial application.",
+      "type": "boolean"
+     },
+     "description": {
+      "description": "Optional pre-edit caption (max 120 chars). Omit it to use the file-path label.",
+      "maxLength": 120,
+      "type": "string"
+     },
+     "edits": {
+      "description": "Shortest-unique-anchor operations, in order.",
+      "items": {
+       "properties": {
+        "anchor": {
+         "description": "Exact, normally unique existing text. For replace, this is the old text being removed.",
+         "minLength": 1,
+         "type": "string"
+        },
+        "content": {
+         "description": "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete. Insert: added lines only, without copied anchor/context.",
+         "type": "string"
+        },
+        "operation": {
+         "description": "Prefer replace for complete old-to-new edits, including additions. insert_after adds content below anchor; insert_before above it.",
+         "enum": [
+          "replace",
+          "insert_after",
+          "insert_before"
+         ],
+         "type": "string"
+        },
+        "path": {
+         "description": "File for this edit, when it differs from the batch `path`. Never inherited from the previous edit; omit it rather than sending an empty string.",
+         "minLength": 1,
+         "type": "string"
+        },
+        "replace_all": {
+         "description": "Replace every match; ignored by inserts.",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "operation",
+        "anchor",
+        "content"
+       ],
+       "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+     },
+     "path": {
+      "description": "File this batch edits. Write it once here for a single-file batch instead of repeating it on every edit; an edit's own `path` overrides it.",
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "required": [
+     "edits"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. A command still running after 120 s, or when a new message arrives, moves to the background and returns a `bg_*` handle; results arrive automatically. Avoid waiting for stdin.\n\nFresh subprocess; no persistent shell or environment changes. Prefer absolute paths and `working_dir` over `cd`.\n\nUse `read_files`, `search_files`, `find_files`, `edit_file`, `write_file` for repository data. Filesystem grep uses a bounded FUSE-safe engine or returns a `search_files` translation; filtering command output is allowed. `browser_download_url_to_server` handles authenticated browser downloads. Text helpers: `sd`, `mlr`, `goawk`.\n\nNever use a shell no-op as a placeholder (`true`, `:`, `exit 0`); repetition is a tool loop.",
+   "name": "run_command",
+   "parameters": {
+    "properties": {
+     "background": {
+      "description": "Start in background and return a command_id handle. Completion is delivered automatically — end the turn or do other work. `poll` reads its status or waits for it; `kill` stops it.",
+      "type": "boolean"
+     },
+     "command": {
+      "description": "Shell command, for example `pytest` or `git status`.",
+      "type": "string"
+     },
+     "credentials": {
+      "description": "Vault entry names for THIS child process only; use names from <credential_vault>. Values never enter the command/chat.",
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 16,
+      "type": "array"
+     },
+     "description": {
+      "description": "Short user-language caption: what runs and why.",
+      "type": "string"
+     },
+     "working_dir": {
+      "description": "Optional directory. In multi-root workspaces use `rootname:subdir`. STICKY: an explicit `working_dir` becomes the default for later run_command calls in this conversation; a `cd` INSIDE a command never persists. Default: the explicit sticky directory, then the project root.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "command"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Render one page in a headless browser ON THE SERVER; return screenshot, console, uncaught JS errors, and failed requests. Use after frontend edits for layout/runtime. Give exactly one source: a project-relative .html path, served from project root so relative assets/ES modules work and external requests are blocked/reported; or an HTTP(S) url such as a dev server. Not for text (use fetch_url/browser_read_page) or the user's browser extension.",
+   "name": "browser_preview_page",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "full_page": {
+      "description": "Capture the full scrollable page; default false.",
+      "type": "boolean"
+     },
+     "height": {
+      "description": "Viewport height px; default 800.",
+      "maximum": 2160,
+      "minimum": 240,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Project-relative .html/.htm file.",
+      "minLength": 1,
+      "type": "string"
+     },
+     "url": {
+      "description": "HTTP(S) page URL.",
+      "minLength": 1,
+      "type": "string"
+     },
+     "wait_ms": {
+      "description": "Settle after DOM load in ms; default 1500.",
+      "maximum": 15000,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "width": {
+      "description": "Viewport width px; default 1280.",
+      "maximum": 3840,
+      "minimum": 320,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Search other conversations when the user explicitly asks for past-conversation information. A bound project Coordinator may also inspect same-owner, same-project worker evidence needed to delegate, review or follow the current authorized request. Otherwise do not browse history proactively. Project mode scopes to siblings; scope=all requires an explicit user request beyond that project. The current conversation is never listed; the result names its ID for get_conversation. A keyword match in message text names the matching Turn ID and a snippet (also for the current conversation); read that page with get_conversation(conversation_id, turn_id).",
+   "name": "list_conversations",
+   "parameters": {
+    "properties": {
+     "keyword": {
+      "type": "string"
+     },
+     "limit": {
+      "type": "integer"
+     },
+     "scope": {
+      "enum": [
+       "auto",
+       "project",
+       "all"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Retrieve a conversation by ID when the user explicitly requests past-conversation information. A bound project Coordinator may also inspect same-owner, same-project worker evidence needed to delegate, review or follow the current authorized request. Otherwise do not browse history proactively. Use an ID from list_conversations or the current assignment/result evidence.\n\nThe current conversation's own ID needs no user request: it returns this conversation's durable transcript, including Turns that may be outside your current working view (for example after compaction). Page to those older Turns with before=N.\n\nTo read a specific Turn (for example a list_conversations match), pass turn_id: the page around that Turn, with older/newer before=N hints in the header.\n\n`raw` defaults to true: a structured, unsummarized DB record with row metadata/settings and every field of each delivered message, including full tool rounds. Set `raw=false` only for a readable transcript; it drops per-message metadata and condenses tool rounds.\n\nLong histories return a parseable head+tail window of whole messages. Check `DELIVERED N of M`; use its positive `before=N` hint for older pages. `limit` widens the window but may clamp fields, which the header reports.",
+   "name": "get_conversation",
+   "parameters": {
+    "properties": {
+     "before": {
+      "description": "Exclusive 1-based end cursor (min 1) for an older page. Omit for latest; use the header's positive before=N hint. Never pass 0.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "conversation_id": {
+      "description": "Conversation ID, usually from list_conversations; the current conversation's own ID reads its durable transcript.",
+      "type": "string"
+     },
+     "include_tool_details": {
+      "description": "For raw=false only, include full tool arguments/results (default true); false shortens them. Raw mode always includes them.",
+      "type": "boolean"
+     },
+     "limit": {
+      "description": "Recent-message count (min 1). Omit for a budget-fit whole-message window; too large may clamp fields, reported in the header.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "raw": {
+      "description": "Default true: structured raw record with all fields of each delivered message. False returns readable prose that drops message metadata and condenses tool rounds.",
+      "type": "boolean"
+     },
+     "turn_id": {
+      "description": "Read the page containing this main-transcript Turn, e.g. a Turn ID named by a list_conversations match. Exclusive with before.",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "required": [
+     "conversation_id"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Capture the current isolated writer workspace as a checkpoint. The runtime binds this call to this execution's automatic work ID.",
+   "name": "integration_checkpoint",
+   "parameters": {
+    "properties": {
+     "note": {
+      "description": "Optional one-line milestone note.",
+      "type": "string"
+     }
+    },
+    "required": [],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Save a checkpoint of this execution. Automatic task changes are merged into the current canonical workspace at successful completion, independently of commits and release gates. Explicit candidate submissions retain their review/checker policy.",
+   "name": "integration_submit",
+   "parameters": {
+    "properties": {
+     "summary": {
+      "description": "What changed and how it was verified.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "summary"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Send bounded agent-authored context or a scoped request to an explicitly known same-project conversation. Commits durably, but starts no model call or worker. Idle recipients see it at their next authorized turn. Use get_project_messages to read actual input and consideration receipts. Agent text grants no human authority. Preserve the same idempotency_key/content after uncertainty. Use reply_to only for a message exchanged between the same two participants; no transcript access is implied. Subagents must ask their delegating parent to relay.",
+   "name": "send_project_message",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "content": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+     },
+     "conversation_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+     },
+     "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+     },
+     "kind": {
+      "default": "reference",
+      "enum": [
+       "reference",
+       "consult",
+       "report",
+       "question",
+       "assign",
+       "steer"
+      ],
+      "type": "string"
+     },
+     "reply_to": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "required": [
+     "conversation_id",
+     "content",
+     "idempotency_key"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Read a bounded incoming or outgoing mailbox for this same-project conversation. Does not read private transcripts or start work. State input_confirmed is distinct from an explicit recipient consideration decision, and accepted is not proof of execution or delivery. Do not busy-poll. A conversation_id is required for outgoing; it identifies the recipient mailbox.",
+   "name": "get_project_messages",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "before_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     },
+     "conversation_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+     },
+     "direction": {
+      "default": "incoming",
+      "enum": [
+       "incoming",
+       "outgoing"
+      ],
+      "type": "string"
+     },
+     "message_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Record your explicit accepted/rejected/deferred/conflict decision for an incoming message and explain why. Reads the immutable original message; this action never starts another worker, grants tools, or proves delivery. accepted is a stated commitment only and does not authorize new external side effects. Use expected_revision from get_project_messages; a conflict requires reading current authority, not overwriting another decision. No automatic ACK-of-ACK notification is generated.",
+   "name": "consider_project_message",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "decision": {
+      "enum": [
+       "accepted",
+       "rejected",
+       "deferred",
+       "conflict"
+      ],
+      "type": "string"
+     },
+     "expected_revision": {
+      "minimum": 1,
+      "type": "integer"
+     },
+     "message_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     },
+     "note": {
+      "maxLength": 2048,
+      "type": "string"
+     }
+    },
+    "required": [
+     "message_id",
+     "decision",
+     "note",
+     "expected_revision"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
    "description": "Stage one remote file ON THE TOFU SERVER for download/save/install/unzip/export/copy. Supply its exact HTTP(S) url. text/selector (+ optional tab_id) instead names an <a href>, data-download-url or <img>/<video>/<audio> element whose full signed link is recovered; action buttons have no link — use browser_click. It tries bounded server HTTP first, then the selected logged-in browser; cookies stay in Chrome—never use browser_get_cookies, curl/wget, or browser Downloads, and never call a device-local file server-side. Success: location=server_staging, absolute path, byte size, SHA-256, transport. Staging is temporary; a named final project path needs a separately authorized copy/move and verified destination.",
    "name": "browser_download_url_to_server",
    "parameters": {
@@ -273,6 +875,760 @@
     },
     "required": [
      "path"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Check (and optionally bootstrap) the motion-video render environment: Node>=22, the HyperFrames CLI (auto-installed pinned version when missing), ffmpeg, ffprobe (optional), and a headless Chrome. Call this first when a motion_video_* tool reports env_missing, or before your first render on a fresh deployment. Before authoring your first scene, read the vendored guides lib/motion_video/guide/WORKFLOW.md and COMPOSITION_CONTRACT.md (absolute paths under the tofu install) and start each scene from lib/motion_video/guide/skeleton.html. For one-take films with objects/camera carried between beats, read CONTINUOUS_FILM.md and start from guide/continuous/ (one index.html + continuity.json, no clip concat).",
+   "name": "motion_video_env_check",
+   "parameters": {
+    "properties": {
+     "install": {
+      "description": "When true (default), auto-install the pinned HyperFrames CLI into the tofu data dir if it is missing. First install downloads npm packages and can take a minute.",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Zero-LLM gate: validate a scenes.json storyboard against its SRT transcript — required fields, monotonic contiguity, FULL coverage of the SRT span, and scene-duration sum equal to the span within ±0.1s. MANDATORY before rendering any scene. Returns a list of human-readable errors (empty = pass).",
+   "name": "motion_video_storyboard_check",
+   "parameters": {
+    "properties": {
+     "scenes_path": {
+      "description": "Path to scenes.json — a list of {id, start, end, text, visual?} with float seconds.",
+      "type": "string"
+     },
+     "srt_path": {
+      "description": "Path to the SRT transcript (project-relative or absolute).",
+      "type": "string"
+     },
+     "tolerance": {
+      "description": "Coverage tolerance in seconds (default 0.1).",
+      "type": "number"
+     }
+    },
+    "required": [
+     "srt_path",
+     "scenes_path"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Run the HyperFrames static gates (lint + headless-Chrome validate + layout inspect) on one scene or whole-film project dir. MANDATORY before rendering. If continuity.json is present, also sample each declared handoff in a real browser: persistent DOM identity, visibility, geometry and reverse-seek pixel repeatability. Returns boundary contact-sheet paths for visual review. On failure returns categorized errors with upstream fix hints — repair the composition in place and re-check (max 2 repair rounds).",
+   "name": "motion_video_check",
+   "parameters": {
+    "properties": {
+     "project_dir": {
+      "description": "Scene project dir holding index.html (e.g. .tofu/motion_video/<slug>/scenes/scene-001).",
+      "type": "string"
+     }
+    },
+    "required": [
+     "project_dir"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Render one scene OR one continuous whole-film composition to MP4 via HyperFrames. Opted-in continuity.json handoffs must pass browser checks; render refuses failed/unavailable evidence. No concat is needed for a continuous film. Cost is ~3.5x realtime on this host (a 10s scene ≈ 35s). Use quality 'draft' while iterating, 'standard' for delivery, 'high' for final takes. After rendering, verify with motion_video_probe (resolution/fps/duration/silence).",
+   "name": "motion_video_render",
+   "parameters": {
+    "properties": {
+     "fps": {
+      "description": "Optional frame-rate override (default 30).",
+      "enum": [
+       24,
+       30,
+       60
+      ],
+      "type": "integer"
+     },
+     "output": {
+      "description": "Output MP4 path (project-relative or absolute, e.g. .tofu/motion_video/<slug>/scenes/scene-001/scene-001.mp4).",
+      "type": "string"
+     },
+     "project_dir": {
+      "description": "Scene project dir holding index.html.",
+      "type": "string"
+     },
+     "quality": {
+      "description": "Render quality (default 'standard').",
+      "enum": [
+       "draft",
+       "standard",
+       "high"
+      ],
+      "type": "string"
+     },
+     "timeout": {
+      "description": "Wall-clock seconds before the render is killed (default 1800; 0 = no limit).",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "project_dir",
+     "output"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Probe a media file (ffprobe, ffmpeg fallback): codec, resolution, fps, duration, audio-track presence. Use after every render and after concat to verify specs.",
+   "name": "motion_video_probe",
+   "parameters": {
+    "properties": {
+     "path": {
+      "description": "Media file path (project-relative or absolute).",
+      "type": "string"
+     }
+    },
+    "required": [
+     "path"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Assemble final.mp4 from ordered scene MP4s. Uniform specs concat losslessly (-c copy); mismatched scenes are re-encode-normalized to the first scene's spec. Optional transitions execute real FFmpeg xfade edits. For every overlap, the outgoing scene MUST already include an equal visual tail handle; then the final program duration stays aligned with narration/SRT. Output is atomic and post-verified.",
+   "name": "motion_video_concat",
+   "parameters": {
+    "properties": {
+     "inputs": {
+      "description": "Ordered scene MP4 paths.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "output": {
+      "description": "Final MP4 path (e.g. .tofu/motion_video/<slug>/final.mp4).",
+      "type": "string"
+     },
+     "timeout": {
+      "description": "Wall-clock seconds (default 1800).",
+      "type": "integer"
+     },
+     "transitions": {
+      "description": "Optional ordered N-1 boundary plan. Zero duration is a hard cut; non-zero boundaries consume an equal outgoing visual handle from the previous clip.",
+      "items": {
+       "properties": {
+        "duration_s": {
+         "maximum": 0.8,
+         "minimum": 0,
+         "type": "number"
+        },
+        "ffmpeg": {
+         "enum": [
+          "",
+          "fade",
+          "wipeleft",
+          "wiperight",
+          "wipeup",
+          "wipedown",
+          "slideleft",
+          "slideright",
+          "slideup",
+          "slidedown"
+         ],
+         "type": "string"
+        }
+       },
+       "required": [
+        "duration_s",
+        "ffmpeg"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "inputs",
+     "output"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "P2 音画合成 step 1: synthesize per-scene TTS narration WAVs from a storyboard scenes.json. Returns an alignment manifest — in the default 'loose' mode each scene's target_duration = max(srt, audio + tail_pad); when target_duration exceeds the SRT duration you MUST update that scene's data-duration before rendering. Degrades gracefully (ok=false, degraded=true) when no TTS slot is configured — deliver the silent video.",
+   "name": "motion_video_narrate",
+   "parameters": {
+    "properties": {
+     "alignment": {
+      "description": "'loose' (default): scene duration follows the audio. 'strict': SRT span is fixed; over-long narration is reported as overflow for you to shorten the text.",
+      "enum": [
+       "loose",
+       "strict"
+      ],
+      "type": "string"
+     },
+     "out_dir": {
+      "description": "Directory for per-scene narration WAVs (e.g. .tofu/motion_video/<slug>/audio).",
+      "type": "string"
+     },
+     "scenes_path": {
+      "description": "Path to scenes.json (the storyboard-checked list).",
+      "type": "string"
+     },
+     "speed": {
+      "description": "Optional TTS speed override (e.g. 1.1).",
+      "type": "number"
+     },
+     "voice": {
+      "description": "Optional TTS voice override (default: data/config/tts.json).",
+      "type": "string"
+     }
+    },
+    "required": [
+     "scenes_path",
+     "out_dir"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Final audio step. With audio_plan_path, stage and hash licensed local BGM/SFX, resolve cues against scenes/beat time, duck BGM under narration, mix to -14 LUFS, and emit audio_plan.json + audio_attribution.txt. Without a plan, mux the single narration track using the legacy loudnorm path. Runtime audio downloads are forbidden. Post-verified: audio present and program duration preserved.",
+   "name": "motion_video_mux",
+   "parameters": {
+    "properties": {
+     "audio": {
+      "description": "Optional narration track. Required when no audio plan is provided; optional for BGM/SFX-only delivery.",
+      "type": "string"
+     },
+     "audio_plan_path": {
+      "description": "Optional motion-audio-v1 JSON, relative to the project or absolute. Its asset paths resolve beside the plan.",
+      "type": "string"
+     },
+     "loudnorm": {
+      "description": "Apply EBU R128 loudness normalization (default true).",
+      "type": "boolean"
+     },
+     "output": {
+      "description": "Deliverable MP4 path (e.g. .tofu/motion_video/<slug>/final.mp4).",
+      "type": "string"
+     },
+     "scenes_path": {
+      "description": "scenes.json carrying motion-timeline-v1 fields; required for scene-relative SFX cues.",
+      "type": "string"
+     },
+     "video": {
+      "description": "Silent final MP4 (from motion_video_concat).",
+      "type": "string"
+     }
+    },
+    "required": [
+     "video",
+     "output"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Produce a short science-explainer VIDEO from a single topic or news headline — fully automatic, no storyboard or SRT needed. The pipeline researches the topic on the web (every claim is grounded in a real source URL and credited on an end card), writes a spoken script, times it to real TTS narration, and renders a narrated vertical MG video. Returns immediately with a task_id; the video generates in the background (a few minutes) and the user watches progress in the video panel. Use this when the user asks for a video ABOUT something and has not supplied their own script/SRT/storyboard. Does NOT require an attached project. This is an agent-based tool with an authored workflow: internal models work within fixed stages, with output validation, domain quality checks and durable checkpoints. Call it directly from normal Chat; no Goal mode or free-form agent delegation is needed. A returned task_id confirms acceptance, not delivery. Continue other requested work and let the task panel report progress; do not repeatedly poll or claim a finished artifact from the acceptance receipt.",
+   "name": "produce_video",
+   "parameters": {
+    "properties": {
+     "aspect": {
+      "description": "Frame aspect (default 1080x1440 vertical).",
+      "enum": [
+       "1080x1440",
+       "1080x1920",
+       "1920x1080",
+       "1080x1080"
+      ],
+      "type": "string"
+     },
+     "creative_mode": {
+      "description": "Planning strategy. 'director' (DEFAULT) drafts two contrasting evidence/visual plans, gates both, and uses an independent critic to select the stronger one. 'standard' makes one planning call and is the lower-cost A/B control.",
+      "enum": [
+       "director",
+       "standard"
+      ],
+      "type": "string"
+     },
+     "lang": {
+      "description": "Narration language (default zh).",
+      "enum": [
+       "zh",
+       "en"
+      ],
+      "type": "string"
+     },
+     "max_scenes": {
+      "description": "Upper bound on scene count / cost (3..12, default 8). Exceeding it degrades gracefully.",
+      "type": "integer"
+     },
+     "model": {
+      "description": "Optional model id that locks both the script writer and every scene author, for example 'kimi-k3'.",
+      "type": "string"
+     },
+     "narration": {
+      "description": "TTS voice-over (default true; degrades to a silent video when no TTS slot is configured).",
+      "type": "boolean"
+     },
+     "topic": {
+      "description": "The subject or news headline to explain, e.g. '为什么天空是蓝色的' or 'the James Webb telescope's latest exoplanet finding'.",
+      "type": "string"
+     },
+     "visual_quality": {
+      "description": "'authored' (DEFAULT) gives every scene its own small agent that writes a bespoke composition with real typographic hierarchy, staggered entrances and supporting graphics. 'template' is the fast zero-LLM fallback card (one centred line on a gradient) — pass it only when the user explicitly wants speed over looks. A scene whose authoring fails may fall back to a template and be marked degraded. Final task status and quality determine whether the film was delivered.",
+      "enum": [
+       "template",
+       "authored"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "topic"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Produce a long-form RESEARCH REPORT from a single topic — fully automatic. The pipeline researches the topic on the web (every claim grounded in a real source URL), drafts an outline, writes each section, and assembles a cited markdown report published as an artifact. Returns immediately with a task_id; the report generates in the background. Use this when the user wants a written deep-dive / report / briefing on a subject rather than a quick chat answer. Does NOT require an attached project. This is an agent-based tool with an authored workflow: internal models work within fixed stages, with output validation, domain quality checks and durable checkpoints. Call it directly from normal Chat; no Goal mode or free-form agent delegation is needed. A returned task_id confirms acceptance, not delivery. Continue other requested work and let the task panel report progress; do not repeatedly poll or claim a finished artifact from the acceptance receipt.",
+   "name": "produce_report",
+   "parameters": {
+    "properties": {
+     "depth": {
+      "description": "brief ≈3 sections, standard ≈5, deep ≈8. Deeper costs more and takes longer.",
+      "enum": [
+       "brief",
+       "standard",
+       "deep"
+      ],
+      "type": "string"
+     },
+     "lang": {
+      "description": "Report language (default zh).",
+      "enum": [
+       "zh",
+       "en"
+      ],
+      "type": "string"
+     },
+     "topic": {
+      "description": "The subject to research and report on.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "topic"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Develop candidate RESEARCH IDEAS in a field — the automated research pipeline. Given a research direction it harvests the recent literature into a local paper corpus (parsed once, then reused), surveys it to map what has already been done, and proposes scored ideas screened against that inspected corpus. Novelty and value judgments are provisional and limited to the retrieved evidence. The output is a survey and candidate ideas; research conclusions require reproducible baseline and candidate experiments, independent validation and inspection of originals. Continue the user goal through those stages before claiming empirical gains or publication readiness. Returns immediately with a task_id; the survey runs in the background (several minutes). Use this when the user asks what is worth working on, wants research directions / open problems / a gap analysis in a field — NOT for a written summary of a topic (that is produce_report). Does NOT require an attached project. This is an agent-based tool with an authored workflow: internal models work within fixed stages, with output validation, domain quality checks and durable checkpoints. Call it directly from normal Chat; no Goal mode or free-form agent delegation is needed. A returned task_id confirms acceptance, not delivery. Continue other requested work and let the task panel report progress; do not repeatedly poll or claim a finished artifact from the acceptance receipt.",
+   "name": "produce_research",
+   "parameters": {
+    "properties": {
+     "direction": {
+      "description": "The research direction to mine for open problems, e.g. 'long-context KV cache compression' or '扩散模型的推理加速'.",
+      "maxLength": 2000,
+      "type": "string"
+     },
+     "lang": {
+      "description": "Output language (default en).",
+      "enum": [
+       "zh",
+       "en"
+      ],
+      "type": "string"
+     },
+     "n_ideas": {
+      "description": "How many ideas to generate and score (3..12, default 6). Ideas that fail the novelty screen against the corpus are reported as rejected, with the reason.",
+      "maximum": 12,
+      "minimum": 3,
+      "type": "integer"
+     },
+     "seed_arxiv_ids": {
+      "description": "Optional arXiv ids to seed the corpus with, e.g. ['2312.00752']. Use when the user names specific papers to start from.",
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 200,
+      "type": "array"
+     }
+    },
+    "required": [
+     "direction"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Produce a polished, DESIGNER-QUALITY slide deck (PPTX) from a single topic — fully automatic. The pipeline classifies the scenario (tech / business / academic / education / brand / report / analysis), binds ONE curated theme (palette + licensed CJK/Latin typefaces + the scenario's design bible), authors every page in the PPTD layout language, renders per-page previews, runs a multimodal visual-QA pass, and exports a NATIVE, fully editable .pptx (real text boxes, shapes, tables — not page images) with fade transitions. Returns immediately with a task_id; the deck generates in the background and the user watches progress. Use this whenever the user asks for a PPT / slide deck / presentation / 幻灯片 / 课件 / 路演. Does NOT require an attached project. This is an agent-based tool with an authored workflow: internal models work within fixed stages, with output validation, domain quality checks and durable checkpoints. Call it directly from normal Chat; no Goal mode or free-form agent delegation is needed. A returned task_id confirms acceptance, not delivery. Continue other requested work and let the task panel report progress; do not repeatedly poll or claim a finished artifact from the acceptance receipt.",
+   "name": "produce_slides",
+   "parameters": {
+    "properties": {
+     "creative_mode": {
+      "description": "Planning strategy. 'director' (DEFAULT) drafts two contrasting deck plans, gates both, and uses an independent critic to select the stronger one. 'standard' is the single-plan A/B control.",
+      "enum": [
+       "director",
+       "standard"
+      ],
+      "type": "string"
+     },
+     "lang": {
+      "description": "Deck language (default zh).",
+      "enum": [
+       "zh",
+       "en"
+      ],
+      "type": "string"
+     },
+     "material": {
+      "description": "Optional caller-supplied source material (up to 20000 chars) the deck MUST be grounded in — a content brief, resume, project report or notes. Use this whenever the deck must reflect the user's OWN work, numbers and attributions rather than public web research: its facts and figures are treated as authoritative and are never replaced by web results or invented values. Keep 'topic' as the short deck title.",
+      "type": "string"
+     },
+     "max_pages": {
+      "description": "Upper bound on page count / cost (3..20, default 12).",
+      "type": "integer"
+     },
+     "model": {
+      "description": "Optional model id that locks the outline, page authors and repair rounds, for example 'kimi-k3'.",
+      "type": "string"
+     },
+     "size": {
+      "description": "Page geometry: 1280x720 (16:9, default), 960x540 (16:9 compact), 720x540 (4:3).",
+      "enum": [
+       "1280x720",
+       "960x540",
+       "720x540"
+      ],
+      "type": "string"
+     },
+     "style": {
+      "description": "Optional style direction, e.g. '深色科技风' or 'editorial luxury'. The scenario/theme defaults are already curated; use this to steer (or to name a brand to anchor to).",
+      "type": "string"
+     },
+     "template_id": {
+      "description": "Optional visual template id (tpl_...) from the import-template upload: the deck binds the uploaded brand deck's palette/typefaces/geometry instead of a curated theme.",
+      "type": "string"
+     },
+     "topic": {
+      "description": "The subject of the deck, e.g. '小米 YU7 产品发布' or '固态电池技术路线评审'.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "topic"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Edit ONE or SEVERAL pages of a deck created by produce_slides, in plain language — e.g. '第 3 页标题改成…', 'make page 2 dark', '给第 5 页加一个柱状图'. Each page is re-authored from its CURRENT layout (everything else stays), re-validated, re-rendered and the PPTX is re-exported once at the end. Use this for content rewrites / layout restructuring; for simple field-level changes (改文字/字号/颜色/图片) prefer patch_slides (deterministic, no LLM, seconds). Pass `page` for one page or `pages` for a batch (≤8) sharing one instruction.",
+   "name": "edit_slides",
+   "parameters": {
+    "properties": {
+     "instruction": {
+      "description": "What to change on that page, in the user's words.",
+      "type": "string"
+     },
+     "lang": {
+      "description": "Edit language (default zh).",
+      "enum": [
+       "zh",
+       "en"
+      ],
+      "type": "string"
+     },
+     "page": {
+      "description": "1-based page number to edit (single-page form; mutually exclusive with pages).",
+      "type": "integer"
+     },
+     "pages": {
+      "description": "1-based page numbers for a batch edit with the same instruction (≤8 pages).",
+      "items": {
+       "type": "integer"
+      },
+      "maxItems": 8,
+      "type": "array"
+     },
+     "task_id": {
+      "description": "The produce_slides job id.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id",
+     "instruction"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Edit ONE scene of a video created by produce_video, in plain language — e.g. '把第 2 个镜头的标题改成…', 'make scene 3 slower and darker', '给第 4 镜换成柱状图表达'. Two modes: 'rewrite' (default) has the scene author rewrite that scene's composition from its CURRENT frame (everything else stays; the better of old/new wins), then only that scene is re-rendered and the final video re-assembled in place. 'set_narration' replaces the scene's spoken narration text deterministically (new TTS must FIT the scene's existing duration — shorten the text when it overflows); the frame is untouched and only the audio/subtitles rebuild. Returns immediately with an edit task_id. Use this for follow-up edits instead of regenerating the whole film. Scene numbers are 1-based (scene-001 … scene-NNN also accepted).",
+   "name": "edit_video",
+   "parameters": {
+    "properties": {
+     "asset_kind": {
+      "description": "swap_asset: fetch stock media (default), AI-generate a still, or 't2v' — a text-to-video CLIP (video targets only, needs TOFU_T2V_* configured).",
+      "enum": [
+       "stock",
+       "generate",
+       "t2v"
+      ],
+      "type": "string"
+     },
+     "instruction": {
+      "description": "rewrite: what to change in that scene, in the user's words. set_narration: the NEW narration text for the scene. set_subtitle_style: a short note (may be a placeholder like '字幕样式'). swap_asset: the QUERY describing the replacement asset.",
+      "type": "string"
+     },
+     "model": {
+      "description": "Optional model id locking the scene author for this edit (rewrite only).",
+      "type": "string"
+     },
+     "op": {
+      "description": "Edit mode (default 'rewrite'). set_subtitle_style is JOB-LEVEL (scene may be omitted) and needs `style`.",
+      "enum": [
+       "rewrite",
+       "set_narration",
+       "set_subtitle_style",
+       "swap_asset"
+      ],
+      "type": "string"
+     },
+     "scene": {
+      "description": "Scene to edit: 1-based number ('2') or scene id ('scene-002').",
+      "type": "string"
+     },
+     "style": {
+      "description": "set_subtitle_style: subtitle overrides — font_scale (0.6..1.8), font_px (10..200), margin_v (px from bottom), outline (0..12), font_name.",
+      "type": "object"
+     },
+     "target": {
+      "description": "swap_asset: the scene's current media path to replace (required only when the scene references several media files).",
+      "type": "string"
+     },
+     "task_id": {
+      "description": "The produce_video job id.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id",
+     "scene",
+     "instruction"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "DETERMINISTIC field-level edits to ONE page of a deck created by produce_slides — zero LLM, applies in seconds, fully predictable. PREFER this over edit_slides whenever the user's request maps to a field mutation: 改标题/正文文字 (set_text), 调字号/颜色/加粗 (set_style), 挪位置/改大小 (set_bounds), 换图片 (swap_image), 删元素 (delete), 复制元素 (duplicate). Targets are elementId / componentId shown in the page source; use edit_slides instead when the change needs rewriting copy, restructuring the layout, or editing component internals beyond metric/quote/code scalar fields. Every op is validated and layout-measured; a patch that breaks validation or worsens the page's measured layout is rolled back and reported.",
+   "name": "patch_slides",
+   "parameters": {
+    "properties": {
+     "ops": {
+      "description": "Ordered patch operations.",
+      "items": {
+       "properties": {
+        "bounds": {
+         "description": "set_bounds: [x, y, w, h] in page points.",
+         "items": {
+          "type": "number"
+         },
+         "type": "array"
+        },
+        "dx": {
+         "type": "number"
+        },
+        "dy": {
+         "type": "number"
+        },
+        "field": {
+         "description": "set_text on a component: the scalar field (metric: value|label|support|source; quote: text|source; code: code).",
+         "type": "string"
+        },
+        "newId": {
+         "description": "duplicate: optional explicit id for the clone.",
+         "type": "string"
+        },
+        "op": {
+         "enum": [
+          "set_text",
+          "set_style",
+          "set_bounds",
+          "swap_image",
+          "delete",
+          "duplicate"
+         ],
+         "type": "string"
+        },
+        "props": {
+         "description": "set_style: style fields (fontSize, color, bold, italic, fontFamily, lineHeight, letterSpacing, align, backgroundColor).",
+         "type": "object"
+        },
+        "src": {
+         "description": "swap_image: new image src (deck media path or https).",
+         "type": "string"
+        },
+        "target": {
+         "description": "elementId or componentId on this page.",
+         "type": "string"
+        },
+        "text": {
+         "description": "set_text: the new text.",
+         "type": "string"
+        }
+       },
+       "required": [
+        "op",
+        "target"
+       ],
+       "type": "object"
+      },
+      "maxItems": 16,
+      "type": "array"
+     },
+     "page": {
+      "description": "1-based page number to patch.",
+      "type": "integer"
+     },
+     "task_id": {
+      "description": "The produce_slides job id.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id",
+     "page",
+     "ops"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Deck-LEVEL deterministic restyle of a deck created by produce_slides — zero LLM, re-renders in seconds. PREFER this whenever the user asks to restyle the WHOLE deck: 换主题 (theme_id), 换配色 (colors), 换字体 (fonts). The deck's elements reference theme tokens precisely so the entire visual language changes without rewriting one page. Do NOT re-run produce_slides for a restyle.",
+   "name": "restyle_slides",
+   "parameters": {
+    "properties": {
+     "colors": {
+      "description": "Palette slot overrides, e.g. {\"primary\": \"#0E7A5F\", \"bg\": \"#101418\"}. Slots: bg, ink, primary, accent, muted, hairline; hex only.",
+      "type": "object"
+     },
+     "fonts": {
+      "description": "Typeface swap per role: {\"title\": \"ZCOOL XiaoWei\", \"body\": \"MiSans\"}. Roles: title, body, caption, bignum; registry family or id.",
+      "type": "object"
+     },
+     "task_id": {
+      "description": "The produce_slides job id.",
+      "type": "string"
+     },
+     "theme_id": {
+      "description": "Curated theme id to bind (palette + typeface pairing + table defaults). The error reply lists available ids.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Undo a conversational deck edit: restore the deck to the snapshot taken before a patch_slides / restyle_slides / edit_slides step (versions are listed in every edit result, newest first). The restored deck is re-validated, every page re-rendered and the PPTX re-exported. Reverting keeps the snapshot — the user can bounce between versions.",
+   "name": "revert_slides",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "description": "The produce_slides job id.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Snapshot version to restore (from the edit results' versions list).",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id",
+     "version"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Undo a conversational scene edit: restore ONE scene's composition to the snapshot taken before an edit_video rewrite (every rewrite result carries its `version`). Only that scene is re-rendered and the final video re-assembles at its original URL. Narration/audio is not affected.",
+   "name": "revert_video",
+   "parameters": {
+    "properties": {
+     "scene": {
+      "description": "Scene to revert: 1-based number ('2') or scene id ('scene-002').",
+      "type": "string"
+     },
+     "task_id": {
+      "description": "The produce_video job id.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Snapshot version to restore.",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id",
+     "scene",
+     "version"
     ],
     "type": "object"
    }
@@ -4419,7 +5775,7 @@
  },
  {
   "function": {
-   "description": "Check or wait on background work: background shell commands (bg_* handles from run_command background=true), swarm sub-agents from spawn_agents, or tasks running in other conversations. With no id, returns a snapshot of everything currently running. With an id, returns that handle's status — and its full result once finished. Set wait_s to block until completion: the wait returns as soon as the handle finishes, new input arrives for this turn, or the task is stopped, so a long wait costs no extra model requests (capped at 1500 s = 25 minutes; on cap returns the running snapshot — call again to keep waiting). Background command completions are also delivered automatically, so only wait when there is nothing else to do.",
+   "description": "Check or wait on background work: background shell commands (bg_* handles from run_command), swarm sub-agents from spawn_agents, or tasks running in other conversations. With no id, returns a snapshot of everything currently running. With an id, returns that handle's status — and its full result once finished. Set wait_s to block until completion: the wait returns as soon as the handle finishes, new input arrives for this turn, or the task is stopped, so a long wait costs no extra model requests (capped at 1500 s = 25 minutes; on cap returns the running snapshot — call again to keep waiting). Background command completions are also delivered automatically, so only wait when there is nothing else to do.",
    "name": "poll",
    "parameters": {
     "properties": {

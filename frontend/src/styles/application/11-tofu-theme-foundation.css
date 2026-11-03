@@ -49,7 +49,7 @@
   --thinking-text:#7E4A1E;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
-  --error-text:#B05B48;
+  --error-text:#9E4838;
   /* Status chips (tofu) — same contract as the dark block in
      01-shell-navigation.css; values use the warm kinako/matcha/azuki casts. */
   --chip-ok-color:#5E8A50;

@@ -375,13 +375,16 @@ CASES = [('openai', 'gpt-4o'), ('responses', 'gpt-4o'), ('anthropic', 'gpt-4o'),
 
 def _decoded_diagnostics(wire):
     from lib.tasks_pkg.wire_fingerprint import (
-        capture_wire_message_evidence, marker_signature, static_prefix_hash,
-        system_fingerprint, wire_byte_region,
+        cache_relevant_controls, capture_wire_message_evidence,
+        marker_signature, static_prefix_hash, system_fingerprint,
+        wire_byte_region,
     )
     items = wire.get('messages') or wire.get('input') or []
     evidence = capture_wire_message_evidence(items)
     return (evidence.canonical, evidence.message_bytes, evidence.field_bytes,
-            static_prefix_hash(items), wire_byte_region(wire.get('system'), wire.get('tools')),
+            static_prefix_hash(items),
+            wire_byte_region(wire.get('system'), wire.get('tools'),
+                             cache_relevant_controls(wire)),
             marker_signature(wire), system_fingerprint(wire.get('system'), wire.get('tools')))
 
 

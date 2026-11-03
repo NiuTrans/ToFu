@@ -12,6 +12,7 @@ import threading
 from contextlib import contextmanager
 from functools import lru_cache
 import time
+from typing import Any
 import weakref
 
 from lib.cost import observed_usage_totals
@@ -93,16 +94,16 @@ class ExecutionBudget:
         self._child_observer = root.get('_executionChildObserver')
         self._child_ordinal = 0
         self._child_records = {}
-        self._tool_observer = root.get('_executionToolObserver')
+        self._tool_observer: Any = root.get('_executionToolObserver')
         self._tool_ordinal = 0
         self._tool_attempts = {}
         self._tool_reservation_observer = None
         self._tool_reservation_ordinal = 0
         self._model_allowance_provider = None
         self._replayed_account = None
-        self._replayed_actor_frontier = None
+        self._replayed_actor_frontier: Any = None
         self._pending_actor_prefixes = None
-        self._rebound_actor_sources = None
+        self._rebound_actor_sources: Any = None
         self._account_frontier_observer = None
         self._actor_rebind_observer = None
         self._actor_rebind_bytes = None
@@ -726,7 +727,7 @@ class ExecutionBudget:
                     or (task is not root and not self._is_live_descendant(task,root))):
                 raise ValueError('native child model parent is not an owned live actor')
 
-    def authorizes_model_owner(self, task: dict, owner: int) -> bool:
+    def authorizes_model_owner(self, task: dict, owner: Any) -> bool:
         """Native account binding reads the same live tree/actor identities."""
         with self._lock:
             participants = (task, self._active.get(self.root_id), self._active.get(task.get('id')))
@@ -752,14 +753,14 @@ class ExecutionBudget:
                     'pending_tool_attempts':[dict(value) for _,value in sorted(self._tool_attempts.items())],
                     'unknown_usage':self._unknown_usage}
 
-    def _model_actor_limits(self, task):
+    def _model_actor_limits(self, task: dict) -> dict[str, Any]:
         """A detached copy can restrict, never expand, its active owner's slice."""
         owner=self._active.get(task['id']) or task
         scopes=[(value.get('config') or {}).get('executionLimits') or self.limits
                 for value in (owner,task)]
         effective={}
         for key in ('max_tokens','max_tool_calls','deadline'):
-            values=[scope[key] for scope in scopes if scope[key] is not None]
+            values: list[Any] = [scope[key] for scope in scopes if scope[key] is not None]
             effective[key]=min(values) if values else None
         return effective
 
@@ -796,7 +797,7 @@ class ExecutionBudget:
         active identity, but a foreign or closed identity cannot read this port.
         """
         from lib.agent_core.execution_limits import validate_execution_limits
-        limits = (task.get('config') or {}).get('executionLimits')
+        limits: Any = (task.get('config') or {}).get('executionLimits')
         validate_execution_limits(limits)
         with self._lock:
             task_id = task['id']
@@ -816,7 +817,7 @@ class ExecutionBudget:
                      and all(t.get('_executionActualsComplete') is not False
                              for t in self._active.values()))
             headrooms = [max(0, cap - spent - pending) for cap, spent, pending in caps]
-            deadlines = [d for d in (self.limits['deadline'], limits['deadline'])
+            deadlines: list[Any] = [d for d in (self.limits['deadline'], limits['deadline'])
                          if d is not None]
             deadline = min(deadlines) if deadlines else None
             tool_caps = [(cap, admitted) for cap, admitted in (
@@ -1218,9 +1219,9 @@ def execution_deadline_unix_ms(task: dict) -> int | None:
     budget = task.get('_executionBudget')
     if budget is not None and not isinstance(budget, ExecutionBudget):
         raise ValueError('execution deadline requires the canonical account')
-    tree_limits = budget.limits if budget is not None else None
+    tree_limits: Any = budget.limits if budget is not None else None
     validate_execution_limits(tree_limits)
-    deadlines = [source['deadline'] for source in (limits, tree_limits)
+    deadlines: list[Any] = [source['deadline'] for source in (limits, tree_limits)
                  if source is not None and source['deadline'] is not None]
     if not deadlines:
         return None

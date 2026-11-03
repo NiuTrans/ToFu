@@ -345,7 +345,8 @@ def project_agent_evidence(
     per-call usage, context/compaction telemetry, the effective clean custom
     schema, and truth-checked orchestration adoption evidence.
     """
-    config = task.get('config') if isinstance(task.get('config'), dict) else {}
+    raw_config = task.get('config')
+    config: dict = raw_config if isinstance(raw_config, dict) else {}
     schemas = config.get('_explicitToolSchemas')
     if not isinstance(schemas, list):
         schemas = config.get('_customToolSchemas')

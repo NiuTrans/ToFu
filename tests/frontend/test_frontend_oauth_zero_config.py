@@ -17,8 +17,8 @@ LOCALE_DIR = ROOT / 'frontend/src/i18n/locales'
 
 def test_primary_surface_only_asks_for_official_authorization():
     html = PANEL.read_text(encoding='utf-8')
-    assert 'settings.oauthUserRole' in html
-    assert 'settings.oauthSystemRole' in html
+    assert 'settings.oauthPageDesc' in html
+    assert 'settings.oauthManualAction' in html
     assert 'settings.oauthProviderClaude' in html
     assert 'settings.oauthProviderCodex' in html
     for implementation_detail in (
@@ -74,16 +74,17 @@ def test_user_facing_copy_states_the_ownership_boundary():
     locales = {lang: json.loads((LOCALE_DIR / f'{lang}.json').read_text())
                for lang in ('zh', 'en')}
     for key in (
-        'settings.oauthUserRole',
-        'settings.oauthSystemRole',
+        'settings.oauthPageDesc',
+        'settings.oauthManualAction',
         'settings.oauthAutomaticRecovery',
         'settings.oauthProviderClaude',
         'settings.oauthProviderCodex',
     ):
         assert all(locales[lang].get(key) for lang in locales)
-    assert locales['zh']['settings.oauthUserRole'] == '你只需在官方页面完成登录和授权'
-    assert locales['zh']['settings.oauthSystemRole'] == \
-        '网络选择、凭据交换、模型接入与后续刷新均由 Tofu 自动完成'
+    assert locales['zh']['settings.oauthPageDesc'] == \
+        '连接已有的 Claude 或 ChatGPT 订阅，无需填写 API Key。'
+    assert locales['zh']['settings.oauthManualAction'] == \
+        '自动跳转未完成时，只需打开下面的官方授权页。'
 
 
 def test_terminal_command_is_not_a_user_recovery_path():

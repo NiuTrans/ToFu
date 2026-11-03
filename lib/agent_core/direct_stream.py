@@ -13,6 +13,7 @@ import json
 import threading
 import time
 from concurrent.futures import Future
+from typing import Any
 
 from lib.agent_core.execution_session import ExecutionPhase, ExecutionSession
 from lib.error_envelope import make_envelope
@@ -154,7 +155,9 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
     with a typed error because OpenAI-compatible SSE has no retraction frame.
     """
     if dispatch_fn is None:
-        from lib.llm_dispatch import async_dispatch_stream as dispatch_fn
+        from lib.llm_dispatch import async_dispatch_stream as default_dispatch
+        dispatch_fn = default_dispatch
+    dispatch: Any = dispatch_fn
 
     if queue_maxsize < 1:
         raise ValueError('queue_maxsize must be positive')
@@ -179,7 +182,7 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         dispatch_policy['tool_choice'] = client_tool_choice
 
     q: asyncio.Queue = asyncio.Queue()
-    frame_store = None
+    frame_store: Any = None
     loop = asyncio.get_running_loop()
     loop_thread_id = threading.get_ident()
     consumer_attached = True
@@ -281,7 +284,7 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
             from lib.llm_dispatch.provider_pin import provider_pin
             with provider_pin(pinned_provider_id):
                 result = await asyncio.wait_for(
-                    dispatch_fn(
+                    dispatch(
                         messages,
                         on_content=_on_content,
                         on_thinking=_on_thinking,
@@ -356,6 +359,8 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
             if isinstance(text, Future):
                 try:
                     stored = await asyncio.wrap_future(text)
+                    if frame_store is None:
+                        raise RuntimeError('direct relay frame store is unavailable')
                     payload = await asyncio.wrap_future(frame_store.read(stored))
                     text = payload['text']
                     stored = payload = None

@@ -115,9 +115,10 @@ running. Only an interrupt that a live command leaves unconsumed past its
 grace, with both task clocks stale, fails the task. The same ladder applies to
 Swarm, Goal and Flow workers: a worker's silent command is interrupted and the
 worker continues; a wedged worker settles with its own typed stall. Stop still ends every command, and a stdin prompt
-keeps only its own command in the foreground. Child invocations still never
-hand a running command off (they own no conversation delivery); each
-concurrent call can choose `background=true` and read its handle with `poll`.
+keeps only its own command in the foreground. A child invocation hands a
+command still running after `AUTO_BACKGROUND_AFTER_S` off and reads its handle
+with `poll`; it owns no conversation delivery, so a steer never moves it, and
+each concurrent call can also choose `background=true`.
 A Flow parent blocked on a child invocation advances its clocks only through
 child events, so it publishes the wait (`explained_wait.child_invocation_wait`)
 and the reaper treats its silence as explained while that child is live: the

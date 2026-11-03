@@ -120,7 +120,12 @@ class SummaryTransport:
         if selected_provider and existing_pin and selected_provider != existing_pin:
             raise RuntimeError('summary_provider_pin_conflict')
         pin = provider_pin(selected_provider) if selected_provider else nullcontext()
-        with affinity_scope, pin:
+        # An owner-wide auxiliary route is optional work: it never challenges a
+        # recorded billing stop. The task's own route keeps attended admission.
+        from lib.key_stats import strict_billing_stop_admission
+        admission = (strict_billing_stop_admission() if summary_route.get('requestOwned')
+                     else nullcontext())
+        with affinity_scope, pin, admission:
             if not use_stream:
                 chat_content, chat_usage = self._dispatch_transport(self.dispatch_chat,
                     self.messages,

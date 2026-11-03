@@ -30,7 +30,10 @@ def _make_task(**overrides):
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry():
+def _clean_registry(monkeypatch, tmp_path):
+    # Durable records belong to this test, never the host's data root.
+    monkeypatch.setattr('lib.tasks_pkg.background_commands._records_root',
+                        lambda: str(tmp_path / 'background_commands'))
     with _lock:
         _registry.clear()
     yield

@@ -266,6 +266,7 @@ def test_routed_native_exposure_narrows_only_eager_families():
 def test_run_command_schema_keeps_complete_shell_guidance():
     """The project and standalone shell schemas share one complete contract."""
     from lib.tools.code_exec import CODE_EXEC_TOOL
+    from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
     from lib.tools.project import PROJECT_TOOL_RUN_COMMAND
 
     for tool in (PROJECT_TOOL_RUN_COMMAND, CODE_EXEC_TOOL):
@@ -275,7 +276,8 @@ def test_run_command_schema_keeps_complete_shell_guidance():
             'no persistent shell', 'read_files', 'search_files', 'find_files',
             'edit_file', 'write_file', 'browser_download_url_to_server',
             'FUSE-safe', 'credentials', '`sd`', '`mlr`', '`goawk',
-            'move to the background', 'arrive automatically',
+            f'after {AUTO_BACKGROUND_AFTER_S} s', 'moves to the background',
+            'arrive automatically',
         ):
             assert guidance in wire
 

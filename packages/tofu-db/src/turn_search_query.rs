@@ -381,14 +381,28 @@ impl OpenTurnSearchProjection {
                 return page(items, &state, true);
             }
             let header = if state.pending.is_some() {
+                chunks_read = 0;
                 let (time, id) = state.after.as_ref().unwrap();
                 let stored_key = header_key(&transaction, *time, id)?;
                 let raw = self.database.entity_get(&mut transaction, &stored_key)?;
                 match raw {
                     Some(raw) => decode_header(&raw)?,
                     None => {
-                        state.pending = None;
-                        continue;
+                        let active_key = active_key(&transaction, id)?;
+                        let raw = self.database.entity_get(&mut transaction, &active_key)?;
+                        match raw {
+                            Some(raw) => {
+                                let header = decode_header(&raw)?;
+                                state.pending = None;
+                                state.after = None;
+                                chunks_read = 0;
+                                header
+                            }
+                            None => {
+                                state.pending = None;
+                                continue;
+                            }
+                        }
                     }
                 }
             } else if let Some(header) = headers.pop_front() {
@@ -433,23 +447,8 @@ impl OpenTurnSearchProjection {
             // phase-0 requires the phrase (whose every gram was emitted)
             // in the title, id, or one chunk; phase-1 requires every word
             // (again with every gram emitted) somewhere across them. The
-            // skipped conversation's state effects are exactly those of a
-            // non-matching one, so pages stay byte-identical while its meta
-            // namespace is never opened. A resumed conversation (matching
-            // pending generation) always runs its exact legacy scan.
-            if state
-                .pending
-                .as_ref()
-                .is_none_or(|pending| pending.generation != header.generation)
-            {
-                let phase = usize::from(state.phase);
-                if !bloom_might_contain(&header.bloom, &conversation_blooms[phase]) {
-                    state.pending = None;
-                    state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
-                    barren += 1;
-                    continue;
-                }
-            }
+            // namespace is never opened. Its exact chunk count is already in
+            // the header, preserving scan-page budgets without metadata reads.
             if gram_index_ready
                 && state
                     .pending
@@ -457,6 +456,15 @@ impl OpenTurnSearchProjection {
                     .is_none_or(|pending| pending.generation != header.generation)
             {
                 let phase = usize::from(state.phase);
+                if !bloom_might_contain(&header.bloom, &conversation_blooms[phase]) {
+                    chunks_read = chunks_read.saturating_add(
+                        usize::try_from(header.chunk_count).unwrap_or(usize::MAX),
+                    );
+                    state.pending = None;
+                    state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
+                    barren += 1;
+                    continue;
+                }
                 if gram_sets[phase].is_none() && barren >= GRAM_ACTIVATE_AFTER_BARREN {
                     let terms: &[&str] = if phase == 0 {
                         &[query.as_str()]
@@ -492,6 +500,9 @@ impl OpenTurnSearchProjection {
                             && !candidates.contains(&generation_id)
                     };
                     if skip {
+                        chunks_read = chunks_read.saturating_add(
+                            usize::try_from(header.chunk_count).unwrap_or(usize::MAX),
+                        );
                         state.pending = None;
                         state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
                         continue;
@@ -861,6 +872,49 @@ mod tests {
     }
 
     #[test]
+    fn body_match_after_a_rebuild_does_not_reuse_the_old_body_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), 64 * 1024 * 1024).unwrap();
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "before",
+            100,
+            "unrelated",
+            &rows,
+        );
+        let mut request = request("needle absent");
+        request.limit = 1;
+        let first = projection
+            .search_page_until(&request, None, || false)
+            .unwrap();
+        assert!(first.items.is_empty());
+        assert!(first.next_cursor.is_some());
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle absent"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "after",
+            200,
+            "unrelated",
+            &rows,
+        );
+        let hits = collect_pages(&projection, "needle absent", 1)
+            .into_iter()
+            .flat_map(|(items, _, _)| items)
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].match_field, "content");
+        assert_eq!(hits[0].turn_id, Some("turn".into()));
+    }
+
+    #[test]
     #[ignore = "explicit real-data read comparison; set TOFU_SEARCH_FIXTURE"]
     fn real_source_projection_read_comparison() {
         let Some(fixture) = std::env::var_os("TOFU_SEARCH_FIXTURE") else {
@@ -881,7 +935,7 @@ mod tests {
             let source = std::io::BufReader::new(source);
             for (index, line) in std::io::BufRead::lines(source).enumerate() {
                 let line = line.unwrap();
-                let conversation: serde_json::Value = serde_json::from_str(line).unwrap();
+                let conversation: serde_json::Value = serde_json::from_str(&line).unwrap();
                 let id = conversation["id"].as_str().unwrap();
                 let generation = "real-source-v1";
                 projection

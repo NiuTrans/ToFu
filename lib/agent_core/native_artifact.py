@@ -17,6 +17,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from typing import Any, BinaryIO, Protocol
 import zlib
 
 from .native_content_contract import NATIVE_ARTIFACT_SPEC as SPEC,NATIVE_STDIO_CONTRACT
@@ -52,9 +53,14 @@ class _BoundedTarInfo(tarfile.TarInfo):
 _ARCHIVE_CHUNK_BYTES = 65536
 
 
-class _BoundedGzipReader:
+class _ReadableStream(Protocol):
+    def read(self, size: int | None = -1) -> bytes: ...
+
+
+class _BoundedGzipReader(_ReadableStream):
     """Borrow compressed snapshot bytes; bound decoded output before tar parsing."""
-    def __init__(self, source):
+    def __init__(self, source: Any):
+        # tarfile's stream-only protocol is broader than its file-object stub.
         self.source=source
         self.decoder=zlib.decompressobj(16+zlib.MAX_WBITS)
         self.pending=b''
@@ -69,7 +75,9 @@ class _BoundedGzipReader:
         self.failure=message
         raise _refuse(message)
 
-    def read(self, size):
+    def read(self, size: int | None = -1) -> bytes:
+        if size is None:
+            size = -1
         if self.failure is not None:raise _refuse(self.failure)
         if type(size) is not int or size<0:raise _refuse('decoded read bound invalid')
         remaining=min(size,_ARCHIVE_CHUNK_BYTES)
@@ -92,24 +100,30 @@ class _BoundedGzipReader:
         while self.read(_ARCHIVE_CHUNK_BYTES):pass
 
 
-def _self_check(image,command,directory,timeout,output_bytes):
+def _self_check(image: BinaryIO, command: str, directory: Path, timeout: float, output_bytes: int) -> Any:
     process=subprocess.Popen([f'/proc/self/fd/{image.fileno()}',command],
         pass_fds=(image.fileno(),),cwd=directory,env={'PATH':str(directory/'empty-path')},
         stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    stdout, stderr = process.stdout, process.stderr
+    if stdout is None or stderr is None:
+        raise _refuse('self-check streams unavailable')
     output=bytearray();total=0;deadline=time.monotonic()+timeout
     try:
         with selectors.DefaultSelector() as selector:
-            for stream in (process.stdout,process.stderr):
+            for stream in (stdout,stderr):
                 os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ)
             while selector.get_map():
                 remaining=deadline-time.monotonic()
                 if remaining<=0:raise _refuse('self-check timed out')
                 for key,_ in selector.select(remaining):
-                    chunk=os.read(key.fileobj.fileno(),min(65536,output_bytes-total+1))
+                    stream = key.fileobj
+                    if not isinstance(stream, BinaryIO):
+                        raise _refuse('self-check stream is invalid')
+                    chunk=os.read(stream.fileno(),min(65536,output_bytes-total+1))
                     if not chunk:selector.unregister(key.fileobj);continue
                     total+=len(chunk)
                     if total>output_bytes:raise _refuse('self-check output byte bound exceeded')
-                    if key.fileobj is process.stdout:output.extend(chunk)
+                    if key.fileobj is stdout:output.extend(chunk)
             if process.wait(timeout=max(.001,deadline-time.monotonic()))!=0:raise _refuse('self-check failed')
         return json.loads(output)
     except (subprocess.TimeoutExpired,ValueError) as error:
@@ -118,7 +132,7 @@ def _self_check(image,command,directory,timeout,output_bytes):
     finally:
         if process.poll() is None:process.kill()
         process.wait()
-        process.stdout.close();process.stderr.close()
+        stdout.close();stderr.close()
 
 
 def inspect_archive(path:Path,*,archive_sha256=None,application_version=None,binary_bytes=None,
@@ -167,7 +181,8 @@ def inspect_archive(path:Path,*,archive_sha256=None,application_version=None,bin
                         raise _refuse('metadata/header aggregate bound exceeded')
                     return entry
             decompressed=_BoundedGzipReader(snapshot)
-            with tarfile.open(fileobj=decompressed,mode='r|',bufsize=_ARCHIVE_CHUNK_BYTES,tarinfo=BudgetedTarInfo) as archive:
+            stream: Any = decompressed
+            with tarfile.open(fileobj=stream,mode='r|',bufsize=_ARCHIVE_CHUNK_BYTES,tarinfo=BudgetedTarInfo) as archive:
                 for entry in archive:
                     name=entry.name
                     if (not entry.isfile() or entry.sparse is not None or name in records or name.startswith('/')
@@ -227,6 +242,8 @@ def inspect_archive(path:Path,*,archive_sha256=None,application_version=None,bin
             if verify_run:
                 host={'x86_64':'x86_64','aarch64':'aarch64'}.get(platform.machine())
                 if platform.system()!='Linux' or build['target_arch']!=host:raise _refuse('target does not match host')
+                if image is None:
+                    raise _refuse('selected image missing')
                 with tempfile.TemporaryDirectory(prefix='tofu-native-check-') as directory:
                     results={command:_self_check(image,command,Path(directory),timeout,output_bytes) for command in SPEC['identity_commands']}
                 if (any(not isinstance(value,dict) for value in results.values()) or results['build-info']!=build or results['check-session'].get('invariants_satisfied') is not True
@@ -290,6 +307,8 @@ def _inspect_library_archive(path,archive_sha256,application_version,binary_byte
     manifest,image=inspect_archive(path,archive_sha256=archive_sha256,
         application_version=application_version,binary_bytes=binary_bytes,
         seal_image=True,image_member=extension['member'])
+    if image is None:
+        raise _refuse('selected library image missing')
     try:
         if extension['contract_member'] not in manifest['files']:
             raise _refuse('selected library extension missing')

@@ -358,6 +358,7 @@ def _bundle_environment_digest() -> str | None:
         if name.rsplit('/', 1)[-1].startswith('tsconfig')]
     for path in (
             ROOT / 'scripts' / 'vite_test_bundle.mjs',
+            Path(__file__),
             ROOT / 'node_modules' / '.package-lock.json',
             ROOT / 'package-lock.json',
             *sorted(ROOT.glob('tsconfig*.json')),

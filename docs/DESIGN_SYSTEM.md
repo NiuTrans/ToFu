@@ -67,7 +67,9 @@ asserted scope of that exception: `verify.py` check #2.
 
 The warm dark palette (V5, 2026-10-27) replaces the dark violet/green accents
 with charcoal `#24221f`, cream `#f0e7d8`, warm secondary `#b9ae9c` and coral
-error `#e4a193`. Light/paper palettes remain independent. The V5 sizing (18px
+error `#e4a193`. Tofu's coral error text is `#9E4838`: the previous `#B05B48`
+measured 4.21:1 on the paper receipt canvas, below the shared 4.5:1 text floor.
+The deeper ink retains the existing error fill and border roles. Light/paper palettes remain independent. The V5 sizing (18px
 rows, two-line 64px headers, 960px measure) is superseded by compact action
 reading. `23-reading-tool-summary.css` owns the shared one-line action row
 and the reasoning fold; existing specialized sheets own evidence bodies.

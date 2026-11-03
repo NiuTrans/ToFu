@@ -107,6 +107,41 @@ def _has_explicit_false_override_unlocked(pk: str) -> bool:
     return ov is False
 
 
+def _billing_stop_recorded(entry: dict, model: str) -> bool:
+    """A key-wide stop, or a stop recorded for *model* on this key."""
+    return bool(entry.get('exhausted')
+                or (model and model in (entry.get('exhausted_models') or {})))
+
+
+def _pair_key_for(provider_id: str, key_name: str) -> str:
+    # Resolve through the package so tests can monkeypatch ``ks._pair_key``.
+    _pk = _pkg()
+    return (_pk._pair_key(provider_id, key_name) if _pk is not None
+            else _pair_key(provider_id, key_name))
+
+
+def is_key_refused_for_optional_work(provider_id: str, key_name: str,
+                                     model: str = '') -> bool:
+    """Return True when strict optional-work admission refuses this key outright.
+
+    These are the refusals that hold whatever the key's siblings are: a
+    recorded key-wide or *model* billing stop (it beats a manual ON inside
+    :func:`strict_billing_stop_admission`) and an explicit user disable. A
+    planner can therefore consult them before any slot for the key exists.
+    An automatic credential-health disable is not included: dispatch may
+    still promote such a key as last resort among its live siblings.
+    """
+    if not key_name:
+        return False
+    pk = _pair_key_for(provider_id, key_name)
+    observed = None if _FRESH_WITHIN_BATCH.get() else _observe_store()
+    with _lock:
+        if observed is not None:
+            _ensure_fresh_unlocked(observed)
+        return (_billing_stop_recorded(_cache['stats'].get(pk) or {}, model)
+                or _has_explicit_false_override_unlocked(pk))
+
+
 def _rank_for_last_resort_unlocked(pk: str) -> tuple:
     """Ranking tuple for last-resort selection. Higher = "healthier".
 
@@ -221,8 +256,7 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
     if not key_name:
         return True
     _pk = _pkg()
-    pk = (_pk._pair_key(provider_id, key_name) if _pk is not None
-          else _pair_key(provider_id, key_name))
+    pk = _pair_key_for(provider_id, key_name)
 
     # Read siblings before taking _lock: resolving the dispatcher may take
     # its lock, which a pick holds while it takes _lock.  Resolve through the
@@ -235,9 +269,7 @@ def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
         if observed is not None:
             _ensure_fresh_unlocked(observed)
         entry = _cache['stats'].get(pk) or {}
-        if is_strict_billing_stop_admission() and (
-                entry.get('exhausted')
-                or (model and model in (entry.get('exhausted_models') or {}))):
+        if is_strict_billing_stop_admission() and _billing_stop_recorded(entry, model):
             return False
         # Per-model billing-stop gate. Skip when an override exists — the
         # raw check below already lets the override win, and consulting it

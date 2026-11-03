@@ -340,6 +340,8 @@ class ExecutionSession:
                 if resource.disposition is not None:
                     continue
                 try:
+                    if resource.release is None:
+                        raise RuntimeError('execution resource release is unavailable')
                     raw_disposition = resource.release(context)
                     if raw_disposition in (ResourceDisposition.DEFERRED, "deferred"):
                         resource.disposition = ResourceDisposition.DEFERRED
