@@ -383,6 +383,11 @@ removed.
 The AST census must fail when Git cannot enumerate tracked files; an empty
 result from a failed subprocess is never a clean audit. Event vocabulary scans
 read retained sources directly, without compiling browser test adapters.
+The native-fetch ownership guard reads those authored sections and parses
+TypeScript through its AST. A typed `fetch` port or receiver-qualified call is
+not a browser-global fetch; injected test graphs are not additional transport
+owners. Global `fetch(url)` and `window.fetch(url)` remain violations outside
+the transport and locale owners, with executable positive and negative controls.
 The syntax smoke census includes tracked and non-ignored untracked Python
 files through NUL-delimited Git enumeration, preserving its scratch-directory
 exclusions and skipping deleted paths. It compiles source bytes in memory:
