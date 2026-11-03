@@ -168,8 +168,10 @@ A bounded launch-probed LRU may retain recursively frozen parsed frontmatter onl
 - Final-admission summary failure: preserve live/transient source and refuse
   an overfull main dispatch, retaining only a current issued safe credential
   cause. Unquoted auxiliary credential outages may requalify within the existing
-  owner/quote policy; explicit utility recovery remains separate. Retain usable
-  complete model text after shaping faults.
+  owner/quote policy; explicit utility recovery remains separate. Auxiliary
+  selection and dispatch never challenge a recorded billing stop
+  (`docs/CONTEXT_BUDGET_POLICY.md`). Retain usable complete model text after
+  shaping faults.
 - Concurrent manual compaction: reject/retry from a fresh transcript revision.
 - Invalid tool history: fail or repair at the single message-construction
   boundary, with diagnostics.
