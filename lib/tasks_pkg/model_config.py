@@ -62,7 +62,7 @@ def _extract_latest_user_text(cfg) -> str:
 
 def _memory_scope(cfg):
     """``(memory_enabled, project_path, project_enabled)`` of a chat-mode cfg."""
-    project_path = cfg.get('projectPath', '')
+    project_path = cfg.get('canonicalProjectPath') or cfg.get('projectPath', '')
     project_enabled = bool(project_path)
     if not project_enabled:
         # RWA: a remote-worktree binding (cfg['project_remote'], 总闸

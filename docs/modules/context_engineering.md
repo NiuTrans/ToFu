@@ -142,6 +142,14 @@ Relevance uses the latest authored human turn, not machine-authored carriers, at
 Augmented projections retain `_authoredUserText` locally; plain text needs no duplicate. Same-role merges keep the newest value, text-only replay permits it, and provider sanitization removes it. `UserPromptSubmit` replacements update provenance too, preserving redaction.
 An empty/image-only request cannot reuse an older topic. Each selection resets held matches and distinguishes disabled from failed status. Legacy projections strip whole composer sections and generated image hints, not arbitrary authored tool identifiers.
 
+Project memories belong to the configured canonical project, not a task-owned execution checkout.
+When workspace binding records `canonicalProjectPath` / `canonicalProjectPaths`, prefetch, search,
+CRUD and merge use those roots; file execution stays in the isolated checkout. Legacy configs
+without the canonical mapping retain their `projectPath` / `projectPaths` behavior. Existing
+memories stranded in an old worker checkout remain there; recreating their verified lesson through
+the supported `create_memory` tool writes the canonical store, with no database or file migration.
+Specification: `tests/memory/test_memory_canonical_workspace.py`.
+
 Memory retrieval is precision-first and bounded: metadata-only prefetch hydrates selected evidence only, explicit search streams one 2,000-character body prefix at a time, and BM25 retains query-term statistics rather than corpus tokens. Stored memories, My Context facts,
 and session context stay distinct. After a clean interactive turn, one bounded
 learner accepts at most two concise items backed by verbatim real-user evidence;

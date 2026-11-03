@@ -51,17 +51,21 @@ def test_receipt_uses_only_live_catalog(controls, has_conversation):
         '_tool_schema': _catalog((POLL_TOOL, KILL_TOOL)),
         '_swarm_role': 'general',
     }
+    if has_conversation:
+        task.update(convId='unit-conv', _userId=7)
     before = deepcopy(task)
-    result = background_command_result(
-        'unit-command', 'bg_unit', task=task,
-        has_conversation=has_conversation)
+    result = background_command_result('unit-command', 'bg_unit', task=task)
     _assert_guidance(result, _names(controls))
     assert 'bg_unit' in result
     if has_conversation:
         assert 'end this turn for automatic delivery' in result
     else:
-        assert 'No conversation completion delivery' in result
         assert 'will be shown in the conversation' not in result
+        # Without a conversation only its own run, through `poll`, collects it.
+        if 'poll' in _names(controls):
+            assert 'reaches your next step' in result
+        else:
+            assert 'No conversation completion delivery' in result
     assert task == before
 
 

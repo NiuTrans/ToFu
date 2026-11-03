@@ -69,9 +69,9 @@ def build_round_usage(body: dict, *, cache_read: int, cache_write: int,
     pre-fix state).
     """
     from lib.tasks_pkg.wire_fingerprint import (
-        canonical_messages, marker_signature, routing_fingerprint,
-        static_prefix_hash, system_fingerprint, wire_byte_field_prefix,
-        wire_byte_prefix, wire_byte_region,
+        cache_relevant_controls, canonical_messages, marker_signature,
+        routing_fingerprint, static_prefix_hash, system_fingerprint,
+        wire_byte_field_prefix, wire_byte_prefix, wire_byte_region,
     )
     msgs = body.get('messages') or []
     usage: dict[str, Any] = {
@@ -81,7 +81,8 @@ def build_round_usage(body: dict, *, cache_read: int, cache_write: int,
         '_wire_static': static_prefix_hash(msgs),
         '_wire_bytes': wire_byte_prefix(msgs),
         '_wire_field_bytes': wire_byte_field_prefix(msgs),
-        '_wire_region': wire_byte_region(body.get('system'), body.get('tools')),
+        '_wire_region': wire_byte_region(body.get('system'), body.get('tools'),
+                                         cache_relevant_controls(body)),
         '_wire_markers': marker_signature(body),
         '_wire_system': system_fingerprint(body.get('system'), body.get('tools')),
     }

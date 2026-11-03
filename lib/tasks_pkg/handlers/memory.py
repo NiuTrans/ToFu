@@ -119,14 +119,14 @@ _MEMORY_OP_DISPATCH = {
 @tool_registry.tool_set(MEMORY_TOOL_NAMES, category='memory',
                         description='Create, update, delete, or merge memories')
 def _handle_memory_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    _proj = project_path if project_enabled else None
-    # Multi-root: read/locate memories across the primary + extra roots
-    # (projectPaths[1:]). New memories are still written to the primary.
+    _proj = ((cfg or {}).get('canonicalProjectPath') or project_path) if project_enabled else None
+    # Memory belongs to the configured project, not its task-owned checkout.
     _extra_paths = []
     if _proj:
-        _all_paths = (cfg or {}).get('projectPaths') or []
-        _extra_paths = [p for p in _all_paths[1:]
-                        if p and p != _proj] if len(_all_paths) > 1 else []
+        _all_paths = ((cfg or {}).get('canonicalProjectPaths')
+                      or (cfg or {}).get('projectPaths') or [])
+        _extra_paths = list(dict.fromkeys(
+            p for p in _all_paths if p and p != _proj))
     memory_ok = False
     try:
         handler = _MEMORY_OP_DISPATCH.get(fn_name)

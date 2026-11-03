@@ -364,14 +364,16 @@ def test_elapsed_handoff_accepts_with_more_than_32_live_commands(monkeypatch):
     assert delivered.wait(3)
 
 
-def test_handoff_waits_long_but_never_past_the_reaper(monkeypatch):
-    """A foreground wait costs no model request (owner decision 2026-10-28):
-    the handoff waits 25 minutes, clamped by reaper_safe_wait_s so a silent
-    foreground command is handed off before the silence reaper interrupts it."""
+def test_handoff_returns_inside_the_prompt_cache_ttl_and_before_the_reaper(monkeypatch):
+    """A foreground command returns control within the provider's 5-minute
+    prompt-cache TTL (owner decision 2026-11-03), clamped by
+    reaper_safe_wait_s so a silent foreground command is handed off before
+    the silence reaper interrupts it."""
     from lib.tasks_pkg import manager
+    from lib.tools.poll import AUTO_BACKGROUND_AFTER_S
     monkeypatch.delenv('TOFU_STUCK_TASK_MAX_SILENT_SECS', raising=False)
-    assert background.AUTO_BACKGROUND_AFTER_S == 1500
-    assert manager.reaper_safe_wait_s(background.AUTO_BACKGROUND_AFTER_S) == 1500
+    assert background.AUTO_BACKGROUND_AFTER_S == AUTO_BACKGROUND_AFTER_S == 120
+    assert manager.reaper_safe_wait_s(background.AUTO_BACKGROUND_AFTER_S) == 120
 
     clamps = []
     monkeypatch.setattr(manager, 'reaper_safe_wait_s',
@@ -391,7 +393,7 @@ def test_handoff_waits_long_but_never_past_the_reaper(monkeypatch):
     finally:
         release.set()
     assert background.is_background_command_result(result)
-    assert clamps == [1500]
+    assert clamps == [120]
 
 
 def test_no_subprocess_does_not_auto_handoff(monkeypatch):

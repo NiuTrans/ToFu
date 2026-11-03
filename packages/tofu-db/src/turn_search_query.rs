@@ -927,7 +927,7 @@ mod tests {
             let source = std::io::BufReader::new(source);
             for (index, line) in std::io::BufRead::lines(source).enumerate() {
                 let line = line.unwrap();
-                let conversation: serde_json::Value = serde_json::from_str(line).unwrap();
+                let conversation: serde_json::Value = serde_json::from_str(&line).unwrap();
                 let id = conversation["id"].as_str().unwrap();
                 let generation = "real-source-v1";
                 projection

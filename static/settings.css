@@ -4716,93 +4716,191 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 .codex-shared-login[data-state="error"] .codex-shared-feedback { color: var(--warning-text); }
 /* Channel Settings panels: 大象 (settings-panels/dx.html, features/settings/
    dx-channel.ts) and GitHub (settings-panels/github.html, github-channel.ts)
-   share one layout through features/settings/channel-settings-view.ts.
-   Layout and status tone only; controls come from the UI kit. */
+   share one presentation through features/settings/channel-settings-view.ts,
+   in the Database panel's card language (11-database.css). Controls come
+   from the UI kit; feature classes own layout, rhythm and status tone. */
 
-.channel-settings-subtitle {
-  margin: var(--space-2) 0 var(--space-5);
-  color: var(--s-ink-soft);
-  font-size: var(--font-size-md);
-  line-height: var(--leading-body);
+:is(#settingsTab_dx, #settingsTab_github) .channel-page-heading {
+  margin-bottom: var(--space-5);
 }
 
-.channel-settings {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-
-.channel-settings .channel-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  border: 1px solid var(--s-line);
-  border-radius: var(--radius-sm);
-  background: var(--s-white);
-  font-size: var(--font-size-md);
-}
-
-.channel-settings .channel-card-title {
+:is(#settingsTab_dx, #settingsTab_github) .channel-page-heading .settings-section-title {
+  margin: 0;
+  padding: 0;
   color: var(--s-ink);
   font-size: var(--font-size-xl);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-title);
 }
 
-.channel-settings .channel-status {
+:is(#settingsTab_dx, #settingsTab_github) .channel-page-heading .settings-desc {
+  margin: var(--space-2) 0 0;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
+}
+
+.channel-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  color: var(--s-ink);
+  font-size: var(--font-size-md);
+  line-height: var(--leading-title);
+}
+
+/* ── Cards: head (title + state chip or action), then hairline sections ── */
+.channel-settings .channel-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+}
+
+.channel-settings .channel-card-head {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+}
+
+.channel-settings .channel-card-title {
   color: var(--s-ink);
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+}
+
+.channel-settings .channel-section,
+.channel-settings .channel-facts,
+.channel-settings .channel-table,
+.channel-settings .channel-outbox,
+.channel-settings .channel-advanced {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .channel-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .channel-hint,
+.channel-settings .channel-empty {
+  margin: 0;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+}
+
+.channel-settings .channel-empty {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .channel-link {
+  color: var(--s-ink);
   font-weight: var(--weight-medium);
-  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
-.channel-settings .channel-status[data-tone="bad"] {
-  color: var(--error-text);
-}
-
-.channel-settings .channel-status-dot {
-  flex: none;
-  width: 10px;
-  height: 10px;
-  border: 1px solid var(--s-line-strong);
-  border-radius: var(--radius-pill);
-  background: var(--s-skin);
-}
-
-.channel-settings .channel-status[data-tone="ok"] .channel-status-dot {
-  background: var(--s-done);
-}
-
-.channel-settings .channel-status[data-tone="bad"] .channel-status-dot {
-  background: var(--s-danger);
-}
-
+/* ── Facts: label above value, two columns ── */
 .channel-settings .channel-facts {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--space-2) var(--space-4);
-  align-items: center;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
   margin: 0;
+}
+
+.channel-settings .channel-fact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
 .channel-settings .channel-facts dt {
   color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
 }
 
 .channel-settings .channel-facts dd {
+  max-width: 100%;
   margin: 0;
+  color: var(--s-ink);
   overflow-wrap: anywhere;
 }
 
+/* ── Tone chips: account state, command chat, outbox item state ── */
+.channel-settings .channel-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--s-line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-chip-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--s-skin);
+}
+
+.channel-settings .channel-chip[data-tone="ok"] .channel-chip-dot {
+  background: var(--s-done);
+}
+
+.channel-settings .channel-chip[data-tone="busy"] {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.channel-settings .channel-chip[data-tone="busy"] .channel-chip-dot {
+  background: var(--s-gold);
+}
+
+.channel-settings .channel-chip[data-tone="bad"] {
+  border-color: var(--error-border);
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.channel-settings .channel-chip[data-tone="bad"] .channel-chip-dot {
+  background: var(--s-danger);
+}
+
+/* ── Rows of buttons, and fields whose buttons align with the control ── */
 .channel-settings .channel-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
   align-items: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
 .channel-settings .channel-field {
@@ -4810,39 +4908,87 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   min-width: 0;
 }
 
-.channel-settings .channel-hint {
-  color: var(--s-ink-soft);
-  font-size: var(--font-size-sm);
-  line-height: var(--leading-body);
+/* The Settings modal's ambient form rules (`.modal input, .modal select` in
+   05-paper-report-media.css, `.settings-panel input|select|label` in
+   07-settings-providers-onboarding.css) out-specify the kit: a bottom margin
+   that pushed each field below its buttons, an uppercase label, and a
+   different surface for inputs than for selects. These panels restore one
+   field treatment for both. */
+.channel-settings .ui-field {
+  gap: var(--space-1);
+  min-width: 0;
 }
 
-.channel-settings .channel-link {
-  color: var(--s-ink);
+.channel-settings .ui-field__label {
+  margin: 0;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
   font-weight: var(--weight-medium);
-  text-decoration: underline;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
-.channel-settings .channel-advanced > summary {
+.channel-settings :is(input.ui-input, .ui-select > select) {
+  height: var(--control-h-md);
+  margin: 0;
+  padding-block: 0;
+  border: var(--s-border);
+  border-radius: var(--radius-xs);
+  background-color: var(--bg-primary);
+  box-shadow: none;
+  color: var(--s-ink);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-md);
+}
+
+.channel-settings input.ui-input {
+  padding-inline: var(--space-3);
+}
+
+.channel-settings :is(input.ui-input, .ui-select > select):focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.channel-settings :is(input.ui-input, .ui-select > select):disabled {
+  background-color: var(--bg-tertiary);
+  color: var(--text-tertiary);
+}
+
+.channel-settings .ui-field__hint {
+  color: var(--s-ink-soft);
+}
+
+/* ── Thread table: one header row; each cell's own label is for assistive
+   tech and narrow panes ── */
+.channel-settings .channel-table {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.channel-settings .channel-table-head,
+.channel-settings .channel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.channel-settings .channel-table-head {
+  padding-bottom: var(--space-2);
   color: var(--s-ink-soft);
   font-size: var(--font-size-sm);
-  cursor: pointer;
-}
-
-.channel-settings .channel-advanced[open] > summary {
-  margin-bottom: var(--space-3);
+  font-weight: var(--weight-medium);
 }
 
 .channel-settings .channel-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-3);
-  align-items: end;
   padding: var(--space-3) 0;
+  border-top: 1px solid var(--s-line);
 }
 
-.channel-settings .channel-row + .channel-row,
-.channel-settings .channel-outbox-item + .channel-outbox-item {
-  border-top: 1px solid var(--s-line);
+.channel-settings .channel-row:last-child {
+  padding-bottom: 0;
 }
 
 .channel-settings .channel-row-title {
@@ -4852,6 +4998,12 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   min-width: 0;
 }
 
+.channel-settings .channel-row-name {
+  color: var(--s-ink);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
 .channel-settings .channel-key {
   color: var(--s-ink-soft);
   font-family: var(--font-mono);
@@ -4859,20 +5011,200 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   overflow-wrap: anywhere;
 }
 
+.channel-settings a.channel-key:hover {
+  color: var(--s-ink);
+  text-decoration: underline;
+}
+
+.channel-settings .channel-cell {
+  position: relative;
+  min-width: 0;
+}
+
+.channel-settings .channel-cell > :is(.ui-field__label, .channel-cell-caption) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.channel-settings .channel-cell-static {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h-md);
+}
+
+/* ── Outbox ── */
+.channel-settings .channel-outbox {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .channel-settings .channel-outbox-item {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  min-width: 0;
   padding: var(--space-3) 0;
 }
 
+.channel-settings .channel-outbox-item:first-child {
+  padding-top: 0;
+}
+
+.channel-settings .channel-outbox-item:last-child {
+  padding-bottom: 0;
+}
+
+.channel-settings .channel-outbox-item + .channel-outbox-item {
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .channel-outbox-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .channel-outbox-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.channel-settings .channel-outbox-thread {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.channel-settings .channel-outbox-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
 .channel-settings .channel-outbox-text {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--s-cream);
+  line-height: var(--leading-body);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
+.channel-settings .channel-outbox-error {
+  color: var(--error-text);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* ── GitHub Enterprise disclosure (Database panel summary treatment) ── */
+.channel-settings .channel-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h-sm);
+  list-style: none;
+  cursor: pointer;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+}
+
+.channel-settings .channel-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.channel-settings .channel-advanced > summary::after {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline-start: auto;
+  border-inline-end: 1px solid currentColor;
+  border-block-end: 1px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.channel-settings .channel-advanced[open] > summary::after {
+  transform: rotate(225deg);
+}
+
+.channel-settings .channel-advanced > summary:hover {
+  color: var(--s-ink);
+}
+
+.channel-settings .channel-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-1);
+  border-radius: var(--radius-xs);
+}
+
+.channel-settings .channel-advanced[open] > summary {
+  margin-bottom: var(--space-3);
+}
+
+.channel-settings .channel-advanced > .channel-actions + .channel-hint {
+  margin-top: var(--space-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .channel-settings .channel-advanced > summary::after {
+    transition: none;
+  }
+}
+
+/* Narrow panes stack each thread and show every cell's own label. */
 @media (max-width: 720px) {
+  .channel-settings .channel-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .channel-settings .channel-actions > .channel-field {
+    flex-basis: 100%;
+  }
+
+  .channel-settings .channel-table-head {
+    display: none;
+  }
+
   .channel-settings .channel-row {
     grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .channel-settings .channel-table-head + .channel-row {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .channel-settings .channel-cell > :is(.ui-field__label, .channel-cell-caption) {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+  }
+
+  .channel-settings .channel-cell-static {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
+    min-height: 0;
+  }
+
+  .channel-settings .channel-cell-caption {
+    color: var(--s-ink-soft);
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
   }
 }

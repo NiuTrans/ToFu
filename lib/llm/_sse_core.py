@@ -829,8 +829,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     }
     try:
         from lib.tasks_pkg.wire_fingerprint import (
-            capture_wire_message_evidence, marker_signature,
-            static_prefix_hash, system_fingerprint, wire_byte_region,
+            cache_relevant_controls, capture_wire_message_evidence,
+            marker_signature, static_prefix_hash, system_fingerprint,
+            wire_byte_region,
         )
         _wire_key = 'messages' if body.get('messages') else 'input'
         _wire_items = body.get(_wire_key) or []
@@ -863,7 +864,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # is invisible to it. This hashes the real serialized bytes so that
         # divergence can't be laundered into "eviction". See wire_byte_region.
         raw_dumper.wire_region = wire_byte_region(
-            body.get('system'), body.get('tools'))
+            body.get('system'), body.get('tools'),
+            cache_relevant_controls(body))
         # Capture WHERE the cache_control breakpoints sit — canonical_messages
         # deliberately strips them, so a miss caused purely by a breakpoint
         # being LOST in translation (byte-identical content) would otherwise be

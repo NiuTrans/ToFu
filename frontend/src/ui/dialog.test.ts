@@ -128,3 +128,43 @@ describe.each([
     expect(close).not.toHaveBeenCalled();
   });
 });
+
+/** Platform semantics jsdom lacks: showModal refuses a detached dialog; close fires `close`. */
+function nativeModal(el: HTMLDialogElement): void {
+  el.showModal = () => {
+    if (!el.isConnected) throw new DOMException('The element is not in a Document.', 'InvalidStateError');
+    el.setAttribute('open', '');
+  };
+  el.close = (result?: string) => {
+    if (!el.open) return;
+    el.removeAttribute('open');
+    el.returnValue = result ?? '';
+    el.dispatchEvent(new Event('close'));
+  };
+}
+
+describe('dialog mounting', () => {
+  it('opens a dialog its caller never attached and removes it once settled', async () => {
+    const dialog = createDialog({ title: 't', body: 'b', actions: [{ id: 'ok', label: 'OK' }] });
+    nativeModal(dialog.el);
+    const choice = dialog.open();
+    expect(dialog.el.isConnected).toBe(true);
+    expect(dialog.el.open).toBe(true);
+    dialog.el.querySelector('button')!.click();
+    await expect(choice).resolves.toBe('ok');
+    expect(dialog.el.isConnected).toBe(false);
+  });
+
+  it('leaves a caller-mounted dialog where the caller put it', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const dialog = createDialog({ title: 't', body: 'b' });
+    nativeModal(dialog.el);
+    host.append(dialog.el);
+    const choice = dialog.open();
+    dialog.close('done');
+    await expect(choice).resolves.toBe('done');
+    expect(dialog.el.parentElement).toBe(host);
+    host.remove();
+  });
+});

@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 
 def memory_prefetch_corpus_roots(cfg, project_path, project_enabled):
     """The primary and extra roots whose memory corpus the prefetch ranks."""
-    paths = cfg.get('projectPaths') or []
+    paths = cfg.get('canonicalProjectPaths') or cfg.get('projectPaths') or []
     primary = project_path if project_enabled else None
     extras = [p for p in paths if p and p != primary] if primary else []
     return primary, extras

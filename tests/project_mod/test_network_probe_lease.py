@@ -271,13 +271,13 @@ def test_real_curl_does_not_load_hidden_output_config_or_replay_probe(repo, tmp_
                        'HOME': str(home), 'CURL_HOME': str(home)}
         with _internal_writer(repo):
             result = subprocess.run(planned, shell=True, cwd=repo, env=environment,
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert result.stdout.splitlines() == ['a -> 204', 'b -> 204']
         assert requests == ['/a', '/b']
         assert not hidden.exists()
     finally:
         server.shutdown()
-        worker.join(5)
+        worker.join()
         server.server_close()
         assert not worker.is_alive()

@@ -23448,6 +23448,60 @@
         assert_eq!(execute(&mut database, &read(1, 1), 1000).unwrap(), json!([]));
     }
 
+
+    #[test]
+    fn event_list_selection_beyond_stream_read_bound_is_payload_size_not_protocol_error() {
+        // Every event stays inline (below MAX_STREAM_EVENT_BYTES); only the
+        // selected page's stored bytes exceed the stream point-read bound.
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let text = "x".repeat(crate::generated_tofudb_ir::MAX_STREAM_EVENT_BYTES / 2);
+        let count = crate::generated_tofudb_ir::MAX_STREAM_READ_BYTES / text.len() + 2;
+        for sequence in 0..count {
+            execute(&mut database, &request("event.append", 11, json!({
+                "task_id": "inline-inspector-page", "sequence": sequence,
+                "event": {"type": "messages_snapshot", "text": text},
+                "created_at_ms": 1000
+            }), Some(&format!("inline-page-seed-{sequence}"))), 1000).unwrap();
+        }
+        let read = |after: i64, limit: usize, filtered: bool| {
+            let mut payload = json!({
+                "task_id": "inline-inspector-page", "after_sequence": after, "limit": limit
+            });
+            if filtered {
+                payload["types"] = json!(["messages_snapshot"]);
+            }
+            request("event.list", 11, payload, None)
+        };
+        for filtered in [true, false] {
+            let error = execute(&mut database, &read(-1, 1000, filtered), 1000).unwrap_err();
+            assert_eq!(error.code(), "storage_payload_too_large");
+            assert!(!error.retryable());
+        }
+        // Halving at the same cursor (the Request Inspector's recovery) reads
+        // every row exactly once, in order, with its complete payload.
+        let (mut after, mut limit, mut seen) = (-1_i64, 1000_usize, 0_usize);
+        loop {
+            let rows = match execute(&mut database, &read(after, limit, true), 1000) {
+                Err(error) if error.code() == "storage_payload_too_large" && limit > 1 => {
+                    limit /= 2;
+                    continue;
+                }
+                result => result.unwrap(),
+            };
+            let rows = rows.as_array().unwrap();
+            for row in rows {
+                assert_eq!(row["sequence"], seen);
+                assert_eq!(row["event"]["text"].as_str().unwrap(), text);
+                seen += 1;
+            }
+            if rows.len() < limit {
+                break;
+            }
+            after = rows.last().unwrap()["sequence"].as_i64().unwrap();
+        }
+        assert_eq!(seen, count);
+    }
 #[test]
 fn timer_counts_and_recovery_feed_have_no_live_or_saved_row_admission_quota() {
     let directory = tempfile::tempdir().unwrap();

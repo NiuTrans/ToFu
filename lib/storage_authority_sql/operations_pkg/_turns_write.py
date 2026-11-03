@@ -64,10 +64,10 @@ def _ensure_turn_conversation_header(
     if conversation is None:
         if not bool(defaults.get("allowCreate")):
             raise StorageError("database_not_found", "Conversation not found")
-        settings = (
-            dict(defaults.get("settings"))
-            if isinstance(defaults.get("settings"), Mapping)
-            else {}
+        raw_settings = defaults.get("settings")
+        settings: dict[str, Any] = (
+            {str(key): value for key, value in raw_settings.items()}
+            if isinstance(raw_settings, Mapping) else {}
         )
         settings.pop("activeTaskId", None)
         session.execute(
@@ -92,6 +92,8 @@ def _ensure_turn_conversation_header(
             "WHERE id=? AND user_id=?",
             (conv_id, user_id),
         )
+        if current_row is None:
+            raise StorageError("database_not_found", "Conversation not found")
         current_settings = dict(_load(current_row["settings_json"]) or {})
         incoming_settings = dict(defaults["settings"])
         incoming_settings.pop("activeTaskId", None)
@@ -150,6 +152,10 @@ def _turn_create_pair(session: Session, payload: Mapping[str, Any]) -> Any:
             if turn is not None and turn.get("parent_turn_id")
             else None
         )
+        if turn is None or attempt is None:
+            raise StorageError(
+                "database_integrity", "Turn command replay references missing rows"
+            )
         queue_row = None
         if str(attempt.get("queue_state") or "") == "pending":
             queue_row = session.fetch_one(
@@ -273,6 +279,11 @@ def _turn_create_pair(session: Session, payload: Mapping[str, Any]) -> Any:
     if not isinstance(input_projection, Mapping):
         input_projection = {"content": ""}
     input_projection = normalize_projection_document(input_projection)
+    tail_row = session.fetch_one(
+        "SELECT 1 AS present FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND lane_id=? LIMIT 1",
+        (conv_id, user_id, lane_id),
+    )
     row = session.fetch_one(
         "SELECT COALESCE(MAX(ordinal), -1) AS ordinal FROM storage_conversation_turns "
         "WHERE conversation_id=? AND user_id=? AND lane_id=?",
@@ -288,6 +299,10 @@ def _turn_create_pair(session: Session, payload: Mapping[str, Any]) -> Any:
     output_presentation_id = str(
         payload.get("output_presentation_id") or f"{command_id}:output"
     )
+    if row is None and tail_row is not None:
+        raise StorageError("database_integrity", "Turn ordinal is unavailable")
+    if row is None:
+        row = {"ordinal": -1}
     if len(input_presentation_id) > 512 or len(output_presentation_id) > 512:
         raise StorageError("database_protocol_error", "Invalid presentation identity")
     submitted_settlement = {
@@ -494,6 +509,10 @@ def _turn_create_pair(session: Session, payload: Mapping[str, Any]) -> Any:
     attempt_row = session.fetch_one(
         "SELECT * FROM storage_generation_attempts WHERE attempt_id=?", (attempt_id,)
     )
+    if input_row is None or output_row is None or attempt_row is None:
+        raise StorageError(
+            "database_integrity", "Created turn pair is incomplete"
+        )
     _upsert_turn_search_row(session, input_row)
     _upsert_turn_search_row(session, output_row)
     result = {
@@ -573,6 +592,8 @@ def _turn_queue_activate(session: Session, payload: Mapping[str, Any]) -> Any:
         "SELECT rev FROM storage_conversations WHERE id=? AND user_id=?",
         (conv_id, user_id),
     )
+    if conversation is None:
+        raise StorageError("database_integrity", "Queued conversation is missing")
     revision = int(conversation["rev"] or 0) + 1
     session.execute(
         "UPDATE storage_conversations SET rev=?,updated_at_ms=? "
@@ -582,6 +603,8 @@ def _turn_queue_activate(session: Session, payload: Mapping[str, Any]) -> Any:
         "SELECT * FROM storage_generation_attempts WHERE attempt_id=?",
         (attempt["attempt_id"],),
     )
+    if attempt is None:
+        raise StorageError("database_integrity", "Queued attempt is missing")
     return {
         "submittedTurn": _turn_public(session, input_row),
         "turn": _turn_public(session, output_row),
@@ -778,11 +801,15 @@ def _turn_steer_commit(session: Session, payload: Mapping[str, Any]) -> Any:
         "SELECT * FROM storage_conversation_turns WHERE turn_id=?",
         (row["turn_id"],),
     )
+    if updated is None:
+        raise StorageError("database_integrity", "Steered turn is missing")
     _upsert_turn_search_row(session, updated)
     conversation = session.fetch_one(
         "SELECT rev FROM storage_conversations WHERE id=? AND user_id=?",
         (conv_id, user_id),
     )
+    if conversation is None:
+        raise StorageError("database_integrity", "Steered conversation is missing")
     return {
         "steered": True,
         "injectionId": command_id,
@@ -890,10 +917,13 @@ def _turn_append_settled(session: Session, payload: Mapping[str, Any]) -> Any:
                 now,
             ),
         )
-        attempt_public = _attempt_public(session.fetch_one(
+        attempt_row = session.fetch_one(
             "SELECT * FROM storage_generation_attempts WHERE attempt_id=?",
             (attempt_id,),
-        ))
+        )
+        if attempt_row is None:
+            raise StorageError("database_integrity", "Settled attempt is missing")
+        attempt_public = _attempt_public(attempt_row)
     revision = int(conversation["rev"]) + 1
     session.execute(
         "UPDATE storage_conversations SET rev=?,updated_at_ms=? "
@@ -902,6 +932,8 @@ def _turn_append_settled(session: Session, payload: Mapping[str, Any]) -> Any:
     )
     turn_row = session.fetch_one(
         "SELECT * FROM storage_conversation_turns WHERE turn_id=?", (turn_id,))
+    if turn_row is None:
+        raise StorageError("database_integrity", "Settled turn is missing")
     _upsert_turn_search_row(session, turn_row)
     return {
         "turn": _turn_public(session, turn_row),
@@ -1109,10 +1141,18 @@ def _turn_attempt_create(session: Session, payload: Mapping[str, Any]) -> Any:
             "SELECT * FROM storage_generation_attempts WHERE attempt_id=?",
             (existing["attempt_id"],),
         )
+        if attempt_row is None:
+            raise StorageError(
+                "database_integrity", "Attempt command replay references a missing attempt"
+            )
         turn_row = session.fetch_one(
             "SELECT * FROM storage_conversation_turns WHERE turn_id=?",
             (existing["turn_id"],),
         )
+        if turn_row is None:
+            raise StorageError(
+                "database_integrity", "Attempt command replay references a missing turn"
+            )
         replay = {
             "turn": _turn_public(session, turn_row),
             "attempt": _attempt_public(attempt_row),
@@ -1326,6 +1366,8 @@ def _turn_attempt_create(session: Session, payload: Mapping[str, Any]) -> Any:
         parent = session.fetch_one(
             "SELECT * FROM storage_conversation_turns WHERE turn_id=?", (parent_id,)
         )
+        if parent is None:
+            raise StorageError("database_integrity", "Submitted turn is missing")
         _upsert_turn_search_row(session, parent)
         submitted = _turn_public(session, parent)
     discarded_turn_ids: list[str] = []
@@ -1472,6 +1514,8 @@ def _turn_attempt_create(session: Session, payload: Mapping[str, Any]) -> Any:
     attempt = session.fetch_one(
         "SELECT * FROM storage_generation_attempts WHERE attempt_id=?", (attempt_id,)
     )
+    if attempt is None:
+        raise StorageError("database_integrity", "Created attempt is missing")
     attempt_public = _attempt_public(attempt)
     event = {
         "conversationId": conv_id,
@@ -1530,6 +1574,8 @@ def _turn_attempt_create(session: Session, payload: Mapping[str, Any]) -> Any:
     turn = session.fetch_one(
         "SELECT * FROM storage_conversation_turns WHERE turn_id=?", (turn_id,)
     )
+    if turn is None:
+        raise StorageError("database_integrity", "Created attempt turn is missing")
     result = {
         "turn": _turn_public(session, turn),
         "attempt": attempt_public,
@@ -1569,6 +1615,8 @@ def _turn_projection_update(session: Session, payload: Mapping[str, Any]) -> Any
         row = session.fetch_one(
             'SELECT * FROM storage_conversation_turns WHERE conversation_id=? AND user_id=? AND turn_id=?',
             (conv_id, user_id, turn_id))
+        if row is None:
+            raise StorageError("database_integrity", "Guidance turn is missing")
         previous = projection_from_turn_row(session, row)
         matches = [r for r in previous.get('toolRounds', [])
                    if isinstance(r, Mapping) and r.get('guidanceId') == answer.get('guidanceId')]
@@ -1590,6 +1638,8 @@ def _turn_projection_update(session: Session, payload: Mapping[str, Any]) -> Any
                 raise StorageError('database_conflict', 'Human guidance already answered differently')
             conversation = session.fetch_one(
                 'SELECT rev FROM storage_conversations WHERE id=? AND user_id=?', (conv_id, user_id))
+            if conversation is None:
+                raise StorageError("database_integrity", "Guidance conversation is missing")
             return {'turn': _turn_public(session, row),
                     'conversationRevision': int(conversation['rev']), 'idempotentReplay': True}
         if row['status'] not in ('pending', 'running') or question.get('status') not in ('pending', 'awaiting_human'):
@@ -1654,11 +1704,15 @@ def _turn_projection_update(session: Session, payload: Mapping[str, Any]) -> Any
     updated = session.fetch_one(
         "SELECT * FROM storage_conversation_turns WHERE turn_id=?", (turn_id,)
     )
+    if updated is None:
+        raise StorageError("database_integrity", "Updated turn is missing")
     _upsert_turn_search_row(session, updated)
     conversation = session.fetch_one(
         "SELECT rev FROM storage_conversations WHERE id=? AND user_id=?",
         (conv_id, user_id),
     )
+    if conversation is None:
+        raise StorageError("database_integrity", "Updated conversation is missing")
     return {
         "turn": _turn_public(session, updated),
         "conversationRevision": int(conversation["rev"]),
@@ -1767,6 +1821,8 @@ def _turn_perception_record(session: Session, payload: Mapping[str, Any]) -> Any
             raise StorageError(
                 "database_conflict", "Attempt changed while perception was recorded"
             )
+    if conversation is None:
+        raise StorageError("database_integrity", "Perception conversation is missing")
     return {
         "applied": bool(applied),
         **({"idempotentReplay": True} if not applied else {}),
@@ -1929,6 +1985,8 @@ def _turn_attempt_bind(session: Session, payload: Mapping[str, Any]) -> Any:
     row = session.fetch_one(
         "SELECT * FROM storage_generation_attempts WHERE attempt_id=?", (attempt_id,)
     )
+    if row is None:
+        raise StorageError("database_integrity", "Bound attempt is missing")
     result = _attempt_public(row)
     if attempt["status"] == "pending":
         turn_projection = projection_from_turn_row(session, turn)
@@ -2026,6 +2084,8 @@ def _turn_attempt_start(session: Session, payload: Mapping[str, Any]) -> Any:
     row = session.fetch_one(
         "SELECT * FROM storage_generation_attempts WHERE attempt_id=?", (attempt_id,)
     )
+    if row is None:
+        raise StorageError("database_integrity", "Started attempt is missing")
     result = _attempt_public(row)
     turn_projection = projection_from_turn_row(session, turn)
     if not isinstance(turn_projection, Mapping):

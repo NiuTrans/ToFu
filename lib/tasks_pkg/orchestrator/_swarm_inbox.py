@@ -118,6 +118,14 @@ def drain_and_inject_inbox(
             # Otherwise every available completion joins this model round.
             _bgcmd_items = ([] if task.get('_bgcmd_delivery_event') is not None else
                 _drain_inbox(_swarm_key, modes=['background-command']))
+            # A task without its own conversation has no durable row or twin:
+            # the command registry is its lane, read for this run only.
+            from lib.tasks_pkg.conversation_delivery import conversation_delivery_available
+            if (task.get('_bgcmd_delivery_event') is None
+                    and not conversation_delivery_available(task)):
+                from lib.tasks_pkg.background_commands import take_run_completions
+                _bgcmd_items = list(_bgcmd_items) + take_run_completions(
+                    task_id=str(task.get('id') or ''), user_id=task.get('_userId'))
             # Project path-overlap advice is task-local, never durable inbox/feed
             # state. Once appended, the ordinary note projection records what
             # entered context; it does not turn advice into a delivery/ACK lane.

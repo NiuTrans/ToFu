@@ -61,7 +61,12 @@ def _classify_break(
       * no_reuse        — a large fresh write with ZERO read despite an
                           established prefix last round.
       * partial_no_reuse— a large write repeated round-over-round while the
-                          read stayed pinned (body re-billed uncached).
+                          read fell short of the prefix the previous round
+                          left cached (its read + write): the body was
+                          re-billed uncached. Measuring against the
+                          previous READ missed a head-only read after a
+                          zero-read miss and flagged a fully-read prefix
+                          extended by large writes.
     """
     api_break = (
         call_count > 0
@@ -86,7 +91,8 @@ def _classify_break(
         and not no_reuse
         and cache_write >= _MIN_NO_REUSE_TOKENS
         and prev_cache_write >= _MIN_NO_REUSE_TOKENS
-        and cache_read <= prev_cache_read * 1.05
+        and cache_read < prev_prefix_tokens * 0.95
+        and (prev_prefix_tokens - cache_read) >= _MIN_CACHE_MISS_TOKENS
     )
 
     return bool(api_break), bool(no_reuse), bool(partial_no_reuse)

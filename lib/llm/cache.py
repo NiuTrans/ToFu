@@ -28,7 +28,9 @@ logger = get_logger(__name__)
 #   gen 8 = OpenAI-wire tail-marker walk-back past tool loops + Claude-cloak
 #           system marker carried onto the rebuilt system[] (lib/oauth).
 #   gen 9 = selected-route cache-marker support and text-only content collapse.
-CACHE_FIX_GEN = 9
+#   gen 10 = only an explicit OpenAI-wire chat_cache_breakpoints declaration
+#            skips markers; undeclared profiled routes keep them.
+CACHE_FIX_GEN = 10
 
 # ── Cache-marker capability matrix ──
 # Empirically probed on the example-corp gateway (2026-05-03).
@@ -176,10 +178,19 @@ def _is_prefill_converted(msg) -> bool:
 
 def _gateway_honors_cache_markers(model: str, *, inference_profile=None,
                                   protocol: str = 'openai') -> bool:
-    """Return True if the selected route accepts cache marker annotations."""
-    from lib.llm.route_features import route_feature
-    if route_feature(inference_profile, 'chat_cache_breakpoints',
-                     protocol=protocol) is False:
+    """Return True if the selected route accepts cache marker annotations.
+
+    ``chat_cache_breakpoints`` is an OpenAI wire feature: only an explicit
+    declaration other than ``supported`` on that wire skips the markers. A
+    missing declaration, or another wire, keeps the model-family policy.
+    ``route_feature`` cannot express that: it is closed-world and answers
+    False for an undeclared feature and for another wire's feature alike.
+    """
+    features = (inference_profile.get('features')
+                if isinstance(inference_profile, dict) else None)
+    declared = (features.get('chat_cache_breakpoints')
+                if isinstance(features, dict) else None)
+    if protocol == 'openai' and declared not in (None, 'supported'):
         return False
     if is_claude(model):
         return True

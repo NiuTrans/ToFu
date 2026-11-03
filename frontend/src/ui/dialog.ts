@@ -4,7 +4,9 @@
  * Responsibility: promise-based modal built on the NATIVE <dialog> element —
  * Escape-to-close and top-layer rendering come from the platform; an explicit
  * boundary cycle prevents Tab from landing on the document body. Adds structure (header/body/footer), a
- * footer action row, and backdrop-click dismissal.
+ * footer action row, and backdrop-click dismissal. `open()` places a detached
+ * dialog on <body> for as long as it is open (showModal requires a connected
+ * element); a dialog its caller mounted stays where the caller put it.
  * Entry points: createDialog.
  * Dependencies: button and shared backdrop factories; styles from 30-ui-kit.css.
  */
@@ -62,6 +64,7 @@ export function createDialog(options: DialogOptions): DialogHandle {
 
   let resolveOpen: ((result: string | null) => void) | null = null;
   let settled = true;
+  let mountedByOpen = false;
 
   const settle = (result: string | null): void => {
     if (settled) return;
@@ -110,6 +113,10 @@ export function createDialog(options: DialogOptions): DialogHandle {
   // path; el.returnValue is '' for Escape and programmatic close().
   el.addEventListener('close', () => {
     settle(el.returnValue === '' ? null : el.returnValue);
+    if (mountedByOpen) {
+      mountedByOpen = false;
+      el.remove();
+    }
   });
   bindDialogBackdrop(el, settle);
 
@@ -123,6 +130,10 @@ export function createDialog(options: DialogOptions): DialogHandle {
       const promise = new Promise<string | null>((resolve) => {
         resolveOpen = resolve;
       });
+      if (!el.isConnected) {
+        el.ownerDocument.body.append(el);
+        mountedByOpen = true;
+      }
       el.showModal();
       return promise;
     },

@@ -410,10 +410,15 @@ credential vault.
   `GET|PUT /api/v4/channels/github` (status, token or vault entry, API base),
   `GET /api/v4/channels/github/threads`, `PUT /api/v4/channels/github/threads/{key}`
   (URL-encoded key),
-  `GET /api/v4/channels/outbox`, `POST /api/v4/channels/outbox/{id}/approve|discard`.
+  `GET /api/v4/channels/outbox[?channel=dx|github]` (all channels, or one),
+  `POST /api/v4/channels/outbox/{id}/approve|discard`.
 - Browser: Settings → 大象 (`frontend/src/features/settings/dx-channel.ts`,
   markup `frontend/src/settings-panels/dx.html`) and Settings → GitHub
   (`github-channel.ts`, `settings-panels/github.html`), facade `Api.channels`.
+  Both tabs share one presentation (`channel-settings-view.ts`, styles
+  `frontend/src/styles/settings/13-dx-channel.css`): a status card, the
+  channel's own cards, a thread table with one column header row, and the
+  outbox of that channel only (`?channel=`).
 
 ## Verification
 

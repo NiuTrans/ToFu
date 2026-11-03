@@ -200,8 +200,11 @@ Explicit serial-tool requirements and strict function schemas survive both adapt
 
 `chat_cache_breakpoints` is an OpenAI wire feature: explicit `unsupported`
 skips `cache_control` creation and collapses text-only content parts to strings
-at the shared stream/non-stream Chat boundary. A missing declaration retains
-the model-family cache policy; no new configuration knob exists. The observed
+at the shared stream/non-stream Chat boundary. A missing declaration, or any
+other wire, retains the model-family cache policy; no new configuration knob
+exists. The gate reads the declaration itself, because the closed-world
+`route_feature` answers False for both cases ([LLM cost optimization
+§10](../LLM_COST_OPTIMIZATION.md#10-cache-breakpoints-on-profiled-routes)). The observed
 Baidu DeepSeek V4 Pro wire rejects its content-part variants but accepts the
 same prompt with string content, so this declaration is Deployment-scoped.
 

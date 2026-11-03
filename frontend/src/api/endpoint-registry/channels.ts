@@ -1,7 +1,7 @@
 /** channels endpoint facade (docs/CHANNELS.md). Wire DTOs come from api/channels.generated.ts. */
 import type { EndpointPorts } from './contracts';
 import type {
-  ChannelAccountUpdate, ChannelAccountView, ChannelThreadPage, ChannelThreadUpdate,
+  Channel, ChannelAccountUpdate, ChannelAccountView, ChannelThreadPage, ChannelThreadUpdate,
   ChannelThreadView, GitHubAccountUpdate, GitHubAccountView, OutboxItemView, OutboxPage,
 } from '../channels.generated';
 
@@ -24,7 +24,8 @@ export function createChannelsEndpoints(ports: EndpointPorts) {
       { query: cursor ? { cursor } : {}, signal }),
     updateGitHubThread: (key: string, update: ChannelThreadUpdate, signal?: AbortSignal) =>
       put<ChannelThreadView>(`/api/v4/channels/github/threads/${encodeURIComponent(key)}`, update, { signal }),
-    outbox: (signal?: AbortSignal) => get<OutboxPage>('/api/v4/channels/outbox', { signal }),
+    outbox: (channel: Channel, signal?: AbortSignal) =>
+      get<OutboxPage>('/api/v4/channels/outbox', { query: { channel }, signal }),
     approveOutbox: (id: string, signal?: AbortSignal) =>
       post<OutboxItemView>(`/api/v4/channels/outbox/${encodeURIComponent(id)}/approve`, {}, { signal }),
     discardOutbox: (id: string, signal?: AbortSignal) =>

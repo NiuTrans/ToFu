@@ -200,6 +200,22 @@ test('Escape uses one winning shell target; settings backdrop ignores inner cont
   f.fire(settings, 'click'); assert.equal(f.calls.at(-1)[0], 'closeSettings'); dispose(); f.dom.window.close();
 });
 
+test('an open native dialog owns Escape: the shell neither closes the overlay under it nor cancels its close request', () => {
+  const f = fixture(), dispose = installApplicationInteractions(f.ports);
+  f.d.getElementById('settingsModal').classList.add('open');
+  f.d.getElementById('sidebarSearchWrapper').style.display = '';
+  const dialog = f.d.createElement('dialog'); dialog.setAttribute('open', ''); dialog.innerHTML = '<button>cancel</button>';
+  f.d.body.append(dialog);
+  const before = f.calls.length;
+  for (const target of [dialog.firstChild, f.d.body]) {
+    assert.equal(f.fire(target, 'keydown', { key: 'Escape' }).defaultPrevented, false);
+  }
+  assert.equal(f.calls.length, before);
+  dialog.remove(); f.d.getElementById('sidebarSearchWrapper').style.display = 'none';
+  assert.equal(f.fire(f.d, 'keydown', { key: 'Escape' }).defaultPrevented, true);
+  assert.equal(f.calls.at(-1)[0], 'closeSettings'); dispose(); f.dom.window.close();
+});
+
 test('viewport resize bursts and orientation retries are bounded; invalid metrics cannot collapse the page', () => {
   const f = fixture(); f.d.documentElement.style.setProperty('height', '90vh', 'important');
   const dispose = installViewportHeightGuard(f.w, f.d);

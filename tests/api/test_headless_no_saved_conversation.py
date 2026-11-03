@@ -1,18 +1,22 @@
-"""Headless request routes never hand work to an undeliverable deferred lane.
+"""Headless request routes never hand work to a lane that outlives the response.
 
 Native ``/api/v1/chat/completions``, ``/api/v1/agent/run`` and the
 OpenAI/Anthropic-compatible agent routes run a task under a client job label
 (``api-…``, ``agent-…``, ``compat-…``) that never becomes a saved conversation.
-A background command, timer continuation or ``current``-conversation agent
-schedule started there could only publish into that missing conversation, so
-the caller would lose the result. The real routes, task runner, tool pipeline
-and handlers run here; only the provider transport is scripted.
+An explicit background command, timer continuation or ``current``-conversation
+agent schedule started there could only publish into that missing
+conversation, so the caller would lose the result. A long foreground command
+still moves to the background after ``AUTO_BACKGROUND_AFTER_S``, inside the
+run: its result reaches the next model round or ``poll``, and it is stopped
+when the response ends. The real routes, task runner, tool pipeline and
+handlers run here; only the provider transport is scripted.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 
 import pytest
@@ -49,9 +53,10 @@ def _run(coro):
 class ScriptedProvider:
     """Answer each model request with the next scripted turn.
 
-    A turn is either final text or tool calls. Each request's messages and
-    offered tools are recorded as JSON so assertions see exactly what the
-    model was told, including earlier tool results.
+    A turn is either final text or tool calls, or a callable that computes one
+    from the requests recorded so far. Each request's messages and offered
+    tools are recorded as JSON so assertions see exactly what the model was
+    told, including earlier tool results.
     """
 
     def __init__(self, *turns):
@@ -69,6 +74,8 @@ class ScriptedProvider:
                              for tool in body.get('_executable_tool_catalog') or []
                              if tool.get('function')]}, default=str)))
             turn = self._turns.pop(0) if self._turns else {'content': 'done'}
+        if callable(turn):
+            turn = turn(self)
         if 'tool_calls' in turn:
             return ProviderStreamResult.from_legacy(
                 {'role': 'assistant', 'content': None, 'tool_calls': turn['tool_calls']},
@@ -110,6 +117,21 @@ class ScriptedProvider:
 def _call(name, arguments, call_id='call-headless-1'):
     return {'tool_calls': [{'id': call_id, 'type': 'function', 'function': {
         'name': name, 'arguments': json.dumps(arguments)}}]}
+
+
+def _handle(receipt: str) -> str:
+    match = re.search(r'\[Command moved to background: (bg_[0-9a-f]+)\.', receipt)
+    assert match, receipt
+    return match.group(1)
+
+
+def _wait_until_finished(command_id, within_s=30.0):
+    """Wait on the registry's own completion; the bound only turns a hang into a failure."""
+    from lib.tasks_pkg import background_commands
+    info = background_commands.check_background_command(
+        command_id, user_id=OWNER, wait_s=within_s)
+    assert info and info['status'] == 'completed', info
+    return info
 
 
 @pytest.fixture(scope='module')
@@ -226,21 +248,65 @@ async def _post(runtime, path, body):
 
 @pytest.mark.parametrize('mode', ['code_exec', 'project'])
 @pytest.mark.parametrize('route', ['chat', 'agent'])
-def test_long_command_runs_in_the_foreground_and_returns_its_result(
+def test_long_command_hands_off_and_poll_collects_its_result(
         route, mode, runtime, monkeypatch, tmp_path):
     from lib.tasks_pkg.handlers import _background_command as handoff
 
     # Every subprocess is old enough for the elapsed-time handoff at once.
     monkeypatch.setattr(handoff, 'AUTO_BACKGROUND_AFTER_S', 0.0)
     provider = ScriptedProvider(
-        _call('run_command', {'command': 'sleep 1; echo headless-foreground-done'}),
+        _call('run_command', {'command': 'sleep 1; echo headless-handoff-done'}),
+        lambda seen: _call('poll', {'id': _handle(seen.tool_results(1)[0]),
+                                    'wait_s': 60}, 'call-headless-2'),
         {'content': 'finished'}).install(monkeypatch)
     _run(_post(runtime, *_task_request(route, config=_command_config(mode, tmp_path))))
 
-    result, = provider.tool_results()
-    assert 'headless-foreground-done' in result
-    assert '[Command moved to background:' not in result
-    assert _commands() == []
+    receipt, polled = provider.tool_results(2)
+    assert 'reaches your next step' in receipt
+    assert 'stopped' in receipt  # nothing started here outlives the response
+    assert 'shown in the conversation' not in receipt
+    assert 'headless-handoff-done' in polled
+    # poll already showed the result, so no round boundary presents it again.
+    assert '<background-command id=' not in json.dumps(provider.requests[2]['messages'])
+
+
+@pytest.mark.parametrize('route', ['chat', 'agent'])
+def test_finished_handoff_reaches_the_next_model_round(
+        route, runtime, monkeypatch, tmp_path):
+    from lib.tasks_pkg.handlers import _background_command as handoff
+
+    monkeypatch.setattr(handoff, 'AUTO_BACKGROUND_AFTER_S', 0.0)
+
+    def once_it_finished(seen):
+        _wait_until_finished(_handle(seen.tool_results(1)[0]))
+        return _call('poll', {}, 'call-headless-2')  # a snapshot collects nothing
+
+    provider = ScriptedProvider(
+        _call('run_command', {'command': 'sleep 1; echo headless-lane-done'}),
+        once_it_finished,
+        {'content': 'finished'}).install(monkeypatch)
+    _run(_post(runtime, *_task_request(
+        route, config=_command_config('code_exec', tmp_path))))
+
+    told = json.dumps(provider.requests[2]['messages'])
+    assert told.count('<background-command id=') == 1
+    assert 'headless-lane-done' in told
+
+
+def test_handed_off_command_is_stopped_when_the_response_ends(
+        runtime, monkeypatch, tmp_path):
+    from lib.tasks_pkg.handlers import _background_command as handoff
+
+    monkeypatch.setattr(handoff, 'AUTO_BACKGROUND_AFTER_S', 0.0)
+    marker = tmp_path / 'outlived-the-response'
+    provider = ScriptedProvider(
+        _call('run_command', {'command': f'sleep 60; touch {marker}'}),
+        {'content': 'finished'}).install(monkeypatch)
+    _run(_post(runtime, *_task_request('chat', config=_command_config('code_exec', tmp_path))))
+
+    # Settling long before the sleep could end proves the stop.
+    _wait_until_finished(_handle(provider.tool_results(1)[0]))
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize('route,surface_kind', [
@@ -272,26 +338,26 @@ def test_explicit_background_is_refused_before_anything_runs(
 
 @pytest.mark.parametrize('mode', ['code_exec', 'project'])
 @pytest.mark.parametrize('route', ['chat', 'agent'])
-def test_command_tool_text_never_promises_conversation_delivery(
+def test_command_tool_text_describes_delivery_within_the_request(
         route, mode, runtime, monkeypatch, tmp_path):
     provider = ScriptedProvider({'content': 'finished'}).install(monkeypatch)
     _run(_post(runtime, *_task_request(route, config=_command_config(mode, tmp_path))))
 
     offered = provider.offered()
     command = offered['run_command']
-    text = command['description'] + command['parameters']['properties']['background']['description']
+    background = command['parameters']['properties']['background']['description']
+    text = command['description'] + background
     assert 'arrive automatically' not in text
     assert 'delivered automatically' not in text
-    assert 'backgrounded one' not in text
-    assert NO_CONVERSATION in text
-    # Neither a command nor a sub-agent handle can exist in this request:
-    # poll keeps only tasks in other conversations, and kill, which could stop
-    # nothing here, is withheld.
+    assert 'reaches your next step' in command['description']
+    assert NO_CONVERSATION in background
+    # A handed-off command's handle exists here; a sub-agent's cannot.
     control = json.dumps(offered['poll'])
-    assert 'bg_*' not in control and 'delivered automatically' not in control
+    assert 'bg_*' in control and 'other conversations' in control
+    assert 'delivered automatically' not in control
     assert 'swarm' not in control and 'spawn_agents' not in control
-    assert 'other conversations' in control
-    assert 'kill' not in offered
+    stop = json.dumps(offered['kill'])
+    assert 'bg_*' in stop and 'swarm' not in stop
 
 
 @pytest.mark.parametrize('route', ['chat', 'agent', 'openai', 'anthropic'])
@@ -321,11 +387,11 @@ def test_sub_agents_are_not_offered(route, runtime, monkeypatch):
 
 
 # Everything a request without a saved conversation is never offered: the
-# deferred-completion lanes, and every tool whose call registers in, reads from
-# or reports into the request's own conversation (sub-agents, retained agents,
-# exploration plans, working facts and the project mailbox).
+# deferred timer continuation, and every tool whose call registers in, reads
+# from or reports into the request's own conversation (sub-agents, retained
+# agents, exploration plans, working facts and the project mailbox).
 NOT_OFFERED = frozenset({
-    'timer_create', 'kill',
+    'timer_create',
     'spawn_agents', 'get_agent_result', 'send_agent_message',
     'get_agent_messages', 'set_approval_delegate', 'manage_agents', 'list_agents',
     'get_exploration', 'manage_exploration', 'read_working_facts',
@@ -348,7 +414,10 @@ def test_conversation_scoped_tools_are_not_offered(route, mode, runtime, monkeyp
     assert offered and catalog, 'the route must still offer its ordinary tools'
     assert not NOT_OFFERED & (offered | catalog)
     prompt = json.dumps(provider.requests[0]['messages'])
-    assert not [name for name in NOT_OFFERED - {'kill'} if name in prompt]
+    assert not [name for name in NOT_OFFERED if name in prompt]
+    if mode:
+        # A handed-off command is collected and stopped within the request.
+        assert {'run_command', 'poll', 'kill'} <= offered
     # Owner-scoped scheduling (command/python/prompt jobs, or agent turns in an
     # existing conversation) stays, as do the task's own isolated-workspace
     # controls and reads of other owned conversations.
@@ -381,9 +450,13 @@ def test_spawn_agents_is_refused_before_any_agent_exists(runtime, monkeypatch):
     assert 'directly' in result  # the next action: do the work in this request
     assert 'arrive automatically' not in result and 'async_launched' not in result
     assert launches == []
-    # Every model request is the parent's own; no worker ever ran.
-    assert all('Run the requested command.' in json.dumps(request['messages'][:2])
-               for request in provider.requests)
+    # Every model request is the parent's own; no worker ever ran. The prompt
+    # may span several system messages, so locate the opening user turn.
+    opening_user_turns = [
+        next(m['content'] for m in request['messages'] if m.get('role') == 'user')
+        for request in provider.requests]
+    assert all('Run the requested command.' in json.dumps(turn)
+               for turn in opening_user_turns), opening_user_turns
 
 
 TIMER_ARGUMENTS = {'continuation_message': 'Report the build result.',

@@ -259,17 +259,18 @@ def report_confirmed_break(report: BreakReport) -> dict:
         return {'no_cache_reuse': cause_str}
 
     if report.partial_no_reuse and not report.api_break and not report.no_reuse:
-        # Big write repeated while cache_read stayed pinned at the
-        # static prefix — the conversation body is being re-billed
-        # uncached every round. WARN so each occurrence is greppable.
+        # Big write repeated while cache_read fell short of the prefix the
+        # previous round left cached — the conversation body is being
+        # re-billed uncached. WARN so each occurrence is greppable.
         logger.warning(
             '[CacheTrack] conv=%s call=%d ⚠ PREFIX RE-WRITTEN: '
-            'cache_write=%d cache_read=%d (prev write=%d read=%d, '
-            'gap=%.1fs) — read pinned, body re-billed uncached. '
-            'Cause: %s%s',
-            report.conv_id[:8], report.call_count, report.cache_write, report.cache_read,
-            report.previous_write, report.previous_read, report.elapsed, cause_str,
-            _split_note(report),
+            'cache_write=%d cache_read=%d of %d cached-prefix tokens '
+            '(prev write=%d read=%d, gap=%.1fs) — body re-billed '
+            'uncached. Cause: %s%s',
+            report.conv_id[:8], report.call_count, report.cache_write,
+            report.cache_read, report.previous_prefix_tokens,
+            report.previous_write, report.previous_read, report.elapsed,
+            cause_str, _split_note(report),
         )
         if report.client_changes:
             return report.client_changes

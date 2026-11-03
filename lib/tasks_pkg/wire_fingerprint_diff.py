@@ -184,11 +184,12 @@ def diff_byte_region(old: dict | None, new: dict | None) -> list[str]:
     """Name which hoisted region(s) diverged at the RAW-byte level.
 
     Compares ``wire_byte_region`` outputs. Returns ``<bytes>system`` /
-    ``<bytes>tools`` for each field whose true bytes changed, so a downstream
-    verdict tells a hoisted-region byte divergence apart from a lossy
-    ``system_fingerprint`` ``<hoisted>`` culprit and from a per-message
-    ``<bytes>`` culprit. ``.get(...)`` defaults keep pre-change (missing) state
-    inert — a mid-deploy round with no stored region never cries wolf.
+    ``<bytes>tools`` / ``<bytes>controls`` for each field that changed, so a
+    downstream verdict tells a hoisted-region byte divergence apart from a
+    lossy ``system_fingerprint`` ``<hoisted>`` culprit and from a per-message
+    ``<bytes>`` culprit. A missing region stays inert — a mid-deploy round
+    with no stored region never cries wolf — and ``controls`` is compared
+    only when both regions captured it.
     """
     if not old or not new:
         return []
@@ -196,6 +197,9 @@ def diff_byte_region(old: dict | None, new: dict | None) -> list[str]:
     for fld in ('system', 'tools'):
         if old.get(fld) != new.get(fld):
             changes.append('<bytes>' + fld)
+    if ('controls' in old and 'controls' in new
+            and old['controls'] != new['controls']):
+        changes.append('<bytes>controls')
     return changes
 
 
