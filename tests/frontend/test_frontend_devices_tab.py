@@ -298,9 +298,12 @@ def test_neuter_hook_means_blank_tab():
     output = run_harness(
         target_js=owner,
         body_js=_NEUTER_HOOK_BODY.replace(
-            'window._populateDevicesTab = global._populateDevicesTab = () => {',
+            "switchSettingsTab('devices');",
             'delete featureRegistry._populateDevicesTab;\n'
-            'window._populateDevicesTab = global._populateDevicesTab = () => {',
+            'delete window._populateDevicesTab; delete global._populateDevicesTab;\n'
+            'if (featureRegistry._populateDevicesTab !== undefined) '
+            '  throw new Error("Devices registry fallback was not removed");\n'
+            "switchSettingsTab('devices');",
         ).replace("check('hook_fills_tab',", "check('neuter_tab_stays_blank',")
         .replace("=== 'POPULATED'", "!== 'POPULATED'"),
         min_pass=1,
