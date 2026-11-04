@@ -30,14 +30,15 @@ _PERMANENT = re.compile(
     r'no matching distribution|unsatisfiable|resolution impossible', re.I)
 
 
-def redact(text: str) -> str:
+def redact(text: str, *, env: dict[str, str] | None = None) -> str:
     """Never echo URL credentials or explicitly configured provider secrets."""
     text = _URL_SECRET.sub(r'\1[redacted]@', text)
     text = _QUERY_SECRET.sub(r'\1[redacted]', text)
-    for name in ('LLM_API_KEY', 'LLM_API_KEYS', 'PIP_PASSWORD', 'UV_INDEX_PASSWORD'):
-        for value in os.environ.get(name, '').split(','):
-            if value:
-                text = text.replace(value, '[redacted]')
+    for source in (os.environ, env or {}):
+        for name in ('LLM_API_KEY', 'LLM_API_KEYS', 'PIP_PASSWORD', 'UV_INDEX_PASSWORD'):
+            for value in source.get(name, '').split(','):
+                if value:
+                    text = text.replace(value, '[redacted]')
     return text
 
 
@@ -71,7 +72,7 @@ def run_command(
             start_new_session=(os.name != 'nt'),
         )
     except OSError as exc:
-        message = redact(f'Could not start installer command: {exc}')
+        message = redact(f'Could not start installer command: {exc}', env=child_env)
         if emit:
             emit(message)
         return 127, message
@@ -128,7 +129,7 @@ def run_command(
                 discarding_line = True
                 text = '[installer output line omitted: exceeds 4096 bytes]'
             else:
-                text = redact(chunk.decode('utf-8', errors='replace').rstrip('\r\n'))
+                text = redact(chunk.decode('utf-8', errors='replace').rstrip('\r\n'), env=child_env)
             output.append(text + '\n')
             size += len((text + '\n').encode('utf-8'))
             while size > OUTPUT_LIMIT and output:

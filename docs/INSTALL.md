@@ -445,6 +445,14 @@ match the target interpreter's accepted tags. Archives reject traversal, links,
 duplicates and undeclared members; lock and wheel hashes are checked before use.
 Cache slots `.tofu-install-cache/wheels/{uv,conda}` keep one complete generation
 per backend; replacement reclaims the previous generation after publication.
+Both uv and the pip-only acquisition path apply an adjacent
+`install-constraints.txt` when supplied by the release builder. Falling back
+to pip must not silently select a different dependency graph.
+Release certification installs that exact hashed lock with uv configuration
+discovery disabled, matching the installer. Problem: reapplying the project's
+unpinned resolver floors during hashed installation rejects an already verified
+wheelhouse. Re-resolving or dropping hash enforcement would weaken admission;
+the lock is the installation authority after resolution has finished.
 Archives are bounded to 1 GiB compressed / 4 GiB unpacked / 2048 members;
 temporary files are reclaimed. Download socket/whole-file deadlines are 10/60
 seconds; resolver/acquisition steps retain 900-second deadlines.
@@ -732,14 +740,41 @@ Installation stages a fresh candidate interpreter and configuration. Required
 artifact/import/runtime checks must pass before the selected environment pointer
 changes. Publication failure restores the previous configuration and interpreter;
 provider credentials, source edits, storage authority and user data remain intact.
+The candidate must name a distinct environment directory below `.tofu-envs/`
+and an interpreter entry inside that directory. A virtualenv's interpreter may
+symlink to its managed base Python; an unrelated interpreter path is rejected
+before configuration changes. Problem: checking only that an executable exists
+does not establish the candidate's ownership. Decision: verify its containing
+directory independently from the executable's symlink target. Rejecting all
+interpreter symlinks would break ordinary virtualenvs.
 Use `--no-launch` to prepare without starting a worker; `--no-update` preserves
 source but still permits artifact downloads. Locks reject competing installers.
+While still holding the install lock, completion removes only unpublished
+candidate environments created by that invocation. The selected environment
+and all pre-existing environments remain untouched, including after a launch
+failure. An unreadable selection marker or an unsafe path stops cleanup rather
+than guessing ownership. Problem: every failed attempt previously left another
+full environment on disk. Decision: reclaim invocation-owned staging on settled
+exit; sweeping old environments could remove a running or rollback interpreter.
+Hard kills cannot run cleanup; such leftovers are preserved for explicit review.
+Retention validation with three synthetic 1 MiB failed environments reclaimed
+all 3 MiB while retaining the selected environment; this adds no persistent
+cache or retention setting.
 
 Native artifacts copied between containers still require actual host execution:
 matching wheel tags and versions alone cannot prove loader compatibility. The
 Wasmtime reactor/host-tool and PDF checks run before candidate publication;
 `healthcheck.py --runtime` verifies launched application readiness separately.
 Supported repair and diagnostic commands are documented above.
+
+Installer diagnostics redact provider and package-index secrets supplied in
+either the parent environment or an explicit child environment, for both live
+output and the retained error tail. A separate child environment must not bypass
+the existing log privacy boundary.
+
+On Linux, bootstrap treats both raw subprocess SIGINT/SIGTERM exits and their
+shell-encoded equivalents as intentional stops. They never enter dependency
+repair or the external-SIGKILL restart path.
 
 ## Desktop clients
 

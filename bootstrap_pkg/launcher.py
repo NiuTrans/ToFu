@@ -123,7 +123,7 @@ def _try_start_server(first_attempt: bool = False) -> tuple[bool, str, int]:
     # — that's not a crash, it's intentional. 130 (SIGINT / a second-Ctrl+C
     # force-quit) and 143 (SIGTERM) are likewise deliberate stops, not crashes:
     # do NOT feed them into the LLM dependency-repair loop.
-    if rc in (0, 130, 143):
+    if rc in (0, 130, 143, -signal.SIGINT, -signal.SIGTERM):
         sys.exit(0)
 
     # Non-zero exit → crash.

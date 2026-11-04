@@ -86,6 +86,83 @@ def test_missing_candidate_never_changes_live_configuration(tmp_path):
     assert 'PORT' not in (tmp_path / '.env').read_text()
 
 
+@pytest.mark.parametrize('escape', ['foreign-python', 'prefix-root', 'prefix-link'])
+def test_commit_rejects_candidate_outside_its_environment(tmp_path, escape):
+    prefix = candidate(tmp_path)
+    marker_path = tmp_path / '.tofu_env.pending.json'
+    marker = json.loads(marker_path.read_text())
+    if escape == 'foreign-python':
+        foreign = tmp_path / 'unrelated-python'
+        foreign.write_text('unrelated interpreter')
+        marker['python'] = str(foreign)
+    elif escape == 'prefix-root':
+        marker['env_prefix'] = str(prefix.parent)
+    else:
+        outside = tmp_path / 'outside'
+        prefix.rename(outside)
+        prefix.symlink_to(outside, target_is_directory=True)
+    marker_path.write_text(json.dumps(marker))
+    previous = (tmp_path / '.env').read_bytes()
+    with pytest.raises(ValueError, match='Candidate environment'):
+        transaction.commit(tmp_path)
+    assert (tmp_path / '.tofu_env.json').read_text() == 'old environment'
+    assert (tmp_path / '.env').read_bytes() == previous
+
+
+def test_commit_accepts_venv_interpreter_symlink(tmp_path):
+    prefix = candidate(tmp_path)
+    base = tmp_path / 'base-python'
+    base.write_text('base interpreter')
+    (prefix / 'python').unlink()
+    (prefix / 'python').symlink_to(base)
+    transaction.commit(tmp_path)
+    assert json.loads((tmp_path / '.tofu_env.json').read_text())['env_prefix'] == str(prefix)
+
+
+def test_candidate_cleanup_preserves_selected_and_unlisted_environments(tmp_path):
+    selected = candidate(tmp_path)
+    transaction.commit(tmp_path)
+    failed = selected.parent / 'uv.failed'
+    failed.mkdir()
+    (failed / 'partial-wheel').write_bytes(b'x' * 1024)
+    unlisted = selected.parent / 'uv.previous'
+    unlisted.mkdir()
+    transaction.discard_candidates(tmp_path, [failed, selected])
+    assert not failed.exists()
+    assert selected.is_dir() and unlisted.is_dir()
+    transaction.discard_candidates(tmp_path, [failed, selected])  # Idempotent.
+
+
+def test_candidate_cleanup_normalizes_selected_and_candidate_paths(tmp_path):
+    selected = candidate(tmp_path)
+    transaction.commit(tmp_path)
+    alias = tmp_path / 'selected-env'
+    alias.symlink_to(selected, target_is_directory=True)
+    (tmp_path / '.tofu_env.json').write_text(json.dumps({'env_prefix': str(alias)}))
+    candidate_alias = selected.parent / '..' / '.tofu-envs' / selected.name
+    transaction.discard_candidates(tmp_path, [candidate_alias])
+    assert selected.is_dir()
+
+
+@pytest.mark.parametrize('unsafe', ['outside', 'symlink', 'invalid-pointer'])
+def test_candidate_cleanup_refuses_unproven_ownership(tmp_path, unsafe):
+    selected = candidate(tmp_path)
+    transaction.commit(tmp_path)
+    outside = tmp_path / 'user-environment'
+    outside.mkdir()
+    target = outside
+    if unsafe == 'symlink':
+        target = selected.parent / 'uv.link'
+        target.symlink_to(outside, target_is_directory=True)
+    elif unsafe == 'invalid-pointer':
+        target = selected.parent / 'uv.unpublished'
+        target.mkdir()
+        (tmp_path / '.tofu_env.json').write_text('interrupted marker')
+    with pytest.raises(ValueError):
+        transaction.discard_candidates(tmp_path, [target])
+    assert target.exists() and outside.is_dir() and selected.is_dir()
+
+
 def test_wheel_prefetch_locks_downloaded_artifacts_without_installing(tmp_path, monkeypatch):
     requirements = tmp_path / 'requirements.txt'
     requirements.write_text('tofu-search==0.10.4\n')
