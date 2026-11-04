@@ -273,7 +273,6 @@ import {
   siblingTitleDiscriminators,
   shouldCollapseToolBatch,
   summarizeToolAttention,
-  toolParentCallId,
   toolGroupRoundDisplay,
   toolGroupRoundNumber,
   toolGroupRoundTitle,

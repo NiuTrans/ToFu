@@ -402,15 +402,14 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
                 # renders an origin chip (``R54 compacted``) before the source
                 # label instead of stacking two "Read" verbs. Recovery-rebuilt
                 # rounds lose this key and fall back to parsing the flat label.
+                # The source call is provenance only; it never becomes
+                # ``parentToolCallId``, the execution-child edge.
                 _origin_meta = continuation_origin_meta(
                     fn_name, _origin_args, _origin)
                 if _origin_meta:
                     extra['_artifactOrigin'] = {
                         k: v for k, v in _origin_meta.items()
                         if v is not None and v != ''}
-                    if _origin_meta.get('sourceToolCallId'):
-                        extra['parentToolCallId'] = str(
-                            _origin_meta['sourceToolCallId'])
         except Exception as _origin_err:
             logger.debug('[ToolDisplay] artifact origin relabel failed for '
                          '%s: %s', fn_name, _origin_err)

@@ -1359,9 +1359,11 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   tools fail visible. A settled panel collapses by default only when all four or
   more entries are routine; a parallel batch collapses only when all three or
   more siblings are routine. Important, interactive, active, error, and mixed
-  work stays exposed. `parentToolCallId` draws program/artifact children under
-  their source without duplicating execution. User disclosure state survives
-  semantic repaint, and collapsing never removes data from Turn authority.
+  work stays exposed. `parentToolCallId` draws program and gateway children
+  under their caller without duplicating execution. A saved-output read-back
+  is a sibling row that names its source; provenance never draws a rail.
+  User disclosure state survives semantic repaint, and collapsing never
+  removes data from Turn authority.
 - `segments` owns render order and `toolRounds` owns the rich tool body. The
   generated browser snapshot may receive completed, uniquely matched tool
   segments as `roundRef` records to avoid carrying their input/result bytes a
