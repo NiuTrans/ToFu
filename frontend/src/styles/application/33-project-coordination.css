@@ -78,7 +78,6 @@
 .coordinator-conversations-count { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .coordinator-conversations-live { color: var(--accent); font-size: var(--font-size-xs); white-space: nowrap; }
 .coordinator-conversations-live:empty { display: none; }
-.coordinator-conversations-unread[hidden] { display: none; }
 .coordinator-conversations-body {
   max-height: 40vh; overflow-y: auto; overscroll-behavior: contain;
   margin-inline-start: var(--space-3); padding-inline-start: var(--space-2);
@@ -237,8 +236,10 @@
 .coordination-reference summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
 .coordination-refresh-feedback:empty { display: none; }
 
-/* Session-free task board: the Coordinator's own summary of the human's tasks.
- * One calm card; status is a quiet label, never a progress bar or a count of sessions. */
+/* Session-free task board: the Coordinator's own summary of the human's tasks,
+ * read as a todo list. One line per task behind a status glyph: a ring while
+ * open (half filled in progress), a filled disc once done or dropped. Only
+ * current work shows its note; never a progress bar or a count of sessions. */
 .coordinator-progress { color: var(--text-primary); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
 .coordinator-progress-head { display: flex; flex-direction: column; gap: var(--space-1); cursor: pointer; list-style: none; min-width: 0; }
 .coordinator-progress-head::-webkit-details-marker { display: none; }
@@ -249,21 +250,34 @@
 .coordinator-progress-summary { color: var(--text-secondary); font-size: var(--font-size-sm); line-height: var(--leading-title); }
 .coordinator-progress:not([open]) .coordinator-progress-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .coordinator-progress-body { display: flex; flex-direction: column; gap: var(--space-2); padding-block-start: var(--space-2); max-height: min(40vh, 26rem); overflow: auto; overscroll-behavior: contain; }
+.coordinator-progress-content { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.coordinator-progress-content:empty { display: none; }
 .coordinator-progress-note { margin: var(--space-0); color: var(--text-secondary); font-size: var(--font-size-sm); }
-.coordinator-progress-tasks { display: flex; flex-direction: column; gap: var(--space-1); margin: var(--space-0); padding: var(--space-0); list-style: none; }
-.coordinator-progress-task { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-1) var(--space-0); min-width: 0; }
-.coordinator-progress-status { flex: none; padding-inline: var(--space-1); border-radius: var(--radius-sm); color: var(--text-secondary); font-size: var(--font-size-xs); line-height: var(--leading-title); text-align: center; white-space: nowrap; }
-.coordinator-progress-task[data-status="in_progress"] .coordinator-progress-status { color: var(--accent); background: var(--accent-subtle); }
-.coordinator-progress-task[data-status="completed"] .coordinator-progress-status { color: var(--success-text); }
-.coordinator-progress-task[data-status="cancelled"] .coordinator-progress-text { color: var(--text-tertiary); text-decoration: line-through; }
-.coordinator-progress-text { display: flex; flex-direction: column; gap: var(--space-0); min-width: 0; }
-.coordinator-progress-text strong { font-size: var(--font-size-sm); font-weight: var(--weight-medium); line-height: var(--leading-title); }
-.coordinator-progress-text small { color: var(--text-secondary); font-size: var(--font-size-xs); line-height: var(--leading-title); }
+.coordinator-progress-tasks { display: flex; flex-direction: column; margin: var(--space-0); padding: var(--space-0); list-style: none; }
+.coordinator-progress-task { position: relative; display: flex; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-1); min-width: 0; font-size: var(--font-size-md); line-height: var(--leading-title); }
+/* One first-line box tall, so the glyph centers on the title's first line. */
+.coordinator-progress-glyph { flex: none; display: inline-flex; align-items: center; height: calc(var(--font-size-md) * var(--leading-title)); color: var(--text-tertiary); }
+.coordinator-progress-glyph svg { width: 1.1em; height: 1.1em; }
+.coordinator-progress-glyph-cut { stroke: var(--bg-secondary); }
+.coordinator-progress-task[data-status="in_progress"] .coordinator-progress-glyph { color: var(--accent); }
+.coordinator-progress-task[data-status="completed"] .coordinator-progress-glyph { color: var(--success-text); }
+.coordinator-progress-text { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.coordinator-progress-task[data-status="in_progress"] .coordinator-progress-task-title { font-weight: var(--weight-medium); }
+.coordinator-progress-task[data-status="completed"] .coordinator-progress-task-title { color: var(--text-secondary); text-decoration: line-through; text-decoration-color: var(--text-tertiary); }
+.coordinator-progress-task[data-status="cancelled"] .coordinator-progress-task-title { color: var(--text-tertiary); text-decoration: line-through; }
+.coordinator-progress-task-note { overflow: hidden; color: var(--text-secondary); font-size: var(--font-size-sm); text-overflow: ellipsis; white-space: nowrap; }
+/* Any other note is its row's tooltip and stays readable to assistive technology. */
+.coordinator-progress-task:not([data-status="in_progress"]) .coordinator-progress-task-note { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
 .coordinator-progress-finished > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--font-size-xs); }
 .coordinator-progress-finished > .coordinator-progress-tasks { padding-block-start: var(--space-1); }
-.coordinator-progress-actions { display: flex; justify-content: flex-end; }
+/* A Router's Worker model leads the board's commands instead of taking a line
+ * of its own above the board; opened, its choice takes the row. */
+.coordinator-progress-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
+.coordinator-progress-actions > .router-worker-model[open] { flex-basis: 100%; }
+.coordinator-progress-commands { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-inline-start: auto; }
+.coordinator-progress-command-slot { display: contents; }
 /* An empty board is one line under its title: the hint beside its action. */
 .coordinator-progress[data-state="empty"] .coordinator-progress-body { flex-direction: row; flex-wrap: wrap; align-items: center; }
-.coordinator-progress[data-state="empty"] .coordinator-progress-note { flex: 1 1 16rem; min-width: 0; }
+.coordinator-progress[data-state="empty"] .coordinator-progress-content { flex: 1 1 16rem; }
 .coordinator-progress summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
 @media (max-width: 480px) { .coordinator-progress { padding: var(--space-2); } }

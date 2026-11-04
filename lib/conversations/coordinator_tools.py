@@ -117,10 +117,18 @@ def execute_coordinator_tool(task: dict, name: str, arguments: dict, *, runtime_
             }, arguments)
         elif name == 'update_task_progress':
             from lib.conversations.coordinator_progress import CoordinatorTaskProgress
-            published = CoordinatorTaskProgress(scope['user_id'], scope['project_path']).publish({
+            from lib.conversations.coordinator_progress_translation import (
+                progress_translation_target, schedule_progress_translation)
+            progress_scope = {
                 'owner': scope['user_id'], 'projectPath': scope['project_path'],
                 'coordinatorId': scope['conversation_id'], 'bindingRevision': scope['binding_revision'],
-            }, arguments)
+            }
+            target = progress_translation_target(task, progress_scope)
+            published = CoordinatorTaskProgress(scope['user_id'], scope['project_path']).publish(
+                progress_scope, arguments, translation_target=target)
+            if target is not None:
+                # Also for an unchanged board: it retries a translation that failed before.
+                schedule_progress_translation(scope['user_id'], scope['project_path'], progress_scope, target)
             result = {'revision': published['board']['revision'], 'changed': published['changed'],
                       'task_count': len(published['board']['tasks']),
                       'next_step': 'Shown to the human above this chat. Send the complete board again '

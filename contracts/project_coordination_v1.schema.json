@@ -419,13 +419,36 @@
         "tasks": {"$ref": "#/$defs/progressRequest/properties/tasks"}
       }
     },
+    "progressTranslation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Display translation of the current board's own texts into the owner's reading language, derived by the shared translation engine while the Coordinator conversation auto-translates. Reconstructible from the board; never evidence or authority. Each entry pairs one exact board text (the summary, a task title or a progress note) with its translation; a text without an entry is shown as written. 49 entries = the summary plus a title and a note for each of the board's 24 tasks.",
+      "required": ["target", "texts"],
+      "properties": {
+        "target": {"type": "string", "minLength": 1, "maxLength": 64},
+        "texts": {
+          "type": "array",
+          "maxItems": 49,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "text"],
+            "properties": {
+              "source": {"type": "string", "minLength": 1, "maxLength": 280, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"},
+              "text": {"type": "string", "minLength": 1, "maxLength": 560, "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"}
+            }
+          }
+        }
+      }
+    },
     "progressHead": {
       "type": "object",
       "additionalProperties": false,
       "required": ["scope", "board"],
       "properties": {
         "scope": {"$ref": "#/$defs/reportScope"},
-        "board": {"$ref": "#/$defs/progressBoard"}
+        "board": {"$ref": "#/$defs/progressBoard"},
+        "translation": {"$ref": "#/$defs/progressTranslation"}
       }
     },
     "progressState": {
@@ -436,7 +459,8 @@
         "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
         "conversationId": {"type": "string", "maxLength": 256},
         "bindingRevision": {"type": "integer", "minimum": 0},
-        "board": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/progressBoard"}]}
+        "board": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/progressBoard"}]},
+        "translation": {"$ref": "#/$defs/progressTranslation"}
       }
     }
   },
