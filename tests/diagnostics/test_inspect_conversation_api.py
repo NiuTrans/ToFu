@@ -418,6 +418,8 @@ def test_api_json_mode_absence_errors_and_partial_evidence(monkeypatch, capsys):
     assert set(payload) == JSON_KEYS - {'anomalies'}
     assert payload['exitCode'] == 3 and payload['messages'] == []
     assert payload['document']['diagnostic_resume_index'] == 0
+    # The Turn alone (4.05 MiB of wire reads) exceeds the whole 3 MiB allowance.
+    assert payload['document']['diagnostic_resume_total_mib'] == 5
 
 
 def _rule_note(llm_round):
@@ -543,20 +545,81 @@ def test_final_header_revision_change_is_not_reported_as_consistent(monkeypatch)
     assert sum('kind=chunk' in path for path in seen) == inspector.SNAPSHOT_PASSES
 
 
-def test_unaffordable_turn_reports_unread_and_resume_without_downloading(monkeypatch, capsys):
-    monkeypatch.setattr(inspector._DiagnosticAPI, 'MAX_TOTAL_BYTES', 3 * 1024 * 1024)
-    seen = []
+def _sized_pages(sizes):
     def serve(request):
+        index = int(parse_qs(urlsplit(request.path).query).get('index', ['0'])[0])
+        return pages(request, total=len(sizes), projection={'content': 'x' * sizes[index]})
+    return serve
+
+
+def _resume_line(output):
+    [line] = [line for line in output.splitlines() if line.startswith('  resume: ')]
+    return line
+
+
+def _resume_flags(output):
+    return _resume_line(output).removeprefix('  resume: ').split(' (', 1)[0].split()
+
+
+def test_unaffordable_turn_reports_unread_and_resume_without_downloading(monkeypatch, capsys):
+    # A Turn larger than the whole allowance: paging by turn cannot read it.
+    monkeypatch.setattr(inspector._DiagnosticAPI, 'MAX_TOTAL_BYTES', 1024 * 1024)
+    seen = []
+    serve = _sized_pages([1000, 800_000])
+    def record(request):
         seen.append(request.path)
-        return pages(request, total=1, projection={'content': 'x' * (3 * 1024 * 1024)})
+        return serve(request)
+    with api_server(record) as url:
+        command = ['conversation', '--api-url', url, '--no-logs']
+        assert inspector.main(command) == 3
+        output = capsys.readouterr().out
+        assert 'INCOMPLETE: Turn 1 alone needs' in output
+        assert '1 read, 1 unread' in output
+        assert not any('kind=chunk' in path and '&index=1&' in path for path in seen)
+        assert seen[-1].endswith('?kind=header')
+        resume = _resume_flags(output)
+        assert resume == ['--start-index', '1', '--max-turns', '1', '--api-max-total-mib', '2']
+        # Paging alone fails the same way; the allowance derived from observed sizes reads it.
+        assert inspector.main(command + resume[:4]) == 3
+        assert '0 read, 2 unread' in capsys.readouterr().out
+        assert inspector.main(command + resume) == 0
+        output = capsys.readouterr().out
+        assert '1 read, 1 unread' in output and 'INCOMPLETE' not in output
+
+
+@pytest.mark.parametrize('sizes, allowance, read', [
+    ([300_000] * 3, [], 2),
+    # Each Turn exceeds the default allowance: the resume keeps the explicit one.
+    ([800_000] * 2, ['--api-max-total-mib', '2'], 1),
+])
+def test_budget_cut_at_turn_boundary_resumes_by_paging(monkeypatch, capsys, sizes, allowance, read):
+    monkeypatch.setattr(inspector._DiagnosticAPI, 'MAX_TOTAL_BYTES', 1024 * 1024)
+    with api_server(_sized_pages(sizes)) as url:
+        command = ['conversation', '--api-url', url, '--no-logs']
+        assert inspector.main(command + allowance) == 3
+        output = capsys.readouterr().out
+        assert 'exceeds the remaining diagnostic byte/request budget' in output
+        assert f'{read} read, {len(sizes) - read} unread' in output
+        resume = _resume_flags(output)
+        assert resume == ['--start-index', str(read), '--max-turns', '1', *allowance]
+        assert inspector.main(command + resume) == 0
+        output = capsys.readouterr().out
+        assert f'1 read, {len(sizes) - 1} unread' in output and 'INCOMPLETE' not in output
+
+
+def test_turn_beyond_the_maximum_allowance_has_no_resume(capsys):
+    def serve(request):
+        status, body = pages(request, total=1)
+        if 'kind=turn' in request.path:
+            body['source']['totalBytes'] = inspector.API_TOTAL_MIB_MAX * 1024 * 1024
+        return status, body
     with api_server(serve) as url:
         assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 3
     output = capsys.readouterr().out
-    assert 'INCOMPLETE:' in output
-    assert '0 read, 1 unread' in output
-    assert '--start-index 0 --max-turns 1' in output
-    assert not any('kind=chunk' in path for path in seen)
-    assert seen[-1].endswith('?kind=header')
+    assert 'INCOMPLETE: Turn 0 alone needs' in output
+    resume = _resume_line(output)
+    assert '--start-index' not in resume
+    assert f'{inspector.API_TOTAL_MIB_MAX} MiB maximum --api-max-total-mib' in resume
 
 
 def test_oversize_without_content_length_counts_bytes(monkeypatch):
