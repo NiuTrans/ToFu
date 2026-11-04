@@ -87,10 +87,24 @@ def coordinator_tool_ceiling(scope: dict) -> frozenset:
     return COORDINATOR_TOOLS
 
 
+# The human's own tool settings, kept beside the role's narrowed ones: the
+# Workers a request delegates run under the settings an ordinary conversation
+# of this human would (docs/PROJECT_COORDINATION.md).
+SUBMITTED_TOOL_SETTINGS_KEY = '_coordinatorSubmittedToolSettings'
+
+
 def coordinator_tool_settings(config: dict) -> dict:
     """The request's tool settings under this role, which never runs programs."""
     from lib.context_experiment_flags import normalize_context_experiment_flags
     return {**normalize_context_experiment_flags(config)['tools'], 'programmaticCalling': 'off'}
+
+
+def submitted_tool_settings(config: dict) -> dict:
+    """The tool settings the human submitted before the role narrowed them."""
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    submitted = config.get(SUBMITTED_TOOL_SETTINGS_KEY)
+    return normalize_context_experiment_flags(
+        {'tools': submitted} if isinstance(submitted, dict) else config)['tools']
 
 
 def pin_coordinator_request_policy(conversation_id: str, config: dict, owner_user_id: int) -> dict:
@@ -116,7 +130,8 @@ def pin_coordinator_request_policy(conversation_id: str, config: dict, owner_use
         return config
     if not active:
         return config
-    return {**config, 'tools': coordinator_tool_settings(config), 'humanGuidanceEnabled': True}
+    return {**config, 'tools': coordinator_tool_settings(config), 'humanGuidanceEnabled': True,
+            SUBMITTED_TOOL_SETTINGS_KEY: submitted_tool_settings(config)}
 
 
 def coordinator_call_rejection(task: dict, name: str, arguments: dict,

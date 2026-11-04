@@ -69,6 +69,21 @@ is not authorization. Restrictions remain pinned through the selected turn;
 provider-native multi-agent and programmatic execution stay disabled even when
 old turn/checkpoint latches requested them.
 
+Problem: Workers inherited the Coordinator role's narrowing (no
+`execute_program`, `programmaticCalling=off`, no Swarm/retained agents), so a
+delegated conversation had fewer capabilities than the same human's ordinary
+conversation. Decision (owner, 2026-11-04): a `project` Worker gets exactly the
+capability boundary of an ordinary conversation of that human, inside its
+isolated workspace. Request ingress keeps the human's submitted tool settings
+beside the role's (`_coordinatorSubmittedToolSettings`);
+`delegation.capture_worker_policy` grants those settings and the gateway's
+`execute_program`. Admission fences a Worker's `tools` to exactly that policy.
+`workerDeniedTools` keeps only the Coordinator/Router/Watchdog role tools and
+deferred wakes (timers, schedules, `await_device`, `create_conversation`,
+`integration_submit`), which would start work outside the grant and its Stop
+fence. Alternative rejected: a separate Worker toggle, which would reintroduce a
+second capability ceiling diverging from ordinary conversations.
+
 Problem: the per-call role refusal (`Coordinator policy unavailable`, fail
 closed) converted every lookup exception, so a project-dispatch task whose
 `_projectDispatchAdmission` carrier was removed received a refusal and kept

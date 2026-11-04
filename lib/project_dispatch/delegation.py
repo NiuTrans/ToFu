@@ -146,14 +146,15 @@ def capture_worker_policy(task, config, catalog, model, *, worker_model=None):
             deepcopy(policy['config']), tuple(controls['tools']), controls['model'])
         return
     denied = set(CONTRACT['workerDeniedTools'])
-    names = tuple(sorted({'search_tools', 'execute_tools'} | {
+    # A Worker has the capabilities of an ordinary conversation of this human:
+    # the gateway's program action is admitted like any other tool, and its
+    # tool settings are the human's own, not the Coordinator role's.
+    names = tuple(sorted({'search_tools', 'execute_tools', 'execute_program'} | {
         item['function']['name'] for item in catalog if item['function']['name'] not in denied}))
     keys = CONTRACT['$defs']['workerPolicy']['properties']['config']['properties']
     selected = {key: deepcopy(config[key]) for key in keys if config.get(key) is not None}
-    # Arbitrary program execution obscures independent worker ownership. The
-    # regular batch transport remains available and every member is admitted.
-    from lib.tasks_pkg.coordinator_policy import coordinator_tool_settings
-    selected['tools'] = coordinator_tool_settings(config)
+    from lib.tasks_pkg.coordinator_policy import submitted_tool_settings
+    selected['tools'] = submitted_tool_settings(config)
     selected.update(schedulerEnabled=False, humanGuidanceEnabled=False)
     visible = {item['function']['name'] for item in catalog} | {'search_tools', 'execute_tools'}
     controls = tuple(name for name in CONTRACT['continuationTools'] if name in visible)

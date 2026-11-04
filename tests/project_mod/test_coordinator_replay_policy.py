@@ -176,7 +176,10 @@ def test_continuation_runs_under_the_request_selection_and_its_grant(run, monkey
     assert normalize_context_experiment_flags(resumed) == normalize_context_experiment_flags(human)
     # Capabilities stay with the issued grant and its fixed overrides.
     issued = controls(r)[-1]['request']['delegation']['policy']['config']
-    assert all(resumed[key] == value for key, value in issued.items() if key != 'humanGuidanceEnabled')
+    # The issued tools are the Workers' (the human's own settings); the role
+    # keeps its narrowed settings, so they are compared separately below.
+    assert all(resumed[key] == value for key, value in issued.items()
+               if key not in ('humanGuidanceEnabled', 'tools'))
     assert resumed['tools'] == human['tools'] and resumed['tools']['programmaticCalling'] == 'off'
     assert resumed['model'] == controls(r)[-1]['request']['model'] == MODEL
     assert (resumed['autopilot'], resumed['planMode'], resumed['autoTranslate']) == (False, False, False)
