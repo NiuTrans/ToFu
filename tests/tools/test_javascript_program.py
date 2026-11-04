@@ -262,6 +262,35 @@ def test_data_dependent_fanout_runs_one_sibling_wave():
     assert (stats['tool_calls'], stats['call_stages'], stats['parallel_stages']) == (4,2,1)
 
 
+def test_receipt_fanout_keeps_one_program_past_a_failed_item():
+    world = World()
+    succeed = world.read
+
+    def read(name, arguments):
+        if arguments.get('value') == 'b':
+            return CanonicalReceipt({'status': 'error', 'error': 'permission denied',
+                                     'output_truncated': False}, canonical={'owned': True})
+        return succeed(name, arguments)
+
+    world.read = read
+    value, stats = world.run('''
+      const ids = ['a','b','c'];
+      const receipts = await Promise.all(ids.map(id => tools.call('read_doc', {value:id})));
+      const rows = [];
+      for (const [i, r] of receipts.entries())
+        rows.push(r.status === 'done' ? await tools.value(r) : {id:ids[i], status:r.status});
+      return rows;
+    ''')
+    assert value == ['a', {'id': 'b', 'status': 'error'}, 'c']
+    assert world.waves == [(['read_doc'] * 3, 'parallel')]
+    assert stats['outcome'] == 'completed'
+    assert (stats['tool_calls'], stats['successful_tool_calls']) == (3, 2)
+    handoff, stats = world.run(
+        "return await Promise.all(['a','b'].map(id => tools.invoke('read_doc', {value:id})));")
+    assert (handoff['kind'], handoff['reason']) == ('observation', 'tool_not_done')
+    assert stats['outcome'] == 'needs_model'
+
+
 @pytest.mark.parametrize('mode', ['sequential', 'parallel', 'auto'])
 def test_explicit_batch_obeys_requested_mode(mode):
     world = World()

@@ -297,12 +297,22 @@ do not establish model quality, adoption or latency benefit.
 **Problem:** Treating every tool use as a program adds script-authoring risk
 without useful computation. Ambiguous body/return guidance also turns missing
 results into spurious judgment handoffs; swallowed promise failures and lossy
-object encoding can make an incorrect computation look successful.
+object encoding can make an incorrect computation look successful. Wrapping
+each item of one fan-out in its own sibling program multiplies programs,
+settlements and model handoffs without adding computation.
 
 **Decision:** Prefer a direct tool for one action and `execute_tools` for known
 independent calls. Use `execute_program` for useful aggregation or data-dependent
-workflows. The canonical action schema teaches an async **body**, an executable
-`return` example, and terminal observation semantics. Routine computed results
+workflows. The same steps over several items belong in one program that loops
+over or `Promise.all`s them within the action's per-program call limit
+(`MAX_TOOL_CALLS` in `lib/tools/program_contract.py`, stated by the action
+description), never one program per item. `tools.invoke` stops the program at a
+failed child; a program that continues past failed items checks each
+`tools.call` receipt's `status` before `tools.value`. The tail-context guide
+states this routing policy only: limits, sandbox scope and operations stay in
+the action description, so the guide does not repeat them. The canonical action
+schema teaches an async **body**, an executable `return` example, and terminal
+observation semantics. Routine computed results
 are returned, not passed to `tools.observe`. Observation remains available only
 when evidence needs unresolved model judgment; it ends the script, never resumes
 it, and does not roll back effects.
@@ -330,7 +340,12 @@ it, and does not roll back effects.
 returns, adding compatibility globals, and replaying failed programs each hide
 the actual contract or risk repeating effects. A second workflow engine, new
 retry ladder, and model-specific routing are unnecessary for these fixes.
+Restating the call limit in the guide, or the fan-out rule in every schema,
+duplicates a number that can drift and spends tokens on every request.
 No claim of measured end-to-end model improvement follows from runtime tests.
+Executable coverage: `tests/context/test_programmatic_guidance.py` (guide and
+limit wording) and `tests/tools/test_javascript_program.py` (one receipt
+fan-out continuing past a failed item; `tools.invoke` handing off).
 
 ## Program reasoning boundaries
 
