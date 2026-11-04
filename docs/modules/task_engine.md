@@ -108,6 +108,12 @@ Verify tests/agent_core/test_native_checkpoint_policy.py and tests/storage/test_
 
 Facades may re-export stable entry points, but new implementation belongs in a cohesive leaf module. A facade must not preserve a retired behavior merely to keep an old monkeypatch path alive.
 
+Stall diagnostics retain the judge's silence duration through finalization.
+Problem: the root reaper logged total task age as "no progress", overstating
+silence after productive rounds. Decision: log the frozen verdict used to reap
+the task. Recomputing elapsed age or silence after terminal mutation loses that
+evidence. Verify `tests/tasks_pkg/test_stuck_task_reaper.py`.
+
 ## Terminal projection ownership
 
 Problem: error and queued-abort finalizers repeated the same event, task-result

@@ -38,6 +38,11 @@ context composition, compaction, event folding, and settlement. Read
 - Bound explicit authorization, retries, context, tool output, server messages,
   and retained stream state. Fault injection and rollback paths remain usable.
 
+`invocation_cancellation.py` owns borrowed parent cancellation observation for
+child invocations. Swarm/graph adapters supply the exact control scope; retained
+and issued native controls keep their own authority. See
+`docs/TASK_EXECUTION_MODES.md`, child-cancellation and nested-runtime tests.
+
 Parallel tools and streaming prefetch use the shared demand executor in
 `lib/observability.py`. Worker knobs size idle reuse only; prefetch preserves
 qualified occurrences and never restores a local count gate.

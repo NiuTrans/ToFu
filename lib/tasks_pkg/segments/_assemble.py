@@ -45,6 +45,7 @@ from contextlib import nullcontext
 from itertools import accumulate
 from typing import Any
 
+from lib.conversation_sync.settled_rows import SettledDict, settle
 from lib.log import get_logger
 from lib.tool_results.tool_round_identity import (
     execution_batch_keys,
@@ -318,6 +319,8 @@ def record_injected_note(
             return previous
     scope = attempt_id or task_id
     entry['blockId'] = f'system-note:{scope + ":" if scope else ""}{note_kind}-{len(entries)}'
+    # Recorded facts are immutable; the caller still owns append rollback.
+    entry = settle(entry)
     entries.append(entry)
     return entry
 
@@ -437,7 +440,7 @@ def _insert_injected_note_segments(
     per note: every structural frame of a long Turn re-projects all notes.
     """
     entries = task.get(INJECTED_NOTES_FIELD)
-    if not isinstance(entries, list):
+    if not isinstance(entries, list) or not entries:
         return
     placement: _NotePlacement | None = None
     for position, entry in enumerate(entries):
@@ -529,6 +532,9 @@ class _PlacedNote:
 
     def __init__(self, gap: int, segment: dict[str, Any]) -> None:
         self.gap = gap
+        self.replace(segment)
+
+    def replace(self, segment: dict[str, Any]) -> None:
         self.segment = segment
         self.threshold = _note_anchor_threshold(segment)
         self.attempt_id = segment.get('attemptId')
@@ -536,32 +542,48 @@ class _PlacedNote:
 
 
 class _NotePlacement:
-    """Place notes entry by entry over ordinary blocks that never move.
+    """Index existing note identities and place new notes over fixed blocks.
 
-    Notes stay ordered by ``gap``. A note's first anchoring block is a binary
-    search over the running maximum of block thresholds, one prefix per
-    execution scope; only the notes ahead of that block are walked.
+    Notes stay ordered by gap. Known identities retain their position without
+    consulting historical round anchors; a new identity uses the shared binary
+    search over per-scope running maxima, then preserves same-gap note order.
+    All indexes belong to this one merge and cannot outlive mutable input.
     """
 
-    __slots__ = ('_blocks', '_thresholds', '_scope_maxima', '_notes')
+    __slots__ = ('_blocks', '_thresholds', '_scope_maxima', '_notes', '_by_identity')
 
     def __init__(self, segments: list[dict[str, Any]]) -> None:
         self._blocks: list[dict[str, Any]] = []
-        self._thresholds: list[int | float] = []
+        self._thresholds: list[int | float] | None = None
         self._scope_maxima: dict[tuple[Any, Any], list[int | float]] = {}
         self._notes: list[_PlacedNote] = []
+        self._by_identity: dict[tuple[Any, Any], _PlacedNote] = {}
         for segment in segments:
             if segment.get('type') == SEG_SYSTEM_NOTE:
-                self._notes.append(_PlacedNote(len(self._blocks), segment))
+                self._insert(len(self._notes), len(self._blocks), segment)
             else:
                 self._blocks.append(segment)
-                self._thresholds.append(_note_anchor_threshold(segment))
+
+    @staticmethod
+    def _key(segment: dict[str, Any]) -> tuple[Any, Any] | None:
+        block_id = segment.get('blockId')
+        return (block_id, execution_identity(segment)) if isinstance(block_id, str) else None
+
+    def _insert(self, index: int, gap: int, segment: dict[str, Any]) -> None:
+        note = _PlacedNote(gap, segment)
+        self._notes.insert(index, note)
+        key = self._key(segment)
+        if key is not None:
+            # Legacy duplicate IDs still update only the first occurrence.
+            self._by_identity.setdefault(key, note)
 
     def _first_anchoring_block(self, lr: int | None,
                                note_attempt: Any, note_task: Any) -> int:
         scope = (note_attempt, note_task)
         maxima = self._scope_maxima.get(scope)
         if maxima is None:
+            if self._thresholds is None:
+                self._thresholds = [_note_anchor_threshold(block) for block in self._blocks]
             thresholds = self._thresholds
             if note_attempt or note_task:
                 thresholds = [
@@ -578,25 +600,33 @@ class _NotePlacement:
 
     def place(self, note_segment: dict[str, Any], lr: int | None) -> None:
         notes = self._notes
-        identity = execution_identity(note_segment)
-        for index, note in enumerate(notes):
-            if (note.segment.get('blockId') == note_segment['blockId']
-                    and execution_identity(note.segment) == identity):
-                # Grouped context can gain entries after an earlier event.
-                notes[index] = _PlacedNote(note.gap, note_segment)
-                return
+        key = self._key(note_segment)
+        if key is not None:
+            existing = self._by_identity.get(key)
+        else:
+            # Preserve equality semantics for old non-string identities.
+            identity = execution_identity(note_segment)
+            existing = next((note for note in notes
+                             if note.segment.get('blockId') == note_segment['blockId']
+                             and execution_identity(note.segment) == identity), None)
+        if existing is not None:
+            # Keep validation/encoding memos only for identical immutable rows.
+            # Mutable input still receives a detached replacement.
+            if type(existing.segment) is not SettledDict or existing.segment != note_segment:
+                existing.replace(note_segment)
+            return
         note_attempt = note_segment.get('attemptId')
         note_task = note_segment.get('taskId')
         anchor = self._first_anchoring_block(lr, note_attempt, note_task)
         for index, note in enumerate(notes):
             if note.gap > anchor:
-                notes.insert(index, _PlacedNote(anchor, note_segment))
+                self._insert(index, anchor, note_segment)
                 return
             if _anchors_note(note.threshold, lr) and not _outside_note_scope(
                     note.attempt_id, note.task_id, note_attempt, note_task):
-                notes.insert(index, _PlacedNote(note.gap, note_segment))
+                self._insert(index, note.gap, note_segment)
                 return
-        notes.append(_PlacedNote(anchor, note_segment))
+        self._insert(len(notes), anchor, note_segment)
 
     def merged(self) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []

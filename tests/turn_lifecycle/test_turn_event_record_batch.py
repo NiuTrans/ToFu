@@ -15,9 +15,10 @@ import pytest
 
 from lib.storage.errors import StorageError
 from lib.storage.protocol import wire_payload
-from tests.turn_lifecycle.test_task_event_delivery import _task, _discard
+from tests.turn_lifecycle.test_task_event_delivery import (
+    _task, _discard, storage as storage, turn_service as turn_service,
+)
 
-pytest_plugins = ['tests.turn_lifecycle.test_task_event_delivery']
 pytestmark = pytest.mark.unit
 
 
@@ -280,6 +281,7 @@ def test_any_invalid_entry_rolls_back_every_entry(turn_service, storage, monkeyp
 @pytest.mark.parametrize('committed', [True, False])
 def test_unknown_outcome_reconciles_before_rebasing_without_duplicate_sync_events(
         turn_service, storage, monkeypatch, committed):
+    from lib.tasks_pkg.segments import record_injected_note
     _, task = _task(turn_service, storage, 'batch-lost-ack')
     try:
         assert turn_service.record_task_event(task, {'type': 'phase', 'phase': 'starting'})
@@ -288,7 +290,13 @@ def test_unknown_outcome_reconciles_before_rebasing_without_duplicate_sync_event
         lost = StorageError('database_timeout', 'injected lost batch acknowledgement', True)
         calls = _capture_batch(storage, monkeypatch, **(
             {'after_commit': lost} if committed else {'fail_with': lost}))
+        note = record_injected_note(task, llm_round=1, kind='system-intervention',
+                                    text='accepted before the frozen batch')
         entries = _entries(turn_service, task, _script())
+        # The live producer can advance while this detached FIFO run persists.
+        # Its later note must not leak into retry or replay of earlier frames.
+        record_injected_note(task, llm_round=2, kind='system-intervention',
+                             text='accepted after the frozen batch')
         with pytest.raises(StorageError, match='lost batch acknowledgement'):
             turn_service.record_task_events(task, entries)
         assert all(entry.outcome is None for entry in entries)
@@ -313,6 +321,8 @@ def test_unknown_outcome_reconciles_before_rebasing_without_duplicate_sync_event
                     == [entry['projection_patch']['baseRevision'] for entry in calls[0]['entries']])
         assert task['_turnProjectionState']['projectionRevision'] == base + len(entries)
         assert turn['projection']['toolRounds'][-1]['roundNum'] == 2
+        notes = [row for row in turn['projection']['segments'] if row['type'] == 'system_note']
+        assert [(row['blockId'], row['text']) for row in notes] == [(note['blockId'], note['text'])]
     finally:
         _discard(task)
 
@@ -496,23 +506,29 @@ def test_a_run_beyond_one_ordinary_commit_never_spills(turn_service, storage, mo
         _discard(task)
 
 
-def test_oversized_inline_diagnostics_are_shed_per_entry(turn_service, storage, monkeypatch):
-    monkeypatch.setattr(turn_service, '_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES', 96 * 1024)
-    monkeypatch.setattr(turn_service, '_ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES', 1024)
+def test_large_inline_diagnostics_follow_authority_admission_per_entry(
+        turn_service, storage, monkeypatch, request):
     _, task = _task(turn_service, storage, 'batch-evidence')
     try:
         assert turn_service.record_task_event(task, {'type': 'phase', 'phase': 'starting'})
         calls = _capture_batch(storage, monkeypatch)
         small = {'type': 'tool_compacted', 'roundNum': 1, 'summary': 'kept inline'}
-        large = {'type': 'tool_compacted', 'roundNum': 2, 'summary': 'x' * (128 * 1024)}
+        # Both authorities retain admitted evidence. Native also accepts a real
+        # frame beyond the retired producer estimate; SQL retains its declared
+        # durable transport envelope. Do not invent a smaller producer limit.
+        size = 9 * 1024 * 1024 if request.node.callspec.params['storage'] == 'tofudb' else 128 * 1024
+        large = {'type': 'tool_compacted', 'roundNum': 2, 'summary': 'x' * size}
         script = [(lambda task: None, small), (lambda task: None, large)]
         entries = _entries(turn_service, task, script)
         assert turn_service.record_task_events(task, entries) == ['carried', 'carried']
-        kept, shed = calls[0]['entries']
+        kept, large_entry = calls[0]['entries']
         assert kept['event_payload']['event']['summary'] == 'kept inline'
-        assert 'event' not in shed['event_payload']
-        assert shed['task_event']['event']['summary'] == large['summary']
-        assert task['_debugEvidenceOmittedCount'] == 1
+        assert large_entry['event_payload']['event']['summary'] == large['summary']
+        assert large_entry['task_event']['event']['summary'] == large['summary']
+        assert _rows(storage, task)[-1]['event']['summary'] == large['summary']
+        changes = _sync_changes(storage, task, 0)
+        assert changes[-1]['payload']['event']['payload']['event']['summary'] == large['summary']
+        assert not task.get('_debugEvidenceOmittedCount')
     finally:
         _discard(task)
 

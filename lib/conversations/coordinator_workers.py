@@ -216,6 +216,10 @@ def await_workers(task, scope, arguments, *, repository=None, service=None, runt
                          'status': 'cancelled' if view['revoked'] else execution.get('status', 'queued'),
                          'delivery': view.get('delivery'),
                          'canonical_delivery': view.get('canonicalDelivery', False)})
+        # A completed observation proves this waiter is responsive even when
+        # Workers have no new output. A blocked read or transport-only ticker
+        # must not refresh liveness or exempt a genuinely wedged handler.
+        task['_dispatch_heartbeat'] = time.time()
         return rows
     def settled(row):
         if arguments.get('wait_for') == 'delivery':

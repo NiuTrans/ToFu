@@ -218,6 +218,36 @@ and cold projections, so a resumed card cannot point to another execution's
 request. Parent configuration and transcript remain isolated. Cancellation and
 optional deadlines reach blocked tools through the same child control port.
 
+Problem: each active child previously allocated a polling thread to observe
+the same parent control predicate. Fan-out multiplied observation and teardown
+work independently of useful model/tool execution. Decision:
+`tasks_pkg/invocation_cancellation.py` owns an explicitly borrowed
+`ChildCancellationScope`. Ordinary Swarm siblings share their master scope;
+graph siblings share their invocation runner scope. A scope starts one observer
+on its first active borrow, releases each child's membership before registry
+cleanup, and physically joins the observer after its final borrow. A later
+wave can start a new generation while the old one retires. There is no global
+registry, idle observer or child-count admission limit.
+
+An available parent `AbortSignal` wakes a plain Event subscription immediately.
+External predicates have no notification contract: the inherited 0.1-second
+control poll remains once per scope, defined by
+`_INHERITED_CONTROL_POLL_SECONDS`. This is the previous liveness fallback,
+not a new tuning interval. Effect/admission checks always call the live parent
+predicate. Each child still owns its local Stop and deadline; stopped children
+do not stop siblings. Lost control fails closed with its original failure.
+Retained assignments and issued native runtime controls remain separate scopes;
+prepared graph transfer binds the validated recipient's exact scope at entry.
+Closing a watch fences late propagation, and the final close joins outside locks.
+Control predicates must be non-effecting observations that return; this owner
+does not run arbitrary cleanup from an AbortSignal setter.
+
+Alternatives rejected: caching a cancellation verdict would weaken admission;
+a process-global task lookup would lose explicit lifetime and authority; an
+unjoined monitor could mutate a released carrier. Verify
+`test_child_cancellation_scope.py`, `test_child_invocation.py`, AbortSignal
+subscription races, retained cancellation and `test_nested_agent_runtime.py`.
+
 Problem: detached Swarm parent proxies lost native execution and fee ownership. Decision: `tasks_pkg/native_parent.py` carries a typed, process-local reference to the exact issued parent separately from frozen config/tool grants. Scope and shared account must still match; model selection and child binding validate the canonical live task. The session ID remains the coordinator identity, while a continued child belongs to its current executor. Root usage counts its own requests; `apiRounds` and cost include descendant fees. Alternatives rejected: copying lifecycle fields grants unrelated authority; task-ID lookup weakens exact-instance admission; switching to Python loses native accounting. Session metadata persists only requirement identity and a native-required flag. Unfinished native actors, including parent-stop resumption, require acknowledged actor checkpoints and whole-tree handoff; transcript checkpoints cannot authorize takeover. Cold start retains evidence and Continue refuses before workers or model I/O. The existing usage-unknown error and completeness fields preserve known fees, prevent new admission even without a token cap, and avoid presenting missing actor accounting as a model transport failure. Terminal evidence remains readable without execution. Specs: `tests/tasks_pkg/test_native_parent.py`, `tests/swarm/test_native_delegation_recovery.py`, `tests/tasks_pkg/test_native_production_delegation.py`. Dynamic native-root recovery remains unqualified; shared-root quiescence is unchanged.
 
 Problem: the Swarm session re-root (`lib/swarm/AGENTS.md`) moved a native spawning task's account slot to its proxy. Wave preparation also resolved model overrides through a plain copy that held the issued port. As a result, native selection refused every worker model override as not live, and priced binding refused every worker's fee receiver. Decision: a natively executed spawning task stays the account root, and preparation copies borrow it through `share_native_parent`. Its issued port retires at terminal persist, so no native child is issued after that task settles and re-rooting gains no admission time. Alternatives rejected: accepting the bound proxy as the live actor widens native admission and still leaves fee receivers and transfer refusing. Registering the task as the proxy's descendant is impossible because both share one task ID. Specs in `tests/tasks_pkg/test_native_parent.py`: `test_frozen_policy_and_native_model_override_use_different_owned_carriers`, `test_native_swarm_session_keeps_the_live_parent_as_priced_fee_receiver` and `test_chat_spawn_with_worker_model_override_borrows_the_live_native_parent` (ordinary and Delegate Mode spawns).

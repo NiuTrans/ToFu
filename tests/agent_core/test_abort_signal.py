@@ -57,3 +57,32 @@ def test_multiple_observers_wake_on_their_own_loops():
         signal.set()
         for thread in threads:thread.join(3)
     assert sorted(done)==[0,1] and signal._observers is None
+
+
+def test_event_wake_subscription_is_immediate_disposable_and_signal_only():
+    signal, wake = AbortSignal(), threading.Event()
+    subscription = signal.subscribe_event(wake)
+    subscription.close()
+    signal.set()
+    assert not wake.is_set()
+    immediate = signal.subscribe_event(wake)
+    assert wake.is_set()
+    immediate.close()
+    with pytest.raises(TypeError):
+        signal.subscribe_event(lambda: None)
+    # Another AbortSignal could form a recursive propagation graph; only a
+    # plain wake Event is accepted, never arbitrary callbacks or cleanup.
+    with pytest.raises(TypeError):
+        signal.subscribe_event(AbortSignal())
+
+
+def test_event_subscription_set_race_never_loses_a_wake():
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for _ in range(100):
+            signal, wake = AbortSignal(), threading.Event()
+            worker = executor.submit(signal.set)
+            subscription = signal.subscribe_event(wake)
+            assert wake.wait(1)
+            worker.result()
+            subscription.close()
+            assert signal._observers is None

@@ -596,6 +596,89 @@ def test_timeout_and_stop_leave_no_callbacks_and_never_restart_workers(runtime):
     assert len(r.calls) == 1
 
 
+@pytest.mark.parametrize('wait_for', ['execution', 'delivery'])
+def test_full_worker_wait_remains_live_without_worker_output(runtime, monkeypatch, wait_for):
+    """Successful status reads prove the waiter is live throughout its declared wait."""
+    from lib.agent_core import admission
+    from lib.conversations.coordinator_tools import _scope
+    from lib.tasks_pkg.liveness import judge
+
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    scope = _scope(r.task)
+    clock = SimpleNamespace(elapsed=0.0, started=time.time())
+    r.task.update(status='running', aborted=False, created_at=clock.started - 18,
+                  _t_last_event=clock.started - 18, _dispatch_heartbeat=clock.started - 18)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_unresponsive', lambda: False)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_resumed_at', lambda: (0.0, 0.0))
+    monkeypatch.setattr(coordinator_workers, 'time', SimpleNamespace(
+        time=lambda: clock.started + clock.elapsed, monotonic=lambda: clock.elapsed))
+    monkeypatch.setattr(coordinator_workers, '_input_waiting', lambda task: False)
+    monkeypatch.setattr(coordinator_workers, '_incoming_project_messages', lambda task: None)
+
+    class AdvancingEvent(threading.Event):
+        def wait(self, timeout=None):
+            clock.elapsed += timeout
+            verdict = judge(r.task, clock.started + clock.elapsed, 1800, commands=[])
+            assert verdict.state == 'alive', 'a responsive worker wait must not become worker_lost'
+            return self.is_set()
+
+    monkeypatch.setattr(coordinator_workers, 'threading', SimpleNamespace(Event=AdvancingEvent))
+    result = coordinator_workers.await_workers(r.task, scope, {
+        'assignment_ids': [worker['assignment_id']], 'timeout_seconds': 1800,
+        'wait_for': wait_for,
+    })
+    assert result['wait'] == 'timeout' and result['workers'][0]['status'] == 'running'
+    assert clock.elapsed == 1800 and not r.task['aborted']
+    assert r.task['_t_last_event'] == clock.started - 18, 'observation is not worker output'
+    assert worker['task_id'] not in admission._term_callbacks and len(r.calls) == 1
+    # A returned call grants no permanent exemption if its owner then wedges.
+    assert judge(r.task, clock.started + clock.elapsed + 1801, 1800, commands=[]).state == 'wedged'
+
+
+@pytest.mark.parametrize('blocked_read_number', [1, 2])
+def test_blocked_worker_status_read_remains_reapable(runtime, monkeypatch, blocked_read_number):
+    """Entering a read or emitting transport ticks cannot attest that it returned."""
+    from lib.agent_core import admission
+    from lib.conversations.coordinator_tools import _scope
+    from lib.tasks_pkg.liveness import judge
+    from lib.tasks_pkg.tool_dispatch._heartbeat import _emit_tool_heartbeat
+    from tests.tools.test_tool_settle_all_lanes import _mk_tc
+
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    scope = _scope(r.task)
+    clock = SimpleNamespace(now=time.time(), reads=0)
+    stale = clock.now - 1801
+    r.task.update(status='running', aborted=False, created_at=stale,
+                  _t_last_event=stale, _dispatch_heartbeat=stale)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_unresponsive', lambda: False)
+    monkeypatch.setattr('lib.fs_keepalive.filesystem_resumed_at', lambda: (0.0, 0.0))
+    monkeypatch.setattr(coordinator_workers, 'time', SimpleNamespace(
+        time=lambda: clock.now, monotonic=lambda: clock.now))
+    ticks = []
+    monkeypatch.setattr('lib.tasks_pkg.tool_dispatch._heartbeat.append_event',
+                        lambda task, event: ticks.append(event))
+
+    read = r.service.view_for_coordinator
+    def blocked_read(*args, **kwargs):
+        clock.reads += 1
+        if clock.reads < blocked_read_number:
+            return read(*args, **kwargs)
+        clock.now += 1801
+        item = _mk_tc('wait', 'await_project_workers', 1)
+        _emit_tool_heartbeat(r.task, [item], stale)
+        assert ticks and all(event.get('_selfTick') for event in ticks)
+        assert judge(r.task, clock.now, 1800, commands=[]).state == 'wedged'
+        raise RuntimeError('status read did not complete')
+
+    monkeypatch.setattr(r.service, 'view_for_coordinator', blocked_read)
+    with pytest.raises(RuntimeError, match='status read did not complete'):
+        coordinator_workers.await_workers(r.task, scope, {'assignment_ids': [worker['assignment_id']]})
+    assert r.task['_dispatch_heartbeat'] == (stale if blocked_read_number == 1 else clock.now - 1801)
+    assert worker['task_id'] not in admission._term_callbacks
+
+
 def test_delegate_and_await_reach_handlers_through_ordinary_pipeline(runtime, monkeypatch):
     from tests.tools.test_tool_settle_all_lanes import _mk_task, _mk_tc
     from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
