@@ -2145,7 +2145,7 @@
       "path": "/api/v4/channels/dx",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Enable/disable the 大象 account or choose its command chat",
+      "summary": "Enable/disable the 大象 account, choose its login MIS or its command chat",
       "tags": [
         "channels"
       ],

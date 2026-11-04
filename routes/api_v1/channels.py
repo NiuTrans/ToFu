@@ -2,7 +2,7 @@
 
 Routes (projected onto ``/api/v4`` with the v4 envelope):
   GET  /api/v1/channels/dx                        — 大象 account config and status
-  PUT  /api/v1/channels/dx                        — enable/disable, choose command chat
+  PUT  /api/v1/channels/dx                        — enable/disable, login MIS, choose command chat
   POST /api/v1/channels/dx/command-chat           — create the single-member 'Tofu Router' group
   GET  /api/v1/channels/dx/threads                — 大象 thread page with mode and reply policy
   PUT  /api/v1/channels/dx/threads/<thread_key>   — set a 大象 thread's mode / reply policy
@@ -102,12 +102,12 @@ async def get_dx_account_v1():
 
 @api_v1_channels_bp.route('/api/v1/channels/dx', methods=['PUT'])
 @require_scope('admin')
-@api_meta(summary='Enable/disable the 大象 account or choose its command chat', tags=['channels'],
+@api_meta(summary='Enable/disable the 大象 account, choose its login MIS or its command chat', tags=['channels'],
           scope='admin', request_body=_body('ChannelAccountUpdate'),
           responses=_responses('ChannelAccountView', 'Updated 大象 account'))
 async def update_dx_account_v1():
     from lib.channels import service
-    body = await async_parse_body(strict=True, exact=('enabled', 'commandChat'))
+    body = await async_parse_body(strict=True, exact=('enabled', 'commandChat', 'mis'))
     return await _call(service.update_account, request_user_id(), body)
 
 

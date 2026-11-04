@@ -16,9 +16,11 @@ import queue
 import time
 
 from lib.channels.dx.adapter import (
-    DxBridge, _argv, _child_environment, event_from_history, event_from_live, history_pages,
-    launch_spec, svr_time_from_mid, thread_from_session,
+    DxBridge, _argv, event_from_history, event_from_live, history_pages, launch_spec, launcher_session,
+    svr_time_from_mid, thread_from_session,
 )
+from lib.channels.dx.login import account_login_mis
+from lib.channels.store import ChannelStore
 
 READ_ONLY_OPS = frozenset({'whoami', 'sessions', 'history'})
 # Pages read per session kind: enough to prove the walk moves strictly older.
@@ -62,7 +64,9 @@ def probe(owner: int, listen_seconds: float) -> dict:
     report: dict = {'skillInstalled': spec.installed}
     if not spec.installed:
         return report
-    bridge = DxBridge(_argv(spec), env=_child_environment(owner), cwd=spec.skill_dir)
+    # The probe logs in as the live session would: the account's login MIS.
+    session = launcher_session(owner, account_login_mis(ChannelStore(owner).account('dx')))
+    bridge = DxBridge(_argv(spec), env=session.environment, cwd=spec.skill_dir)
     reader = _ReadOnly(bridge)
     counts = {'status': [], 'messages': 0, 'messagesBySource': {}}
     deadline = time.monotonic() + listen_seconds

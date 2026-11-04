@@ -14,6 +14,7 @@ from typing import Any
 
 from lib.cost import normalize_usage, split_input_tokens
 from lib.log import audit_log, get_logger
+from lib.tasks_pkg.cache_tracking._policy import MIN_CACHEABLE_PROMPT_TOKENS
 from lib.tasks_pkg.cache_tracking._state import (
     CacheState,
     _cache_lock,
@@ -23,14 +24,6 @@ from lib.tasks_pkg.cache_tracking._state import (
 )
 
 logger = get_logger(__name__)
-
-# Largest documented minimum-cacheable prompt length across the Claude tiers
-# (Opus 5 = 512, Sonnet/Opus 4.8 = 1024, Opus 4.7/Haiku 3.5 = 2048,
-# Opus 4.5/4.6 + Haiku 4.5 = 4096). Below this NO tier can cache, so a miss
-# carries no signal and logging it would be pure noise. At or above it, a miss
-# is real money and is always logged.
-_MIN_CACHEABLE_PROMPT = 4096
-
 
 def _apply_rewrite_notice_locked(
     state: CacheState,
@@ -359,7 +352,7 @@ def log_round_cache_stats(
     #   total miss is tagged COLD so it can be grepped directly.
     uncached, total_input = split_input_tokens(usage)
     if not cache_write and not cache_read:
-        if total_input < _MIN_CACHEABLE_PROMPT:
+        if total_input < MIN_CACHEABLE_PROMPT_TOKENS:
             return
 
     # The hit ratio's denominator is the TOTAL prompt the provider

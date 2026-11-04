@@ -20,6 +20,11 @@ _MIN_CACHE_MISS_TOKENS = 2000
 EDITABLE_TAIL_COUNT = 2
 # Repeated large writes with no reuse are meaningful; small-prompt warmup is not.
 _MIN_NO_REUSE_TOKENS = 20000
+# Largest documented minimum-cacheable prompt length across the Claude tiers
+# (Opus 5 = 512, Sonnet/Opus 4.8 = 1024, Opus 4.7/Haiku 3.5 = 2048,
+# Opus 4.5/4.6 + Haiku 4.5 = 4096). Below this NO tier can cache, so a round
+# without cache activity carries no signal.
+MIN_CACHEABLE_PROMPT_TOKENS = 4096
 BUCKET_NAMESPACE = 'cache_namespace_switch'
 BUCKET_TURN_BOUNDARY = 'turn_boundary_rebill'
 BUCKET_TTL_FLIP = 'ttl_flip'
@@ -39,6 +44,7 @@ BUCKET_UPSTREAM = 'upstream_identical'
 BUCKET_BODY_CHANGE = 'body_change'
 BUCKET_NO_BREAK = 'no_break'
 BUCKET_INDETERMINATE = 'indeterminate'
+BUCKET_UNCACHED = 'uncached'
 BUCKET_OTHER = 'other'
 
 
@@ -96,6 +102,25 @@ def _classify_break(
     )
 
     return bool(api_break), bool(no_reuse), bool(partial_no_reuse)
+
+
+def uncached_round(*, claude: bool, call_count: int, cache_read: int,
+                   cache_write: int, prompt_tokens: int) -> bool:
+    """A cacheable Claude round that reported no cache read and no cache write.
+
+    Claude caches only at explicit ``cache_control`` markers, so such a round
+    paid the base input rate for its whole prompt: no marker reached the wire,
+    or the provider ignored or did not report them. No break gate can fire on
+    it (each needs a read drop or a large write), and the 2026-11-03 zero-marker
+    regression was filed as ``no_break`` for that reason.
+
+    ``call_count`` is already incremented for this round. The first round of a
+    thread is left out: an OpenAI-compatible gateway in front of Claude may
+    meter only reads, which reports a cold first write as zero.
+    """
+    return (claude and call_count > 1 and cache_read == 0
+            and cache_write == 0
+            and prompt_tokens >= MIN_CACHEABLE_PROMPT_TOKENS)
 
 
 
@@ -353,6 +378,8 @@ def classify_verdict(verdict: dict | None) -> str:
         return BUCKET_NO_BREAK
     if BUCKET_INDETERMINATE in verdict:
         return BUCKET_INDETERMINATE
+    if BUCKET_UNCACHED in verdict:
+        return BUCKET_UNCACHED
     if BUCKET_NAMESPACE in verdict:
         return BUCKET_NAMESPACE
     if BUCKET_WRITE_UNSETTLED in verdict:
