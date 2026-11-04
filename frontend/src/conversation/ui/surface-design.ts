@@ -63,6 +63,7 @@ const plural = (count: number): string => (count === 1 ? '' : 's');
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const WRENCH = ['M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94'
   + 'l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z'];
+const NOTES = ['M4 6h16', 'M4 12h16', 'M4 18h10'];
 const CHEVRONS_UP = ['m17 11-5-5-5 5', 'm17 18-5-5-5 5'];
 const CHEVRONS_DOWN = ['m7 6 5 5 5-5', 'm7 13 5 5 5-5'];
 
@@ -160,6 +161,29 @@ export function createConversationSurfaceDesign(options: ConversationSurfaceOpti
         () => disclosureChevron(document, 'conversation-tool-panel__chevron'));
       if (button.lastElementChild !== chevron) button.appendChild(chevron);
       return button;
+    },
+    narrationWell(document) {
+      const well = document.createElement('div');
+      well.className = 'conversation-narration';
+      well.dataset.narrationWell = '';
+      const head = span(document, 'conversation-narration__head');
+      head.append(glyph(document, 'conversation-narration__glyph', NOTES),
+        span(document, 'conversation-narration__label'));
+      const body = document.createElement('div');
+      body.className = 'conversation-narration__body';
+      body.dataset.narrationWellBody = '';
+      // A bounded scroller must be reachable by keyboard to be scrollable.
+      body.tabIndex = 0;
+      body.setAttribute('role', 'region');
+      well.append(head, body);
+      return well;
+    },
+    paintNarrationWell(well, count) {
+      const value = t('narrationWell.label', { n: count, s: plural(count) });
+      const label = well.querySelector<HTMLElement>('.conversation-narration__label');
+      if (label) text(label, value);
+      const body = well.querySelector<HTMLElement>('[data-narration-well-body]');
+      if (body && body.getAttribute('aria-label') !== value) body.setAttribute('aria-label', value);
     },
     transportNotice(node, state) {
       className(node, `conversation-surface__transport-notice conversation-surface__transport-notice--${state}`);

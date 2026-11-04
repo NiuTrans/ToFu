@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · {n}ターン",
   "toolPanel.working": "処理中…（{n}）",
   "toolPanel.queued": "開始待ち",
+  "narrationWell.label": "途中経過メモ {n} 件",
   "toolSearch.catalogLimit": "一致した全{total}件中、最初の{shown}件を表示しています。",
   "toolSearch.engineLimit": "表示件数の上限のため、その他の検索エンジンの情報源は省略されています。",
   "toolSearch.failOpen": "完全なツールカタログを復元しました",

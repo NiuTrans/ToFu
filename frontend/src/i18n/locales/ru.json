@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · ходов: {n}",
   "toolPanel.working": "Обработка… ({n})",
   "toolPanel.queued": "Ожидает запуска",
+  "narrationWell.label": "Промежуточные заметки: {n}",
   "toolSearch.catalogLimit": "Показаны первые совпадения: {shown} из {total}.",
   "toolSearch.engineLimit": "Остальные источники поисковых систем скрыты: размер представления ограничен.",
   "toolSearch.failOpen": "полный каталог инструментов восстановлен",

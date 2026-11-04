@@ -2,7 +2,7 @@
  * Retained HTML and detail disclosure primitives. Rich markup passes through
  * the existing reconciliation owner; no content policy.
  * Entry points: directClassChild, setStableData, setManagedHtml, setStreamingMarkdownHtml, setCompletedMarkdownHtml,
- * setManagedRichHtml, resetManagedHtml, preserveDetailsOpen.
+ * setManagedRichHtml, resetManagedHtml, preserveDetailsOpen, endAnchoredScroller.
  * Dependencies: rich-card-reconciliation.
  */
 import { reconcileRichCardHtml } from '../rich-card-reconciliation';
@@ -148,4 +148,50 @@ export function preserveDetailsOpen(
   defaultOpen: boolean,
 ): boolean {
   return node.querySelector('details')?.open ?? defaultOpen;
+}
+
+/** Newest-first bounded scroller: it rests at its end (newest content) on
+ * first layout, on growth and on `pin()`, until the reader scrolls away from
+ * the end; returning to the end resumes following. Layout changes (mounting,
+ * opening a fold, streamed growth) re-anchor through a ResizeObserver on the
+ * scroller and its content, so a scroller built while detached still opens at
+ * its end. One anchor per scroller; `dispose` releases the observer. */
+export interface EndAnchoredScroller {
+  readonly pinned: boolean;
+  pin(): void;
+  follow(): void;
+  dispose(): void;
+}
+
+const endAnchoredScrollers = new WeakMap<HTMLElement, EndAnchoredScroller>();
+
+export function endAnchoredScroller(scroller: HTMLElement, content: HTMLElement): EndAnchoredScroller {
+  const existing = endAnchoredScrollers.get(scroller);
+  if (existing) return existing;
+  let pinned = true;
+  const follow = (): void => {
+    if (pinned) scroller.scrollTop = scroller.scrollHeight;
+  };
+  // A closed or detached scroller has no layout and records no intent.
+  const onScroll = (): void => {
+    if (scroller.clientHeight === 0) return;
+    pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
+  };
+  scroller.addEventListener('scroll', onScroll, { passive: true });
+  const Resize = scroller.ownerDocument.defaultView?.ResizeObserver;
+  const observer = Resize ? new Resize(follow) : null;
+  observer?.observe(scroller);
+  observer?.observe(content);
+  const anchor: EndAnchoredScroller = {
+    get pinned() { return pinned; },
+    pin() { pinned = true; follow(); },
+    follow,
+    dispose() {
+      scroller.removeEventListener('scroll', onScroll);
+      observer?.disconnect();
+      endAnchoredScrollers.delete(scroller);
+    },
+  };
+  endAnchoredScrollers.set(scroller, anchor);
+  return anchor;
 }

@@ -50,6 +50,7 @@ import {
   type ManagedQueueElement,
   type SurfaceRegionWindow,
   directPart,
+  keyedBlockNodes,
   placeAt,
   regionWindowSignature,
 } from './surface-dom';
@@ -938,8 +939,7 @@ export function createConversationSurfaceEngine(
         ManagedBlocksContainerElement | null;
       const windows = blocksContainer?._tofuBlockWindows;
       if (!blocksContainer || blocksContainer.hidden || !windows?.length) continue;
-      const keyed = (Array.from(blocksContainer.children) as HTMLElement[])
-        .filter(child => child.dataset.blockId !== undefined);
+      const keyed = keyedBlockNodes(blocksContainer);
       // Each region measures only its own window's nodes; pinned head/trail
       // entries and in-place boundary rows never enter its geometry.
       for (const window of windows) {

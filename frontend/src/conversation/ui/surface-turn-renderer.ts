@@ -7,12 +7,12 @@ import type {
   PlanDecisionViewModel,
 } from '../presentation/conversation-view-model';
 import {
-  groupedTurnLayout, turnLayoutZone, type GroupedTurnEntry, type ToolPanelEntry,
+  groupedTurnLayout, interimNarrationIds, turnLayoutZone, type GroupedTurnEntry, type ToolPanelEntry,
 } from '../presentation/grouped-turn-layout';
 import type { ConversationSurfaceOptions, ConversationTurnRenderContext } from './surface-contracts';
 import type { ConversationSurfaceDesign, SurfaceRoundOutline } from './surface-design-contracts';
 import { moveRetainedNodeBefore } from './rich-card-reconciliation';
-import { setStableData } from './renderers/stable-dom';
+import { endAnchoredScroller, setStableData } from './renderers/stable-dom';
 import { finishSurfaceCleanup, releaseSurfacePresentation } from './surface-node-lifecycle';
 import {
   sameBlock, sameTurnAvatar, sameTurnHeader, sameTurnActions, sameTurnFooter, samePlanDecision,
@@ -22,7 +22,7 @@ import {
   type ManagedTurnHeaderElement, type ManagedTurnActionsElement, type ManagedTurnFooterElement,
   type ManagedTurnContextRailElement, type ManagedPlanDecisionElement, type ManagedTurnElement,
   type SurfaceRegionWindow,
-  createSurfaceDom, directPart, placeAt, placeManagedAt, hasRenderableContent,
+  createSurfaceDom, directPart, narrationWellBody, placeAt, placeManagedAt, hasRenderableContent,
 } from './surface-dom';
 
 export interface SurfaceTurnRenderPlan {
@@ -143,6 +143,32 @@ export function createSurfaceTurnRenderer(
       else moveRetainedNodeBefore(containerNode, node, cursor);
     };
 
+    /* Interim round prose shares ONE bounded, scrolling well so a long run of
+     * rounds never stretches the reply. Only settled text ever joins (the
+     * latest text stays outside while it may stream), so a leaf is reparented
+     * at most once, when a later round's text arrives. */
+    const wellIds = grouped ? interimNarrationIds(entries) : new Set<string>();
+    let well = containerNode.querySelector<HTMLElement>(':scope > [data-narration-well]');
+    let wellBody = well && narrationWellBody(well);
+    let wellPlaced = false;
+    let wellCursor: Element | null = null;
+    const placeInWell = (node: HTMLElement): void => {
+      if (!well || !wellBody) {
+        well = design.narrationWell(containerNode.ownerDocument);
+        wellBody = narrationWellBody(well)!;
+      }
+      if (!wellPlaced) {
+        place(well);
+        wellPlaced = true;
+        wellCursor = wellBody.firstElementChild;
+      }
+      // A node joining the well may be the outer cursor; never leave the
+      // cursor pointing inside the body.
+      if (cursor === node) cursor = node.nextElementSibling;
+      if (wellCursor === node) wellCursor = node.nextElementSibling;
+      else moveRetainedNodeBefore(wellBody, node, wellCursor);
+    };
+
     /* A grouped reply's calls announce what their window hides in place,
      * inside the card: before the first mounted call and after the last.
      * Prose and ungrouped Turns keep scroll residency and the outer keyboard
@@ -197,17 +223,29 @@ export function createSurfaceTurnRenderer(
       outline.patchBlock(node, block);
       renderVisibleBlock(node, block);
       outline.completeBlock(node, block);
+      const placeBlock = wellIds.has(block.blockId) ? placeInWell : place;
       for (const control of outline.beforeBlock(block.blockId)) {
         // Round controls sit among the calls: they belong to the panel card.
         setStableData(control, 'turnZone', zone);
-        place(control);
+        placeBlock(control);
       }
-      place(node);
+      placeBlock(node);
       existing.delete(block.blockId);
     });
     if (openRegion) boundary(openRegion, 'later');
     for (const node of existing.values()) removeRenderedNode(node);
     for (const node of staleBoundaries) node.remove();
+    if (well && wellBody && wellPlaced) {
+      design.paintNarrationWell(well, wellIds.size);
+      // Newest note first: the well opens at its end and follows growth until
+      // the reader scrolls up inside it.
+      endAnchoredScroller(wellBody, wellBody).follow();
+    } else if (well) {
+      if (wellBody) endAnchoredScroller(wellBody, wellBody).dispose();
+      // Members already moved out or retired above; only the empty shell remains.
+      for (const node of Array.from(wellBody?.children ?? []) as HTMLElement[]) removeRenderedNode(node);
+      well.remove();
+    }
   };
 
   const renderTurn = (turnNode: ManagedTurnElement, turn: ConversationTurnViewModel,

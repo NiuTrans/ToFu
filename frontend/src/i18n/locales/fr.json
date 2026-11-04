@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · {n} tour{s}",
   "toolPanel.working": "En cours… ({n})",
   "toolPanel.queued": "En attente de démarrage",
+  "narrationWell.label": "Notes intermédiaires : {n}",
   "toolSearch.catalogLimit": "Affichage des premières correspondances : {shown} sur {total}.",
   "toolSearch.engineLimit": "Autres sources de moteurs de recherche omises dans cet affichage limité.",
   "toolSearch.failOpen": "catalogue complet restauré",

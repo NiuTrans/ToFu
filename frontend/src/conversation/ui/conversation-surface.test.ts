@@ -249,7 +249,8 @@ it('renders replies as reasoning, one toggleable tool panel and prose; a reader 
     },
   });
   const order = () => [...surface.root.querySelectorAll<HTMLElement>(
-    '[data-turn-id="reply"] .conversation-turn-blocks > [data-block-id]:not([data-block-kind="live-status"])',
+    '[data-turn-id="reply"] .conversation-turn-blocks > [data-block-id]:not([data-block-kind="live-status"]), '
+    + '[data-turn-id="reply"] .conversation-turn-blocks > [data-narration-well] > [data-narration-well-body] > [data-block-id]',
   )].map(node => node.dataset.blockId);
   const toggle = () => surface.root.querySelector<HTMLButtonElement>('.conversation-tool-panel__toggle')!;
   const closed = ['think-0', 'layout:tool-panel', 'narrate-1', 'answer'];
@@ -535,5 +536,72 @@ it('never unmounts reasoning or the panel header while a long live reply follows
       const hiddenCalls = container.querySelector<HTMLElement>('[data-region-boundary="process:earlier"]');
       if (rounds > 15) expect(hiddenCalls?.dataset.hiddenCount).toBe(String(rounds - calls.length));
     }
+  } finally { surface.dispose(); container.remove(); }
+});
+
+it('gathers interim round prose into one scrolling well; the live tail and the answer stay outside', () => {
+  const container = document.createElement('main'); document.body.append(container);
+  const scope = { attemptId: 'attempt-1', taskId: 'task-1' };
+  const state = createTurnState('conv');
+  const say = (round: number) => ({ type: 'text', blockId: `say-${round}`, llmRound: round, ...scope, text: `Step ${round}.` });
+  const call = (round: number) => ({
+    type: 'tool_use', blockId: `call-${round}`, id: `call-${round}`, name: 'read_files', llmRound: round, ...scope,
+    input: { path: `${round}.ts` }, result: { content: String(round), status: 'done' },
+  });
+  const reply = (rounds: number, revision: number, settled = false) => ({
+    turnId: 'reply', presentationId: 'reply', runId: '', conversationId: 'conv', laneId: 'main', ordinal: 1,
+    actor: 'assistant', kind: 'reply', status: settled ? 'completed' : 'running',
+    currentAttemptId: settled ? null : 'attempt-1',
+    projectionRevision: revision, createdAt: 1, updatedAt: revision, settlement: {},
+    projection: { content: settled ? 'Done.' : '', segments: [
+      ...Array.from({ length: rounds }, (_, round) => [say(round), call(round)]).flat(),
+      ...(settled ? [{ type: 'text', blockId: 'answer', llmRound: rounds, ...scope, text: 'Done.', terminal: true, deliverable: true }] : []),
+    ] },
+  }) as never;
+  state.laneOrder.main = ['reply'];
+  const surface = createConversationSurface(container, {
+    scrollAnchor: { following: true, capture: () => null, restore: () => {}, suspendFollow: () => {} },
+  });
+  const blocks = () => surface.root.querySelector<HTMLElement>('[data-turn-id="reply"] .conversation-turn-blocks')!;
+  const well = () => blocks().querySelector<HTMLElement>(':scope > [data-narration-well]');
+  const inWell = () => [...(well()?.querySelectorAll<HTMLElement>('[data-narration-well-body] > [data-block-id]') ?? [])]
+    .map(node => node.dataset.blockId);
+  try {
+    // One streaming round: its prose may still grow, so there is no well yet.
+    state.turnsById.reply = reply(1, 1);
+    surface.render(selectConversationViewModel(state));
+    expect(well()).toBeNull();
+    const first = blocks().querySelector('[data-block-id="say-0"]');
+
+    // A later round's text settles the earlier one into the well (same node).
+    state.turnsById.reply = reply(3, 2);
+    surface.render(selectConversationViewModel(state));
+    expect(inWell()).toEqual(['say-0', 'say-1']);
+    expect(blocks().querySelector('[data-block-id="say-0"]')).toBe(first);
+    expect(blocks().querySelector(':scope > [data-block-id="say-2"]')).not.toBeNull();
+    const body = well()!.querySelector<HTMLElement>('[data-narration-well-body]')!;
+    expect(body.getAttribute('aria-label')).toBe(well()!.querySelector('.conversation-narration__label')!.textContent);
+    expect(body.tabIndex).toBe(0);
+
+    // Newest note first: the well rests at its end; a reader who scrolled up keeps their place.
+    let top = 0;
+    Object.defineProperty(body, 'scrollHeight', { configurable: true, get: () => 800 });
+    Object.defineProperty(body, 'clientHeight', { configurable: true, get: () => 200 });
+    Object.defineProperty(body, 'scrollTop', { configurable: true, get: () => top, set: value => { top = value; } });
+    state.turnsById.reply = reply(3, 3);
+    surface.render(selectConversationViewModel(state));
+    expect(top).toBe(800);
+    top = 50;
+    body.dispatchEvent(new Event('scroll'));
+    state.turnsById.reply = reply(3, 4);
+    surface.render(selectConversationViewModel(state));
+    expect(top).toBe(50);
+
+    // Settled: every round's prose shares the well; the answer reads below it.
+    state.turnsById.reply = reply(3, 5, true);
+    surface.render(selectConversationViewModel(state));
+    expect(inWell()).toEqual(['say-0', 'say-1', 'say-2']);
+    expect(well()!.nextElementSibling?.getAttribute('data-block-id')).toBe('answer');
+    expect(surface.root.querySelectorAll('[data-narration-well]')).toHaveLength(1);
   } finally { surface.dispose(); container.remove(); }
 });

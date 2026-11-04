@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · {n}턴",
   "toolPanel.working": "처리 중… ({n})",
   "toolPanel.queued": "시작 대기 중",
+  "narrationWell.label": "진행 메모 {n}개",
   "toolSearch.catalogLimit": "일치 항목 {total}개 중 처음 {shown}개만 표시합니다.",
   "toolSearch.engineLimit": "표시 범위 제한으로 추가 검색 엔진 출처가 생략되었습니다.",
   "toolSearch.failOpen": "전체 도구 목록 복원됨",

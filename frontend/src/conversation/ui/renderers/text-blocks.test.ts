@@ -136,3 +136,41 @@ it('folds merged reasoning after each round unless the reader opened it', () => 
   expect(node.querySelector('details.thinking-block')).toBe(details);
   expect(details.open).toBe(true);
 });
+
+it('makes open reasoning a labelled, focusable scroller that rests at its newest line', () => {
+  const node = document.createElement('div');
+  document.body.appendChild(node);
+  const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text };
+  const thinking = (markdown: string, terminal: boolean): ThinkingBlockViewModel => ({
+    kind: 'thinking', blockId: 'think-0', source: {}, identitySource: 'contract', memberBlockIds: ['think-0'],
+    markdown, displayMarkdown: markdown, displayMode: 'original', terminal,
+  });
+  try {
+    renderThinkingBlock(node, thinking('Line one', false), ports);
+    const scroller = node.querySelector<HTMLElement>('.thinking-content')!;
+    expect(scroller.tabIndex).toBe(0);
+    expect(scroller.getAttribute('role')).toBe('region');
+    expect(scroller.getAttribute('aria-label'))
+      .toBe(node.querySelector('.thinking-label')!.textContent);
+    // jsdom has no layout: a reader at the end (0 remaining) stays pinned.
+    let top = 0;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => 900 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 300 });
+    Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => top, set: value => { top = value; } });
+    top = 600;
+    renderThinkingBlock(node, thinking('Line one\n\nLine two', false), ports);
+    expect(top).toBe(900);
+    // A reader who scrolled up keeps their place.
+    top = 100;
+    scroller.dispatchEvent(new Event('scroll'));
+    renderThinkingBlock(node, thinking('Line one\n\nLine two\n\nLine three', false), ports);
+    expect(top).toBe(100);
+    // Reopening starts at the newest line again.
+    const details = node.querySelector<HTMLDetailsElement>('.thinking-block')!;
+    details.open = false;
+    details.dispatchEvent(new Event('toggle'));
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    expect(top).toBe(900);
+  } finally { node.remove(); }
+});

@@ -8,7 +8,8 @@
  * panel. Zone membership is presentation policy only: order inside a zone is
  * the projection's block order, and Turn authority is never rewritten.
  *
- * Entry points: groupedTurnLayout, groupedTurnEntries, turnLayoutZone.
+ * Entry points: groupedTurnLayout, groupedTurnEntries, turnLayoutZone,
+ * interimNarrationIds.
  * Dependencies: view-model types and thinking merge, tool attention, round
  * identity/state. DOM-free; memoized per immutable Turn view model.
  */
@@ -114,6 +115,26 @@ const regionCache = new WeakMap<ReadonlyArray<GroupedTurnEntry>, ReadonlyArray<E
 /** Windowable regions of a mounted entry list; unknown lists window whole. */
 export function entryRegions(entries: ReadonlyArray<GroupedTurnEntry>): ReadonlyArray<EntryRegion> {
   return regionCache.get(entries) ?? (entries.length ? [{ kind: 'turn', start: 0, end: entries.length }] : []);
+}
+
+/** Interim prose of a mounted reply: the contiguous run of round narration
+ * that starts at its first interim text, so the run can share one bounded
+ * reading well. Interim text is neither the settled answer nor the reply's
+ * latest text: the latest stays outside while it may still stream (or become
+ * the answer) and joins only once a later round's text follows it. The run
+ * ends at the first other entry, so chronology is never reordered. */
+export function interimNarrationIds(entries: ReadonlyArray<GroupedTurnEntry>): ReadonlySet<string> {
+  let latestText = -1;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index].kind === 'text') { latestText = index; break; }
+  }
+  const interim = (entry: GroupedTurnEntry): boolean => (
+    entry.kind === 'text' && !entry.deliverable && !entry.terminal);
+  const ids = new Set<string>();
+  let index = 0;
+  while (index < latestText && !interim(entries[index])) index += 1;
+  for (; index < latestText && interim(entries[index]); index += 1) ids.add(entries[index].blockId);
+  return ids;
 }
 
 /* Backend block ids never use the `layout:` namespace. */
