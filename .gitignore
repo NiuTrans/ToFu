@@ -126,6 +126,7 @@ __pycache__/
 !/benchmarks/catalog_origin_reads.py
 !/benchmarks/owned_inventory_reads.py
 !/benchmarks/dispatch_contention.py
+!/benchmarks/route_group_retirement.py
 !/benchmarks/wire_fingerprint_compare.py
 !/benchmarks/tool_call_identity_compare.py
 !/benchmarks/turn_trace_compare.py
