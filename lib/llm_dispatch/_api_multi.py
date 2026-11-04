@@ -103,12 +103,13 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
             return (content, usage, slot)
         except Exception as e:
             from lib.llm.llm_errors import (
-                LocalRequestPreparationError, ModelRouteUnavailableError,
-                RateLimitError)
+                EndpointUnreachableError, LocalRequestPreparationError,
+                ModelRouteUnavailableError, RateLimitError)
             if not settled:
-                # Neither local preparation nor a gateway no-channel verdict
-                # is evidence about this key.
-                if isinstance(e, (LocalRequestPreparationError,
+                # Local preparation, a gateway no-channel verdict and an
+                # unreachable network endpoint are not evidence about this key.
+                if isinstance(e, (EndpointUnreachableError,
+                                  LocalRequestPreparationError,
                                   ModelRouteUnavailableError)):
                     slot.release()
                 else:

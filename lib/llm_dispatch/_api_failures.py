@@ -7,7 +7,6 @@ returns the already-established wait duration; callers own cancellable waiting,
 queue timing, transport execution and attempt observation.
 """
 
-import time
 from lib.log import get_logger
 from lib.llm.llm_errors import (
     AbortedError,
@@ -28,13 +27,13 @@ from lib.llm.llm_errors import (
     parse_subscription_retry_after,
 )
 from ._api_budget import (
-    _UNREACHABLE_COOLDOWN,
     _force_oauth_token_refresh,
     _raise_if_429_attempt_budget_exhausted,
     _record_route_missing_model,
 )
 from ._api_contention import _shared_contention_retry_delay
 from ._api_errors import DispatchSharedContentionDeferred
+from ._endpoint_outage import log_endpoint_outage
 from ._route_unavailable import log_route_unavailable, route_unavailable_reason
 
 logger = get_logger('lib.llm_dispatch.api')
@@ -153,12 +152,38 @@ class DispatchFailurePolicy:
 
     def _local_preparation(self, error, slot, tag):
         slot.release()
+        if self._skip_unrepresentable_route(error, slot, tag):
+            return 0.0
         if not self.state.credential_outage.absorb(error, slot, log_prefix=tag):
             raise error
         self._remember_failure(error)
         if self.attempt_observer is not None:
             self.attempt_observer.note_cause(type(error).__name__)
         return 0.0
+
+    def _skip_unrepresentable_route(self, error, slot, tag):
+        """Let a non-strict pick pass over a route that cannot carry the request.
+
+        Native continuity (signed reasoning, opaque replay items) binds the
+        request to protocols that represent it; another route may. A strict
+        pick cannot change model or protocol and still surfaces the error.
+        """
+        from lib.llm.conversion import ProtocolConversionError
+        if self.strict_model or not (
+                isinstance(error, ProtocolConversionError)
+                and error.code == 'mandatory_continuity_unrepresentable'):
+            return False
+        self.state.note_unrepresentable_route(slot, self.dispatcher)
+        # A provider failure seen earlier stays the actionable terminal cause.
+        if self.state.last_err is None:
+            self.state.last_err = error
+        if self.attempt_observer is not None:
+            self.attempt_observer.note_cause(type(error).__name__)
+        logger.info(
+            '%s %s cannot represent this request\'s native continuity '
+            '— route excluded for the call, trying other eligible routes',
+            tag, slot.model)
+        return True
 
     def _deferred(self, error, slot, tag):
         slot.release()
@@ -332,27 +357,31 @@ class DispatchFailurePolicy:
         return 0.0
 
     def _endpoint_unreachable(self, error, slot, tag):
-        slot.record_error(is_rate_limit=False, error=str(error)[:200])
-        slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
-        slot.cooldown_reason = 'upstream'
+        """Hold the unreachable network endpoint; its slots are not at fault.
+
+        Only a caller with an explicit upstream budget spends a hard attempt;
+        otherwise the outage is waitable like a gateway 5xx storm.
+        """
+        slot.release()
         self._remember_failure(error)
-        self.state.note_unreachable_pair(slot)
-        logger.warning(
-            '%s Endpoint unreachable on %s:%s (%s) — cooled %ds + excluded pair, failing over: %s',
-            self.log_prefix,
-            slot.key_name,
-            slot.model,
-            getattr(error, 'base_url', '') or '?',
-            _UNREACHABLE_COOLDOWN,
-            str(error)[:160],
-        )
+        outage = self.state.endpoint_outage
+        probe_in_s = outage.absorb(slot)
+        if self.max_429_attempts is None:
+            self.state.note_endpoint_outage()
+            attempt = outage.observations
+        else:
+            self.state.hard_attempts += 1
+            attempt = self.state.hard_attempts
+        log_endpoint_outage(
+            self.log_prefix, slot, error,
+            observations=outage.observations, probe_in_s=probe_in_s)
         self._retry_notice(
             slot,
-            attempt=self.state.hard_attempts,
+            attempt=attempt,
             reason='Endpoint unreachable',
             status_code=0,
         )
-        self._restart('endpoint unreachable — rotating slot')
+        self._restart('endpoint unreachable — holding network endpoint')
         return 0.0
 
     def _aborted(self, error, slot, tag):

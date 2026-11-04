@@ -2635,11 +2635,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_UNREACHABLE_COOLDOWN": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_UPDATE_BRANCH": {
       "status": "legacy",
       "owner": "",
@@ -4411,5 +4406,5 @@
       "description": "Absolute path to an extracted runtime tree produced by python -m evaluations.pi_contract build-runtime. When set, the native Pi relay-stub test executes that pinned runtime; when unset, the offline helper and contract tests still run and the live-runtime test skips."
     }
   },
-  "legacy_count": 600
+  "legacy_count": 599
 }

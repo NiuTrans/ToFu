@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import time
 
 import pytest
 
@@ -303,7 +302,7 @@ class TestAsyncDispatchStreamRetry:
 
 @pytest.mark.unit
 class TestAsyncDispatchStreamUnreachableFailover:
-    def test_unreachable_cools_slot_and_fails_over(self, monkeypatch):
+    def test_unreachable_releases_slot_neutrally_and_next_slot_serves(self, monkeypatch):
         from lib.llm_dispatch import api
 
         dead = _make_slot(key='dead')
@@ -328,12 +327,12 @@ class TestAsyncDispatchStreamUnreachableFailover:
         msg, finish, usage = _run(api.async_dispatch_stream(
             [{'role': 'user', 'content': 'hi'}], log_prefix='[t]'))
 
-        # Failed over to the live slot — did NOT retry the dead one.
+        # The next eligible slot served; the dead one was not re-tried.
         assert msg == 'ok'
         assert calls['n'] == 2
-        # The dead slot was cooled down (routed around), not just error-bumped.
-        assert dead.cooldown_until > time.time()
-        assert dead.total_errors >= 1
+        # The network path failed, not the slot: no cooldown or health penalty
+        # (endpoint holds and probing: test_dispatch_endpoint_outage.py).
+        assert (dead.cooldown_until, dead.total_errors, dead.inflight) == (0, 0, 0)
         assert live.last_success_time > 0
 
 
