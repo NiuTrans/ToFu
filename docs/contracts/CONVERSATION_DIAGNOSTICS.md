@@ -94,6 +94,8 @@ default, and wall time at 30 seconds. Request allowance derives from the total
 byte allowance and 64 KiB chunk size rather than retaining the old 128-page cap.
 `--api-max-total-mib N` explicitly changes aggregate allowance (1–1024 MiB);
 `--full` changes presentation/history selection, not these resource bounds.
+The wall time is fixed; a read its deadline interrupts is a time-budget stop
+(`DiagnosticBudgetError`), never a transport or authorization fault.
 
 A turn is preflighted against remaining bytes/requests. The final header has a
 protected byte and request reserve throughout turn and archive reads, including

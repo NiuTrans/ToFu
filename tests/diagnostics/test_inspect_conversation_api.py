@@ -235,7 +235,7 @@ def test_api_deadline_interrupts_continuously_dripping_body(monkeypatch):
             time.sleep(.01)
     with api_server(serve) as url:
         started = time.monotonic()
-        with pytest.raises(inspector.DiagnosticAPIError):
+        with pytest.raises(inspector.DiagnosticBudgetError, match='time budget'):
             inspector._DiagnosticAPI(url, None).get('/x')
         assert time.monotonic() - started < 1.0
 
@@ -296,7 +296,16 @@ def test_api_deadline_interrupts_dripping_headers(monkeypatch):
             time.sleep(.01)
     with api_server(serve) as url:
         started = time.monotonic()
-        with pytest.raises(inspector.DiagnosticAPIError):
+        with pytest.raises(inspector.DiagnosticBudgetError, match='time budget'):
+            inspector._DiagnosticAPI(url, None).get('/x')
+        assert time.monotonic() - started < 1.0
+
+
+def test_api_deadline_interrupts_a_server_that_never_answers(monkeypatch):
+    monkeypatch.setattr(inspector._DiagnosticAPI, 'DEADLINE_SECONDS', .12)
+    with api_server(lambda request: time.sleep(1)) as url:
+        started = time.monotonic()
+        with pytest.raises(inspector.DiagnosticBudgetError, match='time budget'):
             inspector._DiagnosticAPI(url, None).get('/x')
         assert time.monotonic() - started < 1.0
 

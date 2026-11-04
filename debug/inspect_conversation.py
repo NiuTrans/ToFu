@@ -1394,7 +1394,16 @@ class _DiagnosticAPI:
             if not isinstance(envelope, dict) or not isinstance(envelope.get('data'), dict):
                 raise DiagnosticAPIError('API returned an invalid v4 success envelope')
             return envelope['data']
-        except (OSError, ValueError, RecursionError, http.client.HTTPException) as exc:
+        except DiagnosticBudgetError:
+            raise
+        except (DiagnosticAPIError, OSError, ValueError, RecursionError,
+                http.client.HTTPException) as exc:
+            # The deadline timer shuts the socket down, so the interrupted read surfaces
+            # as a transport or framing fault; it is the exhausted time budget.
+            if time.monotonic() >= self.deadline:
+                raise DiagnosticBudgetError('API diagnostic exceeded its total time budget') from exc
+            if isinstance(exc, DiagnosticAPIError):
+                raise
             detail = ': '.join(
                 f'{link.__class__.__name__}: {link}'
                 for link in _exception_chain(exc))
