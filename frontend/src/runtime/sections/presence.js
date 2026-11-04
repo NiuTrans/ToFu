@@ -334,9 +334,6 @@
       var flags = _convStatusFlags(c);
       return flags.streaming || flags.waiting || Boolean(flags.background && !flags.background.queuedOnly);
     },
-    hasUnread: function (c) {
-      return _convStatusFlags(c).needsReview;
-    },
     status: function (c) {
       var flags = _convStatusFlags(c);
       if (flags.streaming || flags.waiting || flags.background) return 'running';

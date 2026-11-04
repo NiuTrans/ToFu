@@ -227,7 +227,7 @@ it('pins only the task board atop the Coordinator chat: no sessions, references,
   expect(f.canvas.firstElementChild).toBe(card);
   expect(card.open).toBe(true);
   expect(card.querySelector('.coordinator-progress-summary')?.textContent).toBe(BOARD.summary);
-  expect([...card.querySelectorAll('.coordinator-progress-task strong')].map(node => node.textContent))
+  expect([...card.querySelectorAll('.coordinator-progress-task-title')].map(node => node.textContent))
     .toEqual(['Research New Year homestays', 'Fix folder creation']);
   for (const retired of ['.coordination-work-list', '.coordination-topology', '.coordination-reference',
     '.coordinator-budget', '.coordinator-plan', '.coordination-report']) expect(f.canvas.querySelector(retired)).toBeNull();
@@ -260,6 +260,8 @@ it('keeps fold state and focus across live board updates and opens management on
     tasks: BOARD.tasks.map(task => ({ ...task, status: 'completed' as const })) }));
   f.wake();
   await vi.waitFor(() => expect(f.canvas.querySelector('.coordinator-progress-summary')?.textContent).toBe('Research done.'));
+  // A live update repaints the same card in place.
+  expect(f.canvas.querySelector('.coordinator-progress')).toBe(card);
   expect(f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress')?.open).toBe(false);
   expect(f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress-finished')?.open).toBe(true);
   expect(document.activeElement?.textContent).toBe('projectCoordination.controls');
@@ -268,6 +270,24 @@ it('keeps fold state and focus across live board updates and opens management on
   expect(f.details).toHaveBeenCalledWith(expect.objectContaining({ path: '/project' }));
   expect(f.ports.navigate).not.toHaveBeenCalled();
   f.surface.destroy();
+});
+
+it('shows the board in its display translation once the server attaches one, in the chat and the sidebar tooltip', async () => {
+  const f = fixture('sidebar'), chat = fixture('canvas');
+  for (const surface of [f, chat]) {
+    await surface.surface.refresh();
+    vi.mocked(surface.ports.progress!.read).mockResolvedValue({ ...progressState(), translation: { target: 'Chinese', texts: [
+      { source: BOARD.summary, text: '文件夹修复已验证；正在调研行程。' },
+      { source: 'Research New Year homestays', text: '调研新年民宿' }] } });
+    surface.wake();
+  }
+  await vi.waitFor(() => expect(chat.canvas.querySelector('.coordinator-progress-summary')?.textContent)
+    .toBe('文件夹修复已验证；正在调研行程。'));
+  expect([...chat.canvas.querySelectorAll('.coordinator-progress-task-title')].map(node => node.textContent))
+    .toEqual(['调研新年民宿', 'Fix folder creation']);
+  await vi.waitFor(() => expect(f.sidebar.querySelector<HTMLElement>('.coordination-leader')?.title)
+    .toBe('projectCoordination.openCoordinator · 文件夹修复已验证；正在调研行程。'));
+  f.surface.destroy(); chat.surface.destroy();
 });
 
 it("shows an empty or unavailable board explicitly and never a previous binding's board", async () => {
