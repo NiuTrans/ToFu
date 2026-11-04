@@ -400,6 +400,25 @@ closed panel mounts none of its calls, so it hydrates no lazy outputs; opening
 an oversized panel windows its calls from the first one. A reply without calls
 has no panel; its process rows render inline before the prose.
 
+Interim round prose shares ONE bounded, scrolling narration well
+(`interimNarrationIds` in `grouped-turn-layout.ts`; design ports
+`narrationWell`/`paintNarrationWell`; styles in `23-reading-prose.css`), so a
+long run of rounds no longer stretches the reply. Members are the contiguous
+run of non-deliverable, non-terminal text starting at the first one, excluding
+the reply's latest text: that text may still stream or become the answer, so
+a leaf is reparented at most once, when a later round's text follows it. The
+answer always reads on the open page below. The well wears the activity
+card's palette, radius and glyph tile, labels its note count, scrolls with
+edge shadows and is keyboard-focusable. Per-block caps were rejected: many
+short rounds still stretched the reply. Open reasoning (`.thinking-content`)
+is the same kind of scroller: shared `--conversation-process-scroll-max`, edge
+shadows covered with the surface it sits on, a labelled focusable region.
+Both read newest-first through `endAnchoredScroller` (`renderers/stable-dom.ts`):
+they rest at their end when first laid out, when reasoning is (re)opened and
+as content grows, until the reader scrolls up; scrolling back to the end
+resumes following. Starting at the top was rejected: the latest progress is
+what the reader wants.
+
 When reasoning and calls are both present, their independent disclosures form
 one activity card: two full-width, equal-height rows with matching glyph tiles
 and trailing chevrons, separated by the card's rule rather than a detached pill.

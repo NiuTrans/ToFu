@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · Durchgänge: {n}",
   "toolPanel.working": "Wird bearbeitet… ({n})",
   "toolPanel.queued": "Wartet auf Start",
+  "narrationWell.label": "Zwischennotizen: {n}",
   "toolSearch.catalogLimit": "Angezeigt werden die ersten {shown} von {total} Treffern.",
   "toolSearch.engineLimit": "Weitere Suchmaschinenquellen wurden in dieser begrenzten Ansicht ausgelassen.",
   "toolSearch.failOpen": "vollständiger Tool-Katalog wiederhergestellt",

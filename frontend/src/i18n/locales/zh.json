@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · {n} 轮",
   "toolPanel.working": "处理中…（{n}）",
   "toolPanel.queued": "等待开始",
+  "narrationWell.label": "{n} 段过程说明",
   "toolSearch.catalogLimit": "仅显示前 {shown} 个，共 {total} 个匹配。",
   "toolSearch.engineLimit": "更多搜索引擎来源因视图容量限制而省略。",
   "toolSearch.failOpen": "已恢复完整工具目录",

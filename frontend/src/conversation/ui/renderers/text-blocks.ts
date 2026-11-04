@@ -22,6 +22,8 @@ import {
   setCompletedMarkdownHtml,
   resetManagedHtml,
   preserveDetailsOpen,
+  endAnchoredScroller,
+  type EndAnchoredScroller,
 } from './stable-dom';
 import {
   disclosureChevron,
@@ -167,6 +169,8 @@ interface ThinkingBodyRenderState {
   body: HTMLElement;
   appliedMarkdown: string | null;
   appliedStreaming: boolean | null;
+  /** Newest-first reading: every opening rests at the end. */
+  end: EndAnchoredScroller;
   render(): void;
   dispose(): void;
 }
@@ -245,6 +249,11 @@ export function renderThinkingBlock(
     details.appendChild(content);
   }
   content.className = 'thinking-content';
+  // The open body is a bounded scroller; keyboard readers need to reach it.
+  if (content.tabIndex !== 0) content.tabIndex = 0;
+  if (content.getAttribute('role') !== 'region') content.setAttribute('role', 'region');
+  if (content.getAttribute('aria-label') !== labelText) content.setAttribute('aria-label', labelText);
+  const scroller = content;
   let body = directClassChild<HTMLElement>(content, 'thinking-text');
   if (!body) {
     body = document.createElement('div');
@@ -259,13 +268,19 @@ export function renderThinkingBlock(
     const disclosure = details;
     const next: ThinkingBodyRenderState = {
       details, body, appliedMarkdown: null, appliedStreaming: null,
+      end: endAnchoredScroller(scroller, body),
       render() {},
       dispose() {
         disclosure.removeEventListener('toggle', onToggle);
+        next.end.dispose();
         next.render = () => {};
       },
     };
-    const onToggle = (): void => { if (disclosure.open) next.render(); };
+    const onToggle = (): void => {
+      if (!disclosure.open) return;
+      next.render();
+      next.end.pin();
+    };
     disclosure.addEventListener('toggle', onToggle);
     state = next;
     thinkingBodyRenderStates.set(node, state);
@@ -282,6 +297,7 @@ export function renderThinkingBlock(
     current.appliedMarkdown = markdown;
     current.appliedStreaming = streaming;
     delete target.dataset.deferredReasoning;
+    current.end.follow();
   };
   if (block.terminal && !details.open
       && markdown.length > DEFERRED_REASONING_MIN_CHARACTERS) {

@@ -159,14 +159,9 @@ export function createSurfaceDom(retireNodes: (nodes: readonly HTMLElement[]) =>
      * cache (and jsdom) serve as an O(n) lookup per index — quadratic on Turns
      * that carry thousands of blocks. Complete the scan before retirement so
      * renderer teardown cannot interrupt discovery of later duplicates. */
-    let child = parent.firstElementChild;
-    while (child) {
-      const next = child.nextElementSibling;
+    const visit = (child: Element): void => {
       const value = (child as HTMLElement).dataset[key];
-      if (!value) {
-        child = next;
-        continue;
-      }
+      if (!value) return;
       /* A keyed child is a singleton by contract. A stale asset transition or
        * interrupted live render can leave two DOM nodes carrying the same key.
        * Map.set alone retained only the last node and made every earlier copy an
@@ -175,13 +170,40 @@ export function createSurfaceDom(retireNodes: (nodes: readonly HTMLElement[]) =>
        * its focus/disclosure state) and converge duplicate DOM on every commit. */
       if (result.has(value)) duplicates.push(child as HTMLElement);
       else result.set(value, child as HTMLElement);
-      child = next;
+    };
+    for (let child = parent.firstElementChild; child; child = child.nextElementSibling) {
+      const wellBody = narrationWellBody(child);
+      if (!wellBody) visit(child);
+      else for (let inner = wellBody.firstElementChild; inner; inner = inner.nextElementSibling) visit(inner);
     }
     if (duplicates.length) retireNodes(duplicates);
     return result;
   }
 
   return { ensurePart, directKeyedChildren };
+}
+
+/** A reply's interim prose shares one scrolling well inside the blocks
+ * container; its keyed blocks are children of the well's body. */
+export function narrationWellBody(node: Element): HTMLElement | null {
+  if ((node as HTMLElement).dataset.narrationWell === undefined) return null;
+  for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
+    if ((child as HTMLElement).dataset.narrationWellBody !== undefined) return child as HTMLElement;
+  }
+  return null;
+}
+
+/** Keyed block nodes of a blocks container in DOM order, through the well. */
+export function keyedBlockNodes(container: HTMLElement): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
+  for (let child = container.firstElementChild; child; child = child.nextElementSibling) {
+    const body = narrationWellBody(child);
+    const members = body ? Array.from(body.children) : [child];
+    for (const node of members) {
+      if ((node as HTMLElement).dataset.blockId !== undefined) nodes.push(node as HTMLElement);
+    }
+  }
+  return nodes;
 }
 
 export function placeAt(parent: HTMLElement, node: HTMLElement, index: number): void {

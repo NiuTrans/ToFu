@@ -28,6 +28,18 @@
   background: var(--turn-process-panel);
 }
 
+/* Open, the header sits above a hairline like the narration well's head. */
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel) > .thinking-block[open] > .thinking-header {
+  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+/* The reasoning scroller's edge covers match the card it sits on. */
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel) .thinking-content {
+  --process-scroll-cover: var(--turn-process-panel);
+}
+
 .conversation-surface .conversation-turn-blocks > .conversation-block--thinking + .conversation-tool-panel {
   margin-block-start: 0;
   border-block-start: 0;

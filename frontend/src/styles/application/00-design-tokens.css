@@ -87,6 +87,7 @@
   --conversation-flow-gap:var(--space-0);
   --conversation-prose-gap:var(--space-3);
   --conversation-process-radius:12px;
+  --conversation-process-scroll-max:min(24rem, 50vh);
   --conversation-process-shell-inset:var(--space-0);
   --conversation-reading-inset:var(--space-0);
   --conversation-inspector-width:440px;

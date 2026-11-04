@@ -5477,6 +5477,7 @@
   "toolPanel.turnsSuffix": " · {n} turn{s}",
   "toolPanel.working": "Working… ({n})",
   "toolPanel.queued": "Waiting to start",
+  "narrationWell.label": "{n} progress note{s}",
   "toolSearch.catalogLimit": "Showing first {shown} of {total} matches.",
   "toolSearch.engineLimit": "Additional engine sources omitted from this bounded view.",
   "toolSearch.failOpen": "full catalog restored",
