@@ -167,11 +167,16 @@ Current boundaries that prevent treating Agent count as a capacity claim:
   event-driven seams; they do not already replace every predicate-based wait.
 - Shared settled rows and progress-source reuse avoid copying every historical
   value on every token. They do not make every structural projection incremental.
-  For example, injected-note placement in `segments/_assemble.py` scans segment
-  history per note and searches again for an existing identity. History length
-  and note count can multiply work even when the number of Agents is unchanged.
-  Indexing must preserve attempt/task scope, continuation prose, stable note
-  order, terminal anchors and replacement semantics.
+  Each structural frame still re-runs linear normalization passes over the
+  whole Turn. Injected-note placement in `segments/_assemble.py` no longer
+  rescans history per note: ordinary blocks never move, so each anchor is a
+  binary search over per-execution-scope running maxima of block thresholds,
+  and only notes are walked (identity replacement and same-gap order). It keeps
+  attempt/task scope, continuation prose, stable note order, terminal anchors
+  and replacement semantics; `test_note_placement_matches_the_linear_anchor_rule`
+  pins parity with the linear scan. On a recorded 1,494-segment Turn with 45
+  notes, placement fell from 9.6 ms to 0.9 ms per frame and the full running
+  projection from 20 ms to 11 ms (10 ms for that Turn without notes).
 - Delivery lanes separate execution from ordinary persistence and batch existing
   work without a timed window. Required effect, interaction and terminal barriers
   still wait for their ordered debt. Slow projection or storage therefore affects
