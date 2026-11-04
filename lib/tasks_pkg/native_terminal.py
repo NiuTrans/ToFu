@@ -70,6 +70,12 @@ def project_native_terminal(task: dict, request: TerminalRequest) -> None:
         result = event.get('result')
         if not isinstance(result, dict):
             raise ValueError('native terminal result invalid')
+        provider_reason = result.get('finish_reason')
+        from lib.tasks_pkg.stream_handler._terminal_recovery import OUTPUT_LIMIT_FINISH_REASONS
+        if provider_reason is not None:
+            if provider_reason not in OUTPUT_LIMIT_FINISH_REASONS:
+                raise ValueError('native terminal finish reason invalid')
+            reason = provider_reason
         messages, usages = result.get('messages'), result.get('usage')
         if (not isinstance(messages, list) or not messages
                 or any(not isinstance(row, dict) for row in messages)

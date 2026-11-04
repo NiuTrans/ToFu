@@ -133,11 +133,18 @@ fn response(message: Value) -> StreamResult {
         malformed_frames: 0,
     }
 }
+fn cut_response(message: Value, state: ProviderStreamState) -> StreamResult {
+    StreamResult {
+        state,
+        finish_reason: Some("length".into()),
+        ..response(message)
+    }
+}
 fn tools(args: &str) -> Value {
     json!({"role":"assistant","tool_calls":[{"id":"a1","type":"function","function":{"name":"echo","arguments":args}}]})
 }
 struct Rounds {
-    values: Mutex<VecDeque<Value>>,
+    values: Mutex<VecDeque<StreamResult>>,
     seen: Mutex<Vec<Vec<Value>>>,
 }
 impl Provider for Rounds {
@@ -147,10 +154,13 @@ impl Provider for Rounds {
         _: &Arc<ExecutionSession>,
     ) -> Result<StreamResult, ProviderError> {
         self.seen.lock().unwrap().push(messages.to_vec());
-        Ok(response(self.values.lock().unwrap().pop_front().unwrap()))
+        Ok(self.values.lock().unwrap().pop_front().unwrap())
     }
 }
 fn rounds(values: Vec<Value>) -> Rounds {
+    stream_rounds(values.into_iter().map(response).collect())
+}
+fn stream_rounds(values: Vec<StreamResult>) -> Rounds {
     Rounds {
         values: Mutex::new(values.into()),
         seen: Mutex::new(vec![]),
@@ -270,6 +280,162 @@ fn retained_tool_history_survives_provider_error_cancel_and_panic_without_replay
         assert!(result.receipt.invariants_satisfied);
     }
 }
+#[test]
+fn output_limit_replays_reasoning_without_cut_tool_effects() {
+    for arguments in ["{", "", "{}"] {
+        let p = stream_rounds(vec![
+            cut_response(
+                json!({"role":"assistant","content":"writing",
+                "reasoning_content":"design",
+                "_responses_items":[{"type":"reasoning","id":"r1"},
+                    {"type":"message","role":"assistant","phase":"commentary",
+                        "content":[{"type":"output_text","text":"writing"}]},
+                    {"type":"tofu_state_origin","version":1,"deployment_id":"d1"},
+                    {"type":"function_call","id":"unsafe"}],
+                "_anthropic_content_blocks":[{"type":"thinking","thinking":"design"},
+                    {"type":"tool_use","id":"unsafe"}],
+                "tool_calls":[{"id":"a1","type":"function",
+                    "function":{"name":"echo","arguments":arguments}}]}),
+                ProviderStreamState::ProviderFinished,
+            ),
+            response(json!({"role":"assistant","content":"done"})),
+        ]);
+        let (r, c) = run(&p, &Allow, budget());
+        assert_eq!(r.status, TaskStatus::Done);
+        assert_eq!(c, 0);
+        let seen = p.seen.lock().unwrap();
+        let replay = &seen[1][1];
+        assert_eq!(replay["reasoning_content"], "design");
+        assert!(replay.get("tool_calls").is_none());
+        assert_eq!(
+            replay["_responses_items"],
+            json!([{"type":"reasoning","id":"r1"},
+                {"type":"message","role":"assistant","phase":"commentary",
+                    "content":[{"type":"output_text","text":"writing"}]},
+                {"type":"tofu_state_origin","version":1,"deployment_id":"d1"}])
+        );
+        assert_eq!(
+            replay["_anthropic_content_blocks"],
+            json!([{"type":"thinking","thinking":"design"}])
+        );
+        assert_eq!(
+            seen[1][2]["content"],
+            tofu_runtime::execution_contract::OUTPUT_LIMIT_RECOVERY_NOTICE
+        );
+        assert_eq!(seen[1][2]["_contextInjectionId"], "output_limit_recovery");
+        assert_eq!(
+            r.result.as_ref().unwrap()["usage"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    let p = stream_rounds(vec![
+        cut_response(
+            json!({"role":"assistant","content":"",
+            "_responses_items":[{"type":"function_call","id":"unsafe"}],
+            "_anthropic_content_blocks":[{"type":"tool_use","id":"unsafe"}]}),
+            ProviderStreamState::ProviderFinished,
+        ),
+        response(json!({"role":"assistant","content":"done"})),
+    ]);
+    let (r, c) = run(&p, &Allow, budget());
+    assert_eq!(r.status, TaskStatus::Done);
+    assert_eq!(c, 0);
+    let seen = p.seen.lock().unwrap();
+    assert_eq!(seen[1][1]["_responses_items"], json!([]));
+    assert_eq!(seen[1][1]["_anthropic_content_blocks"], json!([]));
+}
+
+#[test]
+fn output_limit_recovers_reasoning_only_empty_response_and_bounds_streak() {
+    let mut values = (0..2)
+        .map(|_| {
+            cut_response(
+                json!({"role":"assistant","content":"","reasoning_content":"partial proof"}),
+                ProviderStreamState::EmptyResponse,
+            )
+        })
+        .collect::<Vec<_>>();
+    values.push(response(json!({"role":"assistant","content":"proved"})));
+    let p = stream_rounds(values);
+    let (r, c) = run(&p, &Allow, budget());
+    assert_eq!(r.status, TaskStatus::Done);
+    assert_eq!(c, 0);
+    assert_eq!(p.seen.lock().unwrap().len(), 3);
+
+    let p = stream_rounds(
+        (0..3)
+            .map(|_| {
+                cut_response(
+                    json!({"role":"assistant","content":"","reasoning_content":"still thinking"}),
+                    ProviderStreamState::EmptyResponse,
+                )
+            })
+            .collect(),
+    );
+    let (r, c) = run(&p, &Allow, budget());
+    assert_eq!(r.status, TaskStatus::Error);
+    assert_eq!(r.error.as_ref().unwrap()["kind"], "abnormal_stop");
+    assert_eq!(
+        r.error.as_ref().unwrap()["message"],
+        tofu_runtime::execution_contract::OUTPUT_LIMIT_EXHAUSTED_MESSAGE
+    );
+    assert_eq!(c, 0);
+    assert_eq!(p.seen.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn output_limit_returns_cut_text_after_exhaustion_and_resets_after_tools() {
+    let p = stream_rounds(
+        (0..3)
+            .map(|index| {
+                cut_response(
+                    json!({"role":"assistant","content":format!("part {index}")}),
+                    ProviderStreamState::ProviderFinished,
+                )
+            })
+            .collect(),
+    );
+    let (r, c) = run(&p, &Allow, budget());
+    assert_eq!(r.status, TaskStatus::Done);
+    assert_eq!(c, 0);
+    assert_eq!(r.result.as_ref().unwrap()["finish_reason"], "length");
+    assert_eq!(
+        r.result.as_ref().unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["content"],
+        "part 2"
+    );
+
+    let mut values = (0..2)
+        .map(|_| {
+            cut_response(
+                json!({"role":"assistant","content":"","reasoning_content":"design"}),
+                ProviderStreamState::ProviderFinished,
+            )
+        })
+        .collect::<Vec<_>>();
+    values.push(response(tools("{}")));
+    values.extend((0..2).map(|_| {
+        cut_response(
+            json!({"role":"assistant","content":"","reasoning_content":"more design"}),
+            ProviderStreamState::ProviderFinished,
+        )
+    }));
+    values.push(response(json!({"role":"assistant","content":"done"})));
+    let p = stream_rounds(values);
+    let mut b = budget();
+    b.rounds = Some(6);
+    let (r, c) = run(&p, &Allow, b);
+    assert_eq!(r.status, TaskStatus::Done);
+    assert_eq!(c, 1);
+}
+
 #[test]
 fn ordered_feedback_continues_and_terminalizes_once() {
     let p = rounds(vec![
