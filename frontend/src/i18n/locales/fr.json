@@ -3731,6 +3731,7 @@
   "ptc.status.failed": "Échec",
   "ptc.status.incomplete": "Incomplet",
   "ptc.status.running": "Programme en cours d’exécution",
+  "ptc.status.waiting": "En attente de démarrage",
   "ptc.tasks": "Appels d’outil enfants : {n}",
   "ptc.title": "Exécution du programme",
   "ptc.activity.inputs": "Script : rechercher les résultats antérieurs",

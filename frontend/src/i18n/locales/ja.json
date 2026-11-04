@@ -3731,6 +3731,7 @@
   "ptc.status.failed": "失敗",
   "ptc.status.incomplete": "未完了",
   "ptc.status.running": "プログラム実行中",
+  "ptc.status.waiting": "開始待ち",
   "ptc.tasks": "子ツール呼び出し{n}件",
   "ptc.title": "プログラム実行",
   "ptc.activity.inputs": "スクリプト：過去の結果を検索",

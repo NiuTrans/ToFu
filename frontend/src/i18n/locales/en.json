@@ -3731,6 +3731,7 @@
   "ptc.status.failed": "Failed",
   "ptc.status.incomplete": "Incomplete",
   "ptc.status.running": "Executing program",
+  "ptc.status.waiting": "Waiting to start",
   "ptc.tasks": "{n} child tool calls",
   "ptc.title": "Program execution",
   "ptc.activity.inputs": "Script: look up prior results",

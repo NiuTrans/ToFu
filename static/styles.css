@@ -9168,7 +9168,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptc-card[open] > .ptc-head > .ptc-chevron { transform: rotate(90deg); }
 .ptc-body { margin: var(--space-1) var(--space-3) var(--space-2) var(--space-4); padding-inline-start: var(--space-3); border-inline-start: var(--control-edge-inset) solid var(--border); }
 .ptc-title { font-weight: var(--weight-semibold); color: var(--text-primary); }
-.ptc-status { margin-left: auto; max-width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-xs); color: var(--text-tertiary); }
+/* One line that never shrinks: it moves under the title when both do not
+ * fit, and is cut only when it alone exceeds the head. */
+.ptc-status { flex: none; max-width: 100%; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-xs); color: var(--text-tertiary); }
 .ptc-running .ptc-status { color: var(--accent); }
 .ptc-status.ptc-status-error { color: var(--chip-err-color); background: var(--chip-err-bg); font-weight: var(--weight-semibold); }
 .ptc-meta { flex-basis: 100%; min-width: 0; padding-inline-start: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-xs); overflow-wrap: anywhere; white-space: normal; }
@@ -27527,6 +27529,20 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   border-radius: 0;
 }
 .conversation-surface .conversation-block .sw-header[data-action-summary] > .conversation-tool-identity { display: none; }
+/* A program head (ui/program-execution-card.ts) names its step once: the
+ * localized title is the intent, never clamped or shrunk, and the exact
+ * identity (execute_program) lives only in the title tooltip. Its status
+ * stays on one line, and the head keeps wrapping so its summary takes its
+ * own line beneath instead of squeezing title and status into one row. */
+.conversation-surface .conversation-block .ptc-head[data-action-summary] { flex-wrap: wrap; }
+.conversation-surface .conversation-block .ptc-head[data-action-summary] > .ptc-title {
+  flex: none;
+  max-width: none;
+  -webkit-line-clamp: none;
+  overflow: visible;
+  white-space: nowrap;
+}
+.conversation-surface .conversation-block .ptc-head[data-action-summary] > .conversation-tool-identity { display: none; }
 .conversation-surface details[open] > [data-action-summary] > .ptool-line-preview { visibility: hidden; }
 /* Outcomes (owner report 2026-11-01): a chip in a row always means "look
  * here". Telemetry (tokens, characters), counts and routine status words are
@@ -28077,9 +28093,10 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
 /* Phones keep one row per call too: the intent clamps beside its outcome
  * instead of pushing the chip onto a line of its own. A failure's reason
  * still takes its own line, as do structured summaries (saved-output
- * artifacts, repository-map parameters) and an attention step's identity. */
+ * artifacts, repository-map parameters), a program head's summary and an
+ * attention step's identity. */
 @media (max-width: 600px) {
-  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(:has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
+  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(.ptc-head, :has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
     flex-wrap: nowrap;
   }
   /* A saved-output summary keeps its responsive basis, which holds its

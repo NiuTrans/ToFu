@@ -146,6 +146,20 @@
   border-radius: 0;
 }
 .conversation-surface .conversation-block .sw-header[data-action-summary] > .conversation-tool-identity { display: none; }
+/* A program head (ui/program-execution-card.ts) names its step once: the
+ * localized title is the intent, never clamped or shrunk, and the exact
+ * identity (execute_program) lives only in the title tooltip. Its status
+ * stays on one line, and the head keeps wrapping so its summary takes its
+ * own line beneath instead of squeezing title and status into one row. */
+.conversation-surface .conversation-block .ptc-head[data-action-summary] { flex-wrap: wrap; }
+.conversation-surface .conversation-block .ptc-head[data-action-summary] > .ptc-title {
+  flex: none;
+  max-width: none;
+  -webkit-line-clamp: none;
+  overflow: visible;
+  white-space: nowrap;
+}
+.conversation-surface .conversation-block .ptc-head[data-action-summary] > .conversation-tool-identity { display: none; }
 .conversation-surface details[open] > [data-action-summary] > .ptool-line-preview { visibility: hidden; }
 /* Outcomes (owner report 2026-11-01): a chip in a row always means "look
  * here". Telemetry (tokens, characters), counts and routine status words are

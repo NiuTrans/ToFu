@@ -3731,6 +3731,7 @@
   "ptc.status.failed": "Сбой",
   "ptc.status.incomplete": "Не завершено",
   "ptc.status.running": "Выполнение программы",
+  "ptc.status.waiting": "Ожидание запуска",
   "ptc.tasks": "Дочерних вызовов инструментов: {n}",
   "ptc.title": "Выполнение программы",
   "ptc.activity.inputs": "Скрипт: поиск предыдущих результатов",

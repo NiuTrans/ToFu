@@ -1720,6 +1720,26 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   Artifact/cursor metadata remains inspectable but excluded from previews.
   Rejected: synthetic-only rendering, arbitrary code-tool aliases, and inferred
   completion/statistics from script-returned data.
+  Only the synthetic parent records that a program started, so an unanswered
+  gateway call of a live (`pending`/`running`) Turn reads Waiting to start,
+  without script activity, counters or a result, until its started parent
+  replaces it and reads Executing program. A settled Turn's unanswered call
+  is Incomplete, whatever in-flight status its round last carried. Problem:
+  sibling programs serialized behind one running program all claimed to be
+  executing and to have requested tools. Rejected: timers or elapsed-time
+  guesses, and reading any in-flight gateway status as a running program.
+  Specs: `program-execution-card.test.ts` and `program-gateway-card.test.ts`.
+  Program heads name the step once: the localized title, never clamped (the
+  exact `execute_program` identity stays in its tooltip), and a one-line
+  status that never shrinks share one compact line. A long localized status
+  that cannot fit beside the title moves beneath it whole, and is cut only
+  when it alone exceeds the head; the summary keeps its own line beneath at
+  every width. Problem: an open program row also showed the raw tool name,
+  and the generic one-line call row squeezed the summary beside them,
+  clipping the title to one glyph and wrapping the status. Rejected:
+  restyling every tool row, and a truncated single-line summary. Spec: real
+  Chromium `test_visual_program_row_status.py` (waiting, running and settled
+  rows) at desktop/mobile widths.
 
   Problem: zero-call wording made saved-result reads look like no work, and
   keeper receipt JSON exposed private references in the glanceable header.

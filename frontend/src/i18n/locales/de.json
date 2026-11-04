@@ -3731,6 +3731,7 @@
   "ptc.status.failed": "Fehlgeschlagen",
   "ptc.status.incomplete": "Unvollständig",
   "ptc.status.running": "Programm wird ausgeführt",
+  "ptc.status.waiting": "Wartet auf Start",
   "ptc.tasks": "Untergeordnete Tool-Aufrufe: {n}",
   "ptc.title": "Programmausführung",
   "ptc.activity.inputs": "Skript: frühere Ergebnisse abrufen",
