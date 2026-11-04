@@ -379,14 +379,18 @@ choose models.
 the owner's routing document; `null` clears it. `GET
 /api/v4/router/worker-model?path=` reads it for any bound router. The owner
 sees and sets it in the browser (`frontend/src/features/router-worker-model.ts`):
-a compact "Worker model: …" disclosure whose choices are the composer model
+one compact labelled select on a single row (its closed value is the current
+model, its tooltip the explanation) whose choices are the composer model
 picker's catalog and visibility policy (hidden models, chat capability,
 display-name order and labels), never a second model list; its first option,
-"Owner default model", sends `null`, and a refused choice keeps the stored
-value with the server's message. The Global Router's control is in its header;
+the owner's default model, sends `null`, a refused choice keeps the stored
+value with the server's message, and a failed read shows its error beside a
+retry. The Global Router's control is in its header;
 every other Project Router's leads the footer of the task board on its
 coordinator conversation surface, beside "Manage work" rather than on a line
-of its own, where it stays attached across repaints and reads once per visit; the Watchdog conversation has none. A
+of its own (the board starts folded, so the control shows once it is opened),
+where it stays attached across repaints and reads once per visit; the Watchdog
+conversation has none. A
 conversation is the Global Router when its project path is the router home the
 Global Router read last reported (the `_globalRouter` setting is a server-side
 presentation marker the settings contract does not project to the browser).
@@ -638,7 +642,7 @@ setting (event-driven model turns the owner did not choose).
   delegates and authors no board. Both owners are created before the locale
   catalog loads, so labels carry `data-i18n`/`data-i18n-title` keys that
   `ready()` and every language switch translate; parameterized text (the
-  Worker model summary) re-renders on `tofu:language-change` and removes that
+  Worker model's read and write failures) re-renders on `tofu:language-change` and removes that
   listener on teardown. The retained presence section hides the card where the
   listed conversations belong to a project (that project's coordinator card
   takes the slot), gives the router home and Watchdog location no project

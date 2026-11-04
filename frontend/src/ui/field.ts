@@ -16,6 +16,8 @@ export interface FieldOptions {
   controlId?: string; // id used for label[for]; generated when omitted
   hint?: string;
   required?: boolean;
+  /** 'sm': compact inline row — the label beside a small control; hint and error wrap below. */
+  size?: 'sm' | 'md';
 }
 
 export interface FieldHandle {
@@ -58,7 +60,7 @@ export function createField(options: FieldOptions, document: Document = globalTh
   }
 
   const el = document.createElement('div');
-  el.className = 'ui-field';
+  el.className = options.size === 'sm' ? 'ui-field ui-field--sm' : 'ui-field';
   el.appendChild(label);
   if (options.choices && !options.control) {
     const selectWrapper = document.createElement('div');

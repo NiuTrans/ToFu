@@ -487,20 +487,25 @@ sessions and tells the human what matters.
   (owner-scoped `conversations`, passive) returns `progressState`.
 - Browser. `frontend/src/features/coordinator-progress.ts` is the only thing
   pinned atop the bound Coordinator chat: a collapsible card that reads as a
-  todo list. Its head carries the title, the in-progress count and the update
-  time over the one-line summary. Each task is one line behind a status glyph
-  (a ring while pending, half filled in progress, a filled check when
-  completed, a filled cross when cancelled): in-progress work first, then the
-  Coordinator's order, finished tasks folded. Only an in-progress task shows
-  its note, cut to one line; every other note is its row's tooltip and stays
-  in the accessibility tree. The footer holds one explicit "Manage work"
-  button for the existing management dialog, led by a Project Router's Worker
-  model control ([ROUTER.md](ROUTER.md) R5) instead of a line of its own. The
-  card persists across repaints of the same Coordinator chat, so fold, scroll
-  and focus survive live board updates. No session list, references, graph,
-  usage or report banner remains there. The sidebar entry shows the
-  in-progress count (or "all done") with the summary as its tooltip. A Worker
-  chat keeps one "return to Coordinator" button.
+  todo list and starts folded to its head, one line holding the title, the
+  in-progress count, the summary and the update time (an empty or unavailable
+  board says so there); opened, the summary takes its own line. Each task is
+  one line behind a status glyph (a ring while pending, half filled in
+  progress, a filled check when completed, a filled cross when cancelled):
+  in-progress work first, then the Coordinator's order, finished tasks folded.
+  Only an in-progress task shows its note, cut to one line; every other note
+  is its row's tooltip and stays in the accessibility tree. The footer holds
+  one explicit "Manage work" button for the existing management dialog, led
+  by a Project Router's Worker model control ([ROUTER.md](ROUTER.md) R5)
+  instead of a line of its own. The card persists across repaints of the same
+  Coordinator chat, so fold, scroll and focus survive live board updates. It
+  starts folded because the sidebar already shows the in-progress count and
+  lists the Coordinator's Worker conversations, so an open board only
+  repeated them in the chat's reading space; removing the board instead would
+  also drop the summary and the in-chat way to management. No session list,
+  references, graph, usage or report banner remains there. The sidebar entry
+  shows the in-progress count (or "all done") with the summary as its
+  tooltip. A Worker chat keeps one "return to Coordinator" button.
 - Display translation. Problem: the board stayed in the Coordinator's working
   language beside its auto-translated replies. Decision: while the human reads
   the Coordinator chat auto-translated (the publishing turn's config, else the

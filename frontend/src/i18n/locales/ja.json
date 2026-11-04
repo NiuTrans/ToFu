@@ -6909,8 +6909,6 @@
   "globalRouter.entryTitle": "メインコーディネーターと会話",
   "globalRouter.entryMeta": "プロジェクトの作業はプロジェクトコーディネーターへ",
   "globalRouter.headerSubtitle": "ここやDaxiangなどのチャネルからのメッセージは、まずメインコーディネーターに届きます。プロジェクトの作業はそのプロジェクトのコーディネーターへ、それ以外はワーカーの会話に振り分けられます。",
-  "globalRouter.workerModel": "ワーカーモデル：{model}",
-  "globalRouter.workerModelDefault": "既定のモデル",
   "globalRouter.unavailable": "メインコーディネーターを利用できません：{error}",
   "routerWorkerModel.label": "ワーカーの会話のモデル",
   "routerWorkerModel.ownerDefault": "あなたの既定のモデル",

@@ -6909,8 +6909,6 @@
   "globalRouter.entryTitle": "Написать главному координатору",
   "globalRouter.entryMeta": "Передает работу по проектам их координаторам",
   "globalRouter.headerSubtitle": "Сообщения отсюда и из каналов, таких как Daxiang, сначала попадают к главному координатору: работа по проекту передается координатору этого проекта, остальное — в чаты исполнителей.",
-  "globalRouter.workerModel": "Модель исполнителей: {model}",
-  "globalRouter.workerModelDefault": "модель по умолчанию",
   "globalRouter.unavailable": "Главный координатор недоступен: {error}",
   "routerWorkerModel.label": "Модель для чатов исполнителей",
   "routerWorkerModel.ownerDefault": "Ваша модель по умолчанию",

@@ -225,7 +225,8 @@ it('pins only the task board atop the Coordinator chat: no sessions, references,
   expect(f.sidebar.querySelector('[data-coordinator-id]')?.getAttribute('data-coordinator-id')).toBe('leader');
   const card = f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress')!;
   expect(f.canvas.firstElementChild).toBe(card);
-  expect(card.open).toBe(true);
+  // Folded to its one-line head by default: the sidebar already lists the work.
+  expect(card.open).toBe(false);
   expect(card.querySelector('.coordinator-progress-summary')?.textContent).toBe(BOARD.summary);
   expect([...card.querySelectorAll('.coordinator-progress-task-title')].map(node => node.textContent))
     .toEqual(['Research New Year homestays', 'Fix folder creation']);
@@ -251,7 +252,7 @@ it('pins only the task board atop the Coordinator chat: no sessions, references,
 it('keeps fold state and focus across live board updates and opens management only explicitly', async () => {
   const f = fixture(); await f.surface.refresh();
   const card = f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress')!;
-  card.open = false; card.dispatchEvent(new Event('toggle'));
+  card.open = true; card.dispatchEvent(new Event('toggle'));
   const finished = f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress-finished')!;
   finished.open = true; finished.dispatchEvent(new Event('toggle'));
   const manage = [...f.canvas.querySelectorAll('button')].find(button => button.textContent === 'projectCoordination.controls')!;
@@ -262,7 +263,7 @@ it('keeps fold state and focus across live board updates and opens management on
   await vi.waitFor(() => expect(f.canvas.querySelector('.coordinator-progress-summary')?.textContent).toBe('Research done.'));
   // A live update repaints the same card in place.
   expect(f.canvas.querySelector('.coordinator-progress')).toBe(card);
-  expect(f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress')?.open).toBe(false);
+  expect(f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress')?.open).toBe(true);
   expect(f.canvas.querySelector<HTMLDetailsElement>('.coordinator-progress-finished')?.open).toBe(true);
   expect(document.activeElement?.textContent).toBe('projectCoordination.controls');
   expect(f.sidebar.querySelector('.coordination-leader-meta')?.textContent).toBe('coordinatorProgress.sidebar.allDone');

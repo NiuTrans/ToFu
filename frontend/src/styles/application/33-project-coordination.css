@@ -98,7 +98,7 @@
 }
 
 
-#presenceStrip:has(.coordinator-progress) { padding: var(--space-3) var(--space-4); }
+#presenceStrip:has(.coordinator-progress) { padding: var(--space-2) var(--space-4); }
 /* A worker conversation's strip holds the way back to its coordinator; inset
  * it from the pane corner instead of printing it flush under the topbar. */
 #presenceStrip:has(> .ui-btn) { padding: var(--space-2) var(--space-6) var(--space-0); }
@@ -239,20 +239,24 @@
 /* Session-free task board: the Coordinator's own summary of the human's tasks,
  * read as a todo list. One line per task behind a status glyph: a ring while
  * open (half filled in progress), a filled disc once done or dropped. Only
- * current work shows its note; never a progress bar or a count of sessions. */
+ * current work shows its note; never a progress bar or a count of sessions.
+ * Folded, the head is a single line (it wraps only when the pane is too narrow);
+ * open, the summary takes its own line under the title. */
 .coordinator-progress { color: var(--text-primary); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
-.coordinator-progress-head { display: flex; flex-direction: column; gap: var(--space-1); cursor: pointer; list-style: none; min-width: 0; }
+.coordinator-progress-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); cursor: pointer; list-style: none; min-width: 0; }
 .coordinator-progress-head::-webkit-details-marker { display: none; }
-.coordinator-progress-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; }
-.coordinator-progress-title { font-weight: var(--weight-semibold); }
+.coordinator-progress-title { font-weight: var(--weight-semibold); white-space: nowrap; }
+/* The flex head drops the native marker; this triangle matches the finished-task fold's. */
+.coordinator-progress-title::before { content: '\25B8'; content: '\25B8' / ''; display: inline-block; margin-inline-end: var(--space-1); color: var(--text-tertiary); font-size: var(--font-size-xs); font-weight: var(--weight-regular); }
+.coordinator-progress[open] .coordinator-progress-title::before { content: '\25BE'; content: '\25BE' / ''; }
+.coordinator-progress-head:hover .coordinator-progress-title::before { color: var(--text-primary); }
 .coordinator-progress-tally { color: var(--accent); font-size: var(--font-size-xs); font-weight: var(--weight-semibold); white-space: nowrap; }
 .coordinator-progress-updated { margin-inline-start: auto; color: var(--text-tertiary); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.coordinator-progress-summary { color: var(--text-secondary); font-size: var(--font-size-sm); line-height: var(--leading-title); }
-.coordinator-progress:not([open]) .coordinator-progress-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coordinator-progress-summary { flex: 1 1 8rem; min-width: 0; color: var(--text-secondary); font-size: var(--font-size-sm); line-height: var(--leading-title); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coordinator-progress[open] .coordinator-progress-summary { order: 1; flex-basis: 100%; white-space: normal; }
 .coordinator-progress-body { display: flex; flex-direction: column; gap: var(--space-2); padding-block-start: var(--space-2); max-height: min(40vh, 26rem); overflow: auto; overscroll-behavior: contain; }
 .coordinator-progress-content { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .coordinator-progress-content:empty { display: none; }
-.coordinator-progress-note { margin: var(--space-0); color: var(--text-secondary); font-size: var(--font-size-sm); }
 .coordinator-progress-tasks { display: flex; flex-direction: column; margin: var(--space-0); padding: var(--space-0); list-style: none; }
 .coordinator-progress-task { position: relative; display: flex; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-1); min-width: 0; font-size: var(--font-size-md); line-height: var(--leading-title); }
 /* One first-line box tall, so the glyph centers on the title's first line. */
@@ -271,13 +275,9 @@
 .coordinator-progress-finished > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--font-size-xs); }
 .coordinator-progress-finished > .coordinator-progress-tasks { padding-block-start: var(--space-1); }
 /* A Router's Worker model leads the board's commands instead of taking a line
- * of its own above the board; opened, its choice takes the row. */
+ * of its own above the board. */
 .coordinator-progress-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
-.coordinator-progress-actions > .router-worker-model[open] { flex-basis: 100%; }
 .coordinator-progress-commands { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-inline-start: auto; }
 .coordinator-progress-command-slot { display: contents; }
-/* An empty board is one line under its title: the hint beside its action. */
-.coordinator-progress[data-state="empty"] .coordinator-progress-body { flex-direction: row; flex-wrap: wrap; align-items: center; }
-.coordinator-progress[data-state="empty"] .coordinator-progress-content { flex: 1 1 16rem; }
 .coordinator-progress summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
 @media (max-width: 480px) { .coordinator-progress { padding: var(--space-2); } }

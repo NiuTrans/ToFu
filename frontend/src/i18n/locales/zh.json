@@ -6909,8 +6909,6 @@
   "globalRouter.entryTitle": "与总负责人对话",
   "globalRouter.entryMeta": "接收所有消息，项目的事转给项目负责人",
   "globalRouter.headerSubtitle": "这里和大象等渠道的消息都先到总负责人：项目的事转给该项目的负责人，其余开执行会话处理。",
-  "globalRouter.workerModel": "执行模型：{model}",
-  "globalRouter.workerModelDefault": "默认模型",
   "globalRouter.unavailable": "总负责人不可用：{error}",
   "routerWorkerModel.label": "执行会话使用的模型",
   "routerWorkerModel.ownerDefault": "你的默认模型",

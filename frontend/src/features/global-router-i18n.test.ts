@@ -37,12 +37,14 @@ it('translates the card created before the locale catalog loads, then follows a 
   const card = sidebar.querySelector<HTMLElement>('.coordination-leader')!;
   const label = () => card.querySelector('.coordination-leader-label')!.textContent;
   const meta = () => card.querySelector('.coordination-leader-meta')!.textContent;
-  const summary = () => header.querySelector('.router-worker-model summary')!.textContent;
+  const workerLabel = () => header.querySelector('.router-worker-model label')!.textContent;
+  const workerHelp = () => header.querySelector<HTMLSelectElement>('.router-worker-model select')!.title;
   await vi.waitFor(() => expect(header.querySelector('.router-worker-model')).not.toBeNull());
 
   // Painted before the catalog arrived: lookups are premature and return keys.
   expect(label()).toBe('globalRouter.entry');
-  expect(summary()).toBe('globalRouter.workerModel');
+  expect(workerLabel()).toBe('routerWorkerModel.label');
+  expect(workerHelp()).toBe('routerWorkerModel.help');
 
   const ready = i18n.ready();
   releaseZh();
@@ -51,8 +53,8 @@ it('translates the card created before the locale catalog loads, then follows a 
   expect(meta()).toBe(zh['globalRouter.entryMeta']);
   expect(card.title).toBe(zh['globalRouter.entryTitle']);
   expect(header.querySelector('.global-router-header-subtitle')!.textContent).toBe(zh['globalRouter.headerSubtitle']);
-  expect(summary()).toBe('执行模型：默认模型');
-  expect(header.querySelector('.router-worker-model label')!.textContent).toBe(zh['routerWorkerModel.label']);
+  expect(workerLabel()).toBe(zh['routerWorkerModel.label']);
+  expect(workerHelp()).toBe(zh['routerWorkerModel.help']);
   expect(header.querySelector('.router-worker-model option')!.textContent).toBe(zh['routerWorkerModel.ownerDefault']);
   expect(header.querySelector('.router-instructions summary')!.textContent).toBe(zh['routerInstructions.title']);
 
@@ -60,7 +62,8 @@ it('translates the card created before the locale catalog loads, then follows a 
   expect(label()).toBe('Main coordinator');
   expect(meta()).toBe(en['globalRouter.entryMeta']);
   expect(card.title).toBe(en['globalRouter.entryTitle']);
-  expect(summary()).toBe('Worker model: default model');
+  expect(workerLabel()).toBe(en['routerWorkerModel.label']);
+  expect(workerHelp()).toBe(en['routerWorkerModel.help']);
   expect(header.querySelector('.router-worker-model option')!.textContent).toBe('Your default model');
   expect(header.querySelector('.router-instructions summary')!.textContent).toBe('Standing instructions');
   entry.destroy();

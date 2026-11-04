@@ -64,7 +64,8 @@ describe('Global Router entry (the main coordinator)', () => {
     // The topbar already names the chat: the header explains it instead of repeating the name.
     expect(view.textContent).not.toContain('globalRouter.entry');
     expect(view.querySelector('.global-router-header-subtitle')!.textContent).toBe('globalRouter.headerSubtitle');
-    expect(view.textContent).toContain('globalRouter.workerModelDefault');
+    expect(view.querySelector<HTMLSelectElement>('.router-worker-model select')!.selectedOptions[0].textContent)
+      .toBe('routerWorkerModel.ownerDefault');
   });
 
   it('opens from the keyboard like the project card', async () => {

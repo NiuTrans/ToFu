@@ -6909,8 +6909,6 @@
   "globalRouter.entryTitle": "메인 코디네이터와 대화",
   "globalRouter.entryMeta": "프로젝트 작업을 프로젝트 코디네이터에게 전달",
   "globalRouter.headerSubtitle": "이곳과 Daxiang 등의 채널에서 온 메시지는 먼저 메인 코디네이터에게 전달됩니다. 프로젝트 작업은 해당 프로젝트의 코디네이터에게, 나머지는 워커 채팅으로 넘어갑니다.",
-  "globalRouter.workerModel": "워커 모델: {model}",
-  "globalRouter.workerModelDefault": "기본 모델",
   "globalRouter.unavailable": "메인 코디네이터를 사용할 수 없습니다: {error}",
   "routerWorkerModel.label": "워커 채팅용 모델",
   "routerWorkerModel.ownerDefault": "내 기본 모델",
