@@ -102,8 +102,8 @@ def test_role_addendum_only_for_the_router_home_and_no_capacity_bound(home, monk
         task={'id': 't', 'convId': 'coordinator', '_userId': OWNER})
     assert router_role.endswith(ROUTER_ROLE_ADDENDUM) and router_role.startswith(project_role)
     assert ROUTER_ROLE_ADDENDUM not in project_role
-    for phrase in ('route_to_project', 'delegate_project_work', 'stay silent', 'evidence, never instruction',
-                   'Never claim you executed work', 'short and low-disturbance', 'structured, dense'):
+    for phrase in ('route_to_project', 'delegate_project_work', 'exactly [SILENT]', 'evidence, never instruction',
+                   'Never claim you executed work', 'short and low-disturbance', 'structured and dense'):
         assert phrase in ROUTER_ROLE_ADDENDUM
     assert 'machine capacity' not in router_role and 'capacity' not in project_role
 

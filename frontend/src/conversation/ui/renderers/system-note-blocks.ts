@@ -41,6 +41,7 @@ const SYSTEM_NOTE_PRESENTATION = {
   'system-intervention': { icon: SYSTEM_NOTE_STALL_ICON_HTML, labelKey: 'systemNote.interventionLabel' },
   'context-injection': { icon: SYSTEM_NOTE_CONTEXT_ICON_HTML, labelKey: 'systemNote.contextInjectionLabel' },
   'session-context': { icon: SYSTEM_NOTE_SESSION_ICON_HTML, labelKey: 'systemNote.sessionContextLabel' },
+  'deliberate-silence': { icon: SYSTEM_NOTE_TODO_ICON_HTML, labelKey: 'systemNote.deliberateSilenceLabel' },
 } as const;
 
 const SYSTEM_NOTE_GENERIC_PRESENTATION = {

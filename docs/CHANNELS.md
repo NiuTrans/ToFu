@@ -156,11 +156,16 @@ canonical non-deliverable assistant text block once (tool-round
 `assistantContent` and released continuation prose, never reasoning or raw
 tool payloads), plus each changed `update_task_progress` board summary. The
 observer does no model or network work. A Global Router Turn whose human input
-came from a channel thread enqueues its final assistant answer to that thread
-with idempotency key = the Turn ID, followed by an explicit completed, failed,
+came from a channel thread, including a genuine human command steered into a
+nonhuman notice Turn, enqueues its final assistant answer to that thread with
+idempotency key = the Turn ID, followed by an explicit completed, failed,
 interrupted or aborted receipt from the existing task terminal-listener seam.
-Receipts and progress use the command chat; other channel events and nonhuman
-Turns never gain these automatic messages. Agent-authored messages in threads
+A successfully reviewed nonhuman notice may instead declare deliberate
+silence (ROUTER.md R3): its audit note stays in Tofu, with no empty reply or
+misleading completion receipt. A failed or interrupted review sends a
+command-chat warning even when that notice had no reply origin. Receipts and
+progress use the command chat; other channel events and nonhuman Turns never
+gain these automatic messages. Agent-authored messages in threads
 other than the command chat carry the visible label `[Tofu 代发]`. Each queued
 item takes an exact per-thread queue position (CAS on the thread record);
 approval appends a draft at the end. The executor sends each thread in order,

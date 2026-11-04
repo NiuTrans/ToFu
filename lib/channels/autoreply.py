@@ -96,19 +96,40 @@ def reply_origin(owner: int, conversation_id: str, turn_id: str) -> dict[str, An
     try:
         require_human_turn(human)
     except ValueError:
-        return None
-    channel = ((human.get('projection') or {}).get('origin') or {}).get('channel')
-    return channel if isinstance(channel, dict) and channel.get('thread') else None
+        human = None
+    channel = (((human or {}).get('projection') or {}).get('origin') or {}).get('channel')
+    if isinstance(channel, dict) and channel.get('thread'):
+        return channel
+    from lib.turn_initiation import steered_input_turn
+    for record in (output.get('projection') or {}).get('_userSteerInjects') or []:
+        if not isinstance(record, dict) or not record.get('author'):
+            continue
+        try:
+            source = steered_input_turn(output, str(record.get('commandId') or ''))
+            require_human_turn(source, user_id=owner)
+        except ValueError:
+            continue
+        channel = ((source.get('projection') or {}).get('origin') or {}).get('channel')
+        if isinstance(channel, dict) and channel.get('thread'):
+            return channel
+    return None
 
 
-def _command_receipt_pending(task: dict[str, Any]) -> bool:
-    """A queued command starts after the receipt said it was queued, not started."""
+def _command_receipt_pending(task: dict[str, Any], store, channel: dict[str, Any]) -> bool:
+    """Only a command whose existing receipt said queued gets a start receipt."""
     from lib.turn_lifecycle import get_attempt
     attempt_id = str(task.get('_attemptId') or '')
     if not attempt_id:
         return False
     attempt = get_attempt(attempt_id, user_id=int(task['_userId']))
-    return str((attempt or {}).get('commandId') or '').startswith('channel-owner-')
+    if not str((attempt or {}).get('commandId') or '').startswith('channel-owner-'):
+        return False
+    for event_id in channel.get('eventIds') or []:
+        item_id = store.outbox_item_id(int(task['_userId']), channel['thread'],
+                                       'receipt:' + str(event_id))
+        item, _version = store.outbox_item(item_id)
+        return item is not None and item.extra.get('authoredText') == _RECEIPT_LABELS['queued']
+    return False
 
 
 def _publish_segments(task: dict[str, Any], store, channel: dict[str, Any],
@@ -180,7 +201,7 @@ def on_task_event(stream: str, task_id: str, payload: dict[str, Any]) -> None:
         task = chat_task_runtime.get_owned(task_id, user_id=owner)
         if task is None or task.get('_parentTaskId') or task.get('_transientRuntime'):
             return
-        if _command_receipt_pending(task):
+        if _command_receipt_pending(task, store, channel):
             _enqueue(store, owner, channel, conversation_id, turn_id, 'router_receipt',
                      _RECEIPT_LABELS['started'], f'{turn_id}:started')
         _publish_progress(task, store, channel, conversation_id, turn_id, payload)
@@ -200,6 +221,40 @@ def _terminal_outcome(task: dict[str, Any]) -> str:
     return 'error'
 
 
+def _notify_notice_failure(task: dict[str, Any], owner: int, conversation_id: str,
+                           turn_id: str, outcome: str, store) -> None:
+    """A failed nonhuman review must not disappear with the model that failed."""
+    if outcome not in {'error', 'interrupted'}:
+        return
+    from lib.channels.delivery import is_global_router
+    if not is_global_router(owner, conversation_id):
+        return
+    from lib.turn_initiation import INITIATOR_CHANNEL, INITIATOR_PEER, resolve_turn_initiator
+    from lib.turn_lifecycle import get_turn
+    output = get_turn(conversation_id, turn_id, user_id=owner)
+    if output.get('actor') != 'assistant' or output.get('conversationId') != conversation_id:
+        return
+    parent_id = output.get('parentTurnId')
+    if not parent_id:
+        return
+    source = get_turn(conversation_id, parent_id, user_id=owner)
+    if resolve_turn_initiator(source) not in {INITIATOR_CHANNEL, INITIATOR_PEER}:
+        return
+    account = store.account('dx')
+    command_chat = str((account or {}).get('commandChat') or '')
+    if not command_chat:
+        return
+    text = '总负责人处理一条通知时失败，尚未完成审阅。请在 Tofu 的总负责人对话中重新处理。'
+    origin = ((source.get('projection') or {}).get('origin') or {})
+    channel = origin.get('channel') or {}
+    reply_to = None
+    if channel.get('thread') == command_chat and origin.get('initiator') == 'channel':
+        reply_to = next(iter(channel.get('eventIds') or []), None)
+    _enqueue(store, owner, {'channel': 'dx', 'thread': command_chat, 'eventIds': []},
+             conversation_id, turn_id, 'router_status', text,
+             f'{turn_id}:notice-review:{outcome}', reply_to=reply_to)
+
+
 def on_task_terminal(task: dict[str, Any]) -> None:
     if task.get('_parentTaskId') or task.get('_transientRuntime'):
         return
@@ -214,9 +269,13 @@ def on_task_terminal(task: dict[str, Any]) -> None:
     if not account or not account.get('enabled'):
         return
     channel = _channel(store, int(owner), conversation_id, turn_id)
-    if channel is None:
-        return
     outcome = _terminal_outcome(task)
+    if channel is None:
+        _notify_notice_failure(task, int(owner), conversation_id, turn_id, outcome, store)
+        return
+    from lib.tasks_pkg.stream_handler._router_silence import silent_turn_declared
+    if outcome == 'done' and silent_turn_declared(task):
+        return
     if outcome == 'done':
         _enqueue(store, int(owner), channel, conversation_id, turn_id, 'router_reply',
                  str(task.get('content') or ''), turn_id)

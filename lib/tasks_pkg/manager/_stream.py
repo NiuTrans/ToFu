@@ -809,6 +809,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         Deliberately NOT passed to the FloorRetry resend call — during resends
         the first attempt's text is still the fallback content and must
         survive unless a resend is adopted."""
+        _text_deltas.discard_held_content()
         # Tool callbacks own execution-bearing state too. A discarded provider
         # response must retire its early rows and quarantine its prefetch
         # futures even when it emitted no prose (tool-only responses are common).

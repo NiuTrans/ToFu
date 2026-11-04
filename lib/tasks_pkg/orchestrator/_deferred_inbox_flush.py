@@ -186,6 +186,8 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
                 'count': 1,
                 'previews': [_preview],
                 'deliveryState': 'delivered',
+                **({'author': dict(_sit['steerAuthor'])}
+                   if isinstance(_sit.get('steerAuthor'), dict) else {}),
             })
         if _legacy_steer_previews:
             _steer_lane.append({

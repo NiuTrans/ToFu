@@ -5131,6 +5131,7 @@
   "systemNote.actionToolPolicy": "Tool-Richtlinie geändert",
   "systemNote.activeChecklistLabel": "Systemeingriff · Aktive Checkliste",
   "systemNote.contextInjectionLabel": "Kontext eingefügt",
+  "systemNote.deliberateSilenceLabel": "Hinweis geprüft · Keine Antwort nötig",
   "systemNote.detailsLabel": "Protokollierter Eingriff",
   "systemNote.groupItemsTitle": "Einträge: {n}",
   "systemNote.groupLabel": "Kontexthinweise",

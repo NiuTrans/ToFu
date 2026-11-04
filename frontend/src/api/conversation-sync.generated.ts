@@ -5125,7 +5125,8 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "todo-continuation",
           "system-intervention",
           "context-injection",
-          "session-context"
+          "session-context",
+          "deliberate-silence"
         ],
         "type": "string"
       },
@@ -6573,7 +6574,7 @@ export type TurnSystemNoteSegment = {
   "attemptId"?: string;
   "taskId"?: string;
   "text": string;
-  "noteKind": "intent-stall" | "todo-continuation" | "system-intervention" | "context-injection" | "session-context";
+  "noteKind": "intent-stall" | "todo-continuation" | "system-intervention" | "context-injection" | "session-context" | "deliberate-silence";
   "injectionId"?: string;
   "action"?: "prompt" | "stop" | "tool-policy" | "continue";
   "reason"?: string;
