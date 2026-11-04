@@ -34,8 +34,8 @@ fn prepare_append(database: &AuthorityDatabase, tx: &mut AuthorityTransaction) -
 }
 
 fn prepare_append_sized(database: &AuthorityDatabase, tx: &mut AuthorityTransaction,
-    requires_snapshot: bool) -> Value {
-    let content = if requires_snapshot { "x".repeat(9 * 1024 * 1024) }
+    large_event: bool) -> Value {
+    let content = if large_event { "x".repeat(9 * 1024 * 1024) }
         else { "汉😀\\\"".repeat(32_768) };
     append_attempt_event(database, tx, AttemptEventAppend {
         conversation_id: "ref-conversation", turn_id: "ref-turn", attempt_id: "ref-attempt",
@@ -147,22 +147,43 @@ fn retention_protects_the_source_then_old_snapshot_survives_both_prunes() {
 }
 
 #[test]
-fn oversized_replay_uses_snapshot_invalidation_at_the_full_envelope_boundary() {
-    let envelope = conversation_sync_event("ref-conversation", 1, "attempt.event",
-        2_000, json!({"event":{"seq":1}}), Some("ref-turn"), Some("ref-attempt"));
-    let overhead = serde_json::to_vec(&envelope).unwrap().len()
-        - serde_json::to_vec(&envelope["payload"]["event"]).unwrap().len();
-    let exact = super::prepare(&envelope, MAX_LEGACY_DOCUMENT_BYTES - overhead).unwrap();
-    assert_eq!(exact.document_identity, super::DOCUMENT_IDENTITY);
-    assert_eq!(exact.envelope, envelope);
-    let refresh = super::prepare(&envelope, MAX_LEGACY_DOCUMENT_BYTES - overhead + 1).unwrap();
-    assert_eq!(refresh.document_identity, SYNC_DOCUMENT_IDENTITY);
-    assert_eq!(refresh.envelope["type"], "conversation.activity");
-    assert_eq!(refresh.envelope["payload"], json!({"requiresSnapshot": true}));
-    for field in ["conversationId", "turnId", "attemptId", "syncSeq", "occurredAt"] {
-        assert_eq!(refresh.envelope[field], envelope[field]);
+fn large_canonical_events_replay_exactly_after_reopen_and_across_row_pages() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    seed(&mut database);
+    let mut tx = database.begin(7, 11).unwrap();
+    let before = sync_head(&database, &mut tx, "ref-conversation").unwrap();
+    let canonical_events = (0..8)
+        .map(|_| prepare_append_sized(&database, &mut tx, true))
+        .collect::<Vec<_>>();
+    database.commit(tx).unwrap();
+    drop(database);
+    let database = AuthorityDatabase::open(directory.path()).unwrap();
+    let mut tx = database.begin(7, 11).unwrap();
+    {
+        let bytes = sync_changes(&database, &mut tx, "ref-conversation",
+            before, canonical_events.len(), &mut || false).unwrap().unwrap();
+        assert!(bytes.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["events"].as_array().unwrap().len(), canonical_events.len());
+        assert_eq!(page["hasMore"], false);
+        for (index, canonical) in canonical_events.iter().enumerate() {
+            assert!(&page["events"][index]["payload"]["event"] == canonical,
+                "chunked replay must preserve every complete canonical event");
+        }
     }
-    assert!(refresh.value_json.len() < MAX_LEGACY_DOCUMENT_BYTES);
+    for (index, canonical) in canonical_events.iter().enumerate() {
+        let bytes = sync_changes(&database, &mut tx, "ref-conversation",
+            before + index as u64, 1, &mut || false).unwrap().unwrap();
+        assert!(bytes.len() > 8 * 1024 * 1024);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["events"].as_array().unwrap().len(), 1);
+        assert_eq!(page["events"][0]["type"], "attempt.event");
+        assert!(&page["events"][0]["payload"]["event"] == canonical,
+            "row-paginated replay must preserve the complete canonical event");
+        assert_eq!(page["events"][0]["syncSeq"], before + index as u64 + 1);
+        assert_eq!(page["hasMore"], index + 1 < canonical_events.len());
+    }
 }
 
 
@@ -232,14 +253,14 @@ fn source_reference_and_cursor_are_atomic_at_every_commit_io_fault() {
 }
 
 #[test]
-fn oversized_source_and_snapshot_invalidation_are_atomic_at_every_commit_io_fault() {
+fn large_source_reference_and_cursor_are_atomic_at_every_commit_io_fault() {
     publication_is_atomic_at_every_commit_io_fault(true);
 }
 
-fn publication_is_atomic_at_every_commit_io_fault(requires_snapshot: bool) {
+fn publication_is_atomic_at_every_commit_io_fault(large_event: bool) {
     let (vfs, mut database) = fault_fixture();
     let mut tx = database.begin(7, 11).unwrap();
-    prepare_append_sized(&database, &mut tx, requires_snapshot);
+    prepare_append_sized(&database, &mut tx, large_event);
     vfs.arm_fault(None).unwrap();
     database.commit(tx).unwrap();
     let trace = vfs.trace().unwrap();
@@ -254,7 +275,7 @@ fn publication_is_atomic_at_every_commit_io_fault(requires_snapshot: bool) {
             let (vfs, mut database) = fault_fixture();
             let mut tx = database.begin(7, 11).unwrap();
             let before = sync_head(&database, &mut tx, "ref-conversation").unwrap();
-            let canonical = prepare_append_sized(&database, &mut tx, requires_snapshot);
+            let canonical = prepare_append_sized(&database, &mut tx, large_event);
             vfs.arm_fault(Some(FaultRule { operation_number: index as u64 + 1, action })).unwrap();
             let acknowledged = database.commit(tx).is_ok();
             let durable = Arc::new(vfs.fork_durable().unwrap());
@@ -268,17 +289,7 @@ fn publication_is_atomic_at_every_commit_io_fault(requires_snapshot: bool) {
                 "ref-conversation", before, 100, &mut || false).unwrap().unwrap()).unwrap();
             assert_eq!(rows["events"].as_array().unwrap().len(), usize::from(head > before));
             if head > before {
-                if requires_snapshot {
-                    assert_eq!(rows["events"][0]["type"], "conversation.activity");
-                    assert_eq!(rows["events"][0]["payload"], json!({"requiresSnapshot": true}));
-                    let source = crate::versioned_document::get_value_with_version(
-                        &database, &mut tx, &source, ATTEMPT_EVENT_DOCUMENT_IDENTITY,
-                        &format!("ref-attempt\u{1f}{:020}", canonical["seq"].as_u64().unwrap()),
-                    ).unwrap().unwrap();
-                    assert_eq!(serde_json::from_slice::<Value>(&source.0).unwrap(), canonical);
-                } else {
-                    assert_eq!(rows["events"][0]["payload"]["event"], canonical);
-                }
+                assert_eq!(rows["events"][0]["payload"]["event"], canonical);
             }
             assert!(!acknowledged || head > before, "lost acknowledged event: {index} {action:?}");
         }

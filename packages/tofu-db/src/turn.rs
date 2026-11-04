@@ -61,7 +61,7 @@ use crate::generated_tofudb_ir::{
     MAX_TIMING_TRACE_COUNTER, MAX_TIMING_TRACE_PERSISTED_BYTES, MAX_TIMING_TRACE_ROWS_PER_QUERY,
     MAX_TIMING_TRACE_TASK_CANDIDATES, MAX_LEGACY_DOCUMENT_BYTES,
     MAX_TURN_COMPACTION_MATERIALIZED_BYTES, MAX_TURN_COMPACTION_METADATA_ROWS,
-    MAX_TURN_COMPACTION_PROJECTION_BYTES, MAX_TURN_COMPACTION_PROJECTION_UPDATES,
+    MAX_TURN_COMPACTION_PROJECTION_UPDATES,
     MAX_TURN_COMPACTION_REPARENTED_TURNS, MAX_TURN_PROJECTION_HEAD_PATCHES,
     MAX_TURN_PROJECTION_INLINE_LIVE_BYTES, MAX_TURN_PROJECTION_PATCH_BYTES,
     MAX_WORKER_JOB_PAYLOAD_BYTES, TURN_ACTIVITY_INDEX_NAMESPACE, TURN_DOCUMENT_NAMESPACE,
@@ -3816,7 +3816,6 @@ pub(crate) fn append_attempt_event(
     });
     let event_json = serde_json::to_vec(&event)
         .map_err(|_| invalid_data("attempt event cannot be encoded"))?;
-    let event_json_bytes = event_json.len();
     crate::versioned_document::put(
         database,
         transaction,
@@ -3854,20 +3853,19 @@ pub(crate) fn append_attempt_event(
         let logical_key = format!("{conversation_id}\u{1f}{sync_sequence:020}");
         let mut encoded_key = conversation_prefix(conversation_id)?;
         encoded_key.extend_from_slice(&sync_sequence.to_be_bytes());
-        let publication = sync_attempt_reference::prepare(&envelope, event_json_bytes)?;
         crate::versioned_document::put(
             database,
             transaction,
             crate::versioned_document::PutRequest {
                 key: entity_key(transaction, CONVERSATION_SYNC_EVENT_NAMESPACE, &encoded_key)?,
-                namespace: publication.document_identity.to_owned(),
+                namespace: sync_attempt_reference::DOCUMENT_IDENTITY.to_owned(),
                 logical_key,
-                value_json: publication.value_json,
+                value_json: sync_attempt_reference::encode(&envelope)?,
                 expected_version: Some(0),
                 updated_at_ms: occurred_at_ms,
             },
         )?;
-        store_sync_retention_indexes(database, transaction, &publication.envelope)?;
+        store_sync_retention_indexes(database, transaction, &envelope)?;
         database.entity_put(
             transaction,
             sync_head_key,
@@ -7713,15 +7711,6 @@ pub(crate) fn visible_sync(
             "turns": related_turns,
             "updateKind": "visible_turns_committed"
         });
-        if serde_json::to_vec(&payload)
-            .map_err(|_| invalid_data("visible sync event cannot be encoded"))?
-            .len()
-            > MAX_LEGACY_DOCUMENT_BYTES
-        {
-            return Err(crate::resource_exhaustion::domain_bound(
-                "visible sync event exceeds 8 MiB",
-            ));
-        }
         append_attempt_event(
             database,
             transaction,
@@ -7794,7 +7783,6 @@ pub(crate) fn related_announce(
         .to_owned();
     let mut related_turns = Vec::new();
     let mut related_attempts = Vec::new();
-    let mut materialized_bytes = 0_usize;
     for turn_id in &request.turn_ids {
         let Some(stored) = database.entity_get(
             transaction,
@@ -7811,18 +7799,6 @@ pub(crate) fn related_announce(
             return Err(invalid_data("related Turn identity differs"));
         }
         let public = public_turn(document.clone(), execution_epoch)?;
-        materialized_bytes = materialized_bytes
-            .checked_add(
-                serde_json::to_vec(&public)
-                    .map_err(|_| invalid_data("related Turn cannot be encoded"))?
-                    .len(),
-            )
-            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
-            .ok_or_else(|| {
-                crate::resource_exhaustion::domain_bound(
-                    "related Turn projection exceeds 8 MiB",
-                )
-            })?;
         if turn_id != &root_turn_id {
             related_turns.push(public);
         }
@@ -8498,7 +8474,6 @@ pub(crate) fn compact(
     }
 
     let mut seen_updates = BTreeSet::new();
-    let mut projection_bytes = request.summary_projection_json.len();
     for update in &request.projection_updates {
         let Some(row) = retained.iter().find(|row| row.turn_id == update.turn_id) else {
             return Err(invalid_input("invalid retained Turn update"));
@@ -8509,14 +8484,6 @@ pub(crate) fn compact(
         if row.projection_revision != update.expected_projection_revision {
             return Err(conflict("a retained Turn changed before compaction"));
         }
-        projection_bytes = projection_bytes
-            .checked_add(update.projection_json.len())
-            .filter(|bytes| *bytes <= MAX_TURN_COMPACTION_PROJECTION_BYTES)
-            .ok_or_else(|| {
-                crate::resource_exhaustion::domain_bound(
-                    "Turn compaction projections exceed 8 MiB",
-                )
-            })?;
     }
 
     let reparented = retained
@@ -10855,7 +10822,6 @@ pub(crate) fn attempt_dispatchable_list(
     )?;
     let rows = database.entity_scan(transaction, &start, &end, limit)?;
     let mut response = Vec::with_capacity(rows.len());
-    let mut response_bytes = 2_usize;
     for (index_key, raw_locator) in rows {
         let locator = serde_json::from_slice::<Value>(&raw_locator)
             .ok()
@@ -10976,22 +10942,10 @@ pub(crate) fn attempt_dispatchable_list(
             "attempt": public_attempt(&attempt)?,
             "config": config,
         });
-        let projected_bytes = serde_json::to_vec(&item)
-            .map_err(|_| invalid_data("attempt dispatchable response cannot be encoded"))?
-            .len();
-        if response_bytes
-            .checked_add(projected_bytes)
-            .and_then(|bytes| bytes.checked_add(usize::from(!response.is_empty())))
-            .is_none_or(|bytes| bytes > MAX_LEGACY_DOCUMENT_BYTES)
-        {
-            return Err(crate::resource_exhaustion::domain_bound(
-                "attempt dispatchable response exceeds 8 MiB",
-            ));
-        }
-        response_bytes += projected_bytes + usize::from(!response.is_empty());
         response.push(item);
     }
-    encode_response(&Value::Array(response))
+    // Complete dispatch configurations use the existing chunked transport.
+    encode_response_raw(&Value::Array(response))
 }
 
 pub(crate) fn attempt_dispatch_worker(
@@ -15311,7 +15265,7 @@ pub(crate) fn sync_prune(
         };
         let (_, event_json) = sync_attempt_reference::materialize(
             database, transaction, &event_key, &stored,
-            MAX_LEGACY_DOCUMENT_BYTES, false)?;
+            usize::MAX, false)?;
         if materialized_bytes.saturating_add(event_json.len()) > MAX_SYNC_PRUNE_MATERIALIZED_BYTES {
             break;
         }
@@ -16091,7 +16045,6 @@ pub(crate) fn sync_changes(
         &conversation_prefix(conversation_id)?,
     )?;
     let mut events = Vec::with_capacity(limit.min(INDEX_PAGE_ROWS));
-    let mut response_bytes = 128_usize;
     let mut cursor = start;
     'pages: while events.len() < limit {
         let page_limit = (limit - events.len()).min(INDEX_PAGE_ROWS);
@@ -16125,30 +16078,10 @@ pub(crate) fn sync_changes(
             }
             let (_, value) = sync_attempt_reference::materialize(
                 database, transaction, &key, &stored,
-                MAX_LEGACY_DOCUMENT_BYTES, true)?;
-            // Same resumable-prefix contract as the deadline path above: an
-            // event that would push the page past its byte budget TRUNCATES
-            // the page instead of failing it. A hard error here is not a
-            // transient signal — replay clients re-ask for exactly one page
-            // shape (the SSE route uses limit=500), so a conversation whose
-            // next 500 events exceed the budget wedged every lagging stream
-            // into an infinite `database_resource_exhausted` retry loop that
-            // yielded only degraded heartbeats (2026-09-28 incident: frozen
-            // "queued" placeholders on swarm-fat conversations). Zero events
-            // is still answered loud: one event beyond the budget can never
-            // make progress, and a silent empty page would read as caught-up.
-            let Some(next_bytes) = response_bytes
-                .checked_add(value.len() + usize::from(!events.is_empty()))
-                .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
-            else {
-                if events.is_empty() {
-                    return Err(crate::resource_exhaustion::domain_bound(
-                        "conversation sync page exceeds 8 MiB",
-                    ));
-                }
-                break 'pages;
-            };
-            response_bytes = next_bytes;
+                usize::MAX, true)?;
+            // Row limits and the caller's deadline provide resumable pages.
+            // storage.v2 chunks the complete response; neither one event nor
+            // the selected page inherits a legacy document byte quota.
             events.push(
                 serde_json::from_slice::<Value>(&value)
                     .map_err(|_| invalid_data("conversation sync event is malformed"))?,
@@ -16173,7 +16106,7 @@ pub(crate) fn sync_changes(
         .and_then(|event| event.get("syncSeq"))
         .and_then(Value::as_u64)
         .unwrap_or(after);
-    encode_response(&json!({
+    encode_response_raw(&json!({
         "head": head,
         "events": events,
         "resetRequired": false,

@@ -788,18 +788,6 @@ def test_snapshot_rejected_after_shedding_still_fails_closed(
     assert rejections[0].endswith('reason=Turn projection patch is invalid')
 
 
-def test_attempt_event_budget_matches_the_native_document_bound():
-    import json
-    from pathlib import Path
-
-    import lib.turn_lifecycle as lifecycle
-
-    contract = json.loads((Path(__file__).resolve().parents[2]
-                           / 'contracts' / 'tofudb_ir_v1.json').read_text())
-    assert (lifecycle._ATTEMPT_EVENT_DOCUMENT_MAX_BYTES
-            == contract['bounds']['maximumLegacyDocumentBytes'])
-
-
 def test_unwritable_even_slim_frame_signals_cooperative_abort(
         chat_sidecar, monkeypatch):
     """When even the text-only frame is rejected, the worker must stop."""

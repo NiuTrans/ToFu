@@ -298,6 +298,7 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "streamAppendAdmission": "complete-atomic-segmented-append-without-byte-quota",
         "maximumStreamReadEvents": 1000,
         "maximumStreamReadBytes": 8 * 1024 * 1024,
+        "streamPointReadAdmission": "complete-selected-positions-without-aggregate-byte-quota",
         "transactionStreamAdmission": "complete-batch-without-stream-count-quota",
     }
     for table in document["logicalTables"]:
@@ -739,6 +740,19 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         == 1024 * 1024
     )
     assert "maximumTurnProjectionWirePatchBytes" not in tables["conversation_turns"]
+    assert "maximumCompactionProjectionBytes" not in tables["conversation_turns"]
+    assert tables["conversation_turns"]["syncResponseAdmission"] == (
+        "complete-requested-events-over-storage-v2-chunks-without-aggregate-byte-quota"
+    )
+    assert tables["conversation_turns"]["dispatchableResponseAdmission"] == (
+        "complete-requested-configurations-over-storage-v2-chunks-without-aggregate-byte-quota"
+    )
+    assert tables["conversation_turns"]["compactionProjectionAdmission"] == (
+        "complete-summary-and-retained-updates-without-aggregate-byte-quota"
+    )
+    for field in tables["conversation_turns"]["fields"]:
+        if field["name"] in {"projection", "settlement"}:
+            assert "maximumBytes" not in field
     assert tables["conversation_turns"]["maximumTurnProjectionPatchDepth"] == 128
     assert (
         tables["conversation_turns"]["maximumTurnProjectionPatchOperations"]

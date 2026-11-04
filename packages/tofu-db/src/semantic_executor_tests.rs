@@ -15083,6 +15083,36 @@
     }
 
     #[test]
+    fn turn_compaction_preserves_large_summary_and_retained_projection_after_reopen() {
+        let content = "c".repeat(9 * 1024 * 1024);
+        let mut command = turn_compaction_fault_request();
+        let mut payload: Value = serde_json::from_slice(&command.payload).unwrap();
+        payload["summary_projection"]["content"] = json!(content);
+        payload["projection_updates"][0]["projection"]["content"] = json!(content);
+        command.payload = serde_json::to_vec(&payload).unwrap();
+        let vfs = prepared_vfs();
+        let mut database = seeded_turn_compaction_database(vfs.clone());
+        let result = execute(&mut database, &command, 2_000).unwrap();
+        assert_eq!(result["conversationRevision"], 4);
+        drop(database);
+        assert_turn_compaction_replay_converges(vfs.clone(), &command);
+        let mut recovered =
+            AuthorityDatabase::open_with_vfs(std::path::Path::new("/data"), vfs).unwrap();
+        for turn_id in ["fault-compact-summary", "fault-compact-t2"] {
+            let turn = execute(
+                &mut recovered,
+                &request("turn.get", 11, json!({
+                    "conversation_id": "fault-compact-conversation", "user_id": 11,
+                    "turn_id": turn_id
+                }), None),
+                2_001,
+            ).unwrap();
+            assert!(turn["projection"]["content"].as_str() == Some(content.as_str()),
+                "compaction must preserve complete summary and retained Turn content");
+        }
+    }
+
+    #[test]
     fn every_turn_compaction_commit_fault_recovers_one_complete_graph() {
         let command = turn_compaction_fault_request();
         let baseline_vfs = prepared_vfs();
@@ -23450,9 +23480,9 @@
 
 
     #[test]
-    fn event_list_selection_beyond_stream_read_bound_is_payload_size_not_protocol_error() {
+    fn event_list_preserves_selected_inline_events_above_eight_mib_after_reopen() {
         // Every event stays inline (below MAX_STREAM_EVENT_BYTES); only the
-        // selected page's stored bytes exceed the stream point-read bound.
+        // selected page's stored bytes exceed the former point-read quota.
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         let text = "x".repeat(crate::generated_tofudb_ir::MAX_STREAM_EVENT_BYTES / 2);
@@ -23473,34 +23503,18 @@
             }
             request("event.list", 11, payload, None)
         };
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
         for filtered in [true, false] {
-            let error = execute(&mut database, &read(-1, 1000, filtered), 1000).unwrap_err();
-            assert_eq!(error.code(), "storage_payload_too_large");
-            assert!(!error.retryable());
-        }
-        // Halving at the same cursor (the Request Inspector's recovery) reads
-        // every row exactly once, in order, with its complete payload.
-        let (mut after, mut limit, mut seen) = (-1_i64, 1000_usize, 0_usize);
-        loop {
-            let rows = match execute(&mut database, &read(after, limit, true), 1000) {
-                Err(error) if error.code() == "storage_payload_too_large" && limit > 1 => {
-                    limit /= 2;
-                    continue;
-                }
-                result => result.unwrap(),
-            };
+            let rows = execute(&mut database, &read(-1, 1000, filtered), 1000).unwrap();
             let rows = rows.as_array().unwrap();
-            for row in rows {
-                assert_eq!(row["sequence"], seen);
+            assert_eq!(rows.len(), count);
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row["sequence"], index);
                 assert_eq!(row["event"]["text"].as_str().unwrap(), text);
-                seen += 1;
             }
-            if rows.len() < limit {
-                break;
-            }
-            after = rows.last().unwrap()["sequence"].as_i64().unwrap();
+            assert_eq!(execute(&mut database, &read(count as i64 - 1, 1000, filtered), 1000).unwrap(), json!([]));
         }
-        assert_eq!(seen, count);
     }
 #[test]
 fn timer_counts_and_recovery_feed_have_no_live_or_saved_row_admission_quota() {

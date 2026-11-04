@@ -47,6 +47,16 @@ storage warning through terminal persistence debt and clear it after successful
 settlement; stale markers on fully settled tasks remain ignored. Inferring
 completion from worker exit would publish uncommitted results.
 
+Live event preparation retains diagnostic evidence when a large structural
+patch accompanies it. Problem: a duplicated 8 MiB estimate discarded the inline
+event even after native storage stopped enforcing that quota. Decision: the
+storage authority and selected transport decide actual admission; single and
+batched producers add no legacy byte estimate. Existing typed refusal handling
+remains for genuine backend errors. Raising the estimate or predicting native
+envelope growth in the producer would create another drifting limit. The large
+structural-frame regression verifies the canonical diagnostic event, exact
+conversation replay, carried task event and completed settlement together.
+
 Problem: retry exhaustion previously turned a temporary write outage into a
 producer admission error that aborted the managed task on its next progress
 event. Decision: retain the transient failure as persistence debt while still

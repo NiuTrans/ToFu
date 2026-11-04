@@ -31,6 +31,7 @@
     "streamAppendAdmission": "complete-atomic-segmented-append-without-byte-quota",
     "maximumStreamReadEvents": 1000,
     "maximumStreamReadBytes": 8388608,
+    "streamPointReadAdmission": "complete-selected-positions-without-aggregate-byte-quota",
     "transactionStreamAdmission": "complete-batch-without-stream-count-quota"
   },
   "physicalFamilies": [
@@ -3228,7 +3229,7 @@
       "maximumCompactionMetadataRows": 100000,
       "maximumCompactionProjectionUpdates": 512,
       "maximumCompactionReparentedTurns": 512,
-      "maximumCompactionProjectionBytes": 8388608,
+      "compactionProjectionAdmission": "complete-summary-and-retained-updates-without-aggregate-byte-quota",
       "maximumCompactionMaterializedBytes": 67108864,
       "activityIndexNamespace": "turn_activity_timestamps",
       "maximumActivityTurnRowsPerQuery": 100000,
@@ -3237,6 +3238,7 @@
       "laneLiveAttemptNamespace": "turn_lane_live_attempts",
       "searchDirtyNamespace": "turn_search_dirty",
       "syncHeadNamespace": "conversation_sync_heads",
+      "syncResponseAdmission": "complete-requested-events-over-storage-v2-chunks-without-aggregate-byte-quota",
       "syncEventNamespace": "conversation_sync_events",
       "syncAgeIndexNamespace": "conversation_sync_events_by_created",
       "attemptEventSyncReferenceNamespace": "attempt_event_sync_references",
@@ -3245,6 +3247,7 @@
       "attemptNamespace": "generation_attempts",
       "attemptDispatchableIndexNamespace": "generation_attempts_dispatchable",
       "maximumDispatchableAttemptsPerQuery": 32,
+      "dispatchableResponseAdmission": "complete-requested-configurations-over-storage-v2-chunks-without-aggregate-byte-quota",
       "attemptRecoveryIndexNamespace": "generation_attempts_live_by_created",
       "maximumRecoveryRowsPerTransaction": 500,
       "maximumRecoveryIndexRowsPerOwner": 10000,
@@ -3300,7 +3303,8 @@
       "constraints": [
         "turn document, lane and compact activity indexes and head, conversation header revision/count/timestamp/index, search markers, sync event, receipt, and outbox commit atomically",
         "projection patches share the existing request, reconstructed Turn and attempt-event document byte admission; the compact projection-head byte budget controls checkpointing only and no separate patch byte quota rejects an otherwise admissible event",
-        "an attempt event exceeding the expanded conversation-sync envelope byte boundary remains complete in its canonical journal; the same transaction publishes conversation.activity with requiresSnapshot instead of an unreadable replay reference",
+        "live attempt-event publication and conversation-sync replay preserve the complete canonical event without a private sync byte quota; the storage.v2 transport chunks complete responses, while requested row limits and deadlines retain resumable cursors",
+        "live attempt creation, related-Turn publication and dispatchable recovery do not impose the legacy 8 MiB document quota on already authenticated conversation state",
         "each search invalidation gets a fresh persisted 128-bit token; exact-token acknowledgement cannot erase a later mutation even after an earlier token was acknowledged and removed; legacy 8-byte tokens remain readable until replaced",
         "turn and attempt IDs are unique across owners within a tenant through dedicated tenant-global claims",
         "new attempt documents cluster by owner and conversation while the tenant-global attempt claim stores a versioned owner/conversation locator; exact lookup remains bounded and legacy owner-only claims remain read-only compatible without startup migration",
@@ -3371,13 +3375,11 @@
         {
           "name": "projection",
           "type": "json-object",
-          "maximumBytes": 8388608,
           "nullable": false
         },
         {
           "name": "settlement",
           "type": "json-object",
-          "maximumBytes": 8388608,
           "nullable": false
         },
         {

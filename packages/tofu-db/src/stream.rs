@@ -158,15 +158,6 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-/// A deterministic byte bound that a smaller selection can satisfy; bare
-/// `InvalidInput` would reach the wire as an opaque protocol error.
-fn payload_too_large(message: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("storage_payload_too_large: {message}"),
-    )
-}
-
 fn conflict(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, message)
 }
@@ -648,7 +639,6 @@ pub(crate) fn read_persisted_positions(
         references.insert(first, reference);
     }
     let mut selected = BTreeMap::new();
-    let mut selected_bytes = 0_usize;
     for (first, reference) in references {
         let decoded = decode_segment(&backend.read_verified(reference.block_id)?, key, first)?;
         if decoded.len() != reference.event_count as usize
@@ -664,10 +654,6 @@ pub(crate) fn read_persisted_positions(
             .ok_or_else(|| invalid_data("persisted stream segment sequence overflow"))?;
         for position in positions.range(first..=end) {
             let event = decoded[(*position - first) as usize].clone();
-            selected_bytes = selected_bytes
-                .checked_add(event.encoded_len())
-                .filter(|bytes| *bytes <= MAX_STREAM_READ_BYTES)
-                .ok_or_else(|| payload_too_large("stream point-read exceeds 8 MiB"))?;
             selected.insert(*position, event);
         }
     }
@@ -1321,7 +1307,6 @@ impl StreamCatalog {
             return Err(invalid_input("stream point-read positions are invalid"));
         }
         let mut selected = BTreeMap::new();
-        let mut selected_bytes = 0_usize;
         let mut segment_first = 1_u64;
         for reference in self.streams.get(key).into_iter().flatten() {
             let segment_end = segment_first
@@ -1339,10 +1324,6 @@ impl StreamCatalog {
                         .get((*position - segment_first) as usize)
                         .ok_or_else(|| invalid_data("stream point-read offset is missing"))?
                         .clone();
-                    selected_bytes = selected_bytes
-                        .checked_add(event.encoded_len())
-                        .filter(|bytes| *bytes <= MAX_STREAM_READ_BYTES)
-                        .ok_or_else(|| payload_too_large("stream point-read exceeds 8 MiB"))?;
                     selected.insert(*position, event);
                 }
             }

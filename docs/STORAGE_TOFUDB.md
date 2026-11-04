@@ -189,11 +189,14 @@ Turn could produce an 8.8 MB patch that fit the request, reconstructed Turn and
 as `database_protocol_error`. The retained event could never drain, including
 on terminal retry. **Decision:** patch application and construction use those
 existing enclosing byte boundaries; the 1 MiB compact-head budget only decides
-when to checkpoint. If the expanded replay envelope exceeds its existing
-8 MiB boundary, that same transaction retains the complete attempt event and
-publishes a small `conversation.activity` / `requiresSnapshot` invalidation.
-The existing browser recovery owner reloads authoritative state; ordinary
-events keep their exact replay references. Depth, operation validation, revision fencing, atomic event
+when to checkpoint. Conversation-sync references retain every canonical event
+without a private expanded-envelope or aggregate page byte quota. The existing
+`storage.v2` protocol chunks complete responses; row limits and deadlines retain
+contiguous cursors. Legacy snapshot invalidations remain readable. Python event
+production no longer sheds inline evidence against an estimated 8 MiB quota.
+Attempt creation, related-Turn publication, dispatchable recovery and compaction
+summary/retained-projection updates likewise accept complete authenticated state
+without that legacy quota. Depth, operation validation, revision fencing, atomic event
 publication and settlement admission remain enforced. **Alternatives:** raising
 the private quota merely moves the failure; slimming or splitting the event
 would weaken its exact projection or atomicity. Codec, native reopen/settlement
@@ -269,9 +272,8 @@ their separate operator response contract.
 
 ## Live projection patch budgets
 
-The native contract separates the individual wire patch budget (8 MiB) from
-the compact projection-head chain budget (1 MiB across at most 64 patches).
-Request-frame and transaction admission remain independent hard limits. A
+The compact projection-head chain budget is 1 MiB across at most 64 patches;
+there is no independent 8 MiB wire-patch quota. A
 patch larger than the chain budget folds directly into a checkpoint at its
 committed revision; it never creates an unreadable oversized chain. Later
 patches use that exact checkpoint, and durable attempt/sync replay retains
@@ -452,7 +454,7 @@ Decision: `turn.context.read` returns a complete prefix of the selected suffix u
 
 Alternatives considered: raising the global response limit merely postpones failure as history grows and enlarges every transport buffer; stripping rounds/segments corrupts model-visible history; asking the executor to use another backend violates configured authority; transparent retries repeat a deterministically unfulfillable query. Per-Turn pages with a revision witness preserve the existing storage boundary and give bounded progress.
 
-## Page byte budgets in long read loops
+## Complete conversation-sync replay
 
 Problem: `turn.sync.changes` enforced its 8 MiB wire-page budget as a hard
 `database_resource_exhausted` error. Replay callers re-ask for one fixed page
@@ -463,18 +465,18 @@ and delivered only degraded heartbeats, freezing every lagging browser
 projection at its last applied state (2026-09-28 incident: Turns pinned at
 the pre-start queue placeholder while the bound tasks ran normally).
 
-Decision: the byte budget truncates exactly like the deadline budget above:
-the page stops before the event that would cross the cap, keeps
-`hasMore = last < head` honest, and the caller resumes from the last
-delivered sequence. Zero delivered events still fails loud — a single
-over-budget event can never make progress, and an empty page would read as
-caught-up.
+Decision: replay has no private expanded-envelope or aggregate page byte quota.
+The existing `storage.v2` transport chunks the complete response, including an
+individual event above 8 MiB. Row and deadline pagination keep
+`hasMore = last < head` honest, and callers resume from the last delivered
+sequence. An expired deadline before the first event still fails explicitly.
+Canonical source references preserve exact events and retention protection;
+reopen and commit-fault tests cover full large-event replay and cursor continuity.
 
-Alternatives considered: (a) a smaller fixed `limit` still breaks on fatter
-events and wastes round trips on thin ones; (b) client-side recovery on
-degraded heartbeats treats the symptom and doubles snapshot load during
-genuine storage wedges; (c) a larger page budget only moves the wedge to
-longer histories.
+Alternatives considered: byte-based pagination still cannot deliver one large
+event; a smaller fixed row limit wastes round trips without resolving that case;
+client-side recovery on degraded heartbeats duplicates snapshot work during
+genuine storage wedges; raising the byte quota merely moves the failure.
 
 ## Continuation document budget
 
@@ -482,15 +484,14 @@ Native continuation checkpoints use the shared versioned-document codec:
 small records remain inline and larger records use owner-bound Blob
 references. The projection retains its 8 MiB limit plus a 4 KiB wrapper.
 
-Task-event logical JSON uses the existing 8 MiB transaction literal budget.
-Payloads beyond the physical stream's 256 KiB event limit are stored with the
+Task-event payloads beyond the physical stream's 256 KiB event limit use the
 shared owner-bound document/Blob codec under the event index namespace; the
 stream reference, content and all indexes commit together, and
 list/latest/export hydrate and verify the original digest and timestamp. GC
 and backup discover these documents through the entity graph; retention
-pruning deletes the associated document in the same transaction. Replay pages
-retain their 8 MiB output cap; large writes must fit a one-row replay
-envelope before any content is staged.
+pruning deletes the associated document in the same transaction. Live replay
+returns complete selected positions over the existing chunked transport,
+without an aggregate 8 MiB point-read or response quota.
 
 Publication remains in the terminal settlement transaction, and the common
 reachability walker includes these references in backup and garbage collection.
@@ -1005,16 +1006,14 @@ On FUSE/network mounts the background packer can starve foreground round trips w
 
 ### Live projection admission and connection readiness
 
-A projection patch document has an 8 MiB logical ceiling, matching the Turn
-projection field budget. The storage.v2 request frame and the event envelope
-retain their independent bounds; this ceiling is not a promise that an 8 MiB
-payload plus its envelope fits a request. The compact projection head still
-retains at most 64 patches totaling 1 MiB. An individually larger admissible
-patch causes checkpoint materialization instead of a permanent write rejection.
-Both limits derive from `contracts/tofudb_ir_v1.json`; changing a physical head
-budget must not silently change the public update vocabulary. Application
-certification exercises a high-entropy 1.25 MiB structural update, a subsequent
-increment, and exact recovery after authority restart on both backends.
+A projection patch has no separate 8 MiB byte ceiling. Turn snapshot and
+canonical Attempt-event contracts own logical admission; `storage.v2` chunks
+requests and responses without a private aggregate transport quota. The compact
+projection head retains at most 64 patches totaling 1 MiB. A larger admissible
+patch checkpoints at the same committed revision. These physical checkpoint
+targets never reject a public update. Native regressions cover a 9 MiB
+structural update, exact replay after reopen and final settlement; the ordinary
+high-entropy structural-update contract also remains covered on both backends.
 
 On Unix, the native listener waits for socket readability with a bounded poll.
 Incoming connections wake it immediately; the existing 25 ms timeout bounds
@@ -1050,17 +1049,17 @@ iterators and a per-call exact cache of 256 entries (3,328 bytes); eviction
 never suppresses a different gram. These optimizations do not change the
 persisted projection format, Bloom bits, integrity hashes or durability barriers.
 
-Task replay events have separate logical and physical budgets, declared in
-`tofudb_ir_v1.json.indexedStreamPayloads`. A logical event may be up to
-8 MiB minus 1 KiB while a physical stream payload remains at most 256 KiB.
-Larger events atomically publish an owner-scoped versioned blob document,
+Task replay events use the representation declared in
+`tofudb_ir_v1.json.indexedStreamPayloads`: a physical stream payload remains
+at most 256 KiB. Larger logical events atomically publish an owner-scoped versioned blob document,
 a small stream marker and the original payload digest/index. Ordinary,
 filtered, latest and offline migration reads hydrate and verify that digest.
 Retention deletes the overflow document with its event index; the existing
 entity/blob reachability graph protects backups, snapshots and garbage
 collection. No extra cache or worker is introduced. Existing inline events
 remain readable; older binaries cannot read new overflow markers. The
-aggregate Transaction IR and response page budgets remain 8 MiB.
+live point-read selection and response retain complete requested events without
+a separate 8 MiB quota; physical stream scans keep their resumable page targets.
 
 
 ## Activity-index churn and retry deadlines (2026-09-18)
