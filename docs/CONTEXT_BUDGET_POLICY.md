@@ -575,8 +575,20 @@ that witness before reading the saved `postMessages`. It then restores managed
 runtime context through the ordinary composer and replays only uncovered tool
 rounds. Full checkpoint records still own display, accounting and execution
 recovery. Missing/legacy/unaccepted archives, edits, permission/model changes,
-steering, unreproducible media and storage errors retain full canonical
-replay. No new store or transcript authority is introduced.
+unconsumed inbox carriers, unreproducible media and storage errors retain full
+canonical replay. No new store or transcript authority is introduced.
+
+Steering does not suppress the witness; it follows the steered-turn
+publication rule ([CONTEXT_COMPACTION.md](CONTEXT_COMPACTION.md#continuation-checkpoints)).
+A consumed steer stays in the witnessed view, the only place its carrier
+survives. The round-drain mark `_inboxDeliveryUnverified` withholds the witness
+until the provider consumes every drained inbox carrier, because an unconsumed
+one is salvaged to the queue or redelivered from its durable row and restoring
+it would deliver it twice. Problem: the witness refused every Turn carrying
+`_userSteerInjects`, so an interrupted steered run re-summarized its whole
+replay and the rebuild dropped steers the model had already acted on.
+Rejected: keeping the refusal; rebuilding steers from the 1,200-character Turn
+preview (lossy, a second transcript authority).
 
 Media does not suppress the witness. Image references in the snapshot
 (`/api/images/`, `tofu-media:`, remote URLs) are resolved again at dispatch;
