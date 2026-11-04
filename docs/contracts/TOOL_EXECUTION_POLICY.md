@@ -1027,6 +1027,7 @@ Only connected stdio servers share host workspace paths; network servers and des
 Unrelated parameters remain opaque: names such as `path` or `out_path` alone confer no policy.
 Declared files use admitted stable roots and canonical-to-execution mappings; all targets are checked before side effects.
 Unknown roots, traversal outside roots, escaping symlinks, readonly outputs and canonical/peer writes refuse invocation.
+Refusals name the effective target: an outside target lists the admitted roots (read-only marked) and the relative or rootname:path forms; an escaping symlink reports where it resolves.
 Inputs must exist. Declared output parents are prepared only within authorized roots; no workspace lease is taken or awaited.
 Transport cancellation is forwarded and ambiguous calls are not automatically replayed; a call cancelled before invocation is refused.
 Receipts retain error, structured and media payloads and report effective absolute paths; transport failures never claim not-started.
