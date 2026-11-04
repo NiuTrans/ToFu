@@ -163,8 +163,9 @@ The generated artifact contract is authoritative; verify loader/release/installe
 fixtures and package membership. from_archive reuses native_process image/close
 ownership; never add an install tree, second image owner or automatic download.
 
-abort_signal owns task Event-compatible loop notification, with disposable
-subscriptions and no polling workers. Verify set/subscribe races, cross-loop
+abort_signal owns task Event-compatible loop and plain-Event notification, with
+disposable signal-only subscriptions and no polling workers or arbitrary
+callbacks. Verify set/subscribe races, target validation, cross-loop
 wakes, native initial Stop, silent HTTP settlement and canonical terminal ACK.
 
 ModelPricing is a bounded settle-only snapshot; generated model_price is its

@@ -995,6 +995,70 @@ semantics, accounting and exact cost invalidation.
 projection and patch time against task size, idle and beside CPU-bound
 threads, after checking both trees produce identical documents.
 
+### Injected-note identity across capture and delivery
+
+Problem: completed intervention notes remained mutable rows, so every pending
+structural frame copied the history. Projection then searched old tool rounds
+and existing segment IDs again for each already-placed note. Fan-out, history
+length and persistence debt multiplied this avoidable work.
+
+Decision: `record_injected_note` settles each accepted record once. Its list
+remains caller-owned so a failed append can roll back. Structural capture shares
+only immutable rows; replacing/truncating the list or changing legacy mutable
+rows still invalidates the derived source. Normalization preserves identical
+settled note segments. The merger indexes the first existing system-note row by
+block ID and execution scope, updates it at its original position, and searches
+anchors only for new identities. New insertion still observes existing prose,
+round, terminal and stable-order rules. This is not an incremental index for
+every segment type or a claim that initial note placement never scans history.
+
+The ordinary terminal release owner drops this duplicate live note list only
+after durable acknowledgement. Pending terminal persistence retains its retry
+source; transient children retain their sole result representation. The
+committed Turn, event rows and replay patches keep all accepted notes.
+
+Alternatives rejected: a process-global note cache has no authoritative
+invalidation; freezing a still-mutable list breaks rollback; truncating notes
+changes visible history; releasing on the terminal stamp alone loses retry
+evidence after an unknown acknowledgement.
+
+Executable retention measurement in `test_note_projection_index.py`: 128
+accepted notes held by 32 pending structural captures retain 128 unique note
+row objects, with 32 detached lists. The previous capture retained 4,096 note
+row objects. This is unique-object sharing, not a 32-fold whole-process RSS
+claim. Logical retained-byte charges still count each graph as documented
+above and remain observations, never admission gates. Tests cover mutable
+legacy rows, replacement/rollback, duplicate IDs and distinct execution scopes.
+`test_turn_event_record_batch.py` verifies frozen note history through
+unknown-ACK reconciliation against both SQL and native storage authorities.
+
+Matched-source measurement (2026-11-04): the current
+`benchmarks/turn_projection_incremental.py` driver ran three fresh alternating
+pairs against source `b4a6e1c0068010fd6ae9142d5c7d1f1d793892a4`, seed 7,
+25 measured cycles (100 structural events) after warm-up, `--busy 0`. Each
+history round carries one note and each measured round adds another. Medians
+of the three per-arm medians, in milliseconds per structural event:
+
+| History tool rounds | Previous capture + projection + patch | Current | Ratio |
+|---|---:|---:|---:|
+| 10 | 1.696 | 1.079 | 1.57× |
+| 100 | 16.328 | 2.866 | 5.70× |
+| 500 | 281.918 | 8.837 | 31.90× |
+
+Every pair had identical projection/patch digests. Reproduce each pair with
+`python3 benchmarks/turn_projection_incremental.py --source-root BASE_TREE
+--sizes 10,100,500 --busy 0 --events 25 --seed 7 --json`; alternate source order
+when comparing repeated arms. These are component wall clocks on a shared
+host, excluding provider, storage, delivery scheduling and browser work. They
+do not establish production capacity or an end-to-end latency ratio.
+
+In separate fresh processes, capturing the 128-note/32-frame retention fixture
+above under `tracemalloc` retained a median 2,053,615 newly allocated bytes
+before and 1,355,745 after, across three alternating pairs with identical
+snapshot JSON digests. Tracing started after note production and included
+cold capture setup; all frames remained reachable at measurement. This is
+allocation attributed to capture, not process RSS or logical delivery debt.
+
 ## Frames and history rows visited once
 
 Problem: a 300 s live `py-spy --gil` profile on 2026-11-02 (12,617 GIL

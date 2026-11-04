@@ -43,6 +43,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any
 
+from lib.conversation_sync.settled_rows import SettledDict, settle
 from lib.log import get_logger
 from lib.tool_results.tool_round_identity import (
     execution_batch_keys,
@@ -316,6 +317,9 @@ def record_injected_note(
             return previous
     scope = attempt_id or task_id
     entry['blockId'] = f'system-note:{scope + ":" if scope else ""}{note_kind}-{len(entries)}'
+    # A recorded intervention is a completed fact. History lists may roll back
+    # an uncommitted append, but accepted rows are immutable across captures.
+    entry = settle(entry)
     entries.append(entry)
     return entry
 
@@ -430,8 +434,16 @@ def _insert_injected_note_segments(
     the tail.
     """
     entries = task.get(INJECTED_NOTES_FIELD)
-    if not isinstance(entries, list):
+    if not isinstance(entries, list) or not entries:
         return
+    # A cumulative source includes old notes on every structural event. Resolve
+    # their durable identity once, before searching anchors: replacing a known
+    # note never moves it, even when its consuming round has changed.
+    positions = {}
+    for index, segment in enumerate(segments):
+        block_id = segment.get('blockId')
+        if segment.get('type') == SEG_SYSTEM_NOTE and isinstance(block_id, str):
+            positions.setdefault((block_id, execution_identity(segment)), index)
     for position, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
@@ -453,6 +465,32 @@ def _insert_injected_note_segments(
                if isinstance(entry.get('taskId'), str)
                and entry['taskId'] else {}),
         }
+        note_segment = {
+            'type': SEG_SYSTEM_NOTE,
+            'blockId': entry.get('blockId') or f'system-note:{kind}-{position}',
+            'text': text,
+            'noteKind': kind,
+            'action': entry.get('action') if entry.get('action') in NOTE_ACTIONS else 'prompt',
+            **({'reason': entry['reason'][:NOTE_REASON_LIMIT]}
+               if isinstance(entry.get('reason'), str) else {}),
+            'llmRound': lr,
+            **identity_fields,
+        }
+        block_id = note_segment['blockId']
+        key = (block_id, execution_identity(note_segment)) if isinstance(block_id, str) else None
+        existing_index = positions.get(key) if key is not None else next((
+            i for i, current in enumerate(segments)
+            if current.get('type') == SEG_SYSTEM_NOTE
+            and current.get('blockId') == block_id
+            and execution_identity(current) == execution_identity(note_segment)
+        ), None)
+        if existing_index is not None:
+            current = segments[existing_index]
+            # Preserve the immutable row's validation/encoding memos when its
+            # contents have not changed. Mutable inputs still receive a copy.
+            if type(current) is not SettledDict or current != note_segment:
+                segments[existing_index] = note_segment
+            continue
         index = len(segments)
         for i, segment in enumerate(segments):
             if any(identity_fields.get(field) and segment.get(field)
@@ -487,28 +525,12 @@ def _insert_injected_note_segments(
                 continue
             index = i
             break
-        note_segment = {
-            'type': SEG_SYSTEM_NOTE,
-            'blockId': entry.get('blockId') or f'system-note:{kind}-{position}',
-            'text': text,
-            'noteKind': kind,
-            'action': entry.get('action') if entry.get('action') in NOTE_ACTIONS else 'prompt',
-            **({'reason': entry['reason'][:NOTE_REASON_LIMIT]}
-               if isinstance(entry.get('reason'), str) else {}),
-            'llmRound': lr,
-            **identity_fields,
-        }
-        existing_index = next((
-            i for i, current in enumerate(segments)
-            if current.get('type') == SEG_SYSTEM_NOTE
-            and current.get('blockId') == note_segment['blockId']
-            and execution_identity(current) == execution_identity(note_segment)
-        ), None)
-        if existing_index is None:
-            segments.insert(index, note_segment)
-        else:
-            # Grouped context can gain entries after an earlier event.
-            segments[existing_index] = note_segment
+        segments.insert(index, note_segment)
+        for existing_key, existing_position in positions.items():
+            if existing_position >= index:
+                positions[existing_key] = existing_position + 1
+        if key is not None:
+            positions[key] = index
 
 
 def _merged_rounds(task: dict[str, Any], merged: list | None) -> list:

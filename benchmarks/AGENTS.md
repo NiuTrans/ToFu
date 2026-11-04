@@ -250,7 +250,10 @@ process with `--repository`; the behavior is specified in
 projection and patch time for seeded 10/100/500-round tasks, idle and beside
 CPU-bound GIL-contention threads, one fresh worker per arm; `--source-root`
 names an exported pre-change tree. Every arm of one size must produce the same
-projection/patch digest before clocks count. `--entry append` instead drives
+projection/patch digest before clocks count.
+Each seeded history also includes canonical intervention notes, and projection
+cycles introduce another note, so cumulative identity work participates.
+`--entry append` instead drives
 the production `append_event` producer entry on a delivery lane and reports
 producer-thread CPU per frame and per capture; its digest covers every admitted
 charge and captured structure. Verify

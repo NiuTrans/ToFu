@@ -281,6 +281,7 @@ def test_any_invalid_entry_rolls_back_every_entry(turn_service, storage, monkeyp
 @pytest.mark.parametrize('committed', [True, False])
 def test_unknown_outcome_reconciles_before_rebasing_without_duplicate_sync_events(
         turn_service, storage, monkeypatch, committed):
+    from lib.tasks_pkg.segments import record_injected_note
     _, task = _task(turn_service, storage, 'batch-lost-ack')
     try:
         assert turn_service.record_task_event(task, {'type': 'phase', 'phase': 'starting'})
@@ -289,7 +290,13 @@ def test_unknown_outcome_reconciles_before_rebasing_without_duplicate_sync_event
         lost = StorageError('database_timeout', 'injected lost batch acknowledgement', True)
         calls = _capture_batch(storage, monkeypatch, **(
             {'after_commit': lost} if committed else {'fail_with': lost}))
+        note = record_injected_note(task, llm_round=1, kind='system-intervention',
+                                    text='accepted before the frozen batch')
         entries = _entries(turn_service, task, _script())
+        # The live producer can advance while this detached FIFO run persists.
+        # Its later note must not leak into retry or replay of earlier frames.
+        record_injected_note(task, llm_round=2, kind='system-intervention',
+                             text='accepted after the frozen batch')
         with pytest.raises(StorageError, match='lost batch acknowledgement'):
             turn_service.record_task_events(task, entries)
         assert all(entry.outcome is None for entry in entries)
@@ -314,6 +321,8 @@ def test_unknown_outcome_reconciles_before_rebasing_without_duplicate_sync_event
                     == [entry['projection_patch']['baseRevision'] for entry in calls[0]['entries']])
         assert task['_turnProjectionState']['projectionRevision'] == base + len(entries)
         assert turn['projection']['toolRounds'][-1]['roundNum'] == 2
+        notes = [row for row in turn['projection']['segments'] if row['type'] == 'system_note']
+        assert [(row['blockId'], row['text']) for row in notes] == [(note['blockId'], note['text'])]
     finally:
         _discard(task)
 

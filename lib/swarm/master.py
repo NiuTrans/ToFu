@@ -645,6 +645,9 @@ class MasterOrchestrator:
         self.search_mode = search_mode
         self.on_progress = on_progress
         self.abort_check = abort_check or (lambda: False)
+        from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
+        self._child_cancellation = ChildCancellationScope(
+            lambda: self._aborted or self.abort_check())
 
         self.before_agent_admission = before_agent_admission
         self.all_tools = all_tools or []
@@ -918,7 +921,7 @@ class MasterOrchestrator:
 
         parent, tools, model = self._parent_task_proxy, self.all_tools, self.model
         project_path, thinking = self.project_path, self.thinking_enabled
-        abort = lambda: self._aborted or self.abort_check()
+        abort = self._child_cancellation
         if spec.retained_agent_id or spec.retained_execution_context is not None:
             parent, context = _retained_assignment_proxy(spec, self._parent_task_proxy)
             tools, model = context['tools'], context['model']

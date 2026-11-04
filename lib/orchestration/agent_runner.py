@@ -88,6 +88,9 @@ class OrchestrationInvocationRunner:
         self._config = config
         self._emit = emit
         self._abort_check = abort_check
+        from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
+        self._child_cancellation = ChildCancellationScope(
+            abort_check, source_signal=(config.parent_task or {}).get('abort_event'))
         self._model_resolver = model_resolver
         from lib.goal_runs.worker_context import GoalWorkerContext
         self._worker_context = GoalWorkerContext()
@@ -301,8 +304,7 @@ class OrchestrationInvocationRunner:
             system_prompt=self._config.system_prompt_base,
             project_path=self._config.project_path,
             thinking_enabled=self._config.thinking_enabled,
-            event_sink=event_sink, abort_check=lambda: execution_owner._abort_check() or (
-                callable(runtime_abort) and runtime_abort()))
+            event_sink=event_sink, abort_check=self._child_cancellation)
         entered = closed = executing = False
         execution_thread = None
         preparation_lock = threading.Condition()
@@ -333,6 +335,15 @@ class OrchestrationInvocationRunner:
                         raise ValueError('Prepared graph child context or execution owner changed')
                     execution_owner = recipient_runner
                     runtime_abort = runtime_abort_check
+                # Preparation can transfer an issued native child to a different
+                # graph owner. Bind its exact control source before execution;
+                # ordinary siblings borrow the runner's one observer.
+                if callable(runtime_abort):
+                    from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
+                    child['_invocationAbortCheck'] = ChildCancellationScope(
+                        lambda: execution_owner._abort_check() or runtime_abort())
+                else:
+                    child['_invocationAbortCheck'] = execution_owner._child_cancellation
                 entered = executing = True
                 execution_thread = threading.get_ident()
             from lib.tasks_pkg.explained_wait import child_invocation_wait

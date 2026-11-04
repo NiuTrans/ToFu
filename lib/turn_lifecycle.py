@@ -1163,7 +1163,7 @@ def _derive_history_rows(task, values):
             values['toolRounds'] = compacted
     if isinstance(values.get('segments'), list):
         derive('segments', _segments_without_round_mirror)
-    for field in ('_timingStatusHistory', '_checkpointToolRounds'):
+    for field in ('_timingStatusHistory', '_checkpointToolRounds', INJECTED_NOTES_FIELD):
         if isinstance(values.get(field), list) and values[field]:
             derive(field, _same_rows)
     task[_PROJECTION_ROWS_KEY] = next_memos
