@@ -27,7 +27,9 @@ export interface ConversationSurfaceDesign {
    * carry `data-narration-well` and one `data-narration-well-body` child;
    * the engine owns which blocks live in the body. */
   narrationWell(document: Document): HTMLElement;
-  paintNarrationWell(well: HTMLElement, count: number): void;
+  /** Paint the well's header row for `count` notes; the returned button is
+   * its disclosure toggle. Engine owns open state and event delegation. */
+  paintNarrationWell(well: HTMLElement, count: number): HTMLButtonElement;
   transportNotice(node: HTMLElement, state: SurfaceTransportNotice): void;
   /** Engine owns identity, disabled state, paging and event delegation. */
   blockBoundary(node: HTMLElement, direction: SurfaceHistoryDirection, count: number): HTMLButtonElement;

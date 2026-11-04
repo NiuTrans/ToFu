@@ -407,10 +407,26 @@ long run of rounds no longer stretches the reply. Members are the contiguous
 run of non-deliverable, non-terminal text starting at the first one, excluding
 the reply's latest text: that text may still stream or become the answer, so
 a leaf is reparented at most once, when a later round's text follows it. The
-answer always reads on the open page below. The well wears the activity
-card's palette, radius and glyph tile, labels its note count, scrolls with
-edge shadows and is keyboard-focusable. Per-block caps were rejected: many
-short rounds still stretched the reply. Open reasoning (`.thinking-content`)
+answer always reads on the open page below. Per-block caps were rejected: many
+short rounds still stretched the reply.
+
+The well is the activity card's last fold (owner report 2026-11-04: a
+separate notes box under the reasoning and tool rows read as a second card
+that could not be put away). Its header is a Surface-owned native button in
+the panel header's grammar: glyph tile, "N notes" label, trailing chevron
+(design port `paintNarrationWell` returns it; the engine owns its state and
+delegation). `23-reading-tool-panel.css` joins it under the reasoning row, the
+panel header or the panel's last call; with no adjacent card row it is a card
+of its own. Without a reader choice it follows the panel's settlement rule
+(`narrationDefaultOpen`): open while the reply works, folded once it has
+completed with an explicit answer and nothing left to act on; a still-running
+call keeps only the panel open. An explicit toggle, or any click inside a
+note, is a reader choice keyed by Turn presentation, cleared with the panel's
+choices. A folded body stays mounted and hidden, so notes keep their identity
+and the well never reparents a leaf to fold; every reopening rests at the
+newest note. The body scrolls with edge shadows and is keyboard-focusable
+(`23-reading-prose.css`). Unmounting folded notes was rejected: every fold
+would remount and re-render each note. Open reasoning (`.thinking-content`)
 is the same kind of scroller: shared `--conversation-process-scroll-max`, edge
 shadows covered with the surface it sits on, a labelled focusable region.
 Both read newest-first through `endAnchoredScroller` (`renderers/stable-dom.ts`):
@@ -419,9 +435,9 @@ as content grows, until the reader scrolls up; scrolling back to the end
 resumes following. Starting at the top was rejected: the latest progress is
 what the reader wants.
 
-When reasoning and calls are both present, their independent disclosures form
-one activity card: two full-width, equal-height rows with matching glyph tiles
-and trailing chevrons, separated by the card's rule rather than a detached pill.
+When reasoning, calls and notes sit together, their independent disclosures
+form one activity card: full-width, equal-height rows with matching glyph tiles
+and trailing chevrons, separated by the card's rule rather than detached pills.
 The reasoning glyph is the shared brain icon; the former dot was only a
 streaming-status decoration, not a necessary control or content state.
 `23-reading-tool-panel.css` joins the existing keyed siblings visually without
@@ -429,7 +445,8 @@ reparenting either disclosure, so streaming identity, focus and reader-owned
 expansion remain unchanged. Expanded reasoning starts at the card's normal
 inset rather than a second indent under the header label; it never toggles
 the tool panel. A reply without
-calls keeps the ordinary reasoning disclosure, not an empty activity section.
+calls or notes keeps the ordinary reasoning disclosure, not an empty activity
+section.
 
 **Alternatives rejected:** stretching only the old pill leaves two disconnected
 cards and an unexplained status dot; a wrapper around both disclosures would

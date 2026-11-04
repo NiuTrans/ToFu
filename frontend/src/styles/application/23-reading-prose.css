@@ -15,51 +15,14 @@
 
 
 /* ---- Interim narration well ---------------------------------------------
- * A reply's interim round prose shares ONE bounded, scrolling sheet in the
- * activity card's language (process palette, radius, glyph tile, hairline
- * row dividers), so many rounds never stretch the reply while the answer
- * below stays on the open page. Scroll shadows use local-attached
- * backgrounds: they appear only on the side that has more to read. */
-.conversation-surface .conversation-turn-blocks > .conversation-narration {
-  --narration-shade: color-mix(in srgb, var(--text-primary) 10%, transparent);
-  margin-block: var(--space-2) var(--space-3);
-  border: var(--control-edge-inset) solid var(--turn-process-line);
-  border-radius: var(--conversation-process-radius);
-  background: var(--turn-process-panel);
-  overflow: hidden;
-}
-
-.conversation-surface .conversation-narration__head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--control-h-md);
-  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
-  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
-  color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--conversation-process-font-size);
-  font-variant-numeric: tabular-nums;
-}
-
-.conversation-surface .conversation-narration__glyph {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: var(--space-6);
-  height: var(--space-6);
-  border-radius: var(--radius-sm);
-  background: var(--accent-subtle);
-  color: var(--accent);
-}
-
-.conversation-surface .conversation-narration__glyph svg {
-  width: 58%;
-  height: 58%;
-}
-
+ * A reply's interim round prose shares ONE bounded, scrolling body, so many
+ * rounds never stretch the reply while the answer below stays on the open
+ * page. The well is the activity card's last fold: its card chrome and
+ * disclosure row live with the card (23-reading-tool-panel.css). Scroll
+ * shadows use local-attached backgrounds: they appear only on the side that
+ * has more to read. */
 .conversation-surface .conversation-narration__body {
+  --narration-shade: color-mix(in srgb, var(--text-primary) 10%, transparent);
   max-height: var(--conversation-process-scroll-max);
   overflow-y: auto;
   overscroll-behavior: contain;

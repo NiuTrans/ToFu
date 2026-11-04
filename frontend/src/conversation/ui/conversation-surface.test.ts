@@ -605,3 +605,112 @@ it('gathers interim round prose into one scrolling well; the live tail and the a
     expect(surface.root.querySelectorAll('[data-narration-well]')).toHaveLength(1);
   } finally { surface.dispose(); container.remove(); }
 });
+
+const notesReply = (status: string, revision: number) => {
+  const scope = { attemptId: 'attempt-1', taskId: 'task-1' };
+  const call = (id: string, llmRound: number) => ({
+    type: 'tool_use', blockId: id, id, name: 'read_files', llmRound, ...scope,
+    input: { path: `${id}.ts` }, result: { content: id, status: 'done' },
+  });
+  return {
+    turnId: 'reply', presentationId: 'reply', runId: '', conversationId: 'conv', laneId: 'main', ordinal: 1,
+    actor: 'assistant', kind: 'reply', status, currentAttemptId: status === 'running' ? 'attempt-1' : null,
+    projectionRevision: revision, createdAt: 1, updatedAt: revision, settlement: {},
+    projection: { content: 'Done.', segments: [
+      { type: 'text', blockId: 'say-0', llmRound: 0, ...scope, text: 'Reading.' },
+      call('tool-a', 0),
+      { type: 'text', blockId: 'say-1', llmRound: 1, ...scope, text: 'Checking.' },
+      call('tool-b', 1),
+      { type: 'text', blockId: 'answer', llmRound: 2, ...scope, text: 'Done.', terminal: true, deliverable: true },
+    ] },
+  } as never;
+};
+
+const mountNotes = () => {
+  const container = document.createElement('main'); document.body.append(container);
+  const state = createTurnState('conv');
+  state.turnsById.reply = notesReply('running', 1);
+  state.laneOrder.main = ['reply'];
+  const scroll = { following: true };
+  const surface = createConversationSurface(container, {
+    scrollAnchor: {
+      get following() { return scroll.following; },
+      capture: () => null, restore: () => {},
+      suspendFollow: () => { scroll.following = false; },
+    },
+  });
+  const well = () => surface.root.querySelector<HTMLElement>(
+    '[data-turn-id="reply"] .conversation-turn-blocks > [data-narration-well]')!;
+  const toggle = () => well().querySelector<HTMLButtonElement>(':scope > [data-conversation-narration]')!;
+  const body = () => well().querySelector<HTMLElement>(':scope > [data-narration-well-body]')!;
+  const settle = (status: string, revision: number) => {
+    state.turnsById.reply = notesReply(status, revision);
+    surface.render(selectConversationViewModel(state));
+  };
+  surface.render(selectConversationViewModel(state));
+  return {
+    surface, scroll, well, toggle, body, settle,
+    dispose: () => { surface.dispose(); container.remove(); },
+  };
+};
+
+it('folds the narration well as the activity card\'s last disclosure, like the panel', () => {
+  const view = mountNotes();
+  const { well, toggle, body, settle } = view;
+  const notes = () => [...body().querySelectorAll<HTMLElement>(':scope > [data-block-id]')]
+    .map(node => node.dataset.blockId);
+  try {
+    // Working: the notes read open as the card's row after the calls.
+    expect(well().firstElementChild).toBe(toggle());
+    expect(toggle().type).toBe('button');
+    expect(toggle().textContent).toBe(body().getAttribute('aria-label'));
+    expect(toggle().getAttribute('aria-expanded')).toBe('true');
+    expect(body().hidden).toBe(false);
+    expect(well().previousElementSibling?.getAttribute('data-block-id')).toBe('tool-b');
+    const note = body().querySelector('[data-block-id="say-0"]');
+
+    // Settled with an answer: the well folds with the panel; its notes stay mounted.
+    settle('completed', 2);
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(well().dataset.narrationState).toBe('closed');
+    expect(body().hidden).toBe(true);
+    expect(notes()).toEqual(['say-0', 'say-1']);
+    expect(body().querySelector('[data-block-id="say-0"]')).toBe(note);
+    expect(well().previousElementSibling?.getAttribute('data-block-id')).toBe('layout:tool-panel');
+    expect(well().nextElementSibling?.getAttribute('data-block-id')).toBe('answer');
+    expect(view.scroll.following).toBe(true);
+
+    // The reader's toggle keeps focus and survives a resumed attempt and its settlement.
+    const button = toggle();
+    button.focus(); button.click();
+    expect(view.scroll.following).toBe(false);
+    expect(toggle()).toBe(button);
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(body().hidden).toBe(false);
+    settle('running', 3);
+    settle('completed', 4);
+    expect(body().hidden).toBe(false);
+
+    // Each fold is its own: the notes fold without touching the panel.
+    const panel = view.surface.root.querySelector<HTMLButtonElement>('.conversation-tool-panel__toggle')!;
+    expect(panel.getAttribute('aria-expanded')).toBe('false');
+    toggle().click();
+    expect(body().hidden).toBe(true);
+    expect(panel.getAttribute('aria-expanded')).toBe('false');
+    panel.click();
+    expect(panel.getAttribute('aria-expanded')).toBe('true');
+    expect(body().hidden).toBe(true);
+    expect(well().previousElementSibling?.getAttribute('data-block-id')).toBe('tool-b');
+  } finally { view.dispose(); }
+});
+
+it('keeps the narration well open after settlement once the reader engaged with a note', () => {
+  const view = mountNotes();
+  try {
+    view.body().querySelector<HTMLElement>('[data-block-id="say-0"]')!.click();
+    view.settle('completed', 2);
+    expect(view.toggle().getAttribute('aria-expanded')).toBe('true');
+    expect(view.body().hidden).toBe(false);
+  } finally { view.dispose(); }
+});

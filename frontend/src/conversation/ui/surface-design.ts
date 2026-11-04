@@ -166,24 +166,38 @@ export function createConversationSurfaceDesign(options: ConversationSurfaceOpti
       const well = document.createElement('div');
       well.className = 'conversation-narration';
       well.dataset.narrationWell = '';
-      const head = span(document, 'conversation-narration__head');
-      head.append(glyph(document, 'conversation-narration__glyph', NOTES),
-        span(document, 'conversation-narration__label'));
       const body = document.createElement('div');
       body.className = 'conversation-narration__body';
       body.dataset.narrationWellBody = '';
       // A bounded scroller must be reachable by keyboard to be scrollable.
       body.tabIndex = 0;
       body.setAttribute('role', 'region');
-      well.append(head, body);
+      well.append(body);
       return well;
     },
     paintNarrationWell(well, count) {
+      // The activity card's last fold: its header row repeats the tool
+      // panel's toggle grammar (glyph tile, label, trailing chevron).
+      const document = well.ownerDocument;
+      const toggle = slot(well, 'conversation-narration__toggle', () => {
+        const created = document.createElement('button');
+        created.type = 'button';
+        created.className = 'conversation-narration__toggle';
+        return created;
+      });
+      if (well.firstElementChild !== toggle) well.prepend(toggle);
+      const tile = slot(toggle, 'conversation-narration__glyph',
+        () => glyph(document, 'conversation-narration__glyph', NOTES));
+      if (toggle.firstElementChild !== tile) toggle.prepend(tile);
       const value = t('narrationWell.label', { n: count, s: plural(count) });
-      const label = well.querySelector<HTMLElement>('.conversation-narration__label');
-      if (label) text(label, value);
-      const body = well.querySelector<HTMLElement>('[data-narration-well-body]');
+      text(slot(toggle, 'conversation-narration__label',
+        () => span(document, 'conversation-narration__label')), value);
+      const chevron = slot(toggle, 'conversation-narration__chevron',
+        () => disclosureChevron(document, 'conversation-narration__chevron'));
+      if (toggle.lastElementChild !== chevron) toggle.appendChild(chevron);
+      const body = well.querySelector<HTMLElement>(':scope > [data-narration-well-body]');
       if (body && body.getAttribute('aria-label') !== value) body.setAttribute('aria-label', value);
+      return toggle;
     },
     transportNotice(node, state) {
       className(node, `conversation-surface__transport-notice conversation-surface__transport-notice--${state}`);
