@@ -100,6 +100,10 @@ class CompactionContext:
         stamp_fn: Bound ``_stamp_l1`` closure (request-local evidence).
         ignore_cache_prefix: Aggressive arm — treat the prefix as
             compactable.
+        keep_refetched_results: Optional-pressure policy — the newest live
+            copy of a call whose earlier result was already compacted is
+            preferred inside the unchanged hot budget, so an economic pass
+            does not evict evidence the model just re-fetched.
         edit: A :class:`MessageEditor`, granted only to structural steps.
         summarize_fn: A bound cheap-model summary callable, granted only
             to ``needs=('llm',)`` steps.
@@ -113,6 +117,7 @@ class CompactionContext:
     cache_prefix_count: int = 0
     stamp_fn: Optional[Callable[[dict, int, int], None]] = None
     ignore_cache_prefix: bool = False
+    keep_refetched_results: bool = False
     dry_run: bool = False  # candidate transforms may not emit/archive evidence
     edit: Optional['MessageEditor'] = None
     summarize_fn: Optional[Callable[..., str]] = None
