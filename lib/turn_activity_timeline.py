@@ -69,7 +69,7 @@ _COUNT_MAX = 2_147_483_647
 _KINDS = frozenset({'model', 'tool', 'status', 'error', 'system'})
 _STATUSES = frozenset({
     'started', 'running', 'waiting', 'succeeded', 'failed', 'skipped',
-    'switched', 'aborted',
+    'switched', 'aborted', 'superseded',
 })
 _SEVERITIES = frozenset({'info', 'warning', 'error'})
 
@@ -1563,6 +1563,78 @@ def _fold_compaction_event(
     })
 
 
+# compaction_resume reasons -> exact catalog literals plus English fallback.
+_RESUME_REASONS: dict[str, tuple[str, str]] = {
+    'no_witness': ('activity.compaction.resumeReason.noWitness',
+                   'no reusable checkpoint was recorded'),
+    'settings_changed': ('activity.compaction.resumeReason.settingsChanged',
+                         'the model or conversation settings changed'),
+    'history_changed': ('activity.compaction.resumeReason.historyChanged',
+                        'the conversation history changed'),
+    'progress_changed': ('activity.compaction.resumeReason.progressChanged',
+                         'the recorded tool progress changed'),
+    'media_unavailable': ('activity.compaction.resumeReason.mediaUnavailable',
+                          'an image it contains is no longer available'),
+    'unavailable': ('activity.compaction.resumeReason.unavailable',
+                    'its saved snapshot could not be read'),
+    'ineligible': ('activity.compaction.resumeReason.ineligible',
+                   'this resume could not use saved context'),
+    'earlier_restored': ('activity.compaction.resumeReason.earlierRestored',
+                         'an earlier compaction was reused instead'),
+}
+
+
+def _fold_compaction_resume(
+    entries: list[dict[str, Any]], raw_event: Mapping[str, Any],
+) -> bool:
+    """Mark accepted compactions a resumed attempt discarded; keep their rows.
+
+    A resume restores at most one archive. Every succeeded compaction of the
+    replaced attempts after it -- or every one, when nothing was restored --
+    stopped shaping the model context. Its row keeps the real time and token
+    accounting but reads as superseded. A restored archive without a row
+    (a suspended checkpoint) is the latest state, so nothing after it exists.
+    """
+    lineage = {value for value in raw_event.get('sourceAttemptIds') or ()
+               if isinstance(value, str) and value}
+    rows = [
+        index for index, entry in enumerate(entries)
+        if entry.get('reasonCode') == 'context_compaction'
+        and entry.get('status') in {'succeeded', 'superseded'}
+        and entry.get('attemptId') in lineage
+    ]
+    candidates = [index for index in rows if entries[index]['status'] == 'succeeded']
+    reason = _text(raw_event.get('reason'), 80)
+    if raw_event.get('restored') is True:
+        archive_id = _text(raw_event.get('archiveId'), _IDENTIFIER_MAX_CHARS)
+        kept = [index for index in rows
+                if archive_id and entries[index].get('archiveId') == archive_id]
+        candidates = [index for index in candidates if kept and index > kept[-1]]
+        reason = 'earlier_restored'
+    if not candidates:
+        return False
+    reason_key, phrase = _RESUME_REASONS.get(reason, ('', reason))
+    for index in candidates:
+        entry = {
+            **entries[index],
+            'status': 'superseded',
+            'summary': 'Context compaction discarded on resume',
+            'summaryKey': 'activity.compaction.superseded',
+            'detail': 'Not reused after the interruption.',
+        }
+        entry.pop('detailKey', None)
+        entry.pop('detailArgs', None)
+        if phrase:
+            entry.update({
+                'detail': f'Not reused after the interruption: {phrase}.',
+                'detailKey': 'activity.compaction.supersededDetail',
+                'detailArgs': {'reason': phrase,
+                               **({'reasonKey': reason_key} if reason_key else {})},
+            })
+        entries[index] = entry
+    return True
+
+
 def _fold_schema_rejection(
     entries: list[dict[str, Any]], raw_event: Mapping[str, Any],
     task: Mapping[str, Any], seq: int, now: int,
@@ -1713,6 +1785,9 @@ def fold_activity_timeline(
         _fold_phase(entries, raw_event, task, seq, occurred_at)
     elif event_type in {EventType.COMPACTION, EventType.COMPACTION_DONE}:
         _fold_compaction_event(entries, raw_event, task, seq, occurred_at)
+    elif event_type == EventType.COMPACTION_RESUME:
+        if not _fold_compaction_resume(entries, raw_event):
+            return existing
     elif event_type == EventType.MODEL_FALLBACK:
         _fold_model_fallback(entries, raw_event, task, seq, occurred_at)
     elif event_type == EventType.ERROR:

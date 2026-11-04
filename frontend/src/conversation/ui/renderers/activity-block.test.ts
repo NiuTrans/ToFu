@@ -260,6 +260,36 @@ describe('compact compression diagnostics', () => {
     } finally { dom.window.close(); }
   });
 
+  it.each([
+    ['en', en, 'Context compaction discarded on resume',
+      'Not reused after the interruption: no reusable checkpoint was recorded.'],
+    ['zh', zh, '上下文已收束 · 续跑时作废', '中断后续跑未复用这次收束：未记录可复用的检查点。'],
+  ] as const)('shows in %s why a resume discarded a real compaction', (_language, catalog, summary, detail) => {
+    const localizedText: ClassicConversationRendererPorts['localizedText'] = (key, fallback, values) => (
+      (catalog[key as keyof typeof catalog] ?? fallback).replace(/\{(\w+)\}/g,
+        (match, name: string) => String(values?.[name] ?? match))
+    );
+    const {dom, node} = render({
+      status: 'superseded', trigger: 'working_set', tokensBefore: 249_784, tokensAfter: 30_628,
+      summary: 'Context compaction discarded on resume', summaryKey: 'activity.compaction.superseded',
+      detail: 'Not reused after the interruption: no reusable checkpoint was recorded.',
+      detailKey: 'activity.compaction.supersededDetail',
+      detailArgs: {reason: 'no reusable checkpoint was recorded',
+        reasonKey: 'activity.compaction.resumeReason.noWitness'},
+    }, localizedText);
+    try {
+      const row = node.querySelector('.activity-event--compaction')!;
+      expect(row.classList.contains('activity-event--superseded')).toBe(true);
+      expect(row.querySelector('.activity-event__summary')?.textContent).toBe(summary);
+      // The cause is the row's point, not a folded diagnostic.
+      expect(row.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+        .toBe(detail);
+      // The discarded work keeps its real accounting and snapshot.
+      expect(row.querySelector('.compaction-token-flow')).not.toBeNull();
+      expect(row.querySelector('[data-conversation-action="open-compaction"]')).not.toBeNull();
+    } finally { dom.window.close(); }
+  });
+
   it('does not guess unknown trigger meanings or interpret diagnostic markup', () => {
     const {dom, node} = render({trigger: 'future_kind', summaryModel: '<img src=x>',
       detail: '<script>unsafe()</script>'});

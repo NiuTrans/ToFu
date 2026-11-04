@@ -810,6 +810,11 @@ Summarization uses a separately prepared, bounded request: the
 main context's threshold does not imply that the summarizer received that entire
 context or reached its own route limit. UI specs: `activity-block.test.ts` and
 `tests/visual/test_visual_compaction_trigger_wording.py`.
+A compaction that a resumed attempt did not reuse keeps its row, duration,
+token flow and snapshot, but reads `superseded` ("Context compaction discarded
+on resume" / "上下文已收束 · 续跑时作废") with muted, struck-through counts and
+its cause in the visible detail; the resume report that decides this is
+described in [contracts/EVENTS.md](contracts/EVENTS.md).
 The local token authority reuses exact-ish counts above 4 KiB, or above 512 characters when a caller proves reuse. Full repeated requests batch all short text plus unique cold misses once, while stable large-prefix digest hits skip BPE work. Encoding/length/SHA-256 keys retain no prompt text; capacity is launch-probed with a 4,096-entry ceiling. General short text bypasses hashing; changed content or encoding is recounted. Provider-reported per-conversation anchors use a separate launch-probed LRU (128 fallback, 4,096 distributed, 8,192 hard ceiling): TTL/capacity/pressure eviction falls through to the next counter, retained fields are bounded, and expiration plus replacement are atomic.
 
 Child invocations use `compaction_owner_key(task)` for provider-usage cache writes and native-compaction invalidation; parent `convId` is authorization lineage, never the child's cache key. The common settlement helper folds paid summary calls into `usage` and `apiRounds` before child/root terminal branching (and is shared by failure/cancellation). Drained costs are retained on the task until projection succeeds, so a cleanup fault cannot silently discard them. Child teardown independently releases token-cache and summary-cooldown entries, including after `KeyboardInterrupt`, without clearing parent or sibling state. Completed children retain no global usage/cache/cooldown scope; durable archive retention remains the storage owner's separate lifecycle. Specs: `tests/tasks_pkg/test_child_compaction_lifecycle.py`.

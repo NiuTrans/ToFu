@@ -1871,9 +1871,11 @@ components:
         kind:
           type: string
           enum: [model, tool, status, error, system]
+        # superseded: a completed context compaction that a resumed attempt
+        # did not reuse; its accounting stays, it no longer shapes context.
         status:
           type: string
-          enum: [started, running, waiting, succeeded, failed, skipped, switched, aborted]
+          enum: [started, running, waiting, succeeded, failed, skipped, switched, aborted, superseded]
         severity:
           type: string
           enum: [info, warning, error]
