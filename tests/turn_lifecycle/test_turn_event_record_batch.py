@@ -496,23 +496,29 @@ def test_a_run_beyond_one_ordinary_commit_never_spills(turn_service, storage, mo
         _discard(task)
 
 
-def test_oversized_inline_diagnostics_are_shed_per_entry(turn_service, storage, monkeypatch):
-    monkeypatch.setattr(turn_service, '_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES', 96 * 1024)
-    monkeypatch.setattr(turn_service, '_ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES', 1024)
+def test_large_inline_diagnostics_follow_authority_admission_per_entry(
+        turn_service, storage, monkeypatch, request):
     _, task = _task(turn_service, storage, 'batch-evidence')
     try:
         assert turn_service.record_task_event(task, {'type': 'phase', 'phase': 'starting'})
         calls = _capture_batch(storage, monkeypatch)
         small = {'type': 'tool_compacted', 'roundNum': 1, 'summary': 'kept inline'}
-        large = {'type': 'tool_compacted', 'roundNum': 2, 'summary': 'x' * (128 * 1024)}
+        # Both authorities retain admitted evidence. Native also accepts a real
+        # frame beyond the retired producer estimate; SQL retains its declared
+        # durable transport envelope. Do not invent a smaller producer limit.
+        size = 9 * 1024 * 1024 if request.node.callspec.params['storage'] == 'tofudb' else 128 * 1024
+        large = {'type': 'tool_compacted', 'roundNum': 2, 'summary': 'x' * size}
         script = [(lambda task: None, small), (lambda task: None, large)]
         entries = _entries(turn_service, task, script)
         assert turn_service.record_task_events(task, entries) == ['carried', 'carried']
-        kept, shed = calls[0]['entries']
+        kept, large_entry = calls[0]['entries']
         assert kept['event_payload']['event']['summary'] == 'kept inline'
-        assert 'event' not in shed['event_payload']
-        assert shed['task_event']['event']['summary'] == large['summary']
-        assert task['_debugEvidenceOmittedCount'] == 1
+        assert large_entry['event_payload']['event']['summary'] == large['summary']
+        assert large_entry['task_event']['event']['summary'] == large['summary']
+        assert _rows(storage, task)[-1]['event']['summary'] == large['summary']
+        changes = _sync_changes(storage, task, 0)
+        assert changes[-1]['payload']['event']['payload']['event']['summary'] == large['summary']
+        assert not task.get('_debugEvidenceOmittedCount')
     finally:
         _discard(task)
 
