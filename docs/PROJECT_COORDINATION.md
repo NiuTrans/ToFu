@@ -933,6 +933,20 @@ last-resort guard and still warns for any other adjacent assistant producer.
 Verification: `tests/tasks_pkg/test_coordinator_report_model_view.py` (real
 report producer and Turn-native builder, cold and restored replay).
 
+Reading order. Problem: the same durable order (report after its still-running
+reply) rendered the live reply above a newer, settled report bubble, so every
+later tool row and steered message landed in the older bubble above the report.
+Decision: presentation (`presentation/view-model/report-placement.ts`) reads a
+`coordinator_report.*` Turn immediately before the reply whose execution window
+contains it (reply live, or report `createdAt` < reply attempt `settledAt`).
+The test uses only durable timestamps, so the order is identical while the
+reply runs and after it settles; durable lane order is unchanged. Reports never
+move above a human Turn or a queued reply. Alternatives rejected: pinning the
+live reply to the tail moves it back above reports at settlement; splitting the
+reply into before/after-report bubbles needs two view models per Turn identity
+across windowing, navigation and actions. Verification:
+`frontend/src/conversation/presentation/coordinator-report-placement.test.ts`.
+
 The sidebar's fixed Coordinator entry shows an unread dot and the latest title.
 Clicking it opens the ordinary conversation, where the report is a normal
 message. Opening the Coordinator chat while the page is visible reads the latest

@@ -282,10 +282,12 @@ neither is inferred from ad-hoc flags by the reader.
   ``stamp_initiator`` at the turn-creation seam (a fresh timer/proactive/goal/
   peer input projection, or the autopilot simulated user); ``message_queue``
   tags queued rows for operator-vs-peer before dispatch. It rides the
-  projection into ``TurnOrigin.initiator`` and the renderer shows a distinct
-  labelled banner for every non-human source
-  (``classic-conversation-renderers.ts:renderOriginBlock``) — so an autonomous
-  turn never masquerades as the human. Do not add a parallel actor enum or a
+  projection into ``TurnOrigin.initiator``; the Turn header's localized role
+  label names every non-human source, and
+  ``renderers/context-blocks.ts:renderOriginBlock`` adds a block only when the
+  origin carries more than that label (peer/operator source, Brain dispatch
+  details) — so an autonomous turn never masquerades as the human and the
+  label is never shown twice. Do not add a parallel actor enum or a
   flag the reader must pattern-match on; extend ``VALID_INITIATORS`` instead.
 * **What was injected mid-turn** — the registry ``injectionId`` /
   ``_contextInjectionId`` on the carrier, projected display-only as a
