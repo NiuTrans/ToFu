@@ -66,11 +66,16 @@ of every live slot; specs are in `tests/llm_dispatch/test_slot_pool_scopes.py`.
 It also keeps the exact key-health credential index (`key_stats_key_names`)
 that `lib.key_stats` reads for last-resort siblings; every pool mutation keeps
 it current, so never project credentials from a walk over the pool.
+Membership uses ordered occurrences plus an identity index: request withdrawal
+must not scan unrelated requests. Generic sequence edits rebuild the views;
+diagnostic iteration snapshots membership. Verify identity, duplicate, reload,
+quiescent reclamation and retirement-work specs in `test_slot_pool_membership.py`
+and `test_route_group_retirement_measure.py`.
 
 `ephemeral.py` owns atomic request-handle registration/disposal without a count
 ceiling. Each execution holds its owner-authorized candidate group: prepare
 every slot without a lock, publish the group in one critical section, dispose
-it in one identity pass. Keep registration, rollback, cancellation,
+it by indexed identity lookup. Keep registration, rollback, cancellation,
 observer-failure and one-lock-acquisition tests in `test_ephemeral_capacity.py`;
 remaining candidate-selection policy is separate.
 

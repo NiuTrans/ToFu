@@ -786,6 +786,64 @@ Stream-idle timeouts use the existing bounded premature-close retry budgets. A z
 
 Problem: selected-slot adaptation built bodies, clamped output and stamped `usage['_dispatch']` with the Deployment's wire id. Exact-key knowledge misses decorated or opaque gateway spellings: `_clamp_max_tokens('kunlunbedrock.gpt-6.1-sol-m17')` returned 32,768 instead of 128,000, an opaque Claude wire (`yuju-opus-55-evaDaily`) skipped the prefill guard, and paths that priced from `_dispatch.model` (child-round snapshots, L2 summary calls and receipts, compaction rows, paper meters, pool rescue) fell back to `default_estimate` (USD 1.9125 instead of 0.50 for identical usage). Anthropic 1-hour cache writes were billed at the 5-minute 1.25x rate. Decision: every `_dispatch` producer (stream settlement, `dispatch_chat`, race dispatch) stamps `logical_model` beside the wire `model`; pricing consumers and call rows prefer it, and run evidence keeps it. Adaptation passes `knowledge_model=slot.logical_model` to `build_body` and uses it for output clamps, reasoning compilation, Claude/Gemini message tweaks and the `pinned_context_profile` knowledge fallback and output cap; non-stream `dispatch_chat` and race dispatch forward the same `knowledge_model` through `chat()`, which also seals the request with `logical_model=knowledge_model` (kept by the non-stream budget re-seal), so request settlement prices the logical model on both paths instead of the wire alias's `default_estimate`, which strict billing rejects as `IncompleteRequestUsage`. `build_body` and stream adaptation clamp with `_clamp_route_max_tokens(..., wire_model=)`: the logical id's family ceiling plus only the wire spelling's per-name learned limit, so a limit learned where a Deployment's wire id equals the logical id never clamps another gateway's spelling. `body['model']`, route-limit keys, learned context windows, exclusions/health, transport cache markers and selected-slot input admission stay on the wire id. Transport re-admission matches `_route_context_model` against `body['model']`, so switching admission would drop the declared route window. `_convert_usage` carries Anthropic's `cache_creation` TTL breakdown on stream and non-stream paths; `compute_cost` prices the 1-hour share at the row's `cacheWrite1hMul`, else 2.0x base input for Anthropic-family rows on the official 1.25x write schedule ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)), clamped to the reported write total; a row with its own write multiplier keeps it for both TTLs. Usage without the breakdown is priced unchanged. Alternatives rejected: adding wire-spelling rows or another prefix-strip normalizer keeps exact tables growing and still misses opaque ids; rewriting `_dispatch.model` to the logical id would break wire-keyed exclusion, rotation and diagnostics; billing every cache write at 2.0x over-charges 5-minute writes; applying the logical id's learned limit alongside the wire's imports another Deployment's evidence. Specs: `tests/llm_dispatch/test_dispatch_logical_identity.py`, `tests/cost/test_cost.py::CacheWriteTtlCostTest`, the TTL cases in `tests/llm/test_anthropic_outbound.py` and the logical rescue case in `tests/tasks_pkg/test_pool_rescue_fallback.py`.
 
+## Route-group retirement under agent fan-out
+
+**Problem:** each request owns all of its eligible route candidates, but retiring
+one group walked and copied every live slot while holding the shared dispatcher
+lock. Finishing A groups of K candidates therefore did O(A²K) membership work,
+blocking unrelated selection and publication during each pass.
+
+**Decision:** `slot_pool.py` keeps publication order in an occurrence map and
+indexes occurrences by object identity. Withdrawal visits the requested objects
+and their affected provider scopes, preserving survivor order, duplicate
+occurrences, exact key-health reference counts and idempotent disposal. Generic
+sequence edits and configuration reload rebuild the views. Diagnostic iteration
+captures a membership snapshot, so concurrent retirement cannot invalidate a
+reader. Once the last request retires, the pool compacts its maps around the
+configured survivors without re-reading their credential identities. No runtime
+limit, extra worker, timeout, cache staleness or provider policy is introduced.
+
+**Alternatives considered:** retaining the flat list preserves the global scan;
+swap-removal changes candidate order; deferred retirement prolongs credential and
+handle lifetime. Leaving empty map capacity after a large wave retained 7.5 MiB
+in the first indexed implementation; exact quiescence reclamation removes that
+retention without a threshold or periodic sweep.
+
+Reproduce with `python3 benchmarks/route_group_retirement.py --pool-source
+/path/to/frozen/slot_pool.py --samples 5` in alternating fresh processes. The
+baseline is `cc65c689b:lib/llm_dispatch/slot_pool.py`; the owner depends only on
+standard collections and Slot attributes, so the rest of the fixture stays
+identical. Three alternating process pairs on 2026-11-04, five complete samples
+per size after one warm-up, used 52 real Slot candidates per request, one
+configured survivor and the same shuffled retirement order. Exact ordered
+membership, removed identities, scopes and credential cleanup gate every result.
+The following are medians of process medians, in milliseconds:
+
+| Concurrent request groups | Retirement before → after | Publication + retirement before → after |
+|---|---:|---:|
+| 1 | 0.051 → 0.074 | 0.103 → 0.137 |
+| 32 | 4.047 → 2.479 | 5.938 → 4.691 |
+| 256 | 167.011 → 21.332 | 184.957 → 41.725 |
+| 1024 | 2511.884 → 107.678 | 2593.182 → 217.536 |
+
+At 1024 groups, process-median retirement ranges were 2499–2525 ms before and
+103–121 ms after. The index trades extra publication/diagnostic work for much
+less retirement work: at that size publication was 76.9→107.9 ms and a full
+membership snapshot 0.240→0.613 ms; scoped candidate selection is unchanged.
+The single-request complete lifecycle adds about 0.034 ms. Separate
+`--allocations` runs exclude Slot construction: live pool allocation at 32 groups
+is approximately 0.34→0.70 MiB and at 1024 groups 10.8→23.1 MiB; after all
+requests retire the indexed pool returns to approximately 3 KiB, independent of
+wave size, while retaining the configured slot. These are component observations,
+not application throughput, provider latency, storage performance or a supported
+Agent-count guarantee. Keep the change for the measured fan-out lifecycle gain.
+
+Specifications: `tests/llm_dispatch/test_slot_pool_membership.py`, existing scoped
+selection and ephemeral registration/rollback/cancellation tests, and
+`tests/meta/test_route_group_retirement_measure.py`. The deterministic identity
+probe rejects unrelated-slot work without a flaky clock threshold; the benchmark
+self-check rejects dropped, retained or reordered work before reporting numbers.
+
 ## Task image preparation budget
 
 Text-only preparation skips hydration/pinning and preserves references. First vision preparation performs an owner-scoped bounded source read, retaining original unresized bytes/references for fallback; only fresh wire bodies resize. `lib/llm/body/_image_reuse.py` is an explicit task-owned derived-wire LRU: lean defaults **8 entries / 4 MiB**, hard ceilings **32 / 16 MiB**, counting URL storage and per-entry overhead. Both limits apply; oversized entries bypass retention. Keys bind exact source-URL SHA-256, model, dimension cap, transform version, quality/format, metadata policy and base64 byte budget. Owner mismatch fails closed; terminal heavy-field release calls `clear()` and releases `_modelImageReuse`. No original replacement, file writes or cross-owner cache. `tests/llm/test_image_preparation_reuse.py` gates zero repeated Pillow work, byte-identical wire/source preservation, eviction, invalidation and owner/text-to-vision boundaries; `test_release_heavy_task_state.py` gates terminal release. The synthetic fresh-original benchmark measures local body preparation only, never end-to-end/provider gains.

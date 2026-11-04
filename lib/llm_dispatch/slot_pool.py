@@ -29,15 +29,17 @@ an immutable value that is replaced, never edited, so it may be read without
 the lock. ``provider_id`` is the index key; it is never changed on a pooled
 slot.
 
-The pool is a ``list`` so existing readers (``list(dispatcher.slots)``,
-iteration, equality) keep working. Generic list mutations rebuild the index;
-the dispatcher's own bulk operations update it in one pass. Dependencies: Slot
-attributes only.
+An ordered occurrence map owns membership; an identity index locates every
+occurrence of a retiring slot without scanning other requests. List-style reads
+and mutations remain available. Generic mutations rebuild the indexes; request
+publication/withdrawal update only the affected entries and provider scopes.
+Iteration snapshots membership so diagnostics can safely outlive the caller's
+lock. Dependencies: standard collections and Slot attributes only.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableSequence
 
 __all__ = ['SlotPool']
 
@@ -58,6 +60,12 @@ class _KeyHealthCredentials:
 
     def names(self, namespace: str) -> tuple[str, ...]:
         return self._names.get(namespace, ())
+
+    def compact(self) -> None:
+        """Release retired dictionary capacity at request-pool quiescence."""
+        self._identity = dict(self._identity)
+        self._counts = {namespace: dict(counts) for namespace, counts in self._counts.items()}
+        self._names = dict(self._names)
 
     def add(self, slots: Iterable) -> None:
         """Count *slots*; their identities are read before anything changes."""
@@ -104,25 +112,67 @@ class _KeyHealthCredentials:
                 self._names.pop(namespace, None)
 
 
-class SlotPool(list):
+class SlotPool(MutableSequence):
     """All live slots, plus per-provider, configured-only and key-health views."""
 
     def __init__(self, slots: Iterable = ()):
-        super().__init__(slots)
-        self._reindex()
+        self._replace(slots)
 
-    def _reindex(self) -> None:
+    def _replace(self, slots: Iterable) -> None:
+        entries = dict(enumerate(slots))
+        positions: dict[int, list[int]] = {}
         by_provider: dict[str, list] = {}
         configured: list = []
-        for slot in list.__iter__(self):
+        for position, slot in entries.items():
+            positions.setdefault(id(slot), []).append(position)
             by_provider.setdefault(slot.provider_id, []).append(slot)
             if not slot.request_scoped:
                 configured.append(slot)
         key_health = _KeyHealthCredentials()
-        key_health.add(list.__iter__(self))
+        key_health.add(entries.values())
+        self._entries = entries
+        self._positions = positions
+        self._next_position = len(entries)
         self._by_provider = by_provider
         self._configured = configured
         self._key_health = key_health
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __iter__(self):
+        return iter(self.copy())
+
+    def __reversed__(self):
+        return reversed(self.copy())
+
+    def __getitem__(self, index):
+        return self.copy()[index]
+
+    def __eq__(self, other):
+        if isinstance(other, SlotPool):
+            other = other.copy()
+        return self.copy() == other
+
+    def __repr__(self):
+        return repr(self.copy())
+
+    def copy(self) -> list:
+        return list(self._entries.values())
+
+    def index(self, value, *bounds):
+        return self.copy().index(value, *bounds)
+
+    def __add__(self, other):
+        return self.copy() + (other.copy() if isinstance(other, SlotPool) else other)
+
+    def __radd__(self, other):
+        return other + self.copy()
+
+    def __mul__(self, count):
+        return self.copy() * count
+
+    __rmul__ = __mul__
 
     # ── Views ──
 
@@ -146,14 +196,17 @@ class SlotPool(list):
         """Append *slots* in order and index them."""
         slots = list(slots)
         self._key_health.add(slots)
-        super().extend(slots)
         for slot in slots:
+            position = self._next_position
+            self._next_position += 1
+            self._entries[position] = slot
+            self._positions.setdefault(id(slot), []).append(position)
             self._by_provider.setdefault(slot.provider_id, []).append(slot)
             if not slot.request_scoped:
                 self._configured.append(slot)
 
     def withdraw(self, slots: Iterable) -> set[int]:
-        """Remove exactly these objects (by identity) in one pass.
+        """Remove all occurrences of these objects without walking other requests.
 
         Returns the ``id`` of every slot that was present. Order of the
         remaining slots is unchanged. Views are replaced rather than edited,
@@ -162,17 +215,15 @@ class SlotPool(list):
         targets = {id(slot): slot for slot in slots}
         if not targets:
             return set()
-        kept = []
         dropped = []
-        for slot in list.__iter__(self):
-            if id(slot) in targets:
-                dropped.append(slot)
-            else:
-                kept.append(slot)
+        removed = set()
+        for slot_id in targets:
+            positions = self._positions.pop(slot_id, ())
+            if positions:
+                removed.add(slot_id)
+                dropped.extend(self._entries.pop(position) for position in positions)
         if not dropped:
             return set()
-        removed = {id(slot) for slot in dropped}
-        super().__setitem__(slice(None), kept)
         gone = [targets[slot_id] for slot_id in removed]
         for provider_id in {slot.provider_id for slot in gone}:
             bucket = [slot for slot in self._by_provider.get(provider_id, ())
@@ -185,63 +236,69 @@ class SlotPool(list):
             self._configured = [slot for slot in self._configured
                                 if id(slot) not in removed]
         self._key_health.remove(dropped)
+        if len(self._entries) == len(self._configured):
+            # The last request retired. Reclaim empty hash-table capacity
+            # without re-reading the surviving slots' credential identities.
+            self._entries = dict(self._entries)
+            self._positions = dict(self._positions)
+            self._by_provider = dict(self._by_provider)
+            self._key_health.compact()
         return removed
 
     def replace_configured(self, slots: Iterable) -> None:
         """Swap the configured slots; live request-scoped slots stay, in order."""
-        request_scoped = [slot for slot in list.__iter__(self) if slot.request_scoped]
-        super().__setitem__(slice(None), list(slots) + request_scoped)
-        self._reindex()
+        request_scoped = [slot for slot in self if slot.request_scoped]
+        self._replace(list(slots) + request_scoped)
 
-    # ── Generic list mutations keep the index exact ──
+    # ── Generic sequence mutations keep the indexes exact ──
 
     def append(self, slot) -> None:
-        super().append(slot)
-        self._reindex()
+        self._replace(self.copy() + [slot])
 
     def extend(self, slots) -> None:
-        super().extend(slots)
-        self._reindex()
+        self._replace(self.copy() + list(slots))
 
     def insert(self, index, slot) -> None:
-        super().insert(index, slot)
-        self._reindex()
+        slots = self.copy()
+        slots.insert(index, slot)
+        self._replace(slots)
 
     def remove(self, slot) -> None:
-        super().remove(slot)
-        self._reindex()
+        slots = self.copy()
+        slots.remove(slot)
+        self._replace(slots)
 
     def pop(self, index=-1):
-        slot = super().pop(index)
-        self._reindex()
+        slots = self.copy()
+        slot = slots.pop(index)
+        self._replace(slots)
         return slot
 
     def clear(self) -> None:
-        super().clear()
-        self._reindex()
+        self._replace(())
 
     def sort(self, *args, **kwargs) -> None:
-        super().sort(*args, **kwargs)
-        self._reindex()
+        slots = self.copy()
+        slots.sort(*args, **kwargs)
+        self._replace(slots)
 
     def reverse(self) -> None:
-        super().reverse()
-        self._reindex()
+        self._replace(reversed(self.copy()))
 
     def __setitem__(self, index, value) -> None:
-        super().__setitem__(index, value)
-        self._reindex()
+        slots = self.copy()
+        slots[index] = value
+        self._replace(slots)
 
     def __delitem__(self, index) -> None:
-        super().__delitem__(index)
-        self._reindex()
+        slots = self.copy()
+        del slots[index]
+        self._replace(slots)
 
     def __iadd__(self, slots):
-        super().__iadd__(slots)
-        self._reindex()
+        self.extend(slots)
         return self
 
     def __imul__(self, count):
-        super().__imul__(count)
-        self._reindex()
+        self._replace(self.copy() * count)
         return self

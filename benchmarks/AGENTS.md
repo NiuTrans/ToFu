@@ -285,6 +285,12 @@ in-memory. Compare alternating fresh processes of frozen source roots and put
 `--stats-dir` on the volume class under study. Verify
 `tests/meta/test_dispatch_contention_measure.py`; never read it as chat latency.
 
+`route_group_retirement.py` compares frozen `slot_pool.py` owners using the same
+real Slot fixtures, ordered publication and shuffled retirement. Fresh alternating
+`--pool-source` processes report complete lifecycle clocks; `--allocations` adds
+separate index-only memory observations. Verify `test_route_group_retirement_measure`;
+it excludes storage, provider IO, route compilation and application capacity.
+
 `token_cold_start.py` measures one encoding's first operation in each fresh
 process using token_ingress_measure --cold-only. Verify distinct PIDs, zero warm
 calls, both clocks, identical fixtures/instrumentation and unchanged sources.
