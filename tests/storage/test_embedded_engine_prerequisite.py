@@ -1,10 +1,22 @@
-"""Missing embedded artifacts use the certified engine prerequisite boundary."""
+"""Missing native artifacts use the certified engine prerequisite boundary."""
 import pytest
 
 from lib.storage import supervisor
 from serverctl_pkg.native_engine import EnginePreparationError
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize('explicit_override', [False, True])
+def test_missing_binary_reports_typed_prerequisite(tmp_path, monkeypatch, explicit_override):
+    if explicit_override:
+        monkeypatch.setenv('TOFUDB_BIN', str(tmp_path / 'missing-tofu-db'))
+    else:
+        monkeypatch.delenv('TOFUDB_BIN', raising=False)
+    monkeypatch.setattr(supervisor, '_executable', lambda path: None)
+    monkeypatch.setattr(supervisor.shutil, 'which', lambda name: None)
+    with pytest.raises(EnginePreparationError, match='TOFUDB_BIN must name an executable'):
+        supervisor._resolve_tofudb_binary()
 
 
 @pytest.mark.parametrize('source_checkout', [False, True])

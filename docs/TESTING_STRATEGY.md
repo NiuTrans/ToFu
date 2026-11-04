@@ -772,6 +772,9 @@ and no other exception is reclassified, so an owner that refuses a mismatched
 engine raises `EnginePreparationError` itself, private benchmark authorities
 such as the native HTML corpus (`benchmarks/knowledge_html/durable.py`)
 included; a bare `RuntimeError` bypasses the wrappers and fails every worktree.
+Binary discovery uses the same typed refusal for an absent executable or an
+invalid explicit binary path. The selected native backend still refuses to
+start; only the existing test prerequisite boundary classifies the failure.
 `tests/conftest.py` verifies the selected artifact once per process; native
 `semantic_authority` pins its recorded `TOFUDB_EXPECTED_SHA256` instead of
 repeating the source fingerprint and `--build-info` probe for each test.
