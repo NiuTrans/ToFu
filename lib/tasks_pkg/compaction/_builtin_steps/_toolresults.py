@@ -153,6 +153,64 @@ def _newest_tool_batch_indices(messages: list, tool_indices: list[int]) -> set[i
     return set()
 
 
+def _is_compacted_tool_content(content) -> bool:
+    """True for a result already replaced by an L1 or archive placeholder."""
+    return isinstance(content, str) and (
+        (content.startswith('[') and 'compacted' in content[:80])
+        or content.startswith('[Persisted to:'))
+
+
+def _call_identities(messages: list) -> dict[str, tuple[str, str]]:
+    """Map each assistant tool-call id to its tool name and canonical arguments."""
+    identities: dict[str, tuple[str, str]] = {}
+    for message in messages:
+        if message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or ():
+            if not isinstance(call, dict) or not call.get('id'):
+                continue
+            function = call.get('function') or {}
+            arguments = function.get('arguments')
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    pass
+            try:
+                canonical = json.dumps(
+                    arguments, sort_keys=True, ensure_ascii=False,
+                    separators=(',', ':'), default=str)
+            except (TypeError, ValueError):
+                canonical = str(arguments)
+            identities[str(call['id'])] = (
+                str(function.get('name') or ''), canonical)
+    return identities
+
+
+def _refetched_tool_result_indices(messages: list,
+                                   tool_indices: list[int]) -> set[int]:
+    """Newest live result of each call whose earlier copy was compacted.
+
+    Re-issuing the identical call after its placeholder proves the evidence is
+    still needed. Older live duplicates are superseded by the newest copy.
+    """
+    if not any(_is_compacted_tool_content(messages[idx].get('content'))
+               for idx in tool_indices):
+        return set()
+    identities = _call_identities(messages)
+    compacted: set[tuple[str, str]] = set()
+    newest_refetch: dict[tuple[str, str], int] = {}
+    for idx in sorted(tool_indices):
+        identity = identities.get(str(messages[idx].get('tool_call_id') or ''))
+        if identity is None:
+            continue
+        if _is_compacted_tool_content(messages[idx].get('content')):
+            compacted.add(identity)
+        elif identity in compacted:
+            newest_refetch[identity] = idx
+    return set(newest_refetch.values())
+
+
 def _hot_tool_result_indices(ctx: CompactionContext,
                              tool_indices: list[int]) -> set[int]:
     """Select a count- and token-bounded hot tail plus the newest batch."""
@@ -162,6 +220,13 @@ def _hot_tool_result_indices(ctx: CompactionContext,
     token_limit = max(0, int(getattr(
         ctx.constants, 'MICRO_HOT_TAIL_TOKENS', 48_000)))
     protected = _newest_tool_batch_indices(ctx.messages, tool_indices)
+    refetched = (
+        _refetched_tool_result_indices(ctx.messages, tool_indices) - protected
+        if ctx.keep_refetched_results else set())
+    if refetched:
+        return _hot_indices_preferring_refetched(
+            ctx, tool_indices, protected, refetched,
+            count_limit=count_limit, token_limit=token_limit)
     count_hot = set(tool_indices[-count_limit:]) if count_limit else set()
 
     token_hot: set[int] = set(protected)
@@ -176,6 +241,37 @@ def _hot_tool_result_indices(ctx: CompactionContext,
         token_hot.add(idx)
         accumulated += estimate
     return protected | (count_hot & token_hot)
+
+
+def _hot_indices_preferring_refetched(
+        ctx: CompactionContext, tool_indices: list[int], protected: set[int],
+        refetched: set[int], *, count_limit: int, token_limit: int) -> set[int]:
+    """Spend the same count/token budget on re-fetched evidence, then recency.
+
+    A re-fetched result that cannot fit is skipped so it never blocks smaller
+    evidence; the recency tail keeps its contiguous first-overflow stop.
+    """
+    hot = set(protected)
+    accumulated = sum(
+        max(0, _estimate_msg_tokens(ctx.messages[idx])) for idx in protected)
+    for idx in sorted(refetched, reverse=True):
+        if len(hot) >= count_limit:
+            return hot
+        estimate = max(0, _estimate_msg_tokens(ctx.messages[idx]))
+        if accumulated + estimate <= token_limit:
+            hot.add(idx)
+            accumulated += estimate
+    for idx in reversed(tool_indices):
+        if idx in hot:
+            continue
+        if len(hot) >= count_limit:
+            break
+        estimate = max(0, _estimate_msg_tokens(ctx.messages[idx]))
+        if accumulated + estimate > token_limit:
+            break
+        hot.add(idx)
+        accumulated += estimate
+    return hot
 
 
 @register_step('compact_tool_results')
@@ -294,9 +390,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
 
         # ── Plain-string content ──
         elif isinstance(content, str):
-            if content.startswith('[') and 'compacted' in content[:80]:
-                skipped_already += 1
-            elif content.startswith('[Persisted to:'):
+            if _is_compacted_tool_content(content):
                 skipped_already += 1
             elif tool_name == 'load_skill' and content.startswith('Skill loaded:'):
                 old_len = len(content)
