@@ -326,6 +326,17 @@ class WorkerExecutionContext:
     def mark_authority_lost(self) -> None:
         self._authority_lost.set()
 
+    def publication_claim(self, *, terminal: bool = False) -> dict[str, Any]:
+        """Carry this claim into a domain's atomic publication operation.
+
+        This local check is an accelerator only. The storage transaction must
+        revalidate ownership and lease time; possession never permits replay
+        of an external effect or replaces domain terminal settlement.
+        """
+        self.checkpoint(allow_cancelled=terminal)
+        return {'worker_id': self.claim.worker_id,
+                'fencing_token': self.claim.fencing_token}
+
     def checkpoint(self, *, allow_cancelled: bool = False) -> None:
         """Fail before another event, terminal write, or fenced side effect."""
         if self.authority_lost:

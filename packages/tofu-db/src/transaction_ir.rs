@@ -890,6 +890,7 @@ pub enum TransactionIrStep {
         attempt_id: String,
         task_id: String,
         automation_context: Option<crate::automation_events::TaskStartedContext>,
+        worker_claim: Option<crate::worker_job::PublicationClaim>,
         committed_at_ms: u64,
         slot: usize,
     },
@@ -4315,6 +4316,11 @@ impl TransactionIr {
                     )?;
                 }
                 TransactionIrStep::TurnEventRecord { request, slot } => {
+                    if let Some(claim) = &request.worker_claim {
+                        claim.validate()?;
+                        literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     let initialized = initialized_slots
                         .get_or_insert(*slot as usize);
                     if *initialized {
@@ -4680,10 +4686,16 @@ impl TransactionIr {
                     attempt_id,
                     task_id,
                     automation_context,
+                    worker_claim,
                     committed_at_ms,
                     slot,
                 } => {
                     if let Some(context) = automation_context { context.validate()?; }
+                    if let Some(claim) = worker_claim {
+                        claim.validate()?;
+                        literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     let initialized = initialized_slots
                         .get_or_insert(*slot as usize);
                     if *initialized {
@@ -7491,6 +7503,7 @@ fn prepare_transaction_ir_mode(
                 attempt_id,
                 task_id,
                 automation_context,
+                worker_claim,
                 committed_at_ms,
                 slot,
             } => {
@@ -7501,6 +7514,7 @@ fn prepare_transaction_ir_mode(
                     task_id,
                     *committed_at_ms,
                     automation_context.as_ref(),
+                    worker_claim.as_ref(),
                 )?));
             }
             TransactionIrStep::TurnEventsList {

@@ -1199,6 +1199,8 @@ fn compile_turn_event_record_request(
         _ => return Err(SemanticExecutionError::InvalidPayload),
     };
     Ok(crate::turn::EventRecordRequest {
+        worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+            .map_err(|_| SemanticExecutionError::InvalidPayload)?,
         model_continuation: payload
             .get("model_continuation")
             .cloned()
@@ -2129,6 +2131,8 @@ fn compile_turn(
                 attempt_id,
                 task_id,
                 automation_context,
+                worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+                    .map_err(|_| SemanticExecutionError::InvalidPayload)?,
                 committed_at_ms: now_unix_ms,
                 slot: 0,
             }],

@@ -2053,6 +2053,10 @@ def _turn_attempt_start(session: Session, payload: Mapping[str, Any]) -> Any:
             or turn["current_attempt_id"] != attempt_id
             or str(attempt["task_id"] or "") != task_id):
         return None
+    from ._worker_jobs import _require_conversation_publication_claim
+    _require_conversation_publication_claim(
+        session, attempt_id=attempt_id, task_id=task_id, user_id=user_id,
+        proof=payload.get('worker_claim'))
     if attempt["status"] == "running":
         return _attempt_public(attempt)
     if attempt["status"] != "pending" or turn["status"] != "pending":

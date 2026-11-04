@@ -283,6 +283,21 @@ def test_shutdown_revokes_local_dispatch_without_inventing_user_cancellation():
     assert context.cancellation_sequence == 0
 
 
+def test_publication_claim_preserves_identity_and_obeys_local_revocation():
+    from lib.durable_worker import WorkerCancellationRequested
+
+    claim = WorkerJobClaim.from_document(_job_document(), expected_worker_id='replica-a/worker-1')
+    context = WorkerExecutionContext(claim)
+    assert context.publication_claim() == {'worker_id': 'replica-a/worker-1', 'fencing_token': 7}
+    context.observe_claim_state({'ok': True, 'cancelSequence': 1, 'cancelReason': 'stop'})
+    with pytest.raises(WorkerCancellationRequested):
+        context.publication_claim()
+    assert context.publication_claim(terminal=True)['fencing_token'] == 7
+    context.mark_authority_lost()
+    with pytest.raises(WorkerLeaseLost):
+        context.publication_claim(terminal=True)
+
+
 def test_already_stopped_runner_never_claims_a_job():
     class Store:
         def claim_next(self, **kwargs):
