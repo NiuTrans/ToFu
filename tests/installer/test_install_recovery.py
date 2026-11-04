@@ -55,6 +55,17 @@ def test_flooded_output_retains_only_tail_and_redacts_credentials(monkeypatch):
     assert output.endswith('last-error\n')
 
 
+def test_child_environment_credentials_are_redacted_from_tail_and_stream(monkeypatch):
+    monkeypatch.delenv('LLM_API_KEY', raising=False)
+    environment = dict(os.environ, LLM_API_KEY='synthetic-child-only-secret')
+    emitted = []
+    rc, output = run_command([sys.executable, '-c',
+        'import os; print(os.environ["LLM_API_KEY"])'], env=environment, emit=emitted.append)
+    assert rc == 0
+    assert 'synthetic-child-only-secret' not in output + '\n'.join(emitted)
+    assert '[redacted]' in output
+
+
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX session cleanup')
 def test_output_callback_failure_reaps_tree_even_if_direct_child_exits(monkeypatch):
     import signal

@@ -186,10 +186,10 @@ def _acquire_python_wheels(python: str, requirements: Path, wheelhouse: Path) ->
     acquisition = wheelhouse / 'acquisition.lock'
     uv = shutil.which('uv')
     expected = None
+    constraints = requirements.parent / 'install-constraints.txt'
+    constraint_args = ['--constraint', str(constraints)] if constraints.is_file() else []
     if uv:
         # Resolve once using uv; no pip dry-run download before wheel acquisition.
-        constraints = requirements.parent / 'install-constraints.txt'
-        constraint_args = ['--constraint', str(constraints)] if constraints.is_file() else []
         subprocess.run([uv, 'pip', 'compile', '--no-config', '--python', python,
                         '--generate-hashes', '--output-file', str(acquisition),
                         *constraint_args, str(requirements)], check=True, timeout=900,
@@ -197,7 +197,7 @@ def _acquire_python_wheels(python: str, requirements: Path, wheelhouse: Path) ->
         expected = _compiled_versions(acquisition)
     else:
         subprocess.run([python, '-m', 'pip', 'install', '--dry-run', '--ignore-installed', '--upgrade', '--no-user',
-                        '--report', str(report), '-r', str(requirements)],
+                        '--report', str(report), *constraint_args, '-r', str(requirements)],
                        check=True, timeout=900, env=environment, stdout=sys.stderr)
         records = json.loads(report.read_text())['install']
         if not records:
