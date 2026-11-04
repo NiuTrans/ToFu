@@ -9,8 +9,8 @@ drain + LLM call:
 
 1. **Two-layer context compaction** (``run_compaction_pipeline``):
    L1 micro-compacts cold tool results every round at zero LLM cost;
-   L2 substitutes a smart summary as a synthetic tool result on
-   context overflow.
+   L2 folds history into a typed continuation handoff with source-derived
+   execution state under the common admission policy.
 2. **Per-turn attachments** (``compute_turn_attachments`` +
    ``inject_attachments``): dynamic per-turn context injection —
    session memory, tool discovery deltas. Skipped on

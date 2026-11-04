@@ -208,13 +208,15 @@ def compact_tool_results(ctx: CompactionContext) -> int:
     from lib.tasks_pkg.compaction._skills import active_skill_message_ids
     protected_skills = active_skill_message_ids(messages, ctx.task)
     hot_indices = _hot_tool_result_indices(ctx, tool_indices)
-    hot_indices.update(i for i in tool_indices if id(messages[i]) in protected_skills)
+    if protected_skills:
+        hot_indices.update(i for i in tool_indices if id(messages[i]) in protected_skills)
     cold_indices = [idx for idx in tool_indices if idx not in hot_indices]
     if cold_indices:
         from lib.tasks_pkg.compaction._handoff import latest_continuation_message_ids
         continuation_ids = latest_continuation_message_ids(messages)
-        cold_indices = [idx for idx in cold_indices
-                        if id(messages[idx]) not in continuation_ids]
+        if continuation_ids:
+            cold_indices = [idx for idx in cold_indices
+                            if id(messages[idx]) not in continuation_ids]
     if not cold_indices:
         logger.debug('[L1] %d tool results fit count=%d/token=%d hot tail; '
                      'skipping Phase B (Phase C image strip may still run)',
@@ -230,6 +232,18 @@ def compact_tool_results(ctx: CompactionContext) -> int:
     # former backward walk repeated every sibling prefix for every mutation.
     # At most one index per input message, released with this working pass.
     paired_by_index = None
+    observation_calls = None
+
+    def retain_observation(message, original_content):
+        nonlocal observation_calls
+        if observation_calls is None:
+            from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
+            observation_calls = {id(result): call for call, result in
+                                 adjacent_tool_call_result_pairs(messages)}
+        call = observation_calls.get(id(message))
+        if call is not None:
+            from lib.tasks_pkg.compaction._evidence import retain_compacted_observation
+            retain_compacted_observation(message, call, original_content, ctx.task)
 
     for idx in cold_indices:
         if ctx.is_in_cache_prefix(idx):
@@ -277,7 +291,8 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                         + (recovery + '\n' if recovery else '')
                         + f'Text was: {text_preview}'
                     )
-                tool_tokens_saved += text_len // 4 + image_count * _c._IMAGE_TOKENS_DEFAULT
+                retain_observation(msg, content)
+                tool_tokens_saved += max(0, text_len - len(msg['content'])) // 4 + image_count * _c._IMAGE_TOKENS_DEFAULT
                 compacted_count += 1
                 mutated = True
                 ctx.stamp(msg, _before_chars, len(msg['content']))
@@ -292,6 +307,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                     f'[{tool_name} result compacted — was {text_len:,} chars'
                     f' — re-call tool if full content needed]'
                 )
+                retain_observation(msg, content)
                 tool_tokens_saved += max(0, text_len - len(msg['content'])) // 4
                 compacted_count += 1
                 mutated = True
@@ -340,6 +356,7 @@ def compact_tool_results(ctx: CompactionContext) -> int:
                 )
                 msg['content'] = (_archive_message_if_enabled(
                     ctx, msg, content, tool_name) or placeholder)
+                retain_observation(msg, content)
                 tool_tokens_saved += max(0, old_len - len(msg['content'])) // 4
                 compacted_count += 1
                 mutated = True
