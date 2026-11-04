@@ -6,9 +6,11 @@ import pytest
 from lib.storage.errors import StorageError
 from lib.tasks_pkg.manager import _events as manager
 from lib.agent_core import push
-from tests.turn_lifecycle.test_task_event_delivery import _task, _discard
+from tests.turn_lifecycle.test_task_event_delivery import (
+    _task, _discard, storage as storage, turn_service as turn_service,
+    owner as owner,
+)
 
-pytest_plugins = ['tests.turn_lifecycle.test_task_event_delivery']
 from tests.turn_lifecycle.test_turn_event_carried_task_event import _stored_event
 
 pytestmark = pytest.mark.unit

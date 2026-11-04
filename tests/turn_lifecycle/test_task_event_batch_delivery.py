@@ -18,13 +18,15 @@ from lib.agent_core import push
 from lib.storage.errors import StorageError
 from lib.tasks_pkg import event_delivery
 from lib.tasks_pkg.manager import _events as manager
-from tests.turn_lifecycle.test_task_event_delivery import _discard, _task
+from tests.turn_lifecycle.test_task_event_delivery import (
+    _task, _discard, storage as storage, turn_service as turn_service,
+    owner as owner,
+)
 from tests.turn_lifecycle.test_turn_event_carried_task_event import _stored_event
 from tests.turn_lifecycle.test_turn_event_record_batch import (
     _rows, _sync_changes, _sync_sequence, _turn,
 )
 
-pytest_plugins = ['tests.turn_lifecycle.test_task_event_delivery']
 pytestmark = pytest.mark.unit
 
 

@@ -1,7 +1,8 @@
-"""Task-owned threading.Event with loop-only wake subscriptions.
+"""Task-owned threading.Event with disposable signal-only wake subscriptions.
 
-Entry AbortSignal.subscribe_async. Signal remains the sole abort fact; listeners
-only enqueue Future wakes, never execute cleanup under the setter's owner lock.
+Entries AbortSignal.subscribe_async and subscribe_event. Signal remains the sole
+abort fact; listeners enqueue Future wakes or set plain Events, never execute
+arbitrary callbacks or cleanup under the setter's owner lock.
 No worker, timer, polling loop or global registry is created. Subscriptions have
 explicit disposal and retain only active loop/Future references.
 """
@@ -41,6 +42,20 @@ class AbortSignal(threading.Event):
                 self._observers[token]=(loop,future)
         return AbortSubscription(self,token,future)
 
+    def subscribe_event(self, event):
+        """Wake one plain Event without creating a thread or propagation graph."""
+        if type(event) is not threading.Event:
+            raise TypeError('Abort wake target must be a plain threading.Event')
+        token = object()
+        with self._observer_lock:
+            if self.is_set():
+                event.set()
+            else:
+                if self._observers is None:
+                    self._observers = {}
+                self._observers[token] = (None, event)
+        return AbortSubscription(self, token, None)
+
     def set(self):
         # Publish the original Event first. Registration checks it under this
         # lock, so set/subscribe cannot lose a wake even on different threads.
@@ -49,6 +64,9 @@ class AbortSignal(threading.Event):
             observers=self._observers
             self._observers=None
         for loop,future in (observers or {}).values():
+            if loop is None:
+                future.set()
+                continue
             try:loop.call_soon_threadsafe(_wake,future)
             except RuntimeError:
                 # A disposed loop has no live executor to wake. Event remains

@@ -161,22 +161,27 @@ Current boundaries that prevent treating Agent count as a capacity claim:
 
 - `DemandExecutor` starts accepted jobs on demand. Its worker setting controls
   idle reuse, not admission. Synchronous provider/tool/wait work still occupies
-  a carrier. Swarm has a session driver, and `run_child_invocation` mirrors its
-  abort predicate with a per-active-child monitoring thread. The existing
-  `AbortSignal` async subscriptions and tool cancellation callbacks provide
-  event-driven seams; they do not already replace every predicate-based wait.
+  a carrier. Swarm has a session driver. Ordinary Swarm and graph siblings now
+  borrow one `ChildCancellationScope` observer per explicit control owner;
+  `run_child_invocation` joins observation before releasing its child. Native
+  issued controls and retained assignments keep their distinct authorities.
+  `AbortSignal` can wake that observer directly; opaque predicates retain the
+  existing polling fallback. This removes duplicate parent observation without
+  changing execution admission or making every blocking operation asynchronous.
 - Shared settled rows and progress-source reuse avoid copying every historical
   value on every token. They do not make every structural projection incremental.
-  Each structural frame still re-runs linear normalization passes over the
-  whole Turn. Injected-note placement in `segments/_assemble.py` no longer
-  rescans history per note: ordinary blocks never move, so each anchor is a
-  binary search over per-execution-scope running maxima of block thresholds,
-  and only notes are walked (identity replacement and same-gap order). It keeps
-  attempt/task scope, continuation prose, stable note order, terminal anchors
-  and replacement semantics; `test_note_placement_matches_the_linear_anchor_rule`
-  pins parity with the linear scan. On a recorded 1,494-segment Turn with 45
-  notes, placement fell from 9.6 ms to 0.9 ms per frame and the full running
-  projection from 20 ms to 11 ms (10 ms for that Turn without notes).
+  Completed injected notes retain immutable row identity through producer
+  capture and projection. A per-merge index resolves existing scoped note IDs
+  without scanning old rounds for every note. New identities use binary search
+  over per-execution-scope running maxima of fixed-block thresholds, followed
+  by same-gap note ordering. Anchor indexes are built only when new notes need
+  them. Scope, continuation prose, stable ordering, terminal placement and
+  first-duplicate replacement remain unchanged; the randomized linear-rule
+  oracle in `test_system_intervention_notes.py` verifies placement parity.
+  Detached capture lists preserve rollback/replacement; mutable legacy rows
+  are still copied. Terminal ACK releases duplicate live note history, while
+  pending persistence and transient results retain it. Component measurements
+  and their limits live in [task event delivery](TASK_EVENT_DELIVERY.md).
 - Delivery lanes separate execution from ordinary persistence and batch existing
   work without a timed window. Required effect, interaction and terminal barriers
   still wait for their ordered debt. Slow projection or storage therefore affects
@@ -203,6 +208,14 @@ expensive execution only behind a proven ownership boundary. Hardware probes
 never become concurrency or admission limits. No new tuning interval, cap,
 sampling policy, history truncation or feature switch is justified by this map.
 
+**Decision:** keep the existing process composition while removing repeated
+work across these owners. The shared cancellation observer and immutable history
+have explicit acquisition, invalidation and release boundaries. A generic Agent
+registry, another queue and speculative process sharding were rejected: none
+removes the repeated derivation, and each would require new Stop routing and
+recovery authority. Physical worker isolation remains subject to those existing
+ownership requirements; this change does not certify an arbitrary Agent count.
+
 ### Whole-graph verification
 
 Existing component evidence remains useful but has explicit limits:
@@ -212,6 +225,16 @@ Existing component evidence remains useful but has explicit limits:
 The [system performance contract](../benchmarks/system_performance_contract.json)
 covers component domains; passing it alone does not establish nested delegation
 capacity. Its existing parity and regression requirements are not weakened here.
+
+`tests/goals/test_nested_agent_runtime.py` drives eight concurrent graph children
+that each delegate again through the actual child/model/tool runtime, with
+controlled provider and tool transports. Completion checks exact effects and
+usage; concurrent Stop checks cancellation and full registry/observer release.
+It is a transient execution test. Durable event batching and unknown-ACK retry
+are separately exercised against SQLite and native TofuDB in
+`tests/turn_lifecycle/test_turn_event_record_batch.py`, including frozen note
+history while the producer advances. These tests do not substitute for deployed
+browser latency, process-loss recovery or capacity measurements.
 
 Before claiming the application supports a larger Agent population, retain a
 reproducible graph workload covering these independent cases and their overlap:

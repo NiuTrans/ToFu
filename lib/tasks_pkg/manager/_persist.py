@@ -16,6 +16,7 @@ from lib.log import get_logger
 from lib.observability import measure_task_completion, observe_task_completion
 from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 from lib.tasks_pkg.manager._events import snapshot_task_text
+from lib.tasks_pkg.segments import INJECTED_NOTES_FIELD
 from lib.tool_results.tool_round_identity import tool_rounds_with_execution_identity
 from lib.storage.storage_projection import (
     _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
@@ -809,6 +810,8 @@ _HEAVY_TERMINAL_FIELDS = (
 
 _CONVERSATION_TERMINAL_PROJECTION_FIELDS = (
     'toolRounds', 'segments', 'programRuns', '_checkpointToolRounds',
+    # The committed Turn segments own the note facts after the terminal ACK.
+    INJECTED_NOTES_FIELD,
     # Live event persistence keeps one last-applied projection baseline so
     # structural events can send revision patches without re-reading the
     # growing Turn. The settled Turn is authoritative after terminal.

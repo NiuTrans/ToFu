@@ -487,11 +487,10 @@ def close_unstarted_child_invocation(child: dict, *, reason: str,
 
 def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
     """Execute synchronously, retain the result for the caller, release registry."""
-    import threading
     from lib.tasks_pkg.manager import discard_task
-    from lib.tasks_pkg.invocation import invocation_abort_requested
-    # Legacy subprocess handlers poll the carrier flag. One cancellation mirror per
-    # active child connects the inherited control port even inside a long tool.
+    from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
+    control = child['_invocationAbortCheck']
+    scope = control if isinstance(control, ChildCancellationScope) else ChildCancellationScope(control)
     from lib.swarm.liveness import ProgressBeacon, thread_progress_sink
     owns_beacon = child.get('_invocationProgressBeacon') is None
     beacon = child.get('_invocationProgressBeacon') or ProgressBeacon()
@@ -502,14 +501,9 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
     # The swarm's view of this agent follows the same judge as its registry
     # task (lib/tasks_pkg/liveness.py); the reaper delivers a stall verdict.
     beacon.bind(progress_key, child)
-    stop = threading.Event()
-    def mirror():
-        while not stop.wait(0.1):
-            if invocation_abort_requested(child):
-                return
-    monitor = threading.Thread(target=mirror, name=f'child-abort-{child["id"][:8]}', daemon=True)
+    watch = None
     try:
-        monitor.start()
+        watch = scope.watch(child)
         with thread_progress_sink(beacon, progress_key):
             # Required durable admission, after preparation and
             # before the invocation can enter any model/tool work. Failure
@@ -548,7 +542,8 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
             raise RuntimeError(message) from failure
         return child
     finally:
-        stop.set()
+        if watch is not None:
+            watch.close()
         beacon.unbind(progress_key, child)
 
         close_child_ingress(child)
@@ -556,8 +551,6 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
         child.pop('_invocationEventSink', None)
         child.pop('_invocationAbortCheck', None)
         child.pop('_invocationCheckpointSink', None)
-        if monitor.ident is not None:
-            monitor.join(timeout=0.3)
         from lib.agent_core.execution_budget import close_execution_budget
         close_execution_budget(child)
         child.pop('_invocationProgressBeacon', None)
