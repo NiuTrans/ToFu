@@ -1,10 +1,10 @@
 """Grouped reply reading through the Surface, real presenters and shipped CSS.
 
-A reply reads as one reasoning summary and ONE tool panel joined in a single
-activity card, then its prose. The panel holds every call plus the failures
-between them, each failure directly below the call it followed, in one issue
-style. No persisted conversation is touched: an inert iframe mounts a synthetic
-Turn graph.
+A reply reads as one reasoning summary, ONE tool panel and one fold of interim
+notes joined in a single activity card, then its answer. The panel holds every
+call plus the failures between them, each failure directly below the call it
+followed, in one issue style. No persisted conversation is touched: an inert
+iframe mounts a synthetic Turn graph.
 """
 from __future__ import annotations
 
@@ -111,8 +111,10 @@ def test_reply_groups_reasoning_tools_and_prose_with_inline_failures(
     }""", language)
 
     turn = frame.locator('[data-turn-id="reply"] .conversation-turn-blocks')
-    order = '(node)=>[...node.children].filter(n=>n.dataset.blockId).map(n=>n.dataset.blockId)'
-    assert turn.evaluate(order) == ['think-0', 'layout:tool-panel', 'narrate-0', 'narrate-2', 'answer']
+    order = """(node)=>[...node.children]
+      .map(n=>n.dataset.blockId||('narrationWell' in n.dataset?'notes':''))
+      .filter(Boolean)"""
+    assert turn.evaluate(order) == ['think-0', 'layout:tool-panel', 'notes', 'answer']
     assert frame.locator('[data-block-kind="tool"]').count() == 0
     toggle = frame.locator('.conversation-tool-panel__toggle')
     assert toggle.get_attribute('aria-expanded') == 'false'
@@ -145,6 +147,41 @@ def test_reply_groups_reasoning_tools_and_prose_with_inline_failures(
     for measurement in ('iconOffset', 'chevronOffset', 'labelOffset'):
         assert abs(activity_geometry[measurement]) <= 1, activity_geometry
     assert activity_geometry['rowPadding'] == activity_geometry['buttonPadding'], activity_geometry
+    # Interim notes are the card's last row: a settled reply folds them like
+    # its calls, on the same columns, joined by the card's rule.
+    notes = frame.locator('[data-narration-well]')
+    notes_toggle = notes.locator(':scope > .conversation-narration__toggle')
+    notes_body = notes.locator(':scope > [data-narration-well-body]')
+    assert notes_body.evaluate(
+        '(node)=>[...node.querySelectorAll(":scope > [data-block-id]")].map(n=>n.dataset.blockId)',
+    ) == ['narrate-0', 'narrate-2']
+    assert notes_toggle.get_attribute('aria-expanded') == 'false'
+    assert not notes_body.is_visible()
+    notes_geometry = frame.evaluate("""()=>{
+      const box=selector=>document.querySelector(selector).getBoundingClientRect();
+      const style=selector=>getComputedStyle(document.querySelector(selector));
+      const tools=box('.conversation-tool-panel__toggle'),notes=box('.conversation-narration__toggle');
+      const panel=box('.conversation-tool-panel'),well=box('.conversation-narration');
+      return {widths:[tools.width,notes.width,panel.width,well.width],
+        lefts:[tools.left,notes.left,panel.left,well.left],heights:[tools.height,notes.height],
+        joined:well.top-panel.bottom,
+        iconOffset:box('.conversation-narration__glyph').left-box('.conversation-tool-panel__glyph').left,
+        labelOffset:box('.conversation-narration__label').left-box('.conversation-tool-panel__label').left,
+        chevronOffset:box('.conversation-narration__chevron').right-box('.conversation-tool-panel__chevron').right,
+        seam:[style('.conversation-tool-panel').borderBottomLeftRadius,
+          style('.conversation-narration').borderTopLeftRadius,style('.conversation-narration').borderTopWidth],
+        foot:style('.conversation-narration').borderBottomLeftRadius};
+    }""")
+    assert notes_geometry['widths'][0] == notes_geometry['widths'][1], notes_geometry
+    assert notes_geometry['widths'][2] == notes_geometry['widths'][3], notes_geometry
+    assert notes_geometry['lefts'][0] == notes_geometry['lefts'][1], notes_geometry
+    assert notes_geometry['lefts'][2] == notes_geometry['lefts'][3], notes_geometry
+    assert max(notes_geometry['heights']) - min(notes_geometry['heights']) <= 1, notes_geometry
+    assert abs(notes_geometry['joined']) <= 1, notes_geometry
+    for measurement in ('iconOffset', 'labelOffset', 'chevronOffset'):
+        assert abs(notes_geometry[measurement]) <= 1, notes_geometry
+    assert notes_geometry['seam'] == ['0px', '0px', '0px'], notes_geometry
+    assert notes_geometry['foot'] != '0px', notes_geometry
     assert not reasoning.evaluate('(node)=>node.open')
     frame.locator('.thinking-header').click()
     assert reasoning.evaluate('(node)=>node.open')
@@ -175,7 +212,15 @@ def test_reply_groups_reasoning_tools_and_prose_with_inline_failures(
     assert toggle.get_attribute('aria-expanded') == 'true'
     assert toggle.evaluate('(el)=>el===document.activeElement')
     assert turn.evaluate(order) == ['think-0', 'layout:tool-panel', 'tool-a', 'activity:request-failed',
-                                    'tool-b', 'activity:rate-wait', 'tool-c', 'narrate-0', 'narrate-2', 'answer']
+                                    'tool-b', 'activity:rate-wait', 'tool-c', 'notes', 'answer']
+    # Open calls still end on the notes row: the last call's rule divides them.
+    open_seam = frame.evaluate("""()=>{
+      const well=document.querySelector('.conversation-narration'),last=well.previousElementSibling;
+      return {joined:well.getBoundingClientRect().top-last.getBoundingClientRect().bottom,
+        foot:getComputedStyle(last).borderBottomLeftRadius,rule:getComputedStyle(last).borderBottomWidth};
+    }""")
+    assert abs(open_seam['joined']) <= 1 and open_seam['foot'] == '0px', open_seam
+    assert open_seam['rule'] != '0px', open_seam
     rows = frame.locator('[data-turn-zone="process"]')
     assert rows.evaluate_all("""nodes=>nodes.every(n=>{
       const s=getComputedStyle(n);return parseFloat(s.borderLeftWidth)>=1 && parseFloat(s.paddingLeft)>0;
@@ -212,6 +257,21 @@ def test_reply_groups_reasoning_tools_and_prose_with_inline_failures(
     closed_shot = tmp_path / f'grouped-closed-{width}-{language}-{theme}.png'
     page.locator('#grouped-reading-fixture').screenshot(path=str(closed_shot))
 
+    # The notes fold is its own disclosure: it opens at the newest note and
+    # never touches the calls.
+    notes_toggle.focus()
+    page.keyboard.press('Enter')
+    assert notes_toggle.get_attribute('aria-expanded') == 'true'
+    assert notes_toggle.evaluate('(el)=>el===document.activeElement')
+    assert notes_body.is_visible() and toggle.get_attribute('aria-expanded') == 'false'
+    assert notes_body.evaluate('(node)=>node.scrollTop+node.clientHeight>=node.scrollHeight-1')
+    frame.evaluate('document.activeElement?.blur()')
+    notes_shot = tmp_path / f'grouped-notes-open-{width}-{language}-{theme}.png'
+    page.locator('#grouped-reading-fixture').screenshot(path=str(notes_shot), animations='disabled')
+    notes_toggle.focus()
+    page.keyboard.press('Space')
+    assert notes_toggle.get_attribute('aria-expanded') == 'false' and not notes_body.is_visible()
+
     # A later live round preserves both disclosures' reader choices. Its
     # readable label and shared glyph replace the old pulsing status dot.
     toggle.focus()
@@ -234,9 +294,11 @@ def test_reply_groups_reasoning_tools_and_prose_with_inline_failures(
     assert frame.locator('[data-block-kind="tool"]').count() == 3
     frame.locator('.thinking-header').click()
     assert reasoning.evaluate('(node)=>node.open')
+    # The reader's fold outlives the reply resuming work.
+    assert notes_toggle.get_attribute('aria-expanded') == 'false'
     streaming_shot = tmp_path / f'activity-streaming-{width}-{language}-{theme}.png'
     page.locator('#grouped-reading-fixture').screenshot(path=str(streaming_shot))
-    print(f'Grouped reading screenshots: {closed_shot} {open_shot} {streaming_shot}')
+    print(f'Grouped reading screenshots: {closed_shot} {open_shot} {notes_shot} {streaming_shot}')
 
 
 def test_open_panel_shows_newest_calls_and_pages_only_on_click(

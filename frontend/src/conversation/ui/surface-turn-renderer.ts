@@ -32,6 +32,8 @@ export interface SurfaceTurnRenderPlan {
   windows: ReadonlyArray<SurfaceRegionWindow>;
   windowSignature: string;
   planDecisionForTurn: PlanDecisionViewModel | null;
+  /** Fold of the reply's narration well: reader choice, else layout default. */
+  narrationOpen: boolean;
 }
 
 interface SurfaceTurnRendererPorts {
@@ -92,6 +94,7 @@ export function createSurfaceTurnRenderer(
     windows: ReadonlyArray<SurfaceRegionWindow>,
     lane: ConversationLaneViewModel,
     turn: ConversationTurnViewModel,
+    narrationOpen: boolean,
   ): void => {
     /* Entries outside every region (a grouped reply's head and trail) are
      * always mounted, so reasoning and the panel header never blink out while
@@ -236,10 +239,21 @@ export function createSurfaceTurnRenderer(
     for (const node of existing.values()) removeRenderedNode(node);
     for (const node of staleBoundaries) node.remove();
     if (well && wellBody && wellPlaced) {
-      design.paintNarrationWell(well, wellIds.size);
+      /* Surface chrome like the panel header: the retained toggle keeps focus
+       * across a fold. A folded body stays mounted, so its members keep their
+       * identity and the well never reparents a leaf to fold it. */
+      const toggle = design.paintNarrationWell(well, wellIds.size);
+      setStableData(toggle, 'conversationNarration', 'toggle');
+      const expanded = String(narrationOpen);
+      if (toggle.getAttribute('aria-expanded') !== expanded) toggle.setAttribute('aria-expanded', expanded);
+      const opening = narrationOpen && well.dataset.narrationState === 'closed';
+      setStableData(well, 'narrationState', narrationOpen ? 'open' : 'closed');
+      if (wellBody.hidden === narrationOpen) wellBody.hidden = !narrationOpen;
       // Newest note first: the well opens at its end and follows growth until
-      // the reader scrolls up inside it.
-      endAnchoredScroller(wellBody, wellBody).follow();
+      // the reader scrolls up inside it; every reopening rests at the end again.
+      const end = endAnchoredScroller(wellBody, wellBody);
+      if (opening) end.pin();
+      else end.follow();
     } else if (well) {
       if (wellBody) endAnchoredScroller(wellBody, wellBody).dispose();
       // Members already moved out or retired above; only the empty shell remains.
@@ -250,7 +264,7 @@ export function createSurfaceTurnRenderer(
 
   const renderTurn = (turnNode: ManagedTurnElement, turn: ConversationTurnViewModel,
     lane: ConversationLaneViewModel, plan: SurfaceTurnRenderPlan): void => {
-    const { visibleBlocks, windows, windowSignature, planDecisionForTurn } = plan;
+    const { visibleBlocks, windows, windowSignature, planDecisionForTurn, narrationOpen } = plan;
     const activePlanDecision = planDecisionForTurn;
     const presentationId = turn.presentationId || turn.turnId;
     setStableData(turnNode, 'presentationId', presentationId);
@@ -319,11 +333,13 @@ export function createSurfaceTurnRenderer(
     if (managedBlocks._tofuBlocksSource !== visibleBlocks
         || managedBlocks._tofuOutlineStatus !== turn.status
         || managedBlocks._tofuBlocksSignature !== windowSignature
+        || managedBlocks._tofuNarrationOpen !== narrationOpen
         || managedBlocks._tofuBlocksRenderer !== design.renderers.renderBlock) {
-      renderBlocks(blocksContainer, visibleBlocks, windows, lane, turn);
+      renderBlocks(blocksContainer, visibleBlocks, windows, lane, turn, narrationOpen);
       managedBlocks._tofuBlocksSource = visibleBlocks;
       managedBlocks._tofuOutlineStatus = turn.status;
       managedBlocks._tofuBlocksSignature = windowSignature;
+      managedBlocks._tofuNarrationOpen = narrationOpen;
       managedBlocks._tofuBlocksRenderer = design.renderers.renderBlock;
     }
     managedBlocks._tofuBlockWindows = windows;
@@ -461,6 +477,7 @@ export function createSurfaceTurnRenderer(
     turnNode._tofuTurnEntries = visibleBlocks;
     turnNode._tofuTurnWindowSignature = windowSignature;
     turnNode._tofuTurnPlanDecision = planDecisionForTurn;
+    turnNode._tofuTurnNarrationOpen = narrationOpen;
     turnNode._tofuTurnSurfaceOptions = options;
   };
 

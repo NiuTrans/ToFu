@@ -35,6 +35,8 @@ export type ManagedBlocksContainerElement = HTMLElement & {
   _tofuBlockWindows?: ReadonlyArray<SurfaceRegionWindow>;
   _tofuBlocksSignature?: string;
   _tofuBlocksRenderer?: ConversationSurfaceRenderers['renderBlock'];
+  /** Narration well fold last painted; a reader's toggle changes it alone. */
+  _tofuNarrationOpen?: boolean;
 };
 
 /** One region's mounted window. `start`/`end` are relative to the region,
@@ -93,6 +95,7 @@ export type ManagedTurnElement = HTMLElement & {
   _tofuTurnEntries?: ReadonlyArray<GroupedTurnEntry>;
   _tofuTurnWindowSignature?: string;
   _tofuTurnPlanDecision?: PlanDecisionViewModel | null;
+  _tofuTurnNarrationOpen?: boolean;
   _tofuTurnSurfaceOptions?: unknown;
 };
 

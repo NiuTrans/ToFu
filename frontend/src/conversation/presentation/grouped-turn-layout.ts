@@ -81,6 +81,9 @@ export interface GroupedTurnLayout {
   readonly trail: ReadonlyArray<ConversationBlockViewModel>;
   /** Present only when the process zone holds a tool or program call. */
   readonly panel: ToolPanelSummary | null;
+  /** Narration well state without a reader choice: open while the reply
+   * works, folded once it settles, like reasoning and the panel. */
+  readonly narrationDefaultOpen: boolean;
 }
 
 /** Surface-owned panel header entry; never a Turn fact or renderer block. */
@@ -163,9 +166,19 @@ function processErrorCount(block: ConversationBlockViewModel): number {
   return 0;
 }
 
+/* A completed reply with its own explicit answer and no pending command or
+ * approval: its process folds by default. Without an explicit answer the
+ * process is the reply's content, so it stays in view. */
+function replySettled(turn: ConversationTurnViewModel): boolean {
+  const answered = turn.blocks.some((block) => block.kind === 'text'
+    && (block.terminal || block.deliverable) && Boolean(block.markdown.trim()));
+  return turn.status === 'completed' && answered
+    && !turn.commandPending && !turn.metadata.waitingOn;
+}
+
 function summarizePanel(
-  turn: ConversationTurnViewModel,
   process: ReadonlyArray<ConversationBlockViewModel>,
+  settled: boolean,
 ): ToolPanelSummary | null {
   const tools = process.filter(
     (block): block is ToolLikeBlock => block.kind === 'tool' || block.kind === 'program',
@@ -184,17 +197,13 @@ function summarizePanel(
     return attention === 'active' || attention === 'interactive'
       || states[index] === 'active' || states[index] === 'background';
   });
-  // Without an explicit answer the calls are the reply's content, so they stay
-  // in view; so does any unfinished, waiting or unresolved work.
-  const answered = turn.blocks.some((block) => block.kind === 'text'
-    && (block.terminal || block.deliverable) && Boolean(block.markdown.trim()));
   return {
     toolCount: tools.length,
     roundCount: identified ? rounds.size : tools.length,
     errorCount: process.reduce((total, block) => total + processErrorCount(block), 0),
     active: states.includes('active'),
-    defaultOpen: turn.status !== 'completed' || !answered || unresolved
-      || Boolean(turn.commandPending) || Boolean(turn.metadata.waitingOn),
+    // Unresolved work keeps the calls in view even after the reply settles.
+    defaultOpen: !settled || unresolved,
   };
 }
 
@@ -210,13 +219,15 @@ export function groupedTurnLayout(turn: ConversationTurnViewModel): GroupedTurnL
     };
     for (const block of turn.blocks) zones[turnLayoutZone(block)].push(block);
     const thinking = zones.thinking as ThinkingBlockViewModel[];
+    const settled = replySettled(turn);
     layout = {
       lead: zones.lead,
       thinking: thinking.length ? mergeThinkingBlocks(thinking) : null,
       process: zones.process,
       content: zones.content,
       trail: zones.trail,
-      panel: summarizePanel(turn, zones.process),
+      panel: summarizePanel(zones.process, settled),
+      narrationDefaultOpen: !settled,
     };
   }
   layouts.set(turn, layout);
