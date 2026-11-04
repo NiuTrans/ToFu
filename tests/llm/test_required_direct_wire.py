@@ -72,14 +72,16 @@ def test_required_schema_survives_budget_and_ptc(monkeypatch, search_mode, expos
     ('responses', GPT56_ALIAS_TARGET, 'https://api.openai.com/v1'),
     ('anthropic', 'claude-opus-4.6', 'https://api.anthropic.com'),
 ])
-def test_native_search_never_defers_declared_direct_schema(monkeypatch, protocol, model, url):
+def test_retired_native_search_stays_local_and_keeps_declared_direct_schema(
+        monkeypatch, protocol, model, url):
     monkeypatch.setattr('lib.llm._sse_core.add_cache_breakpoints', lambda *a, **kw: None)
     body = _body(stale=True)
     body.update(model=model, _tool_search_mode='native', _responses_feature_profile='openai')
     before = deepcopy(body)
     plan = prepare_request(body, base_url=url, api_key='test-key', api_protocol=protocol)
-    assert plan.tool_search_backend == ('native_openai' if protocol == 'responses' else 'native_anthropic')
-    assert any(tool.get('type', '').startswith('tool_search') for tool in plan.body['tools'])
+    assert plan.tool_search_backend == 'local'
+    assert not any(str(tool.get('type', '')).startswith('tool_search')
+                   for tool in plan.body['tools'])
     function = _functions(plan.body.get('tools'))['seal_result']
     assert not function.get('defer_loading', False)
     assert function['parameters'] == before['_executable_tool_catalog'][0]['function']['parameters']

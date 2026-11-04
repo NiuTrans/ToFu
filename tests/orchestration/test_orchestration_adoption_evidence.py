@@ -250,7 +250,6 @@ def test_successful_local_read_only_wave_records_actual_agent_adoption(
     monkeypatch.setattr(persistence, "save_session", lambda *_a, **_k: None)
 
     decision = _raw_decision("independent_read_only_agents")
-    decision["maxConcurrentAgents"] = 2
     task = {
         "id": "task", "convId": "conv", "_userId": 17,
         "_toolOrchestration": decision,

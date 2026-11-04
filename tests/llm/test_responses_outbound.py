@@ -435,64 +435,26 @@ class TestRequestConversion:
         assert image['type'] == 'input_image'
         assert image['detail'] == 'original'
 
-    def test_tool_search_defers_only_non_pinned_catalog(self):
-        tools = [{
-            'type': 'function',
-            'function': {
-                'name': f'tool_{index}', 'description': f'tool {index}',
-                'parameters': {'type': 'object', 'properties': {}},
-            },
-        } for index in range(24)]
-        out, _ = openai_body_to_responses({
-            'model': 'gpt-5.6-sol',
-            '_responses_feature_profile': 'openai',
-            'messages': [{'role': 'user', 'content': 'work'}],
-            'tools': tools, '_tool_search_mode': 'auto',
-            '_frontend_selected_tool_names': ['tool_0', 'tool_1'],
-            '_tool_namespace_by_name': {
-                f'tool_{index}': ('project' if index < 12 else 'automation')
-                for index in range(24)
-            },
-            '_tool_discovery_policy_by_name': {
-                f'tool_{index}': ('eager' if index < 12 else 'searchable')
-                for index in range(24)
-            },
-        })
-        assert out['tools'][0] == {'type': 'tool_search'}
-        direct = [tool for tool in out['tools']
-                  if tool.get('type') == 'function']
-        assert {tool['name'] for tool in direct} == {
-            f'tool_{index}' for index in range(12)}
-        assert all('defer_loading' not in tool for tool in direct)
-        namespaces = [tool for tool in out['tools']
-                      if tool.get('type') == 'namespace']
-        assert namespaces and all(len(ns['tools']) <= 10 for ns in namespaces)
-        deferred = [tool for ns in namespaces for tool in ns['tools']]
-        assert len(deferred) == 12
-        assert all(tool['defer_loading'] is True for tool in deferred)
-        assert {tool['name'] for tool in direct + deferred} == {
-            f'tool_{index}' for index in range(24)}
-
-    def test_long_searchable_name_uses_the_same_truncated_policy_identity(self):
+    @pytest.mark.parametrize('retired_mode', ['auto', 'native'])
+    def test_retired_hosted_tool_search_never_reaches_the_wire(self, retired_mode):
         name = 'custom__' + ('long_tool_name_' * 7)
         tools = [{'type': 'function', 'function': {
             'name': name if index == 0 else f'tool_{index}',
-            'parameters': {'type': 'object'},
+            'parameters': {'type': 'object', 'properties': {}},
         }} for index in range(24)]
         out, _ = openai_body_to_responses({
             'model': 'gpt-5.6-sol', '_responses_feature_profile': 'openai',
             'messages': [{'role': 'user', 'content': 'work'}],
-            'tools': tools, '_tool_search_mode': 'auto',
+            'tools': tools, '_tool_search_mode': retired_mode,
             '_tool_discovery_policy_by_name': {
                 name: 'searchable',
                 **{f'tool_{index}': 'searchable' for index in range(1, 24)},
             },
         })
-        deferred = [tool for namespace in out['tools']
-                    if namespace.get('type') == 'namespace'
-                    for tool in namespace['tools']]
-        assert len(deferred[0]['name']) <= 64
-        assert deferred[0]['defer_loading'] is True
+        assert {tool['type'] for tool in out['tools']} == {'function'}
+        assert len(out['tools']) == 24
+        assert all('defer_loading' not in tool for tool in out['tools'])
+        assert all(len(tool['name']) <= 64 for tool in out['tools'])
 
     def test_tool_choice_is_hoisted_out_of_tool_search(self):
         tools = [{
@@ -519,11 +481,9 @@ class TestRequestConversion:
             'model': 'gpt-5.6-sol', '_working_set_tokens': 128000,
             '_responses_feature_profile': 'openai',
             '_multi_agent_mode': 'read_only',
-            '_multi_agent_max_concurrent_subagents': 4,
             'messages': [{'role': 'user', 'content': 'compare modules'}],
         })
-        assert out['multi_agent'] == {
-            'enabled': True, 'max_concurrent_subagents': 4}
+        assert out['multi_agent'] == {'enabled': True}
         assert 'context_management' not in out
         # Native projection must not append ephemeral body-only instructions;
         # stable policy is supplied by the Context Composer carrier.

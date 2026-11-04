@@ -22,7 +22,7 @@ def names(schemas):
     return {schema['function']['name'] for schema in schemas}
 
 
-def prepared(monkeypatch, role, mode='auto', policy_updates=None):
+def prepared(monkeypatch, role, mode='local', policy_updates=None):
     catalog = [tool('read_files')] + [tool(f'deferred_{i}', 'documentation ' * 1000)
                                     for i in range(32)] + [tool('mcp__fixture__hidden')]
     policy = {
@@ -57,13 +57,17 @@ def prepared(monkeypatch, role, mode='auto', policy_updates=None):
 
 
 @pytest.mark.parametrize('role', ['chat', 'coordinator', 'conversation', 'delegated'])
+# ``auto`` and ``native`` are retired values a stored child policy may still carry.
 @pytest.mark.parametrize('mode', ['auto', 'local', 'off', 'native'])
 def test_roles_share_admission_without_losing_provider_candidates(monkeypatch, role, mode):
     task, candidates, authority = prepared(monkeypatch, role, mode)
     expected = names(authority) - {'mcp__fixture__hidden'}
     assert names(candidates) == expected
     assert names(task['_executable_tool_catalog']) == names(authority)
-    if mode in ('auto', 'local'):
+    discovered = mode != 'off'
+    # Admission estimates the same surface the wire boundary will send.
+    assert task['_toolSearchMode'] == ('local' if discovered else 'off')
+    if discovered:
         assert names(task['_tool_schema']) == {'read_files', 'search_tools', 'execute_tools'}
         assert tool_schema_tokens(task['_tool_schema']) < tool_schema_tokens(authority) / 10
     else:
@@ -75,14 +79,14 @@ def test_roles_share_admission_without_losing_provider_candidates(monkeypatch, r
         project_tool_wire(body, api_protocol=protocol, base_url=base_url)
         return body
 
-    local = projected('openai', 'https://fixture.invalid')
-    if mode in ('auto', 'local'):
-        assert names(local['tools']) == {'read_files', 'search_tools', 'execute_tools'}
-    native = projected('anthropic', 'https://api.anthropic.com')
-    if mode in ('auto', 'native'):
-        assert native['_resolved_tool_search_backend'] == 'native_anthropic'
-        assert names(native['tools']) == expected
-    assert 'mcp__fixture__hidden' not in names(native['tools'])
+    # An official provider host gets the same local surface as any gateway.
+    for protocol, base_url in (('openai', 'https://fixture.invalid'),
+                               ('anthropic', 'https://api.anthropic.com')):
+        body = projected(protocol, base_url)
+        assert body['_resolved_tool_search_backend'] == ('local' if discovered else 'full')
+        if discovered:
+            assert names(body['tools']) == {'read_files', 'search_tools', 'execute_tools'}
+        assert 'mcp__fixture__hidden' not in names(body['tools'])
 
 
 def test_parent_snapshot_retains_discovery_candidates_after_admission_projection(monkeypatch):

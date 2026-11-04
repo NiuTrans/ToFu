@@ -7,9 +7,9 @@ behind Tool Search. A new tool fails the inventory test until its exposure is
 decided here and in docs/modules/tools_execution.md ("Default tool exposure").
 
 Projection cases run the real registry through task assembly and the shared
-provider boundary: local Tool Search defers searchable tools behind
-``search_tools``; provider-native search marks them deferred; Tool Search
-``off`` has no discovery path, so it never hides a declared-searchable tool.
+provider boundary: Tool Search defers searchable tools behind ``search_tools``
+on every route, official provider endpoints included; Tool Search ``off`` has
+no discovery path, so it never hides a declared-searchable tool.
 """
 from copy import deepcopy
 
@@ -125,9 +125,9 @@ INVENTORY = {
 
 _BACKENDS = {
     'local': ('openai', 'https://api.moonshot.cn/v1', 'kimi-k3', ''),
-    'native_anthropic': (
+    'official_anthropic': (
         'anthropic', 'https://api.anthropic.com', 'claude-opus-4-6', ''),
-    'native_openai': ('responses', 'https://api.openai.com/v1', '', 'openai'),
+    'official_openai': ('responses', 'https://api.openai.com/v1', '', 'openai'),
 }
 
 
@@ -189,7 +189,7 @@ def _request_local_routing(monkeypatch):
     _reset_sticky_exposure_for_tests()
 
 
-def _project_turn(backend='local', *, tool_search='auto'):
+def _project_turn(backend='local', *, tool_search='local'):
     """Assemble one durable project turn and project it for *backend*."""
     from lib.llm._sse_core import prepare_request
     from lib.model_info._openai_gpt56 import GPT56_ALIAS_TARGET
@@ -300,25 +300,21 @@ def test_search_off_never_hides_a_declared_searchable_tool():
     assert DEFERRED & catalog - hidden <= wire
 
 
-def test_native_anthropic_defers_exactly_the_declared_searchable_tools():
-    _task, candidates, plan = _project_turn('native_anthropic')
-    assert plan.tool_search_backend == 'native_anthropic'
+@pytest.mark.parametrize('backend', ['official_anthropic', 'official_openai'])
+def test_official_endpoints_use_the_same_local_search(backend):
+    task, candidates, plan = _project_turn(backend)
+    assert plan.tool_search_backend == 'local'
     functions = _functions(plan.body['tools'])
-    deferred = {name for name, fn in functions.items() if fn.get('defer_loading')}
-    assert 'tool_search_tool_bm25' in set(functions) - deferred
-    assert deferred == DEFERRED & candidates
+    assert not {name for name, fn in functions.items()
+                if fn.get('defer_loading')}
+    assert 'tool_search_tool_bm25' not in functions
+    wire = set(functions)
+    deferred = DEFERRED & candidates
     assert _ROUTED_AWAY_BEFORE <= deferred
-    assert (EAGER | PINNED) & candidates <= set(functions) - deferred
-
-
-def test_native_openai_catalog_contains_every_declared_searchable_tool():
-    _task, candidates, plan = _project_turn('native_openai')
-    assert plan.tool_search_backend == 'native_openai'
-    functions = _functions(plan.body['tools'])
-    deferred = {name for name, fn in functions.items() if fn.get('defer_loading')}
-    assert _ROUTED_AWAY_BEFORE <= DEFERRED & candidates <= deferred
-    assert PINNED <= {
-        name for name, fn in functions.items() if not fn.get('defer_loading')}
+    assert not deferred & wire
+    assert deferred <= _names(task['_executable_tool_catalog'])
+    assert {'search_tools', 'execute_tools'} <= wire
+    assert (EAGER | PINNED) & candidates <= wire
 
 
 @pytest.mark.parametrize('query,expected', [

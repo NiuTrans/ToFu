@@ -298,28 +298,14 @@ def _directory_capability_absence(request: ComposeRequest, name: str) -> str:
     return name + ('_not_enabled' if isinstance(catalog, list) else '_unavailable')
 
 
-def _swarm_guidance(request: ComposeRequest, query: str) -> str:
-    """Return guidance only when the request's task shape can use it."""
+def _swarm_guidance(request: ComposeRequest, _query: str) -> str:
+    """Return guidance whenever the request can spawn agents."""
     if not _capability_available(request, 'spawn_agents'):
         return ''
     from lib.tasks_pkg.delegate_mode import delegate_mode_active
     if delegate_mode_active(request.task):
         # <delegate_mode> replaces it: a delegating root has no local work.
         return ''
-    try:
-        from lib.context_experiment_flags import normalize_context_experiment_flags
-        from lib.tasks_pkg.tool_orchestration_policy import multi_agent_task_shape
-
-        mode = normalize_context_experiment_flags(
-            (request.task or {}).get("config") or {}
-        )["orchestration"]["multiAgent"]
-        # No user-facing 'off': the lane is always on; 'auto' still gates on
-        # a first-round independently-decomposable task shape.
-        if mode == "auto" and not multi_agent_task_shape(query):
-            return ""
-    except Exception as exc:
-        logger.debug("[ContextComposer] swarm task-shape gate failed: %s", exc)
-        raise
     return """<parallel_execution>
 For two or more independent branches, use one spawn_agents call; keep sequential
 work local. The tool schema is the sole authority for roles and their live

@@ -512,7 +512,7 @@ def test_conversation_child_keeps_root_tool_discovery_but_not_human_approval(mon
         **({'tools': {'programmaticCalling': programmatic}} if programmatic else {}),
         'compaction': {'steps': ['compact_tool_results']},
         '_executableToolCatalog': visible + [tool('fixture_hidden'), tool('ask_human')],
-        '_toolSearchMode': 'on', '_toolExecutionScope': 'available',
+        '_toolSearchMode': 'local', '_toolExecutionScope': 'available',
         '_toolScriptSafeByName': {'fixture_hidden': True},
         '_executableToolNamespaceByName': {'fixture_hidden': 'fixture'},
         '_executableToolSearchTextByName': {'fixture_hidden': 'synthetic evidence'},
@@ -533,7 +533,7 @@ def test_conversation_child_keeps_root_tool_discovery_but_not_human_approval(mon
         assert _known_tool_names(child) == {
             'read_files', 'spawn_agents', 'fixture_hidden', 'search_tools',
             'execute_tools', *program}
-        assert child['_toolSearchMode'] == 'on'
+        assert child['_toolSearchMode'] == 'local'
         assert child['_toolScriptSafeByName']['fixture_hidden']
         assert child['_executableToolNamespaceByName']['fixture_hidden'] == 'fixture'
         assert {'search_tools', 'execute_tools'} <= child['_toolContractDocumentsByName'].keys()

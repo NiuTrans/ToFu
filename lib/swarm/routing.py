@@ -126,7 +126,7 @@ def resolve_multi_agent_backend(
 def project_multi_agent_wire_tools(
         tools: list[dict[str, Any]] | None, *,
         authority_catalog: list[dict[str, Any]] | None,
-        backend: str, max_concurrent_agents: int = 3,
+        backend: str,
         programmatic_workers: bool = False) -> list[dict[str, Any]]:
     """Return the model-visible surface for one resolved backend.
 

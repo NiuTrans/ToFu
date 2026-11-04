@@ -18,23 +18,21 @@ def _profile(*names):
 
 @pytest.mark.parametrize('model', ['future-unregistered-release', 'gpt-6-unrecognized', 'provider-arbitrary-id'])
 def test_declared_unknown_model_extensions_resolve_without_name_checks(model):
-    profile = _profile('responses_tool_search', 'responses_programmatic',
+    profile = _profile('responses_programmatic',
                        'responses_multi_agent', 'responses_compaction')
     kwargs = {'model': model, 'protocol': 'responses', 'inference_profile': profile,
               'base_url': 'https://gateway.example/v1', 'responses_profile': 'compatible'}
-    assert resolve_tool_search_backend('auto', **kwargs) == 'native_openai'
     assert resolve_programmatic_backend('on', **kwargs) == 'native_openai'
     assert resolve_multi_agent_backend('read_only', **kwargs) == 'native_openai'
     assert native_compaction_mode_for_route(**kwargs) == 'openai_responses'
 
 
 @pytest.mark.parametrize('profile', [{}, {'features': {}}, {'features': {
-    'responses_tool_search': 'unknown', 'responses_programmatic': 'unsupported',
+    'responses_programmatic': 'unsupported',
     'responses_multi_agent': 'unsupported', 'responses_compaction': 'unknown'}}])
 def test_explicit_profile_never_falls_back_to_old_name_inference(profile):
     kwargs = {'model': 'gpt-5.6-sol', 'protocol': 'responses', 'inference_profile': profile,
               'base_url': 'https://api.openai.com/v1', 'responses_profile': 'openai'}
-    assert resolve_tool_search_backend('auto', **kwargs) == 'local'
     assert resolve_programmatic_backend('on', **kwargs) == 'local'
     assert resolve_multi_agent_backend('read_only', local_swarm_available=True, **kwargs) == 'local_swarm'
     assert native_compaction_mode_for_route(**kwargs) == ''
@@ -42,7 +40,7 @@ def test_explicit_profile_never_falls_back_to_old_name_inference(profile):
 
 def test_declared_features_cannot_cross_protocol_or_subscription_boundaries():
     profile = _profile('responses_compaction', 'responses_programmatic',
-                       'responses_multi_agent', 'responses_websocket', 'responses_tool_search')
+                       'responses_multi_agent', 'responses_websocket')
     for name in profile['features']:
         assert route_feature(profile, name, protocol='anthropic') is False
         assert route_feature(profile, name, protocol='responses', oauth='codex') is False
@@ -62,19 +60,27 @@ def test_codex_installed_stateful_bindings_preserve_explicit_denial(feature):
 
 
 def test_explicit_anthropic_compatible_gateway_can_declare_native_extensions():
-    profile = _profile('anthropic_compaction', 'anthropic_tool_search')
+    profile = _profile('anthropic_compaction')
     kwargs = {'protocol': 'anthropic', 'model': 'any-model',
               'base_url': 'https://gateway.example/v1', 'inference_profile': profile}
     assert native_compaction_mode_for_route(**kwargs) == 'anthropic_messages'
-    assert resolve_tool_search_backend('auto', **kwargs) == 'native_anthropic'
     assert native_compaction_mode_for_route(**kwargs, oauth='claude') == ''
 
 
+@pytest.mark.parametrize('mode', ['auto', 'native', 'local', ''])
+def test_tool_search_is_always_local_whatever_the_route_declares(mode):
+    """Hosted Tool Search is retired: no route declaration selects it."""
+    profile = _profile('responses_tool_search', 'anthropic_tool_search')
+    for protocol in ('responses', 'anthropic'):
+        for feature in ('responses_tool_search', 'anthropic_tool_search'):
+            assert route_feature(profile, feature, protocol=protocol) is False
+    assert resolve_tool_search_backend(mode) == 'local'
+    assert resolve_tool_search_backend('off') == 'full'
+
+
 def test_support_is_not_task_authorization_or_requested_activation():
-    profile = _profile('responses_multi_agent', 'responses_tool_search', 'responses_programmatic')
+    profile = _profile('responses_multi_agent', 'responses_programmatic')
     kwargs = {'protocol': 'responses', 'inference_profile': profile}
-    assert resolve_tool_search_backend('off', **kwargs) == 'full'
-    assert resolve_tool_search_backend('local', **kwargs) == 'local'
     assert resolve_programmatic_backend('off', **kwargs) == 'off'
     assert resolve_programmatic_backend('on', eligible_present=False, **kwargs) == 'off'
     assert resolve_multi_agent_backend('off', **kwargs) == 'off'

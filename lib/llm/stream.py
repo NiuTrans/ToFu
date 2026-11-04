@@ -20,7 +20,6 @@ import requests
 from lib.llm._sse_core import (
     SSEAccumulator,
     activate_native_orchestration_fallback,
-    activate_native_tool_search_fallback,
     activate_subscription_transient_retry,
     classify_status_error,
     prepare_request,
@@ -352,17 +351,13 @@ def _classify_stream_error_response(
         plan.raw_archive_capture.append_response(captured_error.data)
         plan.raw_archive_capture.commit(
             response_complete=captured_error.complete, status_code=resp.status_code)
-    for activate_fallback, error_text in (
-            (activate_native_tool_search_fallback,
-             'native Tool Search rejected; retrying locally'),
-            (activate_native_orchestration_fallback,
-             'native orchestration rejected; retrying locally')):
-        if activate_fallback(
-                resp.status_code, err_body, plan=plan,
-                canonical_body=canonical_body):
-            error = RetryableAPIError(
-                error_text, status_code=resp.status_code)
-            raise annotate_network_error(error, 'provider_response')
+    if activate_native_orchestration_fallback(
+            resp.status_code, err_body, plan=plan,
+            canonical_body=canonical_body):
+        error = RetryableAPIError(
+            'native orchestration rejected; retrying locally',
+            status_code=resp.status_code)
+        raise annotate_network_error(error, 'provider_response')
     if activate_subscription_transient_retry(
             resp.status_code, oauth=oauth,
             canonical_body=canonical_body):

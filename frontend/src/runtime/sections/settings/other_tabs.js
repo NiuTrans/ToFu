@@ -813,31 +813,15 @@ function _setSelectValue(id, value, fallback) {
 function _populateResponsesExperimentControls() {
   var toolsCfg = (config && config.tools) || {};
   var responsesCfg = (config && config.responses) || {};
-  var orchestrationCfg = (config && config.orchestration) || {};
-  _setSelectValue('settingToolSearch', toolsCfg.toolSearch, 'auto');
-  _setSelectValue('settingProgrammaticCalling', toolsCfg.programmaticCalling, 'auto');
+  // Retired saved values (toolSearch auto/native, programmaticCalling auto)
+  // display the server's normalized default.
+  _setSelectValue('settingToolSearch', toolsCfg.toolSearch, 'local');
+  _setSelectValue('settingProgrammaticCalling', toolsCfg.programmaticCalling, 'on');
   _setSelectValue('settingResponsesPromptProfile', responsesCfg.promptProfile, 'auto');
   _setSelectValue('settingResponsesTransport', responsesCfg.transport, 'sse');
   _setSelectValue('settingResponsesReasoning', responsesCfg.reasoningMode, 'standard');
   _setSelectValue('settingResponsesVerbosity', responsesCfg.verbosity, 'medium');
   _setSelectValue('settingResponsesImageDetail', responsesCfg.imageDetail, 'auto');
-  var multiAgentMode = Object.prototype.hasOwnProperty.call(orchestrationCfg, 'multiAgent')
-    ? orchestrationCfg.multiAgent : responsesCfg.multiAgent;
-  _setSelectValue('settingResponsesMultiAgent', multiAgentMode, 'auto');
-  var maxEl = document.getElementById('settingResponsesMaxSubagents');
-  var maxAgents = Object.prototype.hasOwnProperty.call(orchestrationCfg, 'maxConcurrentAgents')
-    ? orchestrationCfg.maxConcurrentAgents : responsesCfg.maxConcurrentSubagents;
-  if (maxEl) maxEl.value = Math.max(1, Math.min(8,
-    parseInt(maxAgents, 10) || 3));
-  _syncResponsesExperimentUi();
-}
-
-function _syncResponsesExperimentUi() {
-  // Multi-agent is always on (no 'off' mode), so the concurrency cap is
-  // always editable. Kept as a named handler because the select's change
-  // action references it.
-  var maxEl = document.getElementById('settingResponsesMaxSubagents');
-  if (maxEl) maxEl.disabled = false;
 }
 
 function _collectResponsesExperimentControls() {
@@ -845,16 +829,13 @@ function _collectResponsesExperimentControls() {
     var el = document.getElementById(id);
     return (el && el.value) || fallback;
   };
-  var maxEl = document.getElementById('settingResponsesMaxSubagents');
-  var maxSubagents = Math.max(1, Math.min(8,
-    parseInt(maxEl && maxEl.value, 10) || 3));
   config.tools = Object.assign({}, config.tools || {}, {
-    toolSearch: value('settingToolSearch', 'auto'),
+    toolSearch: value('settingToolSearch', 'local'),
     // Composer switches shape model-visible schemas; the browser UI never
     // turns those switches into an execution allow-list. ``selected_only``
     // remains a headless/API compatibility input only.
     executionScope: 'available',
-    programmaticCalling: value('settingProgrammaticCalling', 'auto'),
+    programmaticCalling: value('settingProgrammaticCalling', 'on'),
   });
   config.responses = Object.assign({}, config.responses || {}, {
     transport: value('settingResponsesTransport', 'sse'),
@@ -863,15 +844,11 @@ function _collectResponsesExperimentControls() {
     imageDetail: value('settingResponsesImageDetail', 'auto'),
     promptProfile: value('settingResponsesPromptProfile', 'auto'),
   });
-  // Provider-neutral owner. Old saved configs are read above, then migrated
-  // on the next save so a Responses-only label can no longer imply that
-  // other models lose multi-agent orchestration.
-  config.orchestration = Object.assign({}, config.orchestration || {}, {
-    multiAgent: value('settingResponsesMultiAgent', 'auto'),
-    maxConcurrentAgents: maxSubagents,
-  });
+  // Multi-agent orchestration is always ``full`` with no concurrency
+  // ceiling; drop the retired controls' saved values.
   delete config.responses.multiAgent;
   delete config.responses.maxConcurrentSubagents;
+  delete config.orchestration;
 }
 
 function _costExperimentInt(id, fallback, min, max) {

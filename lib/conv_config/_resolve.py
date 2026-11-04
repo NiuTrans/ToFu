@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
+from lib.context_experiment_flags import DEFAULT_CONTEXT_EXPERIMENT_FLAGS
 from lib.log import get_logger
 
 from lib.conv_config._flow import _parse_active_flow
@@ -284,7 +285,9 @@ def resolve_conv_config(
     # Global, request-local Responses experiments. They are not conversation
     # content and therefore do not persist into settings; the live toolbar
     # snapshot applies equally to active and background conversations.
-    for block in ('cache', 'tools', 'responses', 'compaction'):
+    # The block set is the normalizer's own: a hand-kept subset silently
+    # dropped ``orchestration`` and ``context`` overrides.
+    for block in DEFAULT_CONTEXT_EXPERIMENT_FLAGS:
         value = ov.get(block)
         if not isinstance(value, Mapping):
             value = defaults.get(block)

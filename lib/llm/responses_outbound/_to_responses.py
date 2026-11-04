@@ -38,7 +38,6 @@ Profile knobs (``RESPONSES_PROFILES``):
 from __future__ import annotations
 
 import json
-import re
 
 from lib.llm.conversion import (
     ProtocolConversionError, checked_conversion, conversion_report, object_arguments,
@@ -78,9 +77,6 @@ RESPONSES_PROFILES: dict = {
 
 #: OpenAI function-name hard limit (all Responses upstreams share it).
 _MAX_TOOL_NAME = 64
-_TOOL_SEARCH_MIN_FUNCTIONS = 16
-_TOOL_SEARCH_MIN_DEFERRED = 8
-_TOOL_SEARCH_NAMESPACE_SIZE = 10
 
 # Opaque output items safe/necessary to replay when ``store=false``.  The
 # response adapters capture this same set.  Unknown items are observable but
@@ -195,94 +191,6 @@ def _responses_text_format(response_format) -> dict | None:
     if kind in ('json_object', 'text') and set(response_format) == {'type'}:
         return {'type': kind}
     raise ProtocolConversionError('response_format_unrepresentable')
-
-
-def _safe_namespace(value: str) -> str:
-    """Return a stable Responses namespace identifier."""
-    normalized = re.sub(r'[^a-z0-9_-]+', '_', str(value or '').lower())
-    normalized = normalized.strip('_') or 'general'
-    return normalized[:48]
-
-
-def _tool_search_surface(tools: list[dict], *, pinned_names: set[str],
-                         namespace_by_name: dict[str, str],
-                         discovery_policy_by_name: dict[str, str]) -> list[dict]:
-    """Defer only the residual tool catalog behind hosted Tool Search.
-
-    ``pinned_names`` is authoritative: every matching function stays at the
-    top level with no ``defer_loading`` marker.  This is the protocol-boundary
-    enforcement of the frontend/caller selection contract.
-    """
-    functions = [tool for tool in tools
-                 if isinstance(tool, dict) and tool.get('type') == 'function']
-    deferred = [tool for tool in functions
-                if str(tool.get('name') or '') not in pinned_names
-                and discovery_policy_by_name.get(
-                    str(tool.get('name') or ''), 'eager') != 'eager']
-    if (len(functions) < _TOOL_SEARCH_MIN_FUNCTIONS
-            or len(deferred) < _TOOL_SEARCH_MIN_DEFERRED):
-        return tools
-
-    direct: list[dict] = []
-    groups: dict[str, list[dict]] = {}
-    group_order: list[str] = []
-    for tool in tools:
-        if not isinstance(tool, dict) or tool.get('type') != 'function':
-            direct.append(tool)
-            continue
-        name = str(tool.get('name') or '')
-        if name in pinned_names or discovery_policy_by_name.get(
-                name, 'eager') == 'eager':
-            # Defensive copy also guarantees a caller-supplied stale marker
-            # can never accidentally defer a frontend-selected tool.
-            selected = dict(tool)
-            selected.pop('defer_loading', None)
-            direct.append(selected)
-            continue
-        namespace = _safe_namespace(namespace_by_name.get(name) or 'general')
-        if namespace not in groups:
-            groups[namespace] = []
-            group_order.append(namespace)
-        deferred_tool = dict(tool)
-        deferred_tool['defer_loading'] = True
-        groups[namespace].append(deferred_tool)
-
-    namespaces: list[dict] = []
-    used_names: set[str] = set()
-    for base in group_order:
-        members = groups[base]
-        for offset in range(0, len(members), _TOOL_SEARCH_NAMESPACE_SIZE):
-            chunk = members[offset:offset + _TOOL_SEARCH_NAMESPACE_SIZE]
-            suffix = offset // _TOOL_SEARCH_NAMESPACE_SIZE + 1
-            name = base if len(members) <= _TOOL_SEARCH_NAMESPACE_SIZE \
-                else f'{base}_{suffix}'
-            while name in used_names:
-                suffix += 1
-                name = f'{base}_{suffix}'
-            used_names.add(name)
-            namespaces.append({
-                'type': 'namespace',
-                'name': name,
-                'description': (
-                    f'{base.replace("_", " ")} tools available on demand.'),
-                'tools': chunk,
-            })
-
-    direct_names = {
-        str(tool.get('name') or '') for tool in direct
-        if isinstance(tool, dict) and tool.get('type') == 'function'}
-    missing = pinned_names.intersection(
-        str(tool.get('name') or '') for tool in functions) - direct_names
-    if missing:
-        # Fail open to the original full surface.  This branch should be
-        # unreachable, but correctness beats token savings if policy drifts.
-        logger.error('[Responses] Tool Search pin invariant failed for %s; '
-                     'sending the full tool catalog', sorted(missing))
-        return tools
-    logger.info('[Responses] Tool Search: %d direct, %d deferred across %d '
-                'namespace(s)', len(direct_names), len(deferred),
-                len(namespaces))
-    return [{'type': 'tool_search'}] + direct + namespaces
 
 
 def _programmatic_eligible_names() -> set[str]:
@@ -405,8 +313,6 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
         body.get('_gpt56_breakpoint_mode') or 'implicit').lower()
     programmatic_mode = str(
         body.get('_programmatic_tool_calling') or 'off').lower()
-    tool_search_mode = str(
-        body.get('_tool_search_mode') or 'off').lower()
     from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
     programmatic_enabled = (
         supports('responses_programmatic')
@@ -429,11 +335,6 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
     if (_resolved_multi_agent
             and _resolved_multi_agent != 'native_openai'):
         multi_agent_enabled = False
-    resolved_tool_search = str(
-        body.get('_resolved_tool_search_backend') or '').lower()
-    tool_search_enabled = supports('responses_tool_search') and (
-        resolved_tool_search == 'native_openai'
-        if resolved_tool_search else tool_search_mode == 'auto')
     programmatic_names = (_programmatic_eligible_names()
                           if programmatic_enabled else set())
     out: dict = {
@@ -560,17 +461,9 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
         if safety_identifier and supports('responses_safety_identifier'):
             out['safety_identifier'] = safety_identifier[:64]
         if multi_agent_enabled:
-            try:
-                max_subagents = int(
-                    body.get('_multi_agent_max_concurrent_agents')
-                    or body.get('_multi_agent_max_concurrent_subagents') or 3)
-            except (TypeError, ValueError) as exc:
-                logger.debug('[ResponsesOut] invalid max-subagents value: %s', exc)
-                max_subagents = 3
-            out['multi_agent'] = {
-                'enabled': True,
-                'max_concurrent_subagents': max(1, min(max_subagents, 8)),
-            }
+            # Tofu sets no subagent concurrency ceiling, so the optional
+            # max_concurrent_subagents field is omitted.
+            out['multi_agent'] = {'enabled': True}
 
     includes = list(prof['include'])
     if replay_enabled and 'reasoning.encrypted_content' not in includes:
@@ -603,36 +496,6 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
         if programmatic_enabled:
             out['tools'] = _enable_programmatic_tools(
                 out['tools'], eligible=programmatic_names)
-
-        if tool_search_enabled:
-            raw_pins = body.get('_frontend_selected_tool_names') or ()
-            pinned_names = {
-                _truncate_name(str(name), reverse)
-                for name in raw_pins if str(name or '')
-            }
-            choice = body.get('tool_choice')
-            if isinstance(choice, dict) and choice.get('type') == 'function':
-                forced = str((choice.get('function') or {}).get('name') or '')
-                if forced:
-                    pinned_names.add(_truncate_name(forced, reverse))
-            raw_policies = body.get('_tool_discovery_policy_by_name') or {}
-            discovery_policy_by_name = {}
-            if isinstance(raw_policies, dict):
-                discovery_policy_by_name = {
-                    _truncate_name(str(name), reverse): str(policy)
-                    for name, policy in raw_policies.items() if str(name or '')}
-            raw_namespaces = body.get('_tool_namespace_by_name') or {}
-            namespace_by_name = {}
-            if isinstance(raw_namespaces, dict):
-                namespace_by_name = {
-                    _truncate_name(str(name), reverse): str(namespace)
-                    for name, namespace in raw_namespaces.items()
-                    if str(name or '')
-                }
-            out['tools'] = _tool_search_surface(
-                out['tools'], pinned_names=pinned_names,
-                namespace_by_name=namespace_by_name,
-                discovery_policy_by_name=discovery_policy_by_name)
 
     # Mark the stable input floor. ``chatgpt.com/backend-api/codex`` is not the public
     # Responses API and rejects this public per-content field on some models.

@@ -109,7 +109,7 @@ Serial-call observations remain diagnostic, not grounds for model intervention. 
 
 **Alternatives rejected:** client prefix repairs (the prefix was already byte-stable); a session-affinity header, tool reordering or salted leading bytes (measured no effect on this edge); ranking pins above built-ins as `tools.schemaBudgetTokens` does (R61 would hide ten built-ins to keep eight auto-preselected MCP schemas instead of hiding five long names); a budget on every route or every model on the face (Kimi on the same face reads 98% with the same surface, and other providers showed no such edge); aliasing long names (model-visible names are shared by guidance, search results and execution authority); waiting for a gateway fix (every root round pays a full rewrite meanwhile). The mechanism is inside the gateway, which looks consistent with a ~512-byte key built from the joined names; report it to the gateway owner and re-measure the edge before raising the budget.
 
-**Explicit Tool Search `off` (2026-10-28):** `tools.toolSearch=off` resolves to the `full` backend, which keeps every tool direct with no `search_tools`/`execute_tools`, so hiding has no discovery path. **Decision:** the setting is honored; such a request goes out over budget and logs the WARNING above (`no search_tools/execute_tools discovery path, Tool Search backend=full`) on every request, so the cost is visible per round and in the read-share split. The same applies to small or all-eager catalogs where `local` adds no gateway. No deployment default sets `off` (`tools.toolSearch` defaults to `auto`). **Alternatives rejected:** forcing the discovery pair onto this route when over budget (it overrides an explicit setting for cost, not correctness: the request still succeeds); hiding tools without a discovery path (they would become unreachable); aliasing names (rejected above).
+**Explicit Tool Search `off` (2026-10-28):** `tools.toolSearch=off` resolves to the `full` backend, which keeps every tool direct with no `search_tools`/`execute_tools`, so hiding has no discovery path. **Decision:** the setting is honored; such a request goes out over budget and logs the WARNING above (`no search_tools/execute_tools discovery path, Tool Search backend=full`) on every request, so the cost is visible per round and in the read-share split. The same applies to small or all-eager catalogs where `local` adds no gateway. No deployment default sets `off` (`tools.toolSearch` defaults to `local`). **Alternatives rejected:** forcing the discovery pair onto this route when over budget (it overrides an explicit setting for cost, not correctness: the request still succeeds); hiding tools without a discovery path (they would become unreachable); aliasing names (rejected above).
 
 **Detection (2026-10-28):** the lane split was in the 2026-10-23 logs (`cache_waste_report.py` printed root 0.03 against children 0.94) but nothing ran the report, and each cold round's own `upstream_identical`/`cache_write_unsettled` verdict pointed away from the request. **Decision:** `_health.read_share_monitor` folds every round record into a bounded per-minute window and warns while one request group on a model is cold and another warm; the cold side's break reports say so instead of attributing the miss upstream. The nightly optimizer streams the last 24 hours of rotated `app.log` files (personal deployments only, since process logs carry no owner), puts any split first in the proposer prompt with a rule to propose an investigation and never a TTL change, and keeps it in the run summary's `evidence_summary`. `scripts/cache_ab_probe.py --arm` is the manual single-variable A/B for the next quirk; the diagnosis order is in `lib/tasks_pkg/cache_tracking/AGENTS.md`. **Alternatives rejected:** duplicate, keep-alive or warm-up requests to raise reuse (they spend money to hide the signal); automatic probing from production (unbudgeted model calls outside execution accounting); a per-round verdict change (one round cannot know another group is warm, and the bucket stays the factual evidence class). Specifications: `tests/cache/test_cache_read_share_health.py`, `tests/cache/test_cache_record_lane.py`, `tests/optimizer/test_cache_read_share_evidence.py`, `tests/cache/test_cache_ab_probe.py`.
 
@@ -399,17 +399,17 @@ this channel has enough coverage and a semantic-quality evaluator.
 ## Context-efficiency controls
 
 Request-local switches support single-factor ablation without process-global
-state. Public GPT-5.6 Responses requests additionally get automatic native
-Tool Search for the declared-searchable residual catalog; eager tools stay direct:
+state. Every tool-capable request defers the declared-searchable residual
+catalog behind the local Tool Search gateway; eager tools stay direct:
 
 ```json
 {
   "cache": {"gpt56BreakpointMode": "explicit"},
   "tools": {
     "nativeExposure": "routed",
-    "programmaticCalling": "auto",
+    "programmaticCalling": "on",
     "programmaticExposure": "additive",
-    "toolSearch": "auto"
+    "toolSearch": "local"
   },
   "responses": {
     "transport": "sse",
@@ -419,8 +419,7 @@ Tool Search for the declared-searchable residual catalog; eager tools stay direc
     "promptProfile": "auto"
   },
   "orchestration": {
-    "multiAgent": "full",
-    "maxConcurrentAgents": 3
+    "multiAgent": "full"
   },
   "compaction": {"evidenceLedger": false}
 }
@@ -450,10 +449,12 @@ Tool Search for the declared-searchable residual catalog; eager tools stay direc
   impossible. Capability is preserved instead of silently hiding those tools.
   Local admission measures the initial projected local surface, and native
   admission measures its actual projected surface, not the deferred catalog.
-- `tools.toolSearch=auto` never removes tools from the task authority catalog.
+- `tools.toolSearch=local` never removes tools from the task authority catalog.
   Eager tools, explicit caller tools, the current task's MCP active set and a
-  forced `tool_choice` remain direct; searchable residual tools are deferred
-  natively or reached through the local gateway. Each model turn assembles its
+  forced `tool_choice` remain direct; searchable residual tools are reached
+  through the local `search_tools`/`execute_tools` gateway on every provider.
+  Provider-hosted Tool Search is not used, so the wire never depends on a
+  route's hosted-search support; `off` sends every schema directly. Each model turn assembles its
   wire catalog and discovery metadata from current settings; provider
   conversion uses that request-local projection.
 - L2 always uses the source-derived continuity packet in
@@ -465,13 +466,13 @@ Tool Search for the declared-searchable residual catalog; eager tools stay direc
 - `compaction.evidenceLedger=true` additionally persists exact L1 cold tool
   results and adds their recovery handles to that ledger. It remains opt-in
   because durable raw-result storage has a different privacy/I/O trade-off.
-- `tools.programmaticCalling=on|auto|off` defaults to `auto`, which behaves like `on`. Verified provider features plus reviewed eligibility select native OpenAI PTC; other tool-capable routes keep direct tools and add local async JavaScript (`execute_program`) over the complete task-executable catalog; `off` disables programs. [The gateway contract](contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md) owns interface selection, eligibility, approval, runtime bounds, replay and recovery; local execution never gains hosted-only authority.
+- `tools.programmaticCalling=on|off` defaults to `on` (a retired `auto` reads as `on`). Verified provider features plus reviewed eligibility select native OpenAI PTC; other tool-capable routes keep direct tools and add local async JavaScript (`execute_program`) over the complete task-executable catalog; `off` disables programs. [The gateway contract](contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md) owns interface selection, eligibility, approval, runtime bounds, replay and recovery; local execution never gains hosted-only authority.
   Local projection is additive and cache-stable: active modes expose the resident program tier whenever executable tools exist, independent of request wording or observed fan-out, and repeated authoring failures move one task to JSON batches. `TOFU_PTC_TIER=program|batch` is an explicit evaluation/operator override, never a model-size heuristic. Native-to-local fallback uses the local program tier. Productive single-read chains neither force adoption nor change the wire schema; historical `serial_gateway` settings remain readable only for explicit experiments. Actual completed `programRuns` and backend/evidence identity establish adoption; byte counts and `expectedSavings.basis=program_surface_unmeasured` do not establish model cost or latency gains.
   Historical production calibration: 93 calls, 107 tools, 7.149M prompt tokens (6.945M cache reads), ¥23.05, 2,286.3 seconds; 45 gateway offers and zero program runs. Five serial-read chains covered 24 model rounds; 19-call and nine-call counterfactual opportunity ceilings are theoretical, not savings. The [paired public-SDK pilot](../evaluations/programmatic_pilot/README.md) measures optional adoption, complete-evidence answer quality, actual usage and latency before promotion.
 - `responses.promptProfile=auto` selects compact GPT-5.6 but keeps Kimi on full.
   Explicit Kimi lean/ablation arms emit applied profile, SHA-256 and token proof;
   the benchmark rejects missing/mismatched adoption before any promotion.
-- `orchestration.multiAgent=full` (shipped default) keeps `spawn_agents` and the parallel-execution guidance on the wire every round, and workers inherit the parent's full authority catalog minus the leaf-worker denylist (no nested orchestration, no blocking on the human). `read_only` forces the analysis-only lane, `auto` is the legacy first-round-only gate requiring independent, complex workstreams, and `off` is the immediate rollback. The provider-neutral policy in `lib/tasks_pkg/tool_orchestration_policy.py` selects this control plane and the programmatic data plane independently. Both may therefore be active: agents partition independent workstreams, while the root and each eligible local worker use PTC to reduce repeated reads inside its own workstream. `lib/swarm/routing.py` selects native OpenAI acceleration only for a verified public GPT-5.6 Responses face carrying a `read_only` decision — a `full` lane never routes to the analysis-only native extension and otherwise projects the existing local `spawn_agents` runtime for every model whose task authority includes it. Read-only workers (native or local) share the read-only dispatch filter: the shared execution boundary rejects file, shell, artifact, scheduler, project-state, integration, and other non-root mutations even if prompt guidance is ignored. Full-authority local workers keep writes and run under the ordinary per-tool approval/authority gates. Streaming and non-streaming surfaces expose only `/root`'s `final_answer`. Benchmark arms remain single-factor experiments for causal attribution; that experimental isolation is not a production mutual-exclusion rule.
+- `orchestration.multiAgent=full` (shipped default) keeps `spawn_agents` and the parallel-execution guidance on the wire every round, and workers inherit the parent's full authority catalog minus the leaf-worker denylist (no nested orchestration, no blocking on the human). `read_only` is the API-only analysis lane; the retired `auto` and `off` values read as `full`, and there is no concurrency setting because accepted workers start on demand. The provider-neutral policy in `lib/tasks_pkg/tool_orchestration_policy.py` selects this control plane and the programmatic data plane independently. Both may therefore be active: agents partition independent workstreams, while the root and each eligible local worker use PTC to reduce repeated reads inside its own workstream. `lib/swarm/routing.py` selects native OpenAI acceleration only for a verified public GPT-5.6 Responses face carrying a `read_only` decision — a `full` lane never routes to the analysis-only native extension and otherwise projects the existing local `spawn_agents` runtime for every model whose task authority includes it. Read-only workers (native or local) share the read-only dispatch filter: the shared execution boundary rejects file, shell, artifact, scheduler, project-state, integration, and other non-root mutations even if prompt guidance is ignored. Full-authority local workers keep writes and run under the ordinary per-tool approval/authority gates. Streaming and non-streaming surfaces expose only `/root`'s `final_answer`. Benchmark arms remain single-factor experiments for causal attribution; that experimental isolation is not a production mutual-exclusion rule.
 - Each terminal task result keeps bounded reason, `expectedSavings`, and
   `projectionEvidence` per routing decision. Provider wire projection is never
   adoption: only a real program run, native multi-agent call, or launched local

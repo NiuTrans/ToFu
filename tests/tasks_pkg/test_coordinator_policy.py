@@ -170,7 +170,7 @@ def test_provider_execution_lanes_follow_role_not_settings_or_replay(coordinator
     catalog = [schema('get_conversation'), schema('create_conversation')]
     messages = [{'role': 'user', 'content': 'Review independent modules in parallel'}]
     task['config'].update(tools={'programmaticCalling': 'on', 'programmaticExposure': 'code_api'},
-                          orchestration={'multiAgent': 'auto'})
+                          orchestration={'multiAgent': 'read_only'})
     if latch:
         decision = resolve_tool_orchestration(
             requested_programmatic='on', requested_programmatic_exposure='code_api',

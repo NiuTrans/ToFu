@@ -27,8 +27,7 @@ def test_profile_uses_existing_exposure_flags_without_enabling_permissions():
     assert result['tools.programmaticCalling'] == 'off'
     assert result['codeExecEnabled'] is False
     from lib.tools.gateway import resolve_tool_search_backend
-    assert resolve_tool_search_backend(
-        result['tools.toolSearch'], protocol='openai') == 'full'
+    assert resolve_tool_search_backend(result['tools.toolSearch']) == 'full'
 
 
 def test_direct_common_schemas_come_from_registry(tmp_path):

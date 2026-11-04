@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -149,7 +150,13 @@ def test_lean_prompt_is_default_for_gpt56_and_materially_smaller():
     assert 'System-added <system-reminder>' in lean
 
 
-def test_multi_agent_auto_is_task_gated_while_ptc_auto_is_resident(monkeypatch):
+@pytest.mark.parametrize('text', [
+    '全面并行检查多个模块，分别比较所有文件，筛选、去重并汇总结果',
+    '打开一个文件'])
+@pytest.mark.parametrize('round_num', [1, 2])
+def test_shipped_lanes_are_resident_whatever_the_wording(
+        monkeypatch, text, round_num):
+    from lib.context_experiment_flags import normalize_context_experiment_flags
     from lib.tasks_pkg.tool_orchestration_policy import (
         resolve_tool_orchestration,
     )
@@ -158,41 +165,19 @@ def test_multi_agent_auto_is_task_gated_while_ptc_auto_is_resident(monkeypatch):
     monkeypatch.setattr(
         programmatic, 'eligible_programmatic_tool_names',
         lambda: {'read_files'})
-    complex_task = [{
-        'role': 'user',
-        'content': (
-            '全面并行检查多个模块，分别比较所有文件，筛选、去重并汇总结果'),
-    }]
+    flags = normalize_context_experiment_flags({})
     decision = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='auto',
-        messages=complex_task, tools=[_tool('read_files')], round_num=1)
-    assert decision['programmaticCalling'] == 'auto'
+        requested_programmatic=flags['tools']['programmaticCalling'],
+        requested_multi_agent=flags['orchestration']['multiAgent'],
+        messages=[{'role': 'user', 'content': text}],
+        tools=[_tool('read_files')], round_num=round_num)
+    assert decision['programmaticCalling'] == 'on'
+    assert decision['programmaticReason'] == 'resident_eligible_read_tools'
     assert decision['programmaticEligibleTools'] == ['read_files']
-    assert decision['multiAgent'] == 'read_only'
-    assert decision['multiAgentReason'] == 'independent_complex_workstreams'
+    assert decision['multiAgent'] == 'full'
+    assert decision['multiAgentReason'] == 'explicit_full'
     assert decision['compositionMode'] == (
         'multi_agent_with_programmatic_workers')
-    assert decision['programmaticStage']
-
-    delegated = resolve_tool_orchestration(
-        requested_programmatic='off', requested_multi_agent='auto',
-        messages=complex_task, tools=[_tool('read_files')], round_num=1)
-    assert delegated['multiAgent'] == 'read_only'
-    assert delegated['multiAgentStage']
-
-    small = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='auto',
-        messages=[{'role': 'user', 'content': '打开一个文件'}],
-        tools=[_tool('read_files')], round_num=1)
-    assert small['programmaticCalling'] == 'auto'
-    assert small['programmaticReason'] == 'resident_eligible_read_tools'
-    assert small['multiAgent'] == 'disabled'
-
-    later = resolve_tool_orchestration(
-        requested_programmatic='auto', requested_multi_agent='auto',
-        messages=complex_task, tools=[_tool('read_files')], round_num=2)
-    assert later['multiAgent'] == 'disabled'
-    assert later['multiAgentReason'] == 'first_round_only'
 
 
 def test_multi_agent_wire_contract_includes_beta_header():
@@ -204,11 +189,9 @@ def test_multi_agent_wire_contract_includes_beta_header():
         '_responses_feature_profile': 'openai',
         '_multi_agent_mode': 'read_only',
         '_multi_agent_stage': 'compare independent modules',
-        '_multi_agent_max_concurrent_subagents': 3,
     }, api_key='secret', base_url='https://api.openai.com/v1',
        api_protocol='responses')
-    assert plan.body['multi_agent'] == {
-        'enabled': True, 'max_concurrent_subagents': 3}
+    assert plan.body['multi_agent'] == {'enabled': True}
     assert 'responses_multi_agent=v1' in plan.hdrs['OpenAI-Beta']
     # The stage brief deliberately stays OUT of the wire input: per-round tail
     # text drifted the cache prefix (9afe2a467); the read-only boundary is
@@ -306,17 +289,47 @@ def test_multi_agent_only_exposes_root_final_answer_in_stream_and_json():
     assert visible == 'public result'
 
 
-def test_frontend_defaults_expose_auto_gates_and_no_fake_pro_model():
+def _select_options(panel: str, select_id: str) -> list[str]:
+    match = re.search(rf'<select id="{select_id}"[^>]*>(.*?)</select>',
+                      panel, re.S)
+    assert match, select_id
+    return re.findall(r'<option value="([^"]+)"', match.group(1))
+
+
+def test_settings_page_offers_exactly_the_server_accepted_tool_modes():
+    from lib.context_experiment_flags import (
+        DEFAULT_CONTEXT_EXPERIMENT_FLAGS,
+        normalize_context_experiment_flags,
+    )
+
     root = Path(__file__).resolve().parents[2]
     panel = (root / 'static/settings_panels/advanced.html').read_text()
     sections = root / 'frontend' / 'src' / 'runtime' / 'sections'
     other_tabs = (sections / 'settings/other_tabs.js').read_text()
     tool_rounds = (sections / 'ui/tool_rounds.js').read_text()
-    assert 'id="settingResponsesPromptProfile"' in panel
-    assert '<option value="auto">auto</option>' in panel
+    defaults = DEFAULT_CONTEXT_EXPERIMENT_FLAGS['tools']
+    for select_id, field, retired in (
+            ('settingToolSearch', 'toolSearch', ('auto', 'native')),
+            ('settingProgrammaticCalling', 'programmaticCalling', ('auto',))):
+        options = _select_options(panel, select_id)
+        # The unsaved page shows the server default, and every option is a
+        # value the server accepts; retired values are not offered.
+        assert f"toolsCfg.{field}, '{defaults[field]}'" in other_tabs
+        assert options[0] == defaults[field]
+        for value in options:
+            normalize_context_experiment_flags(
+                {'tools': {field: value}}, strict=True)
+        for value in retired:
+            assert value not in options
+            with pytest.raises(ValueError):
+                normalize_context_experiment_flags(
+                    {'tools': {field: value}}, strict=True)
+    # Multi-agent orchestration is always full with no concurrency ceiling:
+    # the page has no control for either and never sends the block.
+    for control in ('settingResponsesMultiAgent', 'settingResponsesMaxSubagents'):
+        assert control not in panel + other_tabs
+    assert 'delete config.orchestration;' in other_tabs
+    assert '<option value="auto">auto</option>' in panel  # prompt profile
     assert "responsesCfg.promptProfile, 'auto'" in other_tabs
-    assert "orchestrationCfg.multiAgent : responsesCfg.multiAgent" in other_tabs
-    assert 'config.orchestration = Object.assign' in other_tabs
     assert 'Native multi-agent worker:' in tool_rounds
-    assert "toolsCfg.programmaticCalling, 'auto'" in other_tabs
     assert "model_id: 'gpt-5.6-pro'" not in other_tabs + tool_rounds

@@ -16,7 +16,8 @@ Tool Search dual-backend precedent):
   the first-class JavaScript action ``execute_program``; child calls share the
   ordinary execution boundary.
 
-The default ``auto`` and explicit ``on`` both select the program tier locally,
+The default ``on`` (and the retired ``auto``, which older task decisions may
+still carry) selects the program tier locally,
 including after a hosted fallback (owner decision 2026-11-02, recorded in
 docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md). Repeated JavaScript authoring
 failures move one task to the batch surface. ``TOFU_PTC_TIER=program|batch`` is
@@ -70,9 +71,9 @@ def resolve_programmatic_backend(
         responses_profile: str = '', base_url: str = '', oauth: str = '',
         eligible_present: bool = True, local_present: bool | None = None,
         inference_profile=None) -> str:
-    """Resolve ``programmaticCalling=auto|on`` into a concrete backend.
+    """Resolve ``programmaticCalling=on`` into a concrete backend.
 
-    Fail-closed: anything other than an explicit ``auto``/``on`` with at
+    Fail-closed: anything other than ``on`` (or the retired ``auto``) with at
     least one executable function resolves to ``off``. ``eligible_present``
     is hosted review evidence; ``local_present`` describes the task catalog.
     Legacy callers that omit local evidence keep their previous gate.
@@ -134,10 +135,10 @@ def local_programmatic_tool_names(tools: Any) -> set[str]:
 
 
 def programmatic_tier(model: str = '', *, provider_id: str = '',
-                      requested: str = 'auto') -> str:
+                      requested: str = 'on') -> str:
     """Select the local interface from explicit policy, never model-name guesses.
 
-    Active modes (default ``auto`` and ``on``) expose JavaScript; per-task
+    Active modes (``on`` and the retired ``auto``) expose JavaScript; per-task
     authoring failures, not model names, move a task to JSON batches. The
     environment override supports controlled evaluations; callers separately
     enforce inactive/off modes. Model/provider arguments remain for

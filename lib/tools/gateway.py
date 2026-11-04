@@ -18,7 +18,6 @@ from collections import Counter
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 from lib.log import get_logger
 from lib.tools.background_guidance import (
@@ -1580,74 +1579,15 @@ def catalog_index(catalog: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
-def resolve_tool_search_backend(
-    mode: str,
-    *,
-    protocol: str,
-    model: str = '',
-    responses_profile: str = '',
-    base_url: str = '',
-    oauth: str = '',
-    capabilities: dict[str, Any] | None = None,
-    inference_profile=None,
-) -> str:
-    """Resolve ``native_openai | native_anthropic | local | full``.
+def resolve_tool_search_backend(mode: str) -> str:
+    """Resolve the product Tool Search mode to ``local | full``.
 
-    A non-official endpoint is never promoted from a model-name guess.  It
-    must carry a positive capability-probe result in ``capabilities``.
+    ``off`` sends the full catalog; every other value, including the retired
+    ``auto``/``native`` still stored on older tasks, uses Tofu's local
+    ``search_tools`` gateway. Provider-hosted Tool Search is never selected,
+    so the wire always matches the two modes the settings page offers.
     """
-    requested = str(mode or 'auto').strip().lower()
-    if requested not in ('auto', 'native', 'local', 'off'):
-        requested = 'auto'
-    if requested == 'off':
-        return 'full'
-    if requested == 'local':
-        return 'local'
-
-
-    if inference_profile is not None:
-        from lib.llm.route_features import route_feature
-        if route_feature(inference_profile, 'responses_tool_search',
-                         protocol=protocol, oauth=oauth):
-            return 'native_openai'
-        if route_feature(inference_profile, 'anthropic_tool_search',
-                         protocol=protocol, oauth=oauth):
-            return 'native_anthropic'
-        return 'local'
-    protocol = str(protocol or 'openai').strip().lower()
-    model_id = str(model or '').strip().lower()
-    host = (urlparse(str(base_url or '')).hostname or '').lower()
-    caps = capabilities if isinstance(capabilities, dict) else {}
-
-    from lib.model_info._openai_gpt56 import is_official_gpt56_model
-    public_responses = (
-        protocol == 'responses'
-        and str(responses_profile or '').lower() == 'openai'
-        and host in ('', 'api.openai.com')
-        and is_official_gpt56_model(model_id)
-        and str(oauth or '').lower() != 'codex'
-    )
-    if public_responses or caps.get('openai_native_tool_search') is True:
-        return 'native_openai'
-
-    # Tool Search is available on Claude 4.5+ (and the 5.x family).  Older
-    # Claude endpoints must not receive the hosted-tool shape merely because
-    # their model name begins with ``claude-``.
-    native_claude_model = bool(re.search(
-        r'(?:^|[-_])(?:opus|sonnet|haiku)[-_](?:4[-_.]?(?:5|6|7|8)|[5-9])(?:$|[-_.])',
-        model_id))
-    official_anthropic = (
-        protocol == 'anthropic'
-        and host in ('api.anthropic.com', '')
-        and model_id.startswith('claude-')
-        and native_claude_model
-    )
-    if official_anthropic or caps.get('anthropic_bm25_tool_search') is True:
-        return 'native_anthropic'
-
-    # ``native`` means "prefer native", not "send unverified vendor fields".
-    # Unsupported/unverified providers fail over to the local gateway.
-    return 'local'
+    return 'full' if str(mode or '').strip().lower() == 'off' else 'local'
 
 
 def preserve_background_wire_tools(

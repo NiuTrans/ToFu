@@ -663,43 +663,34 @@ def test_on_mode_composes_with_multi_agent():
     tools = [_fn('read_files')]
     complex_msgs = [{'role': 'user', 'content': (
         '全面并行检查多个模块，分别比较所有文件，筛选、去重并汇总结果')}]
-    # Explicit and automatic multi-agent decisions are independent from the
-    # resident PTC data plane.
-    explicit = resolve_tool_orchestration(
-        requested_programmatic='on', requested_multi_agent='read_only',
-        messages=complex_msgs, tools=tools, round_num=1, model='gpt-5.5')
-    assert explicit['programmaticCalling'] == 'on'
-    assert explicit['multiAgent'] == 'read_only'
-    assert explicit['compositionMode'] == (
-        'multi_agent_with_programmatic_workers')
-    auto = resolve_tool_orchestration(
-        requested_programmatic='on', requested_multi_agent='auto',
-        messages=complex_msgs, tools=tools, round_num=1, model='gpt-5.5')
-    assert auto['programmaticCalling'] == 'on'
-    assert auto['multiAgent'] == 'read_only'
-    assert auto['multiAgentReason'] == 'independent_complex_workstreams'
-    assert auto['compositionMode'] == (
-        'multi_agent_with_programmatic_workers')
+    # Both multi-agent modes are independent from the resident PTC data plane.
+    for mode in ('full', 'read_only'):
+        decision = resolve_tool_orchestration(
+            requested_programmatic='on', requested_multi_agent=mode,
+            messages=complex_msgs, tools=tools, round_num=1, model='gpt-5.5')
+        assert decision['programmaticCalling'] == 'on'
+        assert decision['multiAgent'] == mode
+        assert decision['compositionMode'] == (
+            'multi_agent_with_programmatic_workers')
 
 
-def test_flags_ship_auto_default_and_preserve_explicit_on():
+def test_flags_ship_on_default_and_retire_auto():
     from lib.context_experiment_flags import (
         normalize_context_experiment_flags)
     assert normalize_context_experiment_flags(
-        {})['tools']['programmaticCalling'] == 'auto'
+        {})['tools']['programmaticCalling'] == 'on'
     assert normalize_context_experiment_flags(
-        {'tools': {'programmaticCalling': 'on'}}
-    )['tools']['programmaticCalling'] == 'on'
-    assert normalize_context_experiment_flags(
-        {'tools': {'programmaticCalling': 'auto'}}
-    )['tools']['programmaticCalling'] == 'auto'
-    # Invalid values cannot opt the caller into JavaScript.
-    assert normalize_context_experiment_flags(
-        {'tools': {'programmaticCalling': 'guess'}}
-    )['tools']['programmaticCalling'] == 'auto'
-    with pytest.raises(ValueError, match='programmaticCalling'):
-        normalize_context_experiment_flags(
-            {'tools': {'programmaticCalling': 'guess'}}, strict=True)
+        {'tools': {'programmaticCalling': 'off'}}
+    )['tools']['programmaticCalling'] == 'off'
+    # A retired or invalid value falls back to the shipped default on the
+    # request path; strict validation refuses it.
+    for value in ('auto', 'guess'):
+        assert normalize_context_experiment_flags(
+            {'tools': {'programmaticCalling': value}}
+        )['tools']['programmaticCalling'] == 'on'
+        with pytest.raises(ValueError, match='programmaticCalling'):
+            normalize_context_experiment_flags(
+                {'tools': {'programmaticCalling': value}}, strict=True)
 
 
 def test_backend_resolver_accepts_on():

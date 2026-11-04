@@ -77,7 +77,7 @@ return JSON.parse(second.output);
 
 搜索结果的 `ptc_eligible` 仅描述 hosted OpenAI PTC 的审核资格，不是本地 JavaScript 的权限开关；本地执行仍逐子调用校验任务目录、schema、权限与审批。
 
-本地入口的启用同样独立于 hosted 白名单：`on` 在任务目录有实际 function 工具时常驻；`auto` 还要求有界数据处理意图，或已审核读工具的观察到的 fan-out。仅有搜索/执行网关或没有 function 的目录不自我激活。纯 MCP、自定义工具和写工具目录都可获得本地入口，但未审核工具不会因此获得 hosted `allowed_callers`；官方 Responses 没有审核工具时同样走本地后端。
+本地入口的启用同样独立于 hosted 白名单：默认的 `on` 在任务目录有实际 function 工具时常驻（旧任务里保存的已退役 `auto` 按 `on` 处理），`off` 不暴露。仅有搜索/执行网关或没有 function 的目录不自我激活。纯 MCP、自定义工具和写工具目录都可获得本地入口，但未审核工具不会因此获得 hosted `allowed_callers`；官方 Responses 没有审核工具时同样走本地后端。
 
 **Problem / Decision / Alternatives:** hosted 白名单曾同时控制本地曝光，导致自定义工具的完整合法目录没有程序入口。现在按任务目录判定本地可用性，按显式审核判定 hosted 可用性。把第三方工具自动加入 hosted 白名单会扩大上游执行资格，维持旧门槛则阻断合法本地任务，两者都被拒绝。
 
@@ -97,14 +97,12 @@ return JSON.parse(second.output);
 
 ## Provider 策略
 
-- 已验证的 OpenAI Responses 使用原生 Tool Search；Hosted PTC 能力保持原路径。
-- 已验证的 Anthropic Messages 使用 hosted BM25 Tool Search 和 `defer_loading`。包含 `server_tool_use` / `tool_search_tool_result` 的 assistant blocks 会完整保存并在下一轮回放。
-- Codex OAuth、旧 Claude 和其他兼容 Provider 默认使用本地 `search_tools`，命中后通过固定 `execute_tools` 执行。
-- 非官方端点只有在真实能力探测明确为支持时才启用原生模式，不能仅按模型名升级。
-- 原生请求因 Tool Search 字段被 400/404/422 拒绝时，同一请求降级到本地模式；无关请求错误不降级。本地检索异常时会标记下一轮 fail-open 到完整 executable catalog；当前轮的恢复目录仍只列未直接可见成员，避免以降级为由重复展示 wire tools。
-- 小目录直接发送完整原生 schema，不额外注入任何 gateway 工具。即使目录较大，只要所有 schema 都已 eager 可见，也不会注入无意义的搜索工具。
+- 所有 Provider（包括官方 OpenAI Responses 与 Anthropic Messages）都使用本地 `search_tools` 发现，命中后通过固定 `execute_tools` 执行；路由声明、能力探测和模型名都不会启用 Provider 托管的 Tool Search。Hosted PTC 能力保持原路径。
+- 旧对话中已保存的托管搜索 blocks（Anthropic `server_tool_use` / `tool_search_tool_result`、Responses `tool_search_call` / `tool_search_output`）仍按原样回放，不改写历史。
+- 本地检索异常时会标记下一轮 fail-open 到完整 executable catalog；当前轮的恢复目录仍只列未直接可见成员，避免以降级为由重复展示 wire tools。
+- 小目录直接发送完整 schema，不额外注入任何 gateway 工具。即使目录较大，只要所有 schema 都已 eager 可见，也不会注入无意义的搜索工具。
 
-设置 `tools.toolSearch` 支持 `auto | native | local | off`；`tools.executionScope` 支持默认的 `available` 和兼容模式 `selected_only`。前者使 Composer 开关表达“常驻可见/按需发现”，后者才表达旧式执行 allowlist。
+设置 `tools.toolSearch` 支持 `local`（默认）与 `off`；旧配置里已退役的 `auto` / `native` 按 `local` 处理。**Problem / Decision / Alternatives（owner decision 2026-11-04）：** `auto` 会在部分官方路由上切换到 Provider 托管搜索，`native` 只是同义偏好，设置页无法让用户预测实际请求形态；现在只保留 `local | off`，所有路由共用同一本地网关、审批与回放链路。保留 `auto`（仅改名或改默认）仍需能力探测和两套拒绝回退；把托管路径留作隐藏选项会让设置与 wire 再次分叉，均不采用。`tools.executionScope` 支持默认的 `available` 和兼容模式 `selected_only`。前者使 Composer 开关表达“常驻可见/按需发现”，后者才表达旧式执行 allowlist。
 
 ## 浏览器能力可用性
 
@@ -166,9 +164,9 @@ async calls, result shapes and private handles even for ordinary tool use.
 The observed empty-input `.ref` failure was one avoidable authoring failure;
 better diagnostics alone cannot establish a model's JavaScript proficiency.
 
-**Decision:** `tools.programmaticCalling` defaults to `auto`. Local routes keep
-ordinary tools; the batch tier uses JSON `execute_tools.calls`, and discovery
-uses the same JSON gateway. Independent calls with known arguments
+**Decision:** `tools.programmaticCalling` is `on` (default) or `off`. Local
+routes keep ordinary tools; the batch tier uses JSON `execute_tools.calls`, and
+discovery uses the same JSON gateway. Independent calls with known arguments
 can run in parallel. Sequential batching preserves order but does not substitute
 prior results into arguments: the model must inspect a prerequisite result
 before supplying dependent arguments. Both interfaces use the same task
@@ -198,7 +196,9 @@ Verify `test_gateway_child_occurrences.py` and `test_tool_call_flood_admission.p
 to the JSON batch tier and activated only when the request wording matched
 reduction keywords or earlier rounds showed read fan-out, so ordinary
 conversations never saw the code action and no adoption evidence accrued.
-Decision: the default `auto` and explicit `on` resolve identically. Whenever a
+Decision: the former default `auto` and explicit `on` resolve identically;
+since the 2026-11-04 owner decision the setting offers only `on` (default) and
+`off`, and a retired `auto` stored on an older task resolves as `on`. Whenever a
 task has executable tools, local routes expose `execute_program` additively
 beside the unchanged ordinary tools; where discovery exposes `execute_tools`,
 it remains a JSON-only recovery path. Request wording, observed history, model

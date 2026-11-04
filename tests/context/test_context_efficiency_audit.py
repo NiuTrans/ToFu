@@ -26,16 +26,16 @@ def _tool(name: str) -> dict:
     }
 
 
-def test_context_flags_ship_auto_ptc_default_and_remain_strict():
+def test_context_flags_ship_local_search_and_ptc_on_and_remain_strict():
     from lib.context_experiment_flags import (
         context_experiment_arm, normalize_context_experiment_flags)
 
     assert normalize_context_experiment_flags({}) == {
         'cache': {'gpt56BreakpointMode': 'explicit'},
         'tools': {
-            'nativeExposure': 'routed', 'programmaticCalling': 'auto',
+            'nativeExposure': 'routed', 'programmaticCalling': 'on',
             'programmaticExposure': 'additive',
-            'toolSearch': 'auto', 'executionScope': 'available',
+            'toolSearch': 'local', 'executionScope': 'available',
             'schemaBudgetTokens': 0, 'resultEnvelope': 'v2',
         },
         'responses': {
@@ -43,34 +43,32 @@ def test_context_flags_ship_auto_ptc_default_and_remain_strict():
             'verbosity': 'medium', 'imageDetail': 'auto',
             'promptProfile': 'auto',
         },
-        'orchestration': {
-            'multiAgent': 'full', 'maxConcurrentAgents': 3, 'policy': 'v1',
-        },
+        'orchestration': {'multiAgent': 'full', 'policy': 'v1'},
         'context': {'globalBudgetTokens': 0, 'programmaticInputs': False},
         'compaction': {'evidenceLedger': False, 'strategy': 'unified'},
     }
-    # The provider-neutral owner wins, while the old Responses fields remain
-    # accepted as migration aliases.
+    # Retired tool modes fall back to the defaults on the request path.
+    retired = normalize_context_experiment_flags({
+        'tools': {'toolSearch': 'native', 'programmaticCalling': 'auto'}})
+    assert retired['tools']['toolSearch'] == 'local'
+    assert retired['tools']['programmaticCalling'] == 'on'
+    # The API-only read_only lane is honored; retired modes, the old
+    # Responses alias and every concurrency field are ignored.
     assert normalize_context_experiment_flags({
-        'responses': {'multiAgent': 'read_only',
-                      'maxConcurrentSubagents': 7},
-    })['orchestration'] == {
-        'multiAgent': 'read_only', 'maxConcurrentAgents': 7, 'policy': 'v1'}
-    # The provider-neutral block still wins over the legacy alias; a stale
-    # 'off' is no longer valid and normalizes to the always-on default.
-    assert normalize_context_experiment_flags({
-        'orchestration': {'multiAgent': 'full', 'maxConcurrentAgents': 2},
-        'responses': {'multiAgent': 'read_only',
-                      'maxConcurrentSubagents': 7},
-    })['orchestration'] == {
-        'multiAgent': 'full', 'maxConcurrentAgents': 2, 'policy': 'v1'}
-    assert normalize_context_experiment_flags({
-        'orchestration': {'multiAgent': 'off'},
-    })['orchestration']['multiAgent'] == 'full'
+        'orchestration': {'multiAgent': 'read_only'},
+    })['orchestration'] == {'multiAgent': 'read_only', 'policy': 'v1'}
+    for legacy in (
+            {'orchestration': {'multiAgent': 'auto', 'maxConcurrentAgents': 2}},
+            {'orchestration': {'multiAgent': 'off'}},
+            {'responses': {'multiAgent': 'read_only',
+                           'maxConcurrentSubagents': 7}}):
+        assert normalize_context_experiment_flags(legacy)['orchestration'] == {
+            'multiAgent': 'full', 'policy': 'v1'}
     arm = context_experiment_arm({})
-    assert arm['maxConcurrentAgents'] == 3
+    assert arm['multiAgent'] == 'full'
     assert arm['resultEnvelope'] == 'v2'
     assert arm['programmaticInputs'] is False
+    assert 'maxConcurrentAgents' not in arm
     assert 'maxConcurrentSubagents' not in arm
 
     # Legacy remains an explicit, fingerprinted rollback/control policy.
