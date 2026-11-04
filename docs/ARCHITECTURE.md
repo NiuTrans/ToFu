@@ -208,13 +208,62 @@ expensive execution only behind a proven ownership boundary. Hardware probes
 never become concurrency or admission limits. No new tuning interval, cap,
 sampling policy, history truncation or feature switch is justified by this map.
 
-**Decision:** keep the existing process composition while removing repeated
-work across these owners. The shared cancellation observer and immutable history
-have explicit acquisition, invalidation and release boundaries. A generic Agent
-registry, another queue and speculative process sharding were rejected: none
-removes the repeated derivation, and each would require new Stop routing and
-recovery authority. Physical worker isolation remains subject to those existing
-ownership requirements; this change does not certify an arbitrary Agent count.
+**Problem:** nested delegation multiplies work in a composition whose ordinary
+chat admission, live executor, cancellation and event publication still depend
+on the API process. Removing repeated projection/cancellation work reduces cost
+but does not isolate CPU contention, survive API loss or establish recovery
+authority. A shared task index and process-role flags do not close that gap.
+
+**Decision (owner direction, 2026-11-05):** migrate to a durable execution plane
+with an independent lifetime from HTTP serving. This is the architectural
+direction for ongoing implementation, not a claim that chat already runs there.
+Reuse Turn/Attempt admission, `storage_worker_jobs`, the invocation kernel,
+native checkpoint evidence, domain accounting and immutable child births.
+Preserve the configured storage authority and explicit user/tenant identity.
+The same single-host deployment must benefit before distributed placement is
+qualified. No hardware-derived admission cap or optimization tuning flag is
+part of this migration.
+
+The delivery dependencies and completion evidence are:
+
+1. **Transactional execution ownership.** A durable binding requires a live
+   worker claim in the same transaction as start, progress and terminal
+   publication. The current implementation fences these commands on SQL and
+   native TofuDB, including cancellation and batch rollback. An omitted proof
+   cannot fall back to the legacy path. This is publication authority only;
+   `conversation-attempt` is still not a production-qualified worker kind.
+2. **Reconstructible invocation and effect authority.** Reconstruct the existing
+   executor from accepted configuration and durable references. Carry principal,
+   lineage, execution account and cancellation through the same kernel. Qualify
+   provider calls, tools, terminal accounting, never-entered cancellation and
+   unknown acknowledgements with crash injection before registering the kind.
+   An uncertain external effect
+   is reconciled or reported as uncertain, never blindly retried by a new lease.
+3. **Independent process lifetime and durable control.** Move real admission,
+   Stop and execution to that owner. API restart must leave executing work
+   intact. Prove cross-process idle wake, cancellation and reconnect, then
+   worker death and old-writer refusal. Existing in-process commit callbacks
+   alone cannot wake a separate idle process. Startup recovery must respect
+   live durable ownership rather than retire another process's tasks.
+4. **Execution facts and read projections.** Keep committed execution facts and
+   their accounting authoritative while projection/delivery can drain and
+   reconstruct independently. Browser observation, reconnect and transcript
+   hydration must not multiply execution work or require a resident executor.
+   Reuse the current event and Turn owners; do not introduce a second transcript.
+5. **Whole-system qualification.** Drive Coordinator → conversation → nested
+   invocations with equal requested work and complete outputs. Measure API
+   responsiveness, completed work, provider/tool calls, retained bytes, storage
+   publication, replay lag and post-run quiescence together. Inject API/worker
+   loss, delayed acknowledgements and slow readers while checking identical
+   durable effects and costs. Only then claim capacity or enable distributed
+   placement; the existing distributed preview gate remains in force.
+
+**Alternatives considered:** continued local hot-path optimization alone cannot
+provide process isolation or restart continuity; immediately sharding Python
+processes leaves Stop, effect replay and old-writer authority unresolved; a new
+generic Agent registry/queue duplicates existing ownership and obscures the
+different lifetimes of root, retained and transient children. Local improvements
+remain useful evidence, but are not the completion criteria for this migration.
 
 ### Whole-graph verification
 

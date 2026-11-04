@@ -59,6 +59,18 @@
     "SQLite serializes the writer; PostgreSQL cancel, defer and automation progress hold the current worker row through commit; native OCC validates its current-job dependency.",
     "Only the current backend epoch and backend-owned advancing clock prove or extend a live lease; delayed or forged caller clocks cannot revive one."
   ],
+  "conversationPublication": {
+    "operations": ["turn.attempt.start", "turn.event.record", "turn.event.record_batch"],
+    "binding": "conversation-attempt:{attemptId}, established only by turn.attempt.dispatch_worker",
+    "proofField": "worker_claim",
+    "proof": {"worker_id": "string:1..256", "fencing_token": "positive-signed-64-bit-integer"},
+    "atomic": "Validate the bound job, user, kind, attempt, live holder/token and backend lease epoch/time in the same transaction as publication. SQL holds the worker row until commit; native records its OCC dependency.",
+    "missingOrStale": "database_conflict; no Turn, task event, replay or terminal accounting writes; omission cannot select legacy authority",
+    "cancelled": "A current claim may publish terminal domain settlement only; start and nonterminal progress are refused.",
+    "batch": "Each entry carries the proof. Any refusal rolls back the entire batch including a valid prefix.",
+    "legacy": "An attempt with a non-durable binding retains its existing authority and accepts no worker claim.",
+    "scope": "Publication authority only. This does not authorize external effects or crash replay, and does not qualify conversation-attempt as a production worker kind."
+  },
   "leaseAuthority": {
     "clock": "backend-owned UTC-offset high-water plus monotonic elapsed time",
     "lifetime": "native/SQLite: existing shared store epoch; PostgreSQL: random named server-shared clock epoch scoped by database OID; never a Sidecar-local UUID",

@@ -1,5 +1,18 @@
 # Storage operations and verification
 
+## Durable conversation publication
+
+The worker claim is request-scoped evidence against the existing job, not a new
+receipt, lease ledger or retained Turn field. The cross-authority specification
+`tests/storage/test_conversation_worker_publication.py` compares the complete job
+before and after start, progress and terminal Turn publication: zero job-document
+changes, while the ordinary Turn/replay writes still occur. Refused commands and
+a refused batch suffix leave the complete conversation snapshot and task-event
+log unchanged. This measures logical retained state, not filesystem bytes or
+throughput. PostgreSQL row-lock and native OCC tests cover the publication/claim
+race. Production chat worker admission remains unqualified; see
+[durable worker semantics](STORAGE.md) and [architecture](ARCHITECTURE.md).
+
 ## Payment quote retention
 
 Stripe prepares one durable payment quote before provider IO and later binds its

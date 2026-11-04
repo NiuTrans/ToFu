@@ -97,6 +97,39 @@ def _live_claim(row, worker_id, fence, epoch, now):
             and int(row['lease_deadline_ms']) > now)
 
 
+def _require_conversation_publication_claim(
+    session: Session, *, attempt_id: str, task_id: str, user_id: int,
+    proof: Any, terminal: bool = False,
+) -> None:
+    """Fence publication under the domain transaction, never a preceding RPC.
+
+    The durable binding selects authority, not the caller's optional proof.
+    Legacy attempts need no job read. Claim/complete/cancel serialize on the
+    same row; a later holder cannot interleave with an admitted publication.
+    """
+    if proof is not None and (
+            not isinstance(proof, Mapping) or set(proof) != {'worker_id', 'fencing_token'}
+            or not isinstance(proof['worker_id'], str) or not 0 < len(proof['worker_id']) <= 256
+            or type(proof['fencing_token']) is not int or not 0 < proof['fencing_token'] < 2**63):
+        raise StorageError('database_protocol_error', 'Invalid worker publication claim')
+    if task_id != f'conversation-attempt:{attempt_id}':
+        if proof is not None:
+            raise StorageError('database_conflict', 'Attempt has no durable worker binding')
+        return
+    if proof is None:
+        raise StorageError('database_conflict', 'Durable attempt requires a worker claim')
+    session.lock_key('worker_job', task_id)
+    row = session.fetch_one_for_update(
+        f'SELECT {_WORKER_JOB_COLUMNS} FROM storage_worker_jobs WHERE task_id=? AND user_id=?',
+        (task_id, user_id))
+    epoch, now, _ = _lease_authority(session)
+    if (not _live_claim(row, proof['worker_id'], proof['fencing_token'], epoch, now)
+            or row['task_kind'] != 'conversation-attempt'
+            or (_load(row['payload_json']) or {}).get('attemptId') != attempt_id
+            or (not terminal and int(row['cancel_requested_at_ms']) > 0)):
+        raise StorageError('database_conflict', 'Worker claim cannot publish this attempt')
+
+
 def _job_document(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         'taskId': str(row['task_id']),

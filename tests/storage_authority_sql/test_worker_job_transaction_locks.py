@@ -112,6 +112,59 @@ def test_cancel_decision_excludes_claim_until_its_transaction_commits(queued_job
     assert result["job"]["fencingToken"] == 0
 
 
+def test_conversation_publication_holds_claim_through_domain_commit(queued_job):
+    """A new holder cannot interleave after the publication fence was checked."""
+    task_id = 'conversation-attempt:publishing'
+    with queued_job() as connection:
+        session = PostgresSession(connection)
+        jobs._worker_job_enqueue(session, {
+            'task_id': task_id, 'user_id': 41, 'tenant_id': 'owned-tenant',
+            'task_kind': 'conversation-attempt', 'idempotency_key': task_id,
+            'payload': {'attemptId': 'publishing'}, 'now_ms': 1000,
+        })
+        original = jobs._worker_job_claim_next(session, {
+            'worker_id': 'publisher', 'task_kinds': ['conversation-attempt'],
+            'now_ms': 1000, 'lease_ms': 10000,
+        })
+    admitted = threading.Event()
+    release = threading.Event()
+
+    def publish():
+        with queued_job() as connection:
+            jobs._require_conversation_publication_claim(
+                PostgresSession(connection), attempt_id='publishing',
+                task_id=task_id, user_id=41,
+                proof={'worker_id': 'publisher', 'fencing_token': original['fencingToken']})
+            admitted.set()
+            assert release.wait(10)
+
+    def takeover():
+        with queued_job() as connection:
+            return jobs._worker_job_claim_next(PostgresSession(connection), {
+                'worker_id': 'replacement', 'task_kinds': ['conversation-attempt'],
+                'now_ms': 11001, 'lease_ms': 10000,
+            })
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        publishing = pool.submit(publish)
+        try:
+            assert admitted.wait(10)
+            queued_job.advance_ms(11001)
+            assert takeover() is None
+        finally:
+            release.set()
+        publishing.result(timeout=10)
+    replacement = takeover()
+    assert replacement['fencingToken'] == original['fencingToken'] + 1
+    with queued_job() as connection:
+        from lib.storage.errors import StorageError
+        with pytest.raises(StorageError, match='Worker claim cannot publish'):
+            jobs._require_conversation_publication_claim(
+                PostgresSession(connection), attempt_id='publishing',
+                task_id=task_id, user_id=41,
+                proof={'worker_id': 'publisher', 'fencing_token': original['fencingToken']})
+
+
 def test_cancel_after_claim_waits_for_the_current_running_state(queued_job):
     selected = threading.Event()
     release = threading.Event()

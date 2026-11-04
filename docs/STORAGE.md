@@ -1017,10 +1017,26 @@ answer costs at most one empty exclusive claim, never a second holder.
 
 `turn.attempt.dispatch_worker` atomically binds the accepted Attempt to a
 deterministic task, enqueues one `conversation-attempt` job and captures the
-running sync event. Payloads carry durable conversation/Turn/Attempt references
+pending sync event. Payloads carry durable conversation/Turn/Attempt references
 and an explicit `PrincipalContext`, never projections or request-local provider
 handles. Lost acknowledgements resolve the same job; legacy `@dispatching` or
 another executor binding fails closed instead of creating a second authority.
+
+Durably bound Attempts require `worker_claim` at `turn.attempt.start` and
+`turn.event.record` (including every batch entry), as defined by
+[worker publication authority](../contracts/worker_job_lifecycle_v1.json).
+The stored binding selects the authority; an omitted proof cannot bypass it.
+Publication validates the current holder/token, user, kind, Attempt and
+backend-owned lease clock/epoch in the same transaction. SQL holds the job row
+until commit; native TofuDB retains its exact OCC dependency. A refusal raises
+`database_conflict` and rolls back Turn changes, task events, replay and
+settlement, including a batch's previously applied entries. Cancellation
+permits only current-claim terminal domain cleanup. Legacy in-process bindings
+need no additional job read and accept no worker proof. The context's
+`publication_claim()` provides explicit evidence, never an effect capability.
+This establishes publication fencing only: executor reconstruction, external
+effect admission, API dispatch/Stop cutover and crash-replay qualification are
+still required by the [architecture migration](ARCHITECTURE.md).
 
 [Worker lifecycle](../contracts/worker_job_lifecycle_v1.json) owns the states.
 Live-fenced `worker_job.defer` sets `suspended`, releases the lease and indexes
