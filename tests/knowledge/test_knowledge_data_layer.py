@@ -260,8 +260,9 @@ def test_media_routes_share_the_owner_scoped_attachment_lifecycle(
     assert metadata.status_code == 200
     assert metadata.get_json()['attachment'] == attachment
 
-    source = flask_client.get(
-        f'/api/v4/media/attachments/{attachment_id}/source')
+    # Clients load the emitted link verbatim, so fetch it rather than a path
+    # rebuilt here.
+    source = flask_client.get(attachment['sourceUrl'])
     assert source.status_code == 200
     assert source.data == raw
     assert source.headers['Cache-Control'] == 'private, no-store'
