@@ -27,6 +27,10 @@ an undocumented second source of product policy.
   boundary, atomic replacement, and postcondition verification.
 - Resolve repository/runtime roots safely; never use broad deletion targets,
   unresolved globs, or implicit current-directory authority.
+- `git_land.py` preserves committed and uncommitted source ownership separately;
+  generator families and input/output scopes live in
+  `lib/project_mod/generated_integration.py`. Verify both `test_git_land_*.py`
+  suites and the generated task-delta test in `test_integration_delivery.py`.
 - `frontend_vendor_assets.mjs` derives standalone KaTeX files, CSS font closure
   and `lib/http_transport/generated_frontend_vendor.py` from the installed lockfile version.
   Author the iframe adapter under `frontend/src/artifacts/`; verify generation
