@@ -160,7 +160,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             #   raw 429 yet — otherwise fresh concurrent requests bail on
             #   attempt 1 under heavy contention. Give up only when no
             #   capable slot exists at all. (Mirror of dispatch_stream.)
-            _held_routes = state.route_unavailable.pairs
+            _held_routes = state.held_pairs
             _slots_exist = dispatcher.has_capable_slots(
                 capability, exclude_models=state.exclude,
                 exclude_keys=(state.exclude_keys | state.exclude_keys_durable
@@ -178,7 +178,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 if not _slots_exist and _held_routes:
                     if state.credential_outage.retry_cooled():
                         continue
-                    _queue_sleep(state.route_unavailable.probe_delay_s())
+                    _queue_sleep(state.held_probe_delay_s())
                     continue
                 _queue_sleep(0.3)
                 state.note_cooldown_cycle()

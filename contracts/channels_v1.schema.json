@@ -49,10 +49,13 @@
     "ThreadMode": {"type": "string", "enum": ["command", "watch", "mentions", "ignore"]},
     "ConfigurableThreadMode": {"type": "string", "enum": ["watch", "mentions", "ignore"]},
     "ReplyPolicy": {"type": "string", "enum": ["auto", "draft", "never"]},
-    "AccountState": {"type": "string", "enum": ["disabled", "starting", "connected", "disconnected", "needs_login", "kicked", "error"]},
+    "AccountState": {"type": "string", "enum": ["disabled", "starting", "authorizing", "connected", "disconnected", "needs_login", "kicked", "error"],
+                     "description": "starting: the identity is being confirmed or the session is starting. authorizing: the login MIS has no reusable SSO session, so one 大象 login approval was requested and is awaited."},
+    "Mis": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "description": "A 大象 (SSO) MIS account, lowercase."},
     "EventDisposition": {"type": "string", "enum": ["command", "candidate", "context"]},
     "OutboxState": {"type": "string", "enum": ["draft", "queued", "sending", "unknown", "sent", "failed", "discarded"]},
-    "OutboxOriginKind": {"type": "string", "enum": ["router_reply", "tool"]},
+    "OutboxOriginKind": {"type": "string", "enum": ["router_receipt", "router_content", "router_progress", "router_reply", "router_status", "tool"]},
     "ChannelIdentity": {
       "type": "object",
       "additionalProperties": false,
@@ -77,10 +80,12 @@
     "ChannelAccountView": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["channel", "enabled", "identity", "commandChat", "status", "skillInstalled", "routerConversationId"],
+      "required": ["channel", "enabled", "loginMis", "identity", "commandChat", "status", "skillInstalled", "routerConversationId"],
       "properties": {
         "channel": {"$ref": "#/$defs/Channel"},
         "enabled": {"type": "boolean"},
+        "loginMis": {"anyOf": [{"$ref": "#/$defs/Mis"}, {"type": "null"}],
+                     "description": "The MIS the account logs in as: the one the owner entered, else its bound identity's. null until either exists; enabling then uses the host's shared SSO session account."},
         "identity": {"anyOf": [{"$ref": "#/$defs/ChannelIdentity"}, {"type": "null"}]},
         "commandChat": {"anyOf": [{"$ref": "#/$defs/ThreadKey"}, {"type": "null"}]},
         "status": {"$ref": "#/$defs/ChannelAccountStatus"},
@@ -93,6 +98,8 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {"type": "boolean"},
+        "mis": {"$ref": "#/$defs/Mis",
+                "description": "Log in as this MIS. Its existing SSO session is reused; only a MIS without one gets a single 大象 login approval request. Another account than the bound identity's clears the identity and the command chat and restarts ingress from now; the identity is confirmed asynchronously (states starting/authorizing)."},
         "commandChat": {"anyOf": [{"$ref": "#/$defs/ThreadKey"}, {"type": "null"}]}
       }
     },

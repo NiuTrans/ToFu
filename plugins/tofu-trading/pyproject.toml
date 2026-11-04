@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,7 @@ version = "0.2.1"
 description = "Trading subsystem for Tofu (豆腐) — portfolio, market intel, autopilot, backtest & strategy engines. Mounts into a Tofu host via entry points."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {file = "LICENSE"}
+license = "MIT"
 dependencies = [
     # Tofu 0.17 owns every durable connection through storage.v1. Trading
     # contributes a declarative manifest and uses named semantic operations;

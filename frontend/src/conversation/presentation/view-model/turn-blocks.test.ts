@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TurnRecord } from '../../../api/conversation-sync.generated';
 import { selectTurnBlocks } from './turn-blocks';
+import { visibleActivityEntries } from './activity-blocks';
 function turn(status: TurnRecord['status'] = 'completed'): TurnRecord {
   return { turnId: 'oversized', actor: 'assistant', status, laneId: 'main',
     projection: { content: 'Saved final answer', segments: [
@@ -80,6 +81,46 @@ describe('answer presentation during live generation and translation', () => {
 });
 
 
+describe('saved execute_tools failure replay', () => {
+  it('leaves child failures on their cards, not in duplicate gateway rows', () => {
+    const parent = {
+      roundNum: 67, toolCallId: 'gateway-call', toolName: 'execute_tools',
+      taskId: 'task-a', attemptId: 'attempt-a', status: 'error',
+      toolContent: JSON.stringify({ artifactRef: 'tr:batch', items: [{ results: [
+        { call_id: 'child-a', name: 'read_doc', status: 'error', resultId: 'receipt-a' },
+        { call_id: 'child-b', name: 'read_doc', status: 'error', resultId: 'receipt-b' },
+      ] }] }),
+    };
+    const childRound = (suffix: string, ordinal: number) => ({
+      roundNum: ordinal, toolCallId: `child-${suffix}`, toolName: 'read_doc',
+      taskId: 'task-a', attemptId: 'attempt-a', status: 'error',
+      toolResultEvidence: { resultId: `receipt-${suffix}`, executionStatus: 'error' },
+    });
+    const fallback = (suffix: string) => ({
+      id: `activity:batch:gateway-${suffix}`, spanId: `gateway-tool:${suffix}`,
+      seq: 1, occurredAt: 1000, count: 1, kind: 'tool', status: 'failed', severity: 'error',
+      toolName: 'read_doc', toolCallId: `child-${suffix}`, anchorToolRoundNum: 67,
+      taskId: 'task-a', attemptId: 'attempt-a', summaryKey: 'activity.tool.failed',
+      detail: `failure ${suffix}`,
+    });
+    const source = turn();
+    source.projection.toolRounds = [parent, childRound('a', 8700032),
+      childRound('b', 8700034)] as never;
+    source.projection.segments = [parent, childRound('a', 8700032),
+      childRound('b', 8700034)].map(round => ({
+      type: 'tool_use', blockId: `tool:${round.toolCallId}`, id: round.toolCallId,
+      name: round.toolName, roundNum: round.roundNum, taskId: 'task-a', attemptId: 'attempt-a',
+      input: {}, result: {},
+    })) as never;
+    source.projection.activityTimeline = { blockId: 'activity-timeline', version: 1,
+      entries: [fallback('a'), fallback('b')] } as never;
+    const blocks = selectTurnBlocks(source);
+    const children = blocks.filter(block => block.kind === 'tool' && block.name === 'read_doc');
+    expect(children).toHaveLength(2);
+    expect(visibleActivityEntries(source.projection.activityTimeline,
+      source.projection.toolRounds, blocks)).toEqual([]);
+  });
+});
 describe('retry storms in the projection pipeline', () => {
   const activity = (id: string, changes: Record<string, unknown>) => ({
     id, spanId: id, seq: 1, occurredAt: 1000, count: 1,

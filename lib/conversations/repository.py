@@ -10,6 +10,8 @@ Entry points
 ------------
 ``get_conversation`` reads one owner-scoped full, metadata-only, or bounded-page
 snapshot.
+``ConversationRepository.get_complete`` reads one whole transcript at one
+revision, in message windows when it exceeds any single storage response.
 ``list_conversations`` reads a bounded, filtered snapshot set.
 ``ConversationRepository.list_catalog_page`` reads one metadata page plus its
 authoritative total without materializing the owner's complete archive.
@@ -632,27 +634,29 @@ class ConversationRepository:
             if snapshot is not None:
                 yield snapshot
 
-    def _read_messages_since(
+    def _message_windows(
         self,
         conversation_id: str,
         *,
         user_id: int,
-        since_ms: int,
-        settings_keys: list[str] | tuple[str, ...] | None,
-    ) -> ConversationSnapshot | None:
-        """Read one oversized transcript newest-first in message windows.
+    ) -> Iterator[tuple[ConversationSnapshot, int, int]]:
+        """Yield one oversized transcript's message windows newest-first.
 
-        Both authorities window by main-lane sequence: ``message_window=W``
-        with ``before_sequence=B`` returns sequences ``[max(0, B - W), B)``
-        in order (``B`` defaults to the message count) and reports them in
-        ``message_page``, whose ``start`` is the next cursor. Neither shrinks
-        a window to its response bound (native byte budget, SQL frame); both
-        refuse it with the whole-transcript signal. A one-message tail window
-        is read first: its ``message_page.total_count`` is the authoritative
-        total (a listing ``msg_count`` can be missing or stale), and the
-        refused whole read that would exceed it is never attempted. Read
-        windows therefore start at half of that total and halve on every
-        refusal; a refused one-message window fails loudly.
+        Each item is ``(window, start, total)``: one storage response, the
+        absolute sequence of its first message, and the message count that
+        response reported. Both authorities window by main-lane sequence:
+        ``message_window=W`` with ``before_sequence=B`` returns sequences
+        ``[max(0, B - W), B)`` in order (``B`` defaults to the message count)
+        and reports them in ``message_page``, whose ``start`` is the next
+        cursor. Neither shrinks a window to its response bound (native byte
+        budget, SQL frame); both refuse it with the whole-transcript signal. A
+        one-message tail window is read first: its ``message_page.total_count``
+        is the authoritative total (a listing ``msg_count`` can be missing or
+        stale), and the refused whole read that would exceed it is never
+        attempted. Read windows therefore start at half of that total and
+        halve on every refusal; a refused one-message window fails loudly.
+        An empty transcript yields that probe; a conversation that disappears
+        ends the iteration before the window starting at sequence 0.
         """
         document = self._get_document(
             conversation_id,
@@ -662,60 +666,137 @@ class ConversationRepository:
             before_sequence=None,
         )
         if document is None:
-            return None
+            return
         probe = self._snapshot(document)
         # Validates the tail page and its authoritative total.
         _message_page_start(document, len(probe.messages), None)
         total = document["message_page"]["total_count"]
         if total == 0:
-            metadata = probe.metadata
-            messages: list[dict[str, Any]] = []
+            yield probe, 0, 0
+            return
+        window = max(1, min(MAX_MESSAGE_WINDOW, total // 2))
+        before_sequence = total
+        while True:
+            try:
+                document = self._get_document(
+                    conversation_id,
+                    user_id=user_id,
+                    include_messages=True,
+                    message_window=window,
+                    before_sequence=before_sequence,
+                )
+            except StorageError as exc:
+                if not _is_response_too_large(exc) or window == 1:
+                    raise
+                window //= 2
+                continue
+            if document is None:
+                return
+            snapshot = self._snapshot(document)
+            start = _message_page_start(
+                document, len(snapshot.messages), before_sequence)
+            yield snapshot, start, document["message_page"]["total_count"]
+            if start == 0:
+                return
+            before_sequence = start
+
+    def get_complete(
+        self,
+        conversation_id: str,
+        *,
+        user_id: int,
+    ) -> ConversationSnapshot | None:
+        """Read one whole transcript as one conversation revision.
+
+        One storage response carries the transcript when it fits. A transcript
+        above every single response (``is_resource_bound_refusal``) is read
+        back through ``_message_windows`` instead and stitched only when every
+        window reports the revision and message count of the first, whose end
+        is the transcript's end. Windows are separate reads, and a write
+        between them could otherwise combine two versions of the
+        conversation; that fails as a ``database_conflict`` the caller retries
+        as a whole. Any other failure keeps its original classification.
+        """
+        try:
+            return self.get(conversation_id, user_id=user_id)
+        except StorageError as exc:
+            if not _is_response_too_large(exc):
+                raise
+        metadata: dict[str, Any] | None = None
+        revision = total = None
+        windows: list[list[dict[str, Any]]] = []
+        for window, start, window_total in self._message_windows(
+                conversation_id, user_id=user_id):
+            if metadata is None:
+                metadata, revision, total = (
+                    window.metadata, window.metadata.get("rev"), window_total)
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise RuntimeError("conversation revision is malformed")
+                changed = start + len(window.messages) != total
+            else:
+                changed = (window.metadata.get("rev") != revision
+                           or window_total != total)
+            if changed:
+                raise StorageError(
+                    "database_conflict",
+                    "conversation changed during a windowed read",
+                    operation_id="conversation.get",
+                )
+            windows.append(window.messages)
+            if start == 0:
+                break
         else:
-            window = max(1, min(MAX_MESSAGE_WINDOW, total // 2))
-            before_sequence: int | None = total
-            metadata = None
-            messages = []
-            suffix: list[dict[str, Any]] = []
-            windows = 0
-            while True:
-                try:
-                    document = self._get_document(
-                        conversation_id,
-                        user_id=user_id,
-                        include_messages=True,
-                        message_window=window,
-                        before_sequence=before_sequence,
-                    )
-                except StorageError as exc:
-                    if not _is_response_too_large(exc) or window == 1:
-                        raise
-                    window //= 2
-                    continue
-                if document is None:
-                    return None
-                snapshot = self._snapshot(document)
-                window_messages = snapshot.messages
-                start = _message_page_start(
-                    document, len(window_messages), before_sequence)
-                windows += 1
-                if metadata is None:
-                    metadata = snapshot.metadata
-                boundary = next(
-                    (index for index in range(len(window_messages) - 1, -1, -1)
-                     if _timestamped_before(window_messages[index], since_ms)),
-                    None,
-                )
-                # Cut at the boundary inside the window too, so the suffix
-                # never depends on the window size that happened to fit.
-                suffix[:0] = (
-                    window_messages
-                    if boundary is None
-                    else window_messages[boundary + 1:]
-                )
-                if boundary is not None or start == 0:
-                    break
-                before_sequence = start
-            messages = suffix
+            return None
+        messages = [message for page in reversed(windows) for message in page]
+        logger.info(
+            "[Conversations] %s exceeds one storage response; read all %d "
+            "messages at revision %d in %d windows",
+            conversation_id, len(messages), revision, len(windows) + 1,
+        )
+        return ConversationSnapshot(metadata=metadata, messages=messages)
+
+    def _read_messages_since(
+        self,
+        conversation_id: str,
+        *,
+        user_id: int,
+        since_ms: int,
+        settings_keys: list[str] | tuple[str, ...] | None,
+    ) -> ConversationSnapshot | None:
+        """Read one oversized transcript back to a time bound.
+
+        Windows come newest-first from ``_message_windows``; reading stops at
+        the newest message timestamped before ``since_ms``.
+        """
+        metadata: dict[str, Any] | None = None
+        end = 0
+        suffix: list[dict[str, Any]] = []
+        windows = 0
+        for window, start, _total in self._message_windows(
+                conversation_id, user_id=user_id):
+            window_messages = window.messages
+            windows += 1
+            if metadata is None:
+                metadata = window.metadata
+                end = start + len(window_messages)
+            boundary = next(
+                (index for index in range(len(window_messages) - 1, -1, -1)
+                 if _timestamped_before(window_messages[index], since_ms)),
+                None,
+            )
+            # Cut at the boundary inside the window too, so the suffix
+            # never depends on the window size that happened to fit.
+            suffix[:0] = (
+                window_messages
+                if boundary is None
+                else window_messages[boundary + 1:]
+            )
+            if boundary is not None or start == 0:
+                break
+        else:
+            return None
+        messages = suffix
+        if end:
             logger.info(
                 "[Conversations] %s exceeds one storage response; read the last "
                 "%d of %s messages back to %d in %d windows",
@@ -732,7 +813,7 @@ class ConversationRepository:
             }
         return ConversationSnapshot(
             metadata=metadata, messages=messages,
-            message_start=total - len(messages),
+            message_start=end - len(messages),
         )
 
     def search_ids(

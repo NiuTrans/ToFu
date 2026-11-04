@@ -69,6 +69,29 @@ is not authorization. Restrictions remain pinned through the selected turn;
 provider-native multi-agent and programmatic execution stay disabled even when
 old turn/checkpoint latches requested them.
 
+Problem: Workers inherited the Coordinator role's narrowing (no
+`execute_program`, `programmaticCalling=off`, no Swarm/retained agents), so a
+delegated conversation had fewer capabilities than the same human's ordinary
+conversation. Decision (owner, 2026-11-04): a `project` Worker gets exactly the
+capability boundary of an ordinary conversation of that human, inside its
+isolated workspace. Request ingress keeps the human's submitted tool settings
+beside the role's (`_coordinatorSubmittedToolSettings`);
+`delegation.capture_worker_policy` grants those settings and the gateway's
+`execute_program`. Admission fences a Worker's `tools` to exactly that policy.
+`workerDeniedTools` keeps only the Coordinator/Router/Watchdog role tools and
+deferred wakes (timers, schedules, `await_device`, `create_conversation`,
+`integration_submit`), which would start work outside the grant and its Stop
+fence. Alternative rejected: a separate Worker toggle, which would reintroduce a
+second capability ceiling diverging from ordinary conversations.
+
+A Worker's sub-agents (`spawn_agents` children and their swarm parent proxies)
+carry no grant of their own. `admission.share_dispatch_root` gives each a
+process-local reference to the live Worker task; every admission and workspace
+resolution revalidates that root, so the children use the Worker's isolated
+workspace and stop with its Stop, revocation or settlement. Alternative
+rejected: copying the grant carrier into each child, which would let a child
+outlive or diverge from the Worker's authority.
+
 Problem: the per-call role refusal (`Coordinator policy unavailable`, fail
 closed) converted every lookup exception, so a project-dispatch task whose
 `_projectDispatchAdmission` carrier was removed received a refusal and kept
@@ -103,7 +126,7 @@ would duplicate admission, Stop, settlement and publication authority.
 
 ### Coordinator-started sidebar conversations (owner decision 2026-11-03)
 
-Problem: delegated Workers, watchers and unstarted shells crowded the owner’s ordinary conversation rows and date-group counts. Decision: each Coordinator owns one collapsed-by-default sidebar group directly beneath its own entry, outside the owner’s date groups. It contains every conversation created by `create_conversation`, `delegate_project_work` or `dispatch_project_assignment`, including empty shells, historical workers and terminal/cancelled work. A short localized header carries the total, aggregate running/unread state and the date groups' down chevron, turned to point right while collapsed; unread work uses the rows' review dot. Expanded compact rows show title, status and relative time, newest first. The body scrolls independently without a row cap, and expansion is remembered per Coordinator in browser storage. Keyboard activation, `aria-expanded`, visible focus and reduced motion are required.
+Problem: delegated Workers, watchers and unstarted shells crowded the owner’s ordinary conversation rows and date-group counts. Decision: each Coordinator owns one collapsed-by-default sidebar group directly beneath its own entry, outside the owner’s date groups. It contains every conversation created by `create_conversation`, `delegate_project_work` or `dispatch_project_assignment`, including empty shells, historical workers and terminal/cancelled work. A short localized header carries the total, the aggregate running count and the date groups' down chevron, turned to point right while collapsed. A reply awaiting review is marked only on its own row, visible once the group is expanded (owner decision 2026-11-04: a header dot repeated the rows' marks and made every collapsed group read as awaiting acceptance). Expanded compact rows show title, status and relative time, newest first. The body scrolls independently without a row cap, and expansion is remembered per Coordinator in browser storage. Keyboard activation, `aria-expanded`, visible focus and reduced motion are required.
 
 A known Coordinator mounts its group even when the initial catalog contains no local Worker; the paged inventory supplies cold history on demand. Only a member joining or leaving the local catalog invalidates that inventory: the inventory can only add members the catalog lacks, while revisions, counts and timestamps of known members already arrive through the catalog. Invalidating on every member revision was rejected because it re-scanned the owner catalog several times per second while Workers ran; members a read adopts re-baseline membership so they never trigger a second read. The existing presence refresh also refreshes it when the Coordinator is selected. Every list refresh reaches the group, so an expanded body is rebuilt only when its rendered rows, active row, status or relative time change; otherwise hover and focus would reset on each stream tick. Adopting each page refreshes the catalog projection before the group paints, so the expanded body contains its Workers rather than an empty shell. Opening a grouped Worker also refreshes the shared active-row projection: the ordinary flat-list fast path cannot find a row owned by the group. The current selection therefore survives subsequent catalog and stream updates without changing grouping policy. A group first placed beneath an interim history row moves beneath the Coordinator's card once the catalog names that Coordinator, so one Coordinator never shows two groups.
 
@@ -463,12 +486,42 @@ sessions and tells the human what matters.
   `project` hint. GET `/api/v4/project/coordination/progress?path=`
   (owner-scoped `conversations`, passive) returns `progressState`.
 - Browser. `frontend/src/features/coordinator-progress.ts` is the only thing
-  pinned atop the bound Coordinator chat: a collapsible card with the summary,
-  in-progress then upcoming tasks, finished ones folded, the update time and
-  one explicit "Manage work" button for the existing management dialog. No
-  session list, references, graph, usage or report banner remains there. The
-  sidebar entry shows the in-progress count (or "all done") with the summary as
-  its tooltip. A Worker chat keeps one "return to Coordinator" button.
+  pinned atop the bound Coordinator chat: a collapsible card that reads as a
+  todo list. Its head carries the title, the in-progress count and the update
+  time over the one-line summary. Each task is one line behind a status glyph
+  (a ring while pending, half filled in progress, a filled check when
+  completed, a filled cross when cancelled): in-progress work first, then the
+  Coordinator's order, finished tasks folded. Only an in-progress task shows
+  its note, cut to one line; every other note is its row's tooltip and stays
+  in the accessibility tree. The footer holds one explicit "Manage work"
+  button for the existing management dialog, led by a Project Router's Worker
+  model control ([ROUTER.md](ROUTER.md) R5) instead of a line of its own. The
+  card persists across repaints of the same Coordinator chat, so fold, scroll
+  and focus survive live board updates. No session list, references, graph,
+  usage or report banner remains there. The sidebar entry shows the
+  in-progress count (or "all done") with the summary as its tooltip. A Worker
+  chat keeps one "return to Coordinator" button.
+- Display translation. Problem: the board stayed in the Coordinator's working
+  language beside its auto-translated replies. Decision: while the human reads
+  the Coordinator chat auto-translated (the publishing turn's config, else the
+  conversation's stored settings; a project-dispatch continuation's config
+  pins translation off, so only the settings decide there), every
+  `update_task_progress` call, an unchanged one too so a failed translation
+  retries, schedules one optional job on the shared reconstructible
+  translation lane (`lib/conversations/coordinator_progress_translation.py`).
+  The job translates only the board texts that lack a translation in that
+  language through `lib/translate/display_texts.py`, which runs each text as a
+  segment of the settled-turn segment core (cache, protected spans, enrichment
+  and 429 budgets, polite contention), and merges them into the same head under
+  CAS as `progressTranslation`: reconstructible display data, never evidence.
+  A republished board keeps the translations of texts it still shows; a dropped
+  job (restart, refused admission, translator failure) leaves the board as
+  written until the next publish. The card shows covered texts translated,
+  with the shared "Original" toggle back to the board as written. Alternatives
+  rejected: having the Coordinator write in the reading language (the board
+  would leave its working language and turning translation off could not
+  restore it); translating in the browser or on the GET read (rendering and
+  reads are passive and start no work).
 - Questions are chat cards. Follow-ups are never board entries or report
   banners: the Coordinator asks with `ask_human`. `blocking=false` posts the
   card, whose question states the default the Coordinator works on meanwhile,
@@ -516,7 +569,8 @@ sensible default); deriving the board from `todo_write` (one in-progress item,
 per-turn scope and continuation nudges suit an agent's steps, not a human's
 tasks).
 
-Verification: `tests/project_mod/test_coordinator_progress.py`,
+Verification: `tests/project_mod/test_coordinator_progress.py` (board and
+translation merge), `tests/translate/test_display_texts.py`,
 `tests/project_mod/test_project_coordination.py` (role text and block budget),
 `tests/tasks_pkg/test_ask_human_nonblocking.py`,
 `tests/project_mod/test_coordinator_workers.py` (pending input),
@@ -901,6 +955,20 @@ receipts, unread pointers and the UI. The final `llm_sanitize` merge remains the
 last-resort guard and still warns for any other adjacent assistant producer.
 Verification: `tests/tasks_pkg/test_coordinator_report_model_view.py` (real
 report producer and Turn-native builder, cold and restored replay).
+
+Reading order. Problem: the same durable order (report after its still-running
+reply) rendered the live reply above a newer, settled report bubble, so every
+later tool row and steered message landed in the older bubble above the report.
+Decision: presentation (`presentation/view-model/report-placement.ts`) reads a
+`coordinator_report.*` Turn immediately before the reply whose execution window
+contains it (reply live, or report `createdAt` < reply attempt `settledAt`).
+The test uses only durable timestamps, so the order is identical while the
+reply runs and after it settles; durable lane order is unchanged. Reports never
+move above a human Turn or a queued reply. Alternatives rejected: pinning the
+live reply to the tail moves it back above reports at settlement; splitting the
+reply into before/after-report bubbles needs two view models per Turn identity
+across windowing, navigation and actions. Verification:
+`frontend/src/conversation/presentation/coordinator-report-placement.test.ts`.
 
 The sidebar's fixed Coordinator entry shows an unread dot and the latest title.
 Clicking it opens the ordinary conversation, where the report is a normal
@@ -1471,6 +1539,33 @@ evidence; appending a settled user Turn would fabricate human/model activity and
 leave the assignment unbound. Ordinary non-Worker completions retain their
 existing collective model wake, and restart-paused assignments continue through
 the same Continue path described above.
+
+Problem: a Worker turn that ran without its assignment binding (started by an
+older wake path, or by human input in the Worker conversation) leaves receipts
+with no binding. Their completions took the ordinary collective wake after
+cancellation, and each wake turn's own receipts were unbound again, so the Worker
+conversation kept working. Cancellation reached only the attempt named by the
+execution association, which can be long settled while such a turn runs.
+
+Decision: a Worker conversation (created with `_coordinatorSource`) is governed by
+its assignment. A background batch whose receipts carry no binding resolves the
+conversation's latest recipient admission through its canonical project
+(`recovery.worker_conversation_admission`) and follows the revoked-grant settlement
+above; a live grant keeps the existing wake. Revocation through
+`cancel_project_work` or the assignment revoke API stops the associated attempt and
+every other live attempt in the Worker conversation, with the same
+`dispatch_grant_revoked` cause and provenance. A Coordinator continuation grant
+names the Coordinator conversation as its recipient, so its turns are never swept.
+Human input in a cancelled Worker conversation still runs on the ordinary command
+path; its command results also settle as durable evidence instead of waking a
+model turn.
+
+Alternatives rejected: recording a durable conversation Stop for the Worker
+reports an authority withdrawal as a user Stop and still admits wakes requested
+after it; refusing every unbound automatic turn in Worker conversations would also
+block steering and human takeover of live Workers; rebinding an unbound wake into
+a trusted Continue fails on the stale association and would retroactively give
+that chain the assignment's authority.
 
 The existing command/start handshake owns execution, lane-idle admission and
 queued-human priority. Busy/superseded dispatch is deferred. After the existing

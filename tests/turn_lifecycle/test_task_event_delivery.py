@@ -75,6 +75,49 @@ def _discard(task):
     chat_task_runtime.discard(task['id'])
 
 
+@pytest.mark.parametrize('storage', ['tofudb'], indirect=True)
+def test_large_structural_frame_preserves_projection_event_and_settlement(
+        turn_service, storage):
+    """Checkpoint assembly may exceed the old 8 MiB patch-only quota."""
+    created, task = _task(turn_service, storage, 'large-structural-frame')
+    try:
+        task['content'] = 'x' * (9 * 1024 * 1024)
+        wire = {'type': 'messages_snapshot', 'kind': 'request', 'roundNum': 1,
+                'messages': [{'role': 'user', 'content': 'Complete request evidence'}],
+                'seq': 0}
+        assert turn_service.record_task_event(task, wire, task_event={
+            'task_id': task['id'], 'sequence': 0, 'event': wire,
+        }) == 'carried'
+        turn = turn_service.get_turn(task['convId'], task['_turnId'], user_id=1)
+        assert turn['projection']['content'] == task['content']
+        assert turn['projection']['segments'][-1]['text'] == task['content']
+        assert not task.get('_turnProjectionOversizeCount')
+        assert _stored_event(storage, task['id'], 0)['event']['type'] == wire['type']
+        canonical = storage.client.query('turn.events.list', {
+            'attempt_id': task['_attemptId'], 'user_id': 1, 'after': 0,
+            'limit': 100, 'projection_mode': 'patch',
+        })[-1]
+        assert canonical['payload']['event']['messages'] == wire['messages']
+        changes = storage.client.query('turn.sync.changes', {
+            'conversation_id': task['convId'], 'user_id': 1, 'after': 0, 'limit': 100,
+        })
+        assert changes['events'][-1]['type'] == 'attempt.event'
+        assert changes['events'][-1]['payload']['event'] == canonical
+
+        task['status'] = 'done'
+        task['finishReason'] = 'stop'
+        done = {'type': 'done', 'finishReason': 'stop', 'seq': 1}
+        assert turn_service.record_task_event(task, done, task_event={
+            'task_id': task['id'], 'sequence': 1, 'event': done,
+        }) == 'carried'
+        settled = turn_service.get_turn(task['convId'], task['_turnId'], user_id=1)
+        assert settled['status'] == 'completed'
+        assert settled['projection']['content'] == task['content']
+        assert _stored_event(storage, task['id'], 1)['event']['type'] == 'done'
+    finally:
+        _discard(task)
+
+
 def test_retained_storage_reader_follows_replacement_authority(
         turn_service, storage, tmp_path):
     """A late import must not retain the fixture's stopped supervisor."""

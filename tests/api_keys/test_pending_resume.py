@@ -9,6 +9,7 @@ turn status authority never moves here.
     python3 -m pytest tests/api_keys/test_pending_resume.py -q
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -23,8 +24,10 @@ from lib.tasks_pkg.manager import (  # noqa: E402
     read_pending_resume,
     record_boot_interrupted_conversations,
 )
+from tests.support.semantic_authorities import semantic_authority as semantic_authority  # noqa: E402
 
 
+pytest_plugins = ('tests.support.postgres_cluster',)
 pytestmark = pytest.mark.unit
 
 
@@ -121,60 +124,72 @@ async def _body(response_or_pair):
     return status, json.loads(raw)
 
 
-class _CatalogPage:
-    def __init__(self, items):
-        self.items = items
-        self.total_count = len(items)
-        self.has_more = False
+@pytest.mark.parametrize('semantic_authority', ['sqlite', 'native'], indirect=True)
+def test_get_route_titles_owned_conversations_without_reading_transcripts(
+        semantic_authority, monkeypatch):
+    import routes.conversations as route
+    from quart import g
+    from lib.api_keys import AuthContext
+    from lib.conversations.repository import ConversationRepository
+    from lib.turn_lifecycle import create_turn_pair
 
-
-def _catalog_row(conv_id, title, updated_at):
-    return {
-        "id": conv_id,
-        "title": title,
-        "msg_count": 3,
-        "created_at": 1,
-        "updated_at": updated_at,
-        "settings": {},
-        "rev": 1,
+    client, owner, engine = semantic_authority
+    monkeypatch.setattr('lib.storage.get_storage_client', client)
+    conversations = [('c-old', 'Older', owner), ('c-new', 'Newer', owner)]
+    if engine is None:
+        # A native authority serves exactly one owner and refuses another
+        # owner's rows outright; SQLite hosts several.
+        conversations.append(('c-foreign', 'Foreign', owner + 1))
+    for conv_id, title, user_id in conversations:
+        create_turn_pair(conv_id, command_id=f'create-{conv_id}',
+                         input_projection={'content': 'Interrupted work'},
+                         config={}, user_id=user_id,
+                         conversation_defaults={'allowCreate': True, 'title': title,
+                                                'settings': {}})
+    updated_at = {
+        conv_id: int(ConversationRepository().get(
+            conv_id, user_id=owner, include_messages=False).metadata['updated_at'])
+        for conv_id in ('c-old', 'c-new')
     }
+    reads = []
 
+    class RecordingReads:
+        def __init__(self, inner):
+            self._inner = inner
 
-def test_get_route_lists_owned_conversations_in_pending_order(monkeypatch):
+        def query(self, operation, payload, *args, **kwargs):
+            reads.append(dict(payload))
+            return self._inner.query(operation, payload, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr('routes.conversations.get_storage_client',
+                        lambda **kwargs: RecordingReads(client(**kwargs)))
+    record_boot_interrupted_conversations(
+        _result(['c-new', 'c-gone', 'c-foreign', 'c-old']))
+
     async def run():
-        import routes.conversations as route
-        from quart import g
-        from lib.api_keys import local_admin_context
-
-        record_boot_interrupted_conversations(
-            _result(["c-new", "c-gone", "c-old"]))
-        monkeypatch.setattr(
-            route, "list_conversation_metadata_page",
-            lambda *, user_id, limit, settings_keys, **kwargs: _CatalogPage([
-                _catalog_row("c-old", "Older", 10),
-                _catalog_row("c-new", "Newer", 20),
-            ]),
-        )
-
-        async def _no_document(conv_id, user_id, **kwargs):
-            return None
-
-        monkeypatch.setattr(route, "_get_document", _no_document)
-        app = _make_app()
-        async with app.test_request_context(
+        async with _make_app().test_request_context(
                 '/api/v1/conversations/pending-resume'):
-            g.auth_ctx = local_admin_context()
-            status, body = await _body(await route.list_pending_resume())
-        return status, body
+            g.auth_ctx = AuthContext(key_id='pending-resume-test',
+                                     name='pending-resume-test',
+                                     scopes=frozenset({'admin'}),
+                                     owner_user_id=owner)
+            return await _body(await route.list_pending_resume())
 
-    status, body = __import__('asyncio').run(run())
+    status, body = asyncio.run(run())
     assert status == 200
-    assert body["reason"] == "process_killed"
-    # pending order preserved; the conversation missing from the catalog page
-    # fell back to a (monkeypatched empty) per-id lookup and was dropped.
-    assert [item["id"] for item in body["conversations"]] == ["c-new", "c-old"]
-    assert [item["title"] for item in body["conversations"]] == [
-        "Newer", "Older"]
+    assert body['reason'] == 'process_killed'
+    # Pending order; missing ids and another owner's conversation are dropped.
+    assert body['conversations'] == [
+        {'id': 'c-new', 'title': 'Newer', 'updatedAt': updated_at['c-new']},
+        {'id': 'c-old', 'title': 'Older', 'updatedAt': updated_at['c-old']},
+    ]
+    # A title never needs the transcript, however long that grows.
+    assert reads
+    assert all(payload.get('include_messages', payload.get('derive_messages')) is False
+               for payload in reads)
 
 
 def test_get_route_empty_when_no_record():

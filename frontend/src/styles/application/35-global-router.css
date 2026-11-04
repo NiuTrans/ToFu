@@ -15,7 +15,6 @@
 .router-worker-model>summary:hover,.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
 .router-worker-model[aria-busy="true"]>summary{cursor:progress}
 .router-worker-model-field{max-width:min(100%,32em);padding-top:var(--space-2)}
-.presence-strip>.router-worker-model{margin-bottom:var(--space-2)}
 .router-instructions-status{margin:var(--space-1) 0 0}
 .router-instructions-status:empty{display:none}
 .router-instructions-list{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0 0;padding:0;list-style:none}

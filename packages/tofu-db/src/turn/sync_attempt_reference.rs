@@ -8,7 +8,6 @@
 use super::{attempt_event_key, attempt_sync_reference_key, conversation_sync_event_key, invalid_data,
     AuthorityDatabase, AuthorityTransaction, EntityKey,
     ATTEMPT_EVENT_DOCUMENT_IDENTITY, SYNC_DOCUMENT_IDENTITY};
-use crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES;
 use serde_json::{Map, Value};
 use std::io;
 
@@ -33,22 +32,12 @@ fn sequence(event: &Value) -> io::Result<u64> {
         .ok_or_else(|| invalid_data("attempt sync reference sequence is malformed"))
 }
 
-pub(super) fn encode(envelope: &Value, canonical_event_bytes: usize) -> io::Result<Vec<u8>> {
+pub(super) fn encode(envelope: &Value) -> io::Result<Vec<u8>> {
     sequence(envelope)?;
-    let raw = serde_json::to_vec(envelope)
-        .map_err(|_| invalid_data("attempt sync reference cannot be encoded"))?;
-    let placeholder = serde_json::to_vec(&envelope["payload"]["event"])
-        .map_err(|_| invalid_data("attempt sync reference source cannot be encoded"))?;
-    let expanded_bytes = raw.len().checked_sub(placeholder.len())
-        .and_then(|size| size.checked_add(canonical_event_bytes))
-        .ok_or_else(|| invalid_data("attempt sync reference size overflows"))?;
-    // Keep the former full-envelope put admission and its classified error.
-    // A smaller physical locator must not admit an unreadable larger event.
-    if expanded_bytes > MAX_LEGACY_DOCUMENT_BYTES {
-        return Err(crate::semantic_executor::validation_fence(
-            "attempt event exceeds the conversation-sync document bound"));
-    }
-    Ok(raw)
+    // Live replay uses storage.v2 response chunks. Its complete canonical
+    // event never inherits an unrelated legacy document byte quota.
+    serde_json::to_vec(envelope)
+        .map_err(|_| invalid_data("attempt sync reference cannot be encoded"))
 }
 
 /// Expand only after validating namespace, physical/logical identity and source

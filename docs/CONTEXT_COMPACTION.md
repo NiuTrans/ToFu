@@ -252,7 +252,9 @@ Flow and Goal phases settle as later visible Turns while settlement witnesses on
 the root Turn, so a root-frontier checkpoint would replay every phase again as the
 uncovered suffix. Routers never run visible multi-Turn flows: dispatch grants
 force `autopilot`/`activeFlow` off, and swarm auto-continue Turns already publish.
-Specs: `tests/tasks_pkg/test_steered_checkpoint_publication.py`.
+The compaction resume witness (`compaction_resume_witness`) applies the same
+consumed/unverified rule. Specs: `tests/tasks_pkg/test_steered_checkpoint_publication.py`,
+`tests/compaction/test_continue_working_context.py`.
 
 **Policy drift — Problem:** any witnessed policy drift discarded the checkpoint and
 rebuilt every Turn, and even a route switch rebuilt whenever the checkpoint held
@@ -393,6 +395,48 @@ conversation settle state. Those entries share the existing one-hour TTL and
 Missing conversation identity keeps the legacy no-affinity path; an invalid
 explicit owner fails closed.
 ### Durable adoption and Continue
+
+**Joint L1/L2 projection.** Problem: ordinary L1 protects already-sent cache
+bytes, but L2 planned its replacement from that same bulky projection. Decision:
+L2 runs the existing deterministic L1 transforms on a detached candidate with
+the cache fence lifted, then selects whole semantic source units from it. The
+newest unread tool batch, active skills, user intent and provider-required
+reasoning keep their existing protections. Unchanged messages retain their
+identity. The summary receives the original observations for the selected
+units, so preprocessing cannot replace error or mutation evidence with a short
+preview. The archive and coverage likewise describe the original request.
+Preparation emits no L1 events, writes no artifacts and changes no task state;
+only the existing successful L2 adoption publishes the combined result. Empty,
+failed, cancelled, over-budget and uneconomic candidates preserve the original.
+Explicit L1 ablations remain respected. There is no additional model call,
+trigger, hot-tail knob or retry budget.
+
+Scoped project guidance is retained according to the same remaining tool targets
+used by its restoration owner. Root rules and guidance for retained work remain
+verbatim; verified inactive directory sections leave the candidate, including
+mixed carriers. Unknown provenance stays intact. Restoration and economic
+measurement use that same scope projection, so inactive rules are neither
+re-injected nor charged as an imaginary restore reserve. The next access
+reacquires them through ordinary project guidance. Alternatives rejected:
+eagerly mutating the live prefix before summary success; summarizing L1 previews
+instead of original execution evidence; retaining every historically acquired
+rule forever; and changing cache thresholds to compensate for these boundaries.
+Specifications: `tests/compaction/test_compaction_joint_projection.py` and the
+project-guidance delivery/retirement tests.
+
+Frozen-request measurement (47 messages, original 109,921 local estimated
+tokens; archived summary reused, acquired guidance scopes reconstructed from
+the archive): the original accepted projection is reproduced at 74,520 tokens.
+Scope retirement reduces it to 29,372; scoped-rule material falls from 50,987
+to 5,839. L1 alone leaves this particular text-heavy fixture unchanged, and its
+formatted summary history stays at 6,603 locally counted tokens. Local
+projection medians were about 10.5 ms before and 16 ms after; provider latency,
+storage and final request recomposition are excluded. These are message-view
+measurements, not the UI's calibrated full-request count or a measured reduction
+of the 42-second provider call. In the synthetic 18-image-round regression,
+joint planning reduces selected summary source messages from 28 to 20, formatted
+history tokens from 1,078 to 770, and the retained projection estimate from 3,479
+to 2,105 while preserving the newest unread batch and original summary evidence.
 
 **Local L2 ownership.** Problem: one entrypoint mixed source selection, economic
 eligibility, summary fidelity and final window checks with durable adoption.
@@ -770,10 +814,17 @@ Once a summary has been generated, that cost is sunk and adoption compares only
 the future prefix rewrite with future input savings. Archive and UI token
 counters are explicitly heuristic (`tokenCountKind=estimated`), not
 provider-billed usage.
-`tokensBefore`/`tokensAfter` (including `.compaction-token-stage.is-after`)
-count the complete message lists at the saved compaction boundary: policies,
-history carriers, preserved execution, complete handoff and live input. They are
-not summary-token counts, nor final wire totals with schema/protocol overhead.
+Archive and receipt `tokensBefore`/`tokensAfter` count the complete message
+lists at the saved compaction boundary: policies, history carriers, preserved
+execution, complete handoff and live input. They are not summary-token counts.
+The Turn row (`.compaction-token-stage.is-after` on the card) starts from them
+and then settles on `compaction_request_size`: the gate counter over the complete
+request before compaction, and over the rebuilt request after
+`recompose_context_after_compaction`, restored managed context and tool schemas
+included (`docs/contracts/EVENTS.md`, activity timeline projection). The
+receipt's own list omitted both, so conversation `mw10w4j3ghfsbk` showed 82%
+where the next request was billed 49% smaller. Specs:
+`tests/compaction/test_compaction_request_size.py`.
 Compaction counts/reduction are archive/event metadata only; newly rendered
 model summaries contain no self-referential token-statistics paragraph.
 Economic preflight and adoption reserve the estimated bytes-as-tokens of
@@ -810,6 +861,11 @@ Summarization uses a separately prepared, bounded request: the
 main context's threshold does not imply that the summarizer received that entire
 context or reached its own route limit. UI specs: `activity-block.test.ts` and
 `tests/visual/test_visual_compaction_trigger_wording.py`.
+A compaction that a resumed attempt did not reuse keeps its row, duration,
+token flow and snapshot, but reads `superseded` ("Context compaction discarded
+on resume" / "上下文已收束 · 续跑时作废") with muted, struck-through counts and
+its cause in the visible detail; the resume report that decides this is
+described in [contracts/EVENTS.md](contracts/EVENTS.md).
 The local token authority reuses exact-ish counts above 4 KiB, or above 512 characters when a caller proves reuse. Full repeated requests batch all short text plus unique cold misses once, while stable large-prefix digest hits skip BPE work. Encoding/length/SHA-256 keys retain no prompt text; capacity is launch-probed with a 4,096-entry ceiling. General short text bypasses hashing; changed content or encoding is recounted. Provider-reported per-conversation anchors use a separate launch-probed LRU (128 fallback, 4,096 distributed, 8,192 hard ceiling): TTL/capacity/pressure eviction falls through to the next counter, retained fields are bounded, and expiration plus replacement are atomic.
 
 Child invocations use `compaction_owner_key(task)` for provider-usage cache writes and native-compaction invalidation; parent `convId` is authorization lineage, never the child's cache key. The common settlement helper folds paid summary calls into `usage` and `apiRounds` before child/root terminal branching (and is shared by failure/cancellation). Drained costs are retained on the task until projection succeeds, so a cleanup fault cannot silently discard them. Child teardown independently releases token-cache and summary-cooldown entries, including after `KeyboardInterrupt`, without clearing parent or sibling state. Completed children retain no global usage/cache/cooldown scope; durable archive retention remains the storage owner's separate lifecycle. Specs: `tests/tasks_pkg/test_child_compaction_lifecycle.py`.

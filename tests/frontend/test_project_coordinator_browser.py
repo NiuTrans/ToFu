@@ -99,10 +99,33 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     assert reports.read()['unread'] is False and reports.read()['latest']['turnId'] == first_report['turnId']
     expect(board.locator('.coordinator-progress-summary')).to_have_text(
         'The folder dialog fix is verified; homestay research is underway.')
-    assert board.locator('.coordinator-progress-body > .coordinator-progress-tasks > li').evaluate_all(
-        '(rows) => rows.map((row) => [row.dataset.status, row.querySelector("strong").textContent])') == [
+    rows = board.locator('.coordinator-progress-content > .coordinator-progress-tasks > li')
+    assert rows.evaluate_all(
+        '(rows) => rows.map((row) => [row.dataset.status, row.querySelector(".coordinator-progress-task-title").textContent])') == [
         ['in_progress', 'Research New Year homestays in Tianyu Creek'], ['pending', 'Summarize the WeChat article']]
     expect(board.locator('.coordinator-progress-finished > summary')).to_have_text('Finished: 1')
+    # The Worker model is a compact footer control beside Manage work, never a line of its own.
+    expect(board.locator('.coordinator-progress-actions > .router-worker-model')).to_have_count(1)
+    assert page.locator('#presenceStrip > .router-worker-model').count() == 0
+    # The translation lane finishes after the board is on screen; its project hint repaints in place.
+    original = board.get_by_role('button', name='Original', exact=True)
+    expect(original).to_be_hidden()
+    assert CoordinatorTaskProgress(1, roots[0]).attach_translation(scope, 'Chinese', {
+        'The folder dialog fix is verified; homestay research is underway.': '文件夹对话框的修复已验证，民宿调研正在进行。',
+        'Research New Year homestays in Tianyu Creek': '调研天屿溪的新年民宿',
+    })
+    expect(board.locator('.coordinator-progress-summary')).to_have_text('文件夹对话框的修复已验证，民宿调研正在进行。')
+    expect(rows.first.locator('.coordinator-progress-task-title')).to_have_text('调研天屿溪的新年民宿')
+    # A text without a translation is shown as written.
+    expect(rows.nth(1).locator('.coordinator-progress-task-title')).to_have_text('Summarize the WeChat article')
+    expect(original).to_have_attribute('aria-pressed', 'false')
+    original.click()
+    expect(board.locator('.coordinator-progress-summary')).to_have_text(
+        'The folder dialog fix is verified; homestay research is underway.')
+    expect(original).to_have_attribute('aria-pressed', 'true')
+    expect(original).to_be_focused()
+    original.click()
+    expect(rows.first.locator('.coordinator-progress-task-title')).to_have_text('调研天屿溪的新年民宿')
     # Session-free: no sessions, references, graph, usage or report banner in the chat.
     strip = page.locator('#presenceStrip')
     for retired in ['.coordination-work-row', '.coordination-task-graph', '.coordination-reference',

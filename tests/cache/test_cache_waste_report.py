@@ -207,6 +207,31 @@ class TestBucketNamesComeFromProduction:
         assert rep['rows'][0]['is_waste'] is True
 
 
+class TestUncachedRoundsAreCounted:
+    """Rounds that wrote nothing never reach the write-waste rows, so a client
+    that stops sending cache_control markers must still show up here."""
+
+    def test_uncached_rounds_are_counted_by_the_production_name(self, capsys):
+        from lib.tasks_pkg.cache_tracking._policy import BUCKET_UNCACHED
+        rep = cwr.build_report(
+            [_rec(BUCKET_UNCACHED, call=4, gap=20.0, write=0),
+             _rec(BUCKET_UNCACHED, call=5, gap=20.0, write=0),
+             _rec('no_break', call=6, gap=20.0, write=500, read=90_000)],
+            min_write=20000, w_rate=0.001, r_rate=0.0001)
+        assert rep['uncached_rounds'] == 2
+        assert rep['zero_readback_rounds'] == 0
+        cwr.print_report(rep)
+        assert 'uncached rounds' in capsys.readouterr().out
+
+    def test_no_uncached_line_without_uncached_rounds(self, capsys):
+        rep = cwr.build_report(
+            [_rec('no_break', call=6, gap=20.0, write=500, read=90_000)],
+            min_write=20000, w_rate=0.001, r_rate=0.0001)
+        assert rep['uncached_rounds'] == 0
+        cwr.print_report(rep)
+        assert 'uncached rounds' not in capsys.readouterr().out
+
+
 class TestMinWriteFilter:
     def test_small_writes_are_not_counted(self):
         rep = cwr.build_report(

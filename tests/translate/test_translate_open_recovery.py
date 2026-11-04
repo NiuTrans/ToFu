@@ -155,13 +155,13 @@ def test_sweep_never_respawns_a_turn_that_is_already_translating(monkeypatch):
         skip_policy, 'should_skip_automatic_translation',
         lambda *a, **k: False)
     monkeypatch.setattr(
-        lifecycle, 'list_turns',
-        lambda conv, user_id=None, light=False: {'turns': [
+        lifecycle, 'iter_turns_newest_first',
+        lambda conv, user_id=None, light=False: iter([
             {'turnId': 'live', 'status': 'completed',
              'projection': {'content': 'hello world'}},
             {'turnId': 'missing', 'status': 'completed',
              'projection': {'content': 'hello world'}},
-        ]})
+        ]))
     monkeypatch.setattr(
         terminal, '_active_whole_turn_keys',
         lambda: {('conv', 'live')})
@@ -199,24 +199,33 @@ def test_light_turn_read_keeps_the_translation_verdict(monkeypatch):
 
     # The real light read runs: monkeypatch only the semantic-storage client,
     # so the projection trimming under test is the shipped code path.
+    def _done_turn():
+        return {
+            'turnId': 'done', 'conversationId': 'conv',
+            'laneId': 'main', 'ordinal': 0, 'actor': 'assistant',
+            'kind': 'reply', 'status': 'completed',
+            'projection': {
+                'content': 'hello world',
+                'translatedContent': '\u4f60\u597d\u4e16\u754c',
+                'translation': {'status': 'completed'},
+                '_translateDone': True,
+                # Heavy sidecars the light shape must still drop.
+                'toolRounds': [{'huge': True}],
+            },
+            'projectionRevision': 2, 'settlement': {},
+            'createdAt': 1, 'updatedAt': 2,
+        }
+
+    operations = []
+
     class _Client:
         def query(self, operation, payload):
+            operations.append(operation)
             if operation == 'turn.list':
-                return [{
-                    'turnId': 'done', 'conversationId': 'conv',
-                    'laneId': 'main', 'ordinal': 0, 'actor': 'assistant',
-                    'kind': 'reply', 'status': 'completed',
-                    'projection': {
-                        'content': 'hello world',
-                        'translatedContent': '\u4f60\u597d\u4e16\u754c',
-                        'translation': {'status': 'completed'},
-                        '_translateDone': True,
-                        # Heavy sidecars the light shape must still drop.
-                        'toolRounds': [{'huge': True}],
-                    },
-                    'projectionRevision': 2, 'settlement': {},
-                    'createdAt': 1, 'updatedAt': 2,
-                }]
+                return [_done_turn()]
+            if operation == 'turn.sync.page':
+                return {'turns': [_done_turn()], 'attempts': [],
+                        'hasMore': False, 'syncSequence': 3}
             if operation == 'turn.revision':
                 return 3
             if operation == 'conversation.get':
@@ -244,6 +253,8 @@ def test_light_turn_read_keeps_the_translation_verdict(monkeypatch):
         config={'autoTranslate': True, 'uiLang': 'zh'})
 
     assert count == 0
+    # The sweep reached the turn through its own paged light read.
+    assert 'turn.sync.page' in operations
 
 
 def test_spawn_refuses_a_duplicate_live_translation(monkeypatch):

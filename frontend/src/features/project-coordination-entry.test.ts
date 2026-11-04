@@ -352,7 +352,7 @@ it.each([
     // The Watchdog authors no task board, so its conversation shows none and never reads one.
     expect(!!document.querySelector('#presenceStrip .coordinator-progress')).toBe(board);
     expect(reads.coordinatorProgress.mock.calls.length > 0).toBe(board);
-    const control = document.querySelector<HTMLElement>('#presenceStrip > .router-worker-model');
+    const control = document.querySelector<HTMLElement>('#presenceStrip .coordinator-progress-actions > .router-worker-model');
     if (!shown) {
       expect(control).toBeNull();
       expect(routerWorkerModel).not.toHaveBeenCalled();
@@ -360,8 +360,9 @@ it.each([
     }
     expect(routerWorkerModel).toHaveBeenCalledWith('/project', expect.any(AbortSignal));
     expect(control!.querySelector('select')!.value).toBe('strong-model');
-    // The control sits on the Coordinator surface, above the task board.
-    expect(control!.nextElementSibling?.classList.contains('coordinator-progress')).toBe(true);
+    // The control leads the task board's commands instead of taking a line of its own above the board.
+    expect(control!.parentElement?.firstElementChild).toBe(control);
+    expect(document.querySelector('#presenceStrip > .router-worker-model')).toBeNull();
     // A repaint for new project facts keeps the same attached control and its one read.
     reads.coordinatorProgress.mockResolvedValue({ ...facts.coordinatorProgress, board: {
       ...facts.coordinatorProgress.board, revision: 2, summary: 'Released; writing the notes.' } });
@@ -369,7 +370,7 @@ it.each([
     await vi.waitFor(() => expect(document.querySelector('#presenceStrip .coordinator-progress-summary')?.textContent)
       .toBe('Released; writing the notes.'));
     await nextTask();
-    expect(document.querySelector('#presenceStrip > .router-worker-model')).toBe(control);
+    expect(document.querySelector('#presenceStrip .coordinator-progress-actions > .router-worker-model')).toBe(control);
     expect(control!.isConnected).toBe(true);
     expect(routerWorkerModel).toHaveBeenCalledTimes(1);
   } finally { window.dispatchEvent(new Event('pagehide')); info.mockRestore(); }

@@ -8,6 +8,12 @@ replaced binding starts without a board. The board is model-authored by design
 human, not evidence, and it grants no authority. Questions for the human are
 ask_human cards in the conversation, never board entries. No model, task,
 worker or polling is started here.
+
+Display translation: the head may also carry translations of the board's own
+texts (``board_texts``) into the language the human reads the Coordinator in.
+They are reconstructible display data, derived by
+``coordinator_progress_translation`` and merged here by ``untranslated_texts``
+and ``attach_translation``; a stored translation always has at least one entry.
 """
 from __future__ import annotations
 
@@ -25,6 +31,8 @@ from lib.identity import require_user_id
 from lib.storage.errors import StorageError
 
 POLICY = CONTRACT['taskProgress']
+_TRANSLATION_MAX_CHARS = (CONTRACT['$defs']['progressTranslation']['properties']['texts']
+                          ['items']['properties']['text']['maxLength'])
 
 
 @lru_cache(maxsize=8)
@@ -42,6 +50,31 @@ def validate_progress(value, definition):
     # Character limits alone must not admit invalid Unicode transport strings.
     json.dumps(value, ensure_ascii=False).encode('utf-8')
     return value
+
+
+def board_texts(board):
+    """The board's own texts in order, each once: the summary, then each task's title and note."""
+    texts = [board['summary']]
+    for task in board['tasks']:
+        texts.append(task['title'])
+        if 'progress' in task:
+            texts.append(task['progress'])
+    return list(dict.fromkeys(texts))
+
+
+def _stored_translations(value, target):
+    """``{source: text}`` of a head value's translation when it is in ``target``."""
+    stored = value.get('translation')
+    if not stored or stored['target'] != target:
+        return {}
+    return {entry['source']: entry['text'] for entry in stored['texts']}
+
+
+def _translation(target, translations, board):
+    """``translations`` of ``board``'s texts in board order; None when there is none."""
+    texts = [{'source': text, 'text': translations[text]}
+             for text in board_texts(board) if text in translations]
+    return {'target': target, 'texts': texts} if texts else None
 
 
 def _head_key(owner, project):
@@ -86,8 +119,14 @@ class CoordinatorTaskProgress:
             raise StorageError('database_integrity', 'Invalid Coordinator task board record') from exc
         return row
 
-    def publish(self, scope, request):
-        """Replace the board of exactly ``scope``'s binding; unchanged content is a no-op."""
+    def publish(self, scope, request, *, translation_target=None):
+        """Replace the board of exactly ``scope``'s binding; unchanged content is a no-op.
+
+        ``translation_target`` is the language the human reads this Coordinator
+        in, None without auto-translate. A changed board keeps the stored
+        translations of the texts it still shows when they are in that language,
+        so unchanged strings never flash back to the written language.
+        """
         validate_progress(scope, 'reportScope')
         validate_progress(request, 'progressRequest')
         for _ in range(POLICY['casAttempts']):
@@ -104,7 +143,12 @@ class CoordinatorTaskProgress:
             board = {'revision': previous['revision'] + 1 if previous else 1,
                      'updatedAt': int(self.clock() * 1000),
                      'summary': request['summary'], 'tasks': deepcopy(request['tasks'])}
-            head = validate_progress({'scope': scope, 'board': board}, 'progressHead')
+            head = {'scope': scope, 'board': board}
+            kept = (_translation(translation_target, _stored_translations(original, translation_target), board)
+                    if previous else None)
+            if kept:
+                head['translation'] = kept
+            head = validate_progress(head, 'progressHead')
             try:
                 self.client(write=True).command('record.put', {
                     'namespace': POLICY['namespace'], 'key': self.key, 'value': head,
@@ -119,6 +163,53 @@ class CoordinatorTaskProgress:
             return {'board': deepcopy(board), 'changed': True}
         raise StorageError('database_conflict', 'Task board changed concurrently; send the complete board again')
 
+    def untranslated_texts(self, scope, target):
+        """Texts of exactly ``scope``'s board without a ``target`` translation, in one storage read."""
+        row = self._head()
+        if row is None or row['value']['scope'] != scope:
+            return []
+        known = _stored_translations(row['value'], target)
+        return [text for text in board_texts(row['value']['board']) if text not in known]
+
+    def attach_translation(self, scope, target, texts):
+        """Merge ``{board text: translation}`` into exactly ``scope``'s current board.
+
+        Returns False without writing when the head belongs to another binding or
+        nothing would change. Another ``target`` replaces the stored translations;
+        a text the board no longer shows is dropped. Whitespace runs collapse to
+        one space; empty or over-long translations are skipped.
+        """
+        for _ in range(POLICY['casAttempts']):
+            row = self._head()
+            if row is None or row['value']['scope'] != scope:
+                return False
+            board = row['value']['board']
+            merged = _stored_translations(row['value'], target)
+            for source, text in texts.items():
+                normalized = ' '.join(text.split())
+                if normalized and len(normalized) <= _TRANSLATION_MAX_CHARS:
+                    merged[source] = normalized
+            translation = _translation(target, merged, board)
+            if translation == row['value'].get('translation'):
+                return False
+            head = {'scope': scope, 'board': board}
+            if translation:
+                head['translation'] = translation
+            validate_progress(head, 'progressHead')
+            try:
+                self.client(write=True).command('record.put', {
+                    'namespace': POLICY['namespace'], 'key': self.key, 'value': head,
+                    'expected_version': row['version'],
+                }, 'coordinator-progress-translation-cas:' + uuid.uuid4().hex)
+            except StorageError as exc:
+                if exc.code != 'database_conflict' and not exc.retryable:
+                    raise
+                # A board replaced meanwhile keeps only translations of texts it still shows.
+                continue
+            self._hint()
+            return True
+        raise StorageError('database_conflict', 'Task board changed concurrently; translation not attached')
+
     def read(self):
         scope, binding = self._scope()
         result = {'projectPath': self.project, 'conversationId': binding['conversationId'],
@@ -127,6 +218,8 @@ class CoordinatorTaskProgress:
             row = self._head()
             if row and row['value']['scope'] == scope:
                 result['board'] = deepcopy(row['value']['board'])
+                if 'translation' in row['value']:
+                    result['translation'] = deepcopy(row['value']['translation'])
         return validate_progress(result, 'progressState')
 
     def _hint(self):

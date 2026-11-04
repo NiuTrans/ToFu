@@ -44,8 +44,8 @@ def _policy(store, thread, policy):
 
 
 def _enqueue(store, thread, text, key=None, **kwargs):
-    return outbox.enqueue(OWNER, thread, text, idempotency_key=key or text, origin=ORIGIN,
-                          store=store, **kwargs)
+    return outbox.enqueue(OWNER, thread, text, idempotency_key=key or text,
+                          origin=kwargs.pop('origin', ORIGIN), store=store, **kwargs)
 
 
 def test_policy_is_decided_once_at_enqueue(channel, records):
@@ -177,6 +177,74 @@ def test_echo_of_an_in_flight_item_confirms_it(channel, router, dispatch, mailbo
     assert ingest(OWNER, echo, store=channel).outcome == 'echo'
     assert channel.outbox_item(item.id)[0].state == 'sent'
     assert dispatch.calls == []
+
+
+def test_router_text_is_translated_in_queue_order_and_saved_before_send(channel, monkeypatch):
+    import json
+    class Snapshot:
+        metadata = {'settings': {'uiLang': 'zh'}}
+    monkeypatch.setattr('lib.conversations.repository.ConversationRepository.get', lambda *a, **k: Snapshot())
+    calls = []
+    def translate(texts, target, *, log_tag, abort_check=None):
+        [text] = list(texts)
+        calls.append(text)
+        return {text: {'first': '第一条', 'second': '第二条'}.get(text, text)}
+    monkeypatch.setattr('lib.translate.display_texts.translate_display_texts', translate)
+    _enqueue(channel, COMMAND, 'first', key='router-1',
+             origin={'kind': 'router_content', 'conversationId': ROUTER, 'turnId': 'out-1'})
+    _enqueue(channel, COMMAND, 'second', key='router-2',
+             origin={'kind': 'router_reply', 'conversationId': ROUTER, 'turnId': 'out-1'})
+    sender = Sender()
+    assert outbox.execute(OWNER, sender, channel='dx', store=channel) == 2
+    assert calls == ['first', 'second']
+    assert [text for _, text, _, _ in sender.sent] == ['第一条', '第二条']
+    from lib.channels.store import ChannelStore
+    first_id = ChannelStore.outbox_item_id(OWNER, COMMAND, 'router-1')
+    assert channel.outbox_item(first_id)[0].text == '第一条'
+
+
+def test_router_translation_failure_sends_the_original(channel, monkeypatch):
+    class Snapshot:
+        metadata = {'settings': {'uiLang': 'zh'}}
+    monkeypatch.setattr('lib.conversations.repository.ConversationRepository.get', lambda *a, **k: Snapshot())
+    monkeypatch.setattr('lib.translate.display_texts.translate_display_texts',
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('translator unavailable')))
+    item = _enqueue(channel, COMMAND, 'English progress', key='router-failed',
+                    origin={'kind': 'router_progress', 'conversationId': ROUTER, 'turnId': 'out-1'})
+    sender = Sender()
+    assert outbox.execute(OWNER, sender, channel='dx', store=channel) == 1
+    assert sender.sent[0][1] == 'English progress'
+    assert channel.outbox_item(item.id)[0].state == 'sent'
+
+
+def test_translated_unknown_send_retries_the_same_durable_text(channel, monkeypatch):
+    class Snapshot:
+        metadata = {'settings': {'uiLang': 'zh'}}
+    monkeypatch.setattr('lib.conversations.repository.ConversationRepository.get', lambda *a, **k: Snapshot())
+    calls = []
+    def translate(texts, target, *, log_tag, abort_check=None):
+        calls.append(list(texts))
+        return {'English answer': '中文回答'}
+    monkeypatch.setattr('lib.translate.display_texts.translate_display_texts', translate)
+    item = _enqueue(channel, COMMAND, 'English answer', key='router-unknown',
+                    origin={'kind': 'router_reply', 'conversationId': ROUTER, 'turnId': 'out-1'})
+    sender = Sender()
+    sender.results['中文回答'] = {'ok': False, 'error': {'code': 'ack_timeout'}}
+    outbox.execute(OWNER, sender, channel='dx', store=channel)
+    sender.results.clear()
+    outbox.execute(OWNER, sender, channel='dx', store=channel)
+    assert [text for _, text, _, _ in sender.sent] == ['中文回答', '中文回答']
+    assert calls == [['English answer']]
+    assert channel.outbox_item(item.id)[0].state == 'sent'
+
+
+def test_manual_channel_send_keeps_its_text(channel, monkeypatch):
+    monkeypatch.setattr('lib.translate.display_texts.translate_display_texts',
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not translate tool text')))
+    _enqueue(channel, COMMAND, 'manual English')
+    sender = Sender()
+    outbox.execute(OWNER, sender, channel='dx', store=channel)
+    assert sender.sent[0][1] == 'manual English'
 
 
 def test_reply_to_must_be_an_event_of_the_same_thread(channel):

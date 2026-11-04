@@ -36,7 +36,7 @@ export function activityEntryWithTiming<T extends TurnActivityEntry>(
   entry: T, trace: TurnTimingTrace | undefined,
 ): T {
   if (entry.reasonCode !== 'context_compaction'
-      || !['succeeded', 'failed'].includes(entry.status)
+      || !['succeeded', 'failed', 'superseded'].includes(entry.status)
       || !Number.isFinite(entry.startedAt) || !Number.isFinite(entry.endedAt)) return entry;
   const spans = trace?.spans;
   if (!Array.isArray(spans) || spans.length > 2048) return entry;

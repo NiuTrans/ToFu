@@ -14,8 +14,9 @@ import re
 import time
 from typing import Any
 
-from lib.cost import normalize_usage, observed_cache_read
+from lib.cost import normalize_usage, observed_cache_read, split_input_tokens
 from lib.log import get_logger
+from lib.model_info import is_claude
 from lib.tasks_pkg.cache_tracking._state import (
     CacheState,
     _cache_lock,
@@ -52,10 +53,12 @@ from lib.tasks_pkg.cache_tracking._policy import (
     BUCKET_BODY_CHANGE as BUCKET_BODY_CHANGE,
     BUCKET_NO_BREAK as BUCKET_NO_BREAK,
     BUCKET_INDETERMINATE as BUCKET_INDETERMINATE,
+    BUCKET_UNCACHED as BUCKET_UNCACHED,
     BUCKET_OTHER as BUCKET_OTHER,
     _classify_break as _classify_break,
     _resolve_break_cause as _resolve_break_cause,
     classify_verdict as classify_verdict,
+    uncached_round,
 )
 from lib.tasks_pkg.cache_tracking._wire import (
     _wire_evidence_from_usage, _detect_namespace_switch,
@@ -558,6 +561,86 @@ def _report_indeterminate_round(conv_id, prev, *, cache_write, elapsed,
             'cache.')}
 
 
+def _report_uncached_round(conv_id, prev, *, prompt_tokens, markers) -> dict:
+    """Log a cacheable Claude round with no cache activity and return its
+    ``uncached`` ledger record, naming which side the wire markers implicate."""
+    count = markers.get('count') if isinstance(markers, dict) else None
+    if count == 0:
+        evidence = ('no cache_control marker reached the wire, so the client '
+                    'never asked for caching (a client-side breakpoint '
+                    'regression)')
+    elif isinstance(count, int) and count > 0:
+        evidence = (f'{count} cache_control marker(s) were on the wire, so the '
+                    'gateway dropped them, does not cache this route, or does '
+                    'not report cache usage')
+    else:
+        evidence = ('wire markers were not captured, so the client and '
+                    'provider sides cannot be told apart')
+    logger.warning(
+        '[CacheTrack] conv=%s call=%d UNCACHED: input=%d cache_read=0 '
+        'cache_write=0 — %s. Counted as uncached, NOT as no_break.',
+        conv_id[:8], prev.call_count, prompt_tokens, evidence)
+    return {'uncached': (
+        'the provider reported no cache read and no cache write on a '
+        f'cacheable prompt ({prompt_tokens} input tokens), so the whole prompt '
+        f'was billed at the uncached input rate: {evidence}.')}
+
+
+def _unconfirmed_round_record(conv_id, prev, *, model, usage, cache_read,
+                              cache_write, elapsed, was_compaction,
+                              advertised_rewrite, expected_rewrite_index,
+                              markers) -> dict | None:
+    """Return the ledger record for a round with no confirmed break, or None
+    when it is a genuine ``no_break``; the detector still returns None."""
+    # ── INDETERMINATE vs genuinely-no-break ──
+    # This round paid to write a substantial prefix and read back NOTHING,
+    # yet no break gate fired. That is not "the cache was reused fine" — it
+    # is "we could not tell", and recording both under `no_break` is what
+    # let real spend hide behind a healthy-looking bucket.
+    #
+    # THE ACTUAL SUPPRESSOR IS COMPACTION, measured — not gate starvation.
+    # All three break predicates carry `and not was_compaction`, so a
+    # compacted round with a huge zero-read write is structurally exempt
+    # from every gate and lands here. (An earlier version of this fix
+    # asserted the cause was a miss-predecessor starving the gates; that is
+    # FALSE — `prev_prefix_tokens` is prev_read + prev_write, so a
+    # zero-read predecessor with a large write still satisfies no_reuse's
+    # threshold. Verified directly against _classify_break.)
+    #
+    # The exemption is right for the RETURN value: a compaction legitimately
+    # rebuilds its prefix, so it is not a confirmed break and must not be
+    # blamed on the gateway. But it is wrong for the LEDGER: the tokens were
+    # really paid for, and filing them as `no_break` makes a rebuild look
+    # like a cache hit. Recording them as indeterminate keeps the spend
+    # visible and the cause honestly unresolved.
+    #
+    # Requires a genuine PREDECESSOR. ``prev.call_count`` has already been
+    # incremented for THIS round by the time we get here, so round 1 sees
+    # it as 1 — the guard must be > 1, not > 0, or every cold start is
+    # mislabelled as an unknown. A first round had nothing to read back.
+    gates_starved = (
+        prev.call_count > 1
+        and cache_read == 0
+        and cache_write >= _MIN_NO_REUSE_TOKENS
+    )
+    if gates_starved:
+        return _report_indeterminate_round(
+            conv_id, prev, cache_write=cache_write, elapsed=elapsed,
+            was_compaction=was_compaction,
+            advertised_rewrite=advertised_rewrite,
+            expected_rewrite_index=expected_rewrite_index)
+    # A cacheable Claude round with no cache activity at all paid the base
+    # input rate for its whole prompt. Like the indeterminate case it is a
+    # ledger fact, not a confirmed break: the return value stays None.
+    prompt_tokens = split_input_tokens(usage)[1]
+    if uncached_round(claude=is_claude(model), call_count=prev.call_count,
+                      cache_read=cache_read, cache_write=cache_write,
+                      prompt_tokens=prompt_tokens):
+        return _report_uncached_round(
+            conv_id, prev, prompt_tokens=prompt_tokens, markers=markers)
+    return None
+
+
 def detect_cache_break(
     conv_id: str,
     messages: list,
@@ -927,43 +1010,12 @@ def detect_cache_break(
                 prev_cache_read, cache_read,
             )
 
-        # ── INDETERMINATE vs genuinely-no-break ──
-        # This round paid to write a substantial prefix and read back NOTHING,
-        # yet no break gate fired. That is not "the cache was reused fine" — it
-        # is "we could not tell", and recording both under `no_break` is what
-        # let real spend hide behind a healthy-looking bucket.
-        #
-        # THE ACTUAL SUPPRESSOR IS COMPACTION, measured — not gate starvation.
-        # All three break predicates carry `and not was_compaction`, so a
-        # compacted round with a huge zero-read write is structurally exempt
-        # from every gate and lands here. (An earlier version of this fix
-        # asserted the cause was a miss-predecessor starving the gates; that is
-        # FALSE — `prev_prefix_tokens` is prev_read + prev_write, so a
-        # zero-read predecessor with a large write still satisfies no_reuse's
-        # threshold. Verified directly against _classify_break.)
-        #
-        # The exemption is right for the RETURN value: a compaction legitimately
-        # rebuilds its prefix, so it is not a confirmed break and must not be
-        # blamed on the gateway. But it is wrong for the LEDGER: the tokens were
-        # really paid for, and filing them as `no_break` makes a rebuild look
-        # like a cache hit. Recording them as indeterminate keeps the spend
-        # visible and the cause honestly unresolved.
-        #
-        # Requires a genuine PREDECESSOR. ``prev.call_count`` has already been
-        # incremented for THIS round by the time we get here, so round 1 sees
-        # it as 1 — the guard must be > 1, not > 0, or every cold start is
-        # mislabelled as an unknown. A first round had nothing to read back.
-        _gates_starved = (
-            prev.call_count > 1
-            and cache_read == 0
-            and cache_write >= _MIN_NO_REUSE_TOKENS
-        )
-        if _gates_starved:
-            return _finish(None, record_as=_report_indeterminate_round(
-                conv_id, prev, cache_write=cache_write, elapsed=elapsed,
-                was_compaction=_was_compaction,
-                advertised_rewrite=_advertised_rewrite,
-                expected_rewrite_index=_expected_rewrite_index))
-        _finish(None)
+        _finish(None, record_as=_unconfirmed_round_record(
+            conv_id, prev, model=model, usage=usage, cache_read=cache_read,
+            cache_write=cache_write, elapsed=elapsed,
+            was_compaction=_was_compaction,
+            advertised_rewrite=_advertised_rewrite,
+            expected_rewrite_index=_expected_rewrite_index,
+            markers=_wire_evidence.markers))
 
     return None

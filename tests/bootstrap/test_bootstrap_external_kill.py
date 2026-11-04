@@ -25,6 +25,18 @@ pytestmark = pytest.mark.unit
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX subprocess signal return codes')
+@pytest.mark.parametrize('stop_signal', ['SIGINT', 'SIGTERM'])
+def test_signalled_server_stop_never_enters_dependency_repair(tmp_path, monkeypatch, stop_signal):
+    (tmp_path / 'server.py').write_text(
+        'import os, signal\n'
+        f'os.kill(os.getpid(), signal.{stop_signal})\n')
+    monkeypatch.setattr(_launcher, 'BASE_DIR', str(tmp_path))
+    with pytest.raises(SystemExit) as stopped:
+        _launcher._try_start_server()
+    assert stopped.value.code == 0
+
+
 @pytest.fixture()
 def boot():
     """Import bootstrap.py as a module (it's a script, not a package)."""

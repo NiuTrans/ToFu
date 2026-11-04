@@ -213,6 +213,17 @@
   font-weight: var(--weight-semibold);
 }
 
+/* A compaction a resumed attempt did not reuse keeps its real time and token
+ * accounting, struck through: it no longer shapes the model context. */
+.conversation-surface .activity-event--compaction.activity-event--superseded .activity-event__summary,
+.conversation-surface .activity-event--compaction.activity-event--superseded .compaction-token-value {
+  color: var(--text-tertiary);
+}
+
+.conversation-surface .activity-event--compaction.activity-event--superseded .compaction-token-value {
+  text-decoration: line-through;
+}
+
 .conversation-surface .activity-event__compaction-summary {
   display: flex;
   align-items: flex-start;

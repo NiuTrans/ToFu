@@ -13,6 +13,47 @@
   overflow-wrap: anywhere;
 }
 
+
+/* ---- Interim narration well ---------------------------------------------
+ * A reply's interim round prose shares ONE bounded, scrolling body, so many
+ * rounds never stretch the reply while the answer below stays on the open
+ * page. The well is the activity card's last fold: its card chrome and
+ * disclosure row live with the card (23-reading-tool-panel.css). Scroll
+ * shadows use local-attached backgrounds: they appear only on the side that
+ * has more to read. */
+.conversation-surface .conversation-narration__body {
+  --narration-shade: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  max-height: var(--conversation-process-scroll-max);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding-inline: var(--space-4) var(--space-3);
+  background:
+    linear-gradient(var(--turn-process-panel), transparent) top / 100% var(--space-6) no-repeat local,
+    linear-gradient(transparent, var(--turn-process-panel)) bottom / 100% var(--space-6) no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--narration-shade), transparent) top / 100% var(--space-3) no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, var(--narration-shade), transparent) bottom / 100% var(--space-3) no-repeat scroll;
+}
+
+.conversation-surface .conversation-narration__body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 0 0 var(--conversation-process-radius) var(--conversation-process-radius);
+}
+
+.conversation-surface .conversation-narration__body > .conversation-block--text {
+  margin: 0;
+  padding-block: var(--space-3);
+}
+
+.conversation-surface .conversation-narration__body > .conversation-block--text + .conversation-block--text {
+  border-block-start: var(--control-edge-inset) dashed var(--turn-process-line);
+}
+
+.conversation-surface .conversation-narration__body > .conversation-block--text > .md-content {
+  color: var(--text-secondary);
+}
 /* The rubric is a reading toolbar. Text starts on the exact prose baseline;
  * secondary navigation sits opposite it, never in an extra leading slot. */
 .conversation-surface .conversation-answer-label {

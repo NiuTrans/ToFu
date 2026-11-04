@@ -183,7 +183,7 @@ def _execute_task_invocation(
         # Every preparation/compaction pass may mutate the working projection.
         # Isolate nested content/tool-call containers from the task's durable
         # input view; deepcopy shares immutable strings/bytes, so large payload
-        # bodies are not duplicated. The shallow fallback list remains safe
+        # bodies are not duplicated. The shallow original-input list stays safe
         # because no working transform can now reach its dictionaries.
         original_messages = list(task['messages'])
         messages = copy.deepcopy(task['messages'])

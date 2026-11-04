@@ -9,6 +9,7 @@ from lib.tasks_pkg.context_composer import _providers as providers
 from lib.tasks_pkg.context_composer.registry import injection_spec
 from lib.tools.contracts import compile_execution_contract_documents
 from lib.tools.gateway import execute_program_schema
+from lib.tools.program_contract import MAX_TOOL_CALLS
 from lib.token_counter import count_text
 
 pytestmark = pytest.mark.unit
@@ -49,6 +50,20 @@ def test_guidance_recognizes_the_actual_or_admitted_action(source):
     assert 'Return routine results' in text
     assert 'tools.observe ends the script only for unresolved judgment' in text
     assert 'Never replay completed actions' in text
+
+
+def test_item_fanout_uses_one_program_within_the_action_call_limit():
+    text = providers._programmatic_guidance(request(admitted=True))
+    assert 'Fit many items into one program within its call limit, never one per item.' in text
+    # The action owns numeric limits and sandbox scope; the guide never restates them.
+    assert not any(character.isdigit() for character in text)
+    assert 'imports' not in text
+    description = execute_program_schema()['function']['description']
+    assert f'{MAX_TOOL_CALLS} calls' in description
+    assert 'No imports/timers/files/processes/network' in description
+    # Per-item failures need no per-item program.
+    assert 'runs NEW calls and stops on failure' in description
+    assert 'tools.call(name,args) returns a receipt: check .status' in description
 
 
 @pytest.mark.parametrize('defect', ['configuration_only', 'names_only', 'document_only',

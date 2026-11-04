@@ -87,7 +87,7 @@ for _name, _definition, _description in (
      'This is not a roster of every created conversation: use list_conversations with scope=project to find empty conversation shells. '
      'Use scope=project on new human input to find earlier work in this Coordinator binding (32-row history pages). Use next_cursor as after_id; an empty filtered page can still have a cursor. Source Turn and current_request distinguish earlier objectives. Passive facts only; get_project_assignment reads full evidence.'),
     ('cancel_project_work', 'cancelProjectWork',
-     'Cancel an owned Worker in this Coordinator binding when handling human steering; automatic continuations may cancel only their original request Workers. Withdraws its grant and stops its exact active attempt. '
+     'Cancel an owned Worker in this Coordinator binding when handling human steering; automatic continuations may cancel only their original request Workers. Withdraws its grant and stops every live attempt in its Worker conversation, including turns that ran without the assignment binding. '
      'Late background-command results stay attached to the cancelled attempt as assignment evidence and never start another automatic Worker turn; running commands are not killed. '
      'Preserves results and receipts. Cancel failed or superseded work before marking the request complete.'),
     ('finish_project_request', 'finishProjectRequest',

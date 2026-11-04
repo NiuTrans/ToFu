@@ -1526,9 +1526,6 @@ fn compile_turn(
             let projection_json = canonical_json(&Value::Object(projection))?;
             projection_bytes = projection_bytes
                 .checked_add(projection_json.len())
-                .filter(|bytes| {
-                    *bytes <= crate::generated_tofudb_ir::MAX_TURN_COMPACTION_PROJECTION_BYTES
-                })
                 .ok_or(SemanticExecutionError::InvalidPayload)?;
             projection_updates.push(crate::turn::CompactProjectionUpdate {
                 turn_id,
@@ -2053,20 +2050,6 @@ fn compile_turn(
                 None | Some(Value::Null) => None,
                 Some(value) => value.as_u64(),
             };
-        if serde_json::to_vec(&config)
-            .map_err(|_| SemanticExecutionError::InvalidPayload)?
-            .len()
-            > MAX_LEGACY_DOCUMENT_BYTES
-            || input_update.as_ref().is_some_and(|update| {
-                serde_json::to_vec(update)
-                    .map(|encoded| encoded.len() > MAX_LEGACY_DOCUMENT_BYTES)
-                    .unwrap_or(true)
-            })
-        {
-            return Err(crate::resource_exhaustion::semantic_bound(
-                "Turn attempt request document exceeds 8 MiB",
-            ));
-        }
         let attempt_id =
             deterministic_attempt_id(admitted, &conversation_id, &turn_id, &command_id)?;
         return Ok(TransactionIr {

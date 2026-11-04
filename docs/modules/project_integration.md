@@ -105,6 +105,9 @@ Opt-in linear mode: `concurrent writers → terminal task → immutable checkpoi
   logs why. An owned baseline whose stable left HEAD's history fails closed.
   Alternative rejected: always exporting HEAD would bypass the verified-stable
   gate for repositories where linear publication still works.
+  Every snapshot export prints its source ref, SHA and, when that commit is
+  not HEAD, its commit lag behind HEAD with the override; a trailing stable
+  otherwise reads as a fresh export (`tests/export/test_export_head_snapshot.py`).
 - **Rewritten history and a trailing stable.** Problem: after the history
   rebuild, candidate, stable and baseline still pointed into the abandoned
   history; every task-end checkpoint then failed with "Integration candidate
@@ -236,7 +239,7 @@ another conversation is editing there without committing, so one writer's in-fli
 regenerated bundle) blocked every branch that shared a file with it, and verified work stayed
 unmerged. Decision: `python3 scripts/git_land.py <branch>` records the same `--no-ff` merge
 (first parent: the pre-integration tip, printed for the final answer). `git merge-recursive`
-computes it in a scratch worktree with an index but no checkout. Each changed path is compared
+computes it in a private scratch worktree. Each changed authored path is compared
 with the checkout's bytes: an unmodified file takes the merged content; a file with concurrent
 edits gets a `git merge-file` three-way merge, so those edits stay uncommitted on top of the new
 tip. Under Git's own `index.lock` it rechecks the branch, staged state and every planned file's
@@ -277,6 +280,40 @@ registry is explicit and has no configuration knob. Requiring every generated fa
 rejected because plain projects can have only one family. Specifications:
 `test_generated_i18n_conflict_regenerates_from_merged_sources`, `test_generated_preview_conflict_uses_task_bytes`
 and `test_task_delta_regenerates_i18n_after_merging_authored_sources`.
+
+Problem: branch-conflict recovery alone left uncommitted generated catalogs on the ordinary
+line-merge path. Compact JSON blocked independent source edits; an unchanged catalog could
+instead land successfully while becoming stale relative to dirty sources. Decision: the same
+explicit generator registry also owns landing's input closure and complete output families.
+It covers i18n catalogs/types, retained runtime bundles (including lazy bundles), and composed
+styles (including generated CSS entries). Landing rebuilds and checks two distinct views:
+the immutable merged sources determine the commit tree; those sources with the checkout's
+three-way-merged uncommitted edits determine working files. Other writers' source/output edits
+remain uncommitted. Neither a pending translation nor another writer's source becomes part of
+the merge merely because its generated output shares a line with the task's output. Committed
+i18n passes the generator's complete-translation check; working views preserve its existing
+source-validated fallback for unfinished derived translations, without demanding that another
+writer finish translation review to let an independent branch land.
+
+Only declared input/output closures are materialized in temporary directories. Git blobs are
+read in a batch. A dirty generated output must first reproduce from its own captured checkout
+sources; unexplained output-only edits/deletions, unsafe file types and staged overlapping
+changes refuse without modifying the checkout. Source conflicts remain ordinary conflicts.
+The read fence covers every generator input, including dependencies absent from the branch's
+diff, and the untracked membership of those input scopes. A concurrent change causes a fresh
+plan before publication. `--check` performs the same rebuild, validation and staged/read checks,
+without publishing files, index entries or refs. Generator failure leaves those unchanged.
+Private branch-conflict rebuilds bridge installed dependencies from the receiving checkout;
+the disposable scratch worktree is a source snapshot, not an installed Node environment.
+
+Alternatives rejected: resetting generated files loses uncommitted work; committing the whole
+checkout publishes another writer's unfinished changes; JSON key merging cannot rebuild type
+declarations, hashes, removed keys or other output families; choosing one side drops the other
+side's source changes; timed retries cannot resolve a deterministic derived-file collision.
+No polling service, merge-driver setting or tuning parameter is added. The existing residual
+write-after-revalidation race below remains; the input fence does not claim filesystem-wide
+atomicity. Specifications: `tests/project_mod/test_git_land_generated_work.py`, the original
+landing suite, and the task-delta generated-output test named above.
 
 An existing `index.lock`
 refuses with evidence: the processes holding it open (from `/proc`) mean Git is busy; none means

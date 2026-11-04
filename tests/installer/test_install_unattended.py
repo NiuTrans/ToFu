@@ -167,6 +167,7 @@ def test_failed_interpreter_marker_cannot_report_installed(installer, tmp_path):
     assert 'Could not publish the interpreter binding' in result.stdout
     assert not (project / '.tofu_env.json').exists()
     assert 'UNEXPECTED' not in Path(env['CALLS_FILE']).read_text()
+    assert not list((project / '.tofu-envs').iterdir())
 
 
 def test_local_invocation_wins_over_home_checkout(installer, tmp_path):
@@ -312,6 +313,7 @@ def test_late_storage_failure_preserves_live_pointer_and_configuration(installer
     assert (project / '.tofu_env.json').read_text() == old_marker
     assert (project / '.env').read_bytes() == previous_configuration
     assert (project / '.venv/bin/python').is_file()
+    assert not list((project / '.tofu-envs').iterdir())
 
 
 def test_default_install_defers_chromium_and_uses_candidate_python(installer):

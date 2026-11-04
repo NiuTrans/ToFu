@@ -264,6 +264,8 @@ class EventType:
     MESSAGES_SNAPSHOT = 'messages_snapshot'
     COMPACTION = 'compaction'
     COMPACTION_DONE = 'compaction_done'
+    COMPACTION_RESUME = 'compaction_resume'
+    COMPACTION_REQUEST_SIZE = 'compaction_request_size'
     MEMORY_PREFETCH = 'memory_prefetch'
     PREFERENCES_APPLIED = 'preferences_applied'
     PREFERENCE_LEARNED = 'preference_learned'
@@ -1670,6 +1672,50 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('taskModel', 'str'),
                   FieldSpec('anchorBlockId', 'str'),
                   FieldSpec('anchorPosition', 'str'),
+              )),
+    EventSpec(EventType.COMPACTION_RESUME, _C.CONTEXT,
+              'A resumed attempt reused or discarded earlier compacted context.',
+              fields={
+                  'convId': 'conversation id',
+                  'restored': 'true when an accepted archive replaced the replayed history',
+                  'reason': 'restored|no_witness|settings_changed|history_changed|'
+                            'progress_changed|media_unavailable|unavailable|ineligible',
+                  'sourceAttemptIds': 'earlier attempts of this Turn whose model view the resume replaces',
+                  'archiveId': '(restored) owner-scoped archive id that was reused',
+                  'ts': 'epoch seconds',
+              },
+              schema=(
+                  FieldSpec('convId', 'str', required=True),
+                  FieldSpec('restored', 'bool', required=True),
+                  FieldSpec('reason', 'str', required=True),
+                  FieldSpec('sourceAttemptIds', 'list', required=True),
+                  FieldSpec('ts', 'int', required=True),
+
+                  FieldSpec('archiveId', 'str'),
+              )),
+    EventSpec(EventType.COMPACTION_REQUEST_SIZE, _C.CONTEXT,
+              'The request rebuilt after a compaction was measured, restored context included.',
+              fields={
+                  'archiveId': 'owner-scoped archive id of the compaction',
+                  'convId': 'conversation id',
+                  'tokensBefore': 'estimated complete request before compaction: messages, '
+                                  'managed context and tool schemas',
+                  'tokensAfter': 'estimated complete request after compaction, with the '
+                                 'managed context restored afterwards',
+                  'tokenCountKind': 'estimated',
+                  'reductionPct': 'estimated percentage request token reduction',
+                  'msgsAfter': 'message count of the rebuilt request',
+                  'ts': 'epoch seconds',
+              },
+              schema=(
+                  FieldSpec('archiveId', 'str', required=True),
+                  FieldSpec('convId', 'str', required=True),
+                  FieldSpec('tokensBefore', 'int', required=True),
+                  FieldSpec('tokensAfter', 'int', required=True),
+                  FieldSpec('tokenCountKind', 'str', required=True),
+                  FieldSpec('reductionPct', 'number', required=True),
+                  FieldSpec('msgsAfter', 'int', required=True),
+                  FieldSpec('ts', 'int', required=True),
               )),
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',

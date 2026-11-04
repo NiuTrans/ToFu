@@ -387,3 +387,136 @@ def test_cancellation_rejects_late_capture_and_stops_guest_effects(world):
         run('try{tools.result("read_rows",{})}catch(e){} await tools.write_file({}); return 1;')
     assert error.value.code == 'cancelled'
     assert not reads and not writes
+
+
+_EXECUTED_READ_DOC = {'doc': 'd-1', 'max_chars': 120000, 'include_tables': 'preview'}
+
+
+def _defaulted_read_doc_task(**fields):
+    """A task whose gateway fills a schema default before execution."""
+    from lib.tools.contracts import compile_execution_contract_documents
+    catalog = [{'type': 'function', 'function': {
+        'name': 'mcp__docs__read_doc', 'description': 'Read one document.',
+        'parameters': {'type': 'object', 'properties': {
+            'doc': {'type': 'string'}, 'max_chars': {'type': 'integer'},
+            'include_tables': {'type': 'string', 'enum': ['none', 'preview', 'full'],
+                               'default': 'preview'}},
+            'required': ['doc'], 'additionalProperties': False}}}]
+    return {'_ptc_local': {'tier': 'program'}, '_executable_tool_catalog': catalog,
+            '_executableToolNamespaceByName': {'mcp__docs__read_doc': 'docs'},
+            '_toolContractDocumentsByName': compile_execution_contract_documents(
+                catalog, namespace='docs'),
+            **fields}
+
+
+def _document_capture(doc='d-1'):
+    return capture_result(json.dumps({'doc': doc, 'markdown': '中' * 3000}))
+
+
+def _lookup(task, name, arguments):
+    return read_program_result(task, name, arguments, user_id=7,
+                               budget=ProgrammaticResultBudget(),
+                               catalog_names={'mcp__docs__read_doc'})
+
+
+@pytest.mark.parametrize('name, arguments', [
+    ('mcp__docs__read_doc', {'doc': 'd-1', 'max_chars': 120000}),
+    ('mcp__docs__read_doc', {'max_chars': 120000, 'include_tables': 'preview', 'doc': 'd-1'}),
+    ('mcp__docs__read_doc', {'doc': 'd-1', 'max_chars': '120000', 'include_tables': 'PREVIEW'}),
+    ('read_doc', {'doc': 'd-1', 'max_chars': 120000}),
+])
+def test_equivalent_call_spellings_share_the_executed_binding(name, arguments):
+    task = _defaulted_read_doc_task()
+    canonical = _document_capture()
+    assert retain_program_result(task, 'mcp__docs__read_doc', dict(_EXECUTED_READ_DOC),
+                                 'executed', canonical, user_id=7) is not None
+    receipt = _lookup(task, name, arguments)
+    assert receipt['status'] == 'done' and receipt['call_id'] == 'executed'
+    assert receipt['name'] == 'mcp__docs__read_doc'
+    assert receipt.canonical is canonical
+
+
+@pytest.mark.parametrize('name, arguments', [
+    ('mcp__docs__read_doc', {'doc': 'd-2', 'max_chars': 120000}),
+    ('mcp__docs__read_doc', {'doc': 'd-1', 'max_chars': 120000, 'include_tables': 'full'}),
+    ('mcp__docs__read_doc', {'doc': 'd-1'}),
+    ('mcp__docs__read_doc', {'doc': 'd-1', 'max_chars': 120000, 'unknown': True}),
+    ('mcp__docs__write_doc', {'doc': 'd-1', 'max_chars': 120000}),
+])
+def test_a_different_real_call_never_reuses_the_binding(name, arguments):
+    task = _defaulted_read_doc_task()
+    retain_program_result(task, 'mcp__docs__read_doc', dict(_EXECUTED_READ_DOC),
+                          'executed', _document_capture(), user_id=7)
+    receipt = _lookup(task, name, arguments)
+    assert receipt['status'] == 'error'
+    assert receipt['error']['code'] == 'retained_result_unavailable'
+    assert receipt['error']['reason'] == 'not_retained_in_this_turn'
+
+
+def test_retention_binds_and_advertises_the_executed_form():
+    task = _defaulted_read_doc_task()
+    retain_program_result(task, 'mcp__docs__read_doc', {'max_chars': 120000, 'doc': 'd-1'},
+                          'direct', _document_capture(), user_id=7)
+    listed = list_program_inputs(task, {}, user_id=7, catalog_names={'mcp__docs__read_doc'})
+    assert [(row['name'], row['args']) for row in listed['inputs']] == [
+        ('mcp__docs__read_doc', _EXECUTED_READ_DOC)]
+    assert _lookup(task, 'mcp__docs__read_doc', dict(_EXECUTED_READ_DOC))['status'] == 'done'
+    # Retaining the same executed call again keeps the one advertised binding.
+    retain_program_result(task, 'mcp__docs__read_doc', dict(_EXECUTED_READ_DOC),
+                          'again', _document_capture(), user_id=7)
+    assert len(task['_programResultRefs']) == 1
+
+
+def test_dispatch_retention_and_guest_lookup_share_one_call_binding(monkeypatch):
+    """The real gateway child path retains; the model's own spelling reuses it."""
+    import threading
+    from lib.agent_core.admission import fire_terminal_callbacks
+    from lib.tasks_pkg.handlers import tool_gateway
+    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    from lib.tools.gateway import EXECUTE_PROGRAM_NAME
+
+    executed = []
+
+    def execute_leaf(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
+                     project_path, project_enabled, all_tools=None):
+        executed.append((fn_name, dict(fn_args)))
+        return tc_id, json.dumps({'doc': fn_args['doc'], 'markdown': '中' * 3000}), False
+
+    monkeypatch.setattr(_pipeline, '_execute_tool_one', execute_leaf)
+    monkeypatch.setattr(_heartbeat, '_execute_tool_one', execute_leaf)
+    task = _defaulted_read_doc_task(
+        id='dispatch-retained-binding', _userId=7, model='unit-model',
+        status='running', aborted=False, events=[], events_lock=threading.Lock(),
+        toolRounds=[], _attended=False, config={'tools': {'resultEnvelope': 'v2'}})
+
+    def run(code):
+        call_id = 'program-' + str(len(task.get('programRuns') or []))
+        tool_gateway.handle_execute_program(
+            task, {'id': call_id, 'type': 'function',
+                   'function': {'name': EXECUTE_PROGRAM_NAME}},
+            EXECUTE_PROGRAM_NAME, call_id, {'code': code}, 1,
+            {'calls': [], 'llmRound': 1},
+            {'autoApply': True, 'tools': {'programmaticCalling': 'on'}}, None, False)
+        return task['programRuns'][-1]
+
+    try:
+        first = run('const r=await tools.invoke("mcp__docs__read_doc",'
+                    '{doc:"d-1",max_chars:120000}); return r.markdown.length;')
+        assert first['status'] == 'completed' and first['result'] == 3000
+        assert executed == [('mcp__docs__read_doc', _EXECUTED_READ_DOC)]
+
+        reused = run('const a=tools.result("mcp__docs__read_doc",{doc:"d-1",max_chars:120000}); '
+                     'const b=tools.result("mcp__docs__read_doc",'
+                     '{include_tables:"preview",max_chars:120000,doc:"d-1"}); '
+                     'return [a.doc,b.doc];')
+        assert reused['result'] == ['d-1', 'd-1']
+        assert reused['stats']['result_reads'] == 2 and reused['stats']['tool_calls'] == 0
+
+        missed = run('return tools.result("mcp__docs__read_doc",{doc:"d-2",max_chars:120000});')
+        assert missed['result']['kind'] == 'observation'
+        error = missed['result']['data']['error']
+        assert (error['code'], error['reason']) == (
+            'retained_result_unavailable', 'not_retained_in_this_turn')
+        assert len(executed) == 1
+    finally:
+        fire_terminal_callbacks(task['id'])

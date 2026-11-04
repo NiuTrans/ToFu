@@ -49,9 +49,14 @@ def plan_compaction_sources(
     messages: list, task: dict | None, *, budget_tokens: int, max_turns: int,
     handoff_phase: str, recent_files_block: str, turn_diff_block: str,
     options: dict, result_meta: dict, tokens_before: int, log_prefix: str,
-    ports: SourcePlanningPorts,
+    ports: SourcePlanningPorts, planning_messages: list | None = None,
 ) -> CompactionSources | str:
     """Return planned sources or the unchanged-input refusal message."""
+    source_messages = messages
+    if planning_messages is not None:
+        messages = planning_messages
+    originals = {id(projected): original
+                 for projected, original in zip(messages, source_messages)}
     msg_count_before = len(messages)
     boundary, recent_messages, cold_round_msgs = ports.plan_tail(
         messages, budget_tokens=budget_tokens, max_turns=max_turns)
@@ -157,7 +162,10 @@ def plan_compaction_sources(
                      if message.get('role') not in ('system', 'developer')
                      and (message is not anchor_msg or history_entries(message))]
     folded_ids = {id(m) for m in summary_input + cold_round_msgs + folded_handoffs}
-    summary_input = [m for m in messages if id(m) in folded_ids]
+    # L1 may have reduced a consumed result to a recovery preview. Summarize
+    # the original selected observations so errors, mutations and identifiers
+    # still pass through the existing bounded evidence formatter exactly once.
+    summary_input = [originals[id(m)] for m in messages if id(m) in folded_ids]
     return CompactionSources(
         old_messages=old_messages,
         recent_messages=recent_messages,

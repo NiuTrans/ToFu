@@ -14,6 +14,7 @@ import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from lib.identity import require_user_id
 from lib.log import get_logger
@@ -78,6 +79,15 @@ class MediaProjectionBudget:
             0, int(self.text_chars_remaining) - max(0, int(count)))
 
 
+def attachment_source_url(attachment_id: str) -> str:
+    """Return the browser link to an attachment's original bytes.
+
+    Clients use it verbatim (``<img src>``, downloads) outside transport path
+    rewriting, so it names the mounted v4 source route, never the metadata one.
+    """
+    return f'/api/v4/media/attachments/{quote(attachment_id, safe="")}/source'
+
+
 def attachment_ref(document: dict) -> dict:
     """Project canonical storage metadata into the conversation contract."""
     metadata = document.get('media_metadata')
@@ -101,9 +111,7 @@ def attachment_ref(document: dict) -> dict:
         'status': status,
         'mimeType': mime_type[:255],
         'sizeBytes': int(document.get('size_bytes') or 0),
-        # Live link rendered as <img src>/fetched directly by clients (no
-        # transport rewrite); production serves only the v4 mount.
-        'sourceUrl': f'/api/v4/media/attachments/{attachment_id}/source',
+        'sourceUrl': attachment_source_url(attachment_id),
     }
     if media_kind == 'document':
         result.update({
@@ -226,7 +234,7 @@ def ingest_mcp_image(
     name = str(document.get('name') or filename)[:240]
     return {
         'attachmentId': attachment_id,
-        'preview': f'/api/v4/media/attachments/{attachment_id}/source',
+        'preview': attachment_source_url(attachment_id),
         'caption': f'Image from {str(source_tool or "MCP tool")[:160]}',
         'sizeKB': round(len(raw) / 1024, 1),
         'name': name,
@@ -634,7 +642,8 @@ def project_for_model(
 
 __all__ = [
     'MODEL_TEXT_REQUEST_CAP', 'MediaProjectionBudget', 'attachment_ref',
-    'complete_video', 'create_video', 'delete_attachment', 'discard_draft',
+    'attachment_source_url', 'complete_video', 'create_video',
+    'delete_attachment', 'discard_draft',
     'document_text_budget', 'document_text_request_cap', 'get_attachment',
     'ingest_document', 'mark_failed', 'project_for_model',
     'resolve_client_refs', 'set_phase',

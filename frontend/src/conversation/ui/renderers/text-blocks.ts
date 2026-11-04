@@ -22,12 +22,14 @@ import {
   setCompletedMarkdownHtml,
   resetManagedHtml,
   preserveDetailsOpen,
+  endAnchoredScroller,
+  type EndAnchoredScroller,
 } from './stable-dom';
 import {
   disclosureChevron,
   actionIcon,
 } from './icons';
-import { textFor } from './localized-copy';
+import { formatDuration, textFor } from './localized-copy';
 import { updateAnswerNavigation } from './answer-navigation';
 
 import { liveStatusPhase, presentLivePhaseLabel } from '../../presentation/live-phase';
@@ -167,6 +169,8 @@ interface ThinkingBodyRenderState {
   body: HTMLElement;
   appliedMarkdown: string | null;
   appliedStreaming: boolean | null;
+  /** Newest-first reading: every opening rests at the end. */
+  end: EndAnchoredScroller;
   render(): void;
   dispose(): void;
 }
@@ -245,6 +249,11 @@ export function renderThinkingBlock(
     details.appendChild(content);
   }
   content.className = 'thinking-content';
+  // The open body is a bounded scroller; keyboard readers need to reach it.
+  if (content.tabIndex !== 0) content.tabIndex = 0;
+  if (content.getAttribute('role') !== 'region') content.setAttribute('role', 'region');
+  if (content.getAttribute('aria-label') !== labelText) content.setAttribute('aria-label', labelText);
+  const scroller = content;
   let body = directClassChild<HTMLElement>(content, 'thinking-text');
   if (!body) {
     body = document.createElement('div');
@@ -259,13 +268,19 @@ export function renderThinkingBlock(
     const disclosure = details;
     const next: ThinkingBodyRenderState = {
       details, body, appliedMarkdown: null, appliedStreaming: null,
+      end: endAnchoredScroller(scroller, body),
       render() {},
       dispose() {
         disclosure.removeEventListener('toggle', onToggle);
+        next.end.dispose();
         next.render = () => {};
       },
     };
-    const onToggle = (): void => { if (disclosure.open) next.render(); };
+    const onToggle = (): void => {
+      if (!disclosure.open) return;
+      next.render();
+      next.end.pin();
+    };
     disclosure.addEventListener('toggle', onToggle);
     state = next;
     thinkingBodyRenderStates.set(node, state);
@@ -282,6 +297,7 @@ export function renderThinkingBlock(
     current.appliedMarkdown = markdown;
     current.appliedStreaming = streaming;
     delete target.dataset.deferredReasoning;
+    current.end.follow();
   };
   if (block.terminal && !details.open
       && markdown.length > DEFERRED_REASONING_MIN_CHARACTERS) {
@@ -315,7 +331,13 @@ interface WaitTickState {
   suffix: string;
 }
 const waitTickStates = new WeakMap<HTMLElement, WaitTickState>();
+/* Live-status node -> backend epoch-ms start of the call it reports. */
+const elapsedTickStates = new WeakMap<HTMLElement, number>();
 let waitTickTimer: ReturnType<typeof setInterval> | null = null;
+
+function elapsedSince(startedAt: number): string {
+  return formatDuration((Date.now() - startedAt) / 1000);
+}
 
 function waitTickEligible(block: Extract<ConversationBlockViewModel, { kind: 'live-status' }>): boolean {
   const value = block.value;
@@ -335,6 +357,12 @@ function ensureWaitTickTimer(): void {
     for (const node of Array.from(
       document.querySelectorAll<HTMLElement>('.conversation-block--live-status'),
     )) {
+      const startedAt = elapsedTickStates.get(node);
+      const clock = startedAt == null ? null : node.querySelector<HTMLElement>('.stream-phase-elapsed');
+      if (clock && startedAt != null) {
+        const elapsed = elapsedSince(startedAt);
+        if (clock.textContent !== elapsed) clock.textContent = elapsed;
+      }
       const state = waitTickStates.get(node);
       if (!state) continue;
       const target = node.querySelector<HTMLElement>('.stream-phase-text');
@@ -431,6 +459,20 @@ export function renderLiveStatusBlock(
       { n: value.thinkingLength },
     );
     textNode.appendChild(counter);
+  }
+  const startedAt = value.startedAt;
+  if (startedAt != null) {
+    const clock = document.createElement('span');
+    clock.className = 'stream-phase-ctx stream-phase-elapsed';
+    /* A per-second rewrite inside the polite live region would be announced
+     * every second; the phase text carries the announcement. */
+    clock.setAttribute('aria-hidden', 'true');
+    clock.textContent = elapsedSince(startedAt);
+    textNode.appendChild(clock);
+    elapsedTickStates.set(node, startedAt);
+    ensureWaitTickTimer();
+  } else {
+    elapsedTickStates.delete(node);
   }
   const dots = document.createElement('span');
   dots.className = 'stream-phase-dots';

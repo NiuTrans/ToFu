@@ -1643,6 +1643,40 @@ file growth equals outstanding spilled canonical bodies, reclaimed after
 settlement/cancellation; this adds no durable store or persistent cache.
 
 
+## Large native Turn event publication
+
+Checkpoint reconstruction can change historical segment positions and produce
+a large structural patch. An isolated reconstruction measured an 8,804,963-byte
+patch over a 27,771,257-byte resulting projection. These fit the existing native
+Turn and attempt-event documents. The complete attempt event now commits with
+its compact canonical replay reference; expanded replay has no independent
+8 MiB quota. The native transport chunks the full event instead of requiring a
+replacement snapshot merely because the event exceeds that former quota.
+
+This adds no journal, index, worker or retention setting. The existing canonical
+attempt-event retention owns the complete evidence; all new sync references,
+including large events, protect their source until the existing sync-prune
+transaction releases that reference. Durable growth is one canonical body plus
+the same compact locator/index used by ordinary events. Requested replay memory
+and wire bytes now follow complete selected events. Native write/sync
+fault tests cover all-or-none source, cursor and reference recovery; producer
+tests cover exact content, carried event and terminal settlement above the old
+patch quota. See [STORAGE_TOFUDB.md](STORAGE_TOFUDB.md) for the publication boundaries.
+
+The regression workload also reads 66 inline events of 131,072 text bytes
+(8,650,752 text bytes before JSON/envelope overhead) as one requested diagnostic
+page after reopen. This reuses existing segments and introduces no persistent
+copy, worker, cache, retention interval or tuning setting.
+Conversation-sync replay also selects eight 9 MiB canonical event bodies
+(72 MiB before envelopes), both in one chunked response and in single-row pages.
+This verifies that removing the old quota does not move the refusal to the
+generic Turn response ceiling. Dispatchable configurations use this same
+complete-response serialization; other Turn response contracts are unchanged.
+Compaction verification additionally commits a 9 MiB summary and a 9 MiB
+retained-Turn update together, then checks exact content after crash/reopen and
+idempotent command replay. These replace existing projection documents through
+the existing Blob codec; there is no new persistent representation.
+
 ## SQLite demand and connection ownership
 
 Problem: writer job slots, fixed lane waits and read-pool slots refused or

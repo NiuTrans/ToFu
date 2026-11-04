@@ -613,7 +613,7 @@ its spec. The categories and the most important events:
 | `lifecycle` | `state`, `phase`, `done`, `error` | `state` is the full snapshot sent first on (re)connect; `done` is the **only terminal** event |
 | `content` | `delta` | Incremental assistant output (`content` and/or `thinking`) — append to the live bubble |
 | `tool` | `tool_start`, `tool_progress`, `tool_result`, `tool_complete`, `tool_compacted` | Keyed by `toolCallId` + `roundNum` |
-| `context` | `round_usage`, `round_committed`, `messages_snapshot`, `compaction`, `compaction_done`, `memory_prefetch`, `project_external_edit` | Token accounting, durable checkpoints, context-window mgmt |
+| `context` | `round_usage`, `round_committed`, `messages_snapshot`, `compaction`, `compaction_done`, `compaction_resume`, `compaction_request_size`, `memory_prefetch`, `project_external_edit` | Token accounting, durable checkpoints, context-window mgmt |
 | `interaction` | `human_guidance_request`, `write_approval_request`, `approval_required`, `stdin_request`, `stdin_resolved`, `custom_tool_call` | **Require a client response** before the task proceeds (see below) |
 | `flow` | `flow_iteration`, `flow_planner_done`, `flow_critic_msg`, `flow_new_turn`, `flow_complete` | FlowExecutor chat projection |
 | `swarm` | `swarm_phase`, `swarm_inbox_inject`, `swarm_agent_phase`, `swarm_agent_progress`, `swarm_agent_complete`, `swarm_agent_error`, `swarm_agent_tool_call` | Multi-agent orchestration |

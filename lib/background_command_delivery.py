@@ -123,11 +123,18 @@ def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
     The cancelled execution remains the evidence owner. Attach before retiring
     durable delivery intent so an uncertain commit can only replay the same
     deterministic block; an unrelated human wake cannot race the attachment.
+    Results of a turn that ran without the binding in a Worker conversation are
+    governed by that conversation's assignment, so they settle the same way.
     """
-    binding = (config or {}).get(DISPATCH_ADMISSION_KEY)
-    if not isinstance(binding, dict):
-        return False
     from lib.project_dispatch.repository import DispatchGrantRevoked, ProjectDispatchRepository
+    binding = (config or {}).get(DISPATCH_ADMISSION_KEY)
+    unbound = not isinstance(binding, dict)
+    if unbound:
+        from lib.project_dispatch.recovery import worker_conversation_admission
+        binding = worker_conversation_admission(
+            conv_id, user_id=user_id, repository_factory=ProjectDispatchRepository)
+        if binding is None:
+            return False
     repository = ProjectDispatchRepository(binding['owner'], binding['projectPath'])
     admission = repository.admission(binding['assignmentId'])
     if any(admission[key] != binding.get(key)
@@ -135,7 +142,7 @@ def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
         return False
     assignment = repository.read(binding['assignmentId'])
     execution = assignment.get('execution')
-    if execution is None:
+    if execution is None and not unbound:
         return False
     try:
         repository.validate_own(binding)
@@ -143,6 +150,8 @@ def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
         pass
     else:
         return False
+    if execution is None:
+        return True
     from lib.turn_lifecycle import LifecycleConflict, update_turn_projection
     from lib.background_command_projection import background_command_injection_record
     turn = repository.turn_get(

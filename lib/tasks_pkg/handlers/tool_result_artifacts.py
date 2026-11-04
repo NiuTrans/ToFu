@@ -13,6 +13,7 @@ import json
 from lib.log import get_logger
 from lib.llm.llm_errors import AbortedError
 from lib.agent_core.storage_errors import StorageError, TRANSIENT_STORAGE_CODES
+from lib.media_attachments import attachment_source_url
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
@@ -57,11 +58,6 @@ def _media_descriptors_of(read_result):
         if ref.startswith(_MEDIA_REF_PREFIX):
             out.append((ref, str(item.get('mimeType') or 'image/*')))
     return out
-
-
-def _attachment_url(reference):
-    """Same-origin resolvable URL for a retained media attachment."""
-    return '/api/v1/media/attachments/' + reference[len(_MEDIA_REF_PREFIX):]
 
 
 def _mime_ext(mime):
@@ -477,7 +473,7 @@ def _handle_tool_result_artifact(task, tc, fn_name, tc_id, fn_args, rn,
     )
     if media_refs:
         meta['imageDataUris'] = [
-            {'uri': _attachment_url(ref),
+            {'uri': attachment_source_url(ref[len(_MEDIA_REF_PREFIX):]),
              'format': _mime_ext(mime),
              'filename': f'artifact-media-{index + 1}.{_mime_ext(mime)}'}
             for index, (ref, mime) in enumerate(media_refs)]

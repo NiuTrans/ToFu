@@ -205,8 +205,13 @@ def test_continue_uses_accepted_archive_and_only_replays_new_suffix(monkeypatch)
     assert [call for call in calls if call[0] == 'get' and call[2]] == [('get', 1, True)]
 
 
-@pytest.mark.parametrize('change', ['history', 'policy', 'model', 'tool', 'owner', 'incomplete', 'background'])
-def test_stale_or_unaccepted_archive_falls_back_without_losing_observations(monkeypatch, change):
+@pytest.mark.parametrize('change,reason', [
+    ('history', 'history_changed'), ('policy', 'settings_changed'),
+    ('model', 'settings_changed'), ('tool', 'progress_changed'), ('owner', 'no_witness'),
+    ('incomplete', 'unavailable'), ('background', 'progress_changed'),
+])
+def test_stale_or_unaccepted_archive_falls_back_without_losing_observations(
+        monkeypatch, change, reason):
     from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
     task = _task()
     rounds = [_round(i) for i in range(12)]
@@ -230,6 +235,7 @@ def test_stale_or_unaccepted_archive_falls_back_without_losing_observations(monk
     before = deepcopy(rounds)
     assert restore_compacted_resume(task, config, tuple(rounds)) is None
     assert rounds == before
+    assert task['_compactionResumeOutcome'] == {'reason': reason, 'archiveId': None}
 
 
 def test_resume_projection_receives_fresh_history_proof_without_completed_prefix_reuse():
@@ -346,8 +352,8 @@ def test_continue_keeps_fresh_non_tool_suffix_after_accepted_archive(monkeypatch
     assert task['_checkpointToolRounds'] == old + suffix
 
 
-@pytest.mark.parametrize('change', ['input', 'image', 'tool_history', 'cancel'])
-def test_continue_unproved_or_media_input_never_disappears_into_archive(monkeypatch, change):
+@pytest.mark.parametrize('change', ['input', 'tool_history', 'cancel'])
+def test_continue_unproved_input_never_disappears_into_archive(monkeypatch, change):
     from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
     from lib.tasks_pkg.compaction import _pipeline as pipeline
     from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
@@ -361,9 +367,6 @@ def test_continue_unproved_or_media_input_never_disappears_into_archive(monkeypa
     messages = deepcopy(base)
     if change == 'input':
         messages[0]['content'] = 'new input cannot be erased'
-    elif change == 'image':
-        messages.append({'role': 'user', 'content': [
-            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,c3ludGhldGlj'}}]})
     elif change == 'tool_history':
         config['toolHistory'] = rounds
     else:
@@ -379,6 +382,155 @@ def test_continue_unproved_or_media_input_never_disappears_into_archive(monkeypa
         assert messages == before
     else:
         assert messages == before + _reconstruct_tool_call_messages(rounds)
+
+
+def test_continue_keeps_fresh_media_input_after_accepted_archive(monkeypatch):
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+    from lib.tasks_pkg.compaction import _pipeline as pipeline
+    task = _task()
+    rounds = [_round(i) for i in range(6)]
+    _, post, _ = _archive_fixture(monkeypatch, task, rounds)
+    base = [{'role': 'user', 'content': 'original input'}]
+    task['messages'] = deepcopy(base)
+    config = task['config'] | {'checkpointToolRounds': rounds}
+    task['config'] = config
+    image = {'role': 'user', 'content': [
+        {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,c3ludGhldGlj'}}]}
+    messages = deepcopy(base) + [deepcopy(image)]
+    monkeypatch.setattr(pipeline, 'recompose_context_after_compaction', lambda *a, **k: None)
+    apply_resume_state(task=task, cfg=config, messages=messages,
+                       tid='resume', original_messages=base)
+    assert task['_compactionResumeStatus'] == 'restored'
+    assert messages == post + [image]
+
+
+_PNG = b'\x89PNG\r\n\x1a\n' + b'\x00\x00\x00\rIHDR' + bytes(range(64))
+
+
+def _data_url(raw):
+    import base64
+    return 'data:image/png;base64,' + base64.b64encode(raw).decode('ascii')
+
+
+def _media_archive(monkeypatch, task, rounds, head):
+    """An accepted archive whose retained request carries the user's image."""
+    from lib.tasks_pkg.compaction._resume_projection import compaction_resume_witness
+    from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
+    from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
+    import lib.agent_core.store
+    task['toolRounds'] = rounds
+    post = [deepcopy(head), *(_reconstruct_tool_call_messages(rounds[-1:]) or []),
+            make_compaction_handoff('Accepted summary of completed work', phase='mid_turn')]
+    task['messages'] = deepcopy(post)
+    witness = compaction_resume_witness(task)
+    assert witness is not None, 'media must not suppress the resume witness'
+    receipt = {'status': 'completed', 'summary': {'accepted': True, 'complete': True},
+               'resumeWitness': witness}
+
+    class Store:
+        def list_compaction_archives(self, conversation, *, user_id, limit):
+            return [{'id': 'archive', 'resultStatus': 'completed'}]
+
+        def get_compaction_archive(self, conversation, archive, **kwargs):
+            return {'archive': {'receipt': deepcopy(receipt)},
+                    'postMessages': deepcopy(post) if kwargs['include_post_messages'] else None}
+    monkeypatch.setattr(lib.agent_core.store, 'get_conversation_store', lambda: Store())
+    return post
+
+
+def test_screenshot_request_keeps_its_compaction_resumable(monkeypatch):
+    """A pasted screenshot no longer forces Continue to re-summarize everything."""
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+    from lib.tasks_pkg.compaction import _pipeline as pipeline
+    from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
+    task = _task()
+    request = {'role': 'user', '_turnId': 'human', 'content': [
+        {'type': 'image_url', 'image_url': {'url': '/api/images/screenshot.png'}},
+        {'type': 'text', 'text': 'Why does it compress twice?'}]}
+    old = [_round(i) for i in range(344)]
+    post = _media_archive(monkeypatch, task, old, request)
+    suffix = [_round(344)]
+    config = task['config'] | {'checkpointToolRounds': old + suffix}
+    task['config'] = config
+    task['messages'] = [deepcopy(request)]
+    messages = [deepcopy(request)]
+    monkeypatch.setattr(pipeline, 'recompose_context_after_compaction', lambda *a, **k: None)
+    apply_resume_state(task=task, cfg=config, messages=messages, tid='resume',
+                       original_messages=list(task['messages']))
+    assert task['_compactionResumeOutcome'] == {'reason': 'restored', 'archiveId': 'archive'}
+    assert messages == post + _reconstruct_tool_call_messages(suffix)
+    # The reference is resolved again at dispatch, never frozen in the archive.
+    assert messages[0]['content'][0]['image_url']['url'] == '/api/images/screenshot.png'
+
+
+@pytest.mark.parametrize('case,restored', [
+    ('source_current', True), ('source_deleted', False), ('source_replaced', False),
+    ('fresh_inline', True), ('unproved_inline', False), ('native_media', False),
+])
+def test_retained_image_bytes_need_current_authority(monkeypatch, tmp_path, case, restored):
+    from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
+    monkeypatch.setattr('lib.llm.body._images._local_images_dir', lambda: str(tmp_path))
+    (tmp_path / 'screenshot.png').write_bytes(_PNG)
+    task = _task()
+    pinned = {'role': 'user', '_turnId': 'human',
+              'content': [{'type': 'image_url', 'image_url': {'url': _data_url(_PNG)}},
+                          {'type': 'text', 'text': 'look at this'}]}
+    current = [{'role': 'user', '_turnId': 'human', 'content': [
+        {'type': 'image_url', 'image_url': {'url': '/api/images/screenshot.png'}},
+        {'type': 'text', 'text': 'look at this'}]}]
+    if case.startswith('source'):
+        pinned.update(_modelImageSources=['/api/images/screenshot.png'],
+                      _modelImagesPinnedFor='gpt-6-astra', _modelImagesPinnedOwner=1)
+    elif case == 'fresh_inline':
+        current[0]['content'][0]['image_url']['url'] = _data_url(_PNG)
+    elif case == 'native_media':
+        pinned['content'] = 'look at this'
+        pinned['_anthropic_content_blocks'] = [{'type': 'image', 'source': {'type': 'url'}}]
+    rounds = [_round(i) for i in range(3)]
+    post = _media_archive(monkeypatch, task, rounds, pinned)
+    if case == 'source_deleted':
+        (tmp_path / 'screenshot.png').unlink()
+    elif case == 'source_replaced':
+        (tmp_path / 'screenshot.png').write_bytes(_PNG + b'edited')
+    result = restore_compacted_resume(task, task['config'], rounds, current_messages=current)
+    assert (result == post) is restored
+    assert task['_compactionResumeOutcome']['reason'] == (
+        'restored' if restored else 'media_unavailable')
+
+
+@pytest.mark.parametrize('restored', [True, False])
+def test_continue_reports_which_earlier_attempts_it_replaced(monkeypatch, restored):
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+    from lib.tasks_pkg.compaction import _pipeline as pipeline
+    import lib.tasks_pkg.manager
+    task = _task()
+    rounds = [dict(_round(i), attemptId='attempt-first', taskId='task-first') for i in range(4)]
+    rounds.append(dict(_round(4), attemptId='attempt-second', taskId='task-second'))
+    _archive_fixture(monkeypatch, task, rounds)
+    config = task['config'] | {
+        'checkpointToolRounds': rounds,
+        '_resumeSource': {'attemptId': 'attempt-second', 'taskId': 'task-second'}}
+    if not restored:
+        config['grantedToolPermissions'] = ['changed-scope']
+    task['config'] = config
+    base = [{'role': 'user', 'content': 'original input'}]
+    task['messages'] = deepcopy(base)
+    events = []
+    monkeypatch.setattr(lib.tasks_pkg.manager, 'append_event',
+                        lambda owner, event: events.append((owner, event)))
+    monkeypatch.setattr(pipeline, 'recompose_context_after_compaction', lambda *a, **k: None)
+    apply_resume_state(task=task, cfg=config, messages=deepcopy(base), tid='resume',
+                       original_messages=base)
+    assert len(events) == 1
+    owner, event = events[0]
+    assert owner is task
+    assert {key: event.get(key) for key in (
+        'type', 'convId', 'restored', 'reason', 'sourceAttemptIds', 'archiveId')} == {
+        'type': 'compaction_resume', 'convId': 'conversation', 'restored': restored,
+        'reason': 'restored' if restored else 'settings_changed',
+        'sourceAttemptIds': ['attempt-second', 'attempt-first'],
+        'archiveId': 'archive' if restored else None,
+    }
 
 
 @pytest.mark.parametrize('mode', ['accepted_archive', 'canonical_replay'])

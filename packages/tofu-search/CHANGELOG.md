@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Declare the license as the SPDX expression `MIT` (PEP 639) and build with
+  setuptools>=77; setuptools deprecated the `project.license` table and
+  schedules its removal for 2027-02-18.
 - Optional `AuthSourceProvider.bind()` captures the caller's source view before
   worker dispatch. Existing static and duck-typed providers remain compatible.
   Browser, native site and source registrations are captured together and

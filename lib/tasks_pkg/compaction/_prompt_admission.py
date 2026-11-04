@@ -306,8 +306,8 @@ def enforce_dispatch_prompt_limit(
     if type(window) is int and window > 0:
         reason += (f'; route window {window:,}, '
                    f'output/safety headroom {max(0, window - target):,}')
-    reason += ('; local pre-dispatch safeguard. '
-               'Snapshot totals are message estimates excluding tool schemas.')
+    reason += ('; local pre-dispatch safeguard. Row totals estimate the full '
+               'request; the archived snapshot counts messages only.')
     compacted = force_compact_if_needed(
         messages,
         task=task,

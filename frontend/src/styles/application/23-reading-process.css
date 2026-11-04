@@ -126,8 +126,9 @@
   border-radius: 0;
   background: transparent;
 }
-/* A program result already sits on the card spine; no second rail or inset. */
-.conversation-surface .ptc-result > .ptool-result-body {
+/* A program result already sits on the card spine, and settled edit rows carry
+   their own bordered chrome; neither gets a second rail or inset. */
+.conversation-surface :is(.ptc-result, .ptool-batch-done-block) > .ptool-result-body {
   margin: 0;
   padding: 0;
   border: 0;
@@ -259,11 +260,29 @@
   transform: rotate(180deg);
 }
 
+/* Open reasoning is one bounded scroller in the narration well's grammar:
+ * shared height, contained overscroll and edge shadows that appear only on
+ * the side with more to read (local-attached covers over scroll shadows). */
 .conversation-surface .thinking-content,
 .conversation-surface .thinking-block[open] .thinking-content {
-  max-height: none;
-  overflow: visible;
+  --process-scroll-cover: var(--bg-primary);
+  --process-scroll-shade: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  max-height: var(--conversation-process-scroll-max);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
   transition: none;
+  background:
+    linear-gradient(var(--process-scroll-cover), transparent) top / 100% var(--space-6) no-repeat local,
+    linear-gradient(transparent, var(--process-scroll-cover)) bottom / 100% var(--space-6) no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--process-scroll-shade), transparent) top / 100% var(--space-3) no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, var(--process-scroll-shade), transparent) bottom / 100% var(--space-3) no-repeat scroll;
+}
+
+.conversation-surface .thinking-content:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .conversation-surface .thinking-block:not([open]) .thinking-content {

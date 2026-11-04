@@ -157,7 +157,6 @@ class OpenCodeGuestAgent(BaseAgent):
         context_tokens: int = 200_000,
         output_tokens: int = 131_072,
         timeout_sec: int = 3600,
-        max_continuations: int = 16,
         proxy_metrics_settle_timeout_sec: float = 60.0,
         **kwargs: Any,
     ) -> None:
@@ -186,9 +185,6 @@ class OpenCodeGuestAgent(BaseAgent):
         self._timeout_sec = int(timeout_sec)
         if not 1 <= self._timeout_sec <= 86_400:
             raise ValueError("timeout_sec must be between 1 and 86400")
-        self._max_continuations = int(max_continuations)
-        if not 0 <= self._max_continuations <= 64:
-            raise ValueError("max_continuations must be between 0 and 64")
         self._proxy_metrics_settle_timeout_sec = float(
             proxy_metrics_settle_timeout_sec)
         if not 1.0 <= self._proxy_metrics_settle_timeout_sec <= 600.0:
@@ -368,17 +364,16 @@ class OpenCodeGuestAgent(BaseAgent):
         guest_stderr = f"{guest_attempt}/opencode-stderr.log"
         await environment.upload_file(prompt_host, f"{guest_attempt}/prompt.txt")
         await environment.upload_file(config_host, guest_config_path)
-        continuation = guest_shell_command(
+        run_program = guest_shell_command(
             binary=f"{_GUEST_ROOT}/opencode",
             model=self._model,
             instruction_path=f"{guest_attempt}/prompt.txt",
             raw_output_path=guest_raw,
             stderr_path=guest_stderr,
-            max_continuations=self._max_continuations,
         )
         shell_command = (
             f"umask 077 && mkdir -p {shlex.quote(guest_attempt)} && "
-            f"{continuation}"
+            f"{run_program}"
         )
         guest_env = {
             "HOME": f"{guest_attempt}/home",

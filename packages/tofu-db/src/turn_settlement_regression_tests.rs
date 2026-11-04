@@ -2,7 +2,9 @@
 // growth and stable-segment repair can cross 8 MiB inside the authority.
 #[test]
 fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
-    for stable_segments in [false, true] {
+    for (stable_segments, append_bytes) in [
+        (false, 30_000), (true, 10_000), (true, 9 * 1024 * 1024),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
         execute(
@@ -33,6 +35,9 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
             1_100,
         )
         .unwrap();
+        let config = if append_bytes > 8 * 1024 * 1024 {
+            json!({"retainedContext": "c".repeat(9 * 1024 * 1024)})
+        } else { json!({}) };
         let attempt = execute(
             &mut db,
             &request(
@@ -41,7 +46,8 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
                 json!({
                     "conversation_id": "large-patch", "turn_id": "turn", "user_id": 11,
                     "command_id": "go", "operation": "regenerate", "target_actor": "assistant",
-                    "target_kind": "reply", "expected_projection_revision": 1, "config": {}
+                    "target_kind": "reply", "expected_projection_revision": 1, "config": config,
+                    "dispatch_mode": "conversation_executor"
                 }),
                 Some("large-attempt"),
             ),
@@ -49,6 +55,12 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
         )
         .unwrap();
         let attempt_id = attempt["attempt"]["attemptId"].as_str().unwrap();
+        let dispatchable = execute(&mut db, &request("turn.attempt.dispatchable.list", 99,
+            json!({"created_before_ms": 1_250, "limit": 32}), None), 1_250).unwrap();
+        assert!(dispatchable[0]["config"]["retainedContext"] == config["retainedContext"],
+            "dispatch recovery must retain the complete supplied context");
+        assert!(dispatchable[0]["config"]["_resumeSource"].is_object());
+        assert_eq!(dispatchable[0]["attempt"]["attemptId"], attempt_id);
         execute(
             &mut db,
             &request(
@@ -78,7 +90,6 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
         )
         .unwrap();
         let revision = live["projection_revision"].as_u64().unwrap();
-        let append_bytes = if stable_segments { 10_000 } else { 30_000 };
         let patch_request = request(
             "turn.event.record",
             11,
@@ -93,7 +104,7 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
             }),
             Some("large-patch-event"),
         );
-        assert!(patch_request.payload.len() < 32_000);
+        assert!(patch_request.payload.len() < append_bytes + 2048);
         let patched = execute(&mut db, &patch_request, 1_500).unwrap();
         assert_eq!(patched["applied"], true);
         let get = request(
@@ -173,6 +184,49 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
 
 // Compact heads are physical compression, never permission to admit an
 // un-settleable materialized revision. Exercise the real ceiling, not a mock.
+#[test]
+fn visible_and_related_turn_publication_preserves_content_above_eight_mib() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let pair = execute(&mut db, &request("turn.create_pair", 11, json!({
+        "conversation_id": "large-related", "user_id": 11, "command_id": "create",
+        "input_projection": {"content": "hello"}, "config": {},
+        "conversation_defaults": {"allowCreate": true, "title": "Related"}
+    }), Some("large-related-create")), 1_000).unwrap();
+    let attempt = pair["attempt"]["attemptId"].as_str().unwrap();
+    let root = pair["turn"]["turnId"].as_str().unwrap();
+    execute(&mut db, &request("turn.attempt.bind", 11, json!({
+        "attempt_id": attempt, "task_id": "large-related-task", "user_id": 11
+    }), Some("large-related-bind")), 1_100).unwrap();
+    let content = "v".repeat(9 * 1024 * 1024);
+    execute(&mut db, &request("turn.visible.sync", 11, json!({
+        "conversation_id": "large-related", "attempt_id": attempt, "root_turn_id": root,
+        "default_kind": "flow_node", "run_id": "large-visible-run", "user_id": 11,
+        "messages": [
+            {"role": "assistant", "_isFlowPlanner": true, "content": "plan"},
+            {"role": "user", "_isFlowReview": true, "_flowApproved": false, "content": content}
+        ]
+    }), Some("large-related-visible")), 1_200).unwrap();
+    let turns = execute(&mut db, &request("turn.list", 11, json!({
+        "conversation_id": "large-related", "user_id": 11
+    }), None), 1_300).unwrap();
+    let related = turns.as_array().unwrap().iter()
+        .find(|turn| turn["projection"]["content"] == content).unwrap();
+    let related_id = related["turnId"].as_str().unwrap();
+    execute(&mut db, &request("turn.related.announce", 11, json!({
+        "attempt_id": attempt, "turn_ids": [related_id], "user_id": 11
+    }), Some("large-related-announce")), 1_400).unwrap();
+    drop(db);
+    let mut db = AuthorityDatabase::open(directory.path()).unwrap();
+    let replay = execute(&mut db, &request("turn.sync.changes", 11, json!({
+        "conversation_id": "large-related", "user_id": 11, "after": 0, "limit": 100
+    }), None), 1_500).unwrap();
+    let last = replay["events"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["type"], "attempt.event");
+    assert!(last["payload"]["event"]["payload"]["turns"][0]["projection"]["content"]
+        .as_str() == Some(content.as_str()), "related replay must preserve the complete content");
+}
+
 #[test]
 fn compact_head_ceiling_rejects_atomically_and_retains_settleable_state() {
     for recover in [false, true] {

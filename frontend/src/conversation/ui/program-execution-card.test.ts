@@ -264,11 +264,13 @@ describe.each(['default', 'classic-fallback', 'classic-rich'])('%s execution chi
         renderToolBlockHtml: surface === 'classic-rich' ? () => '<div class="rich-receipt">receipt</div>' : undefined,
       } as Parameters<typeof renderToolBlock>[3]);
     };
-    for (const round of [{ parentToolCallId: 'program' }, { _programCallId: 'program' }]) {
+    for (const round of [{ parentToolCallId: 'program' }, { _programCallId: 'program' },
+      { parentToolCallId: 'program', _artifactOrigin: { sourceToolCallId: 'source' } }]) {
       render(round);
       expect(node.classList.contains('ptool-parent-child')).toBe(true);
       expect(node.dataset.parentToolCallId).toBe('program');
-      for (const unrelated of [{ _artifactOrigin: { parentToolCallId: 'program' } },
+      // Stored read-backs repeat their saved output's source as the parent.
+      for (const unrelated of [{ parentToolCallId: 'source', _artifactOrigin: { sourceToolCallId: 'source' } },
         { _programSynthetic: true, _programCallId: 'program' }, {}]) {
         render(unrelated);
         expect(node.classList.contains('ptool-parent-child')).toBe(false);

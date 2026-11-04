@@ -49,6 +49,7 @@ focused changed stage tests. Add manual-compaction route/reload or long-agent
 context-plan tests when those boundaries change.
 
 Local L2 stages live under `_layer2/`: `_source_plan.py` selects source units,
+`_preparation.py` borrows deterministic L1 transforms for the detached candidate,
 `_candidate_policy.py` owns pre/post-summary economics, `_summary_acceptance.py`
 validates critical state, and `_projection.py` constructs/converges candidates.
 `_compact.py` retains cancellation, archive/adoption order and receipt settlement;

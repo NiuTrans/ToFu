@@ -275,8 +275,7 @@ def test_exact_parent_span_requires_a_scoped_settled_unique_child(unsafe_child):
     assert timeline['entries'][-1]['detail'] == 'new occurrence failed'
 
 
-def test_real_artifact_child_stamp_deduplicates_after_terminal_and_reload():
-    from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
+def _gateway_artifact_owner():
     from lib.tool_results.tool_result_artifacts import register_artifact_provenance
 
     owner = task(toolRounds=[gateway_round()])
@@ -284,9 +283,36 @@ def test_real_artifact_child_stamp_deduplicates_after_terminal_and_reload():
     register_artifact_provenance(
         owner, ref, tool_name='execute_tools', display='Tool execution batch',
         llm_round=0, tool_call_id='gateway-1')
+    return owner, ref
+
+
+def test_saved_output_read_back_is_not_linked_to_its_source_gateway():
+    """Reading a finished gateway's saved output runs after that gateway."""
+    from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
+
+    owner, ref = _gateway_artifact_owner()
+    _, round_entry, payload = _build_tool_round_entry(
+        'read_tool_artifact', {'artifact_ref': ref}, 'read-back', '{}',
+        1, False, task=owner)
+    assert round_entry['_artifactOrigin']['sourceToolCallId'] == 'gateway-1'
+    assert 'parentToolCallId' not in round_entry
+    assert 'parentToolCallId' not in payload
+    timeline = fold_activity_timeline(None, {**payload, 'seq': 1}, owner)
+    assert 'parentSpanId' not in timeline['entries'][0]
+
+
+def test_real_gateway_child_stamp_deduplicates_after_terminal_and_reload():
+    from lib.tasks_pkg.tool_dispatch._parse import _stamp_presentation_parent
+    from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
+
+    owner, ref = _gateway_artifact_owner()
     ordinal, round_entry, payload = _build_tool_round_entry(
         'read_tool_artifact', {'artifact_ref': ref}, 'reused', '{}',
         1, False, task=owner)
+    # Dispatch stamps the gateway edge on calls the gateway itself runs.
+    nested_call = {'_presentationParentToolCallId': 'gateway-1'}
+    _stamp_presentation_parent(round_entry, nested_call)
+    _stamp_presentation_parent(payload, nested_call)
     for value in (round_entry, payload):
         assert value['parentToolCallId'] == 'gateway-1'
         assert value['taskId'] == 'task-a'

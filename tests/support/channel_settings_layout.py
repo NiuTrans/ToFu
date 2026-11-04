@@ -24,11 +24,23 @@ def _bottom(found: dict) -> float:
     return found['y'] + found['height']
 
 
+def _settle_frame_animations(panel) -> None:
+    """Wait for the Settings frame's finite animations (its opening scale, tab transitions).
+
+    Each box is a separate measurement, so two boxes taken on different frames of
+    a running scale would disagree although their layout agrees.
+    """
+    panel.evaluate("""(el) => Promise.all(el.closest('.modal').getAnimations({subtree: true})
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished.catch(() => undefined)))""")
+
+
 def assert_channel_layout_aligned(panel) -> None:
     """Card heads center their aside on the title; the visible controls of an action
     row share one bottom edge and height; every thread cell starts under its header;
     nothing escapes the Settings content scroller to stretch the fixed Settings frame
     (a focus or scroll-into-view would otherwise shift the whole frame)."""
+    _settle_frame_animations(panel)
     overflow = panel.evaluate("""(el) => { const frame = el.closest('.modal');
       return {scroll: frame.scrollHeight, client: frame.clientHeight}; }""")
     assert overflow['scroll'] <= overflow['client'] + _PIXEL, overflow

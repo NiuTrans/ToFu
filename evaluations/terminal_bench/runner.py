@@ -132,7 +132,8 @@ class Runner:
             return harness.tofu_agent(artifact=self.artifacts["tofu"], files_url=self.config.files_url,
                                       model_base_url=model_base_url, model=self.config.model,
                                       timeout_sec=timeout, instruction=task.instruction,
-                                      context_tokens=self.config.context_tokens)
+                                      context_tokens=self.config.context_tokens,
+                                      output_tokens=self.protocol.max_tokens)
         if arm == "opencode":
             return harness.opencode_agent(artifact=self.artifacts["opencode"], files_url=self.config.files_url,
                                           model_base_url=model_base_url, model=self.config.model,

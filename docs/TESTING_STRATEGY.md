@@ -3,6 +3,10 @@
 Tests protect product behavior and architecture ownership. They are not an
 archive of incidents, implementation line numbers, or past migrations.
 
+Observation wrappers around production recorders must return their receipts.
+System-note injection uses the recorder's block identity and rolls back when
+recording fails; collecting call arguments must preserve that boundary.
+
 ## Agent-session audit
 
 `python3 audit_codex_session.py <rollout.jsonl>` and its `--json` form use the
@@ -50,6 +54,14 @@ v2 metric values, CLI thresholds and error outcomes while a payload-retention
 test guards the large-history case.
 
 ## Test layers
+
+The lean installer portability job installs every plugin explicitly loaded by
+the repository's pytest configuration, even with `--noconftest` and plugin
+autoload disabled. `tests/installer/test_installer_portability_workflow.py`
+compares the declared tools with plugin distribution metadata. Problem: an
+omitted plugin prevents collection before any installation behavior is tested.
+Decision: keep the job lean while declaring its actual test dependencies;
+removing required plugins would bypass the shared test contract.
 
 | Layer | Purpose | Typical command |
 |---|---|---|

@@ -363,6 +363,7 @@ def test_optional_sibling_never_waives_mandatory_import(tmp_path, optional_impor
     'scripts/inspect_native_crash.py',
     'scripts/trace_experiment_reads.py',
     'scripts/tofudb_profile_report.py',
+    'benchmarks/project_content_fastpath.py',
     'benchmarks/search_html_reference.py',
     'benchmarks/search_relevance.py',
     'benchmarks/tofudb_context_progression.py',

@@ -75,6 +75,16 @@
   overflow: visible;
   word-break: normal;
 }
+/* A saved-output read-back is a routine call like its siblings: its action
+ * takes the shared intent type and ink, and the glyph and outcome stay on
+ * that line instead of centering beside the source and term lines. */
+.conversation-surface [data-action-summary]:has(.ptool-artifact-header) {
+  align-items: flex-start;
+}
+.conversation-surface [data-action-summary] .ptool-artifact-title {
+  color: inherit;
+  font-weight: inherit;
+}
 /* A human-guidance question is the step itself: never clamped or quieted. */
 .conversation-surface [data-action-summary] .hg-title {
   min-width: 0;

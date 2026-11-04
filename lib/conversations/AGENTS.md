@@ -59,7 +59,11 @@ The source/policy authority is `lib/project_dispatch/delegation.py`; verify
 (`progress*` in `project_coordination_v1.schema.json`): one CAS head per
 owner/project for the current binding, full replacement, no authority. It is
 the human's whole progress view; questions never live there (they are
-`ask_human` cards). Verify `test_coordinator_progress.py`.
+`ask_human` cards). While the Coordinator auto-translates, the head also
+carries a reconstructible display translation of the board's own texts;
+`coordinator_progress_translation.py` derives it with one optional job on the
+shared translation lane through `lib/translate/display_texts.py`. Verify
+`test_coordinator_progress.py` and `tests/translate/test_display_texts.py`.
 
 `coordinator_budget.py` owns the passive request usage projection from dispatch
 receipts. Requests have no spending ceiling, so there are no defaults to save.

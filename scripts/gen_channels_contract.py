@@ -16,7 +16,8 @@ def render() -> str:
     content += f'export const CHANNEL_DISCLOSURE_LABEL = {json.dumps(schema["x-disclosureLabel"], ensure_ascii=False)};\n'
     content += 'export const CHANNEL_DEFAULT_MODE_BY_KIND = ' + json.dumps(
         schema['x-defaults']['modeByKind']) + ' as const;\n'
-    content += f'export const CHANNEL_DEFAULT_REPLY_POLICY = {json.dumps(schema["x-defaults"]["replyPolicy"])};\n\n'
+    content += f'export const CHANNEL_DEFAULT_REPLY_POLICY = {json.dumps(schema["x-defaults"]["replyPolicy"])};\n'
+    content += f'export const CHANNEL_MIS_PATTERN = {json.dumps(schema["$defs"]["Mis"]["pattern"])};\n\n'
     for name, rule in schema['$defs'].items():
         content += f'export type {name} = {ts_type(rule)};\n\n'
     return content
