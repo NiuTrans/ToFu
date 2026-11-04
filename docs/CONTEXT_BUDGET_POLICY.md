@@ -38,6 +38,26 @@ capacity. Model pricing tiers and economic targets cannot force a summary below
 safety pressure, and mandatory pressure cannot justify an incomplete summary:
 failure preserves history and refuses the overfull dispatch.
 
+**Post-loop synthesis.** An empty normal completion after web reads may make
+one synthesis request. It uses a detached copy of the current working context,
+including accepted compaction and owner corrections, then admits the fetched
+evidence through the same final round-context gate before building the body or
+request snapshot. Counting and output reservation use the synthesis model and
+output cap; the task's configured selection is restored afterward. A failed
+admission leaves source messages intact and never dispatches the main request.
+The existing recovery of an exhausted empty response remains available only
+with typed evidence of an observed normal provider stop. Its error clears only
+after a verified, nonempty synthesis answer. Other terminal errors, refusals,
+output limits and owner Stop settle through their original owner without
+synthesis. Preparation failures settle as synthesis errors; Stop during
+preparation remains cancellation.
+**Problem:** rebuilding from the invocation's original history resurrected
+already-compacted input and a second failure could mask the loop's real cause.
+**Alternatives rejected:** raising the model window or truncating original
+history hides the stale-source bug; retrying after terminal failure bypasses
+the existing recovery policy. Specs: `test_post_loop_fallback_admission.py` and
+`test_noprose_fallback_evidence.py`.
+
 **Problem.** Folding only tool spans retained every intervening assistant row
 in a long single turn. A preservation budget therefore did not bound the
 actual working projection, and a complete summary could still fail admission.

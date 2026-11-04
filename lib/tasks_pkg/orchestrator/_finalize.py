@@ -44,6 +44,7 @@ from lib.tasks_pkg.llm_fallback._refusal import (
 )
 from lib.llm.stream_result import (
     ProviderStreamResult,
+    ProviderStreamState,
     ensure_provider_stream_result,
 )
 from lib.log import get_logger
@@ -764,7 +765,8 @@ def _run_post_loop_fallback(
     preset: str,
     thinking_depth: str | None,
     cfg: dict[str, Any],
-    original_messages: list,
+    messages: list,
+    round_num: int,
     all_search_results_text: list[str],
     max_tokens: int,
     thinking_enabled: bool,
@@ -777,57 +779,94 @@ def _run_post_loop_fallback(
 ) -> tuple[Any, Any, ProviderStreamResult | None]:
     """Synthesize a terminal answer when tools returned data but prose did not."""
     tid = task['id'][:8]
-    combined = bounded_search_results_text(all_search_results_text)
-    fallback_messages = list(original_messages)
-    fallback_messages.append({
-        'role': 'assistant',
-        'content': "I've gathered the information. Let me analyze it.",
-    })
+    prior_error = task.get('error')
+    from lib.llm import AbortedError
     from lib.tasks_pkg.context_composer import append_injection
-    append_injection(
-        fallback_messages, 'fallback_synthesis',
-        f'Here are fetched contents:\n\n{combined}\n\n'
-        'Provide a comprehensive answer. Cite sources.', task=task)
-    try:
-        snapshot = _strip_base64_for_snapshot(fallback_messages)
-        append_event(task, build_event(
-            EventType.MESSAGES_SNAPSHOT,
-            kind='state',
-            model=model,
-            roundNum='fallback',
-            label=f'Fallback · {len(fallback_messages)}条',
-            messages=snapshot,
-            contextManifest=list(task.get('_contextManifest') or []),
-        ))
-    except Exception as error:
-        logger.warning(
-            '[Task %s] messages_snapshot fallback failed, model=%s: %s',
-            tid, model, error, exc_info=True,
-        )
+    from lib.tasks_pkg.orchestrator._root_agent_loop import admit_round_context
 
-    body = orchestrator_ports.build_request_body(
-        model,
-        fallback_messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        thinking_enabled=thinking_enabled,
-        preset=preset,
-        thinking_depth=thinking_depth,
-        response_format=cfg.get('responseFormat'),
-        defer_reasoning=True,
-        stream=True,
-    )
     try:
+        # Original invocation input may be far larger than the working view.
+        # Admission can transform nested carriers, so isolate its candidate
+        # from the accepted context and the task's durable source.
+        fallback_messages = copy.deepcopy(messages)
+        combined = bounded_search_results_text(all_search_results_text)
+        fallback_messages.append({
+            'role': 'assistant',
+            'content': "I've gathered the information. Let me analyze it.",
+        })
+        append_injection(
+            fallback_messages, 'fallback_synthesis',
+            f'Here are fetched contents:\n\n{combined}\n\n'
+            'Provide a comprehensive answer. Cite sources.', task=task)
+
+        # Preserve the live task identity required by summary authorization,
+        # while counting against the effective destination after model fallback.
+        configured_selection = task.get('config')
+        task['config'] = dict(
+            configured_selection or cfg, model=model, maxTokens=max_tokens)
+        try:
+            admitted_input_tokens = admit_round_context(
+                task, fallback_messages, [], round_num=round_num, model=model,
+            ).get('totalTokens')
+        finally:
+            if configured_selection is None:
+                task.pop('config', None)
+            else:
+                task['config'] = configured_selection
+        if task.get('aborted'):
+            raise AbortedError('Owner stopped post-loop synthesis before dispatch')
+
+        body = orchestrator_ports.build_request_body(
+            model,
+            fallback_messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_enabled=thinking_enabled,
+            preset=preset,
+            thinking_depth=thinking_depth,
+            response_format=cfg.get('responseFormat'),
+            defer_reasoning=True,
+            stream=True,
+            precomputed_input_tokens=admitted_input_tokens,
+            context_window=(task.get('_contextBudgetDecision') or {}).get(
+                'contextWindowTokens', 0),
+        )
+        try:
+            snapshot = _strip_base64_for_snapshot(
+                body.get('messages', fallback_messages))
+            append_event(task, build_event(
+                EventType.MESSAGES_SNAPSHOT,
+                kind='state',
+                model=model,
+                roundNum='fallback',
+                label=f'Fallback · {len(fallback_messages)}条',
+                messages=snapshot,
+                contextManifest=list(task.get('_contextManifest') or []),
+            ))
+        except Exception as error:
+            logger.warning(
+                '[Task %s] messages_snapshot fallback failed, model=%s: %s',
+                tid, model, error, exc_info=True,
+            )
         last_stream_result = ensure_provider_stream_result(
             stream_llm_response(task, body, tag='FALLBACK'))
         _, finish_reason, usage = last_stream_result
         last_finish_reason = finish_reason
+        if (prior_error and task.get('error') is prior_error
+                and last_stream_result.is_verified_complete
+                and finish_reason in ('stop', 'end_turn')
+                and (last_stream_result.message.get('content') or '').strip()):
+            task['error'] = None
         if usage:
             last_usage = usage
             record_attempt_usage(
                 task, usage, model, 'fallback', accumulated_usage, api_rounds,
                 tag='FALLBACK')
+    except AbortedError:
+        if not task.get('aborted'):
+            raise
     except Exception as error:
+        last_finish_reason = 'error'
         logger.error(
             '[%s] ⚠️ Post-loop fallback failed: %s',
             tid, error, exc_info=True,
@@ -1147,8 +1186,26 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         if _maybe_auto_retry_turn(task, cfg):
             return
 
+    # A clean empty response can exhaust terminal-response recovery. Preserve
+    # that synthesis path using typed provider evidence, never the broad
+    # abnormal_stop kind alone (which also includes broken transports).
+    terminal_error = task.get('error')
+    recoverable_empty_stop = (
+        isinstance(terminal_error, dict)
+        and terminal_error.get('kind') == 'abnormal_stop'
+        and last_finish_reason == 'abnormal_stop'
+        and isinstance(last_stream_result, ProviderStreamResult)
+        and last_stream_result.state in {
+            ProviderStreamState.EMPTY_RESPONSE, ProviderStreamState.PROVIDER_FINISHED}
+        and last_stream_result.provider_finish_reason == 'stop'
+        and not (last_stream_result.message.get('content') or '').strip()
+        and not last_stream_result.message.get('tool_calls')
+    )
     # ── Fallback: synthesize answer from search results if main loop produced nothing ──
-    if not task['content'].strip() and tool_call_happened and all_search_results_text and not task['aborted']:
+    if (not task['content'].strip() and tool_call_happened
+            and all_search_results_text and not task['aborted']
+            and (recoverable_empty_stop or (
+                not terminal_error and last_finish_reason in ('stop', 'end_turn')))):
         (last_finish_reason, last_usage,
          last_stream_result) = _run_post_loop_fallback(
             task,
@@ -1156,7 +1213,8 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             preset=preset,
             thinking_depth=thinking_depth,
             cfg=cfg,
-            original_messages=original_messages,
+            messages=messages,
+            round_num=round_num + 1,
             all_search_results_text=all_search_results_text,
             max_tokens=max_tokens,
             thinking_enabled=thinking_enabled,
