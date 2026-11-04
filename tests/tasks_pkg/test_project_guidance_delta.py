@@ -4,11 +4,13 @@ One spec per delivery requirement: each rule file's text is delivered at most
 once while it stays in model-visible history (rounds and turns), identical
 bytes at another path are a one-line scope note, new rules arrive
 incrementally, changes supersede once, deletions retract briefly, a dropped
-delivery is restored exactly, scopes stay explicit and an unchanged round does
-no guidance work. The end-to-end replay walks root -> lib/tasks_pkg -> a
+delivery returns only for root rules and retained work, scopes stay explicit
+and an unchanged round does no guidance work. The end-to-end replay walks root -> lib/tasks_pkg -> a
 linked worktree -> a second turn.
 """
 from copy import deepcopy
+
+import json
 
 import pytest
 
@@ -76,6 +78,19 @@ def _next_turn(messages, name='turn-2'):
 
 def _visible(messages):
     return '\n'.join(_texts(messages))
+
+
+def _tool_round(name, arguments, call_id='call-retained'):
+    """One assistant tool call and its result, as a compaction retains them."""
+    return [{'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': call_id, 'type': 'function',
+                'function': {'name': name, 'arguments': json.dumps(arguments)}}]},
+            {'role': 'tool', 'tool_call_id': call_id, 'content': 'ok'}]
+
+
+def _without(messages, *bodies):
+    return [message for message in messages
+            if not any(body.strip() in '\n'.join(_texts([message])) for body in bodies)]
 
 
 def test_unchanged_rules_are_delivered_once_across_rounds(tmp_path):
@@ -169,22 +184,31 @@ def test_changed_rule_supersedes_once_and_deleted_rule_is_retracted(tmp_path):
     assert _round(task, projected) == ''
 
 
-def test_compaction_drop_redelivers_exactly_the_missing_block(tmp_path):
+def test_compaction_drop_restores_only_rules_that_retained_work_needs(tmp_path):
     root, worktree = _project(tmp_path)
     task = _task(root)
     messages = [{'role': 'user', 'content': 'implement'}]
     _round(task, messages)
     _round(task, messages, root / 'sub' / 'file.py')
+    _round(task, messages, root / 'other' / 'file.py')
     _round(task, messages, worktree / 'file.py')
-    messages[:] = [message for message in messages
-                   if SUB_BODY.strip() not in '\n'.join(_texts([message]))]
+    # The summary replaced the sub/ and other/ accesses with their carriers;
+    # one read of sub/ is the retained recent work.
+    messages[:] = _without(messages, SUB_BODY, OTHER_BODY) + _tool_round(
+        'read_files', {'reads': [{'path': str(root / 'sub' / 'file.py')}]})
     restored = _round(task, messages)
     assert restored.count(SUB_BODY.strip()) == 1
+    assert OTHER_BODY.strip() not in restored
     assert ROOT_BODY.strip() not in restored and 'same bytes as' not in restored
-    # Dropping the copy that holds identical bytes restores that copy in full;
-    # the surviving scope note keeps pointing at it and is not re-sent.
-    messages[:] = [message for message in messages
-                   if ROOT_BODY.strip() not in '\n'.join(_texts([message]))]
+    assert str(root / 'other' / 'AGENTS.md') not in task['_projectGuidance']['rules']
+    assert _round(task, messages) == ''
+    # Revisiting the summarized directory re-acquires its rule like a first touch.
+    revisit = _round(task, messages, root / 'other' / 'file.py')
+    assert revisit.count(OTHER_BODY.strip()) == 1
+    # Root rules return without retained work; dropping the copy that holds
+    # identical bytes restores that copy in full, and the surviving scope note
+    # keeps pointing at it and is not re-sent.
+    messages[:] = _without(messages, ROOT_BODY)
     restored = _round(task, messages)
     assert restored.count(ROOT_BODY.strip()) == 1 and ENTRY_BODY.strip() in restored
     assert 'same bytes as' not in restored and SUB_BODY.strip() not in restored

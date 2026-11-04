@@ -461,6 +461,25 @@ The compaction pair becomes one inspectable Turn row keyed by `archiveId`; its
 settled form carries the estimated token/message counts before and after plus
 the reduction percentage. The transient `phase=compacting` beat remains
 progress text and is replaced by that receipt row rather than rendered twice.
+Problem: those receipt counts describe the compactor's own message list. The
+managed context restored afterwards and the tool schemas ride on the next
+request but were missing, so conversation `mw10w4j3ghfsbk` showed 134,716 ->
+24,166 (82%) while provider-billed input went from 204,574 to 103,992 (49%).
+Decision: `recompose_context_after_compaction` emits one
+`compaction_request_size` fact for the compaction it restored context for.
+`tokensBefore` is the gate's count of the complete request (a forced pass
+applies the same counter before the compactor replaces the list) and
+`tokensAfter` is that counter over the rebuilt request. The fold replaces only
+that producer's row accounting (`tokensBefore`, `tokensAfter`,
+`reductionPercent`, `messagesAfter`). Status, timing and the archive snapshot
+counts stay unchanged. Without restoration (Stop first) the receipt counts
+remain. Rejected: a second `compaction_done`, because consumers treat it as
+the single settlement; restoring context inside the compactor, because the
+persisted candidate must stay the compactor result and callers own
+restoration; provider-billed input, because it arrives only after the next
+stream completes. Specs: `tests/compaction/test_compaction_request_size.py`
+and `rebuilt_request_size` in
+`tests/turn_lifecycle/test_turn_activity_timeline.py`.
 Problem: archive-less preflight refusals appeared at the conversation start.
 Decision: `compaction_done` may carry producer-scoped `anchorBlockId` and
 `anchorPosition` captured before planning. The fold reuses this witness when

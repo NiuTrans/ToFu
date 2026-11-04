@@ -114,7 +114,7 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `role_directive` | Keep only for an explicitly specialized role | Required; 5,000 tokens |
 | `goal_objective` | Chat Goal worker's durable objective restated verbatim (inline bound 4,000 chars; byte-stable per run so prefix caching holds and compaction cannot drift scope) | Required; 8,000 tokens |
 | `project_rules` | Task project topology/JOURNAL locator; standalone/remote context retains root rules in full | Required; no advisory clipping |
-| `project_scoped_rules` | Accessed-path ancestor guidance from declared roots, one `project_scoped_rules_<instance>` block per rule file; each text is delivered once while it stays in model-visible history (rounds and turns), identical bytes at another path are a one-line scope note, changes supersede and deletions retract at closed model boundaries without an execution gate | Required; no advisory clipping; a task's own acquisition rejects over 128 files or 1 MiB rather than omitting rules (inherited, already-visible blocks do not count) |
+| `project_scoped_rules` | Accessed-path ancestor guidance from declared roots, one `project_scoped_rules_<instance>` block per rule file; each text is delivered once while it stays in model-visible history (rounds and turns), identical bytes at another path are a one-line scope note, changes supersede and deletions retract at closed model boundaries without an execution gate; after compaction a nested rule returns only for retained work, otherwise at its next access | Required; no advisory clipping; a task's own acquisition rejects over 128 files or 1 MiB rather than omitting rules (inherited, already-visible blocks do not count) |
 | `user_context` | Optional enabled, nonempty preferences; not task evidence | 1,000 tokens |
 | `memory_guidance` | Short evidence/retention boundary when memory and tools are enabled; no duplicate CRUD tutorial | 180 tokens |
 | `skills_index` | Discovery index only with admitted `load_skill` in the frozen wire or executable catalog; task-frozen; bodies on demand; capability removal suppresses even a cached index | 1,400 tokens |
@@ -426,8 +426,11 @@ changed:
   supersede notice; a deleted file appends one line `Source: <path> — deleted;
   its earlier text no longer applies within <scope>.`; an emptied file a similar
   line;
-- when compaction or a history rebuild dropped a block, exactly that block is
-  re-delivered; snapshot compaction (`compact_context_snapshots`, now resolving
+- when compaction or a history rebuild dropped a block, a root rule is always
+  re-delivered and a nested rule only while a tool call still in history
+  targets its scope; any other rule is forgotten and the next access acquires
+  it again like a first touch (see "Post-compaction rule restoration" below);
+  snapshot compaction (`compact_context_snapshots`, now resolving
   instance ids through `block_spec`) retires superseded per-file versions, and
   memory-only head truncation protects the newest version of each required one;
 - a new task re-reads, once, the rule files whose blocks its inherited history
@@ -468,6 +471,41 @@ rules at each new task (the old behaviour) is exactly the cost being removed;
 trusting inherited blocks without re-reading their files would keep deleted or
 changed rules current. Counting inherited rules toward the acquisition bound
 would refuse long conversations that merely accumulated history.
+
+### Post-compaction rule restoration (owner decision, 2026-11-04)
+
+**Problem.** Compaction removes the carriers of every delivered rule, and the
+rule above restored all of them, so one compaction re-sent every rule file the
+task had ever touched. The count grew with the directories a long task visited,
+not with what its remaining work needed. Conversation `mw10w4j3ghfsbk`
+(2026-11-04 12:21:08) re-sent 42 rule blocks, 139,706 characters (about 28K
+tokens), immediately after a compaction whose summary had replaced the tool
+calls that acquired them. That alone was more than the compacted message list.
+
+**Decision.** `_forget_unretained_rules` in `lib/tasks_pkg/project_guidance.py`
+runs before each delivery. A rule whose delivered block is no longer visible
+is restored when it is a root rule (its scope is a declared root) or when a
+tool call still in history targets its scope. Targets come from the same
+argument resolution live acquisition uses (`_tool_targets`). Any other lost
+rule is dropped from the task's acquired set, and the next tool access to its
+subtree acquires and delivers it exactly like a first touch. Presence remains
+content-addressed in the messages. The task-local `delivered` record only
+separates a lost block from a never-delivered one.
+
+**Measurement.** Replaying that archive's saved compactor result (25 messages,
+9 retained tool calls, all at the repository root or under `.tofu/memories`)
+through the new rule restores 1 block (root `AGENTS.md`, 16,592 characters)
+instead of 42.
+
+**Trade-off accepted by the owner.** As on a first touch, the first tool call
+into a forgotten subtree runs before its rule is visible again; the rule
+arrives with the next model request. Acquisition never gated execution.
+
+**Alternatives rejected.** Restoring every lost rule is the cost being
+removed. Restoring rules for paths that only the summary or user prose
+mentions would guess at intent from text, while tool-call targets are the same
+evidence first-touch acquisition uses. Keeping rule carriers out of compaction
+would pin every acquired rule for the rest of the task.
 Executable specifications: `tests/tasks_pkg/test_project_guidance_delta.py`
 (one per requirement plus the end-to-end replay).
 

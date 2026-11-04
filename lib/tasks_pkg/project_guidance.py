@@ -11,7 +11,10 @@ text enters model-visible history at most once while it stays there:
 - a byte-identical copy at another path (a linked worktree) is a one-line
   scope note naming the delivered copy;
 - a changed file appends one superseding version, a deleted one a one-line
-  retraction, and history that lost a block gets exactly that block back;
+  retraction;
+- a block that left history (compaction) comes back only for a root rule or a
+  rule governing the target of a tool call still in history; any other rule is
+  forgotten until the next access re-acquires it like a first touch;
 - with nothing changed, a round checks only the identity of the carriers that
   hold the delivered blocks and renders nothing.
 
@@ -23,6 +26,7 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 
+import json
 import os
 import re
 import threading
@@ -103,6 +107,39 @@ def check_project_guidance(task: dict, tool_name: str, arguments: dict) -> str:
     config = task.get('config') or {}
     if not config.get('projectPath') or config.get('project_remote'):
         return ''
+    targets = _tool_targets(task, tool_name, arguments)
+    if not targets:
+        return ''
+    rows = {}
+    for root, selected in targets:
+        for row in read_scoped_guidance(str(root), str(selected)):
+            rows[row['path']] = row
+    state = _state(task)
+    with state['lock']:
+        candidate = {**state['rules'], **rows}
+        removed = {path: reason for path, reason in state['removed'].items() if path not in rows}
+        # Verified absence removes a previously observed rule on this same
+        # target chain, without treating acquisition failures as deletion.
+        for path, old in list(candidate.items()):
+            if (path not in rows and any(old['root'] == str(root)
+                    and selected.is_relative_to(Path(path).parent)
+                    for root, selected in targets)):
+                del candidate[path]
+                removed[path] = 'deleted'
+        inherited = frozenset(path for path in state['inherited']
+                              if path in candidate and path not in rows)
+        if inherited != state['inherited'] or _rules_differ(state['rules'], candidate):
+            acquired = [row for path, row in candidate.items() if path not in inherited]
+            if len(acquired) > MAX_GUIDANCE_FILES:
+                raise ValueError('Too many applicable rule files; no instructions were omitted')
+            check_guidance_bounds(acquired)  # Validate live rows, not removed versions.
+        _commit_rules(state, candidate, removed, inherited)
+    return ''
+
+
+def _tool_targets(task: dict, tool_name: str, arguments: dict) -> list[tuple[Path, Path]]:
+    """``(declared root, resolved path)`` for every path one tool call names."""
+    config = task.get('config') or {}
     from lib.tasks_pkg.workspace_delivery import execution_root_key
     from lib.project_mod.config import resolve_namespaced_path
     roots = [Path(row['path']).resolve() for row in _root_policy(task)['roots'].values()]
@@ -159,9 +196,6 @@ def check_project_guidance(task: dict, tool_name: str, arguments: dict) -> str:
                 if shell_source_has_expansion(target):
                     continue
                 paths.extend(str((cwd / Path(target).expanduser()).resolve()) for cwd in target_cwds | cwds)
-    if not paths:
-        return ''
-    rows = {}
     targets = []
     for raw in dict.fromkeys(paths):
         if raw.startswith('file://'):
@@ -178,29 +212,7 @@ def check_project_guidance(task: dict, tool_name: str, arguments: dict) -> str:
         if root is None:
             continue
         targets.append((root, selected))
-        for row in read_scoped_guidance(str(root), str(selected)):
-            rows[row['path']] = row
-    state = _state(task)
-    with state['lock']:
-        candidate = {**state['rules'], **rows}
-        removed = {path: reason for path, reason in state['removed'].items() if path not in rows}
-        # Verified absence removes a previously observed rule on this same
-        # target chain, without treating acquisition failures as deletion.
-        for path, old in list(candidate.items()):
-            if (path not in rows and any(old['root'] == str(root)
-                    and selected.is_relative_to(Path(path).parent)
-                    for root, selected in targets)):
-                del candidate[path]
-                removed[path] = 'deleted'
-        inherited = frozenset(path for path in state['inherited']
-                              if path in candidate and path not in rows)
-        if inherited != state['inherited'] or _rules_differ(state['rules'], candidate):
-            acquired = [row for path, row in candidate.items() if path not in inherited]
-            if len(acquired) > MAX_GUIDANCE_FILES:
-                raise ValueError('Too many applicable rule files; no instructions were omitted')
-            check_guidance_bounds(acquired)  # Validate live rows, not removed versions.
-        _commit_rules(state, candidate, removed, inherited)
-    return ''
+    return targets
 
 
 def _rules_differ(old: dict, new: dict) -> bool:
@@ -340,9 +352,10 @@ def _deliver(task: dict, state: dict, messages: list[dict], model: str) -> None:
         verified_block_hashes,
     )
     from lib.tasks_pkg.manager import task_user_id
-    version = state['version']
     present = {block_id: digest for block_id, digest in verified_block_hashes(messages).items()
                if block_id.startswith(_BLOCK_PREFIX)}
+    _forget_unretained_rules(task, state, messages, present)
+    version = state['version']
     # A retraction is owed only while an earlier version is still visible.
     state['removed'] = {path: reason for path, reason in state['removed'].items()
                         if _rule_block_id(path) in present}
@@ -360,6 +373,55 @@ def _deliver(task: dict, state: dict, messages: list[dict], model: str) -> None:
             return
     state['delivered'] = {path: row['hash'] for path, row in state['rules'].items()}
     state['witness'] = {'version': version, 'carriers': _rule_carriers(messages)}
+
+
+def _forget_unretained_rules(task: dict, state: dict, messages: list[dict], present: dict) -> None:
+    """Forget delivered rules whose blocks left history unless retained work needs them.
+
+    Compaction summarizes the tool calls that acquired most rules; restoring
+    all of them re-sends rules for directories the remaining work may never
+    revisit. Root rules always return. A nested rule returns only when it
+    governs the target of a tool call still in history; otherwise the next
+    access re-acquires it, exactly like a first touch.
+    """
+    lost = [path for path, row in state['rules'].items()
+            if path in state['delivered'] and _rule_block_id(path) not in present
+            and row['scope'] != row['root'] and render_rule(row)]
+    if not lost:
+        return
+    targets = _retained_targets(task, messages)
+    forgotten = frozenset(
+        path for path in lost
+        if not any(target.is_relative_to(state['rules'][path]['scope']) for target in targets))
+    if not forgotten:
+        return
+    _commit_rules(state, {path: row for path, row in state['rules'].items() if path not in forgotten},
+                  state['removed'], state['inherited'] - forgotten)
+    state['delivered'] = {path: digest for path, digest in state['delivered'].items()
+                          if path not in forgotten}
+
+
+def _retained_targets(task: dict, messages: list[dict]) -> list[Path]:
+    """Paths named by the tool calls still in model-visible history."""
+    targets = []
+    for message in messages:
+        calls = message.get('tool_calls') if isinstance(message, dict) else None
+        for call in calls or ():
+            function = call.get('function') if isinstance(call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get('arguments')
+            try:
+                if isinstance(arguments, str):
+                    arguments = json.loads(arguments)
+                if isinstance(arguments, dict):
+                    targets.extend(selected for _, selected in _tool_targets(
+                        task, str(function.get('name') or ''), arguments))
+            except (OSError, ValueError):
+                # A historical call that no longer parses or resolves names no
+                # target the remaining work can act on.
+                continue
+    return targets
 
 
 def _rule_carriers(messages: list[dict]) -> list[tuple]:

@@ -534,6 +534,36 @@ def _settled_compaction(timeline, task, archive_id, seq):
     }, task)
 
 
+def test_rebuilt_request_size_settles_only_the_compaction_row_it_names():
+    from lib.conversation_sync.validation import decode
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    timeline = _settled_compaction(None, task, 'archive-1', 1)
+    timeline = _settled_compaction(timeline, task, 'archive-2', 3)
+    before = json.loads(json.dumps(timeline))
+    event = build_event(
+        EventType.COMPACTION_REQUEST_SIZE, archiveId='archive-2', convId='conv-a',
+        tokensBefore=306_827, tokensAfter=155_100, tokenCountKind='estimated',
+        reductionPct=49.4, msgsAfter=37, ts=9)
+    settled = fold_activity_timeline(timeline, {**event, 'seq': 5, 'emittedAt': 4_600}, task)
+    decode('TurnActivityTimeline', settled)
+    assert settled['entries'][0] == before['entries'][0]
+    row, previous = settled['entries'][1], before['entries'][1]
+    assert {key: row[key] for key in ('tokensBefore', 'tokensAfter', 'reductionPercent',
+                                      'messagesAfter')} == {
+        'tokensBefore': 306_827, 'tokensAfter': 155_100, 'reductionPercent': 49,
+        'messagesAfter': 37}
+    # Only the accounting changes; the row keeps its identity, timing and fate.
+    unchanged = ('id', 'archiveId', 'status', 'durationMs', 'messagesBefore', 'attemptId', 'seq')
+    assert {key: row[key] for key in unchanged} == {key: previous[key] for key in unchanged}
+    # An unknown archive or another producer's archive leaves the projection alone.
+    assert fold_activity_timeline(
+        settled, {**event, 'archiveId': 'archive-x', 'seq': 6}, task) == settled
+    assert fold_activity_timeline(
+        settled, {**event, 'seq': 7}, _task(_attemptId='attempt-other', id='task-other')) == settled
+
+
 @pytest.mark.parametrize('restored,reason,expected', [
     (None, 'no_witness', ['superseded', 'superseded', 'succeeded']),
     ('archive-1', 'restored', ['succeeded', 'superseded', 'succeeded']),

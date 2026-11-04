@@ -1156,6 +1156,16 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     _meta: dict = _external_meta if isinstance(_external_meta, dict) else {}
     from lib.turn_activity_timeline import capture_compaction_boundary
     _meta['activityBoundary'] = capture_compaction_boundary({}, task or {})
+    # The Turn row reports the complete provider request (messages, managed
+    # context, tool schemas). The gate already counted it; a forced pass counts
+    # it before the compactor replaces the list. Recomposition settles the row
+    # on the rebuilt request (_pipeline._settle_rebuilt_request_size).
+    _request_tokens_before = int(_measurement_out.get('gate_tokens') or 0)
+    if task is not None:
+        task.pop('_compactionRequestSize', None)
+        if _request_tokens_before <= 0:
+            from lib.tasks_pkg.compaction._tokens import _count_tokens_authoritative
+            _request_tokens_before = _count_tokens_authoritative(messages, task)[0]
     execute_compact_tool(
         messages, task=task,
         keep_recent_pairs=keep_recent_pairs,
@@ -1307,6 +1317,10 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                         receipt=_fallback_receipt,
                         summary_usage=_meta.get('summary_usage'),
                         adopted=True, pfx=pfx)
+                    if task is not None and _fallback_archive_id is not None:
+                        task['_compactionRequestSize'] = {
+                            'archiveId': str(_fallback_archive_id),
+                            'tokensBefore': _fallback_tokens_before}
                     # Context was bounded — surface as a real compaction so
                     # the pipeline notifies the cache tracker (prefix changed)
                     # and the round proceeds with a smaller prompt.
@@ -1441,6 +1455,10 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                 ))
             except Exception as _ev_e:
                 logger.debug('[Compact] compaction_done emit failed: %s', _ev_e)
+            if _request_tokens_before > 0:
+                task['_compactionRequestSize'] = {
+                    'archiveId': str(archive_id),
+                    'tokensBefore': _request_tokens_before}
 
     if task is not None:
         try:

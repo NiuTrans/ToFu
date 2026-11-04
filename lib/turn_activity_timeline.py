@@ -1635,6 +1635,44 @@ def _fold_compaction_resume(
     return True
 
 
+def _fold_compaction_request_size(
+    entries: list[dict[str, Any]], raw_event: Mapping[str, Any],
+    task: Mapping[str, Any],
+) -> bool:
+    """Settle a compaction row's token accounting on the request it left.
+
+    The archive receipt counts the compactor's own message list. The managed
+    context restored afterwards and the tool schemas belong to the very next
+    request, so this producer measurement replaces the row's before/after.
+    """
+    archive_id = _text(raw_event.get('archiveId'), _IDENTIFIER_MAX_CHARS)
+    tokens_before = _nonnegative_int(raw_event.get('tokensBefore'))
+    tokens_after = _nonnegative_int(raw_event.get('tokensAfter'))
+    if not archive_id or tokens_before is None or tokens_after is None:
+        return False
+    producer = _producer_identity(raw_event, task)
+    matches = [index for index, entry in enumerate(entries)
+               if entry.get('reasonCode') == 'context_compaction'
+               and entry.get('archiveId') == archive_id
+               and _same_producer(entry, producer)]
+    if len(matches) != 1:
+        return False
+    entry = {
+        **entries[matches[0]],
+        'tokensBefore': tokens_before,
+        'tokensAfter': tokens_after,
+        'tokenCountKind': _text(raw_event.get('tokenCountKind') or 'estimated', 24),
+    }
+    reduction_percent = _compaction_percent(raw_event.get('reductionPct'))
+    if reduction_percent is not None:
+        entry['reductionPercent'] = reduction_percent
+    messages_after = _nonnegative_int(raw_event.get('msgsAfter'))
+    if messages_after is not None:
+        entry['messagesAfter'] = messages_after
+    entries[matches[0]] = entry
+    return True
+
+
 def _fold_schema_rejection(
     entries: list[dict[str, Any]], raw_event: Mapping[str, Any],
     task: Mapping[str, Any], seq: int, now: int,
@@ -1787,6 +1825,9 @@ def fold_activity_timeline(
         _fold_compaction_event(entries, raw_event, task, seq, occurred_at)
     elif event_type == EventType.COMPACTION_RESUME:
         if not _fold_compaction_resume(entries, raw_event):
+            return existing
+    elif event_type == EventType.COMPACTION_REQUEST_SIZE:
+        if not _fold_compaction_request_size(entries, raw_event, task):
             return existing
     elif event_type == EventType.MODEL_FALLBACK:
         _fold_model_fallback(entries, raw_event, task, seq, occurred_at)
