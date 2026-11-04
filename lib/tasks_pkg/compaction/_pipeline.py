@@ -14,6 +14,8 @@ Public surface:
 
 from contextlib import nullcontext
 
+import time
+
 from lib.log import audit_log, get_logger
 
 from lib.tasks_pkg.compaction._ownership import compaction_owner_key
@@ -23,6 +25,7 @@ from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
 from lib.tasks_pkg.compaction._timing import compaction_stage_timing
 from lib.tasks_pkg.compaction._tokens import (
     _TASK_TOOL_SCHEMA,
+    _count_tokens_authoritative,
     _estimate_total_tokens,
     _get_context_limit,
     _task_text_count_view,
@@ -273,6 +276,45 @@ def recompose_context_after_compaction(messages: list, task: dict | None = None)
         disabled_blocks=disabled_context_blocks(cfg),
     )
     logger.info('[PostCompact] Re-composed managed context after compaction')
+    _settle_rebuilt_request_size(messages, task)
+
+
+def _settle_rebuilt_request_size(messages: list, task: dict) -> None:
+    """Report the size of the request a compaction actually leaves.
+
+    The compactor's receipt counts its own message list: no managed context
+    (restored just above) and no tool schemas, although both ride along on the
+    very next request. Its Turn row settles on this measurement instead, using
+    the counter the compaction gate uses for the request before compaction.
+    """
+    pending = task.pop('_compactionRequestSize', None)
+    if not pending:
+        return
+    tokens_after, method = _count_tokens_authoritative(messages, task)
+    tokens_before = int(pending['tokensBefore'])
+    reduction = (1 - tokens_after / max(1, tokens_before)) * 100
+    conv_id = compaction_owner_key(task)
+    logger.info('[PostCompact] conv=%s archive=%s request tokens: %d → %d '
+                '(%.0f%% reduction, via %s)', conv_id[:8] if conv_id else '?',
+                str(pending['archiveId'])[:12], tokens_before, tokens_after,
+                reduction, method)
+    try:
+        from lib.agent_core.events import EventType, build_event
+        from lib.tasks_pkg.manager import append_event
+        append_event(task, build_event(
+            EventType.COMPACTION_REQUEST_SIZE,
+            archiveId=str(pending['archiveId']),
+            convId=conv_id,
+            tokensBefore=tokens_before,
+            tokensAfter=int(tokens_after),
+            tokenCountKind='estimated',
+            reductionPct=round(reduction, 1),
+            msgsAfter=len(messages),
+            ts=int(time.time()),
+        ))
+    except Exception as exc:
+        logger.warning('[PostCompact] request size report unavailable: %s',
+                       type(exc).__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -770,10 +770,17 @@ Once a summary has been generated, that cost is sunk and adoption compares only
 the future prefix rewrite with future input savings. Archive and UI token
 counters are explicitly heuristic (`tokenCountKind=estimated`), not
 provider-billed usage.
-`tokensBefore`/`tokensAfter` (including `.compaction-token-stage.is-after`)
-count the complete message lists at the saved compaction boundary: policies,
-history carriers, preserved execution, complete handoff and live input. They are
-not summary-token counts, nor final wire totals with schema/protocol overhead.
+Archive and receipt `tokensBefore`/`tokensAfter` count the complete message
+lists at the saved compaction boundary: policies, history carriers, preserved
+execution, complete handoff and live input. They are not summary-token counts.
+The Turn row (`.compaction-token-stage.is-after` on the card) starts from them
+and then settles on `compaction_request_size`: the gate counter over the complete
+request before compaction, and over the rebuilt request after
+`recompose_context_after_compaction`, restored managed context and tool schemas
+included (`docs/contracts/EVENTS.md`, activity timeline projection). The
+receipt's own list omitted both, so conversation `mw10w4j3ghfsbk` showed 82%
+where the next request was billed 49% smaller. Specs:
+`tests/compaction/test_compaction_request_size.py`.
 Compaction counts/reduction are archive/event metadata only; newly rendered
 model summaries contain no self-referential token-statistics paragraph.
 Economic preflight and adoption reserve the estimated bytes-as-tokens of

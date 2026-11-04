@@ -265,6 +265,7 @@ class EventType:
     COMPACTION = 'compaction'
     COMPACTION_DONE = 'compaction_done'
     COMPACTION_RESUME = 'compaction_resume'
+    COMPACTION_REQUEST_SIZE = 'compaction_request_size'
     MEMORY_PREFETCH = 'memory_prefetch'
     PREFERENCES_APPLIED = 'preferences_applied'
     PREFERENCE_LEARNED = 'preference_learned'
@@ -1691,6 +1692,30 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('ts', 'int', required=True),
 
                   FieldSpec('archiveId', 'str'),
+              )),
+    EventSpec(EventType.COMPACTION_REQUEST_SIZE, _C.CONTEXT,
+              'The request rebuilt after a compaction was measured, restored context included.',
+              fields={
+                  'archiveId': 'owner-scoped archive id of the compaction',
+                  'convId': 'conversation id',
+                  'tokensBefore': 'estimated complete request before compaction: messages, '
+                                  'managed context and tool schemas',
+                  'tokensAfter': 'estimated complete request after compaction, with the '
+                                 'managed context restored afterwards',
+                  'tokenCountKind': 'estimated',
+                  'reductionPct': 'estimated percentage request token reduction',
+                  'msgsAfter': 'message count of the rebuilt request',
+                  'ts': 'epoch seconds',
+              },
+              schema=(
+                  FieldSpec('archiveId', 'str', required=True),
+                  FieldSpec('convId', 'str', required=True),
+                  FieldSpec('tokensBefore', 'int', required=True),
+                  FieldSpec('tokensAfter', 'int', required=True),
+                  FieldSpec('tokenCountKind', 'str', required=True),
+                  FieldSpec('reductionPct', 'number', required=True),
+                  FieldSpec('msgsAfter', 'int', required=True),
+                  FieldSpec('ts', 'int', required=True),
               )),
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',
