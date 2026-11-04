@@ -262,7 +262,9 @@ ambiguous byte telemetry; batch-wide child indentation also implied unrelated
 siblings were program calls. **Decision:** the shared `program-execution-card.ts`
 owner renders one native details row across retained/classic/default surfaces.
 Normal completion is quiet and collapsed; error, incomplete and model-handoff
-states reveal actionable evidence. Same-state updates preserve reader folds and
+states reveal actionable evidence, except that a handoff inside a model round's
+multi-program batch stays closed and its batch head counts it
+(`docs/RENDER_CONTRACT.md`). Same-state updates preserve reader folds and
 focus; newly actionable transitions open the existing shell without replacing
 source nodes. New attempts, unsuccessful attempts and retained-result reuse are
 separate facts; missing counters never become inferred successes or call counts
@@ -287,7 +289,8 @@ and Technical details stay collapsed; gateway history stays closed for its
 lazy body); failures read `code: message` through the shared failure-text
 owner; the body carries no tool chips or preview line because the header
 already names the tools; the result body sits on the card spine. Like other
-active tools, the Round outline opens a running card on first paint.
+active tools, the Round outline opens a lone running card on first paint;
+batched programs stay closed under their head.
 **Alternatives rejected:** a separate program status vocabulary drifts from
 tool grouping; treating every round-less call as running would leave
 never-executed calls of settled Turns spinning; keeping the preview line
@@ -302,8 +305,10 @@ parents. Producers keep a saved-output read-back's source only in
 written before 2026-11-04) is provenance and draws no rail. A read-back is a
 sibling row: glyph and outcome on its action line in the shared intent ink, source
 and search terms beneath on the text column (owner report 2026-11-04: the rail
-nested read-backs under whichever call preceded them). Headerless program batches
-do not advertise a nonexistent collapse control. **Alternatives rejected:**
+nested read-backs under whichever call preceded them). Two or more sibling
+programs share one collapsible batch head; a lone program, or a classic round
+that mixes programs with direct calls, stays headerless and does not advertise
+a nonexistent collapse control. **Alternatives rejected:**
 relocating children loses chronology; hiding receipts destroys evidence;
 phase-keying the outer shell destroys focused code; showing raw measurements in
 the summary makes pure computation look like failure; rewriting stored rounds to

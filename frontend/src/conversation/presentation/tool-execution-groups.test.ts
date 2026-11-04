@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { computeExecutionBatches } from './tool-execution-groups';
+import { computeExecutionBatches, shouldCollapseProgramBatch, shouldCollapseToolBatch } from './tool-execution-groups';
 
 interface Seg {
   type: string;
@@ -128,6 +128,23 @@ describe('computeExecutionBatches — injection-note rounds', () => {
   });
 });
 
+
+describe('default batch folds', () => {
+  it('folds sibling programs whose outcomes return to the model, but never a reader action', () => {
+    const handoff = { _programSynthetic: true, programStatus: 'completed', status: 'done' };
+    const failed = { _programSynthetic: true, programStatus: 'error', status: 'error' };
+    const live = { _programSynthetic: true, programStatus: 'running', status: 'searching' };
+    const failedChild = { toolName: 'read_doc', parentToolCallId: 'p', status: 'error' };
+    // Direct batches keep important, failed and live work exposed.
+    expect(shouldCollapseToolBatch([handoff, handoff, handoff])).toBe(false);
+    expect(shouldCollapseToolBatch([failed, failed, failed])).toBe(false);
+    // A program batch counts those on its head instead.
+    expect(shouldCollapseProgramBatch([handoff, handoff])).toBe(true);
+    expect(shouldCollapseProgramBatch([failed, handoff, live, failedChild])).toBe(true);
+    expect(shouldCollapseProgramBatch([handoff, handoff, { toolName: 'ask_human', status: 'awaiting_input' }]))
+      .toBe(false);
+  });
+});
 
 describe('seamless logical continuation', () => {
   it.each([

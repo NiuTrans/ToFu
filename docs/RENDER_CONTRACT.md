@@ -1424,6 +1424,49 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   is a sibling row that names its source; provenance never draws a rail.
   User disclosure state survives semantic repaint, and collapsing never
   removes data from Turn authority.
+- Sibling programs of one model round read as one batch
+  (`presentation/program-batch-presentation.ts`). Two or more program cards
+  of a round (synthetic parents or unowned native gateways; an owned gateway
+  stays replaced by its parent) share one head that counts them and their
+  outcomes in a fixed order — running, waiting, completed, returned, returned
+  for model judgment, failed, incomplete — e.g. `9 个程序 · 1 已完成 · 8 交回模型判断`,
+  live `9 个程序 · 1 执行中 · 8 等待执行`. Each count repeats its card's own
+  status: a live Turn's unstarted call is waiting, a settled Turn's unanswered
+  call incomplete. The explicit program rule `shouldCollapseProgramBatch`,
+  beside `shouldCollapseToolBatch`, folds the batch by default whatever its
+  size; only a member awaiting the reader keeps it open. Head attention uses
+  the direct-batch vocabulary: active while a program runs or waits, error for
+  a genuine program failure (only its count is colored), otherwise important.
+  A handoff returns to the model for judgment; it is not a reader action, so a
+  batched handoff card never opens itself, on first paint or on transition.
+  Failed and incomplete cards keep their reveal, as direct-batch failures do.
+  No other member opens on first paint: a child's failure is its program's
+  evidence, already returned to the model, and keeps its state on a closed row.
+  Members — the programs and the execution children that follow them — stay
+  keyed leaves in authored order: the fold only hides them and the head sits
+  before the first mounted member, so narration and chronology keep their
+  places. A lone program keeps its card and no head; so does a retained/classic
+  round that also made direct calls, since its head would not count them. The
+  classic batch is the `_renderTurnHead` batch whose `collapsed`/`aria-expanded`
+  reader choice the keyed reconciliation keeps; the Surface head is a
+  `RoundOutline` control keyed by round scope and occurrence, so the choice
+  survives live repaints, gateway-to-parent replacement and settlement, with
+  the outline's no-durable/cross-window guarantee above. A round search hit
+  inside a folded batch unfolds it.
+
+  Problem: one model response issued nine sibling `execute_program` calls whose
+  document reads were refused; every needs-model card opened itself, so the
+  Turn showed nine full cards with evidence and no batch head. Decision: one
+  collapsed head per round summarizes the batch and handoff cards inside it stay
+  closed. Alternatives rejected: shortening cards but keeping per-card reveal
+  (still N open cards); treating a handoff as an error to reuse the direct-batch
+  exposure rule (it is the model's input, not the reader's); a second fold state
+  machine beside the batch head and outline owners; folding a mixed classic
+  round under a head that counts only its programs. Specs:
+  `program-batch-presentation.test.ts`, `tool-execution-groups.test.ts`,
+  `round-outline.test.ts`, `tests/tool-group-presentation.test.cjs`,
+  `tests/frontend/test_rich_card_reconciliation.py` and real Chromium
+  `tests/visual/test_visual_program_batch_group.py` (desktop/mobile, EN/ZH).
 - `segments` owns render order and `toolRounds` owns the rich tool body. The
   generated browser snapshot may receive completed, uniquely matched tool
   segments as `roundRef` records to avoid carrying their input/result bytes a
