@@ -42,19 +42,6 @@ def _raise_if_429_attempt_budget_exhausted(
 _DEFAULT_429_SATURATION_SECS = 0.0
 
 
-# How long (seconds) to cool a slot whose endpoint was unreachable at the
-# connect phase, so the picker routes around the dead host instead of
-# retrying it every cycle. The local health checker clears this early when
-# the box recovers. Env-tunable for deployments with flaky self-hosted boxes.
-try:
-    _UNREACHABLE_COOLDOWN = float(os.environ.get('TOFU_UNREACHABLE_COOLDOWN', '30'))
-    if _UNREACHABLE_COOLDOWN <= 0:
-        _UNREACHABLE_COOLDOWN = 30.0
-except (ValueError, TypeError) as e:
-    logger.debug('[Dispatch] TOFU_UNREACHABLE_COOLDOWN parse failed, using default: %s', e)
-    _UNREACHABLE_COOLDOWN = 30.0
-
-
 def _gateway_outage_budget_secs() -> float:
     """Wall-clock ceiling (seconds) on a GATEWAY-OUTAGE streak in the
     streaming dispatch loops.
@@ -62,9 +49,10 @@ def _gateway_outage_budget_secs() -> float:
     ``TOFU_GATEWAY_OUTAGE_BUDGET_S`` (default 0 = DISABLED — wait forever).
     Owner directive 2026-08-20: a gateway 5xx (502/503/504) storm means the
     whole upstream is sick, and that is WAITABLE — never interrupt the turn
-    on the user's behalf. The loop keeps rotating (0.3s cycles, abort_check
-    every cycle) until the gateway recovers or the USER cancels; stopping
-    is the user's call, never the system's. Unlike model-local 429 saturation,
+    on the user's behalf. An unreachable network endpoint extends the same
+    streak (``note_endpoint_outage``). The loop keeps rotating (0.3s cycles,
+    abort_check every cycle) until the gateway recovers or the USER cancels;
+    stopping is the user's call, never the system's. Unlike model-local 429 saturation,
     a gateway outage has no independently selectable fallback target here.
 
     A real per-key 429 or a success clears the outage streak, so genuine

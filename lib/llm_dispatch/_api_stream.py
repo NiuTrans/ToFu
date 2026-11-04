@@ -144,8 +144,8 @@ def _check_stream_outage_policy(state, log_prefix, prefer_model):
     _gw_budget = _gateway_outage_budget_secs()
     if state.gateway_outage_exceeded(_gw_budget):
         logger.error(
-            '%s dispatch_stream: gateway 5xx outage exceeded %.0fs budget '
-            '(only gateway errors from every slot) — giving up so the '
+            '%s dispatch_stream: upstream outage (gateway 5xx or unreachable '
+            'endpoint) exceeded %.0fs budget — giving up so the '
             'worker thread is freed. Last error: %s',
             log_prefix, _gw_budget, str(state.last_err)[:200])
         raise state.last_err or RuntimeError(
@@ -261,7 +261,7 @@ def _handle_empty_slot_pick(state, dispatcher, *, capability, prefer_model,
     #       (from OTHER requests' 429s); bailing here on attempt 1
     #       was the cause of spurious "All N attempts failed".
     #   (b) no capable slot exists at all → genuinely unservable.
-    _held_routes = state.route_unavailable.pairs
+    _held_routes = state.held_pairs
     _slots_exist = dispatcher.has_capable_slots(
         capability, exclude_models=state.exclude,
         exclude_keys=(state.exclude_keys | state.exclude_keys_durable
@@ -282,12 +282,12 @@ def _handle_empty_slot_pick(state, dispatcher, *, capability, prefer_model,
             durable_pairs=state.exclude_pairs_durable,
             strict_model=strict_model, prefer_model=prefer_model):
         if not _slots_exist and _held_routes:
-            # Only no-channel routes remain: probe them again on the
-            # fixed backoff instead of polling the gateway.
+            # Only held no-channel routes or unreachable endpoints remain:
+            # probe them again on the fixed backoff instead of polling.
             if state.credential_outage.retry_cooled():
                 return True
             _sleep_and_record_queue_wait(
-                state, state.route_unavailable.probe_delay_s(),
+                state, state.held_probe_delay_s(),
                 abort_check=abort_check)
             return True
         _sleep_and_record_queue_wait(
@@ -677,8 +677,9 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
         _gw_budget = _gateway_outage_budget_secs()
         if state.gateway_outage_exceeded(_gw_budget):
             logger.error(
-                '%s async_dispatch_stream: gateway 5xx outage exceeded %.0fs '
-                'budget — giving up. Last error: %s',
+                '%s async_dispatch_stream: upstream outage (gateway 5xx or '
+                'unreachable endpoint) exceeded %.0fs budget — giving up. '
+                'Last error: %s',
                 log_prefix, _gw_budget, str(state.last_err)[:200])
             raise state.last_err or RuntimeError(
                 'Gateway outage: no slot reachable for %.0fs'
@@ -764,7 +765,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
         if slot is None:
             if state.relax_avoid_if_exhausted():
                 continue
-            _held_routes = state.route_unavailable.pairs
+            _held_routes = state.held_pairs
             _slots_exist = dispatcher.has_capable_slots(
                 capability, exclude_models=state.exclude,
                 exclude_keys=(state.exclude_keys | state.exclude_keys_durable
@@ -785,7 +786,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                         continue
                     _wait_started = time.monotonic()
                     await async_abortable_sleep(
-                        state.route_unavailable.probe_delay_s(), abort_check)
+                        state.held_probe_delay_s(), abort_check)
                     state.record_queue_wait(_wait_started)
                     continue
                 _wait_started = time.monotonic()

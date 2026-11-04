@@ -44,7 +44,6 @@ from lib.llm_dispatch._api_errors import (
 
 from lib.llm_dispatch._api_budget import (
     _DEFAULT_429_SATURATION_SECS as _DEFAULT_429_SATURATION_SECS,
-    _UNREACHABLE_COOLDOWN as _UNREACHABLE_COOLDOWN,
     _force_oauth_token_refresh as _force_oauth_token_refresh,
     _gateway_outage_budget_secs as _gateway_outage_budget_secs,
     _raise_dispatch_exhausted as _raise_dispatch_exhausted,

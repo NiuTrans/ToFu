@@ -11,7 +11,8 @@ from ._api_budget import _remember_route_missing_error
 from ._api_errors import DispatchWaitStatus
 from ._api_hygiene import _advance_credential_delivery_anomaly
 from ._credential_outage import CredentialOutageRouting
-from ._route_unavailable import RouteUnavailableRouting
+from ._endpoint_outage import EndpointOutageRouting
+from ._route_unavailable import RouteUnavailableRouting, _route_identity
 
 logger = get_logger('lib.llm_dispatch.api')
 
@@ -52,10 +53,10 @@ def _cycling_can_ever_serve(dispatcher, capability, *, initial_exclude_models,
     cooldown cycle the condition stayed true even with every key durably
     excluded by 401.
 
-    Transient exclusions (unreachable / timeout pairs and rate-limit cooldown)
-    are deliberately IGNORED here: the 60s exclusion reset resurrects them
-    and each resurrection burns a bounded hard attempt, so that cycling
-    terminates on its own.
+    Transient exclusions (timeout pairs, rate-limit cooldown and probe holds)
+    are deliberately IGNORED here: the 60s exclusion reset resurrects timeout
+    pairs, each resurrection burns a bounded hard attempt, and holds lapse at
+    their probe time, so that cycling terminates or probes on its own.
     """
     return dispatcher.has_capable_slots(
         capability,
@@ -87,6 +88,9 @@ class DispatchRetryState:
         # Provider/wire models whose gateway reported no enabled channel are
         # held until their next probe (see _route_unavailable.py).
         self.route_unavailable = RouteUnavailableRouting(dispatcher, owner_user_id)
+        # Network endpoints whose connection setup failed are held until their
+        # next probe (see _endpoint_outage.py).
+        self.endpoint_outage = EndpointOutageRouting(dispatcher)
         # Caller-provided model exclusions are permanent for this dispatch —
         # remembered so the periodic reset doesn't re-introduce them.
         self._initial_exclude_models = set(self.exclude)
@@ -237,16 +241,29 @@ class DispatchRetryState:
             return outage_keys or None
         return self.exclude_keys | self.exclude_keys_durable | outage_keys
 
+    @property
+    def held_pairs(self):
+        """Pairs held until their probe: no-channel routes, unreachable endpoints."""
+        return self.route_unavailable.pairs | self.endpoint_outage.pairs
+
+    def held_probe_delay_s(self):
+        """Seconds until the earliest active hold is probed again."""
+        delays = [routing.probe_delay_s()
+                  for routing in (self.route_unavailable, self.endpoint_outage)
+                  if routing.pairs]
+        return min(delays) if delays else 0.0
+
     def eff_exclude_pairs(self):
         # Caller-provided avoid pairs are specifically a *first-pick* hint:
         # the previous semantic attempt already proved that slot unhealthy.
         # Waiting for this fresh dispatch call to fail once before exposing the
         # set silently routes the retry straight back to the poisoned slot.
+        # Holds and durable route facts that spent no attempt apply likewise.
+        held = self.held_pairs
         if (self.total_attempts <= 0 and not self._initial_avoid
-                and not self._state_bound_pairs):
+                and not self.exclude_pairs_durable and not held):
             return None
-        return (self.exclude_pairs | self.exclude_pairs_durable
-                | self.route_unavailable.pairs)
+        return self.exclude_pairs | self.exclude_pairs_durable | held
 
     def relax_avoid_if_exhausted(self):
         """Drop the caller-provided avoid set when every other slot is gone.
@@ -289,6 +306,16 @@ class DispatchRetryState:
          exhausted) = _advance_credential_delivery_anomaly(
              error, self._credential_delivery_anomaly_count)
         return exhausted
+
+    def note_endpoint_outage(self):
+        """An unreachable endpoint is an outage observation, not a hard attempt.
+
+        It opens or extends the gateway-outage streak, so the opt-in
+        ``TOFU_GATEWAY_OUTAGE_BUDGET_S`` bounds a network outage like a 5xx
+        storm; a success or a genuine per-key 429 clears it. No upstream
+        response exists, so the caller's 429 budget is not consumed."""
+        if self._gateway_streak_start is None:
+            self._gateway_streak_start = time.monotonic()
 
     def note_success(self):
         """A slot answered — clear any active gateway-outage streak."""
@@ -389,11 +416,19 @@ class DispatchRetryState:
         self.exclude_keys_durable.add(slot.key_name)
         self.hard_attempts += 1
 
-    def note_unreachable_pair(self, slot):
-        """Endpoint unreachable — exclude the pair; hard attempt.  (The caller
-        sets the slot cooldown — that's slot mutation, not retry bookkeeping.)"""
-        self.exclude_pairs.add((slot.key_name, slot.model))
-        self.hard_attempts += 1
+    def note_unrepresentable_route(self, slot, dispatcher):
+        """Durably exclude a route whose protocol cannot carry this request.
+
+        Wire conversion is local and identical for every credential on the
+        same endpoint and wire model, so no provider is involved and no hard
+        attempt is spent; another route may represent the request.
+        """
+        route = _route_identity(slot)
+        for candidate in getattr(dispatcher, 'slots', ()):
+            if _route_identity(candidate) == route:
+                self.exclude_pairs_durable.add(
+                    (candidate.key_name, candidate.model))
+        self.exclude_pairs_durable.add((slot.key_name, slot.model))
 
     def note_generic_error(self, slot, *, is_timeout, strict_model):
         """Generic stream error: a timeout or a strict-model error excludes the
