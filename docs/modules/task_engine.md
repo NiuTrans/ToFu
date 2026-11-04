@@ -276,6 +276,29 @@ Swarm unattended continuation uses durable `parent_cfg._swarmContinuationSource`
 
 ## Failure rules
 
+**Output-token limits.** Problem: a `length`/`max_tokens` response was resent
+unchanged, discarding paid reasoning; a response cut inside tool arguments
+could also reach repair and dispatch. Decision: the shared post-stream decision
+replays the cut assistant text/reasoning and its protocol sidecars, then asks
+the model to resume without changing sampling or thinking settings. For GLM,
+the existing request compiler sends `clear_thinking=false` when that history is
+present. Every tool item in a cut response is unverified: projected calls
+and protocol sidecar items are both removed, even if their visible arguments
+happen to parse. None executes or is replayed before the continuation.
+Responses retains reasoning, text and its non-wire state-origin marker. The
+old order witness also covers the removed calls, so it is retired and the
+checked converter uses ordinary sidecar ordering instead of inventing an
+interleaving. The native Rust root path owns the same rules. After an admitted
+tool batch the output-limit recovery budget resets alongside the existing
+terminal budget. The existing two-attempt terminal budget bounds consecutive
+unproductive stops and resets after an admitted tool batch. Exhaustion preserves
+cut text or reports `abnormal_stop` without whole-turn replay. Alternatives
+rejected: lowering reasoning (ineffective on the measured GLM route), increasing
+provider limits, and evaluation-only continuation. Verify
+`tests/tasks_pkg/test_output_limit_recovery.py`, abnormal-terminal and
+stream-truncation tests, `tests/llm/test_glm53_thinking_body.py`, and native
+Rust `output_limit_*` agent tests.
+
 **Unavailable handler verdict.** Problem: the resolver's missing-handler branch
 returned error prose while ordinary settlement promoted the round to success.
 Decision: that branch emits the existing typed `tool_unavailable` category,

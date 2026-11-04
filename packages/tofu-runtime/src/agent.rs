@@ -296,6 +296,7 @@ impl Agent<'_> {
                 return Ok(Value::Null);
             }
         }
+        let mut output_limit_recoveries = 0usize;
         let ledger = if self.round_admission.is_some() {
             Some(crate::round_admission::Ledger::bind(session)?)
         } else {None};
@@ -367,11 +368,87 @@ impl Agent<'_> {
             if stopped(session)? {
                 return Ok(Value::Null);
             }
-            if response.state != ProviderStreamState::ProviderFinished {
+            let output_limit = response.finish_reason.as_deref().is_some_and(|reason| {
+                crate::execution_contract::OUTPUT_LIMIT_FINISH_REASONS.contains(&reason)
+            });
+            if response.state != ProviderStreamState::ProviderFinished
+                && !(output_limit && response.state == ProviderStreamState::EmptyResponse)
+            {
                 return response.into_task_result();
             }
             if response.message["role"] != "assistant" {
                 return Err(error("agent_provider_shape"));
+            }
+            if output_limit {
+                let mut cut = response.message;
+                cut.as_object_mut().unwrap().remove("tool_calls");
+                // A sidecar can contain a cut tool even when its projected
+                // tool_calls list is empty. Its replay-order witness also
+                // covers the withdrawn calls, so only the non-wire origin
+                // marker accompanies the retained reasoning and text.
+                for (field, kinds) in [
+                    (
+                        "_responses_items",
+                        &[
+                            "reasoning",
+                            "message",
+                            "tofu_state_origin",
+                        ][..],
+                    ),
+                    (
+                        "_anthropic_content_blocks",
+                        &["text", "thinking", "redacted_thinking"][..],
+                    ),
+                ] {
+                    if let Some(items) = cut.get(field).and_then(Value::as_array) {
+                        cut[field] = Value::Array(
+                            items
+                                .iter()
+                                .filter(|item| {
+                                    item.get("type")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|kind| kinds.contains(&kind))
+                                })
+                                .cloned()
+                                .collect(),
+                        );
+                    }
+                }
+                let has_text = cut["content"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty());
+                append(messages, cut, &mut retained, b.retained_bytes)?;
+                let before_usage = retained;
+                append(usage, response.usage, &mut retained, b.retained_bytes)?;
+                usage_bytes += retained - before_usage;
+                if stopped(session)? {
+                    return Ok(Value::Null);
+                }
+                if output_limit_recoveries
+                    >= crate::execution_contract::ABNORMAL_TERMINAL_RECOVERY_MAX
+                {
+                    if !has_text {
+                        return Err(json!({"kind":"abnormal_stop",
+                            "message":crate::execution_contract::OUTPUT_LIMIT_EXHAUSTED_MESSAGE}));
+                    }
+                    let mut result = json!({});
+                    result["finish_reason"] = response.finish_reason.into();
+                    result["messages"] = Value::Array(std::mem::take(messages));
+                    result["usage"] = Value::Array(std::mem::take(usage));
+                    result["llm_rounds"] = (round + 1).into();
+                    result["tool_calls"] = tool_count.into();
+                    return Ok(result);
+                }
+                output_limit_recoveries += 1;
+                append(
+                    messages,
+                    json!({"role":"user",
+                    "content":crate::execution_contract::OUTPUT_LIMIT_RECOVERY_NOTICE,
+                    "_contextInjectionId":"output_limit_recovery","_isMeta":true}),
+                    &mut retained,
+                    b.retained_bytes,
+                )?;
+                continue;
             }
             let calls = match response.message.get("tool_calls") {
                 None => &[][..],
@@ -562,6 +639,7 @@ impl Agent<'_> {
             if finish_tool_round(round, tool_count, messages, usage, &mut progress, &call_signatures)? {
                 return Ok(Value::Null);
             }
+            output_limit_recoveries = 0;
         }
         Err(error("agent_round_budget"))
     }

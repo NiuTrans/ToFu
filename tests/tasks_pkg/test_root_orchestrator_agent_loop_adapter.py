@@ -22,6 +22,7 @@ def _state():
         assistant_msg=None,
         last_finish_reason=None,
         last_usage=None,
+        last_stream_result=None,
         accumulated_usage={},
         api_rounds=[],
         tool_call_happened=False,
@@ -51,7 +52,7 @@ def _request(task, state):
     )
 
 
-def _install_common(monkeypatch, events, *, tool_timeout=False):
+def _install_common(monkeypatch, events, *, tool_timeout=False, real_body=False):
     monkeypatch.setattr(
         root_loop, 'emit_round_open',
         lambda task, state, rnd: events.append(('open', rnd)))
@@ -64,9 +65,10 @@ def _install_common(monkeypatch, events, *, tool_timeout=False):
     monkeypatch.setattr(
         root_loop, 'drain_and_inject_inbox',
         lambda **k: events.append(('inbox', k['round_num'])))
-    monkeypatch.setattr(
-        root_loop, 'build_round_request',
-        lambda task, state, messages, tools, **k: (tools, {'messages': []}))
+    if not real_body:
+        monkeypatch.setattr(
+            root_loop, 'build_round_request',
+            lambda task, state, messages, tools, **k: (tools, {'messages': []}))
     monkeypatch.setattr(
         root_loop, 'build_stream_accumulator',
         lambda *a, **k: SimpleNamespace(
@@ -391,6 +393,108 @@ def test_tool_round_then_verified_natural_completion(monkeypatch):
     assert [e for e in events if e[0] == 'tools'] == [('tools', 0)]
     assert [e for e in events if e[0] == 'checkpoint'] == [
         ('checkpoint', 0)]
+
+
+def test_output_limit_replays_cut_reasoning_without_executing_cut_tools(monkeypatch):
+    task = {'id': 'limit-test', 'aborted': False, 'error': None}
+    state = _state()
+    events = []
+    _install_common(monkeypatch, events)
+    from lib.tasks_pkg.compaction import _prompt_admission as admission
+    monkeypatch.setattr(
+        admission, 'enforce_dispatch_prompt_limit',
+        lambda *args, **kwargs: {'totalTokens': 100, 'toolSchemaTokens': 20})
+    snapshots = []
+
+    def capture(current_task, messages, *args, **kwargs):
+        from copy import deepcopy
+        snapshots.append(deepcopy(messages))
+
+    monkeypatch.setattr(root_loop, 'prepare_round_context', capture)
+    cut = {
+        'role': 'assistant', 'content': 'Writing the file.',
+        'reasoning_content': 'Preserve this design.',
+        'tool_calls': [{'id': 'cut-call', 'type': 'function', 'function': {
+            'name': 'write_file', 'arguments': '{"path":"a.py","content":"cut',
+        }}],
+    }
+    _install_script(monkeypatch, state, [
+        (cut, 'length', {'total_tokens': 10}),
+        ({'role': 'assistant', 'content': 'done'}, 'stop', {'total_tokens': 5}),
+    ], events)
+    request = _request(task, state)
+    result = root_loop.run_root_agent_loop(request)
+
+    assert result.last_round_num == 1
+    assert not task.get('error')
+    assert not [event for event in events if event[0] == 'tools']
+    assert len(snapshots) == 2
+    replay = snapshots[1][-2]
+    assert replay['role'] == 'assistant'
+    assert replay['reasoning_content'] == 'Preserve this design.'
+    assert not replay.get('tool_calls')
+    notice = snapshots[1][-1]
+    assert notice['role'] == 'user'
+    assert 'no tool call from it ran' in notice['content']
+    assert state.exit_reason == 'no_tool_calls_round_1'
+
+
+def test_output_limit_replay_reaches_glm_request_with_preserved_thinking(monkeypatch):
+    from lib.tasks_pkg.compaction import _prompt_admission as admission
+    from lib.tasks_pkg.orchestrator import _ports
+    from lib.llm.body import build_body
+    from lib.llm.reasoning import compile_reasoning
+
+    task = {'id': 'limit-test', 'aborted': False, 'error': None}
+    state = _state()
+    state.model = 'glm-5.3'
+    events = []
+    _install_common(monkeypatch, events, real_body=True)
+    monkeypatch.setattr(
+        admission, 'enforce_dispatch_prompt_limit',
+        lambda *args, **kwargs: {'totalTokens': 100, 'toolSchemaTokens': 20})
+    monkeypatch.setattr(_ports, 'build_request_body', build_body)
+    bodies = []
+    snapshots = []
+
+    def capture(current_task, messages, *args, **kwargs):
+        from copy import deepcopy
+        snapshots.append(deepcopy(messages))
+
+    monkeypatch.setattr(root_loop, 'prepare_round_context', capture)
+
+    def llm_call(current_task, current_state, body, *args, round_num, **kwargs):
+        compile_reasoning(body, current_state.model)
+        bodies.append(body)
+        current_state.assistant_msg = (
+            {'role': 'assistant', 'content': '', 'reasoning_content': 'cut design'}
+            if round_num == 0 else {'role': 'assistant', 'content': 'done'})
+        current_state.last_finish_reason = 'length' if round_num == 0 else 'stop'
+        current_state.last_usage = {'total_tokens': 5}
+        current_state.api_rounds.append({'roundNum': round_num})
+        events.append(('llm', round_num))
+        return 'proceed'
+
+    monkeypatch.setattr(root_loop, 'run_llm_call_with_fallback', llm_call)
+    request = _request(task, state)
+    request.messages = [{'role': 'user', 'content': 'Solve the task.'}]
+    result = root_loop.run_root_agent_loop(request)
+
+    assert result.last_round_num == 1
+    assert [event for event in events if event[0] == 'llm'] == [('llm', 0), ('llm', 1)]
+    replayed = [row for row in snapshots[1]
+                if row.get('reasoning_content') == 'cut design']
+    assert len(replayed) == 1, snapshots[1]
+    replayed = [row for row in bodies[1]['messages']
+                if row.get('reasoning_content') == 'cut design']
+    assert len(replayed) == 1 and replayed[0]['role'] == 'assistant', (
+        snapshots[1], bodies[1]['messages'])
+    assert any(row.get('content', '').startswith('[SYSTEM: OUTPUT LIMIT RECOVERY]')
+               for row in bodies[1]['messages'])
+    assert bodies[1]['thinking']['type'] == 'enabled'
+    assert bodies[1]['thinking']['clear_thinking'] is False
+    assert bodies[1]['reasoning_effort'] == 'low'
+    assert bodies[1]['max_tokens'] == 1024
 
 
 def test_program_continuation_gets_next_round_without_tool_execution(

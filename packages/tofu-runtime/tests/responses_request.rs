@@ -54,6 +54,29 @@ fn unsupported_profiles_and_conflicting_policy_refuse() {
         .is_err());
     }
     let template = json!({"model":"fixture"});
+    let messages = json!([
+        {"role":"assistant","content":"working","_responses_items":[
+            {"type":"reasoning","id":"r1","encrypted_content":"opaque"},
+            {"type":"message","role":"assistant","phase":"commentary",
+                "content":[{"type":"output_text","text":"working"}]},
+            {"type":"tofu_replay_order","version":1},
+            {"type":"tofu_state_origin","version":1,"deployment_id":"d1"}
+        ]},
+        {"role":"user","content":"continue"}
+    ]);
+    let body = serde_json::to_value(Body {
+        profile: Profile::Compatible,
+        template: template.as_object().unwrap(),
+        messages: messages.as_array().unwrap(),
+        output: None,
+        replay: true,
+        reverse: &Default::default(),
+    }).unwrap();
+    assert_eq!(
+        body["input"].as_array().unwrap().iter()
+            .map(|item| item["type"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["reasoning", "message", "message"]
+    );
     for messages in [
         json!([{"role":"assistant","content":"", "_responses_items":[{"type":"reasoning","encrypted_content":"opaque"}]}]),
         json!([{"role":"assistant","content":"", "_responses_items":[{"type":"program_output","output":"result"}]}]),

@@ -233,6 +233,17 @@ class NativeTerminalProjectionTests(unittest.TestCase):
         self.assertEqual(task['messages'],event['result']['messages'])
         self.assertTrue(task['_messages_include_current_run'])
 
+    def test_output_limit_text_remains_a_resumable_prefix(self):
+        from lib.tasks_pkg.native_terminal import project_native_terminal
+        task={'id':'task','_userId':7,'status':'running'}
+        event={'type':'done','status':'done','result':{
+            'finish_reason':'length',
+            'messages':[{'role':'assistant','content':'unfinished prefix'}],
+            'usage':[]}}
+        project_native_terminal(task,self.candidate(event))
+        self.assertEqual((task['status'],task['finishReason'],task['content']),
+            ('done','length','unfinished prefix'))
+
     def test_invalid_success_refuses_before_mutation(self):
         from lib.tasks_pkg.native_terminal import project_native_terminal
         for final in [{'role':'user','content':'question'},
