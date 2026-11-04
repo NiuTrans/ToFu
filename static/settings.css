@@ -5162,6 +5162,192 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   }
 }
 
+/* ── 大象 tab (features/settings/dx-channel.ts, dx-account.ts, dx-thread-list.ts) ── */
+
+/* Each card renders into its own slot; the card stays the column's flex item. */
+#settingsTab_dx .dx-slot {
+  display: contents;
+}
+
+.channel-settings .dx-account-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+/* The Settings shell's ambient `label` / `input` rules (see the field note
+   above) would turn kit choices into uppercase blocks around padded,
+   shadowed boxes; these panels restore the kit's choice treatment. */
+.channel-settings .ui-choice {
+  display: inline-flex;
+  margin: 0;
+  color: var(--s-ink);
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-regular);
+  letter-spacing: normal;
+  line-height: var(--leading-title);
+  text-transform: none;
+}
+
+.channel-settings .ui-choice > input {
+  padding: 0;
+  box-shadow: none;
+}
+
+.channel-settings .ui-choice > input:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* Thread list: toolbar, selection bar, then one row per thread. */
+.channel-settings .dx-thread-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .dx-thread-tools {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+}
+
+.channel-settings .dx-thread-search {
+  position: relative;
+  flex: 1 1 16rem;
+}
+
+.channel-settings .dx-thread-reply {
+  position: relative;
+  flex: 0 1 12rem;
+  min-width: 9rem;
+}
+
+/* Search placeholders and reply options name themselves; the labels stay for assistive tech. */
+.channel-settings :is(.dx-thread-search, .dx-thread-reply) > .ui-field__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.channel-settings .dx-thread-filter,
+.channel-settings .dx-thread-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .dx-thread-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+}
+
+.channel-settings .dx-thread-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.channel-settings .dx-thread-selected {
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+}
+
+.channel-settings .dx-thread-rows {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Two lines per thread: the name with its facts, then its controls under the
+   name, so a long name never shares its width with the controls. */
+.channel-settings .dx-thread-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings .dx-thread-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+.channel-settings .dx-thread-name {
+  min-width: 0;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+/* Controls (and the command chat's name, which has no checkbox) start where
+   a checkbox's name does. */
+.channel-settings :is(.dx-thread-controls, .dx-thread-row--command .dx-thread-head) {
+  padding-inline-start: calc(var(--space-4) + var(--space-2));
+}
+
+.channel-settings .dx-thread-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  min-width: 0;
+  min-height: var(--control-h-md);
+}
+
+.channel-settings .dx-thread-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+}
+
+/* Command chat picker: a bounded, scrolling list under its search. */
+.channel-settings .dx-chat-options {
+  display: flex;
+  flex-direction: column;
+  max-height: min(50vh, 24rem);
+  overflow-y: auto;
+  border: var(--s-border);
+  border-radius: var(--radius-xs);
+}
+
+.channel-settings .dx-chat-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+}
+
+.channel-settings .dx-chat-option + .dx-chat-option {
+  border-top: 1px solid var(--s-line);
+}
+
+.channel-settings :is(.dx-thread-row, .dx-thread-reply, .dx-thread-bulk-actions, .dx-chat-option)[hidden] {
+  display: none;
+}
+
 /* Narrow panes stack each thread and show every cell's own label. */
 @media (max-width: 720px) {
   .channel-settings .channel-facts {
@@ -5206,5 +5392,15 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
     color: var(--s-ink-soft);
     font-size: var(--font-size-sm);
     font-weight: var(--weight-medium);
+  }
+
+  /* A thread's facts take their own line, aligned with its name and controls. */
+  .channel-settings .dx-thread-meta {
+    flex-basis: 100%;
+    padding-inline-start: calc(var(--space-4) + var(--space-2));
+  }
+
+  .channel-settings .dx-thread-row--command .dx-thread-meta {
+    padding-inline-start: 0;
   }
 }
