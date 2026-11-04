@@ -170,13 +170,18 @@ Current boundaries that prevent treating Agent count as a capacity claim:
   changing execution admission or making every blocking operation asynchronous.
 - Shared settled rows and progress-source reuse avoid copying every historical
   value on every token. They do not make every structural projection incremental.
-  Completed injected notes now retain immutable row identity through producer
+  Completed injected notes retain immutable row identity through producer
   capture and projection. A per-merge index resolves existing scoped note IDs
-  without scanning old rounds for every note. New identities still use the
-  original anchor rules, preserving continuation prose, stable ordering and
-  terminal placement. Detached capture lists preserve rollback/replacement;
-  mutable legacy rows are still copied. Terminal ACK releases the duplicate
-  live note history, while pending persistence and transient results retain it.
+  without scanning old rounds for every note. New identities use binary search
+  over per-execution-scope running maxima of fixed-block thresholds, followed
+  by same-gap note ordering. Anchor indexes are built only when new notes need
+  them. Scope, continuation prose, stable ordering, terminal placement and
+  first-duplicate replacement remain unchanged; the randomized linear-rule
+  oracle in `test_system_intervention_notes.py` verifies placement parity.
+  Detached capture lists preserve rollback/replacement; mutable legacy rows
+  are still copied. Terminal ACK releases duplicate live note history, while
+  pending persistence and transient results retain it. Component measurements
+  and their limits live in [task event delivery](TASK_EVENT_DELIVERY.md).
 - Delivery lanes separate execution from ordinary persistence and batch existing
   work without a timed window. Required effect, interaction and terminal barriers
   still wait for their ordered debt. Slow projection or storage therefore affects

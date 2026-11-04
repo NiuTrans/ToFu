@@ -524,9 +524,11 @@ Scope, evidence, opt-out and ranking semantics live in
 **Problem.** Short timers can discard useful slow work or trigger lossy recovery;
 clipped or provider-truncated summaries cannot safely replace source context.
 **Decision.** Elapsed time is telemetry: legacy `summaryBudgetSeconds` values
-(including zero) impose no deadline. Owner Stop, transport failures and bounded
-429 retries remain effective, without a detached worker. Failed identical requests
-latch against repeated cost; changed evidence/route changes the request digest.
+(including zero) impose no deadline. Waitable upstream failures use the shared
+dispatch recovery policy, without a summary-specific attempt ceiling or detached
+worker. Owner Stop and terminal transport failures remain effective. Failed
+identical requests latch against repeated cost; changed evidence/route changes
+the request digest.
 Completed late output is accepted normally.
 Owner Stop is rechecked after final post-summary measurement; it withdraws any
 current credential-failure projection and follows the existing cancellation path,
@@ -560,6 +562,27 @@ Logs expose identity, reasoning length and first-text latency, never reasoning c
 live recovery improves apparent latency at the expense of state. Executable specs:
 `tests/tasks_pkg/test_live_summary_budget.py`, `tests/tasks_pkg/test_transient_summary_budget.py`,
 `tests/compaction/test_summary_completion_policy.py`.
+
+**Waitable summary dispatch.** Problem: the summary caller imposed a two-response
+429 budget on the common dispatcher. A temporary TPM limit or gateway outage
+therefore became `summary_dispatch_failed` before the selected route could recover,
+even though ordinary model dispatch would keep waiting. Decision: summaries use
+the common dispatch policy for rate limits, gateway outages and temporarily
+unavailable routes. With its default policy they retain the admitted request and
+credential grant until recovery or owner Stop, including quoted working-set
+summaries, manual compaction and transient invocations. Provider cooldowns and
+cancellable waits remain owned by dispatch; no summary retry loop, timer, new
+setting or alternate-model purchase is added. Explicit operator escalation and
+terminal billing/authentication/protocol failures retain their existing semantics.
+The original route/quote, complete-output validation, paid-usage accounting and
+joined credential cleanup still govern adoption. Alternatives rejected: increasing
+the arbitrary attempt count merely postpones the same failure; reselection during
+a quoted rewrite changes the authorized spending; ignoring the exception or
+installing an incomplete summary invents success. Specs:
+`tests/compaction/test_summary_upstream_recovery.py` exercises real dispatch and
+slot recovery across repeated 429/503 responses, source preservation, exact quote
+identity, accounting, accepted compaction receipts and Stop during provider cooldown.
+
 ### Credential-outage robustness and authentic failed-attempt settlement
 **Problem.** When the owning subscription's shared credential cannot be read
 (`LocalRequestPreparationError` wrapping `SubscriptionCredentialUnavailableError`,

@@ -763,7 +763,7 @@ fn run_worker(
                         let failures = search_retries[scope_index].consecutive_failures;
                         if failures.is_power_of_two() {
                             crate::engine_log::warn("search_retry", &format!(
-                                "failure_kind={:?} consecutive_failures={} retry_after_ms={}",
+                                "failure_kind={:?} consecutive_failures={} retry_after_ms={} error={error}",
                                 error.kind(), failures, duration_milliseconds(delay)));
                         }
                         let maximum_backoff = maximum_search_failure_backoff(&search_retries);
