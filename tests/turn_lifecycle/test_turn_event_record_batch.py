@@ -15,9 +15,10 @@ import pytest
 
 from lib.storage.errors import StorageError
 from lib.storage.protocol import wire_payload
-from tests.turn_lifecycle.test_task_event_delivery import _task, _discard
+from tests.turn_lifecycle.test_task_event_delivery import (
+    _task, _discard, storage as storage, turn_service as turn_service,
+)
 
-pytest_plugins = ['tests.turn_lifecycle.test_task_event_delivery']
 pytestmark = pytest.mark.unit
 
 

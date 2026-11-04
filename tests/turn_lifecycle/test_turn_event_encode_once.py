@@ -2,8 +2,8 @@
 
 ``turn.event.record`` measures its byte bounds with ``len`` of exactly the
 bytes the storage clients splice (``lib.storage.protocol.FrozenPayload``):
-the inline-evidence decision, the Attempt-event document bound and the batch
-event budget read the same compact UTF-8 encoding the authority receives, and
+the snapshot-delta decision and the batch event budget read the same
+compact UTF-8 encoding the authority receives, and
 the inline evidence copy and the carried row share one encoding. A counting
 instrument over the single admitted encoder proves the count; differential
 checks prove the requests both clients send are unchanged.
@@ -18,10 +18,11 @@ from lib.storage.protocol import (
     FrozenPayload, canonical_json, encode_frame, encode_json_value, wire_payload,
 )
 from lib.storage.v2_semantics import request_payload
-from tests.turn_lifecycle.test_task_event_delivery import _task, _discard
+from tests.turn_lifecycle.test_task_event_delivery import (
+    _task, _discard, storage as storage, turn_service as turn_service,
+)
 from tofu_db.wire import _payload_bytes
 
-pytest_plugins = ['tests.turn_lifecycle.test_task_event_delivery']
 pytestmark = pytest.mark.unit
 
 
@@ -287,21 +288,3 @@ def test_an_unencodable_snapshot_is_refused_before_dispatch_and_shed(
         assert task['_debugEvidenceOmittedCount'] == 1
     finally:
         _finish(task)
-
-
-def test_attempt_event_bound_reads_the_spliced_bytes(monkeypatch):
-    from lib import turn_lifecycle
-    monkeypatch.setattr(turn_lifecycle, '_ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES', 100)
-    evidence = {'type': 'tool_compacted', 'summary': '摘要 "q"\n' * 400}
-    patch = {'baseRevision': 1, 'targetRevision': 2, 'operations': [{'op': 'set', 'value': 'é'}]}
-    needed = len(orjson.dumps(evidence)) + len(orjson.dumps(patch)) + 100
-    for bound, kept in ((needed, True), (needed - 1, False)):
-        monkeypatch.setattr(turn_lifecycle, '_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES', bound)
-        encoding = turn_lifecycle._CommandEncoding()
-        command = {'event_payload': {'phase': None, 'event': evidence},
-                   'projection_patch': patch}
-        shed = turn_lifecycle._shed_oversized_inline_evidence(command, encoding)
-        assert (shed is None) is kept
-        assert ('event' in command['event_payload']) is kept
-        frozen = encoding.frozen(command)
-        assert orjson.loads(frozen.encoded['event_payload']) == command['event_payload']
