@@ -84,6 +84,14 @@ deferred wakes (timers, schedules, `await_device`, `create_conversation`,
 fence. Alternative rejected: a separate Worker toggle, which would reintroduce a
 second capability ceiling diverging from ordinary conversations.
 
+A Worker's sub-agents (`spawn_agents` children and their swarm parent proxies)
+carry no grant of their own. `admission.share_dispatch_root` gives each a
+process-local reference to the live Worker task; every admission and workspace
+resolution revalidates that root, so the children use the Worker's isolated
+workspace and stop with its Stop, revocation or settlement. Alternative
+rejected: copying the grant carrier into each child, which would let a child
+outlive or diverge from the Worker's authority.
+
 Problem: the per-call role refusal (`Coordinator policy unavailable`, fail
 closed) converted every lookup exception, so a project-dispatch task whose
 `_projectDispatchAdmission` carrier was removed received a refusal and kept

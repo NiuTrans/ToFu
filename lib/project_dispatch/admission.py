@@ -18,7 +18,48 @@ from lib.log import get_logger
 
 KEY = '_projectDispatchAdmission'
 WORKSPACE_TASK_KEY = '_projectDispatchWorkspaceTaskId'
+ROOT_TASK_KEY = '_projectDispatchRootTask'
 logger = get_logger(__name__)
+
+
+class _LiveDispatchRoot:
+    """Process-local reference to the bound Worker task; copies share, never clone, it."""
+    __slots__ = ('task',)
+
+    def __init__(self, task):
+        self.task = task
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def share_dispatch_root(parent, carrier):
+    """Let a sub-agent carrier borrow its parent's live dispatch authority.
+
+    The carrier holds no grant of its own: every admission revalidates the live
+    root task, so the Worker's revocation, Stop or settlement fences it too.
+    """
+    if parent is None or not is_dispatch_task(parent):
+        return
+    carrier[ROOT_TASK_KEY] = _LiveDispatchRoot(dispatch_root(parent))
+
+
+def dispatch_root(task):
+    """The bound physical task whose grant admits ``task`` (itself for a root)."""
+    holder = task.get(ROOT_TASK_KEY)
+    if holder is None:
+        return task
+    root = holder.task if isinstance(holder, _LiveDispatchRoot) else None
+    if (not isinstance(root, dict) or ROOT_TASK_KEY in root
+            or task.get('_principalContext') != root.get('_principalContext')
+            or task.get('convId') != root.get('convId')
+            or task.get('_executionBudget') is not root.get('_executionBudget')
+            or task.get('aborted')):
+        raise AbortedError('Project dispatch sub-agent no longer shares its Worker authority')
+    return root
 
 
 def authority_stop_reason(error):
@@ -98,6 +139,7 @@ def requires_isolated_workspace(task):
 
 def owned_workspace(task, binding=None):
     """Neither config, cwd nor a cached receipt can transfer a worktree."""
+    task = dispatch_root(task)
     binding = binding or (task.get('config') or {}).get(KEY)
     if not isinstance(binding, dict):
         raise ToolAdmissionRefused('File execution has no accepted project binding')
@@ -340,6 +382,9 @@ def _validated_binding(task, *, require_account):
     config = task.get('config') or {}
     if not is_dispatch_task(task):
         return None
+    root = dispatch_root(task)
+    if root is not task:
+        return _validated_binding(root, require_account=require_account)
     if KEY not in config:
         raise AbortedError('Project dispatch lost its accepted grant carrier')
     try:

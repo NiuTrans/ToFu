@@ -95,6 +95,7 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
         worker = {'id': identity, 'convId': conv, 'config': cfg, 'status': 'running',
             'messages': [], 'usage': {}, 'toolRounds': [], 'events': [], '_userId': owner,
             '_principalContext': admission.principal_for(cfg[admission.KEY]).to_payload(),
+            '_tenant_id': admission.principal_for(cfg[admission.KEY]).tenant_id,
             '_attended': False, '_turnId': cfg['_turnId'], '_attemptId': cfg['_attemptId'],
             'abort_event': threading.Event()}
         admission.bind_account(worker)
@@ -144,6 +145,29 @@ def test_native_delegate_execute_await_report_and_restart(native_dispatch_author
         checked = _execute_tool_one(worker, {}, 'run_command', 'native-check', command, 1,
             {'name': 'run_command', 'arguments': command, 'query': 'Verify written result'}, cfg, str(work), True, schemas)
         assert 'Error:' not in str(checked[1]), checked
+        # A Worker's sub-agent borrows the Worker's live grant and isolated workspace.
+        from lib.tasks_pkg.child_invocation import create_child_invocation, close_unstarted_child_invocation
+        child = create_child_invocation(worker, model='fixture-model',
+            tools=[s for s in schemas if s['function']['name'] in ('read_files', 'run_command')],
+            objective='Inspect result.txt', project_path=str(work),
+            event_sink=lambda event: None, abort_check=lambda: False)
+        try:
+            assert admission.validate_task(child) == admission.validate_task(worker)
+            child_cfg = child['config']
+            child_read = _execute_tool_one(child, {}, 'read_files', 'native-child-read', {'path': 'result.txt'}, 0,
+                {'name': 'read_files', 'arguments': {'path': 'result.txt'}, 'query': 'Inspect'},
+                child_cfg, child_cfg['projectPath'], True, schemas)
+            assert 'native independent worker result' in str(child_read[1]), child_read
+            assert not child.get('aborted')
+            # Stopping the Worker fences its sub-agent through the same live root.
+            worker['aborted'] = True
+            try:
+                with pytest.raises(Exception):
+                    admission.validate_task(child)
+            finally:
+                worker['aborted'] = False
+        finally:
+            close_unstarted_child_invocation(child, reason='spec complete', cause='child_admission_failed')
         factory(write=True).command('turn.event.record', dict(user_id=owner,
             attempt_id=cfg['_attemptId'], task_id=identity, terminal=True, status='completed',
             projection={'content': 'Verified independent worker bytes'},
