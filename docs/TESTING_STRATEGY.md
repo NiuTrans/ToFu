@@ -3,6 +3,10 @@
 Tests protect product behavior and architecture ownership. They are not an
 archive of incidents, implementation line numbers, or past migrations.
 
+Observation wrappers around production recorders must return their receipts.
+System-note injection uses the recorder's block identity and rolls back when
+recording fails; collecting call arguments must preserve that boundary.
+
 ## Agent-session audit
 
 `python3 audit_codex_session.py <rollout.jsonl>` and its `--json` form use the

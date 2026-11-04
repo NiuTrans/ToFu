@@ -1811,8 +1811,13 @@ def test_verification_stop_settles_incomplete(finish):
 def test_retained_noop_prompt_and_stop_are_recorded(monkeypatch):
     from lib.tasks_pkg import segments
     records = []
-    monkeypatch.setattr(segments, 'record_injected_note',
-                        lambda task, **kwargs: records.append(kwargs))
+    record_note = segments.record_injected_note
+
+    def observe_note(task, **kwargs):
+        records.append(kwargs)
+        return record_note(task, **kwargs)
+
+    monkeypatch.setattr(segments, 'record_injected_note', observe_note)
     task, rs, messages = _task(), _rs(), []
     with registered_chat_task(task):
         for rn in range(2):
