@@ -95,7 +95,8 @@ def test_one_human_request_creates_and_starts_independent_worker_without_grant_c
     assert row['grant']['subject'] == 'user:7' and row['grant']['tenant'] == 'tenant-a'
     assert row['request']['profile']['mode'] == 'project'
     assert 'run_command' in row['request']['profile']['tools']
-    assert not {'spawn_agents', 'timer_create'} & set(row['request']['profile']['tools'])
+    assert {'spawn_agents', 'execute_program'} <= set(row['request']['profile']['tools'])
+    assert 'timer_create' not in row['request']['profile']['tools']
     assert r.task['_principalContext']['scopes'] == []
     replay = r.call('delegate_project_work', **r.args)
     assert replay == result and len(r.calls) == len(r.created) == 1

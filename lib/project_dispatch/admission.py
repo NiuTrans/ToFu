@@ -215,8 +215,9 @@ class TrustedDispatch:
             'projectPaths': [], 'readOnlyPaths': [self.binding['projectPath']] if profile['mode'] == 'consult' else [],
             'model': assignment['request']['model'], 'executionLimits': execution_limits(assignment),
             'planMode': False, 'autopilot': False, 'activeFlow': '', 'humanGuidanceEnabled': asks_human(profile),
-            'autoTranslate': False,
-            'tools': {**config.get('tools', {}), 'programmaticCalling': 'off'}})
+            'autoTranslate': False})
+        if profile['mode'] != 'project':
+            config['tools'] = {**config.get('tools', {}), 'programmaticCalling': 'off'}
         if profile['mode'] not in ('project', 'coordinator'):
             config.update(searchEnabled=False, fetchEnabled=False, codeExecEnabled=False,
                           browserEnabled=False, desktopEnabled=False)
@@ -293,7 +294,9 @@ def _restored_identity(config, *, task=None):
         for key, value in original.items():
             if key not in ('tools', 'humanGuidanceEnabled') and config.get(key) != value:
                 raise PermissionError('Project worker capability policy changed after admission')
-        if config.get('tools', {}).get('programmaticCalling') != 'off':
+        expected = (original.get('tools', {}) if profile['mode'] == 'project'
+                    else {**original.get('tools', {}), 'programmaticCalling': 'off'})
+        if config.get('tools', {}) != expected:
             raise PermissionError('Project worker programmatic policy changed after admission')
     return principal_for(binding), False, assignment
 
