@@ -1,7 +1,7 @@
 # Task execution modes
 
 This guide owns autonomous and collaboration-mode policy referenced by the
-[task-engine domain map](modules/task_engine.md). Delegated tools share parent discovery/initial visibility and exact scoped authority; see [startup context](CONTEXT_INJECTIONS.md#delegated-startup-context).
+[task-engine domain map](modules/task_engine.md). Delegated tools share parent discovery/initial visibility and exact scoped authority; see [startup context](CONTEXT_INJECTIONS.md#shared-agent-startup-context).
 
 ## Autonomous drivers
 

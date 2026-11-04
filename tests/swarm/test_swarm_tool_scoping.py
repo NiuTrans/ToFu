@@ -118,6 +118,58 @@ def _stub(name):
             'function': {'name': name, 'description': '...', 'parameters': {}}}
 
 
+def _capture_child_invocation(monkeypatch):
+    import types
+    captured = {}
+
+    def fake_create(parent, **kwargs):
+        captured.update(kwargs)
+        return {'id': 'child-1', 'config': {}, 'messages': []}
+
+    monkeypatch.setattr(
+        'lib.tasks_pkg.child_invocation.create_child_invocation', fake_create)
+    monkeypatch.setattr(
+        'lib.tasks_pkg.child_invocation.run_child_invocation', lambda child: None)
+    monkeypatch.setattr(
+        'lib.turn_verdict.derive_task_verdict',
+        lambda child: types.SimpleNamespace(
+            status=types.SimpleNamespace(value='completed')))
+    return captured
+
+
+def test_exact_spawn_allowlist_makes_deferred_tools_direct_for_the_child(monkeypatch):
+    """A parent delegating an MCP tool by exact name must not hand the child a
+    catalog where that tool sits behind a discovery surface the child lacks."""
+    from lib.swarm.agent import SubAgent
+    from lib.swarm.protocol import SubTaskSpec
+    captured = _capture_child_invocation(monkeypatch)
+    agent = SubAgent(
+        SubTaskSpec(role='general', objective='Read the doc',
+                    tools=['mcp__xuecheng__read_doc', 'read_files']),
+        parent_task={'id': 'p', 'config': {}},
+        all_tools=[_stub('mcp__xuecheng__read_doc'), _stub('read_files'),
+                   _stub('web_search')],
+        model='m')
+    assert agent.run().status == 'completed'
+    assert sorted(captured['direct_tool_names']) == [
+        'mcp__xuecheng__read_doc', 'read_files']
+
+
+def test_role_scoped_child_keeps_inherited_discovery_policy(monkeypatch):
+    """Without an exact allowlist nothing is promoted: the child inherits the
+    parent's discovery surface instead of gaining direct declarations."""
+    from lib.swarm.agent import SubAgent
+    from lib.swarm.protocol import SubTaskSpec
+    captured = _capture_child_invocation(monkeypatch)
+    agent = SubAgent(
+        SubTaskSpec(role='general', objective='Read the doc'),
+        parent_task={'id': 'p', 'config': {}},
+        all_tools=[_stub('mcp__xuecheng__read_doc'), _stub('read_files')],
+        model='m')
+    assert agent.run().status == 'completed'
+    assert captured['direct_tool_names'] == ()
+
+
 def test_explicit_run_command_allowlist_keeps_its_command_controls():
     """Narrowing to run_command keeps a backgrounded command collectable and
     stoppable; it never grants controls the role scope removed."""
