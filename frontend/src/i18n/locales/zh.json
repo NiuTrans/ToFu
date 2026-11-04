@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "有什么想问的…（Enter 发送）",
   "chat.newConversation": "新对话",
   "chat.scrollToBottom": "滚动到最新",
-  "collab.openBrain": "打开项目大脑",
-  "collab.project": "项目",
   "commitCard.committedHead": "已提交（{n}）—— 确属本会话",
   "commitCard.heldHead": "已保留（{n}）—— 未提交",
   "commitCard.noneClean": "没有可证明属于本会话的文件。",
