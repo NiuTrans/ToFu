@@ -55,6 +55,14 @@ test guards the large-history case.
 
 ## Test layers
 
+The lean installer portability job installs every plugin explicitly loaded by
+the repository's pytest configuration, even with `--noconftest` and plugin
+autoload disabled. `tests/installer/test_installer_portability_workflow.py`
+compares the declared tools with plugin distribution metadata. Problem: an
+omitted plugin prevents collection before any installation behavior is tested.
+Decision: keep the job lean while declaring its actual test dependencies;
+removing required plugins would bypass the shared test contract.
+
 | Layer | Purpose | Typical command |
 |---|---|---|
 | Unit | Pure policy, reducer, parser, repository and lifecycle behavior | `make test-unit` |
