@@ -523,6 +523,18 @@ Turn only through durable queue admission. Alternatives: silently treating
 resource exhaustion as a missing attempt hides the cause; using cached task
 identity risks delivering to a stale attempt.
 
+Hydration walks the lane newest-first through `turn.sync.page`, one Turn per
+page together with that Turn's current attempt, and stops at the busy Turn; a
+stale page resumes at the same cursor under the head it reports. Problem: a
+whole-lane `turn.list` is refused once a long conversation's projections exceed
+the authority's response bound, so every queued or inserted input sent during
+such a reply failed as an internal error. Decision: a single-Turn page fits
+whenever the busy Turn itself fits and reads no history older than it.
+Alternatives: a multi-Turn or byte-windowed page needs a page size or byte
+budget that nothing here defines; naming the busy Turn in the `turn_in_progress`
+refusal would remove the walk but changes both authorities' error contract.
+Covered by `test_steer_live_attempt_target.py` on both authorities.
+
 
 The v3 queue-cancel command also accepts pending background completion rows
 without a Turn pair. It removes only delivery intent, returns `inputTurn: null`
