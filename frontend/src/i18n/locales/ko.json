@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "무엇이든 물어보세요… (Enter 키로 전송)",
   "chat.newConversation": "새 채팅",
   "chat.scrollToBottom": "최신 메시지로 스크롤",
-  "collab.openBrain": "프로젝트 브레인 열기",
-  "collab.project": "프로젝트",
   "commitCard.committedHead": "커밋됨({n}) — 이 대화의 파일로 확인됨",
   "commitCard.heldHead": "보류됨({n}) — 커밋 안 됨",
   "commitCard.noneClean": "이 대화의 파일로 확인된 파일이 없습니다.",

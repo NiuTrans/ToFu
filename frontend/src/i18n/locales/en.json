@@ -610,8 +610,6 @@
   "chat.messagePlaceholder": "Ask me anything… (Enter to send)",
   "chat.newConversation": "New Chat",
   "chat.scrollToBottom": "Scroll to latest",
-  "collab.openBrain": "Open Project Brain",
-  "collab.project": "Project",
   "commitCard.committedHead": "Committed ({n}) — provably yours",
   "commitCard.heldHead": "Held back ({n}) — not committed",
   "commitCard.noneClean": "No files were provably attributable to this conversation.",
