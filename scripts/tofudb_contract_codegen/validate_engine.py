@@ -45,6 +45,7 @@ def validate_engine(document: dict, catalog_names: list[str]) -> None:
         "streamAppendAdmission": "complete-atomic-segmented-append-without-byte-quota",
         "maximumStreamReadEvents": 1000,
         "maximumStreamReadBytes": 8 * 1024 * 1024,
+        "streamPointReadAdmission": "complete-selected-positions-without-aggregate-byte-quota",
         "transactionStreamAdmission": "complete-batch-without-stream-count-quota",
     }
     if document.get("physicalBounds") != expected_physical_bounds:

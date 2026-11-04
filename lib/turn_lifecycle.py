@@ -1606,14 +1606,6 @@ _DEBUG_EVIDENCE_EVENTS = frozenset({'messages_snapshot', 'tool_compacted'})
 # projection the durable event log stores) instead of duplicating the full
 # wire frame on the attempt event. ``read_events`` rehydrates them.
 _DEBUG_EVIDENCE_INLINE_MAX_BYTES = 64 * 1024
-# Canonical source: contracts/tofudb_ir_v1.json -> bounds.maximumLegacyDocumentBytes.
-# The native authority admits one attempt event only while its expanded
-# conversation-sync form fits this bound (turn/sync_attempt_reference.rs); a
-# contract test pins the parity.
-_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024
-# Identity, sequence, status, attempt and sync-envelope fields the authority
-# adds around the producer payload, plus replay-patch normalization drift.
-_ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES = 64 * 1024
 _TERMINAL_EVENTS = frozenset({'done', 'error', 'aborted'})
 
 
@@ -1829,35 +1821,6 @@ def _frame_projection_patch(
         ),
         'projection_segments_stable': True,
     }
-
-
-def _shed_oversized_inline_evidence(command_payload: dict[str, Any],
-                                    encoding: _CommandEncoding) -> str | None:
-    """Drop an inline diagnostic copy the attempt-event bound cannot carry.
-
-    The inline evidence is a diagnostic duplicate of the carried task-event
-    row (or of the caller's standalone append). A full baseline -- the first
-    frame of a (task, turn), or one after projector eviction/reset -- of a
-    conversation whose wire request exceeds the attempt-event bound would
-    otherwise make this frame deterministically unwritable and kill the run.
-    Returns the shed reason, or ``None`` when the copy fits.
-    """
-    event_payload = command_payload['event_payload']
-    if 'event' not in event_payload:
-        return None
-    try:
-        evidence_bytes = len(encoding.encoded(event_payload['event']))
-        patch_bytes = len(encoding.encoded(command_payload['projection_patch']))
-    except StorageError:
-        # Sending the command reports this refusal; its handler sheds evidence.
-        return None
-    if (evidence_bytes + patch_bytes + _ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES
-            <= _ATTEMPT_EVENT_DOCUMENT_MAX_BYTES):
-        return None
-    del event_payload['event']
-    return (f'inline copy of {evidence_bytes} bytes exceeds the '
-            f'{_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES}-byte attempt-event '
-            'bound; the carried task event keeps the complete frame')
 
 
 def _is_frame_overflow_error(exc: 'StorageError') -> bool:
@@ -2411,9 +2374,6 @@ def _record_task_event_locked(
         command_payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
     if task_event is not None:
         command_payload['task_event'] = task_event
-    shed = _shed_oversized_inline_evidence(command_payload, encoding)
-    if shed is not None:
-        _note_debug_evidence_shed(task, attempt_id, event_kind, shed)
     client = _turn_client(write=True)
     command_id = (
         f'turn-event:{attempt_id}:{now}:{event_kind}'
@@ -2719,7 +2679,6 @@ class _PreparedBatchEntry:
     applied_projection: dict[str, Any]
     slim: bool
     progress: bool
-    shed: str | None
     rows: int
     wire: bytes
 
@@ -3004,11 +2963,6 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
         projection=chunk[-1].applied_projection,
         projection_revision=revision + len(chunk),
         segments_stable=not chunk[-1].slim)
-    for prepared in chunk:
-        if prepared.shed is not None:
-            _note_debug_evidence_shed(
-                task, attempt_id, str(prepared.entry.raw_event.get('type') or 'projection'),
-                prepared.shed)
     _finish_task_event_chunk(task, attempt_id, entries, progress, structural)
     return True, True, limit
 
@@ -3049,7 +3003,6 @@ def _prepare_task_event_batch_entry(
     if task.get('_flowRootAttemptId'):
         payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
     payload['task_event'] = entry.task_event
-    shed = _shed_oversized_inline_evidence(payload, encoding)
     frozen = encoding.frozen(payload)
     applied = projection
     if slim:
@@ -3058,7 +3011,7 @@ def _prepare_task_event_batch_entry(
         applied['thinking'] = projection['thinking']
     return _PreparedBatchEntry(
         entry=entry, payload=frozen, applied_projection=applied, slim=slim,
-        progress=task_event_projection_is_progress(raw_event), shed=shed,
+        progress=task_event_projection_is_progress(raw_event),
         rows=1 + len(entry.task_event.get('preceding_events') or ()),
         wire=encode_json_value(frozen.wire_body()))
 

@@ -1,6 +1,6 @@
 //! Canonical attempt-event references in the conversation replay journal.
 //!
-//! Entry points: prepare and materialize. The existing same-owner sync retention
+//! Entry points: encode and materialize. The existing same-owner sync retention
 //! index protects the immutable source. Public replay/export expands the source;
 //! pruning reads only the compact locator. A distinct document identity makes
 //! older readers reject this physical representation rather than publish it.
@@ -8,7 +8,6 @@
 use super::{attempt_event_key, attempt_sync_reference_key, conversation_sync_event_key, invalid_data,
     AuthorityDatabase, AuthorityTransaction, EntityKey,
     ATTEMPT_EVENT_DOCUMENT_IDENTITY, SYNC_DOCUMENT_IDENTITY};
-use crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES;
 use serde_json::{Map, Value};
 use std::io;
 
@@ -33,35 +32,12 @@ fn sequence(event: &Value) -> io::Result<u64> {
         .ok_or_else(|| invalid_data("attempt sync reference sequence is malformed"))
 }
 
-pub(super) struct Publication {
-    pub envelope: Value,
-    pub document_identity: &'static str,
-    pub value_json: Vec<u8>,
-}
-
-pub(super) fn prepare(envelope: &Value, canonical_event_bytes: usize) -> io::Result<Publication> {
+pub(super) fn encode(envelope: &Value) -> io::Result<Vec<u8>> {
     sequence(envelope)?;
-    let raw = serde_json::to_vec(envelope)
-        .map_err(|_| invalid_data("attempt sync reference cannot be encoded"))?;
-    let placeholder = serde_json::to_vec(&envelope["payload"]["event"])
-        .map_err(|_| invalid_data("attempt sync reference source cannot be encoded"))?;
-    let expanded_bytes = raw.len().checked_sub(placeholder.len())
-        .and_then(|size| size.checked_add(canonical_event_bytes))
-        .ok_or_else(|| invalid_data("attempt sync reference size overflows"))?;
-    // The canonical attempt event has its own admission. A transport envelope
-    // that cannot carry it publishes the existing snapshot invalidation in the
-    // same transaction, never an unreadable reference or a discarded patch.
-    if expanded_bytes > MAX_LEGACY_DOCUMENT_BYTES {
-        let mut refresh = envelope.clone();
-        refresh["type"] = Value::String("conversation.activity".to_owned());
-        refresh["payload"] = serde_json::json!({"requiresSnapshot": true});
-        let value_json = serde_json::to_vec(&refresh)
-            .map_err(|_| invalid_data("attempt sync invalidation cannot be encoded"))?;
-        return Ok(Publication { envelope: refresh,
-            document_identity: SYNC_DOCUMENT_IDENTITY, value_json });
-    }
-    Ok(Publication { envelope: envelope.clone(),
-        document_identity: DOCUMENT_IDENTITY, value_json: raw })
+    // Live replay uses storage.v2 response chunks. Its complete canonical
+    // event never inherits an unrelated legacy document byte quota.
+    serde_json::to_vec(envelope)
+        .map_err(|_| invalid_data("attempt sync reference cannot be encoded"))
 }
 
 /// Expand only after validating namespace, physical/logical identity and source

@@ -56,8 +56,11 @@ matching retention reference. They validate the full source JSON before
 splicing its original bytes into the public envelope. Missing or inconsistent
 references fail closed. Public wire formats and SQLite behavior are unchanged.
 Legacy full envelopes remain readable and preserve their exact bytes on export.
-The write limit still counts the expanded envelope; public pagination counts
-expanded bytes and preserves the existing resumable-prefix/deadline behavior.
+Live publication and replay impose no private 8 MiB expanded-envelope or page
+quota. The native transport chunks complete responses; requested row limits and
+deadlines preserve contiguous replay cursors. Legacy `conversation.activity`
+snapshot invalidations remain readable. Exclusive operator migration retains
+its separately declared transfer protocol and requires its own certification.
 
 Pruning reads the compact row without loading the source. Attempt pruning
 cannot retire a source while a sync reference remains. Sync pruning releases
@@ -169,43 +172,30 @@ two 64-bit counter fields total 540 bytes; this excludes table/index/page
 allocation and is not RSS or a throughput result. Physical growth and
 steady-state append/retention latency require separate capacity measurements.
 
-## Task-event page size
+## Complete task-event selections
 
-Problem: a materialized `event.list` response has no private byte quota; it is
-streamed in response chunks. One page's selected events are, however, read by a
-single stream point read whose stored bytes are bounded by
-`maximumStreamReadBytes` (8 MiB, `contracts/tofudb_ir_v1.json`). Events above the
-inline event bound are stored as payload references, so many medium inline
-events (snapshots, tool results) can exceed that bound while every event is
-individually readable. Reported as bare invalid input, the refusal reached the
-wire as an opaque `database_protocol_error`, readers did not shrink the page, and
-the Request Inspector answered 503 for whole rounds.
+Problem: `event.list` already streams complete responses, but its selected
+physical positions inherited an unrelated 8 MiB aggregate read quota. A page of
+individually valid inline snapshots could therefore fail while an equally large
+blob-backed page succeeded.
 
-Decision: the bound is a size bound end to end. The stream point read reports the
-existing non-retryable `storage_payload_too_large` code. Request Inspector (both
-ordinary reads and source-fenced long-history continuation) and Turn Trace halve
-their positive page limit at the **same** sequence cursor, down to one row,
-preserving all payload bytes and chronological snapshot dependencies. Engines
-built before this classification report the same refusal as a
-`database_protocol_error` whose sanitized message is only its code; readers treat
-exactly that signature as the size refusal, never a protocol error carrying client
-or fence text. A one-row rejection, corruption, other protocol error, or generic
-availability failure remains an explicit failed read; it is not EOF and never
-creates a successful partial transcript. The 8 MiB bound, owner fences and source
-guards are unchanged.
+Decision: both persisted and in-memory stream point reads return every selected
+position without a private aggregate byte quota. The physical stream scan's
+ordinary page target remains a resumable work slice, not an admission limit on
+an event selection. Sequence, owner, segment witness, digest and missing-source
+checks remain mandatory. Storage transport chunks retain their format bounds.
+The invariant is `physicalBounds.streamPointReadAdmission` in the native IR.
 
-Alternatives rejected: treating all resource exhaustion as page size would hide
-real admission pressure; enlarging the stream-read bound merely moves the failure;
-truncating page payloads destroys diagnostic/wire evidence. Splitting one page into
-several bounded point reads inside the engine would change `event.list` paging for
-every caller (including cold replay) and is a separate contract decision. The
-engine classification takes effect only after a normal engine rebuild and
-deployment; the application readers handle both engines after an ordinary restart.
+Alternatives rejected: increasing the quota merely moves the failure; making
+current callers guess smaller pages preserves the storage defect; truncation
+would destroy request and tool evidence. Compatibility readers still handle
+typed size refusals from older engines and other selected backends without
+turning a failed read into EOF.
 
 Verification: native
-`event_list_selection_beyond_stream_read_bound_is_payload_size_not_protocol_error`,
-`tests/diagnostics/test_request_inspector_page_size.py` and Turn Trace's
-`test_event_page_size_refusal_halves_the_page_at_the_same_cursor` exercise complete
-exact paging, bounded retries, one-row failure and unrelated errors.
+`event_list_preserves_selected_inline_events_above_eight_mib_after_reopen`
+checks complete filtered and unfiltered pages after reopen. Existing Request
+Inspector and Turn Trace tests retain older-engine error compatibility and
+same-cursor retry, while owner/corruption specifications stay unchanged.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

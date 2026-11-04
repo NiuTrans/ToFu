@@ -147,8 +147,6 @@ def render_execution(tables, worker, inputs) -> list[str]:
         f'{turns["maximumCompactionProjectionUpdates"]};',
         "pub const MAX_TURN_COMPACTION_REPARENTED_TURNS: usize = "
         f'{turns["maximumCompactionReparentedTurns"]};',
-        "pub const MAX_TURN_COMPACTION_PROJECTION_BYTES: usize = "
-        f'{turns["maximumCompactionProjectionBytes"]};',
         "pub const MAX_TURN_COMPACTION_MATERIALIZED_BYTES: usize = "
         f'{turns["maximumCompactionMaterializedBytes"]};',
         "pub const ATTEMPT_RECOVERY_INDEX_NAMESPACE: &str = "
