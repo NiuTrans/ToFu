@@ -55,7 +55,7 @@
             "description": "A 大象 (SSO) MIS account, lowercase."},
     "EventDisposition": {"type": "string", "enum": ["command", "candidate", "context"]},
     "OutboxState": {"type": "string", "enum": ["draft", "queued", "sending", "unknown", "sent", "failed", "discarded"]},
-    "OutboxOriginKind": {"type": "string", "enum": ["router_reply", "tool"]},
+    "OutboxOriginKind": {"type": "string", "enum": ["router_receipt", "router_content", "router_progress", "router_reply", "router_status", "tool"]},
     "ChannelIdentity": {
       "type": "object",
       "additionalProperties": false,

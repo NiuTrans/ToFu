@@ -26,7 +26,7 @@ export type EventDisposition = "command" | "candidate" | "context";
 
 export type OutboxState = "draft" | "queued" | "sending" | "unknown" | "sent" | "failed" | "discarded";
 
-export type OutboxOriginKind = "router_reply" | "tool";
+export type OutboxOriginKind = "router_receipt" | "router_content" | "router_progress" | "router_reply" | "router_status" | "tool";
 
 export type ChannelIdentity = {
   uid: string;

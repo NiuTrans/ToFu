@@ -147,10 +147,20 @@ outbox item (ID derived from owner, thread and key) before any network effect.
 Policy is decided once at enqueue: command chat → `queued`; other threads by
 reply policy: `auto` → `queued`, `draft` → waits for owner approval (Settings
 or the Global Router's `channel_outbox_approve` on a genuine human turn),
-`never` refuses and records nothing. A Global Router Turn whose human input
+`never` refuses and records nothing. A command-chat owner message that the
+Turn command accepts immediately enqueues a receipt: started, steered into the
+live Turn, or queued behind it. A queued command adds its started receipt when
+its Attempt actually begins (`lib/channels/autoreply.py`). While that genuine
+human command-chat Turn runs, the passive chat-Push observer mirrors each
+canonical non-deliverable assistant text block once (tool-round
+`assistantContent` and released continuation prose, never reasoning or raw
+tool payloads), plus each changed `update_task_progress` board summary. The
+observer does no model or network work. A Global Router Turn whose human input
 came from a channel thread enqueues its final assistant answer to that thread
-with idempotency key = the Turn ID (`lib/channels/autoreply.py`, observing the
-existing task terminal-listener seam). Agent-authored messages in threads
+with idempotency key = the Turn ID, followed by an explicit completed, failed,
+interrupted or aborted receipt from the existing task terminal-listener seam.
+Receipts and progress use the command chat; other channel events and nonhuman
+Turns never gain these automatic messages. Agent-authored messages in threads
 other than the command chat carry the visible label `[Tofu 代发]`. Each queued
 item takes an exact per-thread queue position (CAS on the thread record);
 approval appends a draft at the end. The executor sends each thread in order,
@@ -164,11 +174,19 @@ and client UUID for echo suppression and recall. Messages are sent as markdown
 (owner, channel) and executes only its own channel's items. A send that
 settles `failed` or `unknown` also becomes one Router Watchdog fault signal per
 item and state ([ROUTER.md](ROUTER.md) R7); the outbox's own handling is
-unchanged.
+unchanged. Router-generated receipts, content, progress, replies and terminal
+status are translated to the conversation's configured display language
+immediately before the provider send. The first translated bytes are written
+back to the durable item before the network call, so an unknown result or
+restart retries exactly those bytes. A translator failure preserves the
+original text and never blocks later items. Manually authored `channel_send`
+text is not rewritten.
 
 **Alternatives rejected:** sending inside the tool call (lost on crash,
 duplicated on retry); impersonating the owner without disclosure; ordering by
-timestamps (equal milliseconds reorder a thread).
+timestamps (equal milliseconds reorder a thread); forwarding token deltas
+(unbounded message spam and provisional retry text); translating in an
+independent async queue (reorders replies and can retry different bytes).
 
 ### C6. 大象 adapter
 
