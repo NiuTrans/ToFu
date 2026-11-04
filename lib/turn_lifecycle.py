@@ -390,13 +390,8 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         if exc.code == 'turn_in_progress':
             latest = None
             try:
-                rows = _turn_client().query(
-                    'turn.list', {
-                        'conversation_id': conversation_id,
-                        'user_id': user_id,
-                        'lane_id': lane_id,
-                    })
-                latest = _lane_busy_turn(rows, user_id=user_id)
+                latest = _lane_busy_turn(
+                    conversation_id, lane_id, user_id=user_id)
             except StorageError:
                 # Delivery needs the authoritative live attempt. Preserve a
                 # failed read's typed availability/retry contract for the API;
@@ -421,7 +416,7 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
 
 
 def _lane_busy_turn(
-    rows: list[dict[str, Any]], *, user_id: Any,
+    conversation_id: str, lane_id: str, *, user_id: Any,
 ) -> dict[str, Any] | None:
     """Name the Turn whose attempt makes the lane busy, not merely the lane tail.
 
@@ -430,19 +425,57 @@ def _lane_busy_turn(
     pending/running attempt that is not queue-bound; a steer addressed to any
     other Turn finds its window closed. The tail remains the answer only when
     the live attempt settled after the authority refused the command.
+
+    The lane is read newest-first, one Turn per ``turn.sync.page`` (which
+    carries that Turn's current attempt from the same read), and the search
+    stops at the busy Turn. A whole-lane read is refused once a long
+    conversation's projections exceed the authority's response bound, which
+    would turn every input sent during its reply into an internal error.
     """
-    for row in reversed(rows):
-        attempt_id = row.get('currentAttemptId')
-        if not attempt_id or row.get('status') not in ('pending', 'running'):
+    client = _turn_client()
+    sync_sequence = 0
+    before_ordinal: int | None = None
+    tail: dict[str, Any] | None = None
+    while True:
+        payload: dict[str, Any] = {
+            'conversation_id': conversation_id, 'user_id': user_id,
+            'lane_id': lane_id, 'sync_sequence': sync_sequence, 'limit': 1,
+        }
+        if before_ordinal is not None:
+            payload['before_ordinal'] = before_ordinal
+        page = client.query('turn.sync.page', payload)
+        if page is None:
+            return tail
+        if page.get('stale'):
+            # Pages are fenced on the replay head, which the live reply keeps
+            # advancing. Lane ordinals only grow, so the walk continues from
+            # the same cursor at the head the authority reported.
+            head = page.get('syncSequence')
+            if type(head) is not int or head == sync_sequence:
+                raise StorageError(
+                    'database_protocol_error', 'Turn page stale head is malformed')
+            sync_sequence = head
             continue
-        try:
-            attempt = get_attempt(attempt_id, user_id=user_id)
-        except LifecycleNotFound:
-            continue
-        if (attempt.get('status') in ('pending', 'running')
-                and not attempt.get('queueBinding')):
-            return row
-    return rows[-1] if rows else None
+        turns = page.get('turns') or []
+        attempts = {attempt.get('attemptId'): attempt
+                    for attempt in page.get('attempts') or []}
+        for row in reversed(turns):
+            if tail is None:
+                tail = row
+            attempt = attempts.get(row.get('currentAttemptId'))
+            if (row.get('status') in LIVE_ATTEMPT_STATUSES
+                    and attempt is not None
+                    and attempt.get('status') in LIVE_ATTEMPT_STATUSES
+                    and not attempt.get('queueBinding')):
+                return row
+        if not page.get('hasMore'):
+            return tail
+        next_before = page.get('nextBeforeOrdinal')
+        if (not turns or type(next_before) is not int
+                or (before_ordinal is not None and next_before >= before_ordinal)):
+            raise StorageError(
+                'database_protocol_error', 'Turn page cursor did not advance')
+        before_ordinal = next_before
 
 
 def activate_queued_turn_pair(

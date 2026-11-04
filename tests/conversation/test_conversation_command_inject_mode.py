@@ -468,7 +468,7 @@ def test_busy_lane_read_failure_preserves_storage_retry_contract(
 
     class FailedReadClient:
         def query(self, operation, payload):
-            assert operation == 'turn.list'
+            assert operation == 'turn.sync.page'
             raise StorageError(
                 'database_unavailable', 'database_resource_exhausted',
                 retryable=True, retry_after_ms=1500,
@@ -511,8 +511,9 @@ def test_missing_busy_turn_uses_durable_steer_queue(
 
     class EmptyReadClient:
         def query(self, operation, payload):
-            assert operation == 'turn.list'
-            return []
+            assert operation == 'turn.sync.page'
+            return {'syncSequence': payload['sync_sequence'], 'turns': [],
+                    'attempts': [], 'hasMore': False, 'nextBeforeOrdinal': None}
 
     monkeypatch.setattr(turn_lifecycle, '_turn_client',
                         lambda *, write=False: real_client(write=True)
