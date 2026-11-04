@@ -1,18 +1,27 @@
 """lib/self_update/_status.py — working-tree status and update check.
 
 ``_is_runtime_state`` (delegates to lib.runtime.runtime_layout), ``working_tree_status``
-(blocking vs. tolerated churn) and ``check_for_update`` (the full UI payload).
+(blocking vs. tolerated churn), ``_fetch_latest_version_detailed`` (picks the
+release-tags or git-upstream source) and ``check_for_update`` (the full UI
+payload).
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 from lib.runtime.runtime_layout import is_runtime_state as _rl_is_runtime_state
-from lib.self_update._config import UPDATE_REPO
-from lib.self_update._git import _run_git, git_available
+from lib.self_update._config import UPDATE_REPO, update_source_overrides
+from lib.self_update._git import (
+    _remote_url,
+    _run_git,
+    git_available,
+    resolve_update_upstream,
+)
 from lib.self_update._version import (
     _fetch_latest_release_detailed,
+    _fetch_upstream_version_detailed,
     _parse_semver,
     current_version,
 )
@@ -77,26 +86,61 @@ def working_tree_status() -> dict:
     return {'clean': not blocking, 'blocking': blocking, 'runtime': runtime}
 
 
+# ``github.com/<owner>/<repo>`` as an https/http/git/ssh URL or the scp-like
+# ``[user@]github.com:<owner>/<repo>``, with an optional ``.git`` suffix.
+_GITHUB_REPO_URL_RE = re.compile(
+    r'^(?:(?:https?|git|ssh|git\+ssh|ssh\+git)://(?:[^@/]+@)?github\.com(?::\d+)?/'
+    r'|(?:[^@/:]+@)?github\.com:/?)'
+    r'(?P<repo>[^/:]+/[^/]+?)(?:\.git)?/?$',
+    re.IGNORECASE)
+
+
+def _is_official_github_url(url: str) -> bool:
+    """True when ``url`` names the official repository ``UPDATE_REPO`` on GitHub."""
+    match = _GITHUB_REPO_URL_RE.match(url.strip())
+    return bool(match) and match.group('repo').lower() == UPDATE_REPO.lower()
+
+
+def _fetch_latest_version_detailed(git_checkout: bool) -> tuple:
+    """``(payload, error)`` from the source this install updates from.
+
+    A git checkout follows ``resolve_update_upstream`` — the remote/branch
+    ``_apply_via_git`` pulls. Unless that remote is the official GitHub
+    repository, or ``TOFU_UPDATE_REPO`` names a repository explicitly, the
+    upstream is fetched and its ``VERSION`` compared, so an internal mirror
+    whose every push is a release snapshot reports its own version. The
+    release-tags check stays the source for the official repository and for
+    non-git installs, which update from release tarballs.
+    """
+    if git_checkout and update_source_overrides().repo is None:
+        upstream = resolve_update_upstream()
+        url = _remote_url(upstream.remote)
+        if not (url and _is_official_github_url(url)):
+            return _fetch_upstream_version_detailed(upstream)
+    return _facade('_fetch_latest_release_detailed',
+                   _fetch_latest_release_detailed)()
+
+
 # The endpoint is polled on an interval; the two expensive probes — the
-# GitHub release fetch (network) and ``git status`` (subprocess) — change far
-# slower than the poll cadence and, on an IO/CPU-starved host, each held the
-# request thread open 2-3 s (2026-09-24 SLOW log). Cache both briefly: the
-# *payload* is rebuilt every call (current version / dirty flags stay fresh),
-# only the slow probes are reused. A new release or a newly-dirtied tree
-# showing up to TTL later is harmless for a status poll.
+# latest-version lookup (GitHub tags request or upstream ``git fetch``) and
+# ``git status`` (subprocess) — change far slower than the poll cadence and,
+# on an IO/CPU-starved host, each held the request thread open 2-3 s
+# (2026-09-24 SLOW log). Cache both briefly: the *payload* is rebuilt every
+# call (current version / dirty flags stay fresh), only the slow probes are
+# reused. A new release or a newly-dirtied tree showing up to TTL later is
+# harmless for a status poll.
 _LATEST_RELEASE_TTL_S = 300.0
 _TREE_STATUS_TTL_S = 30.0
 _latest_release_cache: dict = {'at': 0.0, 'value': None, 'err': None}
 _tree_status_cache: dict = {'at': 0.0, 'value': None}
 
 
-def _latest_release_cached():
+def _latest_release_cached(git_checkout: bool):
     import time as _time
     now = _time.monotonic()
     if now - _latest_release_cache['at'] < _LATEST_RELEASE_TTL_S:
         return _latest_release_cache['value'], _latest_release_cache['err']
-    value, err = _facade('_fetch_latest_release_detailed',
-                         _fetch_latest_release_detailed)()
+    value, err = _fetch_latest_version_detailed(git_checkout)
     _latest_release_cache.update(
         {'at': now, 'value': value, 'err': err})
     return value, err
@@ -123,11 +167,13 @@ def check_for_update(*, repository=None) -> dict:
     runtime_changes, error, error_kind, error_detail. ``update_method`` is
     ``'git'`` for a checkout or ``'tarball'`` for a non-git deployment —
     both are updatable, so the UI shows the Apply button either way (only a
-    git dirty tree blocks). On a failed release check ``error_kind`` names
-    the concrete cause (``network`` / ``rate_limited`` / ``http`` /
-    ``parse`` / ``no_tags``) and ``error_detail`` carries the raw reason so
-    the UI can tell the user EXACTLY what went wrong. Never raises — every
-    failure is captured in the payload.
+    git dirty tree blocks). ``latest`` comes from the checkout's git upstream
+    or from release tags (``_fetch_latest_version_detailed``); for a git
+    upstream ``tag`` is the fetched commit SHA. On a failed check
+    ``error_kind`` names the concrete cause (``network`` / ``rate_limited`` /
+    ``http`` / ``parse`` / ``no_tags``) and ``error_detail`` carries the raw
+    reason so the UI can tell the user EXACTLY what went wrong. Never raises
+    — every failure is captured in the payload.
     """
     cur = _facade('current_version', current_version)()
     _is_git = (_facade('git_available', git_available)() if repository is None
@@ -148,7 +194,7 @@ def check_for_update(*, repository=None) -> dict:
         'error_detail': None,
     }
 
-    latest, err = _latest_release_cached()
+    latest, err = _latest_release_cached(_is_git)
     if latest is None:
         kind = (err or {}).get('kind') or 'network'
         payload['error_kind'] = kind

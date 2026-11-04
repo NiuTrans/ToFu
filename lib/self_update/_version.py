@@ -1,13 +1,15 @@
 """lib/self_update/_version.py — version parsing and release discovery.
 
-``_parse_semver`` / ``current_version`` and the GitHub tags API lookups
-``_fetch_latest_release_detailed`` / ``fetch_latest_release``.
+``_parse_semver`` / ``current_version``, the GitHub tags API lookups
+``_fetch_latest_release_detailed`` / ``fetch_latest_release``, and
+``_fetch_upstream_version_detailed`` (``VERSION`` on a fetched git upstream).
 """
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import threading
 import time
 from typing import Optional
@@ -15,15 +17,17 @@ from typing import Optional
 import requests
 
 from lib.http_transport.client import http_get
-from lib.self_update._config import UPDATE_REPO, _TAGS_URL
+from lib.self_update._config import UPDATE_REPO, _GIT_TIMEOUT, _TAGS_URL
+from lib.self_update._git import UpdateUpstream, _run_git
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-#: Minimum interval (seconds) between GitHub tags API attempts once a check
-#: has failed. Repeated UI polls / sync threads within this window return the
-#: cached failure instead of re-hammering a proxy that 403s api.github.com.
+#: Minimum interval (seconds) between latest-version lookups (GitHub tags API
+#: or upstream fetch) once a check has failed. Repeated UI polls / sync
+#: threads within this window return the cached failure instead of
+#: re-hammering a proxy that 403s api.github.com or an unreachable remote.
 #: Override with ``TOFU_UPDATE_CHECK_MIN_INTERVAL_S`` (0 disables backoff).
 _UPDATE_CHECK_MIN_INTERVAL_S = 60.0
 
@@ -240,6 +244,60 @@ def _fetch_latest_release_detailed() -> tuple:
     _clear_failure()
     return ({'tag': best_tag, 'version': '.'.join(str(p) for p in best_ver)},
             None)
+
+
+def _fetch_upstream_version_detailed(upstream: UpdateUpstream) -> tuple:
+    """Fetch the git ``upstream`` and read ``VERSION`` from the fetched commit.
+
+    Same ``(payload, error)`` contract, failure backoff and error kinds as
+    :func:`_fetch_latest_release_detailed`. ``payload`` is ``{'tag': <fetched
+    commit SHA>, 'version': 'X.Y.Z'}``; ``kind`` is ``network`` when the
+    fetch failed, ``no_tags`` when the fetched commit has no ``VERSION``
+    file and ``parse`` when that file is not semver. Never raises.
+    """
+    now = time.monotonic()
+    cached, age = _cached_failure(now)
+    if cached is not None:
+        logger.debug('[Update] upstream check throttled after previous '
+                     'failure (%.0fs ago): %s', age, cached.get('detail', ''))
+        return None, cached
+
+    source = f'{upstream.remote} {upstream.branch}'
+
+    def _failed(kind: str, detail: str) -> tuple:
+        err = {'kind': kind, 'detail': detail.strip()[:300]}
+        _record_failure(err)
+        logger.warning('[Update] Upstream check of %s failed (%s): %s',
+                       source, kind, err['detail'])
+        return None, err
+
+    try:
+        # FETCH_HEAD must name the commit just fetched; force it where a
+        # user disabled it (git >= 2.29). Older git ignores the unknown key
+        # and always writes FETCH_HEAD.
+        fetched = _run_git(['-c', 'fetch.writeFetchHEAD=true', 'fetch',
+                            upstream.remote, upstream.branch],
+                           timeout=_GIT_TIMEOUT)
+        if fetched.returncode != 0:
+            return _failed('network', fetched.stderr or fetched.stdout
+                           or f'git fetch exited {fetched.returncode}')
+        head = _run_git(['rev-parse', '--verify', 'FETCH_HEAD'])
+        commit = head.stdout.strip()
+        if head.returncode != 0 or not commit:
+            return _failed('network', head.stderr or 'FETCH_HEAD is unreadable')
+        version_file = _run_git(['cat-file', 'blob', f'{commit}:VERSION'])
+    except (OSError, subprocess.SubprocessError) as e:
+        return _failed('network', str(e))
+
+    if version_file.returncode != 0:
+        return _failed('no_tags', f'{source}: commit {commit} has no VERSION file')
+    parsed = _parse_semver(version_file.stdout)
+    if parsed is None:
+        return _failed('parse', f'{source}: VERSION '
+                                f'{version_file.stdout.strip()[:40]!r} is not semver')
+
+    _clear_failure()
+    return {'tag': commit, 'version': '.'.join(str(p) for p in parsed)}, None
 
 
 def fetch_latest_release() -> Optional[dict]:
