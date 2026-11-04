@@ -359,30 +359,22 @@ async def list_pending_resume():
     ][: _PENDING_RESUME_MAX_ITEMS]
     if not pending_ids:
         return api_ok({"conversations": []})
-    user_id = _owner_id()
 
-    # One owner-scoped catalog page resolves titles for the common case; ids
-    # older than the page fall back to a bounded per-conversation lookup.
-    wanted = set(pending_ids)
-    titled: dict[str, dict] = {}
-    catalog_page = await asyncio.to_thread(
-        list_conversation_metadata_page,
-        user_id=user_id,
-        limit=_MAX_LIST_LIMIT,
-        settings_keys=(),
+    # Titles need metadata only: one owner-scoped read of exactly these ids,
+    # which never materializes a transcript.
+    snapshots = await asyncio.to_thread(
+        ConversationRepository(client_factory=_client).list,
+        user_id=_owner_id(),
+        ids=pending_ids,
+        limit=len(pending_ids),
+        include_messages=False,
+        settings_keys=[],
     )
-    for metadata in catalog_page.items:
-        conv_id = str(metadata.get("id") or "")
-        if conv_id in wanted:
-            titled[conv_id] = _metadata({"metadata": metadata}, sidebar=True)
-    for conv_id in pending_ids:
-        if len(titled) >= _PENDING_RESUME_MAX_ITEMS:
-            break
-        if conv_id in titled:
-            continue
-        document = await _get_document(conv_id, user_id)
-        if document is not None:
-            titled[conv_id] = _metadata(document, sidebar=True)
+    titled = {
+        str(snapshot.metadata.get("id") or ""): _metadata(
+            {"metadata": snapshot.metadata}, sidebar=True)
+        for snapshot in snapshots
+    }
 
     items = [
         {
