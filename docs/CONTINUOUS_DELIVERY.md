@@ -150,6 +150,22 @@ that same pass, including after restart. Other capture failures remain blocked w
 their diagnostic and require the existing owner-scoped retry; an unchanged blocked
 receipt is not recaptured or published merely because it happens to name a checkpoint.
 Conflict/input retry evidence retains its existing separate recovery path.
+
+Problem: a successfully captured checkpoint awaiting project publication was
+recorded with the capture phase, so recovery treated it as a deterministic
+capture failure and never resumed after review. Decision: publication holds use
+`phase=workspace_adoption` and revalidate the existing grant against the pinned
+checkpoint on resume. Older `checkpoint` receipts carrying a
+`project_publication_*` reason receive the same treatment. Recovery does not
+recapture later source edits or require the source writer lease for this frozen
+checkpoint; genuine capture failures retain their explicit retry requirement.
+Alternatives rejected: retrying every blocked capture weakens failure evidence;
+recapturing after review could publish unreviewed changes. The frozen recovery
+and project file lifecycle tests cover both current and older receipts.
+Ancestry-probe fault injection runs before delivery acknowledgement and verifies
+the receipt and target bytes stay unchanged; an already delivered receipt takes
+the idempotent terminal path and cannot exercise that probe.
+
 `origin.delivery.retry` follows
 `workspace_delivery_retry_v1.schema.json`: conflict fingerprints use registered
 baseline/checkpoint and current entries of task-delta paths. Unchanged conflict

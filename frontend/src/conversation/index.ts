@@ -38,7 +38,6 @@ export {
   siblingTitleDiscriminators,
   shouldCollapseToolBatch,
   summarizeToolAttention,
-  toolParentCallId,
   toolRoundAttention,
   toolGroupRoundDisplay,
   toolGroupRoundNumber,

@@ -60,7 +60,10 @@ PI_HOME = "/var/tmp/tofu-pi"
 # indistinguishable from "max" (Mann-Whitney z 0.06 and -0.47), while "high",
 # the Harbor preflight's level, gave 2.3-2.6x fewer completion tokens.
 PI_THINKING_LEVEL = "max"
-# agentix TofuModel _SUBPROCESS_GRACE_S: Tofu finalizes its result after --timeout-s.
+# Tofu stops its own run at --timeout-s (the shared agent budget) and then writes
+# its result document, the audit's trajectory source; the runner's kill waits this
+# long past the budget only for that write (agentix TofuModel _SUBPROCESS_GRACE_S).
+# 2026-11-03 run: no Tofu trial needed the kill and the largest overrun was 2.0 s.
 TOFU_FINALIZE_GRACE_SEC = 120
 # Docker registry pulls of multi-GB task images on a cold VM.
 IMAGE_PULL_TIMEOUT_SEC = 1800
@@ -178,12 +181,12 @@ def load_artifacts(manifest: Path) -> dict[str, Artifact]:
             for name, item in data["artifacts"].items()}
 
 
-def tofu_model_routing(*, base_url: str, model: str, context_tokens: int) -> dict:
+def tofu_model_routing(*, base_url: str, model: str, context_tokens: int, output_tokens: int) -> dict:
     """Complete ``tofu.model-routing/v2`` envelope for one OpenAI-compatible endpoint.
 
-    Shape per docs/DEVELOPER_RUNTIME.md "Model-routing ownership"; values match the
-    envelope the previous Harbor TofuKernel sent. The credential secret is a
-    placeholder because the relay holds the real keys.
+    Shape per docs/DEVELOPER_RUNTIME.md "Model-routing ownership". The context
+    window and output limit are the facts every arm is told. The credential
+    secret is a placeholder because the relay holds the real keys.
     """
     creator_id = TOFU_CATALOG_CREATORS.get(model, "eval")
     model_ref = {"creator_id": creator_id, "model_id": model}
@@ -214,7 +217,8 @@ def tofu_model_routing(*, base_url: str, model: str, context_tokens: int) -> dic
                            "capabilities": capabilities, "context_window": context_tokens, "priority": 0}],
             "deployments": [{"deployment_id": f"{provider_id}-deployment", "offering_id": offering_id,
                              "connection_id": connection_id, "wire_model_id": model, "enabled": True,
-                             "identity_confidence": "high", "probe_status": "passed", "priority": 0}],
+                             "identity_confidence": "high", "probe_status": "passed", "priority": 0,
+                             "max_output_tokens": output_tokens}],
         },
         "model": dict(model_ref),
         "routing": {"preferred_provider_id": provider_id},
@@ -229,8 +233,8 @@ def relay_no_proxy(model_base_url: str) -> str:
 
 
 def tofu_agent(*, artifact: Artifact, files_url: str, model_base_url: str, model: str,
-               timeout_sec: int, instruction: str, context_tokens: int) -> dict:
-    """Headless Tofu (``tofu-agent run``) with every tool, as agentix TofuModel launched it.
+               timeout_sec: int, instruction: str, context_tokens: int, output_tokens: int) -> dict:
+    """Headless Tofu (``tofu-agent run``) with every tool and its product defaults.
 
     ``-I`` keeps the task's cwd and PYTHONPATH off the agent's import path, so
     a project directory named ``lib`` cannot shadow Tofu's own packages; child
@@ -249,12 +253,10 @@ def tofu_agent(*, artifact: Artifact, files_url: str, model_base_url: str, model
         "log_files": {"instruction.md": instruction},
         "env": {
             "TOFU_AGENT_MODEL_ROUTING": json.dumps(tofu_model_routing(
-                base_url=model_base_url, model=model, context_tokens=context_tokens)),
+                base_url=model_base_url, model=model, context_tokens=context_tokens,
+                output_tokens=output_tokens)),
             # Headless runs use only the request-scoped v2 route group (previous TofuKernel).
             "TOFU_DISABLE_CONFIGURED_SLOTS": "1",
-            # agentix TofuModel bounded upstream-fault budgets, kept for continuity.
-            "TOFU_GATEWAY_OUTAGE_BUDGET_S": "600",
-            "TOFU_429_SATURATION_SECS": "1800",
             "no_proxy": relay_no_proxy(model_base_url),
             "NO_PROXY": relay_no_proxy(model_base_url),
         },
@@ -289,7 +291,7 @@ def opencode_config(*, model_base_url: str, model: str, context_tokens: int, out
 
 def opencode_agent(*, artifact: Artifact, files_url: str, model_base_url: str, model: str,
                    instruction: str, context_tokens: int, output_tokens: int) -> dict:
-    """Pinned OpenCode run as Harbor's upstream adapter does, plus the repo's length-continuation loop."""
+    """Pinned OpenCode run once, as Harbor's upstream adapter does."""
     program = guest_shell_command(
         binary=f"{OPENCODE_HOME}/opencode", model=model, instruction_path="/logs/agent/instruction.md",
         raw_output_path="/logs/agent/opencode.jsonl", stderr_path="/logs/agent/opencode-stderr.txt")

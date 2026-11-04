@@ -1,4 +1,6 @@
 """Human steering retains publication authority for already delegated work."""
+from copy import deepcopy
+
 import pytest
 
 from lib.project_dispatch.admission import KEY
@@ -26,6 +28,49 @@ def completed_checkpoint(r):
 def review(r, row):
     return r.call('review_project_work', assignment_id=row['id'], result_revision=1,
                   decision='accept', note='Verified original checkpoint', checkpoint_sha='a' * 40)
+
+
+def test_alias_project_keeps_the_coordinator_and_reviews_the_physical_workspace(run, tmp_path, monkeypatch):
+    from lib.conversations import coordinator_workers
+    from lib.project_dispatch.admission import require_isolated_worker_root
+
+    r = run
+    physical = tmp_path / 'physical'
+    physical.mkdir()
+    project = tmp_path / 'project'
+    project.symlink_to(physical, target_is_directory=True)
+    project_key = str(project)
+    r.c.binding.value['projectPath'] = project_key
+    monkeypatch.setattr(r.c.binding, 'read', lambda path: deepcopy(r.c.binding.value))
+    r.c.request['projectPath'] = project_key
+    for conversation in r.c.conversations.rows.values():
+        conversation['settings']['projectPath'] = project_key
+    r.task['config']['projectPath'] = project_key
+    r.attempts['coordinator-attempt']['config']['projectPath'] = project_key
+    r.task.pop('_coordinatorDispatchScope', None)
+    previous = r.c.repo
+    r.c.repo = type(previous)(previous.owner, project_key, client=previous.client,
+        conversations=previous.conversations, binding_repository=r.c.binding,
+        turn_get=previous.turn_get, attempt_get=previous.attempt_get, clock=previous.clock,
+        storage_version=previous.storage_version)
+    r.service.repository = r.c.repo
+    r.service.publication_wake = lambda: None
+    monkeypatch.setattr(coordinator_workers, 'require_isolated_worker_root', require_isolated_worker_root)
+
+    row, task_id, binding = completed_checkpoint(r)
+    r.workspaces[task_id]['project_root'] = str(physical)
+    def workspace_get(root, identity, *, user_id):
+        assert root == str(physical) and user_id == r.c.repo.owner
+        return deepcopy(r.workspaces.get(identity))
+    r.c.repo.workspace_get = workspace_get
+    result = review(r, row)
+    assert 'error' not in result, result
+    validated = r.c.repo.validate_publication(binding, task_id)
+    assert validated['request']['projectPath'] == project_key
+    assert validated['grant'] == row['grant']
+    assert validated['publication']['checkpointSha'] == 'a' * 40
+    assert r.task['convId'] == 'coordinator' and len(r.created) == len(r.calls) == 1
+    assert project.is_symlink() and (physical / '.git').is_dir()
 
 
 @pytest.mark.parametrize('new_input', [False, True])

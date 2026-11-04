@@ -1703,13 +1703,11 @@
     }
 
     #[test]
-    fn sync_changes_returns_resumable_prefix_when_the_page_budget_elapses() {
+    fn sync_changes_preserves_requested_rows_above_the_former_page_byte_quota() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
-        // One ~62 KiB projection per event: the 500-event replay page crosses
-        // its 8 MiB wire budget after ~130 of these — exactly the 2026-09-28
-        // wedge shape, where a swarm-fat conversation hard-failed every
-        // lagging SSE replay with `database_resource_exhausted` forever.
+        // This complete row page crosses the former 8 MiB aggregate quota.
+        // The native wire transport already chunks the complete response.
         const TOTAL_EVENTS: u64 = 140;
         let fat_projection = json!({
             "content": "x".repeat(62_000),
@@ -1755,8 +1753,7 @@
             sync_head(&database, &mut read, "budget-conversation").unwrap(),
             TOTAL_EVENTS
         );
-        // The budget-truncated page must NOT fail (the pre-fix wedge): each
-        // call delivers a contiguous, resumable prefix with honest `hasMore`.
+        // With no elapsed deadline, every requested row remains readable.
         let mut delivered: Vec<u64> = Vec::new();
         let mut pages = 0_u32;
         let mut after = 0_u64;
@@ -1773,10 +1770,7 @@
             )
             .unwrap()
             .unwrap();
-            assert!(
-                page_bytes.len() <= MAX_LEGACY_DOCUMENT_BYTES + 256,
-                "truncated page still exceeds the wire budget"
-            );
+            assert!(page_bytes.len() > 8 * 1024 * 1024);
             let page: Value = serde_json::from_slice(&page_bytes).unwrap();
             assert_eq!(page["resetRequired"], json!(false));
             let events = page["events"].as_array().unwrap();
@@ -1789,10 +1783,7 @@
                 break;
             }
         }
-        // Truncation actually engaged (one page cannot hold 140 × 62 KiB),
-        // and replay safety holds: no frame is dropped, duplicated, or
-        // reordered across the truncated pages.
-        assert!(pages >= 2, "the fat fixture never crossed the page budget");
+        assert_eq!(pages, 1);
         let expected: Vec<u64> = (1..=TOTAL_EVENTS).collect();
         assert_eq!(delivered, expected);
     }

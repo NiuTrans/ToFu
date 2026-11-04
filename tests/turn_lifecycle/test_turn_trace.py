@@ -1364,6 +1364,39 @@ def test_event_read_failure_raises_with_full_task_id_and_bounded_detail(
     assert len(lines[0]) < 1_000
 
 
+
+@pytest.mark.parametrize('code', [
+    'storage_payload_too_large',
+    # Engines built before the stream point-read bound was classified report
+    # it as a protocol refusal whose sanitized message is only its code.
+    'database_protocol_error',
+])
+def test_event_page_size_refusal_halves_the_page_at_the_same_cursor(monkeypatch, code):
+    import lib.storage
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg import turn_trace
+
+    events = [{'sequence': sequence, 'created_at_ms': _T0 + sequence,
+               'event': {'type': 'round_start', 'roundNum': sequence + 1}}
+              for sequence in range(3)]
+    calls = []
+
+    class Client:
+        def query(self, operation, payload):
+            assert operation == 'event.list'
+            calls.append((payload['after_sequence'], payload['limit']))
+            if payload['limit'] > 1:
+                raise StorageError(code, code)
+            return [row for row in events
+                    if row['sequence'] > payload['after_sequence']][:payload['limit']]
+
+    monkeypatch.setattr(lib.storage, 'get_storage_client', lambda: Client())
+    rows = turn_trace._read_trace_rows(_tid())
+    assert [(row['event_id'], row['payload']['roundNum']) for row in rows] == [
+        (0, 1), (1, 2), (2, 3)]
+    assert calls[:10] == [(-1, limit) for limit in [
+        1000, 500, 250, 125, 62, 31, 15, 7, 3, 1]]
+
 def test_settlement_read_failure_freezes_marked_partial_trace_not_zero_round_fold(
         monkeypatch, caplog):
     """2026-10-27: a failed read at settlement froze a 10,586 s, 217-round run

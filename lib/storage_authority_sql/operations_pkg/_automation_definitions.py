@@ -6,22 +6,27 @@ caller transaction rolls back every effect together. Rule interpretation stays
 at the shared prepare_definition admission boundary.
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
 import hashlib
 import time
+from typing import Any, NoReturn
 
 from lib.storage.errors import StorageError
+from lib.storage_authority_sql.adapters.base import Session
 from lib.automations.contract import LIMITS, STORAGE_NAMESPACES, storage_input_validator, storage_schema
 from ._common import _integer
 from ._records import _record_get, _record_put_owned, _record_delete_owned
 from ._worker_jobs import _worker_job_get, _worker_job_enqueue_owned
 
 
-def _fail(message,code='database_protocol_error'):
+def _fail(message: str, code: str = 'database_protocol_error') -> NoReturn:
     raise StorageError(code,message)
 
 
-def _automation_definition_update(session,payload):
+def _automation_definition_update(
+    session: Session, payload: dict[str, Any],
+) -> Any:
     from lib.automations.publication import (
         canonical,clock_job_id,request_digest,subscription_key,validate_publication_record,
     )
@@ -40,11 +45,16 @@ def _automation_definition_update(session,payload):
     due = payload['first_due_ms']
     if due is not None:
         due = _integer(payload,'first_due_ms',minimum=1,maximum=LIMITS['safeIntegerMax'])
-    record = payload['record']
+    raw_record = payload['record']
+    if raw_record is not None and not isinstance(raw_record, dict):
+        _fail('Invalid prepared publication binding')
+    record: dict[str, Any] | None = raw_record
     if record is not None:
         try:
             entity_id = validate_publication_record(record,payload['definition_json'],payload['actions_json'],owner=owner,tenant=tenant)
         except (TypeError,ValueError):
+            _fail('Invalid prepared publication binding')
+        if not isinstance(record.get('grant'), Mapping):
             _fail('Invalid prepared publication binding')
         if record['grant']['approvedBy'] != payload['actor_subject_id']:
             _fail('Publication actor differs from its approval')
@@ -70,9 +80,11 @@ def _automation_definition_update(session,payload):
     if payload['mode'] in {'pause','retire'} and current is None:
         _fail('Automation definition does not exist','database_not_found')
     if payload['mode']=='publish':
+        if record is None or not isinstance(record.get('definition'), Mapping):
+            _fail('Invalid prepared publication binding')
         from ._automation_projects import require_project
         require_project(session,owner,tenant,record['definition'].get('projectId'))
-    inactive_definition = None
+    inactive_definition: Any = None
     if payload['mode'] in {'pause','retire'}:
         import json
         try:
@@ -89,13 +101,15 @@ def _automation_definition_update(session,payload):
     old_state = current['value'].get('triggerState',{}) if current else {}
     old_subscription = old_state.get('subscriptionKey')
     if old_subscription:
+        if current is None:
+            _fail('Stored subscription identity is inconsistent','database_integrity')
         if old_subscription != subscription_key(prefix,current['value']['definition']):
             _fail('Stored subscription identity is inconsistent','database_integrity')
         previous = _record_get(session,{'namespace':STORAGE_NAMESPACES['subscription'],'key':old_subscription})
         if previous:
             _record_delete_owned(session,{'namespace':STORAGE_NAMESPACES['subscription'],'key':old_subscription,'expected_version':previous['version']})
     old_clock = old_state.get('clockJobId')
-    if old_clock:
+    if old_clock and current is not None:
         if old_clock != clock_job_id(key,current['version']):
             _fail('Stored clock identity is inconsistent','database_integrity')
         # Match publication/progress lock order: definition, worker advisory,
@@ -105,6 +119,8 @@ def _automation_definition_update(session,payload):
         if previous_job is None:
             _fail('Published clock job is missing','database_integrity')
         source=previous_job['payload']
+        if not isinstance(current['value'], Mapping) or not isinstance(current['value'].get('compiled'), Mapping):
+            _fail('Stored automation publication is inconsistent','database_integrity')
         if (previous_job['tenantId'] != tenant or previous_job['taskKind'] != 'automation-clock'
                 or previous_job['idempotencyKey'] != old_clock or not isinstance(source,dict)
                 or source.get('definitionKey') != key
@@ -123,13 +139,18 @@ def _automation_definition_update(session,payload):
             (old_clock,owner,tenant))
         if deleted!=1:
             _fail('Published clock changed during retirement','database_conflict')
+    value: dict[str, Any]
     if payload['mode'] in {'pause','retire'}:
+        if current is None:
+            _fail('Automation definition does not exist','database_not_found')
         value = deepcopy(current['value'])
         if payload['mode'] == 'retire':
             value['deleted'] = True
         value['definition'] = inactive_definition
         value['compiled']['digest'] = hashlib.sha256((payload['definition_json']+'\n'+payload['actions_json']).encode()).hexdigest()
     else:
+        if record is None:
+            _fail('Invalid prepared publication binding')
         value = deepcopy(record)
         value.update(schemaVersion=1,id=entity_id,ownerId=owner,
             tenantId=record['grant']['principal']['tenant_id'],deleted=False)
@@ -141,7 +162,7 @@ def _automation_definition_update(session,payload):
     value['publicationCommand'] = {'id':payload['request_id'],'digest':digest,
         'expectedVersion':version,'requestedBy':payload['actor_subject_id'],'requestedAt':now/1000}
     value['_commitDigest'] = digest
-    state = {'subscriptionKey':None,'clockJobId':None}
+    state: dict[str, str | None] = {'subscriptionKey':None,'clockJobId':None}
     if not value['deleted'] and value['definition']['enabled']:
         state['subscriptionKey'] = subscription_key(prefix,value['definition'])
         if value['definition']['trigger']['kind'] == 'schedule':

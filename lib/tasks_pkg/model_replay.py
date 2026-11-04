@@ -363,6 +363,15 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
         # This is a completed prior execution, not recovery of its mailbox.
         from lib.tasks_pkg.message_input_receipts import historical_swarm_context
         messages = historical_swarm_context(messages)
+        # The checkpoint keeps its publishing Turn's rounds exactly as sent
+        # live. Restored, every covered Turn is settled before this new target,
+        # so, as in a cold rebuild, another protocol may omit their signed
+        # reasoning while the producing protocol still replays it.
+        for message in messages:
+            if (message.get('role') == 'assistant'
+                    and (message.get('thinking_signature')
+                         or message.get('_anthropic_content_blocks'))):
+                message['_reasoning_continuity'] = 'completed_turn'
         return messages, len(prior) if validated_context is None or legacy_prefix else 0
     except Exception as exc:
         config['_modelReplayStatus'] = 'unavailable'

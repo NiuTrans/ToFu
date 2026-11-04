@@ -4,8 +4,11 @@ The caller supplies the already selected Backend and authenticated tenant/owner.
 Each CAS is one receipt-free durable Backend.command; reads are one statement.
 No journal transitions, recovery decisions, backend open, or implicit retry.
 """
+from collections.abc import Callable
 import hashlib
 import time
+from typing import NoReturn
+from typing import Any
 
 import orjson
 
@@ -20,7 +23,7 @@ FENCES = SPEC['namespaces']['replay_fences']
 RESERVED_NAMESPACES = frozenset(SPEC['namespaces'].values())
 
 
-def _refuse(code='database_protocol_error'):
+def _refuse(code: str = 'database_protocol_error') -> NoReturn:
     raise StorageError(code, 'Native checkpoint storage request refused')
 
 
@@ -33,8 +36,8 @@ class NativeCheckpointRows:
         self.owner = owner_user_id
         self.document_bytes = document_bytes
         self.identity_bytes = identity_bytes
-        self.validate_handoff = None
-        self.goal_transaction = None
+        self.validate_handoff: Callable[..., str | None] | None = None
+        self.goal_transaction: Callable[..., Any] | None = None
         self.logical_outbox = logical_outbox
 
     def command(self, request, callback, deadline_at):

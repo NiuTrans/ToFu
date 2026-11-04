@@ -56,8 +56,11 @@ matching retention reference. They validate the full source JSON before
 splicing its original bytes into the public envelope. Missing or inconsistent
 references fail closed. Public wire formats and SQLite behavior are unchanged.
 Legacy full envelopes remain readable and preserve their exact bytes on export.
-The write limit still counts the expanded envelope; public pagination counts
-expanded bytes and preserves the existing resumable-prefix/deadline behavior.
+Live publication and replay impose no private 8 MiB expanded-envelope or page
+quota. The native transport chunks complete responses; requested row limits and
+deadlines preserve contiguous replay cursors. Legacy `conversation.activity`
+snapshot invalidations remain readable. Exclusive operator migration retains
+its separately declared transfer protocol and requires its own certification.
 
 Pruning reads the compact row without loading the source. Attempt pruning
 cannot retire a source while a sync reference remains. Sync pruning releases
@@ -169,33 +172,30 @@ two 64-bit counter fields total 540 bytes; this excludes table/index/page
 allocation and is not RSS or a throughput result. Physical growth and
 steady-state append/retention latency require separate capacity measurements.
 
-## Materialized task-event page size
+## Complete task-event selections
 
-Problem: `event.list` can select individually valid image-bearing snapshots whose
-combined replay envelopes exceed the native 8 MiB materialized-page boundary.
-Reporting this deterministic rejection as `database_resource_exhausted` hides its
-cause behind dispatch's deliberately sanitized error text and incorrectly asks
-clients to retry an unchanged page as transient authority pressure.
+Problem: `event.list` already streams complete responses, but its selected
+physical positions inherited an unrelated 8 MiB aggregate read quota. A page of
+individually valid inline snapshots could therefore fail while an equally large
+blob-backed page succeeded.
 
-Decision: the authority reports the existing non-retryable
-`storage_payload_too_large` code for that boundary. Request Inspector halves its
-positive page limit at the **same** sequence cursor, down to one row, preserving
-all payload bytes and chronological snapshot dependencies. Both ordinary reads
-and source-fenced long-history continuation share this classification. A
-one-row rejection, corruption, protocol error, or generic availability failure
-remains an explicit failed read; it is not EOF and never creates a successful
-partial transcript. The 8 MiB cap, owner fences and source guards are unchanged.
+Decision: both persisted and in-memory stream point reads return every selected
+position without a private aggregate byte quota. The physical stream scan's
+ordinary page target remains a resumable work slice, not an admission limit on
+an event selection. Sequence, owner, segment witness, digest and missing-source
+checks remain mandatory. Storage transport chunks retain their format bounds.
+The invariant is `physicalBounds.streamPointReadAdmission` in the native IR.
 
-Alternatives rejected: treating all resource exhaustion as page size would hide
-real admission pressure; enlarging response budgets merely moves the failure;
-truncating page payloads destroys diagnostic/wire evidence. Old engines that
-sanitize the size failure into generic exhaustion require normal engine
-deployment to gain this distinction; application source changes alone cannot
-repair an already-running older native authority.
+Alternatives rejected: increasing the quota merely moves the failure; making
+current callers guess smaller pages preserves the storage defect; truncation
+would destroy request and tool evidence. Compatibility readers still handle
+typed size refusals from older engines and other selected backends without
+turning a failed read into EOF.
 
 Verification: native
-`event_list_materialized_page_overflow_is_payload_size_not_availability` and
-`tests/diagnostics/test_request_inspector_page_size.py` exercise complete exact
-paging, sparse cursors, bounded retries, one-row failure and unrelated errors.
+`event_list_preserves_selected_inline_events_above_eight_mib_after_reopen`
+checks complete filtered and unfiltered pages after reopen. Existing Request
+Inspector and Turn Trace tests retain older-engine error compatibility and
+same-cursor retry, while owner/corruption specifications stay unchanged.
 
 <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

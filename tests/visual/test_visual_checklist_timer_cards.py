@@ -78,8 +78,9 @@ def test_checklist_timer_reading_and_local_disclosures(frontend_visual_page, the
     assert all(item['size'] == 13 and item['family'] == item['rowFamily'] for item in task_type)
     assert {item['weight'] for item in task_type} <= {'400', '600'}
     frame.evaluate("document.documentElement.style.setProperty('--conversation-font-size-content', '15px')")
-    for selector in ['.ptool-todo-text', '.ptool-text', '.ptool-todo-explanation']:
+    for selector in ['.ptool-todo-text', '.ptool-todo-explanation']:
         expect(checklist.locator(selector).first).to_have_css('font-size', '15px')
+    expect(checklist.locator('.ptool-text').first).to_have_css('font-size', '13px')
     frame.evaluate("document.documentElement.style.removeProperty('--conversation-font-size-content')")
 
     assert checklist.locator('.ptool-todo-text').first.evaluate('(el)=>getComputedStyle(el).opacity') == '1'

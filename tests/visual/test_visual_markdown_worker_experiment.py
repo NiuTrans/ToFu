@@ -2,8 +2,6 @@
 import json
 import os
 import hashlib
-import re
-import tempfile
 import threading
 from pathlib import Path
 
@@ -15,20 +13,6 @@ from tests.support.frontend_visual import frontend_visual_origin as frontend_vis
 pytestmark=pytest.mark.visual
 
 
-def split_renderer_bundle():
-    """Assert one preparation seam; reuse all remaining production projection code."""
-    owner=ROOT/'frontend/src/markdown/index.ts'
-    source=owner.read_text()
-    boundary='const prepared = prepareMarkdownSource(text, escaped);'
-    assert source.count(boundary)==1, 'production preparation boundary changed'
-    source=source.replace(boundary,
-        'const prepared = (globalThis as any).__workerPreparedSource?.(text, escaped) ?? prepareMarkdownSource(text, escaped);')
-    source=re.sub(r"from '([^']+)'",lambda match: "from '"+str((owner.parent/match[1]).resolve())+"'",source)
-    with tempfile.TemporaryDirectory(prefix='tofu-markdown-split-') as temporary:
-        entry=Path(temporary)/'index.ts';entry.write_text(source)
-        return native_module_path('.native/split-'+Path(temporary).name+'.js',entry)
-
-
 def setup(page,origin):
     for path in ('node_modules/marked/lib/marked.umd.js','node_modules/dompurify/dist/purify.min.js',
                  'benchmarks/markdown_worker/client.js'):
@@ -36,7 +20,6 @@ def setup(page,origin):
     bundles={name:native_module_path(f'.native/worker-{name}.js',ROOT/path) for name,path in (
         ('policy','frontend/src/markdown-policy.ts'),('prepare','frontend/src/markdown/prepare-source.ts'),
         ('renderer','frontend/src/markdown/index.ts'))}
-    bundles['renderer']=split_renderer_bundle()
     for path in bundles.values():page.add_script_tag(path=path)
     worker_source='importScripts('+json.dumps(origin+'/node_modules/marked/lib/marked.umd.js')+');\n'
     worker_source+='\n'.join(Path(bundles[name]).read_text() for name in ('policy','prepare'))
@@ -60,12 +43,16 @@ def test_worker_projection_matches_production_and_bounds_supersession(frontend_v
     page=frontend_visual_page;source=setup(page,frontend_visual_origin)
     result=page.evaluate(r'''async source=>{
       const worker=await createParserWorkerExperiment(source);
-      let active=marked,latest=null;
-      globalThis.__workerPreparedSource=(text,escaped)=>active===marked?undefined:{source:latest.source,math:latest.math};
-      const proxy={parse(prepared){if(prepared!==latest.source)throw Error('mixed source');return latest.html;}};
+      let latest=null,workerProjections=0;
+      const proxy={parse(prepared){
+        if(prepared!==latest.source) return marked.parse(prepared);
+        workerProjections++;return latest.html;
+      }};
+      let active=proxy;
       const renderer=createMarkdownRenderer({maximumCacheEntries:300,
         getEnvironment:()=>({document,parser:active,sanitizer:DOMPurify,highlighter:null,
-          mathRenderer:null,basePath:'/fixture',projectActive:false}),ensureMath(){}});
+          mathRenderer:null,basePath:'/fixture',projectActive:false}),ensureMath(){},
+        reportFailure(error){throw error;}});
       const fixtures=['plain 中文 paragraph','~~strict~~ and ~literal~',
         '[reference]\n\nTail.','[reference]\n\nTail.\n\n[reference]: /source',
         '```js\nconst x="<script>";\n','```js\nconst x=1;\n```\n\nNext.',
@@ -75,22 +62,24 @@ def test_worker_projection_matches_production_and_bounds_supersession(frontend_v
       let equal=true;
       for(const text of fixtures){
         for(const escaped of [false,true]){
-          active=marked;const reference=renderer.render(text,{streaming:true,escapeRawHtml:escaped});
-          latest=await worker.parse(text,escaped);active=proxy;
-          equal&&=renderer.render(text,{streaming:true,escapeRawHtml:escaped})===reference;
+          latest=await worker.parse(text,escaped);active=proxy;renderer.clearCache();
+          const projected=renderer.render(text,{streaming:true,escapeRawHtml:escaped});
+          active=marked;renderer.clearCache();
+          const reference=renderer.render(text,{streaming:true,escapeRawHtml:escaped});
+          if (projected!==reference) throw Error(JSON.stringify({text,escaped,projected,reference}));
+          equal&&=projected===reference;
         }
       }
       const first=worker.parse('long source\n\n'.repeat(4000)).catch(error=>error.name);
       const superseded=worker.parse('old waiting').catch(error=>error.name);
       const newest=worker.parse('newest waiting');const bound=worker.pendingCount();
       const stale=await first;const cancelled=await superseded;const final=await newest;
-      const pending=worker.parse('dispose source');worker.dispose();
+      const pending=worker.parse('dispose source');worker.dispose();renderer.dispose();
       let disposed;try{await pending;}catch(error){disposed=error.name;}
-      renderer.dispose();
-      return {equal,bound,stale,cancelled,newest:final.source,disposed,pending:worker.pendingCount()};
+      return {equal,bound,stale,cancelled,newest:final.source,disposed,pending:worker.pendingCount(),workerProjections};
     }''',source)
     assert result=={'equal':True,'bound':2,'stale':'AbortError','cancelled':'AbortError','newest':'newest waiting',
-                    'disposed':'AbortError','pending':0}
+                    'disposed':'AbortError','pending':0,'workerProjections':20}
 
 
 def test_worker_paired_browser_measurement(browser,frontend_visual_origin):

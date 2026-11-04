@@ -42,7 +42,7 @@ from lib.observability import measure_task_startup
 from lib.runtime.runtime_paths import data_root
 from lib import integration_state_repository as _state
 from lib.storage import StorageError
-from lib.git_runtime import git_executable
+from lib.git_runtime import GIT_STALL_SECONDS, git_executable
 from lib.git_checkpoint_policy import (
     PROJECT_GATE_REQUIRED_SUFFIXES as _PROJECT_GATE_REQUIRED_SUFFIXES,
     forbidden_checkpoint_paths as _forbidden_checkpoint_paths,
@@ -65,11 +65,6 @@ _WORKER_AUTHORITY_ARMED = False
 _STATUS_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _STATUS_CACHE_LOCK = threading.Lock()
 _STATUS_CACHE_TTL_SECONDS = 10.0
-# Fixed-class liveness bound (contracts/resource_policy_v1.json): constant,
-# never derived from hardware or tree size. It renews whenever any thread of a
-# snapshot Git command executes, so it ends only a command blocked on an
-# unresponsive volume and never a slow one; there is no total deadline.
-_SNAPSHOT_STALL_SECONDS = 90.0
 
 IntegrationError = RuntimeError
 
@@ -253,18 +248,20 @@ def _repo_root(path: str | Path) -> Path:
     candidate = Path(raw).expanduser().resolve()
     if not candidate.exists():
         raise IntegrationError(f'Project path does not exist: {candidate}')
-    cp = _git(candidate, ['rev-parse', '--show-toplevel'], check=True)
+    cp = _git(candidate, ['rev-parse', '--show-toplevel'], check=True,
+              stall_seconds=GIT_STALL_SECONDS)
     return Path(cp.stdout.strip()).resolve()
 
 
 def _common_dir(path: str | Path) -> Path:
-    cp = _git(path, ['rev-parse', '--git-common-dir'], check=True)
+    cp = _git(path, ['rev-parse', '--git-common-dir'], check=True,
+              stall_seconds=GIT_STALL_SECONDS)
     value = Path(cp.stdout.strip())
     return (Path(path) / value).resolve() if not value.is_absolute() else value.resolve()
 
 
 def _rev(path: str | Path, ref: str) -> str:
-    cp = _git(path, ['rev-parse', '--verify', ref])
+    cp = _git(path, ['rev-parse', '--verify', ref], stall_seconds=GIT_STALL_SECONDS)
     return cp.stdout.strip() if cp.returncode == 0 else ''
 
 
@@ -399,6 +396,7 @@ def _file_lock(key: str, *, cancel=None, wait: bool = True) -> Iterator[None]:
 @contextlib.contextmanager
 def _repo_lock(project_root: str, *, cancel=None):
     """Cross-process admission for shared ref/metadata operations."""
+    project_root = str(Path(project_root).expanduser().resolve())
     with contextlib.ExitStack() as stack:
         with measure_task_startup('workspace_repo_wait'):
             stack.enter_context(_file_lock(project_root, cancel=cancel))
@@ -571,7 +569,8 @@ def create_task_workspace(project_path: str, task_id: str, *, user_id: int,
             return {'workspacePath': existing['workspace_path'], 'workId': task_id}
         if destination.exists():
             raise IntegrationError(f'Managed workspace already exists: {destination}')
-        branch = _git(root, ['symbolic-ref', '-q', 'HEAD']).stdout.strip()
+        branch = _git(root, ['symbolic-ref', '-q', 'HEAD'], cancel=cancel,
+                      stall_seconds=GIT_STALL_SECONDS).stdout.strip()
         head = _rev(root, branch or 'HEAD')
         identity = {'task_id': task_id, 'user_id': owner, 'conversation_id': conversation_id}
         with measure_task_startup('workspace_snapshot', identity=identity):
@@ -717,10 +716,11 @@ def _borrow_index_stat_cache(workspace: Path, index_path: str, *, cancel=None) -
     survive the reseed and would hide working bytes from ``add -A``.
     """
     tagged = _git(workspace, ['ls-files', '-v', '-z'], check=True, cancel=cancel,
-                  stall_seconds=_SNAPSHOT_STALL_SECONDS).stdout
+                  stall_seconds=GIT_STALL_SECONDS).stdout
     if any(entry[:1].islower() or entry[:1] == 'S' for entry in tagged.split('\0')):
         return
-    location = _git(workspace, ['rev-parse', '--git-path', 'index'], check=True).stdout.strip()
+    location = _git(workspace, ['rev-parse', '--git-path', 'index'], check=True,
+                    stall_seconds=GIT_STALL_SECONDS).stdout.strip()
     try:
         source = open(Path(workspace, location), 'rb')
     except FileNotFoundError:
@@ -745,7 +745,7 @@ def _alternate_index_tree(workspace: Path, parent: str, index_path: str, *,
 
     def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         return _git(workspace, args, check=True, cancel=cancel,
-                    stall_seconds=_SNAPSHOT_STALL_SECONDS, **kwargs)
+                    stall_seconds=GIT_STALL_SECONDS, **kwargs)
 
     # Reset membership on each observation: a previously untracked file must
     # not stay privately tracked after ignore rules change in the source.
@@ -804,12 +804,12 @@ def _clean_input_tree(root: Path, parent: str, *, cancel) -> str:
     if not parent:
         return ''
     flags = _git(root, ['ls-files', '-v', '-z'], check=True, cancel=cancel,
-                 stall_seconds=_SNAPSHOT_STALL_SECONDS).stdout
+                 stall_seconds=GIT_STALL_SECONDS).stdout
     if any(entry[:1].islower() or entry[:1] == 'S' for entry in flags.split('\0')):
         return ''
     status = _git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
                   env={'GIT_OPTIONAL_LOCKS': '0'}, check=True, cancel=cancel,
-                  stall_seconds=_SNAPSHOT_STALL_SECONDS).stdout
+                  stall_seconds=GIT_STALL_SECONDS).stdout
     return _rev(root, parent + '^{tree}') if not status else ''
 
 def _task_input_checkpoint(root: Path, parent: str, task_id: str, cancel, *,
@@ -1045,7 +1045,8 @@ def _gate_commands(root: Path, old: str, target: str,
         observations=observations)
     if evidence_out is not None:
         from lib.project_mod.delivery_acceptance import gate_record
-        tree = _git(root, ['rev-parse', '--verify', target + '^{tree}'], check=True).stdout.strip()
+        tree = _git(root, ['rev-parse', '--verify', target + '^{tree}'], check=True,
+                    stall_seconds=GIT_STALL_SECONDS).stdout.strip()
         evidence_out.update(gate_record(base=old, target=target, tree=tree,
             command=configured_command, passed=passed, observed_at=int(_now() * 1000),
             observations=observations))

@@ -14,8 +14,9 @@ covered on BOTH sides:
     hard attempt;
   - a PermissionError excludes the (key, model) PAIR (not the whole model),
     then fails over;
-  - an EndpointUnreachableError cools the slot + excludes the pair, then
-    fails over to a live slot;
+  - an EndpointUnreachableError releases the slot without a health penalty
+    and the next eligible slot serves (endpoint holds and probing:
+    ``test_dispatch_endpoint_outage.py``);
   - AbortedError propagates immediately (no retry) and releases the slot.
 
 Run:  pytest tests/llm_dispatch/test_dispatch_stream.py -m unit
@@ -532,7 +533,7 @@ class TestDispatchStreamUnreachableFailover:
         assert slot.consecutive_errors == 0
         assert slot.cooldown_until == 0
 
-    def test_unreachable_cools_slot_and_fails_over(self, monkeypatch):
+    def test_unreachable_releases_slot_neutrally_and_next_slot_serves(self, monkeypatch):
         from lib.llm_dispatch import api
         from lib.llm.llm_errors import EndpointUnreachableError
 
@@ -559,8 +560,8 @@ class TestDispatchStreamUnreachableFailover:
 
         assert msg == 'ok'
         assert calls['n'] == 2
-        assert dead.cooldown_until > time.time()
-        assert dead.total_errors >= 1
+        # The network path failed, not the slot: no cooldown or health penalty.
+        assert (dead.cooldown_until, dead.total_errors, dead.inflight) == (0, 0, 0)
         assert live.last_success_time > 0
 
 

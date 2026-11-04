@@ -10,14 +10,19 @@ verification.
   (uncommitted or in-flight) work exists in the workspace, NEVER run
   workspace-destroying commands such as `git checkout --`, `git checkout
   <branch>`, `git switch`, `git restore`, `git stash`, `git reset --hard`,
-  or `git clean`: they can silently discard concurrent edits. Commits made
-  in an isolated worktree never reach the current branch by themselves: the
+  or `git clean`: they can silently discard concurrent edits. Create each worktree
+  with `git -C <shared-checkout> worktree add <path> -b <branch>
+  <shared-current-branch>`, never from the platform task workspace's `HEAD`,
+  which may be a task-input snapshot. Commits made in an isolated worktree
+  never reach the current branch by themselves: the
   executing agent (the model — never the human user) must land them itself,
   immediately once the worktree work is finished and verified, not later and
   never as a hand-off: run `python3 scripts/git_land.py <branch>` from the
   shared checkout. Unlike `git merge`, it does not refuse when other writers
   have uncommitted edits in the same files; it carries those edits forward
   with a three-way merge, then removes the worktree and deletes the branch.
+  Known generated outputs are rebuilt from merged sources; uncommitted sources
+  and their outputs stay uncommitted. Do not reset generated files to unblock it.
   If it refuses, nothing was changed; follow its printed instruction (merge
   the current branch into the worktree branch to resolve a real conflict, or
   rerun after another writer's overlapping lines are committed). A task is

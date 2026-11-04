@@ -142,6 +142,18 @@ Relevance uses the latest authored human turn, not machine-authored carriers, at
 Augmented projections retain `_authoredUserText` locally; plain text needs no duplicate. Same-role merges keep the newest value, text-only replay permits it, and provider sanitization removes it. `UserPromptSubmit` replacements update provenance too, preserving redaction.
 An empty/image-only request cannot reuse an older topic. Each selection resets held matches and distinguishes disabled from failed status. Legacy projections strip whole composer sections and generated image hints, not arbitrary authored tool identifiers.
 
+Project memories belong to the configured canonical project, not a task-owned execution checkout.
+When workspace binding records `canonicalProjectPath` / `canonicalProjectPaths`, prefetch, search,
+CRUD and merge use those roots; file execution stays in the isolated checkout. Legacy configs
+without the canonical mapping retain their `projectPath` / `projectPaths` behavior. Existing
+memories stranded in an old worker checkout remain there; recreating their verified lesson through
+the supported `create_memory` tool writes the canonical store, with no database or file migration.
+The mapping belongs to those memory consumers (`handlers/memory.py`, `memory_prefetch_corpus_roots`),
+never to the task's resolved `project_path`: that is the execution root every tool call runs in and
+project dispatch admits against the Worker's registered workspace, so a canonical value there refuses
+every Worker call. Specification: `tests/memory/test_memory_canonical_workspace.py` and
+`test_bound_worker_root_loop_runs_tools_in_its_registered_workspace`.
+
 Memory retrieval is precision-first and bounded: metadata-only prefetch hydrates selected evidence only, explicit search streams one 2,000-character body prefix at a time, and BM25 retains query-term statistics rather than corpus tokens. Stored memories, My Context facts,
 and session context stay distinct. After a clean interactive turn, one bounded
 learner accepts at most two concise items backed by verbatim real-user evidence;
@@ -160,8 +172,10 @@ A bounded launch-probed LRU may retain recursively frozen parsed frontmatter onl
 - Final-admission summary failure: preserve live/transient source and refuse
   an overfull main dispatch, retaining only a current issued safe credential
   cause. Unquoted auxiliary credential outages may requalify within the existing
-  owner/quote policy; explicit utility recovery remains separate. Retain usable
-  complete model text after shaping faults.
+  owner/quote policy; explicit utility recovery remains separate. Auxiliary
+  selection and dispatch never challenge a recorded billing stop
+  (`docs/CONTEXT_BUDGET_POLICY.md`). Retain usable complete model text after
+  shaping faults.
 - Concurrent manual compaction: reject/retry from a fresh transcript revision.
 - Invalid tool history: fail or repair at the single message-construction
   boundary, with diagnostics.

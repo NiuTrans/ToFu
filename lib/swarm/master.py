@@ -352,6 +352,8 @@ def _retained_assignment_proxy(spec: SubTaskSpec, session_parent: dict) -> tuple
         if isinstance(documents, dict):
             parent['_toolContractDocumentsByName'] = deepcopy(
                 {name: value for name, value in documents.items() if name in names})
+    from lib.project_dispatch.admission import share_dispatch_root
+    share_dispatch_root(current if current is not None else session_parent, parent)
     return parent, context
 
 
@@ -755,6 +757,8 @@ class MasterOrchestrator:
         if parent_task is not None:
             from lib.agent_core.execution_budget import share_execution_budget
             share_execution_budget(parent_task, self._parent_task_proxy)
+            from lib.project_dispatch.admission import share_dispatch_root
+            share_dispatch_root(parent_task, self._parent_task_proxy)
             # A spawned swarm is fire-and-forget: sub-agents keep running (and
             # dependency-blocked specs keep WAITING) long after the spawning
             # chat task settles 'done'. Yet the shared execution-budget

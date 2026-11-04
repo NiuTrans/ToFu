@@ -273,7 +273,6 @@ import {
   siblingTitleDiscriminators,
   shouldCollapseToolBatch,
   summarizeToolAttention,
-  toolParentCallId,
   toolGroupRoundDisplay,
   toolGroupRoundNumber,
   toolGroupRoundTitle,
@@ -21562,9 +21561,6 @@ let backgroundConversationActivity = new Map();
     isRunning: function (c) {
       var flags = _convStatusFlags(c);
       return flags.streaming || flags.waiting || Boolean(flags.background && !flags.background.queuedOnly);
-    },
-    hasUnread: function (c) {
-      return _convStatusFlags(c).needsReview;
     },
     status: function (c) {
       var flags = _convStatusFlags(c);

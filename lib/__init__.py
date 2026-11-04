@@ -190,8 +190,8 @@ def _resolve_feature_flag(env_key, json_key, default):
 
 PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
 DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
-# Cache Extended TTL: 1h TTL for stable prefix (system+tools), 5m for tail
-CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
+# Opt-in 1h TTL for system+tools (tail stays 5m); default off: docs/LLM_COST_OPTIMIZATION.md
+CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', False)
 # Daily Optimizer: nightly LLM-driven improvement loop. ON by default —
 # users can disable it in Settings if they don't want autonomous changes
 # (e.g. auto-applied block_search_domain).
@@ -332,7 +332,7 @@ def reload_config():
     # Feature flags
     _mod.PPTX_TRANSLATE_ENABLED = _resolve_feature_flag('PPTX_TRANSLATE_ENABLED', 'pptx_translate_enabled', False)
     _mod.DEBUG_MODE = _resolve_feature_flag('DEBUG_MODE', 'debug_mode', False)
-    _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', True)
+    _mod.CACHE_EXTENDED_TTL = _resolve_feature_flag('CACHE_EXTENDED_TTL', 'cache_extended_ttl', False)
     _mod.OPTIMIZER_ENABLED = _resolve_feature_flag('OPTIMIZER_ENABLED', 'optimizer_enabled', True)
     _mod.SCHEDULER_ALLOW_CODE_EXEC = _resolve_feature_flag(
         'SCHEDULER_ALLOW_CODE_EXEC', 'scheduler_allow_code_exec', True)

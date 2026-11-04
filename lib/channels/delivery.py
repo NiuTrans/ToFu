@@ -185,8 +185,12 @@ def deliver_command(owner: int, conversation_id: str, event: ChannelEvent, *, ti
             'channel': event.channel, 'thread': str(event.thread),
             'eventIds': [event.event_id], 'title': title}},
     }
-    return _dispatch(owner, conversation_id, projection,
-                     _command_id(OWNER_COMMAND_PREFIX, conversation_id, [event.event_id]))
+    outcome = _dispatch(owner, conversation_id, projection,
+                        _command_id(OWNER_COMMAND_PREFIX, conversation_id, [event.event_id]))
+    if outcome.accepted:
+        from lib.channels.autoreply import acknowledge_command
+        acknowledge_command(owner, conversation_id, event, outcome.disposition)
+    return outcome
 
 
 def observe_router(owner: int, router: dict[str, Any], thread: str,

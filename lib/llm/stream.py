@@ -320,6 +320,67 @@ def _stream_websocket_or_none(plan, *, log_prefix, **stream_options):
     return result
 
 
+def _classify_stream_error_response(
+        resp, plan, canonical_body, *, watchdog, abort_check, oauth, log_prefix,
+        report_network_outcome, annotate_network_error):
+    if resp.status_code == 200:
+        return
+    # A complete application-level HTTP response proves the selected network
+    # route. Provider status classification is separate from route health.
+    report_network_outcome(True)
+    from lib.llm.provider_error_body import read_error_body, ERROR_BODY_TIMEOUT_S
+    import lib.llm._transport as transport
+    watchdog.arm_read_deadline(
+        ERROR_BODY_TIMEOUT_S, lambda: transport.interrupt_response_read(resp))
+    error_read_options = dict(
+        abort_check=abort_check,
+        expired_check=lambda: watchdog.read_deadline_expired)
+    # Keep desktop route failures distinct; both adapters consume only a
+    # bounded prefix rather than retaining/draining the entire body.
+    if hasattr(resp, 'read_all_text'):
+        from lib.desktop.egress import EgressUnavailable
+        try:
+            captured_error = read_error_body(resp, **error_read_options)
+        except EgressUnavailable as error:
+            raise EndpointUnreachableError(str(error), base_url=plan.url) from error
+    else:
+        chunks = (_iter_response_bytes(resp)
+                  if callable(getattr(resp, 'iter_content', None)) else None)
+        captured_error = read_error_body(resp, chunks=chunks, **error_read_options)
+    err_body = captured_error.text(resp)
+    if plan.raw_archive_capture is not None:
+        plan.raw_archive_capture.append_response(captured_error.data)
+        plan.raw_archive_capture.commit(
+            response_complete=captured_error.complete, status_code=resp.status_code)
+    for activate_fallback, error_text in (
+            (activate_native_tool_search_fallback,
+             'native Tool Search rejected; retrying locally'),
+            (activate_native_orchestration_fallback,
+             'native orchestration rejected; retrying locally')):
+        if activate_fallback(
+                resp.status_code, err_body, plan=plan,
+                canonical_body=canonical_body):
+            error = RetryableAPIError(
+                error_text, status_code=resp.status_code)
+            raise annotate_network_error(error, 'provider_response')
+    if activate_subscription_transient_retry(
+            resp.status_code, oauth=oauth,
+            canonical_body=canonical_body):
+        error = RetryableAPIError(
+            'subscription upstream transient 404; retrying',
+            status_code=resp.status_code)
+        raise annotate_network_error(error, 'provider_response')
+    try:
+        classify_status_error(
+            resp.status_code, err_body, body=plan.body,
+            log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
+            credential_present=plan.credential_present,
+            route_limit_key=plan.route_output_limit_key)
+    except Exception as error:
+        annotate_network_error(error, 'provider_response')
+        raise
+
+
 def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                       on_tool_call_ready=None,
                       abort_check=None, log_prefix='', attempt=0,
@@ -667,66 +728,11 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
             from lib.oauth.codex_turn_state import observe_turn_state_headers
             observe_turn_state_headers(plan.responses_state_key, resp.headers)
 
-        if resp.status_code != 200:
-            # A complete application-level HTTP response proves the selected
-            # network route. Provider status classification is separate from
-            # route health.
-            _report_network_outcome(True)
-            from lib.llm.provider_error_body import read_error_body, ERROR_BODY_TIMEOUT_S
-            _watchdog.arm_read_deadline(
-                ERROR_BODY_TIMEOUT_S, lambda: _tp.interrupt_response_read(resp))
-            error_read_options = dict(
-                abort_check=abort_check,
-                expired_check=lambda: _watchdog.read_deadline_expired)
-            # Keep desktop route failures distinct; both adapters consume only
-            # a bounded prefix rather than retaining/draining the entire body.
-            if hasattr(resp, 'read_all_text'):
-                from lib.desktop.egress import EgressUnavailable as _EU
-                try:
-                    captured_error = read_error_body(resp, **error_read_options)
-                except _EU as e:
-                    raise EndpointUnreachableError(str(e), base_url=plan.url) from e
-            else:
-                chunks = (_iter_response_bytes(resp)
-                          if callable(getattr(resp, 'iter_content', None)) else None)
-                captured_error = read_error_body(resp, chunks=chunks, **error_read_options)
-            err_body = captured_error.text(resp)
-            if plan.raw_archive_capture is not None:
-                plan.raw_archive_capture.append_response(captured_error.data)
-                plan.raw_archive_capture.commit(
-                    response_complete=captured_error.complete, status_code=resp.status_code)
-            if activate_native_tool_search_fallback(
-                    resp.status_code, err_body, plan=plan,
-                    canonical_body=body):
-                error = RetryableAPIError(
-                    'native Tool Search rejected; retrying locally',
-                    status_code=resp.status_code)
-                raise _annotate_network_error(
-                    error, 'provider_response')
-            if activate_native_orchestration_fallback(
-                    resp.status_code, err_body, plan=plan,
-                    canonical_body=body):
-                error = RetryableAPIError(
-                    'native orchestration rejected; retrying locally',
-                    status_code=resp.status_code)
-                raise _annotate_network_error(
-                    error, 'provider_response')
-            if activate_subscription_transient_retry(
-                    resp.status_code, oauth=oauth, canonical_body=body):
-                error = RetryableAPIError(
-                    'subscription upstream transient 404; retrying',
-                    status_code=resp.status_code)
-                raise _annotate_network_error(
-                    error, 'provider_response')
-            try:
-                classify_status_error(
-                    resp.status_code, err_body, body=plan.body,
-                    log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
-                    credential_present=plan.credential_present,
-                    route_limit_key=plan.route_output_limit_key)
-            except Exception as error:
-                _annotate_network_error(error, 'provider_response')
-                raise
+        _classify_stream_error_response(
+            resp, plan, body, watchdog=_watchdog, abort_check=abort_check,
+            oauth=oauth, log_prefix=log_prefix,
+            report_network_outcome=_report_network_outcome,
+            annotate_network_error=_annotate_network_error)
 
         resp.encoding = 'utf-8'
 

@@ -1280,6 +1280,9 @@ def test_NC_count_only_hot_tail_leaves_projected_over_ceiling(stub_summary, monk
     # Neuter: the convergence check calls this and drops nothing.
     monkeypatch.setattr(reactive_mod, '_head_truncate',
                         lambda *a, **k: 0)
+    # Isolate whole-round retention: the joint L1 pass independently removes
+    # consumed bulk even when this negative control disables L2's safeguards.
+    monkeypatch.setattr(compact_mod, 'prepare_l2_projection', lambda messages, task: messages)
 
     task = {'convId': 'conv_nc', 'id': 't', 'config': {'model': 'gpt-4'}}
     ceiling = _ceiling_for(task)

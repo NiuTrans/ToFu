@@ -473,6 +473,31 @@ def test_terminal_intent_acknowledgment_is_idempotent(workspace):
     assert workspace['settles'][0][2]['outcome'] == 'completed'
 
 
+def test_recovered_terminal_intent_does_not_replay_an_earlier_attempts_error(
+        workspace, monkeypatch):
+    # A direct root has no registration, so settlement records no rows. Once a
+    # later attempt reads the checkout, the earlier read failure is history:
+    # every terminal retry must not keep replaying it as unacknowledged intent.
+    from lib.project_mod import activity_supervised_process as supervised
+    run = supervised.run_activity_supervised
+    stalls = [supervised.ProcessStalled('No thread of the process tree executed for 90s')]
+
+    def volume(argv, **kwargs):
+        if stalls:
+            raise stalls.pop()
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(supervised, 'run_activity_supervised', volume)
+    task = _task(workspace['root'])
+    assert delivery.persist_terminal_workspace_intent(task) is False
+    assert task['_workspaceDelivery']['errors']
+
+    assert delivery.persist_terminal_workspace_intent(task) is True
+    assert delivery.persist_terminal_workspace_intent(task) is True
+    assert not (task.get('_workspaceDelivery') or {}).get('errors')
+    assert workspace['settles'] == []
+
+
 @pytest.mark.parametrize('dirty', [False, True])
 def test_unregistered_linked_root_is_not_ownership_even_when_clean(workspace, dirty):
     selected = workspace['selected']
@@ -1191,8 +1216,8 @@ def test_cancelled_direct_admission_does_not_enter_runner_or_activate_roots(
     else:
         resolve = workspace_policy.resolve_workspace_mode
 
-        def cancel_during_policy(path):
-            mode = resolve(path)
+        def cancel_during_policy(path, **kwargs):
+            mode = resolve(path, **kwargs)
             task['aborted'] = True
             return mode
 

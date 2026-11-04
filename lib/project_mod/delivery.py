@@ -138,7 +138,7 @@ def _publication_hold(row: dict, receipt: dict) -> dict | None:
     from lib.project_dispatch.publication import publication_reason
     reason = publication_reason(row, receipt)
     if reason:
-        return _save(row, receipt, state='blocked', phase=receipt.get('phase') or 'checkpoint',
+        return _save(row, receipt, state='blocked', phase='workspace_adoption',
                      reason=reason, retry=None)
     return None
 
@@ -411,6 +411,9 @@ def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
                           and receipt.get('phase') == 'checkpoint'
                           and receipt.get('taskOutcome') == 'completed'
                           and not receipt.get('retry')
+                          # Older publication holds used the capture phase even
+                          # though the immutable checkpoint was already ready.
+                          and not str(receipt.get('reason') or '').startswith('project_publication_')
                           and receipt.get('reason') not in {
                               'task_background_commands_running',
                               'task_child_agents_running'})

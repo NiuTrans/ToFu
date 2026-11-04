@@ -321,9 +321,9 @@
       "description": ""
     },
     "CACHE_EXTENDED_TTL": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/__init__.py",
+      "description": "Opt-in 1h TTL on the Claude system+tools cache breakpoints plus the extended-cache-ttl beta header; the conversation tail stays 5m. '1' enables, any other set value disables, unset defers to data/config/features.json cache_extended_ttl, default off. Latched per task. Measured net-negative on the Sankuai route: docs/LLM_COST_OPTIMIZATION.md, Stable-head cache TTL."
     },
     "CACHE_FIX_GEN_BASELINE": {
       "status": "legacy",
@@ -2635,11 +2635,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_UNREACHABLE_COOLDOWN": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_UPDATE_BRANCH": {
       "status": "legacy",
       "owner": "",
@@ -4404,7 +4399,12 @@
       "status": "documented",
       "owner": "export_pkg/_live_state.py",
       "description": "Origin of the running application's API from which an internal export reads the current model-routing authority and audited credential reveals. Unset uses http://127.0.0.1:$PORT (default port 15000). Only http(s) on 127.0.0.1, ::1 or localhost is accepted; requests use no proxy and follow no redirect."
+    },
+    "TB_NATIVE_PI_RUNTIME": {
+      "status": "documented",
+      "owner": "tests/evaluations/test_pi_native_contract.py",
+      "description": "Absolute path to an extracted runtime tree produced by python -m evaluations.pi_contract build-runtime. When set, the native Pi relay-stub test executes that pinned runtime; when unset, the offline helper and contract tests still run and the live-runtime test skips."
     }
   },
-  "legacy_count": 601
+  "legacy_count": 599
 }

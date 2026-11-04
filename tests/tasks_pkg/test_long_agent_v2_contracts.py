@@ -2003,8 +2003,9 @@ def test_artifact_continuation_label_names_source_round():
                    "/skill/list?keyword=citadel"),
     }
     assert event["_artifactOrigin"] == round_entry["_artifactOrigin"]
-    assert round_entry["parentToolCallId"] == "source_tc_9"
-    assert event["parentToolCallId"] == "source_tc_9"
+    # The source call is provenance, not the read-back's execution parent.
+    assert "parentToolCallId" not in round_entry
+    assert "parentToolCallId" not in event
 
     _, search_entry, _ = _build_tool_round_entry(
         "search_tool_artifact",

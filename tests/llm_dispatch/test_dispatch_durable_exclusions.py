@@ -125,14 +125,23 @@ class TestStreamRetryStateDurable:
         st.maybe_reset_exclusions('[t]', 'dispatch_stream')
         assert 'k1' in (st.eff_exclude_keys() or set())
 
-    def test_eff_unions_only_after_first_attempt(self):
+    def test_eff_unions_transient_pairs_only_after_first_attempt(self):
+        from lib.llm_dispatch.api import _StreamRetryState
+        st = _StreamRetryState()
+        st.exclude_pairs.add(('k2', 'm2'))
+        assert st.eff_exclude_pairs() is None, (
+            'attempt-1 pick must not see failure-driven transient exclusions')
+        st.hard_attempts = 1
+        assert ('k2', 'm2') in (st.eff_exclude_pairs() or set())
+
+    def test_eff_applies_attempt_free_route_facts_from_first_pick(self):
         from lib.llm_dispatch.api import _StreamRetryState
         st = _StreamRetryState()
         st.exclude_pairs_durable.add(('k1', 'm1'))
-        assert st.eff_exclude_pairs() is None, (
-            'attempt-1 pick must see no exclusions (legacy gating)')
-        st.hard_attempts = 1
-        assert ('k1', 'm1') in (st.eff_exclude_pairs() or set())
+        assert st.eff_exclude_pairs() == {('k1', 'm1')}, (
+            'a durable route fact learned without spending an attempt (an '
+            'unrepresentable protocol) must steer the next pick, or the loop '
+            're-picks the same route')
 
 
 # ── B2: end-to-end — no resurrection of the dead pair during 429 cycling ──

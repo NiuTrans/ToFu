@@ -34,7 +34,6 @@ export interface CoordinatorConversationGroupPorts {
   renderRow(conversation: CoordinatorConversationRow): string;
   activeConversationId(): string;
   isRunning?(conversation: CoordinatorConversationRow): boolean;
-  hasUnread?(conversation: CoordinatorConversationRow): boolean;
   status?(conversation: CoordinatorConversationRow): 'running' | 'done' | 'failed' | 'cancelled' | null;
   readExpanded(coordinatorId: string): boolean | null;
   writeExpanded(coordinatorId: string, expanded: boolean): void;
@@ -76,11 +75,8 @@ export function createCoordinatorConversationGroup(ports: CoordinatorConversatio
   label.textContent = t('projectCoordination.conversations');
   const count = document.createElement('span'); count.className = 'coordinator-conversations-count';
   const live = document.createElement('span'); live.className = 'coordinator-conversations-live';
-  // Same mark as a row's completed-reply-awaiting-review dot.
-  const unread = document.createElement('span');
-  unread.className = 'coordinator-conversations-unread conv-review-dot';
-  unread.setAttribute('aria-hidden', 'true');
-  button.append(chevron, label, count, live, unread);
+  // A reply awaiting review is marked only on its own row, visible once the group is expanded.
+  button.append(chevron, label, count, live);
   const body = document.createElement('div'); body.className = 'coordinator-conversations-body'; body.hidden = true;
   root.append(button, body);
 
@@ -101,12 +97,10 @@ export function createCoordinatorConversationGroup(ports: CoordinatorConversatio
     count.textContent = String(rows.length);
     const running = rows.filter(row => ports.isRunning?.(row)).length;
     live.textContent = running ? t('projectCoordination.running', { n: running }) : '';
-    unread.hidden = !rows.some(row => ports.hasUnread?.(row));
-    unread.title = unread.hidden ? '' : t('sidebar.reviewState');
     button.setAttribute('aria-expanded', String(expanded));
     button.classList.toggle('is-expanded', expanded);
     button.setAttribute('aria-label', [`${t('projectCoordination.conversations')} (${rows.length})`,
-      live.textContent, unread.title].filter(Boolean).join(', '));
+      live.textContent].filter(Boolean).join(', '));
     body.hidden = !expanded;
     if (!expanded) { bodyKey = ''; return; }
     const html = rows.map(ports.renderRow).join('');
@@ -123,7 +117,7 @@ export function createCoordinatorConversationGroup(ports: CoordinatorConversatio
       const conversation = rows.find(item => item.id === row.dataset.convId)!;
       row.tabIndex = 0; row.setAttribute('role', 'button');
       row.classList.toggle('active', row.dataset.convId === activeId);
-      row.querySelector('.conv-actions')?.remove();
+      row.querySelectorAll('.conv-actions > :not(.conv-copy-id)').forEach(action => action.remove());
       row.querySelector('.conv-coordinator-badge')?.remove();
       const date = row.querySelector('.conv-date');
       if (date) {
@@ -139,9 +133,12 @@ export function createCoordinatorConversationGroup(ports: CoordinatorConversatio
         date.replaceChildren(time, ...(statusLabel ? [statusLabel] : []));
       }
       const open = () => { ports.open(row.dataset.convId!); ports.refreshActive?.(); };
-      row.addEventListener('click', open);
+      row.addEventListener('click', event => {
+        if ((event.target as Element).closest('.conv-actions')) return;
+        open();
+      });
       row.addEventListener('keydown', event => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
+        if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
         event.preventDefault(); open();
       });
     });
@@ -232,7 +229,6 @@ export function createCoordinatorConversationGroups(ports: {
   renderRow(conversation: CoordinatorConversationRow): string;
   activeConversationId(): string;
   isRunning?(conversation: CoordinatorConversationRow): boolean;
-  hasUnread?(conversation: CoordinatorConversationRow): boolean;
   status?(conversation: CoordinatorConversationRow): 'running' | 'done' | 'failed' | 'cancelled' | null;
   refresh?(): void;
   refreshActive?(): void;
@@ -258,11 +254,13 @@ export function createCoordinatorConversationGroups(ports: {
     const row = document.createElement('div');
     row.className = 'coordinator-history-entry';
     row.addEventListener('click', event => {
+      if ((event.target as Element).closest('.conv-actions')) return;
       if ((event.target as Element).closest('.conv-item')) open(id);
     });
     row.addEventListener('keydown', event => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
-      if (!(event.target as Element).closest('.conv-item')) return;
+      const item = (event.target as Element).closest('.conv-item');
+      if (!item || event.target !== item) return;
       event.preventDefault(); open(id);
     });
     ports.listHost.before(row);
@@ -276,7 +274,7 @@ export function createCoordinatorConversationGroups(ports: {
       row.innerHTML = html; record.rowHtml = html;
       const item = row.querySelector<HTMLElement>('.conv-item');
       if (item) {
-        item.querySelector('.conv-actions')?.remove();
+        item.querySelectorAll('.conv-actions > :not(.conv-copy-id)').forEach(action => action.remove());
         item.querySelector('.conv-coordinator-badge')?.remove();
         item.tabIndex = 0; item.setAttribute('role', 'button');
         if (focused) item.focus({ preventScroll: true });
@@ -323,7 +321,7 @@ export function createCoordinatorConversationGroups(ports: {
               adoptCoordinator: coordinator => ports.adoptCoordinator?.(coordinator, path),
               open: ports.open, renderRow: ports.renderRow,
               activeConversationId: ports.activeConversationId,
-              isRunning: ports.isRunning, hasUnread: ports.hasUnread, status: ports.status,
+              isRunning: ports.isRunning, status: ports.status,
               readExpanded: key => localStorage.getItem(`tofu.coordinator.conversations.expanded.${key}`) === 'true' ? true : null,
               writeExpanded: (key, value) => localStorage.setItem(`tofu.coordinator.conversations.expanded.${key}`, String(value)),
               refresh: ports.refresh, refreshActive: ports.refreshActive,

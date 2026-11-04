@@ -481,11 +481,8 @@ def _local_root(project_path) -> Path:
         raise ManagedRepositoryUnavailable(
             f'Project root {project_path} is not an existing local directory.',
             'Open an existing local folder as the project.', '请将一个存在的本地文件夹作为项目打开。')
-    # Worker workspaces are registered under real paths; an alias cannot own them.
-    if real != project_path:
-        raise ManagedRepositoryUnavailable(
-            f'Project root {project_path} resolves to {real} through a symlink or relative path.',
-            f'Open {real} as the project.', f'请将 {real} 作为项目打开。')
+    # Project keys retain the person's path; filesystem work and locks use the
+    # physical root, including when an ancestor of the project is a symlink.
     if not os.access(real, os.W_OK | os.X_OK):
         raise ManagedRepositoryUnavailable(
             f'Tofu cannot write to the project folder {real}, so it cannot prepare it for isolated workers.',

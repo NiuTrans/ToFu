@@ -87,7 +87,7 @@
     "refresh": "reconcile local metadata without requery floods; bounded refresh on relevant invalidation and explicit retry; teardown aborts work"
   },
   "nativeProjection": {
-    "formatVersion": 4,
+    "formatVersion": 6,
     "headerScanBatch": 16,
     "invalidationTokenBytes": 16,
     "legacyInvalidationTokenBytes": 8,

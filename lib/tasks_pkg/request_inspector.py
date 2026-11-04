@@ -504,7 +504,8 @@ def _read_events_uncached(task_id: str, *, rebuild: bool, payload_projection='fu
                                    'after_sequence': after,
                                    'limit': page_limit, **type_filter}) or []
             except Exception as exc:
-                # Native storage bounds the MATERIALIZED event page at 8 MiB.
+                # Native storage bounds the stored bytes of one page's selected
+                # events at 8 MiB (stream point-read bound).
                 # Retry only this deterministic page-size rejection at the
                 # SAME cursor; other availability/integrity errors are not
                 # evidence that smaller pages would be safe or useful.

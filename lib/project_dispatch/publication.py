@@ -27,7 +27,7 @@ def workspace_origin(task) -> dict:
 
 
 def _same_project(left, right) -> bool:
-    return bool(left and right) and Path(left).resolve() == Path(right).resolve()
+    return bool(left and right) and Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
 
 
 def _path_allowed(path: str, scopes, root: Path) -> bool:
@@ -121,7 +121,8 @@ def delivery_view(assignment: Mapping, attempt: Mapping | None, workspace_get) -
         return None
     task_id = attempt['taskId']
     try:
-        row = workspace_get(request['projectPath'], task_id, user_id=grant['owner'])
+        project_root = str(Path(request['projectPath']).expanduser().resolve())
+        row = workspace_get(project_root, task_id, user_id=grant['owner'])
         if (not isinstance(row, Mapping) or row.get('task_id') != task_id
                 or type(row.get('user_id')) is not int or row['user_id'] < 1
                 or row['user_id'] != grant['owner']

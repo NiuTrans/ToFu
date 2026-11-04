@@ -30,7 +30,9 @@ def _classify_exception(exc: BaseException) -> str:
     Recognizes both the typed exceptions in ``lib.llm.llm_errors`` and the
     string-shaped errors that bubble up from the dispatch layer.
     """
-    from lib.agent_core.context_errors import TurnRequirementsDeadlineError
+    from lib.agent_core.context_errors import MessageInputScopeError, TurnRequirementsDeadlineError
+    if isinstance(exc, MessageInputScopeError):
+        return 'internal'
     if isinstance(exc, TurnRequirementsDeadlineError):
         return 'timeout'
     # Local durability failures must win before upstream timeout heuristics.

@@ -9,9 +9,10 @@ Policy and state stay in ``lib.channels`` (ingress, outbox, store).
 
 Entry points: ``DxAdapter`` (one live session), ``resolve_identity`` and
 ``create_command_group`` (one-shot launcher commands), ``launch_spec``,
-``event_from_live``, ``event_from_history``. Dependencies: the installed skill
-under ``lib.skills.paths.owner_global_skills_dir(owner)``, ``subprocess`` and
-``lib.channels``.
+``launcher_session``, ``event_from_live``, ``event_from_history``.
+Dependencies: the installed skill under
+``lib.skills.paths.owner_global_skills_dir(owner)``, ``subprocess``,
+``lib.channels`` and ``lib.channels.dx.login`` (the login MIS's SSO session).
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lib.channels.dx.login import LoginSession, login_session, sso_owner
 from lib.channels.model import (
     BRIDGE_CONTRACT, OUTBOX_MARKER_FIELD, PROVIDER_LIMITS, ChannelError, ChannelEvent, ThreadKey,
     external_id_after,
@@ -77,14 +79,16 @@ def launch_spec(owner: int) -> LaunchSpec:
                       engine_dir=os.path.join(skill_dir, 'vendor', 'node_modules', 'dx-engine'))
 
 
-def _child_environment(owner: int) -> dict[str, str]:
-    """Inherit network/runtime configuration; never ambient secrets."""
+def launcher_session(owner: int, mis: str | None) -> LoginSession:
+    """The launcher child's environment, logged in as ``mis``.
+
+    It inherits network/runtime configuration, never ambient secrets; the
+    login MIS selects its SSO session (``lib.channels.dx.login``).
+    """
     from lib.project_mod.run_command import _is_sensitive_inherited_env
     env = {key: value for key, value in os.environ.items() if not _is_sensitive_inherited_env(key)}
-    # TODO(enterprise): one shared SSO session per Tofu owner; the launcher
-    # takes the owner explicitly instead of assuming the personal user.
-    env['DX_TOFU_OWNER'] = f'tofu:{int(owner)}'
-    return env
+    env['DX_TOFU_OWNER'] = sso_owner(owner)
+    return login_session(owner, mis, env)
 
 
 def _argv(spec: LaunchSpec, *extra: str) -> list[str]:
@@ -283,14 +287,31 @@ def history_pages(bridge, thread: ThreadKey):
 
 # ── one-shot launcher commands ────────────────────────────────────────
 
-def _one_shot(owner: int, *extra: str) -> dict[str, Any]:
+def _launcher_refusal(stderr: bytes) -> str:
+    """The SSO adapter's public error envelope (``error_code: error``) on stderr, if any.
+
+    ``python -m tofu_mtsso_auth exec`` prints only that safe projection when
+    it refuses to start the command; it never carries a ticket.
+    """
+    for line in reversed(stderr.decode('utf-8', 'replace').splitlines()):
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get('error_code'):
+            return f"{value['error_code']}: {value.get('error') or ''}".strip()
+    return ''
+
+
+def _one_shot(owner: int, session: LoginSession, *extra: str) -> dict[str, Any]:
     spec = launch_spec(owner)
     if not spec.installed:
         raise ChannelError('skill_missing', f'The {SKILL_NAME} skill is not installed for this owner')
-    completed = subprocess.run(_argv(spec, *extra), cwd=spec.skill_dir, env=_child_environment(owner),
+    completed = subprocess.run(_argv(spec, *extra), cwd=spec.skill_dir, env=session.environment,
                                stdin=subprocess.DEVNULL, capture_output=True, check=False)
+    refusal = _launcher_refusal(completed.stderr)
     if completed.returncode == SESSION_REQUIRED_EXIT:
-        raise ChannelError('needs_login', '大象 SSO session needs the owner to log in again')
+        raise ChannelError('needs_login', refusal or '大象 SSO session needs the owner to log in again')
     for line in completed.stdout.decode('utf-8', 'replace').splitlines():
         try:
             value = json.loads(line)
@@ -302,21 +323,30 @@ def _one_shot(owner: int, *extra: str) -> dict[str, Any]:
                 raise ChannelError(str(error.get('code') or 'engine_error'),
                                    str(error.get('message') or 'The 大象 engine refused the command'))
             return value.get('result') or {}
-    raise ChannelError('bridge_failed', f'The 大象 bridge exited {completed.returncode} without a result')
+    raise ChannelError('bridge_failed', f'The 大象 bridge exited {completed.returncode} without a result'
+                                        + (f' ({refusal})' if refusal else ''))
 
 
-def resolve_identity(owner: int) -> dict[str, str]:
-    """``whoami`` through the launcher: the bound owner account (C6 identity)."""
-    result = _one_shot(owner, '--command', 'whoami')
+def resolve_identity(owner: int, session: LoginSession) -> dict[str, str]:
+    """``whoami`` through the launcher logged in as ``session.mis`` (C6 identity).
+
+    The launcher may first wait for the one 大象 login approval of a MIS
+    without a reusable SSO session, so callers run it off request threads.
+    """
+    result = _one_shot(owner, session, '--command', 'whoami')
     uid = _text(result.get('uid'))
     if not _DIGITS.fullmatch(uid):
         raise ChannelError('identity_unavailable', '大象 whoami returned no uid')
-    return {'uid': uid, 'mis': _text(result.get('mis')), 'name': _text(result.get('name'))}
+    mis = _text(result.get('mis')).lower()
+    if session.mis and mis and mis != session.mis:
+        raise ChannelError('identity_mismatch', f'大象 logged in as {mis}, not {session.mis}')
+    return {'uid': uid, 'mis': mis or session.mis or '', 'name': _text(result.get('name'))}
 
 
-def create_command_group(owner: int, *, name: str, member_uid: str) -> str:
-    """Create the single-member command chat group; returns its gid."""
-    result = _one_shot(owner, '--command', 'create_group', '--name', name, '--member', member_uid)
+def create_command_group(owner: int, *, name: str, member_uid: str, mis: str | None) -> str:
+    """Create the single-member command chat group as ``mis``; returns its gid."""
+    result = _one_shot(owner, launcher_session(owner, mis), '--command', 'create_group', '--name', name,
+                       '--member', member_uid)
     gid = _text(result.get('gid'))
     if not _DIGITS.fullmatch(gid):
         raise ChannelError('group_create_failed', '大象 group creation returned no gid')
@@ -431,8 +461,10 @@ class DxAdapter:
     """One live 大象 session for one owner: bridge + ingest + outbox executor."""
 
     def __init__(self, owner: int, *, store: ChannelStore | None = None,
-                 bridge_factory=None):
+                 bridge_factory=None, login_mis: str | None = None):
         self.owner = int(owner)
+        # The account's login MIS this session runs as; a switch replaces the session.
+        self.login_mis = login_mis
         self.store = store or ChannelStore(owner)
         self._bridge_factory = bridge_factory or self._spawn
         self._bridge: DxBridge | None = None
@@ -446,12 +478,12 @@ class DxAdapter:
         self._wake_pending = False
         self._threads: list[threading.Thread] = []
 
-    @staticmethod
-    def _spawn(owner: int) -> DxBridge:
+    def _spawn(self, owner: int) -> DxBridge:
         spec = launch_spec(owner)
         if not spec.installed:
             raise ChannelError('skill_missing', f'The {SKILL_NAME} skill is not installed for this owner')
-        return DxBridge(_argv(spec), env=_child_environment(owner), cwd=spec.skill_dir)
+        return DxBridge(_argv(spec), env=launcher_session(owner, self.login_mis).environment,
+                        cwd=spec.skill_dir)
 
     # lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -682,5 +714,5 @@ class DxAdapter:
 
 
 __all__ = ['BridgeClosed', 'DxAdapter', 'DxBridge', 'LaunchSpec', 'create_command_group',
-           'event_from_history', 'event_from_live', 'history_pages', 'launch_spec',
+           'event_from_history', 'event_from_live', 'history_pages', 'launch_spec', 'launcher_session',
            'resolve_identity', 'svr_time_from_mid', 'thread_from_session']

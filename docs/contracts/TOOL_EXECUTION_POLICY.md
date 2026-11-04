@@ -115,9 +115,10 @@ running. Only an interrupt that a live command leaves unconsumed past its
 grace, with both task clocks stale, fails the task. The same ladder applies to
 Swarm, Goal and Flow workers: a worker's silent command is interrupted and the
 worker continues; a wedged worker settles with its own typed stall. Stop still ends every command, and a stdin prompt
-keeps only its own command in the foreground. Child invocations still never
-hand a running command off (they own no conversation delivery); each
-concurrent call can choose `background=true` and read its handle with `poll`.
+keeps only its own command in the foreground. A child invocation hands a
+command still running after `AUTO_BACKGROUND_AFTER_S` off and reads its handle
+with `poll`; it owns no conversation delivery, so a steer never moves it, and
+each concurrent call can also choose `background=true`.
 A Flow parent blocked on a child invocation advances its clocks only through
 child events, so it publishes the wait (`explained_wait.child_invocation_wait`)
 and the reaper treats its silence as explained while that child is live: the
@@ -914,6 +915,22 @@ exemption removes finite timeout and reaper safeguards. Verification:
 `poll`'s reaper-safe wait of up to 1500 s remains below the stuck-task silence
 threshold (`reaper_safe_wait_s`, normally 300 s of margin), and returns on
 completion, waiting input or its cap ([cost decision](../LLM_COST_OPTIMIZATION.md#long-waits-and-the-conversation-tail-ttl)).
+
+**Command batches.** Problem: a multi-command `poll` waited serially, so a
+running command could hide a completed sibling until the entire wait cap
+expired. Decision: observe all command handles before waiting and between the
+existing interruptible wait slices. `mode=any` (the default) returns when any
+command completes; `mode=all` waits for all, under one shared deadline. Each
+observation retains user/task ownership checks, and missing handles are
+reported as unavailable rather than replaced by stale snapshots. Cancellation
+and pending input end the wait without stopping commands. Alternatives
+rejected: shortening the cap increases model calls while useful work runs;
+waiting serially preserves the ordering defect. The controlled-clock regression
+in `tests/tasks_pkg/test_poll_command_batch.py` changes a completed sibling's
+delay from the requested 1500 s to 0 s, and observes a sibling finishing during
+the wait within the existing one-second slice. These are wait semantics, not
+a claim that the underlying command itself runs faster.
+
 `ToolSpec.timeout_ms_by_name` declares a tool's own deadline: on expiry the
 call's runtime context is asked to cancel cooperatively, and only that timer's
 own firing replaces the late result with the canonical
@@ -1010,6 +1027,7 @@ Only connected stdio servers share host workspace paths; network servers and des
 Unrelated parameters remain opaque: names such as `path` or `out_path` alone confer no policy.
 Declared files use admitted stable roots and canonical-to-execution mappings; all targets are checked before side effects.
 Unknown roots, traversal outside roots, escaping symlinks, readonly outputs and canonical/peer writes refuse invocation.
+Refusals name the effective target: an outside target lists the admitted roots (read-only marked) and the relative or rootname:path forms; an escaping symlink reports where it resolves.
 Inputs must exist. Declared output parents are prepared only within authorized roots; no workspace lease is taken or awaited.
 Transport cancellation is forwarded and ambiguous calls are not automatically replayed; a call cancelled before invocation is refused.
 Receipts retain error, structured and media payloads and report effective absolute paths; transport failures never claim not-started.

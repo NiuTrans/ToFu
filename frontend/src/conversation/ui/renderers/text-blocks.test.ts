@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationTurnViewModel } from '../../presentation/conversation-view-model';
-import type { TextBlockViewModel, ThinkingBlockViewModel } from '../../presentation/view-model/types';
+import type { LiveStatusBlockViewModel, TextBlockViewModel, ThinkingBlockViewModel } from '../../presentation/view-model/types';
 import type { ClassicConversationRendererPorts } from './ports';
-import { renderTextBlock, renderThinkingBlock } from './text-blocks';
+import { renderLiveStatusBlock, renderTextBlock, renderThinkingBlock } from './text-blocks';
 
 afterEach(() => document.body.replaceChildren());
 function fixture(overrides: Partial<TextBlockViewModel> = {}) {
@@ -84,6 +84,39 @@ describe('message translation attribution', () => {
   });
 });
 
+describe('live status elapsed clock', () => {
+  afterEach(() => vi.useRealTimers());
+  it('ticks from the backend call start outside the announced phase text', () => {
+    vi.useFakeTimers({ now: 1_793_693_000_000 + 125_000, toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const node = document.createElement('div');
+    node.className = 'conversation-block conversation-block--live-status';
+    document.body.appendChild(node);
+    const catalog: Record<string, string> = { 'stream.phase.runningToolIntent': 'Running {tool}: {intent}' };
+    const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text,
+      localizedText: (key, fallback, values) => (catalog[key] ?? fallback)
+        .replace(/\{(\w+)\}/g, (_, name: string) => String(values?.[name] ?? '')) };
+    const block = (value: Partial<LiveStatusBlockViewModel['value']>): LiveStatusBlockViewModel => ({
+      kind: 'live-status', blockId: 'live-status', source: {}, identitySource: 'contract',
+      value: { kind: 'attempt', phase: 'tool_exec', label: '', detail: '', tools: ['run_command'],
+        detailKey: 'stream.phase.runningToolIntent',
+        detailArgs: { tool: 'run_command', intent: 'Run the slides tests' }, ...value },
+    });
+    renderLiveStatusBlock(node, block({ startedAt: 1_793_693_000_000 }), ports);
+    const clock = node.querySelector<HTMLElement>('.stream-phase-elapsed')!;
+    expect(node.querySelector('.stream-phase-text')?.firstChild?.textContent)
+      .toBe('Running run_command: Run the slides tests');
+    expect(clock.textContent).toBe('02:05');
+    expect(clock.getAttribute('aria-hidden')).toBe('true');
+    expect(node.getAttribute('aria-live')).toBe('polite');
+    vi.advanceTimersByTime(2_000);
+    expect(clock.textContent).toBe('02:07');
+    renderLiveStatusBlock(node, block({ phase: 'thinking_active', tools: undefined,
+      detailKey: undefined, detailArgs: undefined }), ports);
+    expect(node.querySelector('.stream-phase-elapsed')).toBeNull();
+    expect(node.querySelector('.stream-phase-text')?.textContent).toBe('Thinking…');
+  });
+});
+
 it('retains focused evidence through answer replay and an appended paragraph', () => {
   const node = document.createElement('section');
   document.body.append(node);
@@ -135,4 +168,42 @@ it('folds merged reasoning after each round unless the reader opened it', () => 
   renderThinkingBlock(node, thinking('Round one\n\nRound two', true), ports);
   expect(node.querySelector('details.thinking-block')).toBe(details);
   expect(details.open).toBe(true);
+});
+
+it('makes open reasoning a labelled, focusable scroller that rests at its newest line', () => {
+  const node = document.createElement('div');
+  document.body.appendChild(node);
+  const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text };
+  const thinking = (markdown: string, terminal: boolean): ThinkingBlockViewModel => ({
+    kind: 'thinking', blockId: 'think-0', source: {}, identitySource: 'contract', memberBlockIds: ['think-0'],
+    markdown, displayMarkdown: markdown, displayMode: 'original', terminal,
+  });
+  try {
+    renderThinkingBlock(node, thinking('Line one', false), ports);
+    const scroller = node.querySelector<HTMLElement>('.thinking-content')!;
+    expect(scroller.tabIndex).toBe(0);
+    expect(scroller.getAttribute('role')).toBe('region');
+    expect(scroller.getAttribute('aria-label'))
+      .toBe(node.querySelector('.thinking-label')!.textContent);
+    // jsdom has no layout: a reader at the end (0 remaining) stays pinned.
+    let top = 0;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => 900 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 300 });
+    Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => top, set: value => { top = value; } });
+    top = 600;
+    renderThinkingBlock(node, thinking('Line one\n\nLine two', false), ports);
+    expect(top).toBe(900);
+    // A reader who scrolled up keeps their place.
+    top = 100;
+    scroller.dispatchEvent(new Event('scroll'));
+    renderThinkingBlock(node, thinking('Line one\n\nLine two\n\nLine three', false), ports);
+    expect(top).toBe(100);
+    // Reopening starts at the newest line again.
+    const details = node.querySelector<HTMLDetailsElement>('.thinking-block')!;
+    details.open = false;
+    details.dispatchEvent(new Event('toggle'));
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    expect(top).toBe(900);
+  } finally { node.remove(); }
 });

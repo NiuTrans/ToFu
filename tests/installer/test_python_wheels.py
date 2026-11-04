@@ -229,3 +229,29 @@ def test_unowned_directory_is_preserved_on_publication(tmp_path):
     with pytest.raises(ValueError, match='unowned'):
         wheels.publish(stage, cache, requirements, RUNTIME)
     assert (cache / 'user-file.txt').read_text() == 'keep'
+
+
+def test_pip_fallback_obeys_release_constraints(tmp_path, monkeypatch):
+    requirements = tmp_path / 'requirements.txt'
+    requirements.write_text('demo>=1\n')
+    constraints = tmp_path / 'install-constraints.txt'
+    constraints.write_text('demo==1.0\n')
+    monkeypatch.setattr(install_artifacts.shutil, 'which', lambda name: None)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if '--dry-run' in command:
+            report = Path(command[command.index('--report') + 1])
+            report.write_text(json.dumps({'install': [{
+                'metadata': {'name': 'demo', 'version': '1.0'},
+                'download_info': {'url': 'https://example.invalid/demo.whl',
+                                  'archive_info': {'hashes': {'sha256': 'a' * 64}}}}]}))
+        else:
+            wheel(Path(command[command.index('--wheel-dir') + 1]))
+
+    monkeypatch.setattr(install_artifacts.subprocess, 'run', run)
+    install_artifacts._acquire_python_wheels('python', requirements, tmp_path / 'house')
+    resolution = calls[0]
+    assert '--constraint' in resolution
+    assert resolution[resolution.index('--constraint') + 1] == str(constraints)

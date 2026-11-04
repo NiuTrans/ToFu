@@ -1,7 +1,7 @@
 """Project conversation messages: durable context, not an execution scheduler.
 
-Entry points execute/inject/confirm/page_view use portable record CAS and owned
-metadata. No private transcript reads, daemon, automatic model wake, permission
+Entry points execute/inject/confirm/page_view/validate_sender use portable record
+CAS and owned metadata. No private transcript reads, daemon, automatic model wake, permission
 grants or second task lifecycle. Originals stay immutable; consideration is
 explicit. `ProjectMailbox` keeps append-only segmented history without a
 lifetime count through generic `record.get`/`record.put` point operations only;
@@ -644,6 +644,15 @@ def _watchdog_sender(owner: int, sender: str) -> bool:
     return binding['availability'] == 'available' and binding['conversationId'] == sender
 
 
+def validate_sender(owner: int, sender: str, project: str) -> None:
+    """Check current sender authority at acquisition and before each send."""
+    try:
+        scope(owner, sender, project)
+    except ProjectMessageError:
+        if not _watchdog_sender(owner, sender):
+            raise
+
+
 def inject(task: dict, messages: list[dict], round_num: int):
     task.pop('_projectMessageAttempt', None)
     if not task.get('convId') or task.get('_parentTaskId'):
@@ -659,11 +668,11 @@ def inject(task: dict, messages: list[dict], round_num: int):
         def eligible(sender):
             if sender not in sender_validity:
                 try:
-                    scope(owner, sender, project)
+                    validate_sender(owner, sender, project)
                     sender_validity[sender] = True
                 except ProjectMessageError:
                     # keep evidence, never transfer a rebound sender's authority
-                    sender_validity[sender] = _watchdog_sender(owner, sender)
+                    sender_validity[sender] = False
             return sender_validity[sender]
         present = {item for m in messages if m.get('_projectMailbox') == mailbox.key
                    for item in m.get('_projectMessageIds', [])}

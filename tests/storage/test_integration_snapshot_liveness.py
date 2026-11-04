@@ -84,7 +84,7 @@ def dilated(monkeypatch):
     monkeypatch.setattr(ic, 'subprocess', proxy)
     # Optional so this specification also runs, and fails for the real
     # reason, against code that only has wall-clock deadlines.
-    monkeypatch.setattr(ic, '_SNAPSHOT_STALL_SECONDS', WINDOW, raising=False)
+    monkeypatch.setattr(ic, 'GIT_STALL_SECONDS', WINDOW, raising=False)
 
 
 def fake_git(tmp_path, monkeypatch, mode, subcommand, seconds=0.0):
@@ -173,7 +173,7 @@ def test_hung_snapshot_git_is_retired_after_one_stall_window(
 def test_stop_retires_a_blocked_snapshot_git_without_waiting_for_the_window(
         repo, tmp_path, monkeypatch, dilated):
     root = repo
-    monkeypatch.setattr(ic, '_SNAPSHOT_STALL_SECONDS', 20 * WINDOW, raising=False)
+    monkeypatch.setattr(ic, 'GIT_STALL_SECONDS', 20 * WINDOW, raising=False)
     marker = fake_git(tmp_path, monkeypatch, 'hung', 'add')
     task = {'aborted': False}
     stopped = []

@@ -137,9 +137,19 @@ def _build_outline_prompt(topic: str, *, lang: str, max_pages: int,
                           scenarios_doc: str, style_hint: str,
                           research_doc: str = '', research_as_of: str = '',
                           material: str = '') -> str:
-    from lib.design_sys.themes import classify_scenario, design_bible_text
+    from lib.design_sys.themes import (
+        classify_scenario,
+        design_bible_text,
+        list_themes,
+    )
 
     scenario_hint = classify_scenario(topic + ' ' + style_hint)
+    # _run_design accepts only a registered theme of the chosen scenario and
+    # otherwise silently uses the scenario default, so the planner must see
+    # the closed set to honour a light/dark or mood request.
+    themes_doc = '; '.join(
+        f'{theme.id}[{theme.scenario}] {theme.label}: {theme.mood}'
+        for theme in list_themes())
     audience_guidance = design_bible_text(
         scenario_hint, include_general=False, limit=1800)
     research_block = ((
@@ -189,7 +199,9 @@ def _build_outline_prompt(topic: str, *, lang: str, max_pages: int,
             ' "handoff": "本页如何把视觉或问题交给下一页",'
             ' "asset_prompt": "若 generate,用英文写无文字的主视觉提示词"}]}\n'
             f'要求:\n1. pages 数量 {_MIN_PAGES} 到 {max_pages};\n'
-            f'2. scenario 从以下选择: {scenarios_doc};\n'
+            f'2. scenario 从以下选择: {scenarios_doc};theme_id 只能从下列'
+            '属于所选 scenario 的主题中选择,按用户风格要求的深/浅与气质匹配,'
+            f'无合适项时留空: {themes_doc};\n'
             '3. 首页 cover,末页 final(回答开篇问题/给出行动,禁止孤悬"谢谢");\n'
             '4. 每页 key_message 必须是完整判断句,不是栏目名;\n'
             '5. 节奏:密页与呼吸页交替;内容页不连续同构;\n'
@@ -231,7 +243,9 @@ def _build_outline_prompt(topic: str, *, lang: str, max_pages: int,
         ' "handoff": "visual/question handoff to the next page",'
         ' "asset_prompt": "English, text-free hero visual prompt if generate"}]}\n'
         f'Rules: {_MIN_PAGES}..{max_pages} pages; scenario one of '
-        f'{scenarios_doc}; first page cover, last page final (answer the '
+        f'{scenarios_doc}; theme_id one of the themes registered for that '
+        'scenario, matched to the style request\'s light/dark tone and mood, '
+        f'else empty: {themes_doc}; first page cover, last page final (answer the '
         'opening question, never a bare "thank you"); every key_message is a '
         'complete judgment sentence; alternate dense and breathing pages; '
         'cite [S#] in content_notes for every fact, number or quote and invent '

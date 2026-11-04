@@ -311,12 +311,56 @@ def check_declared_scripts(root: Path, tracked: set[str], *,
     return failures
 
 
+# setuptools 77 is the first release accepting a PEP 639 SPDX `project.license`
+# string and deprecated the PEP 621 table form; 80.10.2 through 84.2.1 warn on
+# every table build and schedule its removal for 2027-02-18.
+_SPDX_LICENSE_SETUPTOOLS_MAJOR = 77
+_SETUPTOOLS_FLOOR = re.compile(r"setuptools\s*(?:>=|==|~=)\s*(\d+)[.\d]*(?:\s*,.*)?")
+
+
+def check_package_license_metadata(root: Path, tracked: set[str]) -> list[str]:
+    """Keep every tracked package's license buildable by unpinned setuptools.
+
+    Isolated builds (uv workspace syncs, export bundling and installer admission
+    via ``bootstrap_pkg.install_artifacts.build_search_wheel``) resolve the newest
+    setuptools, so a table stops building once its removal ships, without a
+    source edit. setuptools>=77 rejects ``License ::`` classifiers beside an
+    SPDX expression.
+    """
+    failures = []
+    for name in sorted(path for path in tracked if Path(path).name == "pyproject.toml"):
+        document = _toml(root / name)
+        license_value = document.get("project", {}).get("license")
+        if license_value is None:
+            continue
+        if not isinstance(license_value, str):
+            failures.append(
+                f"{name}: project.license must be an SPDX expression string, not a table")
+            continue
+        if any(str(item).startswith("License ::")
+               for item in document["project"].get("classifiers", [])):
+            failures.append(
+                f"{name}: remove License :: classifiers; setuptools rejects them "
+                "beside an SPDX project.license")
+        build = document.get("build-system", {})
+        if build.get("build-backend") != "setuptools.build_meta":
+            continue
+        floors = (_SETUPTOOLS_FLOOR.fullmatch(item.strip()) for item in build.get("requires", []))
+        if not any(floor and int(floor[1]) >= _SPDX_LICENSE_SETUPTOOLS_MAJOR for floor in floors):
+            failures.append(
+                f"{name}: an SPDX project.license needs build-system "
+                f"setuptools>={_SPDX_LICENSE_SETUPTOOLS_MAJOR}")
+    return failures
+
+
 def check() -> list[str]:
     # One index snapshot per check; a later invocation must observe new edits.
     tracked_paths = _tracked_paths()
+    tracked = {p.as_posix() for p in tracked_paths}
     failures = check_declared_scripts(
-        ROOT, {p.as_posix() for p in tracked_paths},
+        ROOT, tracked,
         script_mentions=_tracked_files_mentioning("scripts", "tests/*.py"))
+    failures.extend(check_package_license_metadata(ROOT, tracked))
     root = _toml(ROOT / "pyproject.toml")
     search = _toml(SEARCH_ROOT / "pyproject.toml")
     trading = _toml(TRADING_ROOT / "pyproject.toml")

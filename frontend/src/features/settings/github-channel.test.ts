@@ -57,7 +57,9 @@ function fakeApi(view = account()) {
       updateGitHubAccount: vi.fn(async () => view),
       githubThreads: vi.fn(async () => threads),
       updateGitHubThread: vi.fn(async () => threads.items[0]),
-      outbox: vi.fn(async () => outbox),
+      outbox: vi.fn(async (channel: string) => ({
+        items: outbox.items.filter((item) => item.thread.startsWith(`${channel}:`)),
+      })),
       approveOutbox: vi.fn(async () => outbox.items[0]),
       discardOutbox: vi.fn(async () => outbox.items[0]),
     },
@@ -102,6 +104,13 @@ describe('GitHub settings tab', () => {
     expect(text).toContain('octo/repo, octo/other');
     expect(text).toContain('[Tofu 代发] Plan B is in.');
     expect(text).not.toContain('[Tofu 代发] hello');
+    expect(api.channels.outbox).toHaveBeenCalledWith('github', expect.anything());
+    expect(root().querySelector('.channel-card-head .channel-status')!.textContent)
+      .toBe('settings.github.state.connected');
+    // One header row names the columns; every cell keeps its own label.
+    expect([...root().querySelectorAll('.channel-table-head span')].map((node) => node.textContent))
+      .toEqual(['settings.github.column.thread', 'settings.github.column.mode', 'settings.github.column.reply']);
+    expect(root().querySelectorAll('.channel-row .channel-cell label')).toHaveLength(4);
     const link = [...root().querySelectorAll('a')].find((node) => node.textContent === 'github:octo/repo#12')!;
     expect(link.href).toBe('https://github.com/octo/repo/issues/12');
     expect(link.rel).toContain('noopener');

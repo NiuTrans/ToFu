@@ -244,6 +244,36 @@ def revoke_conversation_dispatch(conversation_id, *, user_id, occurred_at=None,
     return outcome
 
 
+def worker_conversation_admission(conversation_id, *, user_id, conversations=None,
+                                  repository_factory=None):
+    """Admission of the delegation that owns a Coordinator-created Worker conversation.
+
+    A completion from a Worker turn that ran without its binding is still
+    governed by this grant. Only Worker conversations (``_coordinatorSource``)
+    qualify, so ordinary and Coordinator conversations keep their own wake.
+    Returns the latest such admission or ``None``. It grants no authority; the
+    caller validates the grant.
+    """
+    owner = require_user_id(user_id, context='project dispatch Worker conversation')
+    if conversations is None:
+        from lib.conversations.repository import ConversationRepository
+        conversations = ConversationRepository()
+    snapshot = conversations.get(conversation_id, user_id=owner, include_messages=False)
+    metadata = getattr(snapshot, 'metadata', snapshot)
+    settings = metadata.get('settings') if isinstance(metadata, Mapping) else None
+    if not isinstance(settings, Mapping) or not settings.get('_coordinatorSource'):
+        return None
+    project = settings.get('canonicalProjectPath') or settings.get('projectPath')
+    if not isinstance(project, str) or not project.strip():
+        return None
+    repository = (repository_factory or ProjectDispatchRepository)(
+        owner, normalize_project_path(project.strip()))
+    rows = [row for row in repository.list() if row['request']['recipientId'] == conversation_id]
+    if not rows:
+        return None
+    return repository.admission(max(rows, key=lambda row: row['grant']['createdAt'])['id'])
+
+
 def recover_persisted_dispatch(*, client=None, repository_factory=None, recovery=None):
     """One startup pass through the existing record cursor, not a scheduler.
 

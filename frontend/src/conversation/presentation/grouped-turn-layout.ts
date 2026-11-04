@@ -8,7 +8,8 @@
  * panel. Zone membership is presentation policy only: order inside a zone is
  * the projection's block order, and Turn authority is never rewritten.
  *
- * Entry points: groupedTurnLayout, groupedTurnEntries, turnLayoutZone.
+ * Entry points: groupedTurnLayout, groupedTurnEntries, turnLayoutZone,
+ * interimNarrationIds.
  * Dependencies: view-model types and thinking merge, tool attention, round
  * identity/state. DOM-free; memoized per immutable Turn view model.
  */
@@ -80,6 +81,9 @@ export interface GroupedTurnLayout {
   readonly trail: ReadonlyArray<ConversationBlockViewModel>;
   /** Present only when the process zone holds a tool or program call. */
   readonly panel: ToolPanelSummary | null;
+  /** Narration well state without a reader choice: open while the reply
+   * works, folded once it settles, like reasoning and the panel. */
+  readonly narrationDefaultOpen: boolean;
 }
 
 /** Surface-owned panel header entry; never a Turn fact or renderer block. */
@@ -116,6 +120,26 @@ export function entryRegions(entries: ReadonlyArray<GroupedTurnEntry>): Readonly
   return regionCache.get(entries) ?? (entries.length ? [{ kind: 'turn', start: 0, end: entries.length }] : []);
 }
 
+/** Interim prose of a mounted reply: the contiguous run of round narration
+ * that starts at its first interim text, so the run can share one bounded
+ * reading well. Interim text is neither the settled answer nor the reply's
+ * latest text: the latest stays outside while it may still stream (or become
+ * the answer) and joins only once a later round's text follows it. The run
+ * ends at the first other entry, so chronology is never reordered. */
+export function interimNarrationIds(entries: ReadonlyArray<GroupedTurnEntry>): ReadonlySet<string> {
+  let latestText = -1;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index].kind === 'text') { latestText = index; break; }
+  }
+  const interim = (entry: GroupedTurnEntry): boolean => (
+    entry.kind === 'text' && !entry.deliverable && !entry.terminal);
+  const ids = new Set<string>();
+  let index = 0;
+  while (index < latestText && !interim(entries[index])) index += 1;
+  for (; index < latestText && interim(entries[index]); index += 1) ids.add(entries[index].blockId);
+  return ids;
+}
+
 /* Backend block ids never use the `layout:` namespace. */
 export const TOOL_PANEL_BLOCK_ID = 'layout:tool-panel';
 
@@ -142,9 +166,19 @@ function processErrorCount(block: ConversationBlockViewModel): number {
   return 0;
 }
 
+/* A completed reply with its own explicit answer and no pending command or
+ * approval: its process folds by default. Without an explicit answer the
+ * process is the reply's content, so it stays in view. */
+function replySettled(turn: ConversationTurnViewModel): boolean {
+  const answered = turn.blocks.some((block) => block.kind === 'text'
+    && (block.terminal || block.deliverable) && Boolean(block.markdown.trim()));
+  return turn.status === 'completed' && answered
+    && !turn.commandPending && !turn.metadata.waitingOn;
+}
+
 function summarizePanel(
-  turn: ConversationTurnViewModel,
   process: ReadonlyArray<ConversationBlockViewModel>,
+  settled: boolean,
 ): ToolPanelSummary | null {
   const tools = process.filter(
     (block): block is ToolLikeBlock => block.kind === 'tool' || block.kind === 'program',
@@ -163,17 +197,13 @@ function summarizePanel(
     return attention === 'active' || attention === 'interactive'
       || states[index] === 'active' || states[index] === 'background';
   });
-  // Without an explicit answer the calls are the reply's content, so they stay
-  // in view; so does any unfinished, waiting or unresolved work.
-  const answered = turn.blocks.some((block) => block.kind === 'text'
-    && (block.terminal || block.deliverable) && Boolean(block.markdown.trim()));
   return {
     toolCount: tools.length,
     roundCount: identified ? rounds.size : tools.length,
     errorCount: process.reduce((total, block) => total + processErrorCount(block), 0),
     active: states.includes('active'),
-    defaultOpen: turn.status !== 'completed' || !answered || unresolved
-      || Boolean(turn.commandPending) || Boolean(turn.metadata.waitingOn),
+    // Unresolved work keeps the calls in view even after the reply settles.
+    defaultOpen: !settled || unresolved,
   };
 }
 
@@ -189,13 +219,15 @@ export function groupedTurnLayout(turn: ConversationTurnViewModel): GroupedTurnL
     };
     for (const block of turn.blocks) zones[turnLayoutZone(block)].push(block);
     const thinking = zones.thinking as ThinkingBlockViewModel[];
+    const settled = replySettled(turn);
     layout = {
       lead: zones.lead,
       thinking: thinking.length ? mergeThinkingBlocks(thinking) : null,
       process: zones.process,
       content: zones.content,
       trail: zones.trail,
-      panel: summarizePanel(turn, zones.process),
+      panel: summarizePanel(zones.process, settled),
+      narrationDefaultOpen: !settled,
     };
   }
   layouts.set(turn, layout);

@@ -45,7 +45,7 @@ def build(root: Path, output: Path) -> Path:
             subprocess.run(['uv', 'venv', '--python', sys.executable, str(candidate)],
                            check=True, timeout=60, stdout=sys.stderr)
             interpreter = candidate / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-            subprocess.run(['uv', 'pip', 'install', '--python', str(interpreter),
+            subprocess.run(['uv', 'pip', 'install', '--no-config', '--python', str(interpreter),
                             '--no-index', '--find-links', str(house), '--no-deps',
                             '--require-hashes', '-r', str(house / 'install.lock')],
                            check=True, timeout=300, stdout=sys.stderr)

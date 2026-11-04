@@ -866,7 +866,11 @@ def test_read_tool_artifact_replays_retained_media(monkeypatch):
     assert projected['media'][0]['reference'] == 'tofu-media:shot-77'
     meta = finalized['metas'][0]
     uris = meta.get('imageDataUris') or []
+    from lib.media_attachments import attachment_source_url
+    # Tiles are <img src> links: they must name the canonical source route
+    # (docs/contracts/API_CONTRACT.md), never metadata or a retired major.
     assert [u['uri'] for u in uris] == [
-        '/api/v1/media/attachments/shot-77']
+        attachment_source_url('shot-77')] == [
+        '/api/v4/media/attachments/shot-77/source']
     assert uris[0]['format'] == 'img'
     assert uris[0]['filename'] == 'artifact-media-1.img'

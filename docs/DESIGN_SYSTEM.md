@@ -67,12 +67,16 @@ asserted scope of that exception: `verify.py` check #2.
 
 The warm dark palette (V5, 2026-10-27) replaces the dark violet/green accents
 with charcoal `#24221f`, cream `#f0e7d8`, warm secondary `#b9ae9c` and coral
-error `#e4a193`. Light/paper palettes remain independent. The V5 sizing (18px
+error `#e4a193`. Tofu's coral error text is `#9E4838`: the previous `#B05B48`
+measured 4.21:1 on the paper receipt canvas, below the shared 4.5:1 text floor.
+The deeper ink retains the existing error fill and border roles. Light/paper palettes remain independent. The V5 sizing (18px
 rows, two-line 64px headers, 960px measure) is superseded by compact action
 reading. `23-reading-tool-summary.css` owns the shared one-line action row
 and the reasoning fold; existing specialized sheets own evidence bodies.
-`ui/tool-summary.ts` places exact identity right after the native intent and
-keeps the full intent as its tooltip, including lazy hydration;
+`ui/tool-summary.ts` places exact identity (projected by
+`presentation/tool-summary-identity.ts`, which the live-status row shares)
+right after the native intent and keeps the full intent as its tooltip,
+including lazy hydration;
 `ui/round-outline.ts` owns only reader expansion/search over the immutable
 ordered projection. Rationale is in
 [RENDER_CONTRACT.md](RENDER_CONTRACT.md#compact-action-reading-2026-10-27).
@@ -130,7 +134,7 @@ invisible retry/reload actions to layout or the keyboard focus order.
 | Field (label+hint+error) | `createField`, `setFieldError`; `size: 'sm'` is the compact inline row (label beside a `--control-h-sm` control, hint/error below) | ✅ |
 | Text input / textarea | `.ui-input` | ✅ |
 | Select | `.ui-select` wrapping native `<select>` | ✅ |
-| Dialog | `createDialog` on native `<dialog>` (focus trap, Esc, backdrop from the platform) | ✅ |
+| Dialog | `createDialog` on native `<dialog>` (focus trap, Esc, backdrop from the platform); `open()` mounts a detached dialog on `<body>` until it closes | ✅ |
 | Drawer | `createDrawer` — right-docked `<dialog>` variant | ✅ |
 | Card / badge | `.ui-card`, `.ui-badge` (+feedback variants) | ✅ |
 | Checkbox / radio / switch | `createChoice` on native inputs | ✅ |
@@ -176,6 +180,16 @@ Problem: a generic cold/hairline dialog did not match the established CO-PILOT
 workbench. Decision: extend the existing factory/kit with semantic tokens.
 Rejected: adding legacy `.modal` classes or feature-level `.ui-*` overrides
 would duplicate chrome authority and couple native dialogs to legacy skins.
+
+An open native `<dialog>` owns Escape. Problem: the document-level shell
+shortcuts (`application-shell/interactions/shortcuts.ts`) closed the Settings
+overlay underneath and `preventDefault()`ed the keydown, which cancels the
+dialog's platform close request and strands it on screen. Decision: the shell
+handles no Escape while any `dialog[open]` exists; every dialog owner opens
+with `showModal()`, so an open dialog is always the topmost layer. Rejected:
+stopping propagation inside each dialog misses keydowns targeted at `<body>`
+(Chromium's modal focus cycle can land there) and must be repeated by every
+dialog owner.
 
 ### Settings status colors
 

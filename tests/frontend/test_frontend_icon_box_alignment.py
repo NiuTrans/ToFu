@@ -29,6 +29,8 @@ This test parses styles.css with tinycss2 (not regex) and asserts:
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 import pytest
 
@@ -149,8 +151,13 @@ def test_zoom_bar_uses_svg_not_unicode_glyphs():
     controls must be inline SVGs inside .icon-box buttons, NOT unicode glyphs
     (⤢ U+2922, − U+2212, +) which drift off-center and fall back per-platform."""
     html = open(HTML_PATH, encoding='utf-8').read()
+    fragment = re.search(
+        r'<!-- APPLICATION_SHELL_FRAGMENT:(.*?) -->', html)
+    assert fragment, 'Paper workspace fragment not declared in index.html'
+    html = (Path(HTML_PATH).parent / 'frontend' / 'src' / 'application-shell' /
+            'fragments' / (fragment.group(1) + '.html')).read_text(encoding='utf-8')
     i = html.find('paper-pdf-toolbar')
-    assert i != -1, 'paper-pdf-toolbar not found in index.html'
+    assert i != -1, 'paper-pdf-toolbar not found in the Paper workspace fragment'
     # Bound the check to the toolbar block.
     block = html[i:html.find('paper-pdf-container', i)]
 

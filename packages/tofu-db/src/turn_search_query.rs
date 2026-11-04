@@ -11,6 +11,11 @@ use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 
+#[cfg(test)]
+thread_local! {
+    static GENERATION_META_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // Gram-posting candidate filter bounds: at most this many posting-list
 // entries read per query and this many gram row lookups per candidate set;
 // either exhaustion degrades the set to "unfiltered", never to an incomplete
@@ -44,12 +49,7 @@ fn posting_query_digests(value: &str) -> Vec<(u8, [u8; 32])> {
         .collect();
     // Rarest grams first: a discriminating gram shrinks the intersection in
     // one scan. Digest order ties keep the scan deterministic.
-    digests.sort_unstable_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    });
+    digests.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     digests.dedup_by_key(|(_, digest)| *digest);
     digests
 }
@@ -71,12 +71,7 @@ fn gram_candidate_set(
     for term in terms {
         digests.extend(posting_query_digests(term));
     }
-    digests.sort_unstable_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    });
+    digests.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     digests.dedup_by_key(|(_, digest)| *digest);
     let mut set: Option<HashSet<u64>> = None;
     for (_, digest) in digests.into_iter().take(GRAM_SCANS_PER_SET) {
@@ -158,6 +153,11 @@ mod cursor_bytes {
     }
 }
 
+#[cfg(test)]
+fn record_generation_scans(&count: &usize) {
+    GENERATION_META_SCANS.with(|current| current.set(current.get() + count));
+}
+
 fn deadline(check: &mut impl FnMut() -> bool) -> io::Result<()> {
     if check() {
         return Err(io::Error::new(
@@ -228,7 +228,9 @@ fn page(
         .map_err(|_| invalid_data("search cursor serialization failed"))?;
     let cursor = URL_SAFE.encode(bytes);
     if cursor.len() > CURSOR_BYTES {
-        return Err(crate::resource_exhaustion::domain_bound("search cursor exceeds its budget"));
+        return Err(crate::resource_exhaustion::domain_bound(
+            "search cursor exceeds its budget",
+        ));
     }
     Ok(ConversationSearchPage {
         items,
@@ -332,9 +334,12 @@ impl OpenTurnSearchProjection {
                 GRAM_EXCLUSION_NAMESPACE,
                 b"",
             )?;
-            let rows = self
-                .database
-                .entity_scan(&mut transaction, &start, &end, GRAM_EXCLUSION_SCAN_CAP)?;
+            let rows = self.database.entity_scan(
+                &mut transaction,
+                &start,
+                &end,
+                GRAM_EXCLUSION_SCAN_CAP,
+            )?;
             if rows.len() == GRAM_EXCLUSION_SCAN_CAP {
                 // Too many excluded generations to trust the index: walk.
                 gram_index_ready = false;
@@ -347,7 +352,16 @@ impl OpenTurnSearchProjection {
                 gram_excluded.insert(u64::from_be_bytes(raw[..8].try_into().unwrap()));
             }
         }
+        let conversation_blooms = [
+            bloom_query_bits(query.as_str()),
+            words
+                .iter()
+                .flat_map(|word| bloom_query_bits(word))
+                .collect::<Vec<_>>(),
+        ];
         let mut gram_sets: [Option<Option<HashSet<u64>>>; 2] = [None, None];
+        #[cfg(test)]
+        let mut generation_meta_scans = 0_usize;
         let mut gram_budget = GRAM_POSTING_READ_BUDGET;
         // Lazy activation: a candidate set is computed only after this many
         // consecutive conversations in the current phase matched nothing.
@@ -362,17 +376,33 @@ impl OpenTurnSearchProjection {
         while state.phase <= u8::from(words.len() > 1) {
             deadline(&mut deadline_elapsed)?;
             if headers_read >= CANDIDATE_SCAN_PAGE || chunks_read >= CHUNK_SCAN_PAGE {
+                #[cfg(test)]
+                record_generation_scans(&generation_meta_scans);
                 return page(items, &state, true);
             }
             let header = if state.pending.is_some() {
+                chunks_read = 0;
                 let (time, id) = state.after.as_ref().unwrap();
                 let stored_key = header_key(&transaction, *time, id)?;
                 let raw = self.database.entity_get(&mut transaction, &stored_key)?;
                 match raw {
                     Some(raw) => decode_header(&raw)?,
                     None => {
-                        state.pending = None;
-                        continue;
+                        let active_key = active_key(&transaction, id)?;
+                        let raw = self.database.entity_get(&mut transaction, &active_key)?;
+                        match raw {
+                            Some(raw) => {
+                                let header = decode_header(&raw)?;
+                                state.pending = None;
+                                state.after = None;
+                                chunks_read = 0;
+                                header
+                            }
+                            None => {
+                                state.pending = None;
+                                continue;
+                            }
+                        }
                     }
                 }
             } else if let Some(header) = headers.pop_front() {
@@ -417,10 +447,8 @@ impl OpenTurnSearchProjection {
             // phase-0 requires the phrase (whose every gram was emitted)
             // in the title, id, or one chunk; phase-1 requires every word
             // (again with every gram emitted) somewhere across them. The
-            // skipped conversation's state effects are exactly those of a
-            // non-matching one, so pages stay byte-identical while its meta
-            // namespace is never opened. A resumed conversation (matching
-            // pending generation) always runs its exact legacy scan.
+            // namespace is never opened. Its exact chunk count is already in
+            // the header, preserving scan-page budgets without metadata reads.
             if gram_index_ready
                 && state
                     .pending
@@ -428,8 +456,21 @@ impl OpenTurnSearchProjection {
                     .is_none_or(|pending| pending.generation != header.generation)
             {
                 let phase = usize::from(state.phase);
+                if !bloom_might_contain(&header.bloom, &conversation_blooms[phase]) {
+                    chunks_read = chunks_read.saturating_add(
+                        usize::try_from(header.chunk_count).unwrap_or(usize::MAX),
+                    );
+                    state.pending = None;
+                    state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
+                    barren += 1;
+                    continue;
+                }
                 if gram_sets[phase].is_none() && barren >= GRAM_ACTIVATE_AFTER_BARREN {
-                    let terms: &[&str] = if phase == 0 { &[query.as_str()] } else { &words };
+                    let terms: &[&str] = if phase == 0 {
+                        &[query.as_str()]
+                    } else {
+                        &words
+                    };
                     gram_sets[phase] = Some(gram_candidate_set(
                         &self.database,
                         &mut transaction,
@@ -438,28 +479,32 @@ impl OpenTurnSearchProjection {
                         &mut deadline_elapsed,
                     )?);
                 }
-                if let Some(candidates) = gram_sets[phase].as_ref().and_then(|set| set.as_ref())
-                {
+                if let Some(candidates) = gram_sets[phase].as_ref().and_then(|set| set.as_ref()) {
                     let skip = if candidates.is_empty() && gram_excluded.is_empty() {
                         true
                     } else {
                         let fingerprint = u64::from_be_bytes(
-                            generation_digest(&header.conversation_id, &header.generation)
-                                [..8]
+                            generation_digest(&header.conversation_id, &header.generation)[..8]
                                 .try_into()
                                 .unwrap(),
                         );
                         let generation_id = generation_dictionary::lookup(
-                            &self.database, &mut transaction,
+                            &self.database,
+                            &mut transaction,
                             &generation_digest(&header.conversation_id, &header.generation),
-                        )?.ok_or_else(|| invalid_data("published search generation has no stable ID"))?;
+                        )?
+                        .ok_or_else(|| {
+                            invalid_data("published search generation has no stable ID")
+                        })?;
                         !gram_excluded.contains(&fingerprint)
                             && !candidates.contains(&generation_id)
                     };
                     if skip {
+                        chunks_read = chunks_read.saturating_add(
+                            usize::try_from(header.chunk_count).unwrap_or(usize::MAX),
+                        );
                         state.pending = None;
-                        state.after =
-                            Some((header.updated_at_ms, header.conversation_id.clone()));
+                        state.after = Some((header.updated_at_ms, header.conversation_id.clone()));
                         continue;
                     }
                 }
@@ -491,6 +536,8 @@ impl OpenTurnSearchProjection {
                 let budget = CHUNK_SCAN_BATCH.min(CHUNK_SCAN_PAGE - chunks_read);
                 if budget == 0 {
                     state.pending = Some(pending);
+                    #[cfg(test)]
+                    record_generation_scans(&generation_meta_scans);
                     return page(items, &state, true);
                 }
                 let (mut start, end) = generation_range(
@@ -509,6 +556,10 @@ impl OpenTurnSearchProjection {
                     let mut next = pending.after.clone();
                     next.push(0);
                     start = key(&transaction, TURN_META_NAMESPACE, &next)?;
+                }
+                #[cfg(test)]
+                {
+                    generation_meta_scans += 1;
                 }
                 let rows = self
                     .database
@@ -553,7 +604,11 @@ impl OpenTurnSearchProjection {
                 !pending.phrase && pending.mask == all_bits
             };
             if matched {
-                let (snippet, role, match_field, turn) = if title_hit || (best.is_none() && !id_hit) {
+                if title_hit || id_hit {
+                    pending.best.clear();
+                }
+                let (snippet, role, match_field, turn) = if title_hit || (best.is_none() && !id_hit)
+                {
                     (String::new(), None, "title".to_owned(), None)
                 } else if id_hit {
                     (header.conversation_id.clone(), None, "id".to_owned(), None)
@@ -580,6 +635,10 @@ impl OpenTurnSearchProjection {
                 });
             }
             if items.len() >= request.limit {
+                #[cfg(test)]
+                {
+                    record_generation_scans(&generation_meta_scans);
+                }
                 return page(items, &state, false);
             }
             if matched {
@@ -587,6 +646,10 @@ impl OpenTurnSearchProjection {
             } else {
                 barren += 1;
             }
+        }
+        #[cfg(test)]
+        {
+            record_generation_scans(&generation_meta_scans);
         }
         Ok(ConversationSearchPage {
             items,
@@ -743,9 +806,270 @@ mod tests {
     }
 
     #[test]
+    fn conversation_bloom_preserves_title_and_id_recall() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), 64 * 1024 * 1024).unwrap();
+        replace(
+            &mut projection,
+            "id-needle-83742",
+            "g",
+            200,
+            "title-needle-91823",
+            &[document(0, "unrelated body")],
+        );
+        let walk = collect_pages(&projection, "id-needle-83742", 2);
+        assert_eq!(walk[0].0[0].id, "id-needle-83742");
+        assert_eq!(walk[0].0[0].match_field, "id");
+        let walk = collect_pages(&projection, "title-needle-91823", 2);
+        assert_eq!(walk[0].0[0].id, "id-needle-83742");
+        assert_eq!(walk[0].0[0].match_field, "title");
+        let mut hit = request("title-needle-91823");
+        hit.limit = 200;
+        let hits = projection.search(&hit).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "id-needle-83742");
+        assert_eq!(hits[0].match_field, "title");
+    }
+
+    #[test]
+    fn title_match_after_a_rebuild_does_not_reuse_the_old_body_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), 64 * 1024 * 1024).unwrap();
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "before",
+            100,
+            "unrelated",
+            &rows,
+        );
+        let mut request = request("needle absent");
+        request.limit = 1;
+        let first = projection
+            .search_page_until(&request, None, || false)
+            .unwrap();
+        assert!(first.items.is_empty());
+        let cursor = first.next_cursor.unwrap();
+        replace(
+            &mut projection,
+            "conversation",
+            "after",
+            200,
+            "needle absent title",
+            &rows,
+        );
+        let second = projection
+            .search_page_until(&request, Some(&cursor), || false)
+            .unwrap();
+        assert_eq!(second.items[0].match_field, "title");
+        assert_eq!(second.items[0].turn_id, None);
+        assert_eq!(second.items[0].snippet, "");
+    }
+
+    #[test]
+    fn body_match_after_a_rebuild_does_not_reuse_the_old_body_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), 64 * 1024 * 1024).unwrap();
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "before",
+            100,
+            "unrelated",
+            &rows,
+        );
+        let mut request = request("needle absent");
+        request.limit = 1;
+        let first = projection
+            .search_page_until(&request, None, || false)
+            .unwrap();
+        assert!(first.items.is_empty());
+        assert!(first.next_cursor.is_some());
+        let rows = (0..=CHUNK_SCAN_PAGE)
+            .map(|index| document(index as u32, "needle absent"))
+            .collect::<Vec<_>>();
+        replace(
+            &mut projection,
+            "conversation",
+            "after",
+            200,
+            "unrelated",
+            &rows,
+        );
+        let hits = collect_pages(&projection, "needle absent", 1)
+            .into_iter()
+            .flat_map(|(items, _, _)| items)
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].match_field, "content");
+        assert_eq!(hits[0].turn_id, Some("turn".into()));
+    }
+
+    #[test]
+    #[ignore = "explicit real-data read comparison; set TOFU_SEARCH_FIXTURE"]
+    fn real_source_projection_read_comparison() {
+        let Some(fixture) = std::env::var_os("TOFU_SEARCH_FIXTURE") else {
+            return;
+        };
+        let directory = std::env::var_os("TOFU_SEARCH_FIXTURE_OUTPUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join(format!("tofu-search-real-fixture-{}", std::process::id()))
+            });
+        let projection = if directory.join("CONTROL").exists() {
+            OpenTurnSearchProjection::open(&directory, 4 * 1024 * 1024 * 1024).unwrap()
+        } else {
+            let mut projection =
+                OpenTurnSearchProjection::initialize(&directory, 4 * 1024 * 1024 * 1024).unwrap();
+            let source = std::fs::File::open(fixture).unwrap();
+            let source = std::io::BufReader::new(source);
+            for (index, line) in std::io::BufRead::lines(source).enumerate() {
+                let line = line.unwrap();
+                let conversation: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let id = conversation["id"].as_str().unwrap();
+                let generation = "real-source-v1";
+                projection
+                    .begin_conversation_rebuild(
+                        7,
+                        11,
+                        id,
+                        generation,
+                        conversation["updated_at"]
+                            .as_u64()
+                            .unwrap_or(index as u64 + 1),
+                    )
+                    .unwrap();
+                projection
+                    .set_conversation_title(
+                        7,
+                        11,
+                        id,
+                        generation,
+                        conversation["title"].as_str().unwrap_or(""),
+                    )
+                    .unwrap();
+                let mut documents = Vec::new();
+                for turn in conversation["turns"].as_array().unwrap() {
+                    if turn["laneId"].as_str() != Some("main")
+                        || matches!(turn["status"].as_str(), Some("pending" | "running"))
+                    {
+                        continue;
+                    }
+                    crate::search_text::chunks_for_turn(
+                        turn["turnId"].as_str().unwrap(),
+                        turn["ordinal"].as_u64().unwrap(),
+                        turn["actor"].as_str().unwrap_or("assistant"),
+                        turn["projection"].as_object().unwrap(),
+                        &mut documents,
+                    );
+                }
+                for page in documents.chunks(SOURCE_PAGE_ROWS.min(documents.len().max(1))) {
+                    projection
+                        .append_conversation_page(7, 11, id, generation, page)
+                        .unwrap();
+                }
+                projection
+                    .finalize_conversation_rebuild(7, 11, id, generation)
+                    .unwrap();
+            }
+            publish_gram_index(&mut projection);
+            drop(projection);
+            OpenTurnSearchProjection::open(&directory, 4 * 1024 * 1024 * 1024).unwrap()
+        };
+        for text in ["the", "json", "tofu", "nonexistent-search-token-198273"] {
+            GENERATION_META_SCANS.with(|count| count.set(0));
+            let mut request = request(text);
+            request.limit = 20;
+            let mut cursor = None;
+            let started = std::time::Instant::now();
+            let before =
+                crate::fsync_stats::stage_calls(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ);
+            let nanos =
+                crate::fsync_stats::stage_nanos(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ);
+            let mut hits = Vec::new();
+            let mut pages = 0;
+            loop {
+                let page = projection
+                    .search_page_until(&request, cursor.as_deref(), || false)
+                    .unwrap();
+                hits.extend(page.items);
+                pages += 1;
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            eprintln!(
+                "REAL_SEARCH query={text:?} elapsed_ms={} reads={} read_nanos={} hits={} pages={pages} generation_scans={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                crate::fsync_stats::stage_calls(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ) - before,
+                crate::fsync_stats::stage_nanos(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ) - nanos,
+                hits.len(),
+                GENERATION_META_SCANS.with(std::cell::Cell::get),
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit real-data read comparison; set TOFU_SEARCH_BENCHMARK_DIR"]
+    fn production_projection_read_comparison() {
+        let Some(directory) = std::env::var_os("TOFU_SEARCH_BENCHMARK_DIR") else {
+            return;
+        };
+        let projection = OpenTurnSearchProjection::open(
+            std::path::Path::new(&directory),
+            4 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        for text in ["the", "json", "tofu", "nonexistent-search-token-198273"] {
+            GENERATION_META_SCANS.with(|count| count.set(0));
+            let mut request = request(text);
+            request.limit = 20;
+            let mut cursor = None;
+            let started = std::time::Instant::now();
+            let before =
+                crate::fsync_stats::stage_calls(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ);
+            let nanos =
+                crate::fsync_stats::stage_nanos(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ);
+            let mut hits = Vec::new();
+            let mut pages = 0;
+            loop {
+                let page = projection
+                    .search_page_until(&request, cursor.as_deref(), || false)
+                    .unwrap();
+                hits.extend(page.items);
+                pages += 1;
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            eprintln!(
+                "PRODUCTION_SEARCH query={text:?} elapsed_ms={} reads={} read_nanos={} hits={} pages={pages} generation_scans={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                crate::fsync_stats::stage_calls(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ) - before,
+                crate::fsync_stats::stage_nanos(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ) - nanos,
+                hits.len(),
+                GENERATION_META_SCANS.with(std::cell::Cell::get),
+            );
+        }
+    }
+
+    #[test]
     fn gram_index_matches_the_walk_byte_for_byte_across_a_query_battery() {
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         replace(
             &mut projection,
             "alpha",
@@ -766,7 +1090,14 @@ mod tests {
             ],
         );
         replace(&mut projection, "title", "g", 200, "alpha gamma", &[]);
-        replace(&mut projection, "cross", "g", 300, "alpha", &[document(0, "gamma")]);
+        replace(
+            &mut projection,
+            "cross",
+            "g",
+            300,
+            "alpha",
+            &[document(0, "gamma")],
+        );
         replace(
             &mut projection,
             "unicode",
@@ -817,16 +1148,68 @@ mod tests {
     }
 
     #[test]
+    fn common_posting_gram_does_not_force_a_full_chunk_walk() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), 64 * 1024 * 1024).unwrap();
+        replace(
+            &mut projection,
+            "newest",
+            "g",
+            200,
+            "plain",
+            &(0..4)
+                .map(|index| document(index, "padding"))
+                .collect::<Vec<_>>(),
+        );
+        replace(
+            &mut projection,
+            "match",
+            "g",
+            100,
+            "plain",
+            &[document(0, "to")],
+        );
+        for index in 0..5 {
+            replace(
+                &mut projection,
+                &format!("older-{index}"),
+                "g",
+                50 - index,
+                "plain",
+                &(0..4)
+                    .map(|chunk| document(chunk, "unrelated"))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let legacy = collect_pages(&projection, "to", 20);
+        publish_gram_index(&mut projection);
+        GENERATION_META_SCANS.with(|count| count.set(0));
+        let optimized = collect_pages(&projection, "to", 20);
+        let optimized_scans = GENERATION_META_SCANS.with(std::cell::Cell::get);
+        assert_eq!(optimized, legacy);
+        assert_eq!(
+            optimized_scans, 1,
+            "only the matching generation needs its meta namespace scanned"
+        );
+    }
+
+    #[test]
     fn gram_index_paginates_identically_past_the_header_page_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         for index in 0..(CANDIDATE_SCAN_PAGE + 44) {
             replace(
                 &mut projection,
                 &format!("conversation-{index:04}"),
                 "g",
                 index as u64,
-                if index % 3 == 0 { "commonword title" } else { "plain" },
+                if index % 3 == 0 {
+                    "commonword title"
+                } else {
+                    "plain"
+                },
                 &[document(0, "commonword body")],
             );
         }
@@ -859,7 +1242,8 @@ mod tests {
         // stay identical: the candidate filter only removes conversations
         // that cannot match.
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         for index in 0..(CANDIDATE_SCAN_PAGE + 44) {
             let documents: Vec<TurnSearchDocument> = (0..3)
                 .map(|chunk| {
@@ -1155,7 +1539,14 @@ mod tests {
         let mut archived = document(0, "an archived needle");
         archived.turn_id = format!("{ARCHIVED_SOURCE_PREFIX}[\"archive\",3]");
         replace(&mut projection, "archived", "g", 200, "", &[archived]);
-        replace(&mut projection, "titled", "g", 100, "needle title", &[document(0, "needle")]);
+        replace(
+            &mut projection,
+            "titled",
+            "g",
+            100,
+            "needle title",
+            &[document(0, "needle")],
+        );
         let mut request = request("needle");
         request.limit = 10;
         let hits = projection.search(&request).unwrap();
@@ -1198,7 +1589,10 @@ mod tests {
         let hit = projection.search(&request("phrase")).unwrap().remove(0);
         assert_eq!(hit.match_field, "originalContent");
         assert_eq!(hit.role.as_deref(), Some("user"));
-        assert_eq!((hit.turn_id.as_deref(), hit.ordinal), (Some("turn"), Some(1)));
+        assert_eq!(
+            (hit.turn_id.as_deref(), hit.ordinal),
+            (Some("turn"), Some(1))
+        );
         for query in [
             "x\0y".to_owned(),
             "a".repeat(513),

@@ -162,15 +162,56 @@ def test_staged_files_without_commits_are_refused_not_committed(tmp_path):
     assert not (root / 'AGENTS.md').exists()
 
 
-@pytest.mark.parametrize('layout', ['subdirectory', 'alias', 'missing', 'remote'])
+@pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.parametrize('spelling', ['symlink', 'ancestor', 'relative'])
+def test_project_alias_prepares_the_real_folder_idempotently(folder, tmp_path, monkeypatch, existing, spelling):
+    if existing:
+        prepare_managed_repository(str(folder), policy=SMALL)
+    alias = tmp_path / 'alias'
+    if spelling == 'symlink':
+        alias.symlink_to(folder, target_is_directory=True)
+        project = str(alias)
+    elif spelling == 'ancestor':
+        alias.symlink_to(folder.parent, target_is_directory=True)
+        project = str(alias / folder.name)
+    else:
+        monkeypatch.chdir(folder.parent)
+        project = './' + folder.name
+
+    prepared = prepare_managed_repository(project, policy=SMALL)
+    assert prepared.root == str(folder)
+    assert prepared.state == ('unchanged' if existing else 'created')
+    assert prepare_managed_repository(str(folder), policy=SMALL).baseline == prepared.baseline
+    assert git(folder, 'status', '--porcelain').stdout == ''
+    assert (folder / 'plan.md').read_bytes() == b'# plan\n'
+    if spelling in ('symlink', 'ancestor'):
+        assert alias.is_symlink()
+
+
+def test_project_alias_and_physical_root_share_repository_admission(tmp_path, monkeypatch):
+    from lib import integration_control as integration
+    root = tmp_path / 'project'
+    root.mkdir()
+    alias = tmp_path / 'alias'
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(integration, '_control_root', lambda: tmp_path / 'control')
+    with integration._repo_lock(str(alias)):
+        with pytest.raises(BlockingIOError):
+            with integration._file_lock(str(root), wait=False):
+                pytest.fail('The same repository was admitted through its physical path')
+    with integration._file_lock(str(root), wait=False):
+        pass  # Admission is released on scope exit.
+
+
+@pytest.mark.parametrize('layout', ['subdirectory', 'dangling_alias', 'missing', 'remote'])
 def test_roots_tofu_cannot_prepare_explain_a_remedy_without_git(tmp_path, folder, layout):
     prepare_managed_repository(str(folder), policy=SMALL)
     if layout == 'subdirectory':
         path, reason = str(folder / 'tasks'), 'subdirectory of the Git repository'
-    elif layout == 'alias':
+    elif layout == 'dangling_alias':
         alias = tmp_path / 'alias'
-        alias.symlink_to(folder, target_is_directory=True)
-        path, reason = str(alias), 'through a symlink'
+        alias.symlink_to(tmp_path / 'missing', target_is_directory=True)
+        path, reason = str(alias), 'not an existing local directory'
     elif layout == 'missing':
         path, reason = str(tmp_path / 'missing'), 'not an existing local directory'
     else:

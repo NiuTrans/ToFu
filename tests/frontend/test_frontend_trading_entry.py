@@ -92,13 +92,12 @@ def test_trading_visibility_is_flag_driven_and_applied_at_boot():
 
 def test_toggling_trading_applies_without_a_reload():
     """The settings save path must re-apply visibility, like the debug toggle."""
-    js = _read('frontend', 'src', 'runtime', 'sections', 'settings', 'save_export.js')
-    block = re.search(r'trading_enabled.*?\n\s*\}\n\s*\}', js, re.S)
-    assert block, 'trading toggle save block not found'
-    # Assert the CALL, not a mention: the surrounding comment names the helper
-    # too, so a substring check passed even with the call removed (verified by
-    # neutering it).
-    assert re.search(r'_applyTradingVisibility\s*\(\s*\)', block.group(0)), (
+    js = _read('frontend', 'src', 'features', 'settings', 'save-export.ts')
+    fn = re.search(r'function applyFeatureFlag\(.*?\n\}', js, re.S)
+    assert fn, 'typed feature-flag save owner not found'
+    assert re.search(
+        r"flag === 'trading_enabled'.*_applyTradingVisibility\?\.\(\)",
+        fn.group(0)), (
         'saving the trading toggle must CALL _applyTradingVisibility(), '
         'otherwise the change only appears after a manual reload'
     )
@@ -114,8 +113,8 @@ def test_no_restart_hint_remains_for_the_trading_toggle():
     for content, where in (
         (_index(), 'index.html'),
         (_general_panel(), 'settings_panels/general.html'),
-        (_read('frontend', 'src', 'runtime', 'sections', 'settings', 'core_panel.js'), 'core_panel.js'),
-        (_read('frontend', 'src', 'runtime', 'sections', 'settings', 'save_export.js'), 'save_export.js'),
+        (_read('frontend', 'src', 'features', 'settings', 'core-panel.ts'), 'core-panel.ts'),
+        (_read('frontend', 'src', 'features', 'settings', 'save-export.ts'), 'save-export.ts'),
         (_read('frontend', 'src', 'i18n', 'locales', 'zh.json'), 'i18n/zh.json'),
         (_read('frontend', 'src', 'i18n', 'locales', 'en.json'), 'i18n/en.json'),
     ):
@@ -157,9 +156,9 @@ def test_update_pill_has_one_source_of_truth():
         'the topbar badge renderer must also refresh the settings pill, so the '
         'two surfaces cannot disagree about whether an update exists')
 
-    core = _read('frontend', 'src', 'runtime', 'sections', 'settings', 'core_panel.js')
+    core = _read('frontend', 'src', 'features', 'settings', 'core-panel.ts')
     assert 'classList.contains(\'has-update\')' not in core, (
-        'core_panel.js must not re-derive update availability from the DOM; '
+        'core-panel.ts must not re-derive update availability from the DOM; '
         'call _renderSettingsUpdatePill instead')
 
 

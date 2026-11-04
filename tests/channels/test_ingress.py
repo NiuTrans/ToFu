@@ -65,6 +65,12 @@ def test_command_chat_owner_message_is_verbatim_human_input(channel, dispatch):
     assert '_initiator' not in call['message']
     assert call['inject_mode'] == 'steer' and call['input_actor'] == 'human'
     assert call['command_id'].startswith('channel-owner-')
+    [receipt] = channel.active_outbox()
+    assert receipt.text == '收到，总负责人已开始处理。'
+    assert receipt.origin['kind'] == 'router_receipt'
+    assert receipt.reply_to == f'{COMMAND}/7000000000000000001'
+    ingest(OWNER, make_event(COMMAND, sender=OWNER_UID, text=text), store=channel)
+    assert len(channel.active_outbox()) == 1
 
 
 def test_other_people_in_the_command_chat_are_nonhuman_candidates(channel, dispatch):

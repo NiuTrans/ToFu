@@ -82,6 +82,8 @@ global.getFolderById = (id) => _FOLDERS_STATE.find(f => f.id === id) || null;
 global.folderDefaultProjectPaths = () => [];
 global.setConversationFolder = () => {};
 global.showToast = () => {};
+global.folderDefaultProjectPaths = () => [];
+global.convIsBusy = () => false;
 
 global.sidebarSearchQuery = '';
 global.formatRelativeTime = () => '';

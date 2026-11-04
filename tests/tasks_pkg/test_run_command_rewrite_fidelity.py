@@ -273,6 +273,33 @@ def test_git_hardening_still_applies_around_a_heredoc():
     assert hardened.endswith(tail)
 
 
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX shell grammar')
+@pytest.mark.parametrize('command', [
+    # `$( (` opens a subshell; `$((` would open arithmetic expansion.
+    'x=$( (git status --short; echo listed) | sort); echo "$x"',
+    'x=` (git status --short; echo listed) | sort`; echo "$x"',
+    # The escaped trailing blank belongs to the last word.
+    'git status --short; echo listed\\ ',
+])
+def test_git_hardening_keeps_edge_blanks_that_are_shell_syntax(tmp_path, command):
+    """Hardening rewrites Git words only; the blanks at the edges of a command
+    or substitution body stay, because there they can be syntax."""
+    from lib.project_mod.command_analysis import harden_git_inspections
+    hardened = harden_git_inspections(command)
+    assert '--no-optional-locks' in hardened
+    environment = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True, env=environment)
+
+    def run(source):
+        return subprocess.run(['sh', '-c', source], cwd=tmp_path, env=environment,
+                              capture_output=True, text=True)
+
+    original, rewritten = run(command), run(hardened)
+    assert original.stdout.startswith('listed'), original
+    assert (rewritten.returncode, rewritten.stdout, rewritten.stderr) == (
+        original.returncode, original.stdout, original.stderr)
+
+
 @pytest.mark.skipif(os.name != 'posix', reason='cp fast path is posix-only')
 def test_cp_fast_path_leaves_literal_heredoc_bodies_unchanged():
     from lib.project_mod.copy_engine import plan_cp_splice

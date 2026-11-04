@@ -32,7 +32,7 @@ def test_cancelled_opencode_preserves_partial_evidence_before_cleanup(tmp_path, 
     agent = SimpleNamespace(_binary_info={}, _seed_info={},
         _guest_proxy_url='http://10.0.2.101:8765', context_id='test', session_id='test',
         logs_dir=tmp_path, _model='glm-5.3-m17', _context_tokens=200000,
-        _output_tokens=65536, _max_continuations=16, _timeout_sec=1)
+        _output_tokens=65536, _timeout_sec=1)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(module.OpenCodeGuestAgent.run(agent, 'Task', Environment(), SimpleNamespace()))
     assert order == ['download', 'download', 'cleanup']

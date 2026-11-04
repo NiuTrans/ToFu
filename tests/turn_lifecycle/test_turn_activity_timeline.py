@@ -519,6 +519,134 @@ def test_summary_time_is_not_replaced_by_archive_publication_time(phase_present)
     assert timeline['entries'][0]['durationMs'] == (239251 if phase_present else 238785)
 
 
+def _settled_compaction(timeline, task, archive_id, seq):
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    timeline = fold_activity_timeline(timeline, {
+        'type': EventType.COMPACTION, 'archiveId': archive_id, 'seq': seq,
+        'emittedAt': 1_000 * seq, 'tokensBefore': 249_784, 'msgsBefore': 670,
+    }, task)
+    return fold_activity_timeline(timeline, {
+        'type': EventType.COMPACTION_DONE, 'archiveId': archive_id, 'seq': seq + 1,
+        'emittedAt': 1_000 * seq + 500, 'tokensBefore': 249_784, 'tokensAfter': 30_628,
+        'msgsBefore': 670, 'msgsAfter': 29, 'reductionPct': 87.7,
+        'receipt': {'status': 'completed', 'trigger': 'working_set'},
+    }, task)
+
+
+def test_rebuilt_request_size_settles_only_the_compaction_row_it_names():
+    from lib.conversation_sync.validation import decode
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    timeline = _settled_compaction(None, task, 'archive-1', 1)
+    timeline = _settled_compaction(timeline, task, 'archive-2', 3)
+    before = json.loads(json.dumps(timeline))
+    event = build_event(
+        EventType.COMPACTION_REQUEST_SIZE, archiveId='archive-2', convId='conv-a',
+        tokensBefore=306_827, tokensAfter=155_100, tokenCountKind='estimated',
+        reductionPct=49.4, msgsAfter=37, ts=9)
+    settled = fold_activity_timeline(timeline, {**event, 'seq': 5, 'emittedAt': 4_600}, task)
+    decode('TurnActivityTimeline', settled)
+    assert settled['entries'][0] == before['entries'][0]
+    row, previous = settled['entries'][1], before['entries'][1]
+    assert {key: row[key] for key in ('tokensBefore', 'tokensAfter', 'reductionPercent',
+                                      'messagesAfter')} == {
+        'tokensBefore': 306_827, 'tokensAfter': 155_100, 'reductionPercent': 49,
+        'messagesAfter': 37}
+    # Only the accounting changes; the row keeps its identity, timing and fate.
+    unchanged = ('id', 'archiveId', 'status', 'durationMs', 'messagesBefore', 'attemptId', 'seq')
+    assert {key: row[key] for key in unchanged} == {key: previous[key] for key in unchanged}
+    # An unknown archive or another producer's archive leaves the projection alone.
+    assert fold_activity_timeline(
+        settled, {**event, 'archiveId': 'archive-x', 'seq': 6}, task) == settled
+    assert fold_activity_timeline(
+        settled, {**event, 'seq': 7}, _task(_attemptId='attempt-other', id='task-other')) == settled
+
+
+@pytest.mark.parametrize('restored,reason,expected', [
+    (None, 'no_witness', ['superseded', 'superseded', 'succeeded']),
+    ('archive-1', 'restored', ['succeeded', 'superseded', 'succeeded']),
+    ('archive-2', 'restored', ['succeeded', 'succeeded', 'succeeded']),
+    # A suspended checkpoint is the latest state and has no compaction row.
+    ('checkpoint', 'restored', ['succeeded', 'succeeded', 'succeeded']),
+])
+def test_resume_marks_only_the_compactions_it_did_not_reuse(restored, reason, expected):
+    from lib.conversation_sync.validation import decode
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    interrupted = _task()
+    timeline = _settled_compaction(None, interrupted, 'archive-1', 1)
+    timeline = _settled_compaction(timeline, interrupted, 'archive-2', 3)
+    # A producer outside the replaced lineage keeps its own context.
+    timeline = _settled_compaction(
+        timeline, _task(_attemptId='attempt-other', id='task-other'), 'archive-other', 5)
+    before = json.loads(json.dumps(timeline))
+    event = build_event(
+        EventType.COMPACTION_RESUME, convId='conv-a', restored=restored is not None,
+        reason=reason, sourceAttemptIds=['attempt-a'], ts=9,
+        **({'archiveId': restored} if restored else {}))
+    resumed = fold_activity_timeline(
+        timeline, {**event, 'seq': 1, 'emittedAt': 9_000},
+        _task(_attemptId='attempt-b', id='task-b'))
+    assert [entry['status'] for entry in resumed['entries']] == expected
+    decode('TurnActivityTimeline', resumed)
+    if 'superseded' not in expected:
+        assert resumed == before
+        return
+    for previous, entry in zip(before['entries'], resumed['entries']):
+        if entry['status'] != 'superseded':
+            assert entry == previous
+            continue
+        # The real work stays inspectable; only its fate changes.
+        assert {key: entry[key] for key in ('id', 'archiveId', 'tokensBefore', 'tokensAfter',
+                                            'durationMs', 'attemptId', 'seq')} == {
+            key: previous[key] for key in ('id', 'archiveId', 'tokensBefore', 'tokensAfter',
+                                           'durationMs', 'attemptId', 'seq')}
+        assert entry['summaryKey'] == 'activity.compaction.superseded'
+        assert entry['detailKey'] == 'activity.compaction.supersededDetail'
+        assert entry['detailArgs']['reasonKey'] == (
+            'activity.compaction.resumeReason.noWitness' if restored is None
+            else 'activity.compaction.resumeReason.earlierRestored')
+    # A superseded row keeps its first cause; a later resume of the same
+    # lineage marks only the rows that were still in effect.
+    later = fold_activity_timeline(
+        resumed, {**event, 'restored': False, 'reason': 'history_changed', 'seq': 2},
+        _task(_attemptId='attempt-c', id='task-c'))
+    causes = {entry['archiveId']: (entry.get('detailArgs') or {}).get('reasonKey')
+              for entry in later['entries']}
+    first = ('activity.compaction.resumeReason.noWitness' if restored is None
+             else 'activity.compaction.resumeReason.earlierRestored')
+    assert causes == {
+        'archive-1': (first if restored is None
+                      else 'activity.compaction.resumeReason.historyChanged'),
+        'archive-2': first,
+        'archive-other': None,
+    }
+
+
+def test_restoring_an_already_superseded_archive_still_marks_later_rows():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    first = _task()
+    timeline = _settled_compaction(None, first, 'archive-1', 1)
+    discarded = build_event(EventType.COMPACTION_RESUME, convId='conv-a', restored=False,
+                            reason='settings_changed', sourceAttemptIds=['attempt-a'], ts=1)
+    second = _task(_attemptId='attempt-b', id='task-b')
+    timeline = fold_activity_timeline(timeline, {**discarded, 'seq': 1}, second)
+    timeline = _settled_compaction(timeline, second, 'archive-2', 3)
+    restored = build_event(EventType.COMPACTION_RESUME, convId='conv-a', restored=True,
+                           reason='restored', archiveId='archive-1',
+                           sourceAttemptIds=['attempt-b', 'attempt-a'], ts=2)
+    timeline = fold_activity_timeline(
+        timeline, {**restored, 'seq': 1}, _task(_attemptId='attempt-c', id='task-c'))
+    assert [(entry['archiveId'], entry['status'], entry['detailArgs']['reasonKey'])
+            for entry in timeline['entries']] == [
+        ('archive-1', 'superseded', 'activity.compaction.resumeReason.settingsChanged'),
+        ('archive-2', 'superseded', 'activity.compaction.resumeReason.earlierRestored'),
+    ]
+
+
 def test_failed_compaction_receipt_remains_a_visible_warning_fact():
     from lib.turn_activity_timeline import fold_activity_timeline
 
@@ -1761,6 +1889,41 @@ def test_turn_authority_persists_and_replays_activity_timeline(chat_sidecar):
     replay = read_events(attempt_id, user_id=1)
     hydrated_tail = replay[-1]['payload']['projection']
     assert hydrated_tail['activityTimeline'] == timeline
+
+
+def test_resume_report_persists_superseded_compaction(chat_sidecar):
+    """The registered report crosses the durable writer and the sync contract."""
+    from lib.turn_lifecycle import bind_task, create_turn_pair, get_turn, record_task_event
+
+    token = uuid.uuid4().hex[:10]
+    created = create_turn_pair(
+        f'resume-conv-{token}', command_id=f'resume-pair-{token}',
+        input_projection={'content': 'hello'}, config={'model': 'kimi-k3'}, user_id=1,
+        conversation_defaults={'allowCreate': True, 'title': 'resume', 'settings': {}},
+    )
+    attempt_id = created['attempt']['attemptId']
+    bind_task(attempt_id, f'resume-task-{token}', user_id=1)
+    task = {'_attemptId': attempt_id, '_userId': 1, 'id': f'resume-task-{token}',
+            'status': 'running', 'content': '', 'thinking': '', 'toolRounds': [],
+            'model': 'kimi-k3', 'config': {'model': 'kimi-k3'}}
+    events = [
+        {'type': EventType.COMPACTION, 'archiveId': 'archive-a', 'tokensBefore': 249_784,
+         'msgsBefore': 670, 'emittedAt': 1_000},
+        {'type': EventType.COMPACTION_DONE, 'archiveId': 'archive-a', 'tokensBefore': 249_784,
+         'tokensAfter': 30_628, 'msgsBefore': 670, 'msgsAfter': 29, 'reductionPct': 87.7,
+         'receipt': {'status': 'completed'}, 'emittedAt': 1_500},
+        {**build_event(EventType.COMPACTION_RESUME, convId=f'resume-conv-{token}',
+                       restored=False, reason='no_witness',
+                       sourceAttemptIds=[attempt_id], ts=2),
+         'emittedAt': 2_000},
+    ]
+    for seq, event in enumerate(events):
+        assert record_task_event(task, {**event, 'seq': seq}) is True
+    turn = get_turn(f'resume-conv-{token}', created['turn']['turnId'], user_id=1)
+    [entry] = turn['projection']['activityTimeline']['entries']
+    assert entry['status'] == 'superseded'
+    assert entry['tokensAfter'] == 30_628
+    assert entry['detailArgs']['reasonKey'] == 'activity.compaction.resumeReason.noWitness'
 
 
 def test_stream_boundary_emits_model_span_and_schema_isolation(monkeypatch):

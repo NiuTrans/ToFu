@@ -46,9 +46,11 @@ def test_saved_result_cards_remain_readable_at_narrow_width(page, live_server, t
     assert stylesheet.ok
     page.add_style_tag(content=stylesheet.text())
     host = page.locator('#artifact-visual-fixture')
-    assert host.locator('.ptool-artifact-details').count() == 2
+    assert host.locator('.ptool-artifact-request').count() == 2
     assert host.locator('.ptool-result-block').count() == 2
-    assert 'byte 16,384 · selector /items/0' in host.inner_text()
+    host.locator('details.ptool-result-block').first.locator('summary').click()
+    assert 'Starting byte: 16,384' in host.inner_text()
+    assert 'JSON selector: /items/0' in host.inner_text()
     assert 'fetch_url' in host.inner_text()
     assert 'truncated evidence' in host.inner_text()
     assert 'trq1.signed' not in host.inner_text()
@@ -59,6 +61,7 @@ def test_saved_result_cards_remain_readable_at_narrow_width(page, live_server, t
     }""")
     assert host.is_visible()
     # CSS must be the shipped asset, not the unstyled browser default.
-    assert host.locator('.ptool-text').first.evaluate(
-        "node => getComputedStyle(node).fontFamily.includes('JetBrains Mono')")
+    assert host.locator('.ptool-artifact-request').first.evaluate(
+        "node => getComputedStyle(node).fontFamily === getComputedStyle(node.closest('.conversation-surface')).fontFamily "
+        "&& getComputedStyle(node).fontFamily.includes('Inter')")
     host.screenshot(path=str(tmp_path / 'artifact-continuation-narrow.png'))

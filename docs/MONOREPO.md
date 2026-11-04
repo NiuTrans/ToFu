@@ -264,6 +264,17 @@ scripts and retained tests, including generated protocol clients. `check_monorep
 an ignored file left on a developer machine cannot satisfy a release gate.
 The scripts allow-list in `.gitignore` records these retained owners.
 
+Every tracked `pyproject.toml` that declares `project.license` uses a PEP 639
+SPDX expression string, a `setuptools>=77` build floor for setuptools members,
+and no `License ::` classifier; `check_monorepo.py` rejects each regression.
+Problem: setuptools deprecated the PEP 621 license table (80.10.2 through
+84.2.1 warn on every build and schedule removal for 2027-02-18), while uv
+workspace syncs, export bundling and installer admission build members in
+isolation against the newest setuptools, so a table would stop building with
+no source change. setuptools>=77 also refuses license classifiers beside an
+expression. Alternative considered: capping setuptools below the removal,
+rejected because it freezes every member's build backend.
+
 The guard captures one tracked-path inventory for each `check()` invocation and
 reads the current working-copy source. Problem: a process-global path cache
 hid newly tracked imports and retained deleted paths on a second check.

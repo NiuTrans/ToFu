@@ -20,6 +20,10 @@ export function installShellShortcuts(scope: LifecycleScope, document: Document,
     const e = event as KeyboardEvent;
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); ports.toggleSearch(); return; }
     if (e.key !== 'Escape') return;
+    // Every native <dialog> is shown modally, in the top layer above these
+    // overlays; Escape is its platform close request. Handling it here would
+    // close the overlay underneath and cancel that request, stranding the dialog.
+    if (document.querySelector('dialog[open]')) return;
     const search = document.getElementById('sidebarSearchWrapper');
     if (search && search.style.display !== 'none') { ports.closeSearch(); e.preventDefault(); return; }
     for (const [id, close] of priorities) {

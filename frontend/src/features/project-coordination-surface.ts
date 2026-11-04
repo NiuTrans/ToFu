@@ -7,7 +7,10 @@
 import { createButton } from '../ui';
 import { t } from '../i18n';
 import { apiFailure, isTransientApiFailure } from '../api/errors';
-import { coordinatorProgressHeadline, createCoordinatorProgress, type CoordinatorProgressView } from './coordinator-progress';
+import {
+  coordinatorProgressHeadline, coordinatorProgressText, createCoordinatorProgress,
+  type CoordinatorProgressCard, type CoordinatorProgressView,
+} from './coordinator-progress';
 import type { CoordinatorProgressBoard, CoordinatorReportState } from '../api/project-coordination.generated';
 import { coordinationText } from './project-coordination-board';
 import { createRouterWorkerModel, type RouterWorkerModelControl } from './router-worker-model';
@@ -72,11 +75,12 @@ export function createProjectCoordinationSurface(ports: {
   // The exact report this mount acknowledged; a failed command clears it for retry.
   let acknowledgedTurnId = '';
   let unreadInView: (() => void) | null = null;
-  /* The Coordinator's Worker model control survives repaints of the same
-   * Coordinator conversation: it stays attached (an open choice is never torn
-   * down by a push frame) and reads its value once per visit. */
-  let workerModel: { key: string; control: RouterWorkerModelControl } | undefined;
-  function dropWorkerModel() { workerModel?.control.destroy(); workerModel = undefined; }
+  /* The task board card and the Router's Worker model control in its footer
+   * survive repaints of the same Coordinator conversation: both stay attached
+   * (an open choice is never torn down by a push frame) and the control reads
+   * its value once per visit. */
+  let boardCard: { key: string; card: CoordinatorProgressCard; workerModel?: RouterWorkerModelControl } | undefined;
+  function dropBoardCard() { boardCard?.workerModel?.destroy(); boardCard?.card.el.remove(); boardCard = undefined; }
   let unsubscribe: (() => void) | undefined;
   let subscribedPath = '';
   const norm = (path: string) => path.replace(/[/\\]+$/, '');
@@ -146,7 +150,7 @@ export function createProjectCoordinationSurface(ports: {
       projectSignature = projectKey;
       signature = key; generation++;
       flight?.abort(); flight = null; pending = false;
-      dropWorkerModel();
+      dropBoardCard();
       if (projectChanged) {
         bindingFailed = false; bindingStale = false;
         /* Paint the row shell synchronously on a folder switch. Clearing the
@@ -221,14 +225,15 @@ export function createProjectCoordinationSurface(ports: {
       const progressUnavailable = progressRead.status === 'rejected';
       const progress = progressRead.status === 'fulfilled' ? progressRead.value : null;
       // A board belongs to exactly one binding; a replaced Coordinator starts empty.
-      const board: CoordinatorProgressBoard | null = progress && binding
+      const progressBoard: CoordinatorProgressBoard | null = progress && binding
         && progress.conversationId === binding.conversationId && progress.bindingRevision === binding.revision
         ? progress.board : null;
+      const translation = progressBoard ? progress?.translation : undefined;
 
       if (!detailsPending && reportRead.status === 'fulfilled') lastReport = reportRead.value;
       const report = lastReport?.conversationId === binding?.conversationId
         && lastReport?.bindingRevision === binding?.revision ? lastReport : undefined;
-      const facts = JSON.stringify([key, detailsPending, binding, board, progressUnavailable, report]);
+      const facts = JSON.stringify([key, detailsPending, binding, progressBoard, translation, progressUnavailable, report]);
       if (facts === rendered) return;
       rendered = facts;
 
@@ -245,19 +250,23 @@ export function createProjectCoordinationSurface(ports: {
         if (sidebarCurrent || valid()) scope.navigate(id);
       };
 
-      let keptControl: HTMLElement | null = null;
-      if (ports.mode !== 'sidebar' && scope.workerModel && binding?.availability === 'available'
-        && binding.conversationId === scope.currentConversationId) {
-        const controlKey = JSON.stringify([scope.path, binding.conversationId]);
-        if (workerModel?.key !== controlKey) {
-          dropWorkerModel();
-          workerModel = { key: controlKey, control: createRouterWorkerModel(scope.workerModel, scope.path) };
+      // A Coordinator without a progress port (the Router Watchdog) has no board to show.
+      const coordinatorChat = ports.mode !== 'sidebar' && binding?.availability === 'available'
+        && binding.conversationId === scope.currentConversationId ? binding.conversationId : '';
+      if (coordinatorChat && scope.progress) {
+        const boardKey = JSON.stringify([scope.path, coordinatorChat]);
+        if (boardCard?.key !== boardKey) {
+          dropBoardCard();
+          // The Worker model sits in the board's footer beside Manage work, not on a line of its own.
+          const workerModel = scope.workerModel ? createRouterWorkerModel(scope.workerModel, scope.path) : undefined;
+          boardCard = { key: boardKey, workerModel, card: createCoordinatorProgress({
+            open: boardOpen, finishedOpen, footer: workerModel?.el,
+            toggle: open => { boardOpen = open; }, toggleFinished: open => { finishedOpen = open; },
+          }) };
         }
-        keptControl = workerModel.control.el;
-      } else dropWorkerModel();
+      } else dropBoardCard();
       ports.sidebar.replaceChildren();
-      for (const child of [...ports.canvas.childNodes]) if (child !== keptControl) child.remove();
-      if (keptControl && keptControl.parentNode !== ports.canvas) ports.canvas.prepend(keptControl);
+      for (const child of [...ports.canvas.childNodes]) if (child !== boardCard?.card.el) child.remove();
       if (ports.mode !== 'canvas' && norm(ports.sidebarPath()) === norm(scope.path)) {
         const available = binding?.availability === 'available';
         if (available) coordinatorByPath.set(norm(scope.path), binding!.conversationId);
@@ -286,8 +295,8 @@ export function createProjectCoordinationSurface(ports: {
         if (available) {
           meta.textContent = detailsPending ? t('common.loading')
             : progressUnavailable ? t('projectCoordination.boardUnavailable')
-            : coordinatorProgressHeadline(board) ?? t('projectCoordination.sidebarIdle');
-          if (board) row.title = `${t('projectCoordination.openCoordinator')} · ${board.summary}`;
+            : coordinatorProgressHeadline(progressBoard) ?? t('projectCoordination.sidebarIdle');
+          if (progressBoard) row.title = `${t('projectCoordination.openCoordinator')} · ${coordinatorProgressText(translation, progressBoard.summary)}`;
         } else {
           meta.textContent = t(!binding ? 'projectCoordination.error' : binding.availability === 'unbound'
             ? 'projectCoordination.unbound' : 'projectCoordination.unavailable');
@@ -331,15 +340,11 @@ export function createProjectCoordinationSurface(ports: {
       if (ports.mode === 'sidebar') {
         // The sidebar owns navigation only, never the active conversation canvas.
       } else if (binding?.availability === 'available' && binding.conversationId === scope.currentConversationId) {
-        // A Coordinator without a progress port (the Router Watchdog) has no board to show.
-        if (scope.progress) {
+        if (boardCard) {
           const view: CoordinatorProgressView = progressUnavailable ? { kind: 'unavailable' }
-            : board ? { kind: 'board', board } : { kind: 'empty' };
-          ports.canvas.append(createCoordinatorProgress(view, {
-            open: boardOpen, finishedOpen,
-            toggle: open => { boardOpen = open; }, toggleFinished: open => { finishedOpen = open; },
-            manage: details, retry: invalidate,
-          }));
+            : progressBoard ? { kind: 'board', board: progressBoard, translation } : { kind: 'empty' };
+          boardCard.card.render(view, { manage: details, retry: invalidate });
+          if (boardCard.card.el.parentNode !== ports.canvas) ports.canvas.append(boardCard.card.el);
           const body = ports.canvas.querySelector('.coordinator-progress-body');
           if (body) body.scrollTop = boardScroll;
         }
@@ -413,7 +418,7 @@ export function createProjectCoordinationSurface(ports: {
   };
   return { refresh, coordinatorId, destroy() {
     alive = false; generation++; flight?.abort(); flight = null; pending = false; unreadInView = null;
-    dropWorkerModel();
+    dropBoardCard();
     window.removeEventListener('online', recoverBinding);
     document.removeEventListener('visibilitychange', recoverBinding);
     unsubscribe?.(); coordinatorByPath.clear(); settled = undefined;

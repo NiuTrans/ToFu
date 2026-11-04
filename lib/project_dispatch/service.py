@@ -415,12 +415,32 @@ class ProjectDispatchService:
             worker_control(self.repository, task, assignment)
             revision = assignment['grant']['revision'] - int(assignment['grant']['revoked'])
             execution = self.repository.revoke(assignment['id'], expected_revision=revision)
-            if execution is not None:
-                provenance = (f"Revoked by Coordinator conversation {task.get('convId') or '?'} "
-                              f"(task {task.get('id') or '?'}) calling cancel_project_work "
-                              f"on assignment {assignment['id']}.")
-                self._cancel_execution(execution['attemptId'], assignment['grant']['owner'], provenance)
+            self._cancel_worker(assignment, execution, (
+                f"Revoked by Coordinator conversation {task.get('convId') or '?'} "
+                f"(task {task.get('id') or '?'}) calling cancel_project_work "
+                f"on assignment {assignment['id']}."))
         return self.view_for_coordinator(assignment['id'], scope=scope)
+
+    def _cancel_worker(self, assignment, execution, provenance):
+        """Stop the bound attempt and every other live attempt in its Worker conversation.
+
+        A turn that ran without the binding (an older unbound wake, human input)
+        is unreachable through the association, so it gets the same grant
+        revocation cause. A Coordinator continuation grant's recipient is the
+        Coordinator conversation itself; its live turns are never swept.
+        """
+        owner, request = assignment['grant']['owner'], assignment['request']
+        attempts = [execution['attemptId']] if execution is not None else []
+        if request['recipientId'] != request['coordinatorId']:
+            from lib.tasks_pkg.manager.runtime import chat_task_runtime
+            for task in chat_task_runtime.snapshot_owned(user_id=owner):
+                attempt_id = task.get('_attemptId') or task.get('attemptId')
+                if (task.get('convId') == request['recipientId'] and attempt_id
+                        and task.get('status') in ('pending', 'running')
+                        and not task.get('aborted') and attempt_id not in attempts):
+                    attempts.append(attempt_id)
+        for attempt_id in attempts:
+            self._cancel_execution(attempt_id, owner, provenance)
 
     def _cancel_execution(self, attempt_id, owner, provenance):
         cancel = getattr(self.commands, 'abort_project_attempt', None)
@@ -435,13 +455,12 @@ class ProjectDispatchService:
         # All revocations linearize with the existing final publication lock.
         with self._publication_lock():
             execution = self.repository.revoke(assignment_id, expected_revision=expected_revision)
-            if execution is not None:
-                # Grant revocation and prepublication guards linearize under the
-                # same existing lock; ACK loss only retries this bound cancel.
-                self._cancel_execution(
-                    execution['attemptId'], assignment['grant']['owner'],
-                    f"Revoked through the project assignment revoke API by "
-                    f"{getattr(principal, 'subject_id', None) or '?'} on assignment {assignment_id}.")
+            # Grant revocation and prepublication guards linearize under the
+            # same existing lock; ACK loss only retries this bound cancel.
+            self._cancel_worker(
+                assignment, execution,
+                f"Revoked through the project assignment revoke API by "
+                f"{getattr(principal, 'subject_id', None) or '?'} on assignment {assignment_id}.")
         return self.view(assignment_id, principal=principal)
 
     def publish(self, assignment_id, *, principal, expected_revision, result_revision, expected_checkpoint_sha):

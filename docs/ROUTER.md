@@ -386,9 +386,11 @@ display-name order and labels), never a second model list; its first option,
 the owner's default model, sends `null`, a refused choice keeps the stored
 value with the server's message, and a failed read shows its error beside a
 retry. The Global Router's control is in its header;
-every other Project Router's sits at the top of its coordinator conversation
-surface, above the task board, where it stays attached across repaints and
-reads once per visit; the Watchdog conversation has none. A
+every other Project Router's leads the footer of the task board on its
+coordinator conversation surface, beside "Manage work" rather than on a line
+of its own (the board starts folded, so the control shows once it is opened),
+where it stays attached across repaints and reads once per visit; the Watchdog
+conversation has none. A
 conversation is the Global Router when its project path is the router home the
 Global Router read last reported (the `_globalRouter` setting is a server-side
 presentation marker the settings contract does not project to the browser).
@@ -629,8 +631,8 @@ setting (event-driven model turns the owner did not choose).
   main coordinator does, the Worker model control, the standing-instructions
   list (`router-instructions.ts`: read only when opened, state, scope, pause,
   resume, cancel, cursor paging) and the controls other owners contribute
-  (`hosts.controls`). Project Routers show the same Worker model control above
-  the task board on their coordinator conversation surface
+  (`hosts.controls`). Project Routers show the same Worker model control in
+  the task board's footer on their coordinator conversation surface
   (`project-coordination-surface.ts`). `router-watchdog.ts` contributes the
   health-check disclosure to that header (off: turn on, which ensures the
   Watchdog; on: the periodic review switch, cron cadence and a button that

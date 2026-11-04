@@ -19,14 +19,13 @@ function fixture() {
     { id: 'ordinary', title: 'Owner conversation', _serverTurnCount: 1 },
     { id: 'owner-worker-like', title: 'worker-title only', _serverTurnCount: 1 },
   ];
-  const renderRow = vi.fn((conversation: { id: string }) => `<div class="conv-item" data-conv-id="${conversation.id}">${conversation.id}</div>`);
+  const renderRow = vi.fn((conversation: { id: string }) => `<div class="conv-item" data-conv-id="${conversation.id}">${conversation.id === 'worker-empty' ? '<span class="conv-review-dot"></span>' : ''}${conversation.id}<div class="conv-actions"><button class="conv-copy-id" data-conv-id="${conversation.id}">copy</button><button class="conv-rename" data-conv-id="${conversation.id}">rename</button></div></div>`);
   const open = vi.fn();
   const refresh = vi.fn();
   const group = createCoordinatorConversationGroup({
     host, rows: () => rows, readPage, adoptPage: page => { for (const row of page.conversations) rows.push({ id: row.conversationId, title: row.title, _coordinatorSource: row.coordinatorId, updatedAt: row.updatedAt }); }, open, renderRow,
     activeConversationId: () => 'worker-new',
     isRunning: conversation => conversation.id === 'worker-new',
-    hasUnread: conversation => conversation.id === 'worker-empty',
     readExpanded: vi.fn(() => null),
     writeExpanded: vi.fn(),
     refresh,
@@ -49,15 +48,22 @@ it('is collapsed by default, preserves coordinator provenance, and opens all chi
   expect(button.getAttribute('aria-expanded')).toBe('false');
   expect(f.host.textContent).toContain('projectCoordination.conversations:');
   await vi.waitFor(() => expect(f.host.querySelector('.coordinator-conversations-count')?.textContent).toBe('3'));
-  expect(f.host.querySelector('.coordinator-conversations-unread')).not.toBeNull();
+  // A reply awaiting review is marked on its own row only, never on the folded header.
+  expect(button.querySelector('.conv-review-dot')).toBeNull();
   expect(f.host.textContent).toContain('projectCoordination.running:1');
   expect(f.host.querySelectorAll('.coordination-read-error')).toHaveLength(0);
   button.click();
   await vi.waitFor(() => expect(button.getAttribute('aria-expanded')).toBe('true'));
   const children = [...f.host.querySelectorAll('.conv-item')];
   expect(children.map(row => row.getAttribute('data-conv-id'))).toEqual(['worker-new', 'worker-empty', 'worker-old']);
+  expect(children.map(row => !!row.querySelector('.conv-review-dot'))).toEqual([false, true, false]);
   (children[1] as HTMLElement).click();
   expect(f.open).toHaveBeenCalledWith('worker-empty');
+  const copy = children[1].querySelector<HTMLButtonElement>('.conv-copy-id')!;
+  expect(copy.dataset.convId).toBe('worker-empty');
+  expect(children[1].querySelector('.conv-rename')).toBeNull();
+  copy.click();
+  expect(f.open).toHaveBeenCalledTimes(1);
   f.group.destroy();
 });
 
@@ -232,7 +238,7 @@ function sidebar(initial: { pinned?: string; settled?: boolean; view?: string[] 
     rows: () => rows,
     readPage: vi.fn(async () => ({ conversations: [], nextCursor: null, coverage: 'complete' as const })),
     open, activeConversationId: () => active,
-    renderRow: row => `<div class="conv-item" data-conv-id="${row.id}"><span class="conv-title">${row.title}</span><div class="conv-actions"></div></div>`,
+    renderRow: row => `<div class="conv-item" data-conv-id="${row.id}"><span class="conv-title">${row.title}</span><div class="conv-actions"><button class="conv-copy-id" data-conv-id="${row.id}">copy</button><button class="conv-rename" data-conv-id="${row.id}">rename</button></div></div>`,
   });
   const refresh = () => groups.refresh(rows.filter(row => state.view.includes(row.id)));
   const historyRows = () => [...document.querySelectorAll<HTMLElement>('.coordinator-history-entry .conv-item')].map(row => row.dataset.convId);
@@ -295,21 +301,26 @@ it('reserves pinned ids, keeps a replaced Coordinator row current, and opens it'
   f.refresh();
   expect(f.historyRows()).toEqual(['replaced']);
   const row = () => document.querySelector<HTMLElement>('.coordinator-history-entry .conv-item')!;
-  expect(row().querySelector('.conv-actions')).toBeNull();
+  expect(row().querySelector<HTMLButtonElement>('.conv-copy-id')!.dataset.convId).toBe('replaced');
+  expect(row().querySelector('.conv-rename')).toBeNull();
   expect(row().getAttribute('role')).toBe('button');
   f.rows.find(item => item.id === 'replaced')!.title = 'Renamed coordinator';
   f.setActive('replaced');
   f.refresh();
-  expect(row().textContent).toBe('Renamed coordinator');
+  expect(row().querySelector('.conv-title')!.textContent).toBe('Renamed coordinator');
   expect(row().classList.contains('active')).toBe(true);
   row().querySelector<HTMLElement>('.conv-title')!.click();
   expect(f.open).toHaveBeenCalledWith('replaced');
+  const copy = row().querySelector<HTMLButtonElement>('.conv-copy-id')!;
+  copy.click();
+  copy.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  expect(f.open).toHaveBeenCalledTimes(1);
   row().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   expect(f.open).toHaveBeenCalledTimes(2);
   f.groups.destroy();
 });
 
-it('folds with the date groups\' down chevron and marks unread work with the review dot', async () => {
+it('folds with the date groups\' down chevron and leaves review marks to the rows', async () => {
   const f = fixture();
   f.group.update('coordinator-1');
   const button = f.host.querySelector<HTMLButtonElement>('.coordinator-conversations-toggle')!;
@@ -317,11 +328,9 @@ it('folds with the date groups\' down chevron and marks unread work with the rev
   expect(chevron.getAttribute('aria-hidden')).toBe('true');
   expect(chevron.querySelector('polyline')?.getAttribute('points')).toBe('6 9 12 15 18 9');
   expect(button.classList.contains('is-expanded')).toBe(false);
-  const unread = button.querySelector<HTMLElement>('.coordinator-conversations-unread')!;
-  expect(unread.classList.contains('conv-review-dot')).toBe(true);
-  expect(unread.textContent).toBe('');
   await vi.waitFor(() => expect(button.getAttribute('aria-label')).toBe(
-    'projectCoordination.conversations: (3), projectCoordination.running:1, sidebar.reviewState:'));
+    'projectCoordination.conversations: (3), projectCoordination.running:1'));
+  expect(button.querySelector('.conv-review-dot')).toBeNull();
   button.click();
   expect(button.classList.contains('is-expanded')).toBe(true);
   f.group.destroy();

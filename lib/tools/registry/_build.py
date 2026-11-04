@@ -169,8 +169,8 @@ def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
         from lib.tools.background_guidance import project_no_saved_conversation_tools
         tools = project_no_saved_conversation_tools(tools)
     elif not ctx.delivers_deferred_completions:
-        from lib.tools.background_guidance import project_pull_only_completion_tools
-        tools = project_pull_only_completion_tools(tools)
+        from lib.tools.background_guidance import project_run_completion_tools
+        tools = project_run_completion_tools(tools)
     return tools
 
 
@@ -696,9 +696,9 @@ def _build_background(ctx: ToolContext) -> list[dict]:
     # or code_exec, swarm via spawn_agents), and are deliberately NOT
     # retracted by the lean seam — retracting them while keeping
     # run_command(background=true) would strand live handles behind a
-    # dead-end pointer. A storage-free task keeps them: its background
-    # commands are pull-only (no conversation to publish into), which is
-    # exactly when an explicit control is needed.
+    # dead-end pointer. A task without a saved conversation keeps them: its
+    # handed-off commands reach only its own run (no conversation to publish
+    # into), which is exactly when an explicit control is needed.
     has_swarm = any(
         tool.get('function', {}).get('name') == 'spawn_agents'
         for tool in ctx.executable_tool_catalog)
@@ -707,14 +707,14 @@ def _build_background(ctx: ToolContext) -> list[dict]:
         return []
     from lib.tools.poll import KILL_TOOL, POLL_TOOL
     if ctx.no_saved_conversation:
-        # Neither a background command nor a sub-agent can exist in such a
-        # request, so kill could stop nothing; poll keeps cross-conversation
-        # task handles.
+        # Such a request starts no sub-agent, but a command still running
+        # after AUTO_BACKGROUND_AFTER_S hands off, so poll and kill address
+        # its bg_* handles and cross-conversation task handles.
         from lib.tools.background_guidance import project_no_saved_conversation_tools
-        return project_no_saved_conversation_tools([POLL_TOOL])
+        return project_no_saved_conversation_tools([POLL_TOOL, KILL_TOOL])
     if not ctx.delivers_deferred_completions:
-        from lib.tools.background_guidance import project_pull_only_completion_tools
-        return project_pull_only_completion_tools([POLL_TOOL, KILL_TOOL])
+        from lib.tools.background_guidance import project_run_completion_tools
+        return project_run_completion_tools([POLL_TOOL, KILL_TOOL])
     return [POLL_TOOL, KILL_TOOL]
 
 

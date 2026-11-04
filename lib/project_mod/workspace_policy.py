@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 from typing import Literal
 
 from lib.git_checkpoint_policy import git_policy_environment
-from lib.git_runtime import git_executable
+from lib.git_runtime import GIT_METADATA_CWD, GIT_STALL_SECONDS, git_executable
 
 WorkspaceMode = Literal['direct', 'isolated']
 WORKSPACE_MODES = frozenset({'direct', 'isolated'})
@@ -33,22 +32,35 @@ def _mode(value: str, source: str) -> WorkspaceMode:
     return normalized  # type: ignore[return-value]
 
 
-def resolve_workspace_mode(project_path: str | Path) -> WorkspaceMode:
+def resolve_workspace_mode(project_path: str | Path, *, cancel=None) -> WorkspaceMode:
     """Read bounded local configuration; unknown/failed reads never opt out.
 
     Callers pass a verified canonical Git repository. No cache or tree walk is
     needed: one local config read per admission (zero with a process override).
     Git routing/config environment variables cannot redirect this policy read.
+    The read waits as long as the checkout volume keeps it running; only the
+    shared Git stall window or ``cancel`` (re-raised as ``ProcessCancelled``)
+    ends it early.
     """
     override = os.environ.get('TOFU_WORKSPACE_MODE')
     if override is not None:
         return _mode(override, 'TOFU_WORKSPACE_MODE')
+    from lib.project_mod.activity_supervised_process import (
+        ProcessCancelled, run_activity_supervised)
     try:
-        result = subprocess.run(
-            [git_executable(), 'config', '--local', '--get-all', 'tofu.workspaceMode'],
-            cwd=str(project_path), env=git_policy_environment(), text=True,
-            capture_output=True, timeout=10, check=False)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        from .workspace_lease import _checkout_binding
+        binding = _checkout_binding(project_path)
+        if binding is None:
+            raise WorkspacePolicyError('Workspace policy requires a Git repository')
+        git_dir = binding[2]
+        result = run_activity_supervised(
+            [git_executable(), f'--git-dir={git_dir}',
+             'config', '--local', '--get-all', 'tofu.workspaceMode'],
+            cwd=GIT_METADATA_CWD, env=git_policy_environment(),
+            stall_seconds=GIT_STALL_SECONDS, cancellation=cancel)
+    except ProcessCancelled:
+        raise
+    except (OSError, RuntimeError) as error:
         raise WorkspacePolicyError(f'Workspace policy read failed: {error}') from error
     if result.returncode == 1 and not result.stdout and not result.stderr:
         return 'direct'

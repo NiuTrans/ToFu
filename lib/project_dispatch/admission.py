@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from collections.abc import Mapping
+from pathlib import Path
 import time
 
 from lib.identity import PrincipalContext
@@ -17,7 +18,48 @@ from lib.log import get_logger
 
 KEY = '_projectDispatchAdmission'
 WORKSPACE_TASK_KEY = '_projectDispatchWorkspaceTaskId'
+ROOT_TASK_KEY = '_projectDispatchRootTask'
 logger = get_logger(__name__)
+
+
+class _LiveDispatchRoot:
+    """Process-local reference to the bound Worker task; copies share, never clone, it."""
+    __slots__ = ('task',)
+
+    def __init__(self, task):
+        self.task = task
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def share_dispatch_root(parent, carrier):
+    """Let a sub-agent carrier borrow its parent's live dispatch authority.
+
+    The carrier holds no grant of its own: every admission revalidates the live
+    root task, so the Worker's revocation, Stop or settlement fences it too.
+    """
+    if parent is None or not is_dispatch_task(parent):
+        return
+    carrier[ROOT_TASK_KEY] = _LiveDispatchRoot(dispatch_root(parent))
+
+
+def dispatch_root(task):
+    """The bound physical task whose grant admits ``task`` (itself for a root)."""
+    holder = task.get(ROOT_TASK_KEY)
+    if holder is None:
+        return task
+    root = holder.task if isinstance(holder, _LiveDispatchRoot) else None
+    if (not isinstance(root, dict) or ROOT_TASK_KEY in root
+            or task.get('_principalContext') != root.get('_principalContext')
+            or task.get('convId') != root.get('convId')
+            or task.get('_executionBudget') is not root.get('_executionBudget')
+            or task.get('aborted')):
+        raise AbortedError('Project dispatch sub-agent no longer shares its Worker authority')
+    return root
 
 
 def authority_stop_reason(error):
@@ -97,18 +139,23 @@ def requires_isolated_workspace(task):
 
 def owned_workspace(task, binding=None):
     """Neither config, cwd nor a cached receipt can transfer a worktree."""
+    task = dispatch_root(task)
     binding = binding or (task.get('config') or {}).get(KEY)
     if not isinstance(binding, dict):
         raise ToolAdmissionRefused('File execution has no accepted project binding')
     from lib.integration_state_repository import find_workspace
     from lib.tasks_pkg.workspace_delivery import execution_repositories
-    row = find_workspace(binding['projectPath'], str(task.get('id') or ''), user_id=binding['owner'])
+    # The grant keeps the conversation's project key. Integration registers the
+    # physical root; compare it with the captured binding so retargeted aliases
+    # cannot adopt another checkout.
+    project_root = str(Path(binding['projectPath']).expanduser().resolve())
+    row = find_workspace(project_root, str(task.get('id') or ''), user_id=binding['owner'])
     cfg = task.get('config') or {}
     if (not isinstance(row, dict) or row.get('user_id') != binding['owner']
-            or row.get('task_id') != task.get('id') or row.get('project_root') != binding['projectPath']
+            or row.get('task_id') != task.get('id') or row.get('project_root') != project_root
             or row.get('state') == 'discarded' or row.get('workspace_path') != cfg.get('projectPath')
-            or row.get('workspace_path') == binding['projectPath']
-            or not any(item.get('canonicalRoot') == binding['projectPath']
+            or row.get('workspace_path') == project_root
+            or not any(item.get('canonicalRoot') == project_root
                        and item.get('workspacePath') == row.get('workspace_path')
                        and item.get('workId') == task.get('id')
                        for item in execution_repositories(task))):
@@ -210,8 +257,9 @@ class TrustedDispatch:
             'projectPaths': [], 'readOnlyPaths': [self.binding['projectPath']] if profile['mode'] == 'consult' else [],
             'model': assignment['request']['model'], 'executionLimits': execution_limits(assignment),
             'planMode': False, 'autopilot': False, 'activeFlow': '', 'humanGuidanceEnabled': asks_human(profile),
-            'autoTranslate': False,
-            'tools': {**config.get('tools', {}), 'programmaticCalling': 'off'}})
+            'autoTranslate': False})
+        if profile['mode'] != 'project':
+            config['tools'] = {**config.get('tools', {}), 'programmaticCalling': 'off'}
         if profile['mode'] not in ('project', 'coordinator'):
             config.update(searchEnabled=False, fetchEnabled=False, codeExecEnabled=False,
                           browserEnabled=False, desktopEnabled=False)
@@ -288,7 +336,9 @@ def _restored_identity(config, *, task=None):
         for key, value in original.items():
             if key not in ('tools', 'humanGuidanceEnabled') and config.get(key) != value:
                 raise PermissionError('Project worker capability policy changed after admission')
-        if config.get('tools', {}).get('programmaticCalling') != 'off':
+        expected = (original.get('tools', {}) if profile['mode'] == 'project'
+                    else {**original.get('tools', {}), 'programmaticCalling': 'off'})
+        if config.get('tools', {}) != expected:
             raise PermissionError('Project worker programmatic policy changed after admission')
     return principal_for(binding), False, assignment
 
@@ -332,6 +382,9 @@ def _validated_binding(task, *, require_account):
     config = task.get('config') or {}
     if not is_dispatch_task(task):
         return None
+    root = dispatch_root(task)
+    if root is not task:
+        return _validated_binding(root, require_account=require_account)
     if KEY not in config:
         raise AbortedError('Project dispatch lost its accepted grant carrier')
     try:

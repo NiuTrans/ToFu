@@ -136,7 +136,7 @@ check('render_only_one_primary',
   list.querySelectorAll('.mp-row-primary').length === 1);
 const _topBadge = rowAt(0).querySelector('.mp-row-badge');
 check('render_root_badge_on_top',
-  !!_topBadge && _topBadge.textContent.trim() === 'root',
+  !!_topBadge && _topBadge.textContent.trim() === 'pm.rootBadge',
   _topBadge && _topBadge.textContent);
 check('render_no_root_badge_below',
   rowAt(1).textContent.indexOf('root') === -1, rowAt(1).textContent);

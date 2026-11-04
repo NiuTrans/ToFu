@@ -3,8 +3,8 @@
  *
  * Responsibility: derive stable presentation batches without reading DOM or
  * browser state. Entry points are `computeExecutionBatches`,
- * `computeToolBatches`, `presentToolExecutionPanel`, `toolParentCallId`, and
- * the `toolGroupRound*` presentation helpers.
+ * `computeToolBatches`, `presentToolExecutionPanel`,
+ * `programChildParentCallId`, and the `toolGroupRound*` presentation helpers.
  * Dependencies: none; callers provide Conversation Sync projection values.
  */
 
@@ -254,17 +254,11 @@ export function presentToolExecutionPanel(
 /** Execution-child identity only: retained-result origins are not new calls. */
 export function programChildParentCallId(value: unknown): string {
   if (toolField(value, '_programSynthetic') === true) return '';
-  return firstTruthyIdentifier(toolField(value, 'parentToolCallId'), toolField(value, '_programCallId'));
-}
-
-/** Resolve the presentation-only parent without exposing storage identity. */
-export function toolParentCallId(value: unknown): string {
-  const artifactOrigin = record(toolField(value, '_artifactOrigin'));
-  return firstTruthyIdentifier(
-    toolField(value, 'parentToolCallId'),
-    toolField(value, '_programCallId'),
-    artifactOrigin?.sourceToolCallId,
-  );
+  const parent = firstTruthyIdentifier(toolField(value, 'parentToolCallId'));
+  // Read-backs stored before the producer stopped stamping it repeat their
+  // saved output's source call as the parent; that edge is provenance.
+  const source = firstTruthyIdentifier(record(toolField(value, '_artifactOrigin'))?.sourceToolCallId);
+  return firstTruthyIdentifier(parent === source ? '' : parent, toolField(value, '_programCallId'));
 }
 
 function originRecord(value: unknown): UnknownRecord | null {

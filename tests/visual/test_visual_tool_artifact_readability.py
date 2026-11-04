@@ -177,14 +177,8 @@ def _assert_terms(page, summary, terms, locale, width):
             shown.evaluate('()=>document.getSelection().removeAllRanges()')
 
 
-@pytest.mark.parametrize('width,language,theme', [
-    (1100, 'en', 'light'), (1100, 'zh', 'tofu'),
-    (390, 'en', 'dark'), (390, 'zh', 'tofu'),
-])
-def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
-    frontend_visual_page, tmp_path, width, language, theme,  # noqa: F811
-):
-    page = frontend_visual_page
+def _mount_reading_frame(page, width, language, theme, rounds):
+    """Render accepted rounds through Surface, real row owners and shipped CSS."""
     page.set_viewport_size({'width': width, 'height': 1400})
     styles = page.locator('link[rel="stylesheet"]').evaluate_all('(nodes)=>nodes.map(n=>n.href)')
     page.evaluate('''() => {
@@ -213,26 +207,24 @@ def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
     frame.add_script_tag(path=runtime_section_path('ui/tool_rounds_rich.js'))
     frame.add_script_tag(path=native_module_path(
         '.native/tool-artifact-readability-surface.js', ROOT / 'frontend/src/conversation/index.ts'))
-    fixtures = _fixtures()
-    frame.evaluate(r'''({fixtures,language,replaySuffix}) => {
+    frame.evaluate(r'''({rounds,language,replaySuffix}) => {
       const scope={llmRound:0,attemptId:'artifact-fixture-attempt',taskId:'artifact-fixture-task'};
-      const blocks=fixtures.map((fixture,index)=>({kind:'tool',blockId:fixture.id,ordinal:index+1,source:scope,
-        round:{...scope,roundNum:index+1,toolCallId:fixture.id,toolName:fixture.toolName,
-          status:fixture.status,query:fixture.query,toolArgs:fixture.toolArgs,
-          results:[fixture.metadata||{}],toolContent:fixture.content,
-          ...(fixture.origin?{_artifactOrigin:fixture.origin}:{})}}));
-      blocks.push({kind:'text',blockId:'answer',ordinal:5,source:{},deliverable:true,terminal:true,
+      const blocks=rounds.map((round,index)=>({kind:'tool',blockId:round.toolCallId,ordinal:index+1,source:scope,
+        round:{...scope,roundNum:index+1,...round}}));
+      blocks.push({kind:'text',blockId:'answer',ordinal:blocks.length+1,source:{},deliverable:true,terminal:true,
         text:'Outcome',markdown:language==='zh'?'保留的结果与请求范围保持可读。':'Saved results and requested scope stay readable.'});
+      const toolRounds=blocks.map(block=>block.round);
       const turn={turnId:'artifact-reading-turn',presentationId:'artifact-reading-turn',actor:'assistant',role:'assistant',
         laneId:'main',ordinal:1,status:'completed',terminal:true,blocks,queuedTurns:[],branches:[],actions:[],
         metadata:{translation:{pending:false,streaming:false}},finish:null,
-        source:{projection:{timestamp:'2026-10-07T09:00:00Z'},createdAt:'2026-10-07T09:00:00Z'}};
+        source:{projection:{timestamp:'2026-10-07T09:00:00Z',toolRounds},createdAt:'2026-10-07T09:00:00Z'}};
       window.model={conversationId:'artifact-fixture',conversationRevision:1,transport:'ready',
         mainLane:{laneId:'main',title:'Main',kind:'main',expanded:true,turns:[turn]},
         orphanLanes:[],queue:[],planDecision:null,transportNotice:null};
       window.surface=createConversationSurface(document.getElementById('surface'),createClassicConversationRenderers({
         renderSafeMarkdownHtml:markdown=>'<p>'+escapeHtml(markdown)+'</p>',localizedText:(key,fallback)=>t(key)||fallback,
-        renderToolBlockHtml:block=>_renderUnifiedToolLine(block.round,false),
+        // The production port: the shared slot owner wraps each row line.
+        renderToolBlockHtml:(block,turn)=>_renderToolSlot(block.round,turn.source.projection.toolRounds),
       }));
       let revision=1;
       window.replay=(changedId=null)=>{
@@ -244,14 +236,31 @@ def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
         surface.render(snapshot);
       };
       replay();
-    }''', {'fixtures': fixtures, 'language': language, 'replaySuffix': _REPLAY_SUFFIX})
-
+    }''', {'rounds': rounds, 'language': language, 'replaySuffix': _REPLAY_SUFFIX})
     # A settled reply keeps its calls in a closed tool panel. Open it through
     # the reader's keyboard control before inspecting individual tool cards.
     panel = frame.locator('.conversation-tool-panel__toggle')
     panel.focus()
     panel.press('Enter')
     frame.wait_for_selector('.ptool-result-block')
+    return frame, locale
+
+
+@pytest.mark.parametrize('width,language,theme', [
+    (1100, 'en', 'light'), (1100, 'zh', 'tofu'),
+    (390, 'en', 'dark'), (390, 'zh', 'tofu'),
+])
+def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
+    frontend_visual_page, tmp_path, width, language, theme,  # noqa: F811
+):
+    page = frontend_visual_page
+    fixtures = _fixtures()
+    frame, locale = _mount_reading_frame(page, width, language, theme, [{
+        'toolCallId': fixture['id'], 'toolName': fixture['toolName'], 'status': fixture['status'],
+        'query': fixture['query'], 'toolArgs': fixture['toolArgs'],
+        'results': [fixture.get('metadata') or {}], 'toolContent': fixture['content'],
+        **({'_artifactOrigin': fixture['origin']} if 'origin' in fixture else {}),
+    } for fixture in fixtures])
     assert frame.locator('.ptool-result-block').count() == 4
     assert frame.locator('.conversation-round-header').count() == 0
     assert frame.locator('[data-block-id="answer"]').is_visible()
@@ -356,5 +365,100 @@ def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
     assert expanded_card.get_attribute('open') is None
     assert frame.locator('[data-block-id="answer"]').is_visible()
     assert frame.evaluate('window.__artifactQueryExecuted !== true')
+    _assert_no_overflow(frame)
+    frame.evaluate('surface.dispose()')
+
+
+_SOURCE_COMMAND = ('cd /workspace/tofu && timeout 300 python3 -m pytest -q '
+                   'tests/visual/test_visual_tool_artifact_readability.py -k continuation')
+# continuation_origin_meta bounds the source label to 96 characters.
+_SOURCE_LABEL = _SOURCE_COMMAND[:95].rstrip() + '…'
+
+
+def _read_back_rounds():
+    """Saved-output read-backs between ordinary commands, as stored rounds.
+
+    Rounds stored before the producer stopped stamping it repeat the source
+    call as ``parentToolCallId``; provenance is not an execution parent.
+    """
+    def command(call_id, command_text, description):
+        return {'toolCallId': call_id, 'toolName': 'run_command', 'status': 'done',
+                'query': command_text,
+                'toolArgs': {'command': command_text, 'description': description},
+                'results': [{'exitCode': 0}], 'toolContent': '12 passed'}
+
+    def read_back(call_id, tool_name, verb, args, origin, tokens):
+        return {'toolCallId': call_id, 'toolName': tool_name, 'status': 'done',
+                'query': f'{verb} compacted result of R3 · {_SOURCE_LABEL}',
+                'toolArgs': {'artifact_ref': 'tr:run-command:0123456789abcdef', **args},
+                'parentToolCallId': 'source-command',
+                '_artifactOrigin': {'sourceRound': 3, 'source': _SOURCE_LABEL,
+                                    'sourceToolCallId': 'source-command', **origin},
+                '_repaired': {'label': 'auto-fixed', 'detail': 'limit: schema default',
+                              'patterns': ['schema_default']},
+                'toolTokens': tokens, 'results': [{}], 'toolContent': 'running: 2 tasks'}
+
+    return [
+        command('source-command', _SOURCE_COMMAND,
+                'Check result post-processing and browser window constants'),
+        read_back('searched-output', 'search_tool_artifact', 'Search', {'query': 'running'},
+                  {'kind': 'search', 'queries': ['running'], 'query': 'running'}, 268),
+        read_back('read-output', 'read_tool_artifact', 'Read', {'cursor': '0', 'limit': 4096},
+                  {'kind': 'read'}, 2200),
+        command('next-command', 'sed -n 1,120p tests/fixtures/authority.json',
+                'Read authority fixture and the remaining busy-target spec'),
+    ]
+
+
+@pytest.mark.parametrize('width,language,theme', [
+    (1100, 'zh', 'tofu'), (1100, 'en', 'light'), (1100, 'en', 'dark'), (390, 'zh', 'tofu'),
+])
+def test_saved_output_read_backs_are_sibling_rows_on_one_grid(
+    frontend_visual_page, tmp_path, width, language, theme,  # noqa: F811
+):
+    """Owner report 2026-11-04: read-backs hung on an indented rail under the
+    row above, as if that call had executed them, and their glyph and outcome
+    floated beside the middle of the block. They are routine sibling calls:
+    one glyph column, one text edge, one intent type, outcome on the action."""
+    page = frontend_visual_page
+    rounds = _read_back_rounds()
+    frame, _locale = _mount_reading_frame(page, width, language, theme, rounds)
+    frame.evaluate('document.activeElement?.blur()')
+    rows = frame.evaluate('''ids => ids.map(id => {
+      const block = document.querySelector(`[data-block-id="${id}"]`);
+      const row = block.querySelector('[data-action-summary]');
+      const glyph = row.querySelector(':scope > :is(.ptool-icon, .ptool-cmd-icon)');
+      const intent = row.querySelector('.ptool-artifact-title, .ptool-cmd-desc-inline');
+      const range = document.createRange(); range.selectNodeContents(intent);
+      const line = range.getClientRects()[0];
+      const box = node => { const r = node.getBoundingClientRect();
+        return {left: r.left, top: r.top, width: r.width, middle: r.top + r.height / 2}; };
+      const style = getComputedStyle(intent);
+      return {id, glyph: box(glyph), textLeft: line.left, lineMiddle: line.top + line.height / 2,
+        intentBottom: row.querySelector(':scope > :is(.ptool-text, .ptool-cmd-desc-inline)').getBoundingClientRect().bottom,
+        outcomes: Array.from(row.querySelectorAll(':scope > .ptool-badge')).map(box),
+        ink: style.color, weight: style.fontWeight,
+        railed: [block, ...block.querySelectorAll('*')].some(node =>
+          node.matches('.ptool-parent-child, [data-parent-tool-call-id]'))};
+    })''', [round_['toolCallId'] for round_ in rounds])
+    shot = tmp_path / f'tool-artifact-read-backs-{width}-{language}-{theme}.png'
+    page.locator('#artifact-reading-fixture').screenshot(path=str(shot))
+    print(f'Saved read-back row screenshot: {shot}')
+
+    assert not [row['id'] for row in rows if row['railed']], f'Provenance drew an execution rail: {rows}'
+    assert all(row['glyph']['width'] > 0 for row in rows), rows
+    for column, lefts in (('glyph', [row['glyph']['left'] for row in rows]),
+                          ('text', [row['textLeft'] for row in rows])):
+        assert max(lefts) - min(lefts) <= 1, f'Rows do not share one {column} column: {rows}'
+    command = rows[0]
+    for row in rows[1:3]:
+        assert abs(row['glyph']['middle'] - row['lineMiddle']) <= 2, f'Glyph is off the action line: {row}'
+        assert (row['ink'], row['weight']) == (command['ink'], command['weight']), rows
+        assert len(row['outcomes']) == 3, row
+        for outcome in row['outcomes']:
+            if width > 600:
+                assert abs(outcome['middle'] - row['lineMiddle']) <= 2, f'Outcome is off the action line: {row}'
+            else:
+                assert outcome['top'] >= row['intentBottom'] - 1, f'Phone outcome overlaps the action: {row}'
     _assert_no_overflow(frame)
     frame.evaluate('surface.dispose()')

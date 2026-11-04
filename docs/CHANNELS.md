@@ -147,10 +147,20 @@ outbox item (ID derived from owner, thread and key) before any network effect.
 Policy is decided once at enqueue: command chat → `queued`; other threads by
 reply policy: `auto` → `queued`, `draft` → waits for owner approval (Settings
 or the Global Router's `channel_outbox_approve` on a genuine human turn),
-`never` refuses and records nothing. A Global Router Turn whose human input
+`never` refuses and records nothing. A command-chat owner message that the
+Turn command accepts immediately enqueues a receipt: started, steered into the
+live Turn, or queued behind it. A queued command adds its started receipt when
+its Attempt actually begins (`lib/channels/autoreply.py`). While that genuine
+human command-chat Turn runs, the passive chat-Push observer mirrors each
+canonical non-deliverable assistant text block once (tool-round
+`assistantContent` and released continuation prose, never reasoning or raw
+tool payloads), plus each changed `update_task_progress` board summary. The
+observer does no model or network work. A Global Router Turn whose human input
 came from a channel thread enqueues its final assistant answer to that thread
-with idempotency key = the Turn ID (`lib/channels/autoreply.py`, observing the
-existing task terminal-listener seam). Agent-authored messages in threads
+with idempotency key = the Turn ID, followed by an explicit completed, failed,
+interrupted or aborted receipt from the existing task terminal-listener seam.
+Receipts and progress use the command chat; other channel events and nonhuman
+Turns never gain these automatic messages. Agent-authored messages in threads
 other than the command chat carry the visible label `[Tofu 代发]`. Each queued
 item takes an exact per-thread queue position (CAS on the thread record);
 approval appends a draft at the end. The executor sends each thread in order,
@@ -164,11 +174,19 @@ and client UUID for echo suppression and recall. Messages are sent as markdown
 (owner, channel) and executes only its own channel's items. A send that
 settles `failed` or `unknown` also becomes one Router Watchdog fault signal per
 item and state ([ROUTER.md](ROUTER.md) R7); the outbox's own handling is
-unchanged.
+unchanged. Router-generated receipts, content, progress, replies and terminal
+status are translated to the conversation's configured display language
+immediately before the provider send. The first translated bytes are written
+back to the durable item before the network call, so an unknown result or
+restart retries exactly those bytes. A translator failure preserves the
+original text and never blocks later items. Manually authored `channel_send`
+text is not rewritten.
 
 **Alternatives rejected:** sending inside the tool call (lost on crash,
 duplicated on retry); impersonating the owner without disclosure; ordering by
-timestamps (equal milliseconds reorder a thread).
+timestamps (equal milliseconds reorder a thread); forwarding token deltas
+(unbounded message spam and provisional retry text); translating in an
+independent async queue (reorders replies and can retry different bytes).
 
 ### C6. 大象 adapter
 
@@ -178,17 +196,52 @@ timestamps (equal milliseconds reorder a thread).
   `scripts/tofu/dx-tofu.sh` with `DX_TOFU_OWNER=tofu:<owner>`. SSO tickets
   exist only in the launcher child's environment; the parent passes no ambient
   secrets and nothing enters model context, Tofu storage or argv.
+- **Login MIS** (`lib/channels/dx/login.py`): the account logs in as the MIS
+  the owner entered in Settings, else its bound identity's, else the host's
+  shared SSO session account. That MIS selects the launcher child's SSO
+  session: the host's shared DataFE session when it belongs to that MIS,
+  otherwise the owner's own `<data>/channels/dx/sso/u<owner>/<mis>.json`
+  (directories `0700`). The SSO adapter's `exec` reuses a usable session and
+  requests one 大象 login approval only when there is none; only the DataFE SDK
+  writes session files and Tofu never reads them. The shared session's MIS and
+  whether a login needs an approval are the adapter's own answers
+  (`discover_login_mis`, the non-interactive `session_status`), asked in a
+  child process.
 - **Bridge** (`lib/channels/dx/bridge.mjs`, spawned from `PinnedHelperSource`):
   one Node process per account. It logs in with the engine's own
   `DxWebSdkRuntime`, attaches persistent handlers for `IM_message`,
-  `PUB_MESSAGE`, `KickOff` and `ConnStatusChange`, writes JSON-lines (`status`,
+  `PUB_MESSAGE`, `KickOff`, `KickOffWithSameDeviceId` and `ConnStatusChange`,
+  writes JSON-lines (`status`,
   `message`, `response`) to stdout and executes JSON-lines commands from stdin
   (`whoami`, `send_text`, `send_markdown`, `reply_message`, `history`,
   `sessions`, `create_group`), each answered with its request ID. It decodes
-  quote parts so reply facts survive, flags its own sends, and exits on
-  disconnect (3), kick-off (43) or a closed stdin (0). It holds no policy and
-  no durable state. One-shot mode (`--command whoami|create_group`) serves
-  enable and command-chat creation.
+  quote parts so reply facts survive and flags its own sends. Disconnect is
+  the SDK's own `CONSTANT.LOGIN_STATUS.DISCONNECTED`. On a transport loss it
+  reports `disconnected`, reconnects the existing SDK socket and calls the
+  engine's `login()` with its in-memory credentials. The engine owns rejection
+  recovery and its existing login deadline; its `AuthFail` retry also needs a
+  new socket because `autoConnect` is off. Concurrent loss notifications and
+  commands join that login. Only successful authentication for the same uid
+  reports `connected`, triggering the adapter's ordinary catch-up again.
+  Commands already dispatched are never replayed. Failed recovery exits (4)
+  for the supervisor/launcher to refresh the session; kick-off exits (43) and
+  stdin close exits (0), including during recovery. A kick-off reports
+  `DISCONNECTED` before its kick event in the same synchronous dispatch, so
+  recovery defers one event-loop turn to let the kick decide. An SDK without
+  the required status or socket-reconnect interface fails closed (4).
+  It holds no policy and no durable state. One-shot mode
+  (`--command whoami|create_group`) serves identity confirmation and
+  command-chat creation.
+
+  **Problem:** exiting on every socket close discarded valid IM credentials;
+  repeated network closes therefore called `/login/im_token/generate` on each
+  restart and left ingress offline until the scheduler tick. **Decision:**
+  reconnect in the existing process, retaining the engine's credential cache
+  and using its authentication outcome as the validity check. **Alternatives
+  rejected:** ignoring disconnect leaves ingress deaf; the engine's
+  `reconnect()` unconditionally invalidates credentials; a disk token cache or
+  guessed TTL duplicates authentication policy; a new refresh/backoff timer
+  adds a tuning knob. No new timer, retry budget or credential store is added.
 - **Adapter** (`lib/channels/dx/adapter.py`): normalization of live pushes and
   history rows (server time from the snowflake ID), reconnect catch-up,
   sequential ingest, and the outbox sender port. Provider limits are named in
@@ -205,9 +258,11 @@ timestamps (equal milliseconds reorder a thread).
   scheduled-jobs capability runs, from the scheduler's existing 30 s tick
   (`lib/scheduler/manager.py`) and immediately after a configuration change in
   a hosting process. It starts a session for an enabled account (after
-  checking identity, skill and Global Router), stops it when disabled, and
-  restarts it after any exit at the next tick — no timer, backoff schedule or
-  retry count of its own. Launcher exit `42` (`SSO_SESSION_REQUIRED`) and
+  checking identity, skill and Global Router), stops it when disabled or
+  switched to another login MIS, and restarts it after any exit at the next
+  tick — no timer, backoff schedule or retry count of its own. An enabled
+  account whose login MIS has no bound identity is first confirmed on its own
+  thread (see Identity), so neither the tick nor an HTTP request waits for it. Launcher exit `42` (`SSO_SESSION_REQUIRED`) and
   kick-off stop restarts and surface `needs_login` / `kicked` until the owner
   re-enables; an absent router or skill surfaces `error` without starting.
   A session reports a state transition once, so an account command that does
@@ -218,8 +273,23 @@ timestamps (equal milliseconds reorder a thread).
   Each tick of this and of the GitHub supervisor (C8) also reports an
   unhealthy enabled account to the Router Watchdog: one fault signal per state
   since the last connection ([ROUTER.md](ROUTER.md) R7).
-- **Identity:** enabling the account runs `whoami`; an event whose sender equals
-  that uid is owner-authored.
+- **Identity:** the supervisor confirms it with `whoami` logged in as the login
+  MIS before a session starts; an event whose sender equals that uid is
+  owner-authored. The account reports `authorizing` while the adapter says the
+  login waits for an approval (`login_required` or `pending`), otherwise
+  `starting`. A `whoami` answering another MIS is `identity_mismatch`
+  (`error`); a refused or unapproved login is `needs_login`. Choosing another
+  MIS clears the identity and the command chat and restarts ingress from now.
+  A newer choice starts its own confirmation at once instead of waiting behind
+  an older pending approval; the older one's late answer is discarded by an
+  atomic condition on the account write (`ChannelStore.set_status(when=)`).
+  Problem: enabling ran `whoami`, including a possible 180 s approval wait,
+  inside the HTTP request, and the account could not be switched. Decision:
+  account commands return at once and the supervisor confirms asynchronously.
+  Alternatives rejected: a shorter request timeout (fails slow approvals and
+  adds a knob); a browser-polled login job (a second job resource for one
+  state the account already reports); copying tokens or running CIBA in Tofu
+  (a second credential store or authentication implementation).
 - **Command chat:** chosen in Settings, or created on explicit owner request
   (`POST …/command-chat`) as a single-member group named `Tofu Router`; a
   creation claim on the account prevents a second group.
@@ -383,7 +453,8 @@ only their thread record. The GitHub account adds its credential name, poll
 schedule (`intervalS`, `lastAtMs`, `nextAtMs`, `lastModified`) and API base;
 each GitHub thread record holds `github` state (opening-post time, pull
 request flag, per-list cursors and ETags). The token itself lives only in the
-credential vault.
+credential vault. The 大象 account adds its chosen login MIS (`mis`); its SSO
+session files (C6) are SDK-owned credentials outside the record namespace.
 
 ## Interfaces
 
@@ -398,22 +469,36 @@ credential vault.
   `channel_configure_thread`, `channel_subscribe`, `channel_unsubscribe`,
   `channel_outbox`, `channel_outbox_approve` (handler `lib/tasks_pkg/handlers/channels.py`).
 - `lib/channels/autoreply.py` — router answer → command-chat thread.
-- `lib/channels/dx/` — `bridge.mjs`, `adapter.py`, `supervisor.py`, `probe.py`.
+- `lib/channels/dx/` — `bridge.mjs`, `adapter.py`, `login.py`, `supervisor.py`, `probe.py`.
 - `lib/channels/github/` — `client.py` (REST transport, conditional requests,
   paging, rate limits), `normalize.py`, `adapter.py` (poll worker, sender
   port), `account.py` (Settings commands, token custody), `supervisor.py`.
 - HTTP (`routes/api_v1/channels.py`, served under `/api/v4`):
-  `GET|PUT /api/v4/channels/dx` (config and status),
+  `GET|PUT /api/v4/channels/dx` (config and status; `PUT` enables/disables,
+  sets the login `mis` or the command chat and returns without waiting for a
+  login),
   `POST /api/v4/channels/dx/command-chat` (create `Tofu Router`),
   `GET /api/v4/channels/dx/threads`, `PUT /api/v4/channels/dx/threads/{key}`
   (mode / reply policy; `null` restores the default),
   `GET|PUT /api/v4/channels/github` (status, token or vault entry, API base),
   `GET /api/v4/channels/github/threads`, `PUT /api/v4/channels/github/threads/{key}`
   (URL-encoded key),
-  `GET /api/v4/channels/outbox`, `POST /api/v4/channels/outbox/{id}/approve|discard`.
+  `GET /api/v4/channels/outbox[?channel=dx|github]` (all channels, or one),
+  `POST /api/v4/channels/outbox/{id}/approve|discard`.
 - Browser: Settings → 大象 (`frontend/src/features/settings/dx-channel.ts`,
   markup `frontend/src/settings-panels/dx.html`) and Settings → GitHub
   (`github-channel.ts`, `settings-panels/github.html`), facade `Api.channels`.
+  Both tabs share one presentation (`channel-settings-view.ts`, styles
+  `frontend/src/styles/settings/13-dx-channel.css`): a status card, the
+  channel's own cards, a thread list, and the outbox of that channel only
+  (`?channel=`). A tab re-reads its account while it is `starting`,
+  `authorizing` or `disconnected`. The 大象 account card (`dx-account.ts`)
+  says what each state needs (approve in 大象, reconnect, enter a MIS) and
+  switches the login MIS inline; the command chat is picked from a searchable
+  list. Its thread list (`dx-thread-list.ts`) is built for many groups: search
+  by name or key, a mode filter with counts, a one-click mode and a reply
+  policy per thread, and selection with bulk mode / reply changes, in place
+  of per-row dropdowns. GitHub keeps a thread table with one column header row.
 
 ## Verification
 
@@ -426,7 +511,11 @@ auto-reply, supervisor restart policy, adapter catch-up with a fake bridge,
 the HTTP surface against the contract, and the persistence of the `channel`
 initiator. `tests/channels/test_dx_bridge_contract.py` runs the real
 `bridge.mjs` against a stub engine (persistent handlers, request IDs, exit
-codes, one-shot commands). The live probe is read-only (`whoami`, `sessions`,
+codes, one-shot commands). `tests/channels/test_dx_login.py` covers login-MIS
+session selection and the approval question; the supervisor suite covers
+asynchronous confirmation, switching and superseded approvals;
+`frontend/src/features/settings/dx-channel.test.ts` covers the 大象 tab. The
+live probe is read-only (`whoami`, `sessions`,
 `history`, a persistent listen; counts only):
 `TOFU_DATA_DIR=<data> python -m lib.channels.dx.probe --owner 1 --listen-seconds 45`.
 `tests/channels/test_github_{normalize,adapter,account}.py` run the real

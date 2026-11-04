@@ -101,14 +101,36 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     expect(board.locator('.coordinator-progress-tally')).to_have_text('In progress: 1')
     expect(board.locator('.coordinator-progress-summary')).to_have_text(
         'The folder dialog fix is verified; homestay research is underway.')
-    tasks = board.locator('.coordinator-progress-body > .coordinator-progress-tasks > li')
-    expect(tasks.first).to_be_hidden()
+    rows = board.locator('.coordinator-progress-content > .coordinator-progress-tasks > li')
+    expect(rows.first).to_be_hidden()
     board.locator('summary.coordinator-progress-head').click()
-    expect(tasks.first).to_be_visible()
-    assert tasks.evaluate_all(
-        '(rows) => rows.map((row) => [row.dataset.status, row.querySelector("strong").textContent])') == [
+    expect(rows.first).to_be_visible()
+    assert rows.evaluate_all(
+        '(rows) => rows.map((row) => [row.dataset.status, row.querySelector(".coordinator-progress-task-title").textContent])') == [
         ['in_progress', 'Research New Year homestays in Tianyu Creek'], ['pending', 'Summarize the WeChat article']]
     expect(board.locator('.coordinator-progress-finished > summary')).to_have_text('Finished: 1')
+    # The Worker model is a compact footer control beside Manage work, never a line of its own.
+    expect(board.locator('.coordinator-progress-actions > .router-worker-model')).to_have_count(1)
+    assert page.locator('#presenceStrip > .router-worker-model').count() == 0
+    # The translation lane finishes after the board is on screen; its project hint repaints in place.
+    original = board.get_by_role('button', name='Original', exact=True)
+    expect(original).to_be_hidden()
+    assert CoordinatorTaskProgress(1, roots[0]).attach_translation(scope, 'Chinese', {
+        'The folder dialog fix is verified; homestay research is underway.': '文件夹对话框的修复已验证，民宿调研正在进行。',
+        'Research New Year homestays in Tianyu Creek': '调研天屿溪的新年民宿',
+    })
+    expect(board.locator('.coordinator-progress-summary')).to_have_text('文件夹对话框的修复已验证，民宿调研正在进行。')
+    expect(rows.first.locator('.coordinator-progress-task-title')).to_have_text('调研天屿溪的新年民宿')
+    # A text without a translation is shown as written.
+    expect(rows.nth(1).locator('.coordinator-progress-task-title')).to_have_text('Summarize the WeChat article')
+    expect(original).to_have_attribute('aria-pressed', 'false')
+    original.click()
+    expect(board.locator('.coordinator-progress-summary')).to_have_text(
+        'The folder dialog fix is verified; homestay research is underway.')
+    expect(original).to_have_attribute('aria-pressed', 'true')
+    expect(original).to_be_focused()
+    original.click()
+    expect(rows.first.locator('.coordinator-progress-task-title')).to_have_text('调研天屿溪的新年民宿')
     # Session-free: no sessions, references, graph, usage or report banner in the chat.
     strip = page.locator('#presenceStrip')
     for retired in ['.coordination-work-row', '.coordination-task-graph', '.coordination-reference',
@@ -139,12 +161,12 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
         for state in ('open', 'folded'):
             if state == 'folded':
                 head.click()
-                expect(tasks.first).to_be_hidden()
+                expect(rows.first).to_be_hidden()
             assert board.evaluate('(el) => el.scrollWidth <= el.clientWidth + 1'), state
             page.screenshot(path=str(output / f'{theme}-{width}-{state}.png'), animations='disabled')
             board.screenshot(path=str(output / f'board-{theme}-{width}-{state}.png'), animations='disabled')
         head.click()
-        expect(tasks.first).to_be_visible()
+        expect(rows.first).to_be_visible()
     page.set_viewport_size({'width': 1440, 'height': 960})
     page.evaluate('() => { if (document.getElementById("sidebar").classList.contains("collapsed")) window.toggleSidebar(); }')
     # A message arriving while the Coordinator chat is open is read on arrival.
@@ -278,6 +300,14 @@ def test_coordinator_conversations_are_contained_in_a_collapsible_sidebar_group(
                                 'projectionRevision': source['projectionRevision']},
         'brief': 'Legacy sidebar work', 'model': 'sidebar-model', 'budget': {}},
         PrincipalContext.user(subject_id='user:1', owner_user_id=1, scopes=['chat']), 'sidebar-legacy-' + suffix)
+    def _debug_flags(route):
+        response = route.fetch()
+        body = response.json()
+        body.get('data', body)['feature_flags'] = {
+            'debug_mode': True, 'optimizer_enabled': True}
+        route.fulfill(response=response, json=body)
+
+    page.route('**/api/v*/server-config**', _debug_flags)
     page.evaluate('localStorage.setItem("tofu_ui_lang", "en")')
     page.reload()
     _dismiss_onboarding_modals(page)
@@ -303,6 +333,17 @@ def test_coordinator_conversations_are_contained_in_a_collapsible_sidebar_group(
     expect(body).to_contain_text('Legacy delegated worker')
     expect(body).to_contain_text('Empty delegated shell')
     expect(body).to_contain_text('Done')
+    worker_row = body.locator(f'.conv-item[data-conv-id="{legacy}"]')
+    copy_id = worker_row.locator('.conv-copy-id')
+    expect(copy_id).to_have_attribute('data-conv-id', legacy)
+    worker_row.hover()
+    expect(copy_id).to_be_visible()
+    active_before_copy = page.evaluate('window.activeConvId')
+    page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
+    page.evaluate('navigator.clipboard.writeText("")')
+    copy_id.click()
+    page.wait_for_function('(id) => navigator.clipboard.readText().then(text => text === id)', arg=legacy)
+    assert page.evaluate('window.activeConvId') == active_before_copy
     assert page.evaluate('(id) => localStorage.getItem(`tofu.coordinator.conversations.expanded.${id}`)', arg=leader) == 'true'
     output = Path(__file__).resolve().parents[2] / 'output/playwright/coordinator-sidebar'
     output.mkdir(parents=True, exist_ok=True)

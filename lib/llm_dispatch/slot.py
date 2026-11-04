@@ -36,6 +36,14 @@ THINKING_FORMATS = frozenset({
     'chat_template_kwargs', 'reasoning_split', 'none',
 })
 
+
+def key_stats_namespace(routing_owner_user_id: int, provider_id: str) -> str:
+    """Key-stats namespace of a slot's credential: owner+Provider when routed."""
+    provider_id = provider_id or 'default'
+    if routing_owner_user_id > 0:
+        return f'owner:{routing_owner_user_id}:{provider_id}'
+    return provider_id
+
 # ── Truncation cooldown window (record_truncation) ──
 # ``consecutive_errors`` is zeroed by every interleaved record_success, so an
 # INTERMITTENTLY-truncating upstream (success, truncate, success, truncate —
@@ -273,10 +281,8 @@ class Slot:
 
     def key_stats_provider_id(self) -> str:
         """Stable owner+Provider namespace for durable credential health."""
-        provider_id = self.routing_provider_id or self.provider_id or 'default'
-        if self.routing_owner_user_id > 0:
-            return f'owner:{self.routing_owner_user_id}:{provider_id}'
-        return provider_id
+        return key_stats_namespace(self.routing_owner_user_id,
+                                   self.routing_provider_id or self.provider_id)
 
     def key_stats_key_name(self) -> str:
         """Use v2 credential identity instead of request-random slot names."""

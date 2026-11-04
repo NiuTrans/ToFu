@@ -43,10 +43,12 @@ import {
 } from './view-model/turn-metadata';
 import {
   liveAttemptPresentation,
+  projectLiveActivity,
   selectGoalProgress,
   waitingPlaceholderRedundant,
   selectAutopilotRunNotices,
 } from './view-model/live-turns';
+import { presentationTurnOrder } from './view-model/report-placement';
 
 export type {
   ConversationBlockKind,
@@ -248,9 +250,13 @@ function selectJoins(state: TurnState, presentation: ConversationPresentationSta
     ));
   }
 
+  const laneTurnOrder = new Map(Object.entries(state.laneOrder).map(
+    ([laneId, turnIds]) => [laneId, presentationTurnOrder(state, turnIds ?? [])],
+  ));
+
   return { autopilotNoticesByTurn, nativeQueueByInputTurn, queueExplanationFor,
     queuedOutputTurnIds, latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn,
-    laneOwners, childrenByTurn };
+    laneOwners, childrenByTurn, laneTurnOrder };
 }
 
 interface CompiledSelection {
@@ -327,7 +333,8 @@ function composeSelection(
 ): CompiledSelection {
   const joins = previous?.joins ?? selectJoins(state, presentation, backgroundCommands);
   const { autopilotNoticesByTurn, queueExplanationFor, queuedOutputTurnIds,
-    latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn } = joins;
+    latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn,
+    laneTurnOrder } = joins;
   const lanes = new Map(previous?.lanes);
   const locations = previous?.locations ?? new Map<string, ConversationTurnLocation>();
   const affected = new Map<string, Set<string>>();
@@ -482,14 +489,13 @@ function composeSelection(
             delete liveStatus.tools;
             delete liveStatus.toolContext;
             delete liveStatus.toolContextTools;
+          } else {
+            projectLiveActivity(liveStatus, blocks);
           }
-          /* The bare default 'waiting' placeholder means "no phase frame
-           * has arrived". While a thinking or answer block is still
-           * streaming at the tail, that block IS the live status — the
-           * placeholder beneath it only restates a stall that is not
-           * happening. Real phases (waiting_model / retrying / tool_exec /…)
-           * carry detail/tools/model and never match; the wedge override
-           * above must always render. */
+          /* A row that only restates the streaming block directly above it
+           * is noise. Real phases (waiting_model / retrying / tool_exec /…)
+           * and projected calls never match; the wedge override above must
+           * always render. */
           if (!waitingPlaceholderRedundant(liveStatus, blocks)) {
             blocks.push({
               blockId: 'live-status',
@@ -552,7 +558,7 @@ function composeSelection(
         return [turnVm];
     };
     const turns = cachedLane ? [...cachedLane.turns]
-      : (state.laneOrder[laneId] ?? []).flatMap(selectTurn);
+      : (laneTurnOrder.get(laneId) ?? []).flatMap(selectTurn);
     if (cachedLane) {
       for (const id of affected.get(laneId) ?? []) {
         const location = locations.get(id)!;

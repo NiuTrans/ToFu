@@ -297,12 +297,22 @@ do not establish model quality, adoption or latency benefit.
 **Problem:** Treating every tool use as a program adds script-authoring risk
 without useful computation. Ambiguous body/return guidance also turns missing
 results into spurious judgment handoffs; swallowed promise failures and lossy
-object encoding can make an incorrect computation look successful.
+object encoding can make an incorrect computation look successful. Wrapping
+each item of one fan-out in its own sibling program multiplies programs,
+settlements and model handoffs without adding computation.
 
 **Decision:** Prefer a direct tool for one action and `execute_tools` for known
 independent calls. Use `execute_program` for useful aggregation or data-dependent
-workflows. The canonical action schema teaches an async **body**, an executable
-`return` example, and terminal observation semantics. Routine computed results
+workflows. The same steps over several items belong in one program that loops
+over or `Promise.all`s them within the action's per-program call limit
+(`MAX_TOOL_CALLS` in `lib/tools/program_contract.py`, stated by the action
+description), never one program per item. `tools.invoke` stops the program at a
+failed child; a program that continues past failed items checks each
+`tools.call` receipt's `status` before `tools.value`. The tail-context guide
+states this routing policy only: limits, sandbox scope and operations stay in
+the action description, so the guide does not repeat them. The canonical action
+schema teaches an async **body**, an executable `return` example, and terminal
+observation semantics. Routine computed results
 are returned, not passed to `tools.observe`. Observation remains available only
 when evidence needs unresolved model judgment; it ends the script, never resumes
 it, and does not roll back effects.
@@ -330,7 +340,12 @@ it, and does not roll back effects.
 returns, adding compatibility globals, and replaying failed programs each hide
 the actual contract or risk repeating effects. A second workflow engine, new
 retry ladder, and model-specific routing are unnecessary for these fixes.
+Restating the call limit in the guide, or the fan-out rule in every schema,
+duplicates a number that can drift and spends tokens on every request.
 No claim of measured end-to-end model improvement follows from runtime tests.
+Executable coverage: `tests/context/test_programmatic_guidance.py` (guide and
+limit wording) and `tests/tools/test_javascript_program.py` (one receipt
+fan-out continuing past a failed item; `tools.invoke` handing off).
 
 ## Program reasoning boundaries
 
@@ -445,7 +460,7 @@ serialized text, late-metadata withdrawal and producer mutation are tested in
 program otherwise rereads sources, including small manifests, or copies literals. A fresh VM cannot
 retain derived state. Display artifact references are not private input handles.
 **Decision:** `tools.result(name,args)` reads the latest eligible original
-post-hook snapshot with exact arguments; `tools.result({ref})` reads a versioned
+post-hook snapshot of the same executed call; `tools.result({ref})` reads a versioned
 `input_` handle. Neither executes a source tool or recovers model previews.
 `artifactRef`/`tool-result:` belongs to artifact recovery. Wrong namespaces return typed recovery guidance. Use directory references as variables to avoid copying IDs. Returns are decoded data, not receipts or manifests.
 **Problem:** a program can mistake retained lookup for a first page fetch. **Decision:** the schema distinguishes fresh `tools.invoke` calls from historical `tools.result` reads; missing-result guidance permits an explicit new authorized read while preserving unknown prior effects. Absence is not proof that an operation never ran. **Alternative rejected:** implicit invocation on a lookup miss can repeat effects and invent historical evidence. Retained reads still stop the program before later effects.
@@ -462,6 +477,21 @@ rejected:** handles shared across different calls would outlive their binding;
 stripping the metadata only in the fallback builder leaves every other identity
 consumer broken. Verify `test_program_input_references.py`,
 `test_program_input_delivery.py` and `test_noprose_fallback_evidence.py`.
+**Problem:** retention bound the arguments the gateway executed (schema
+defaults filled, scalars coerced, bounds clamped, aliases resolved) while
+`tools.result(name,args)` keyed the model's own spelling, so a lookup that
+omitted a defaulted argument missed the call a program had just invoked with
+`not_retained_in_this_turn`. **Decision:** retention, lookup and replay share
+one call binding in `lib/tools/program_results.py`: the tool name and arguments
+after `normalize_gateway_call` over the task's executable catalog, namespaces
+and contract documents, encoded as sorted-key JSON. Spellings the gateway
+executes identically select one entry; a different argument value, an unknown
+argument or another tool still misses, and a call the current catalog cannot
+normalize keeps its exact spelling. **Alternatives rejected:** retaining the
+model's raw spelling needs every executor to carry it and still splits
+equivalent spellings; a lookup-only default filler drifts from the gateway's
+coercion, clamp and alias rules; tolerant matching of near arguments can return
+evidence for a different call. Verify `test_program_result_reuse.py`.
 Original captures admit JSON arrays/objects of any size, or outputs at least 4 KiB, at most 1 MiB.
 Failed, explicitly partial, media and child-manifest sources are excluded;
 unknown upstream coverage remains unknown, without recovering missing bytes.
@@ -512,7 +542,8 @@ The card recognizes handoff only from runtime `outcome=needs_model`; returned
 business objects named `kind`, `reason` or `data` remain normal JSON results.
 
 `tools.inputs(query={})` returns `{inputs,total,nextOffset}` without source bodies
-or storage reads. Original entries have `{name,args,ref,bytes,sourceCoverage}`;
+or storage reads. Original entries have `{name,args,ref,bytes,sourceCoverage}`,
+where `name`/`args` are the executed call binding;
 computed entries have the keeper's metadata shape and no fake tool name or args.
 Query accepts optional exact `name`, nonnegative `offset`, and `limit` 1..16;
 a name query excludes computed values. Pages reflect current availability.

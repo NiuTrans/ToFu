@@ -8,6 +8,8 @@ an explicit context or positive owner and never consult a module-global user.
 
 from __future__ import annotations
 
+# pyright: strict
+
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from operator import index

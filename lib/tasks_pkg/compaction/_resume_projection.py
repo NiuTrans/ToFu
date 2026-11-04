@@ -2,16 +2,20 @@
 
 The existing owner-scoped compaction archive is the only persisted snapshot.
 Turn history remains authoritative. Policy/history/tool-prefix mismatch, missing
-archives, media, steering and cancellation fall back to full canonical replay.
+archives, unreproducible media, unconsumed inbox carriers and cancellation fall
+back to full canonical replay. Each resume reports its outcome so the Turn
+timeline can mark earlier compactions it did not reuse
+(``report_compaction_resume``).
 """
 from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
 import json
+import time
 
 from lib.log import get_logger
-from lib.tasks_pkg.model_replay import policy_witness
+from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY, policy_witness
 from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
 logger = get_logger(__name__)
@@ -45,9 +49,15 @@ def resume_execution_digest(content, thinking):
 
 
 def compaction_resume_witness(task):
-    """Describe the exact source prefix only at a complete accepted L2 boundary."""
+    """Describe the exact source prefix only at a complete accepted L2 boundary.
+
+    Consumed steers stay in the witnessed view: the Turn keeps only their
+    display preview, so a canonical rebuild would lose them. A carrier the
+    provider has not consumed is salvaged to the queue or redelivered from its
+    durable row, so restoring it would deliver it twice.
+    """
     if (not isinstance(task, dict) or task.get('aborted') or not task.get('_turnId')
-            or task.get('_userSteerInjects') or task.get('_turnVisibleRunTurnIds')):
+            or task.get(UNVERIFIED_INBOX_DELIVERY) or task.get('_turnVisibleRunTurnIds')):
         return None
     config = task.get('config') or {}
     if any(config.get(key) for key in ('flowId', 'flowBuiltin', 'flowDefinition')):
@@ -57,9 +67,8 @@ def compaction_resume_witness(task):
         return None
     from lib.tasks_pkg.manager._persist import _merge_tool_rounds
     rounds = _merge_tool_rounds(task)
-    from lib.tasks_pkg.message_semantics import has_model_media
-    if any(has_model_media(message) for message in task.get('messages') or []):
-        return None
+    # Media needs no witness field: restore proves each retained image against
+    # current authority before the snapshot can replace fresh history.
     return {'version': 1, 'turnId': task['_turnId'],
             'policyDigest': policy_witness(config), 'historyDigest': history,
             'backgroundDigest': resume_background_digest(task.get('_bgCommandInjects')),
@@ -67,37 +76,64 @@ def compaction_resume_witness(task):
             'toolPrefixDigest': _digest(_reconstruct_tool_call_messages(rounds) or [])}
 
 
-def restore_compacted_resume(task, config, rounds, *, fresh_messages=()):
+def _witness_mismatch(witness, summary, config, rounds, history):
+    """Name the first fresh source this Turn's archive no longer matches."""
+    count = witness.get('toolRoundCount')
+    if witness.get('policyDigest') != policy_witness(config):
+        return 'settings_changed'
+    if witness.get('historyDigest') != history:
+        return 'history_changed'
+    if summary.get('accepted') is not True or summary.get('complete') is not True:
+        return 'unavailable'
+    if (witness.get('backgroundDigest') != config.get(
+            '_resumeBackgroundDigest', resume_background_digest([]))
+            or (witness.get('executionDigest') is not None
+                and witness['executionDigest'] != config.get('_resumeExecutionDigest'))
+            or type(count) is not int or not 0 <= count <= len(rounds)
+            or witness.get('toolPrefixDigest') != _digest(
+                _reconstruct_tool_call_messages(list(rounds[:count])) or [])):
+        return 'progress_changed'
+    return None
+
+
+def restore_compacted_resume(task, config, rounds, *, fresh_messages=(), current_messages=()):
     """Return detached archived context plus uncovered rounds, or None.
 
     At most eight metadata entries and one accepted bounded post snapshot are
     used. Every read passes the authenticated owner to the selected repository.
     The caller keeps the full rounds for display/accounting and side-effect
-    recovery; only the model projection is replaced.
+    recovery; only the model projection is replaced. Captured image bytes in
+    the snapshot must be reproducible from ``current_messages`` (the fresh
+    authoritative projection) or from their recorded sources. The outcome is
+    kept in ``task['_compactionResumeOutcome']`` for the resume report.
     """
-    if (task.get('aborted') or config.get('checkpointImages')
-            or config.get('toolHistory') or fresh_messages is None):
-        return None
-    from lib.tasks_pkg.message_semantics import has_model_media
-    if any(not isinstance(message, dict) or has_model_media(message)
-           for message in fresh_messages):
-        return None
+    projected, reason, archive = _restore_compacted_resume(
+        task, config, rounds, fresh_messages, current_messages)
+    task['_compactionResumeOutcome'] = {'reason': reason, 'archiveId': archive}
+    return projected
+
+
+def _restore_compacted_resume(task, config, rounds, fresh_messages, current_messages):
+    if (task.get('aborted') or config.get('toolHistory') or fresh_messages is None
+            or any(not isinstance(message, dict) for message in fresh_messages)):
+        return None, 'ineligible', None
     history = _history_digest(config)
     if history is None:
-        return None
+        return None, 'ineligible', None
+    reason = None
     try:
         from lib.agent_core.store import get_conversation_store
         from lib.tasks_pkg.manager import task_user_id
         from lib.agent_core.model_context_limits import MAX_ENTRY_BYTES, MAX_MESSAGES
         owner, conversation = task_user_id(task), task.get('convId')
         if not conversation:
-            return None
+            return None, 'ineligible', None
         store = get_conversation_store()
         archives = store.list_compaction_archives(
             conversation, user_id=owner, limit=_MAX_ARCHIVE_CANDIDATES)
         for metadata in archives:
             if task.get('aborted'):
-                return None
+                return None, 'ineligible', None
             if metadata.get('resultStatus') != 'completed':
                 continue
             item = store.get_compaction_archive(
@@ -105,29 +141,23 @@ def restore_compacted_resume(task, config, rounds, *, fresh_messages=()):
                 include_messages=False, include_post_messages=False)
             receipt = ((item or {}).get('archive') or {}).get('receipt') or {}
             witness = receipt.get('resumeWitness') or {}
-            summary = receipt.get('summary') or {}
-            count = witness.get('toolRoundCount')
-            if (witness.get('version') != 1 or witness.get('turnId') != task.get('_turnId')
-                    or witness.get('policyDigest') != policy_witness(config)
-                    or witness.get('historyDigest') != history
-                    or witness.get('backgroundDigest') != config.get(
-                        '_resumeBackgroundDigest', resume_background_digest([]))
-                    or (witness.get('executionDigest') is not None
-                        and witness['executionDigest'] != config.get('_resumeExecutionDigest'))
-                    or summary.get('accepted') is not True or summary.get('complete') is not True
-                    or type(count) is not int or not 0 <= count <= len(rounds)
-                    or witness.get('toolPrefixDigest') != _digest(
-                        _reconstruct_tool_call_messages(list(rounds[:count])) or [])):
+            if witness.get('version') != 1 or witness.get('turnId') != task.get('_turnId'):
+                continue
+            mismatch = _witness_mismatch(
+                witness, receipt.get('summary') or {}, config, rounds, history)
+            if mismatch:
+                # The newest witnessed archive of this Turn names the cause.
+                reason = reason or mismatch
                 continue
             item = store.get_compaction_archive(
                 conversation, metadata['id'], user_id=owner,
                 include_messages=False, include_post_messages=True)
             if ((item or {}).get('archive') or {}).get('receipt') != receipt:
-                return None
+                return None, 'unavailable', None
             post = (item or {}).get('postMessages')
             if (not isinstance(post, list) or not 0 < len(post) <= MAX_MESSAGES
                     or any(not isinstance(message, dict) for message in post)):
-                return None
+                return None, 'unavailable', None
             # The existing continuation size bound also caps restore work.
             encoded_bytes = 0
             for part in json.JSONEncoder(ensure_ascii=False).iterencode(post):
@@ -135,11 +165,16 @@ def restore_compacted_resume(task, config, rounds, *, fresh_messages=()):
                 if encoded_bytes > MAX_ENTRY_BYTES:
                     break
             if encoded_bytes > MAX_ENTRY_BYTES:
-                return None
+                return None, 'unavailable', None
             from lib.tasks_pkg.compaction._handoff import is_compaction_handoff
             if not any(is_compaction_handoff(message) for message in post):
-                return None
+                return None, 'unavailable', None
+            from lib.tasks_pkg.model_images import retained_images_reproducible
+            if not retained_images_reproducible(
+                    post, current_messages=current_messages, user_id=owner):
+                return None, 'media_unavailable', None
             from lib.tasks_pkg.message_input_receipts import historical_swarm_context
+            count = witness['toolRoundCount']
             projected = historical_swarm_context(
                 post, binding=task.get('_swarmMessageBinding'))
             projected.extend(_reconstruct_tool_call_messages(list(rounds[count:])) or [])
@@ -154,15 +189,50 @@ def restore_compacted_resume(task, config, rounds, *, fresh_messages=()):
                     continue
                 projected.append(deepcopy(message))
             if task.get('aborted'):
-                return None
+                return None, 'ineligible', None
             task['_acceptedCompactionReceipt'] = deepcopy(receipt)
             task['_compactionResumeStatus'] = 'restored'
             logger.info('[CompactionResume] conv=%s archive=%s covered=%d suffix=%d messages=%d',
                         conversation, metadata['id'], count, len(rounds) - count, len(projected))
-            return projected
+            return projected, 'restored', metadata['id']
     except Exception as exc:
         logger.debug('[CompactionResume] unavailable: %s', type(exc).__name__)
-    return None
+        return None, 'unavailable', None
+    return None, reason or 'no_witness', None
+
+
+def report_compaction_resume(task, config, rounds):
+    """Publish whether this resumed attempt reused its predecessors' context.
+
+    ``sourceAttemptIds`` names the earlier attempts of this Turn whose model
+    view the resume replaces: the accepted resume source plus every producer
+    of a retained checkpoint round. The Turn timeline marks their accepted
+    compactions that no longer shape the context; the report changes neither
+    the model view nor execution recovery. Observability never aborts resume.
+    """
+    from lib.tool_results.tool_round_identity import execution_identity
+    outcome = task.get('_compactionResumeOutcome') or {}
+    reason = outcome.get('reason') or 'ineligible'
+    current = task.get('_attemptId') or ''
+    source = config.get('_resumeSource')
+    lineage = dict.fromkeys(
+        attempt for attempt, _ in map(execution_identity, [
+            source if isinstance(source, dict) else None, *rounds])
+        if attempt and attempt != current)
+    try:
+        from lib.agent_core.events import EventType, build_event
+        from lib.tasks_pkg.manager import append_event
+        append_event(task, build_event(
+            EventType.COMPACTION_RESUME,
+            convId=str(task.get('convId') or ''),
+            restored=reason == 'restored',
+            reason=reason,
+            sourceAttemptIds=list(lineage),
+            **({'archiveId': str(outcome['archiveId'])} if outcome.get('archiveId') else {}),
+            ts=int(time.time()),
+        ))
+    except Exception as exc:
+        logger.warning('[CompactionResume] report unavailable: %s', type(exc).__name__)
 
 
 def preserve_suspended_compaction(task):

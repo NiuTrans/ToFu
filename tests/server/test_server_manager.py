@@ -1909,7 +1909,7 @@ def test_graceful_signal_after_ready_restarts_without_spending_failure_budget(
     manager = sm.LifecycleManager(str(project))
     monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
     monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
-    _install_clean_worker_marker(manager, project, reason='signal')
+    marker = _install_clean_worker_marker(manager, project, reason='signal')
     # This generation reached readiness before the external signal.
     manager._state['workerReadyLoggedAt'] = time.time() - 0.5
     spawned = []
@@ -1925,6 +1925,10 @@ def test_graceful_signal_after_ready_restarts_without_spending_failure_budget(
     assert manager._state['workerFailureCount'] == 0
     assert manager._state['failureHistory'] == []
     assert manager._state['lastWorkerExitReason'] == 'signal'
+    # The certificate's own timestamp is the exit time, not the tick that
+    # happened to read it.
+    assert manager._state['lastWorkerExitAt'] == (
+        json.loads(marker.read_text())['clean_ts'])
 
 
 def test_signal_before_ready_still_spends_failure_budget(tmp_path, monkeypatch):
@@ -2041,6 +2045,161 @@ def test_manual_clean_exit_changes_durable_desired_state_to_stopped(
     assert manager._state['workerFailureCount'] == 0
     persisted = json.loads(manager.state_path.read_text())
     assert persisted['desired'] == 'stopped'
+
+
+def _unsupervised_departure(tmp_path, monkeypatch, *, marker_reason=None,
+                            ready=True, desired='running'):
+    """A supervised generation that exited while no manager observed it.
+
+    The previous Supervisor stopped together with its worker; a new manager
+    loads the persisted record of that dead generation (pid 987654).
+    """
+    clock = [50_000.0]
+    monkeypatch.setattr(sm, '_now', lambda: clock[0])
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    monkeypatch.setattr(sm, 'cgroup_oom_kill_count', lambda: 0)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
+    monkeypatch.setattr(manager, '_active_storage_lease', lambda: {'held': False})
+    exited_at = clock[0] - 2040.0
+    if marker_reason:
+        _install_clean_worker_marker(
+            manager, project, reason=marker_reason, clean_ts=exited_at)
+    else:
+        manager._state['worker'] = {
+            'pid': 987654, 'host': sm._hostname(), 'processStartTime': 42,
+            'processCwd': str(project.resolve()),
+        }
+    manager._state['worker']['spawnedAt'] = exited_at - 7200.0
+    manager._state['workerReadyLoggedAt'] = (
+        exited_at - 7000.0 if ready else 0.0)
+    manager._state['desired'] = desired
+    manager._save()
+    spawned = []
+    monkeypatch.setattr(
+        manager, '_spawn',
+        lambda source, **_kwargs: spawned.append(source) or {'ok': True})
+    return manager, spawned, exited_at
+
+
+def test_explicit_start_settles_a_generation_that_departed_unsupervised(
+        tmp_path, monkeypatch):
+    """A start that outruns every reconcile tick must not erase an exit.
+
+    The Supervisor was stopped together with its served worker; the new
+    Supervisor's first act is an explicit start, which used to overwrite the
+    dead generation's record so status kept reporting an older exit.
+    """
+    manager, spawned, exited_at = _unsupervised_departure(
+        tmp_path, monkeypatch, marker_reason='signal')
+
+    assert manager.start(source='serverctl')['ok'] is True
+
+    assert spawned == ['serverctl']
+    status = manager.status()
+    assert status['plannedExitCount'] == 1
+    assert status['workerFailureCount'] == 0
+    assert status['lastWorkerExitKind'] == 'planned'
+    assert status['lastWorkerExitReason'] == 'signal'
+    assert status['lastWorkerExitAt'] == exited_at
+    persisted = json.loads(manager.state_path.read_text())
+    assert persisted['plannedExitCount'] == 1
+    assert persisted['lastConsumedExitMarker'].startswith('987654:')
+    # The start itself is the recovery; no stale recovery baton survives.
+    assert persisted['pendingRecoverySource'] == ''
+
+
+def test_explicit_start_records_an_unclean_departure_then_resets_the_budget(
+        tmp_path, monkeypatch):
+    manager, spawned, _ = _unsupervised_departure(tmp_path, monkeypatch)
+
+    assert manager.start(source='serverctl')['ok'] is True
+
+    assert spawned == ['serverctl']
+    status = manager.status()
+    assert status['workerFailureCount'] == 1
+    assert status['plannedExitCount'] == 0
+    assert status['lastWorkerExitKind'] == 'failure'
+    assert status['lastExitCause'] == 'unexpected_exit'
+    # Recorded first, then the explicit start clears crash-loop gating.
+    assert status['recentFailureCount'] == 0
+    assert status['consecutiveFailures'] == 0
+    assert status['nextRetryAt'] == 0
+
+
+def test_stop_settles_a_generation_that_departed_unsupervised(
+        tmp_path, monkeypatch):
+    manager, spawned, exited_at = _unsupervised_departure(
+        tmp_path, monkeypatch, marker_reason='signal')
+
+    assert manager.stop(source='serverctl')['ok'] is True
+
+    assert spawned == []
+    status = manager.status()
+    assert status['desired'] == 'stopped'
+    assert status['worker'] == {}
+    assert status['plannedExitCount'] == 1
+    assert status['lastWorkerExitReason'] == 'signal'
+    assert status['lastWorkerExitAt'] == exited_at
+
+
+def test_stopped_reconcile_settles_a_stop_its_crashed_manager_left_open(
+        tmp_path, monkeypatch):
+    """stop() persists desired=stopped and its PID intent before the signal;
+    a manager that dies before recording the exit leaves that proof for the
+    next manager, which records a manual stop rather than forgetting it."""
+    manager, spawned, exited_at = _unsupervised_departure(
+        tmp_path, monkeypatch, marker_reason='signal', ready=False,
+        desired='stopped')
+    manager._state['pendingWorkerExitIntent'] = {
+        'pid': 987654, 'host': sm._hostname(), 'reason': 'manual',
+        'requestedAt': exited_at - 0.5, 'recoverySource': '',
+    }
+
+    manager.reconcile()
+
+    assert spawned == []
+    assert manager._state['desired'] == 'stopped'
+    assert manager._state['observed'] == 'stopped'
+    assert manager._state['worker'] == {}
+    assert manager._state['plannedExitCount'] == 1
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['lastWorkerExitReason'] == 'manual'
+
+
+def test_stopped_reconcile_records_its_own_termination_as_a_manual_stop(
+        tmp_path, monkeypatch):
+    """Completing a persisted stop is manager-authored: its PID intent
+    precedes the signal as in stop(), so even a still-booting generation's
+    drain is a manual stop, not an unintended signal."""
+    manager, spawned, _ = _unsupervised_departure(
+        tmp_path, monkeypatch, ready=False, desired='stopped')
+    project = Path(manager.project)
+    live = {'running': True}
+    monkeypatch.setattr(
+        sm, 'read_lock_status',
+        lambda _p: _status(project, running=live['running'], pid=987654))
+
+    def drain(_status_value, **_kwargs):
+        (project / 'data' / '.server_shutdown.json').write_text(json.dumps({
+            'state': 'clean', 'pid': 987654, 'host': sm._hostname(),
+            'clean_ts': sm._now(), 'reason': 'signal'}))
+        live['running'] = False
+        return True, False, 'stopped cleanly'
+
+    monkeypatch.setattr(manager, '_terminate', drain)
+
+    manager.reconcile()
+
+    assert spawned == []
+    assert manager._state['observed'] == 'stopped'
+    assert manager._state['worker'] == {}
+    assert manager._state['plannedExitCount'] == 1
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['lastWorkerExitReason'] == 'manual'
 
 
 def test_stale_or_wrong_pid_clean_marker_cannot_hide_worker_failure(
@@ -2572,9 +2731,12 @@ def test_manager_never_judges_or_replaces_a_worker_recorded_on_another_host(
     assert state_path.read_bytes() == persisted
 
     # Moving the service (or recovering a host recreated under a new name)
-    # stays an explicit operator start.
+    # stays an explicit operator start, and never records the owner host's
+    # worker as exited.
     assert manager.start(source='serverctl')['ok'] is True
     assert spawned == ['serverctl']
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['plannedExitCount'] == 0
 
 
 @pytest.mark.parametrize('pending_recovery', ['', 'manager-restart'])

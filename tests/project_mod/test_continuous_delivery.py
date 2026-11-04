@@ -125,6 +125,21 @@ def test_landed_checkpoint_is_no_change_even_after_overlapping_target_edits(repo
     target = git(root, 'rev-parse', 'HEAD')
     merges = spy_merges(monkeypatch)
 
+    probe = ic._git
+
+    def fail_ancestry(checkout, args, **kwargs):
+        if args == ['merge-base', '--is-ancestor', checkpoint, target]:
+            raise AssertionError('an unsuccessful ancestry probe cannot acknowledge delivery')
+        return probe(checkout, args, **kwargs)
+
+    before_ack = receipt(root)
+    with pytest.raises(AssertionError, match='unsuccessful ancestry probe'):
+        with monkeypatch.context() as patch:
+            patch.setattr(ic, '_git', fail_ancestry)
+            delivery._deliver_task_delta(row, before_ack)
+    assert receipt(root) == before_ack
+    assert (root / 'base.txt').read_text() == 'later overlapping lane\n'
+
     result = automatic_settle(repo)
 
     assert result['state'] == 'delivered'
@@ -134,19 +149,6 @@ def test_landed_checkpoint_is_no_change_even_after_overlapping_target_edits(repo
     assert result['retry'] is None
     assert merges == []
     assert (root / 'base.txt').read_text() == 'later overlapping lane\n'
-    probe = ic._git
-
-    def fail_ancestry(checkout, args, **kwargs):
-        if args == ['merge-base', '--is-ancestor', checkpoint, target]:
-            raise AssertionError('an unsuccessful ancestry probe cannot acknowledge delivery')
-        return probe(checkout, args, **kwargs)
-
-    with pytest.raises(AssertionError, match='unsuccessful ancestry probe'):
-        with monkeypatch.context() as patch:
-            patch.setattr(delivery, '_reclaim_completed_source', lambda row: None)
-            patch.setattr(delivery, '_wake_delivered_dependents', lambda row, value: None)
-            patch.setattr(ic, '_git', fail_ancestry)
-            delivery._settle_registered(row, receipt(root))
     assert receipt(root)['state'] == 'delivered'
 
 

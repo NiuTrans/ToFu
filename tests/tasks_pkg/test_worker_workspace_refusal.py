@@ -70,21 +70,38 @@ def test_a_root_tofu_cannot_prepare_carries_a_bilingual_remedy(tmp_path):
     assert hint.startswith('解决办法 / How to fix:\n• ') and hint.endswith(refusal.remedy)
 
 
-def test_subdirectory_symlink_and_linked_worktree_name_the_real_checkout(committed, tmp_path):
+@pytest.mark.parametrize('spelling', ['symlink', 'ancestor'])
+def test_project_symlink_is_resolved_without_reopening(committed, tmp_path, spelling):
+    alias = tmp_path / 'alias'
+    if spelling == 'symlink':
+        alias.symlink_to(committed, target_is_directory=True)
+        project = alias
+    else:
+        alias.symlink_to(committed.parent, target_is_directory=True)
+        project = alias / committed.name
+    assert isolated_workspace_refusal(str(project)) is None
+    assert alias.is_symlink()
+
+
+@pytest.mark.parametrize('aliased', [False, True])
+def test_subdirectory_and_linked_worktree_name_the_real_checkout(committed, tmp_path, aliased):
     sub = committed / 'pkg'
     sub.mkdir()
+    if aliased:
+        alias = tmp_path / 'sub-alias'
+        alias.symlink_to(sub, target_is_directory=True)
+        sub = alias
     refusal = isolated_workspace_refusal(str(sub))
     assert 'subdirectory of the Git repository' in refusal.reason
     assert f'Open {committed} as the project' in refusal.remedy
 
-    alias = tmp_path / 'alias'
-    alias.symlink_to(committed, target_is_directory=True)
-    refusal = isolated_workspace_refusal(str(alias))
-    assert 'through a symlink' in refusal.reason and str(committed) in refusal.remedy
-
     linked = tmp_path / 'linked'
     git(committed, 'worktree', 'add', '-q', '-b', 'side', str(linked))
-    refusal = isolated_workspace_refusal(str(linked.resolve()))
+    if aliased:
+        alias = tmp_path / 'linked-alias'
+        alias.symlink_to(linked, target_is_directory=True)
+        linked = alias
+    refusal = isolated_workspace_refusal(str(linked))
     assert 'linked Git worktree' in refusal.reason and str(committed) in refusal.remedy
 
 

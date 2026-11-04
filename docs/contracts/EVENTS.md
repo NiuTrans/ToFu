@@ -461,12 +461,50 @@ The compaction pair becomes one inspectable Turn row keyed by `archiveId`; its
 settled form carries the estimated token/message counts before and after plus
 the reduction percentage. The transient `phase=compacting` beat remains
 progress text and is replaced by that receipt row rather than rendered twice.
+Problem: those receipt counts describe the compactor's own message list. The
+managed context restored afterwards and the tool schemas ride on the next
+request but were missing, so conversation `mw10w4j3ghfsbk` showed 134,716 ->
+24,166 (82%) while provider-billed input went from 204,574 to 103,992 (49%).
+Decision: `recompose_context_after_compaction` emits one
+`compaction_request_size` fact for the compaction it restored context for.
+`tokensBefore` is the gate's count of the complete request (a forced pass
+applies the same counter before the compactor replaces the list) and
+`tokensAfter` is that counter over the rebuilt request. The fold replaces only
+that producer's row accounting (`tokensBefore`, `tokensAfter`,
+`reductionPercent`, `messagesAfter`). Status, timing and the archive snapshot
+counts stay unchanged. Without restoration (Stop first) the receipt counts
+remain. Rejected: a second `compaction_done`, because consumers treat it as
+the single settlement; restoring context inside the compactor, because the
+persisted candidate must stay the compactor result and callers own
+restoration; provider-billed input, because it arrives only after the next
+stream completes. Specs: `tests/compaction/test_compaction_request_size.py`
+and `rebuilt_request_size` in
+`tests/turn_lifecycle/test_turn_activity_timeline.py`.
 Problem: archive-less preflight refusals appeared at the conversation start.
 Decision: `compaction_done` may carry producer-scoped `anchorBlockId` and
 `anchorPosition` captured before planning. The fold reuses this witness when
 no start/phase exists; an existing start/phase wins. Legacy events without a
 witness keep conservative placement. Reject inferring boundaries from later
 replay segments or inventing a running phase when no summary call happened.
+
+Problem: an interrupted attempt's accepted compaction kept reading as
+"compacted" after a Continue that could not reuse it replayed the full history
+and compacted again, so one Turn showed two successes for one context.
+Decision: every checkpoint resume emits one `compaction_resume` fact: whether
+an archive was restored (`archiveId`), the closed refusal `reason`, and
+`sourceAttemptIds` (the accepted resume source plus every producer of a
+retained checkpoint round). The fold marks each `succeeded` compaction row of
+those attempts that no longer shapes the context `superseded`: all of them
+when nothing was restored, otherwise those after the restored archive's row
+(a restored suspended checkpoint has no row and is the latest state). Rows keep
+their real time, token accounting and snapshot; the detail names the cause and
+an already superseded row keeps its first cause. Rejected: deleting the row
+(hides real, billed work), inferring the outcome from a later compaction (a
+resume may not compact again, and a restored archive may itself be compacted
+further), and marking every other producer (relayed producers keep their own
+context). Specs: `tests/turn_lifecycle/test_turn_activity_timeline.py`
+(`resume_marks_only`, `resume_report_persists`) and
+`tests/compaction/test_dispatch_context_recovery.py`.
 
 Each entry carries a 0-based `llmRound` display anchor — its own 1-based
 `R{n}` request-tag round minus one when present, else the last model-request

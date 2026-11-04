@@ -4,6 +4,14 @@ This module declares evidence only; it owns no reader, provider, retry or store.
 Consumers refuse model admission when a required current snapshot is unavailable.
 """
 
+from lib.llm.llm_errors import RequestScopedError
+
+
+class MessageInputScopeError(RequestScopedError, PermissionError):
+    """Local input scope denial: no route retry, fallback, or health penalty."""
+
+    failure_stage = 'before_dispatch'
+
 
 class TurnRequirementsDeadlineError(TimeoutError):
     """The local requirement reader did not finish before its admission deadline."""

@@ -23,6 +23,13 @@ export interface ConversationSurfaceDesign {
   /** Paint a reply's tool panel header; the returned button is the toggle.
    * Engine owns its identity, open state and event delegation. */
   toolPanelHeader(node: HTMLElement, panel: ToolPanelEntry): HTMLButtonElement;
+  /** Create the shared scrolling well for a reply's interim prose. It must
+   * carry `data-narration-well` and one `data-narration-well-body` child;
+   * the engine owns which blocks live in the body. */
+  narrationWell(document: Document): HTMLElement;
+  /** Paint the well's header row for `count` notes; the returned button is
+   * its disclosure toggle. Engine owns open state and event delegation. */
+  paintNarrationWell(well: HTMLElement, count: number): HTMLButtonElement;
   transportNotice(node: HTMLElement, state: SurfaceTransportNotice): void;
   /** Engine owns identity, disabled state, paging and event delegation. */
   blockBoundary(node: HTMLElement, direction: SurfaceHistoryDirection, count: number): HTMLButtonElement;

@@ -70,6 +70,36 @@ def test_frozen_checkpoint_recovers_while_source_is_busy(repo, monkeypatch):
     assert (work / 'later.txt').read_text() == 'uncaptured source work\n'
 
 
+@pytest.mark.parametrize('legacy_phase', [False, True])
+def test_publication_hold_resumes_the_captured_checkpoint_after_authorization(repo, monkeypatch, legacy_phase):
+    from lib.project_dispatch import publication
+
+    root, _, owner = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'task.txt').write_text('captured task\n')
+    allowed = [False]
+    monkeypatch.setattr(publication, 'publication_reason',
+        lambda row, receipt: '' if allowed[0] else 'project_publication_authority_missing')
+    held = automatic_settle(repo)
+    assert held['state'] == 'blocked' and held['reason'] == 'project_publication_authority_missing'
+    assert held['checkpointSha'] and not (root / 'task.txt').exists()
+    if legacy_phase:
+        row = state.get_workspace(str(root), 'automatic', user_id=owner)
+        delivery._save(row, held, phase='checkpoint')
+
+    allowed[0] = True
+    monkeypatch.setattr(ic, 'checkpoint_workspace',
+        lambda *args, **kwargs: pytest.fail('Publication must reuse the reviewed checkpoint'))
+    (work / 'later.txt').write_text('unreviewed source work\n')
+    with held_source(work):
+        assert delivery.resume_pending_workspace_deliveries()
+        result = receipt(root)
+        assert result['state'] == 'delivered', result.get('reason')
+        assert result['checkpointSha'] == held['checkpointSha']
+    assert (root / 'task.txt').read_text() == 'captured task\n'
+    assert not (root / 'later.txt').exists()
+
+
 @pytest.mark.parametrize('metadata', [False, True])
 def test_source_contention_preserves_frozen_conflict_evidence(repo, monkeypatch, metadata):
     root, _, _ = repo

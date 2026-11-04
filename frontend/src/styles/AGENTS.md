@@ -35,7 +35,8 @@ the composed-sheet size budgets.
   editor,background,execution,tool-summary,tool-panel,context,context-rail}.css`
   own the named content. The tool-summary owner sets shared intent/identity/
   outcome chrome across native tool families; `23-reading-tool-panel.css`
-  draws a grouped reply's reasoning pill and tool-panel card over it;
+  draws a grouped reply's activity card (reasoning row, tool panel and
+  narration fold) over it;
   `23-reading-context.css` draws context-note folds, rows and receipts;
   `23-reading-context-rail.css` owns the per-turn context rail whole: track
   reservation, rail track and sticky card, `--tctx-*` section vocabulary and the narrow-pane

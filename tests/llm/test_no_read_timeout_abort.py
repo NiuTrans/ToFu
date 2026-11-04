@@ -663,6 +663,38 @@ class TestBeatLabelHonesty:
         assert '[truncation]' not in evs[-1]['detail']
         assert '300999' not in evs[-1]['detail']
 
+    def test_quota_wait_never_claims_recovery_is_disabled(self):
+        from types import SimpleNamespace
+        import lib.tasks_pkg.manager._stream as _mgr
+
+        task = {'id': 'task-quota', 'convId': 'cv-quota', '_userId': 1,
+                'status': 'running', 'content': '', 'thinking': '',
+                'config': {'userId': 1}, 'events': [], 'toolRounds': [],
+                'content_lock': threading.Lock(), 'events_lock': threading.Lock()}
+        with chat_task_fixture_guard:
+            chat_task_registry[task['id']] = task
+        captured = {}
+
+        def _fake_dispatch(body, **kwargs):
+            captured['on_waiting'] = kwargs['on_waiting']
+            return {'role': 'assistant', 'content': ''}, 'stop', {}
+
+        _orig = _mgr.dispatch_stream
+        _mgr.dispatch_stream = _fake_dispatch
+        try:
+            _mgr.stream_llm_response(
+                task, {'model': 'kimi-k3.1-pro', 'messages': [{'role': 'user', 'content': 'go'}]},
+                tag='R1')
+        finally:
+            _mgr.dispatch_stream = _orig
+        captured['on_waiting'](
+            status=SimpleNamespace(kind='waiting_slot', cooldown_cause='quota',
+                                   request_elapsed_s=23.0, semantic_idle_s=23.0),
+            slot=None)
+        event = next(e for e in task['events'] if e.get('detailKey') == 'stream.phase.waitingQuotaReset')
+        assert 'retrying automatically' in event['detail']
+        assert 'will not recover' not in event['detail'].lower()
+
     def test_mid_stream_stall_does_not_claim_no_first_byte(self):
         evs = self._beats_for('partial answer so far')
         assert evs, 'no beat emitted'

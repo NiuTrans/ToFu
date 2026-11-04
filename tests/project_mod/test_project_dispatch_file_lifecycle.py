@@ -168,7 +168,8 @@ def test_linked_rework_requires_current_review_and_fresh_human_grant(context):
     with pytest.raises(ValueError): c.repo.authorize(second, c.principal, 'invalid')
 
 
-def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, repo, monkeypatch):
+@pytest.mark.parametrize('spelling', ['canonical', 'symlink', 'ancestor'])
+def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, repo, monkeypatch, spelling):
     """The RSI Exam shape: nobody ran Git, the folder holds notes and bulky data."""
     import os
     from lib.project_mod import delivery
@@ -183,7 +184,12 @@ def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, r
     panel = plain / 'allowed' / 'panel.parquet'
     with open(panel, 'wb') as stream:
         stream.truncate(LARGE_FILE_BYTES)
-    f = file_context(context, (plain, None, owner), monkeypatch)
+    project = plain
+    if spelling != 'canonical':
+        alias = root.parent / 'project-alias'
+        alias.symlink_to(plain if spelling == 'symlink' else plain.parent, target_is_directory=True)
+        project = alias if spelling == 'symlink' else alias / plain.name
+    f = file_context(context, (project, None, owner), monkeypatch)
     row = f.repository.authorize(f.request, f.principal, 'plain-command')
     f.repository.bind_execution(row['id'], 'worker-turn', 'worker-attempt')
     trusted = admission.TrustedDispatch(f.repository.admission(row['id']))
@@ -198,6 +204,11 @@ def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, r
 
     work = Path(task['config']['projectPath'])
     assert work != plain and admission.owned_workspace(task)['task_id'] == 'automatic'
+    assert task['convId'] == 'recipient'
+    assert task['config']['canonicalProjectPath'] == str(project)
+    assert task['config'][admission.KEY]['projectPath'] == str(project)
+    assert f.c.conversations.rows['recipient']['settings']['projectPath'] == str(project)
+    assert state.get_workspace(str(plain), 'automatic', user_id=owner)['origin'][admission.KEY]['projectPath'] == str(project)
     assert (plain / '.git').is_dir() and git(plain, 'status', '--porcelain') == ''
     assert (work / 'AGENTS.md').read_text() == (plain / 'AGENTS.md').read_text()
     assert (work / 'allowed' / 'notes.md').read_text() == 'person notes\n'
@@ -216,6 +227,24 @@ def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, r
     f.output.update(projectionRevision=2, projection={'content': 'Files ready for review'})
     held = automatic_settle((plain, None, owner))
     assert held['state'] == 'blocked'
+    if spelling != 'canonical':
+        from lib.llm.llm_errors import ToolAdmissionRefused
+        from lib.project_dispatch.publication import delivery_view, publication_reason
+        registered = state.get_workspace(str(plain), 'automatic', user_id=owner)
+        assigned = f.repository.read(row['id'])
+        assert delivery_view(assigned, f.attempt, state.find_workspace)['checkpointSha'] == held['checkpointSha']
+        target = alias.readlink()
+        alias.unlink()
+        alias.symlink_to(root, target_is_directory=True)
+        try:
+            with pytest.raises(ToolAdmissionRefused, match='registered owned isolated worktree'):
+                admission.owned_workspace(task)
+            assert publication_reason(registered, held) == 'project_publication_identity_changed'
+            assert delivery_view(assigned, f.attempt, state.find_workspace) is None
+            assert not (root / 'allowed' / 'result.txt').exists()
+        finally:
+            alias.unlink()
+            alias.symlink_to(target, target_is_directory=True)
     service = ProjectDispatchService(f.repository, commands=SimpleNamespace(), turn_get=f.turns,
         attempt_get=lambda *a, **kw: deepcopy(f.attempt), workspace_get=state.find_workspace,
         publication_lock=lambda root: nullcontext(), publication_wake=lambda: None)
@@ -224,8 +253,13 @@ def test_file_worker_in_plain_folder_runs_isolated_and_publishes_back(context, r
     service.publish(row['id'], principal=f.principal, expected_revision=1,
                     result_revision=2, expected_checkpoint_sha=held['checkpointSha'])
     delivery.resume_pending_workspace_deliveries()
+    settled = state.get_workspace(str(plain), 'automatic', user_id=owner)['origin']['delivery']
+    assert settled['state'] == 'delivered', settled.get('reason')
     assert (plain / 'allowed' / 'result.txt').read_text() == 'worker bytes\n'
     assert service.view(row['id'], principal=f.principal)['canonicalDelivery'] is True
+    assert (project / 'allowed' / 'result.txt').read_text() == 'worker bytes\n'
+    if spelling != 'canonical':
+        assert alias.is_symlink()
     assert panel.stat().st_size == LARGE_FILE_BYTES and not panel.is_symlink()
     assert 'allowed/panel.parquet' not in git(plain, 'ls-tree', '-r', '--name-only', held['checkpointSha'])
 

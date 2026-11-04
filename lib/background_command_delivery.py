@@ -117,6 +117,94 @@ def completion_delivery_config(config: dict | None) -> dict:
     return cleaned
 
 
+def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
+    """Attach a revoked Worker's late results without starting another model turn.
+
+    The cancelled execution remains the evidence owner. Attach before retiring
+    durable delivery intent so an uncertain commit can only replay the same
+    deterministic block; an unrelated human wake cannot race the attachment.
+    Results of a turn that ran without the binding in a Worker conversation are
+    governed by that conversation's assignment, so they settle the same way.
+    """
+    from lib.project_dispatch.repository import DispatchGrantRevoked, ProjectDispatchRepository
+    binding = (config or {}).get(DISPATCH_ADMISSION_KEY)
+    unbound = not isinstance(binding, dict)
+    if unbound:
+        from lib.project_dispatch.recovery import worker_conversation_admission
+        binding = worker_conversation_admission(
+            conv_id, user_id=user_id, repository_factory=ProjectDispatchRepository)
+        if binding is None:
+            return False
+    repository = ProjectDispatchRepository(binding['owner'], binding['projectPath'])
+    admission = repository.admission(binding['assignmentId'])
+    if any(admission[key] != binding.get(key)
+           for key in ('version', 'owner', 'tenant', 'projectPath', 'assignmentId', 'recipientId')):
+        return False
+    assignment = repository.read(binding['assignmentId'])
+    execution = assignment.get('execution')
+    if execution is None and not unbound:
+        return False
+    try:
+        repository.validate_own(binding)
+    except DispatchGrantRevoked:
+        pass
+    else:
+        return False
+    if execution is None:
+        return True
+    from lib.turn_lifecycle import LifecycleConflict, update_turn_projection
+    from lib.background_command_projection import background_command_injection_record
+    turn = repository.turn_get(
+        conv_id, execution['turnId'], user_id=user_id)
+    attempt = repository.get_attempt(execution['attemptId'])
+    if not isinstance(turn, dict) or turn.get('status') in {'pending', 'running'}:
+        return True
+    if not isinstance(attempt, dict) or attempt.get('status') in {'pending', 'running'}:
+        return True
+    deliveries = [{
+        'queueId': row['queueId'],
+        'commandId': (row.get('payload') or {}).get('_backgroundCommand'),
+        'value': (row.get('payload') or {}).get('text') or '',
+        'backgroundCommand': row.get('backgroundCommand'),
+    } for row in receipts if isinstance(row.get('queueId'), str)
+            and isinstance((row.get('payload') or {}).get('_backgroundCommand'), str)
+            and (row.get('payload') or {}).get('text')]
+    if not deliveries:
+        return True
+    receipt = background_command_injection_record({
+        'roundNum': 0,
+        'previews': [{
+            'queueId': item['queueId'], 'commandId': item['commandId'],
+            'text': item['value'][:1200], 'textTruncated': len(item['value']) > 1200,
+            **({'backgroundCommand': item['backgroundCommand']}
+               if isinstance(item.get('backgroundCommand'), dict) else {}),
+        } for item in deliveries],
+    }, attempt_id=execution['attemptId'])
+    projection = dict(turn.get('projection') or {})
+    previous = projection.get('_bgCommandInjects') or []
+    if any(isinstance(row, dict) and row.get('blockId') == receipt['blockId']
+           for row in previous):
+        return True
+    projection['_bgCommandInjects'] = [*previous, receipt]
+    try:
+        update_turn_projection(
+            conv_id, execution['turnId'], projection=projection,
+            expected_projection_revision=turn['projectionRevision'], user_id=user_id,
+            preserve_activity=True)
+    except LifecycleConflict as error:
+        if error.code in {'turn_in_progress', 'stale_projection', 'database_conflict'}:
+            return True
+        raise
+    from lib import agent_inbox
+    try:
+        agent_inbox.consume_peer(conv_id, [item['queueId'] for item in deliveries])
+    except Exception as error:
+        logger.debug('[BackgroundDelivery] cancelled Worker inbox fence failed: %s', error)
+    # Late evidence must not claim model consumption. It is retained on the
+    # cancelled Turn; only the automatic synthetic wake is retired.
+    return True
+
+
 def publish_completion_envelope(enqueue, conv_id, envelope, *, kind, user_id):
     """Replay frozen bytes first; repair legacy checkpoints only after refusal.
 

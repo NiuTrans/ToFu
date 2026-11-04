@@ -29,7 +29,11 @@ from lib.conversation_sync.workspace import is_conversation_workspace
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
 from lib.storage.commit_events import CommittedEventOrder, defer_committed_events
-from lib.storage.errors import ProjectionRebaseRequired, StorageError
+from lib.storage.errors import (
+    ProjectionRebaseRequired,
+    StorageError,
+    is_resource_bound_refusal,
+)
 from lib.storage.protocol import FrozenPayload, encode_json_value
 from lib.tasks_pkg.failure_attribution import (
     ensure_failure_attribution,
@@ -390,13 +394,8 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         if exc.code == 'turn_in_progress':
             latest = None
             try:
-                rows = _turn_client().query(
-                    'turn.list', {
-                        'conversation_id': conversation_id,
-                        'user_id': user_id,
-                        'lane_id': lane_id,
-                    })
-                latest = _lane_busy_turn(rows, user_id=user_id)
+                latest = _lane_busy_turn(
+                    conversation_id, lane_id, user_id=user_id)
             except StorageError:
                 # Delivery needs the authoritative live attempt. Preserve a
                 # failed read's typed availability/retry contract for the API;
@@ -420,8 +419,62 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         raise
 
 
+def _lane_turns_newest_first(
+    conversation_id: str, lane_id: str, *, user_id: Any, limit: int,
+) -> Iterator[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """Yield one lane's Turns newest-first, each with its current attempt.
+
+    Every ``turn.sync.page`` is one bounded read at one replay head and carries
+    the current attempts of its Turns. Pages are fenced on that head, which a
+    live reply keeps advancing; lane ordinals only grow, so a stale page is read
+    again from the same cursor at the head the authority reported. A page the
+    authority refuses at its deterministic response bound is read again at half
+    the size, which later pages keep; a refused one-Turn page raises. A missing
+    conversation yields nothing.
+    """
+    client = _turn_client()
+    sync_sequence = 0
+    before_ordinal: int | None = None
+    while True:
+        payload: dict[str, Any] = {
+            'conversation_id': conversation_id, 'user_id': user_id,
+            'lane_id': lane_id, 'sync_sequence': sync_sequence, 'limit': limit,
+        }
+        if before_ordinal is not None:
+            payload['before_ordinal'] = before_ordinal
+        try:
+            page = client.query('turn.sync.page', payload)
+        except StorageError as exc:
+            if limit == 1 or not is_resource_bound_refusal(exc):
+                raise
+            limit //= 2
+            continue
+        if page is None:
+            return
+        if page.get('stale'):
+            head = page.get('syncSequence')
+            if type(head) is not int or head == sync_sequence:
+                raise StorageError(
+                    'database_protocol_error', 'Turn page stale head is malformed')
+            sync_sequence = head
+            continue
+        turns = page.get('turns') or []
+        attempts = {attempt.get('attemptId'): attempt
+                    for attempt in page.get('attempts') or []}
+        for row in reversed(turns):
+            yield row, attempts.get(row.get('currentAttemptId'))
+        if not page.get('hasMore'):
+            return
+        next_before = page.get('nextBeforeOrdinal')
+        if (not turns or type(next_before) is not int
+                or (before_ordinal is not None and next_before >= before_ordinal)):
+            raise StorageError(
+                'database_protocol_error', 'Turn page cursor did not advance')
+        before_ordinal = next_before
+
+
 def _lane_busy_turn(
-    rows: list[dict[str, Any]], *, user_id: Any,
+    conversation_id: str, lane_id: str, *, user_id: Any,
 ) -> dict[str, Any] | None:
     """Name the Turn whose attempt makes the lane busy, not merely the lane tail.
 
@@ -430,19 +483,24 @@ def _lane_busy_turn(
     pending/running attempt that is not queue-bound; a steer addressed to any
     other Turn finds its window closed. The tail remains the answer only when
     the live attempt settled after the authority refused the command.
+
+    The lane is read newest-first, one Turn per ``turn.sync.page`` (which
+    carries that Turn's current attempt from the same read), and the search
+    stops at the busy Turn. A whole-lane read is refused once a long
+    conversation's projections exceed the authority's response bound, which
+    would turn every input sent during its reply into an internal error.
     """
-    for row in reversed(rows):
-        attempt_id = row.get('currentAttemptId')
-        if not attempt_id or row.get('status') not in ('pending', 'running'):
-            continue
-        try:
-            attempt = get_attempt(attempt_id, user_id=user_id)
-        except LifecycleNotFound:
-            continue
-        if (attempt.get('status') in ('pending', 'running')
+    tail: dict[str, Any] | None = None
+    for row, attempt in _lane_turns_newest_first(
+            conversation_id, lane_id, user_id=user_id, limit=1):
+        if tail is None:
+            tail = row
+        if (row.get('status') in LIVE_ATTEMPT_STATUSES
+                and attempt is not None
+                and attempt.get('status') in LIVE_ATTEMPT_STATUSES
                 and not attempt.get('queueBinding')):
             return row
-    return rows[-1] if rows else None
+    return tail
 
 
 def activate_queued_turn_pair(
@@ -1573,14 +1631,6 @@ _DEBUG_EVIDENCE_EVENTS = frozenset({'messages_snapshot', 'tool_compacted'})
 # projection the durable event log stores) instead of duplicating the full
 # wire frame on the attempt event. ``read_events`` rehydrates them.
 _DEBUG_EVIDENCE_INLINE_MAX_BYTES = 64 * 1024
-# Canonical source: contracts/tofudb_ir_v1.json -> bounds.maximumLegacyDocumentBytes.
-# The native authority admits one attempt event only while its expanded
-# conversation-sync form fits this bound (turn/sync_attempt_reference.rs); a
-# contract test pins the parity.
-_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024
-# Identity, sequence, status, attempt and sync-envelope fields the authority
-# adds around the producer payload, plus replay-patch normalization drift.
-_ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES = 64 * 1024
 _TERMINAL_EVENTS = frozenset({'done', 'error', 'aborted'})
 
 
@@ -1796,35 +1846,6 @@ def _frame_projection_patch(
         ),
         'projection_segments_stable': True,
     }
-
-
-def _shed_oversized_inline_evidence(command_payload: dict[str, Any],
-                                    encoding: _CommandEncoding) -> str | None:
-    """Drop an inline diagnostic copy the attempt-event bound cannot carry.
-
-    The inline evidence is a diagnostic duplicate of the carried task-event
-    row (or of the caller's standalone append). A full baseline -- the first
-    frame of a (task, turn), or one after projector eviction/reset -- of a
-    conversation whose wire request exceeds the attempt-event bound would
-    otherwise make this frame deterministically unwritable and kill the run.
-    Returns the shed reason, or ``None`` when the copy fits.
-    """
-    event_payload = command_payload['event_payload']
-    if 'event' not in event_payload:
-        return None
-    try:
-        evidence_bytes = len(encoding.encoded(event_payload['event']))
-        patch_bytes = len(encoding.encoded(command_payload['projection_patch']))
-    except StorageError:
-        # Sending the command reports this refusal; its handler sheds evidence.
-        return None
-    if (evidence_bytes + patch_bytes + _ATTEMPT_EVENT_ENVELOPE_RESERVE_BYTES
-            <= _ATTEMPT_EVENT_DOCUMENT_MAX_BYTES):
-        return None
-    del event_payload['event']
-    return (f'inline copy of {evidence_bytes} bytes exceeds the '
-            f'{_ATTEMPT_EVENT_DOCUMENT_MAX_BYTES}-byte attempt-event '
-            'bound; the carried task event keeps the complete frame')
 
 
 def _is_frame_overflow_error(exc: 'StorageError') -> bool:
@@ -2378,9 +2399,6 @@ def _record_task_event_locked(
         command_payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
     if task_event is not None:
         command_payload['task_event'] = task_event
-    shed = _shed_oversized_inline_evidence(command_payload, encoding)
-    if shed is not None:
-        _note_debug_evidence_shed(task, attempt_id, event_kind, shed)
     client = _turn_client(write=True)
     command_id = (
         f'turn-event:{attempt_id}:{now}:{event_kind}'
@@ -2686,7 +2704,6 @@ class _PreparedBatchEntry:
     applied_projection: dict[str, Any]
     slim: bool
     progress: bool
-    shed: str | None
     rows: int
     wire: bytes
 
@@ -2971,11 +2988,6 @@ def _record_task_event_chunk(task: dict[str, Any], pending: list[TaskEventBatchE
         projection=chunk[-1].applied_projection,
         projection_revision=revision + len(chunk),
         segments_stable=not chunk[-1].slim)
-    for prepared in chunk:
-        if prepared.shed is not None:
-            _note_debug_evidence_shed(
-                task, attempt_id, str(prepared.entry.raw_event.get('type') or 'projection'),
-                prepared.shed)
     _finish_task_event_chunk(task, attempt_id, entries, progress, structural)
     return True, True, limit
 
@@ -3016,7 +3028,6 @@ def _prepare_task_event_batch_entry(
     if task.get('_flowRootAttemptId'):
         payload['flow_root_attempt_id'] = task['_flowRootAttemptId']
     payload['task_event'] = entry.task_event
-    shed = _shed_oversized_inline_evidence(payload, encoding)
     frozen = encoding.frozen(payload)
     applied = projection
     if slim:
@@ -3025,7 +3036,7 @@ def _prepare_task_event_batch_entry(
         applied['thinking'] = projection['thinking']
     return _PreparedBatchEntry(
         entry=entry, payload=frozen, applied_projection=applied, slim=slim,
-        progress=task_event_projection_is_progress(raw_event), shed=shed,
+        progress=task_event_projection_is_progress(raw_event),
         rows=1 + len(entry.task_event.get('preceding_events') or ()),
         wire=encode_json_value(frozen.wire_body()))
 
@@ -3251,6 +3262,48 @@ def list_turns(conversation_id: str, *, user_id: Any,
         'authoritativeFull': bool(lane_id is None and after_ordinal is None
                                   and len(turns) < limit),
     }
+
+
+# The Conversation Sync v3 Turn-page default (contracts/conversation_sync_v3.yaml).
+_TURN_PAGE_DEFAULT_LIMIT = 64
+
+
+def iter_turns_newest_first(conversation_id: str, *, user_id: Any,
+                            light: bool = False) -> Iterator[dict[str, Any]]:
+    """Yield every lane's Turns newest-first in the public ``list_turns`` shape.
+
+    Lanes are read one bounded ``turn.sync.page`` at a time, so a conversation
+    whose whole history exceeds one storage response is still walked; ``light``
+    keeps the ``list_turns`` projection keys. The main lane comes first, and a
+    branch lane follows the lane whose Turn names it in ``_branchLanes``, so no
+    lane directory is needed. Pages are separate reads rather than one
+    snapshot; a consumer that needs one revision reads ``list_turns``. A missing
+    conversation yields nothing.
+    """
+    user_id = require_user_id(user_id, context='walk conversation turns')
+    lanes = ['main']
+    seen = {'main'}
+    while lanes:
+        lane_id = lanes.pop(0)
+        for row, _attempt in _lane_turns_newest_first(
+                conversation_id, lane_id, user_id=user_id,
+                limit=_TURN_PAGE_DEFAULT_LIMIT):
+            projection = row.get('projection')
+            branches = (projection.get('_branchLanes')
+                        if isinstance(projection, Mapping) else None)
+            for branch in branches if isinstance(branches, list) else ():
+                branch_id = (branch.get('laneId')
+                             if isinstance(branch, Mapping) else None)
+                if isinstance(branch_id, str) and branch_id and branch_id not in seen:
+                    seen.add(branch_id)
+                    lanes.append(branch_id)
+            row = public_turn_with_stable_segments(row)
+            if light:
+                row['projection'] = {
+                    key: row['projection'][key]
+                    for key in _LIGHT_PROJECTION_KEYS
+                    if key in row.get('projection', {})}
+            yield row
 
 
 def get_turn(conversation_id: str, turn_id: str, *, user_id: Any,

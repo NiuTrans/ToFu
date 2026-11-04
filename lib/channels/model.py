@@ -38,10 +38,11 @@ THREAD_MODES = tuple(_DEFS['ThreadMode']['enum'])
 CONFIGURABLE_MODES = tuple(_DEFS['ConfigurableThreadMode']['enum'])
 REPLY_POLICIES = tuple(_DEFS['ReplyPolicy']['enum'])
 ACCOUNT_STATES = tuple(_DEFS['AccountState']['enum'])
-# States a running or restarting session reports for itself. An owner command
-# on an account that is already enabled leaves them alone: a session writes each
-# transition once, so a 'starting' written over its 'connected' would stick.
-SESSION_REPORTED_STATES = frozenset({'starting', 'connected', 'disconnected'})
+# States a starting (its identity confirmation included), running or restarting
+# session reports for itself. An owner command on an account that is already
+# enabled leaves them alone: a session writes each transition once, so a
+# 'starting' written over its 'connected' would stick.
+SESSION_REPORTED_STATES = frozenset({'starting', 'authorizing', 'connected', 'disconnected'})
 EVENT_DISPOSITIONS = tuple(_DEFS['EventDisposition']['enum'])
 OUTBOX_STATES = tuple(_DEFS['OutboxState']['enum'])
 # Terminal outbox states leave the per-thread active index; ``failed`` stays

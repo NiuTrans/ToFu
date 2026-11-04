@@ -21,10 +21,9 @@ import os
 import re
 import shlex
 from pathlib import Path
-import subprocess
 import time
 
-from lib.git_runtime import git_executable
+from lib.git_runtime import GIT_METADATA_CWD, GIT_STALL_SECONDS, git_executable
 from lib.git_checkpoint_policy import FORBIDDEN_CHECKPOINT_ROOTS, git_policy_environment
 from lib.log import get_logger
 
@@ -57,10 +56,20 @@ class IsolationRefusal:
         return f'解决办法 / How to fix:\n• {self.remedy_zh}\n\n• {self.remedy}'
 
 
+class _AdmissionStop:
+    """Cooperative Stop as admission observes it; supervised Git polls ``is_set``."""
+
+    def __init__(self, task: dict):
+        self._task = task
+
+    def is_set(self) -> bool:
+        event = self._task.get('abort_event')
+        return bool(self._task.get('aborted') or (event is not None and event.is_set()))
+
+
 def _check_workspace_cancelled(task: dict) -> None:
     """Keep cooperative Stop distinct from a failed workspace binding."""
-    event = task.get('abort_event')
-    if task.get('aborted') or (event is not None and event.is_set()):
+    if _AdmissionStop(task).is_set():
         from lib.llm.llm_errors import AbortedError
         raise AbortedError('Task cancelled during workspace admission')
 
@@ -87,52 +96,94 @@ def _local_path(value) -> str:
     return os.path.realpath(os.path.expanduser(value))
 
 
-def _checkout(path: str) -> tuple[str, str] | None:
-    """Read only the nearest repository, including for a deleted owned file."""
+def _checkout_git(git_dir: str, arguments: list[str], cancel=None):
+    """Read explicit metadata without starting the child on the project mount.
+
+    Its duration follows the volume holding ``git_dir``, not the work, so no
+    wall-clock deadline applies: only a whole shared stall window in which no
+    Git thread ran, or ``cancel`` (admission Stop), ends it early.
+    """
+    from lib.project_mod.activity_supervised_process import (
+        ProcessCancelled, ProcessStalled, run_activity_supervised)
+    try:
+        return run_activity_supervised(
+            [git_executable(), '-c', 'core.fsmonitor=false',
+             f'--git-dir={git_dir}', *arguments], cwd=GIT_METADATA_CWD,
+            env=git_policy_environment(), stall_seconds=GIT_STALL_SECONDS,
+            cancellation=cancel)
+    except ProcessCancelled as error:
+        from lib.llm.llm_errors import AbortedError
+        raise AbortedError('Task cancelled during workspace admission') from error
+    except ProcessStalled as error:
+        raise WorkspaceBindingError(
+            f'Git workspace metadata inspection made no progress and was stopped: {error}',
+            user_hint=f'Git 工作区元数据读取在 {GIT_STALL_SECONDS:g} 秒内没有任何进展（项目文件系统无响应），'
+                      '已停止。请检查项目文件系统是否可访问，然后重试。\n'
+                      f'Git workspace metadata reads made no progress for {GIT_STALL_SECONDS:g}s '
+                      '(the project filesystem stopped responding). Check that it is accessible, '
+                      'then retry.') from error
+    except (OSError, RuntimeError) as error:
+        raise WorkspaceBindingError(f'Cannot read Git workspace metadata: {error}') from error
+
+
+def _checkout(path: str, *, cancel=None) -> tuple[str, str] | None:
+    """Validate the nearest checkout using its metadata, including deleted files."""
+    from lib.project_mod.workspace_lease import _checkout_binding, WorkspaceBusyError
 
     if not path:
         return None
-    candidate = Path(path)
-    while not candidate.is_dir() and candidate != candidate.parent:
-        candidate = candidate.parent
-    # Avoid launching git for non-repositories. Do not walk sibling worktrees.
-    if not any((parent / '.git').exists()
-               for parent in (candidate, *candidate.parents)):
+    try:
+        binding = _checkout_binding(path)
+    except (OSError, UnicodeError, WorkspaceBusyError) as error:
+        raise WorkspaceBindingError(f'Cannot identify workspace repository: {error}') from error
+    if binding is None:
         return None
-    # One repository observation and one subprocess instead of two serial
-    # launches per identity check. Relative common-dir output remains relative
-    # to the same candidate cwd, including linked and nested checkouts.
-    result = subprocess.run(
-        [git_executable(), '-c', 'core.fsmonitor=false', '-C', str(candidate),
-         'rev-parse', '--show-toplevel', '--git-common-dir'],
-        capture_output=True, text=True, timeout=10, check=False,
-        env=git_policy_environment())
+    root, expected_common, git_dir = binding[:3]
+    candidate = Path(_local_path(path))
+    if candidate.is_relative_to(git_dir) or candidate.is_relative_to(expected_common):
+        raise WorkspaceBindingError('Git metadata cannot be used as an execution workspace')
+    result = _checkout_git(
+        git_dir, ['rev-parse', '--is-bare-repository', '--git-common-dir'], cancel)
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()[:800]
         raise WorkspaceBindingError(
-            f'Cannot identify workspace repository at {candidate}: {detail}')
+            f'Cannot identify workspace repository at {root}: {detail}')
     values = result.stdout.strip().splitlines()
     if len(values) != 2 or not all(values):
         raise WorkspaceBindingError('Incomplete workspace repository identity')
-    root = _local_path(values[0])
-    common = _local_path(os.path.join(str(candidate), values[1]))
-    # Matches integration_control's canonical checkout identity. Bare/custom
-    # git-dir layouts are not silently guessed into an unrelated project.
-    if Path(common).name != '.git':
+    common = _local_path(os.path.join(GIT_METADATA_CWD, values[1]))
+    if values[0] != 'false' or Path(common).name != '.git':
         raise WorkspaceBindingError('Unsupported canonical Git directory layout')
+    if common != str(expected_common):
+        raise WorkspaceBindingError('Workspace repository identity changed during inspection')
+    # Git parses includes and worktree configuration. Forcing --work-tree would
+    # silently replace core.worktree and even turn a bare repository into one.
+    configured = _checkout_git(git_dir, ['config', '--path', '--get', 'core.worktree'], cancel)
+    if configured.returncode == 0:
+        paths = configured.stdout.splitlines()
+        if len(paths) != 1 or not paths[0] or configured.stderr.strip():
+            raise WorkspaceBindingError('Incomplete configured workspace identity')
+        root = _local_path(os.path.join(git_dir, paths[0]))
+        if not Path(root).is_dir():
+            raise WorkspaceBindingError('Configured Git workspace is unavailable')
+    elif configured.returncode != 1 or configured.stdout or configured.stderr:
+        detail = (configured.stderr or configured.stdout).strip()[:800]
+        raise WorkspaceBindingError(f'Cannot read configured Git workspace identity: {detail}')
     return root, str(Path(common).parent)
 
 
-def _has_commit(root: str) -> bool:
-    result = subprocess.run(
-        [git_executable(), '-c', 'core.fsmonitor=false', '-C', root,
-         'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'],
-        capture_output=True, text=True, timeout=10, check=False,
-        env=git_policy_environment())
+def _has_commit(root: str, *, cancel=None) -> bool:
+    from lib.project_mod.workspace_lease import _checkout_binding
+
+    binding = _checkout_binding(root)
+    if binding is None:
+        return False
+    result = _checkout_git(
+        binding[2], ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], cancel)
     return result.returncode == 0
 
 
-def isolated_workspace_refusal(project_path: str) -> IsolationRefusal | None:
+def isolated_workspace_refusal(project_path: str, *, cancel=None) -> IsolationRefusal | None:
     """Prepare this root for isolated workers, or explain what Tofu cannot fix.
 
     People never run Git for this: managed_repository turns a plain folder or an
@@ -140,7 +191,8 @@ def isolated_workspace_refusal(project_path: str) -> IsolationRefusal | None:
     one's shared-data policy. Repositories with their own history are left as
     they are. Then this mirrors binding and ownership admission: workspaces
     register under the real top level of a primary checkout and snapshot/publish
-    against a commit, so the accepted project path must be exactly that.
+    against a commit. The accepted project path may alias that physical root;
+    resolving it does not rekey the conversation or its dispatch grant.
     Delegation calls this before any worker exists; binding calls it before a
     worker's first model request.
     """
@@ -154,11 +206,11 @@ def isolated_workspace_refusal(project_path: str) -> IsolationRefusal | None:
         ManagedRepositoryUnavailable, prepare_managed_repository,
     )
     try:
-        prepare_managed_repository(project_path)
+        prepare_managed_repository(local)
     except ManagedRepositoryUnavailable as error:
         return IsolationRefusal(error.reason, error.remedy, error.remedy_zh)
     try:
-        source = _checkout(local)
+        source = _checkout(local, cancel=cancel)
     except WorkspaceBindingError as error:
         return IsolationRefusal(
             f'Project root {project_path} has an unsupported Git layout ({error}).',
@@ -178,19 +230,13 @@ def isolated_workspace_refusal(project_path: str) -> IsolationRefusal | None:
             'isolated only from a primary checkout.',
             f'Open the primary checkout {canonical} as the project.',
             f'请将主检出 {canonical} 作为项目打开。')
-    if project_path != toplevel:
-        if local == toplevel:
-            return IsolationRefusal(
-                f'Project root {project_path} reaches the Git repository {toplevel} through a '
-                'symlink; worker workspaces are registered under its real path.',
-                f'Open {toplevel} as the project.',
-                f'请将 {toplevel} 作为项目打开。')
+    if local != toplevel:
         return IsolationRefusal(
             f'Project root {project_path} is a subdirectory of the Git repository {toplevel}; '
             'worker workspaces are registered per repository.',
             f'Open {toplevel} as the project, or make {project_path} its own Git repository.',
             f'请将 {toplevel} 作为项目打开，或把 {project_path} 初始化为独立的 Git 仓库。')
-    if not _has_commit(toplevel):
+    if not _has_commit(toplevel, cancel=cancel):
         # Preparation records the first commit; only a concurrent change reaches this.
         return IsolationRefusal(
             f'The Git repository {toplevel} has no commits yet, so workers have no baseline '
@@ -205,7 +251,8 @@ def _refuse_unisolatable_dispatch_root(task: dict) -> None:
     from lib.project_dispatch.admission import KEY, requires_isolated_workspace
     if not requires_isolated_workspace(task):
         return
-    refusal = isolated_workspace_refusal(task['config'][KEY]['projectPath'])
+    refusal = isolated_workspace_refusal(task['config'][KEY]['projectPath'],
+                                         cancel=_AdmissionStop(task))
     if refusal is not None:
         raise WorkspaceBindingError(refusal.message(), user_hint=refusal.hint())
 
@@ -263,10 +310,10 @@ def _emit_workspace_preparing(task: dict) -> None:
         logger.debug('[WorkspaceDelivery] preparation phase emit failed: %s', error)
 
 
-def _binding(path: str, task: dict, *, create=False) -> dict | None:
+def _binding(path: str, task: dict, *, create=False, cancel=None) -> dict | None:
     from lib.integration_state_repository import find_workspace
 
-    source = _checkout(path)
+    source = _checkout(path, cancel=cancel)
     if source:
         relative = Path(_local_path(path)).relative_to(source[0])
         if relative.parts and relative.parts[0] in FORBIDDEN_CHECKPOINT_ROOTS:
@@ -287,13 +334,14 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
         from lib.project_mod.workspace_policy import resolve_workspace_mode
         from lib.project_dispatch.admission import requires_isolated_workspace
         try:
-            mode = resolve_workspace_mode(source[1])
+            mode = resolve_workspace_mode(source[1], cancel=cancel)
             # Dispatch file grants require an owned candidate and explicit
             # publication. This is an additional restriction, never authority;
             # consult roots are readonly and do not reach workspace creation.
             if requires_isolated_workspace(task):
                 mode = 'isolated'
         except Exception as exc:
+            _check_workspace_cancelled(task)
             raise WorkspaceBindingError(
                 'Workspace mode admission failed: ' + str(exc)[:500]) from exc
         _check_workspace_cancelled(task)
@@ -311,7 +359,7 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
     workspace = _local_path(registered.get('workspace_path'))
     if _read_only(workspace, task):
         raise WorkspaceBindingError('Registered workspace is readonly; writable execution refused')
-    actual = _checkout(workspace)
+    actual = _checkout(workspace, cancel=cancel)
     if (not actual or actual[0] != workspace or actual[1] != source[1]
             or actual[0] == actual[1]):
         raise WorkspaceBindingError('Registered workspace is missing or mismatched')
@@ -345,7 +393,7 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
             for key in ('verification', 'publicationMode'):
                 if key not in row and cached.get(key):
                     row[key] = cached[key]
-    actual = _checkout(row['workspacePath'])
+    actual = _checkout(row['workspacePath'], cancel=cancel)
     if (not actual or actual[0] != _local_path(row['workspacePath'])
             or actual[1] != _local_path(row['canonicalRoot'])
             or actual[0] == actual[1]):
@@ -410,15 +458,16 @@ def bind_worker_workspace(task: dict) -> dict | None:
     if writable_roots:
         # Consult roots are readonly and never reach this check or workspace creation.
         _refuse_unisolatable_dispatch_root(task)
+    stop = _AdmissionStop(task)
     for path in writable_roots:
 
         _check_workspace_cancelled(task)
         with measure_task_startup('workspace_identity', identity=identity):
-            info = _checkout(path)
+            info = _checkout(path, cancel=stop)
         if info is None:
             continue
         with measure_task_startup('workspace_root_binding', identity=identity):
-            row = _binding(path, task, create=True)
+            row = _binding(path, task, create=True, cancel=stop)
         if row is None:
             continue
         previous = rows.get(row['canonicalRoot'])
@@ -736,6 +785,9 @@ def settle_task_workspaces(task: dict, project_path: str = '', project_paths=Non
     if not errors:
         task['_workspaceDeliveryAcknowledgedOutcome'] = outcome
     if not known and not errors:
+        # Supersede an earlier attempt's errors: the acknowledged outcome makes
+        # every later retry return this receipt instead of settling again.
+        task.pop('_workspaceDelivery', None)
         return None
     return _remember(task, list(known.values()), errors=errors)
 

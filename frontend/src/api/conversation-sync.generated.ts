@@ -2964,7 +2964,8 @@ export const CONVERSATION_SYNC_SCHEMAS = {
           "failed",
           "skipped",
           "switched",
-          "aborted"
+          "aborted",
+          "superseded"
         ],
         "type": "string"
       },
@@ -6957,7 +6958,7 @@ export type TurnActivityEntry = {
   "startedAt"?: number;
   "endedAt"?: number;
   "kind": "model" | "tool" | "status" | "error" | "system";
-  "status": "started" | "running" | "waiting" | "succeeded" | "failed" | "skipped" | "switched" | "aborted";
+  "status": "started" | "running" | "waiting" | "succeeded" | "failed" | "skipped" | "switched" | "aborted" | "superseded";
   "severity": "info" | "warning" | "error";
   "summary"?: string;
   "summaryKey"?: string;

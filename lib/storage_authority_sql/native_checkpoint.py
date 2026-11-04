@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from typing import Any
 
 import orjson
 
@@ -41,10 +42,11 @@ class NativeSqlCheckpoint:
                         and logical_outbox.policy.mode != backend.config.logical_shadow_mode)
                     or (logical_outbox.policy.capture_enabled and not logical_outbox.capture_enabled)))):
             raise NativeConfigurationError('native SQL checkpoint authority configuration is unsupported')
-        self._rows = NativeCheckpointRows(backend, tenant_id=tenant_id, owner_user_id=owner_user_id,
+        rows = NativeCheckpointRows(backend, tenant_id=tenant_id, owner_user_id=owner_user_id,
             document_bytes=document_bytes, identity_bytes=identity_bytes, logical_outbox=logical_outbox)
-        self._rows.validate_handoff = self._validate_handoff
-        self._rows.goal_transaction = self._goal_transaction
+        self._rows: NativeCheckpointRows | None = rows
+        rows.validate_handoff = self._validate_handoff
+        rows.goal_transaction = self._goal_transaction
         self._condition = threading.Condition()
         self._active = 0
         self._state = 'open'
@@ -52,9 +54,10 @@ class NativeSqlCheckpoint:
         self._maximum = (document_bytes * SPEC['request_document_slots']
                          + identity_bytes * SPEC['request_identity_escape_slots'] + SPEC['envelope_bytes'])
         self._image = _seal(library, sha256, binary_bytes, ffi=ffi)
-        self._library = None
+        # CFFI exports are a dynamic ABI boundary; its contract is SPEC above.
+        self._library: Any = None
         self._handle = 0
-        self._callback = None
+        self._callback: Any = None
         try:
             self._callback = ffi.callback('tofu_checkpoint_storage_callback', self._dispatch, error=SPEC['statuses']['internal'])
             self._library = ffi.dlopen(f'/proc/self/fd/{self._image.fileno()}')
@@ -81,12 +84,13 @@ class NativeSqlCheckpoint:
 
     def _dispatch(self, _context, request, length, response, capacity, written):
         try:
-            invocation = getattr(self._invocation, 'value', None)
-            if invocation is None or length > self._maximum:
+            invocation: dict[str, Any] | None = getattr(self._invocation, 'value', None)
+            rows = self._rows
+            if invocation is None or rows is None or length > self._maximum:
                 raise NativeSqlCheckpointError('native SQL callback lacks a bounded invocation')
             if time.monotonic() >= invocation['deadline']:
                 raise NativeSqlCheckpointError('native SQL callback deadline elapsed')
-            value = self._rows.dispatch(orjson.loads(bytes(ffi.buffer(request, length))), invocation['deadline'])
+            value = rows.dispatch(orjson.loads(bytes(ffi.buffer(request, length))), invocation['deadline'])
             raw = orjson.dumps(value)
             if len(raw) > capacity:
                 raise NativeSqlCheckpointError('native SQL callback response exceeds capacity')
@@ -96,7 +100,7 @@ class NativeSqlCheckpoint:
         except BaseException as error:
             # This slot belongs only to the entering call/thread. Preserve the
             # actual storage error without throwing through a foreign stack.
-            invocation = getattr(self._invocation, 'value', None)
+            invocation: dict[str, Any] | None = getattr(self._invocation, 'value', None)
             if invocation is not None:
                 invocation['error'] = error
             return SPEC['statuses']['internal']
@@ -107,7 +111,10 @@ class NativeSqlCheckpoint:
         if len(raw) > self._maximum or len(actual) > self._maximum:
             return 'oversize'
         rows = self._rows
-        status = self._library.tofu_checkpoint_storage_validate_handoff(
+        library = self._library
+        if rows is None or library is None:
+            raise NativeSqlCheckpointError('native SQL checkpoint is closed')
+        status = library.tofu_checkpoint_storage_validate_handoff(
             rows.tenant, rows.owner, rows.document_bytes, rows.identity_bytes,
             raw, len(raw), actual, len(actual))
         if status == SPEC['statuses']['ok']:
@@ -140,6 +147,9 @@ class NativeSqlCheckpoint:
                 return SPEC['statuses']['internal']
         local_callback = ffi.callback('tofu_checkpoint_storage_callback', callback, error=SPEC['statuses']['internal'])
         rows = self._rows
+        library = self._library
+        if rows is None or library is None:
+            raise NativeSqlCheckpointError('native SQL checkpoint is closed')
         response, written = ffi.new('uint8_t[]', rows.document_bytes), ffi.new('size_t *')
         # SQLite runs here on its joined writer thread. Refuse recursive control
         # and close there too, without entering another handle or Backend job.
@@ -147,7 +157,7 @@ class NativeSqlCheckpoint:
         if own_invocation:
             self._invocation.value = {'deadline': deadline_at, 'error': None}
         try:
-            status = self._library.tofu_checkpoint_storage_goal_transaction(
+            status = library.tofu_checkpoint_storage_goal_transaction(
                 rows.tenant, rows.owner, rows.document_bytes, rows.identity_bytes, raw, len(raw),
                 local_callback, ffi.NULL, response, rows.document_bytes, written)
             if errors:
@@ -190,11 +200,14 @@ class NativeSqlCheckpoint:
         raw = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
         if len(raw) > self._maximum:
             raise NativeSqlCheckpointError('native SQL checkpoint request exceeds capacity')
+        library = self._library
+        if library is None:
+            raise NativeSqlCheckpointError('native SQL checkpoint is closed')
         with self._enter(deadline_at) as invocation:
             output, written = ffi.new('uint8_t[]', response_bytes), ffi.new('size_t *')
             deadline = int(time.time() * 1000 + max(0, deadline_at - time.monotonic()) * 1000)
             name = operation.encode('ascii')
-            status = self._library.tofu_checkpoint_storage_control(self._handle, name, len(name), raw, len(raw),
+            status = library.tofu_checkpoint_storage_control(self._handle, name, len(name), raw, len(raw),
                 deadline, output, response_bytes, written)
             if invocation['error'] is not None:
                 raise invocation['error']
@@ -225,8 +238,11 @@ class NativeSqlCheckpoint:
         # Keep code and callback alive if native close fails; unloading after an
         # unproven join would be unsafe. The owner receives the failure.
         try:
-            self._check(self._library.tofu_checkpoint_storage_close(self._handle))
-            ffi.dlclose(self._library)
+            library = self._library
+            if library is None:
+                raise NativeSqlCheckpointError('native SQL checkpoint is closed')
+            self._check(library.tofu_checkpoint_storage_close(self._handle))
+            ffi.dlclose(library)
             self._image.close()
         except BaseException:
             with self._condition:

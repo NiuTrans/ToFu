@@ -8,7 +8,8 @@ import type { GroupedTurnEntry } from '../presentation/grouped-turn-layout';
 import { toolBlockOwnsSummary, toolBlockActivityState, selectRoundOutline,
   type ActionActivityState, type RoundOutlineSection } from '../presentation/round-outline';
 import { hasAcceptedWorkUnit } from '../presentation/tool-execution-groups';
-import { decorateToolSummary, toolSummaryIdentity } from './tool-summary';
+import { toolSummaryIdentity } from '../presentation/tool-summary-identity';
+import { decorateToolSummary } from './tool-summary';
 import { setStableData as setData } from './renderers/stable-dom';
 
 export type RoundOutlineLabel = `roundOutline.${'active' | 'background' | 'attention' | 'returned'

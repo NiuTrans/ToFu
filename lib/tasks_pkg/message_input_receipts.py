@@ -8,17 +8,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.llm.llm_errors import AbortedError, RequestScopedError
+from lib.agent_core.context_errors import MessageInputScopeError
+from lib.llm.llm_errors import AbortedError
 from lib.tasks_pkg.round_prep_timing import round_prep_lap, round_prep_step
 
 
 DISPATCH_ROUND_FIELD = '_messageInputDispatchRound'
-
-
-class MessageInputScopeError(RequestScopedError, PermissionError):
-    """Local mailbox scope denial: no route retry, fallback, or health penalty."""
-
-    failure_stage = 'before_dispatch'
 
 
 def historical_swarm_context(messages: list[dict], *, binding=None) -> list[dict]:
@@ -189,7 +184,7 @@ def validate_matches(task: dict, matches: dict) -> None:
                and w.get('mailbox') != key for w in witnesses):
             raise PermissionError('Restored child message belongs to another run')
     if matches['project']:
-        from lib.conversations.project_messages import identity, scope, ProjectMailbox
+        from lib.conversations.project_messages import identity, validate_sender, ProjectMailbox
         owner, recipient, project = identity(task)
         repository = ProjectMailbox(owner, project, recipient)
         if any(w['family'] == 'project' and set(w['ids']) & set(matches['project'])
@@ -199,7 +194,7 @@ def validate_matches(task: dict, matches: dict) -> None:
         if set(rows) != set(matches['project']):
             raise PermissionError('Restored project message has no durable original')
         for row in rows.values():
-            scope(owner, row['sender'], project)
+            validate_sender(owner, row['sender'], project)
 
 
 def stream_with_receipts(stream, task: dict, body: dict, **kwargs):

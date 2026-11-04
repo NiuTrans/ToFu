@@ -19,11 +19,9 @@ def _validate(value, name):
 @pytest.fixture
 def app(records, router, monkeypatch):
     monkeypatch.setattr('lib.channels.dx.supervisor.notify_account_changed', lambda owner: None)
-    monkeypatch.setattr('lib.channels.dx.adapter.resolve_identity',
-                        lambda owner: {'uid': OWNER_UID, 'mis': 'owner', 'name': 'Owner'})
     created = []
     monkeypatch.setattr('lib.channels.dx.adapter.create_command_group',
-                        lambda owner, *, name, member_uid: created.append((name, member_uid)) or '4242')
+                        lambda owner, *, name, member_uid, mis: created.append((name, member_uid, mis)) or '4242')
     from quart import Quart, g, request
     from lib.api_v4 import attach_v4_envelope, copy_blueprint_to_v4
     from lib.http_transport.error_handlers import register_http_error_handlers
@@ -46,7 +44,7 @@ def app(records, router, monkeypatch):
     return application
 
 
-def test_account_threads_and_outbox_round_trip(app):
+def test_account_threads_and_outbox_round_trip(app, store):
     headers = {'X-Test-Owner': str(OWNER)}
 
     async def exercise():
@@ -56,20 +54,25 @@ def test_account_threads_and_outbox_round_trip(app):
         view = (await (await client.get('/api/v4/channels/dx', headers=headers)).get_json())['data']
         _validate(view, 'ChannelAccountView')
         assert view['enabled'] is False and view['status']['state'] == 'disabled'
-        # Enabling needs the admin scope and resolves the identity (whoami).
+        # Enabling needs the admin scope and answers at once; the supervisor
+        # confirms the identity (whoami) of the login MIS afterwards.
         denied = await client.put('/api/v4/channels/dx', headers={**headers, 'X-Test-Scopes': 'conversations'},
                                   json={'enabled': True})
         assert denied.status_code == 403
-        enabled = await client.put('/api/v4/channels/dx', headers=headers, json={'enabled': True})
+        enabled = await client.put('/api/v4/channels/dx', headers=headers, json={'enabled': True, 'mis': 'owner'})
         view = (await enabled.get_json())['data']
         _validate(view, 'ChannelAccountView')
-        assert view['identity']['uid'] == OWNER_UID and view['routerConversationId'] == ROUTER
+        assert view['identity'] is None and view['loginMis'] == 'owner' and view['routerConversationId'] == ROUTER
+        assert view['status']['state'] == 'starting'
+        assert (await client.put('/api/v4/channels/dx', headers=headers, json={'mis': 'not a mis'})).status_code == 400
+        store.update_account('dx', lambda account: {
+            **account, 'identity': {'uid': OWNER_UID, 'mis': 'owner', 'name': 'Owner'}})
         assert (await client.put('/api/v4/channels/dx', headers=headers, json={'bogus': 1})).status_code == 400
         assert (await client.put('/api/v4/channels/dx', headers=headers,
                                  json={'commandChat': 'dx:gid:x'})).status_code == 400
         created = await client.post('/api/v4/channels/dx/command-chat', headers=headers, json={})
         view = (await created.get_json())['data']
-        assert view['commandChat'] == 'dx:gid:4242' and app.created_groups == [('Tofu Router', OWNER_UID)]
+        assert view['commandChat'] == 'dx:gid:4242' and app.created_groups == [('Tofu Router', OWNER_UID, 'owner')]
         page = (await (await client.get('/api/v4/channels/dx/threads', headers=headers)).get_json())['data']
         _validate(page, 'ChannelThreadPage')
         assert [item['key'] for item in page['items']] == ['dx:gid:4242']
@@ -87,6 +90,12 @@ def test_account_threads_and_outbox_round_trip(app):
         listing = (await (await client.get('/api/v4/channels/outbox', headers=headers)).get_json())['data']
         _validate(listing, 'OutboxPage')
         assert [item['state'] for item in listing['items']] == ['draft']
+        # Each channel's Settings tab lists only its own items, like its thread page.
+        dx_only = await client.get('/api/v4/channels/outbox?channel=dx', headers=headers)
+        assert [item['id'] for item in (await dx_only.get_json())['data']['items']] == [draft.id]
+        github_only = await client.get('/api/v4/channels/outbox?channel=github', headers=headers)
+        assert (await github_only.get_json())['data']['items'] == []
+        assert (await client.get('/api/v4/channels/outbox?channel=mail', headers=headers)).status_code == 400
         # Another owner cannot see or decide this owner's items.
         other = {'X-Test-Owner': str(OWNER + 1)}
         assert (await (await client.get('/api/v4/channels/outbox', headers=other)).get_json())['data']['items'] == []

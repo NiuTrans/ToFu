@@ -92,7 +92,7 @@ test('narration precedes its tools; parent attribution and program/Swarm routing
 test('mixed program batches preserve chronology and attribute only execution children',()=>{
   const rows=[round(1,{llmRound:0,_programSynthetic:true,_programCallId:'program'}),
     round(2,{llmRound:0,parentToolCallId:'program'}),
-    round(3,{llmRound:0,_artifactOrigin:{parentToolCallId:'program'}}),
+    round(3,{llmRound:0,parentToolCallId:'source',_artifactOrigin:{sourceToolCallId:'source'}}),
     round(4,{llmRound:0,_programCallId:'program'}),round(5,{llmRound:0})];
   const before=JSON.stringify(rows);
   documentFor(createToolGroupPresentation(ports()).renderPanel(rows),d=>{

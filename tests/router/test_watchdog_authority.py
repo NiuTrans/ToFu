@@ -271,6 +271,26 @@ def test_message_reaches_a_router_or_worker_of_any_project_as_nonhuman_context(w
     assert _watchdog_sender(world.owner, world.watchdog['conversationId'])
     assert not _watchdog_sender(world.owner, world.coordinator['conversationId'])
     assert not _watchdog_sender(world.owner + 1, world.watchdog['conversationId'])
+    from lib.conversations.project_messages import inject, confirm
+    from lib.llm.stream_result import ProviderStreamResult
+    from lib.tasks_pkg.message_input_receipts import receipt_admission, stream_with_receipts
+    recipient = {'id': 'worker-task', 'convId': world.worker, '_userId': world.owner,
+                 'config': {'projectPath': world.project}}
+    messages = [{'role': 'user', 'content': 'Continue the authorized assignment'}]
+    inject(recipient, messages, 1)
+    assert messages[-1]['_containsHumanSteer'] is False
+
+    def stream(task, body):
+        lease = receipt_admission(task, None)(max_output_tokens=32)
+        lease.prepare_input(body)
+        return ProviderStreamResult.from_legacy(
+            {'role': 'assistant', 'content': 'Read the monitor evidence'}, 'stop', {})
+
+    assert stream_with_receipts(stream, recipient, {'messages': messages}).is_verified_complete
+    confirm(recipient, 1)
+    [confirmed] = ProjectMailbox(world.owner, world.project, world.worker).read()
+    assert confirmed['id'] == message['id'] and confirmed['state'] == 'input_confirmed'
+    assert confirmed['decision'] is None
     for target in ('plain-chat', world.watchdog['conversationId']):
         with pytest.raises(PermissionError):
             execute_watchdog_tool({'id': 't'}, _scope(world), 'watchdog_message',

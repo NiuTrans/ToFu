@@ -30,12 +30,19 @@ fn append(database: &mut AuthorityDatabase) -> (Value, u64) {
 }
 
 fn prepare_append(database: &AuthorityDatabase, tx: &mut AuthorityTransaction) -> Value {
+    prepare_append_sized(database, tx, false)
+}
+
+fn prepare_append_sized(database: &AuthorityDatabase, tx: &mut AuthorityTransaction,
+    large_event: bool) -> Value {
+    let content = if large_event { "x".repeat(9 * 1024 * 1024) }
+        else { "汉😀\\\"".repeat(32_768) };
     append_attempt_event(database, tx, AttemptEventAppend {
         conversation_id: "ref-conversation", turn_id: "ref-turn", attempt_id: "ref-attempt",
         projection_revision: 1, event_type: "projection_updated",
         payload: json!({"status":"running", "projectionPatch":{
             "version":1,"baseRevision":0,"targetRevision":1,"operations":[
-                {"op":"set","path":["content"],"value":"汉😀\\\"".repeat(32_768)}]}}),
+                {"op":"set","path":["content"],"value":content}]}}),
         occurred_at_ms: 2_000, publish_conversation_sync: true,
     }).unwrap()
 }
@@ -140,14 +147,43 @@ fn retention_protects_the_source_then_old_snapshot_survives_both_prunes() {
 }
 
 #[test]
-fn smaller_locator_preserves_the_full_envelope_admission_limit() {
-    let envelope = conversation_sync_event("ref-conversation", 1, "attempt.event",
-        2_000, json!({"event":{"seq":1}}), Some("ref-turn"), Some("ref-attempt"));
-    let overhead = serde_json::to_vec(&envelope).unwrap().len()
-        - serde_json::to_vec(&envelope["payload"]["event"]).unwrap().len();
-    assert!(encode(&envelope, MAX_LEGACY_DOCUMENT_BYTES - overhead).is_ok());
-    let error = encode(&envelope, MAX_LEGACY_DOCUMENT_BYTES - overhead + 1).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+fn large_canonical_events_replay_exactly_after_reopen_and_across_row_pages() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    seed(&mut database);
+    let mut tx = database.begin(7, 11).unwrap();
+    let before = sync_head(&database, &mut tx, "ref-conversation").unwrap();
+    let canonical_events = (0..8)
+        .map(|_| prepare_append_sized(&database, &mut tx, true))
+        .collect::<Vec<_>>();
+    database.commit(tx).unwrap();
+    drop(database);
+    let database = AuthorityDatabase::open(directory.path()).unwrap();
+    let mut tx = database.begin(7, 11).unwrap();
+    {
+        let bytes = sync_changes(&database, &mut tx, "ref-conversation",
+            before, canonical_events.len(), &mut || false).unwrap().unwrap();
+        assert!(bytes.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["events"].as_array().unwrap().len(), canonical_events.len());
+        assert_eq!(page["hasMore"], false);
+        for (index, canonical) in canonical_events.iter().enumerate() {
+            assert!(&page["events"][index]["payload"]["event"] == canonical,
+                "chunked replay must preserve every complete canonical event");
+        }
+    }
+    for (index, canonical) in canonical_events.iter().enumerate() {
+        let bytes = sync_changes(&database, &mut tx, "ref-conversation",
+            before + index as u64, 1, &mut || false).unwrap().unwrap();
+        assert!(bytes.len() > 8 * 1024 * 1024);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["events"].as_array().unwrap().len(), 1);
+        assert_eq!(page["events"][0]["type"], "attempt.event");
+        assert!(&page["events"][0]["payload"]["event"] == canonical,
+            "row-paginated replay must preserve the complete canonical event");
+        assert_eq!(page["events"][0]["syncSeq"], before + index as u64 + 1);
+        assert_eq!(page["hasMore"], index + 1 < canonical_events.len());
+    }
 }
 
 
@@ -213,9 +249,18 @@ fn fault_fixture() -> (Arc<DeterministicVfs>, AuthorityDatabase) {
 
 #[test]
 fn source_reference_and_cursor_are_atomic_at_every_commit_io_fault() {
+    publication_is_atomic_at_every_commit_io_fault(false);
+}
+
+#[test]
+fn large_source_reference_and_cursor_are_atomic_at_every_commit_io_fault() {
+    publication_is_atomic_at_every_commit_io_fault(true);
+}
+
+fn publication_is_atomic_at_every_commit_io_fault(large_event: bool) {
     let (vfs, mut database) = fault_fixture();
     let mut tx = database.begin(7, 11).unwrap();
-    prepare_append(&database, &mut tx);
+    prepare_append_sized(&database, &mut tx, large_event);
     vfs.arm_fault(None).unwrap();
     database.commit(tx).unwrap();
     let trace = vfs.trace().unwrap();
@@ -230,7 +275,7 @@ fn source_reference_and_cursor_are_atomic_at_every_commit_io_fault() {
             let (vfs, mut database) = fault_fixture();
             let mut tx = database.begin(7, 11).unwrap();
             let before = sync_head(&database, &mut tx, "ref-conversation").unwrap();
-            let canonical = prepare_append(&database, &mut tx);
+            let canonical = prepare_append_sized(&database, &mut tx, large_event);
             vfs.arm_fault(Some(FaultRule { operation_number: index as u64 + 1, action })).unwrap();
             let acknowledged = database.commit(tx).is_ok();
             let durable = Arc::new(vfs.fork_durable().unwrap());
@@ -243,7 +288,9 @@ fn source_reference_and_cursor_are_atomic_at_every_commit_io_fault() {
             let rows: Value = serde_json::from_slice(&sync_changes(&database, &mut tx,
                 "ref-conversation", before, 100, &mut || false).unwrap().unwrap()).unwrap();
             assert_eq!(rows["events"].as_array().unwrap().len(), usize::from(head > before));
-            if head > before { assert_eq!(rows["events"][0]["payload"]["event"], canonical); }
+            if head > before {
+                assert_eq!(rows["events"][0]["payload"]["event"], canonical);
+            }
             assert!(!acknowledged || head > before, "lost acknowledged event: {index} {action:?}");
         }
     }

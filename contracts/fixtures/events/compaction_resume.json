@@ -1,0 +1,22 @@
+{
+  "archiveId": "s",
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "convId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "reason": "s",
+  "requestId": "s",
+  "restored": true,
+  "seq": 1,
+  "sourceAttemptIds": [],
+  "taskId": "s",
+  "ts": 1,
+  "turnRole": "s",
+  "type": "compaction_resume",
+  "vuMsgId": "s"
+}

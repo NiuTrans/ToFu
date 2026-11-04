@@ -57,6 +57,7 @@ def main():
                              ('CoordinatorReportReadRequest', 'reportReadRequest'),
                              ('CoordinatorProgressTask', 'progressTask'),
                              ('CoordinatorProgressBoard', 'progressBoard'),
+                             ('CoordinatorProgressTranslation', 'progressTranslation'),
                              ('CoordinatorProgressState', 'progressState')]:
         content += f'export type {name} = ' + ts(schema['$defs'][definition], schema) + ';\n'
 

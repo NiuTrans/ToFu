@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from lib.identity import PrincipalContext
 from .repository import CONTRACT, ProjectDispatchError, _validate_schema
@@ -145,14 +146,15 @@ def capture_worker_policy(task, config, catalog, model, *, worker_model=None):
             deepcopy(policy['config']), tuple(controls['tools']), controls['model'])
         return
     denied = set(CONTRACT['workerDeniedTools'])
-    names = tuple(sorted({'search_tools', 'execute_tools'} | {
+    # A Worker has the capabilities of an ordinary conversation of this human:
+    # the gateway's program action is admitted like any other tool, and its
+    # tool settings are the human's own, not the Coordinator role's.
+    names = tuple(sorted({'search_tools', 'execute_tools', 'execute_program'} | {
         item['function']['name'] for item in catalog if item['function']['name'] not in denied}))
     keys = CONTRACT['$defs']['workerPolicy']['properties']['config']['properties']
     selected = {key: deepcopy(config[key]) for key in keys if config.get(key) is not None}
-    # Arbitrary program execution obscures independent worker ownership. The
-    # regular batch transport remains available and every member is admitted.
-    from lib.tasks_pkg.coordinator_policy import coordinator_tool_settings
-    selected['tools'] = coordinator_tool_settings(config)
+    from lib.tasks_pkg.coordinator_policy import submitted_tool_settings
+    selected['tools'] = submitted_tool_settings(config)
     selected.update(schedulerEnabled=False, humanGuidanceEnabled=False)
     visible = {item['function']['name'] for item in catalog} | {'search_tools', 'execute_tools'}
     controls = tuple(name for name in CONTRACT['continuationTools'] if name in visible)
@@ -180,7 +182,6 @@ def source_for_task(repository, task, *, for_budget=False):
     if principal.kind != 'user' or principal.require_owner() != repository.owner or task.get('_attended') is False:
         raise PermissionError('Synthetic input cannot authorize new workers')
     repository.validate_binding(scope['conversation_id'], scope['binding_revision'])
-    from pathlib import Path
     for path in ([] if for_budget else (task.get('config') or {}).get('readOnlyPaths', [])):
         if Path(repository.project).resolve().is_relative_to(Path(path).resolve()):
             raise PermissionError('Read-only project cannot authorize a writing worker')
@@ -327,11 +328,12 @@ def review_worker(repository, task, arguments):
         if row['review'] is not None and row['review'] != review and not reaffirm:
             raise ValueError('Worker review is immutable; delegate a new repair assignment')
         if checkpoint:
-            workspace = repository.get_workspace(repository.project, attempt.get('taskId'), user_id=repository.owner)
+            project_root = str(Path(repository.project).expanduser().resolve())
+            workspace = repository.get_workspace(project_root, attempt.get('taskId'), user_id=repository.owner)
             if (not workspace or workspace.get('checkpoint_sha') != checkpoint
                     or workspace.get('task_id') != attempt.get('taskId')
                     or workspace.get('user_id') != repository.owner or workspace.get('state') == 'discarded'
-                    or workspace.get('project_root') != repository.project
+                    or workspace.get('project_root') != project_root
                     or (workspace.get('origin') or {}).get('_projectDispatchAdmission') != repository._admission(row)):
                 raise ValueError('Publication requires the exact registered worker checkpoint')
             origin = row['request']['delegation']

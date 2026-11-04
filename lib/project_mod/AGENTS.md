@@ -108,9 +108,11 @@ section 7 of `tests/tasks_pkg/test_run_command_interrupt.py` and
 `tests/tasks_pkg/test_run_command_background_handoff.py`.
 
 `activity_supervised_process.py` runs Git whose duration follows the volume
-(the integration snapshot's whole-tree commands) without a total deadline: a
-fixed stall window renews whenever any thread of its process tree executes,
-and retirement reuses `process_group`. Never add a wall-clock refusal there.
+(the integration snapshot's whole-tree commands and the identity/ref reads
+task admission depends on) without a total deadline: one fixed stall window,
+`lib/git_runtime.GIT_STALL_SECONDS`, renews whenever any thread of its process
+tree executes, and retirement reuses `process_group`. Never add a wall-clock
+refusal there.
 Verify `test_activity_supervised_process.py` and
 `tests/storage/test_integration_snapshot_liveness.py`.
 

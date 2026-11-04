@@ -10,6 +10,23 @@ from lib.tasks_pkg import workspace_delivery
 pytestmark = pytest.mark.unit
 
 
+def test_binary_probe_does_not_inherit_checkout_directory(tmp_path, monkeypatch):
+    executable = tmp_path / 'git'
+    executable.write_text('#!/bin/sh\necho "git version synthetic"\n')
+    executable.chmod(0o755)
+    monkeypatch.setenv('PATH', str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    run = subprocess.run
+
+    def stalled_checkout(command, **kwargs):
+        if kwargs.get('cwd') in (None, str(tmp_path)):
+            raise subprocess.TimeoutExpired(command, 5)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', stalled_checkout)
+    assert git_runtime.git_executable() == str(executable)
+
+
 def test_incompatible_path_git_does_not_block_workspace(tmp_path, monkeypatch):
     broken = tmp_path / 'conda'
     broken.mkdir()

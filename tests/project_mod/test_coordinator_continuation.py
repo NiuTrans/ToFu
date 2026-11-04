@@ -62,7 +62,7 @@ def run(runtime, monkeypatch):
                 key = row['id']; turn, attempt, task = 'turn-' + key, 'attempt-' + key, 'task-' + key
                 if row['request']['profile']['mode'] == 'coordinator':
                     snapshot = request['inputTurn']['contextSnapshot']['snapshot']
-                    assert snapshot['model'] == 'model-a'
+                    assert snapshot['model'] == row['request']['model']
                     assert snapshot['tools'] and snapshot['roots']
                     assert request['inputTurn']['origin']['initiator'] == 'brain'
                 trusted.bind_execution(turn, attempt)

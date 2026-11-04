@@ -50,6 +50,7 @@ import {
   type ManagedQueueElement,
   type SurfaceRegionWindow,
   directPart,
+  keyedBlockNodes,
   placeAt,
   regionWindowSignature,
 } from './surface-dom';
@@ -141,6 +142,11 @@ export function createConversationSurfaceEngine(
   const toolPanelChoices = new Map<string, boolean>();
   const toolPanelOpen = (turn: ConversationTurnViewModel, defaultOpen: boolean): boolean => (
     toolPanelChoices.get(turn.presentationId || turn.turnId) ?? defaultOpen);
+  /* The narration well is the same card's last fold, under the same rule. */
+  const narrationChoices = new Map<string, boolean>();
+  const narrationOpen = (turn: ConversationTurnViewModel): boolean => (
+    narrationChoices.get(turn.presentationId || turn.turnId)
+      ?? groupedTurnLayout(turn)?.narrationDefaultOpen ?? false);
   /* Mounted order of a Turn: grouped zones for replies, authored order otherwise. */
   const surfaceEntries = (turn: ConversationTurnViewModel): ReadonlyArray<GroupedTurnEntry> => {
     const layout = groupedTurnLayout(turn);
@@ -257,6 +263,10 @@ export function createConversationSurfaceEngine(
     const engaged = eventTarget.closest<HTMLElement>('[data-turn-zone="process"]')
       ?.closest<HTMLElement>('[data-presentation-id]')?.dataset.presentationId;
     if (engaged && !toolPanelChoices.has(engaged)) toolPanelChoices.set(engaged, true);
+    // Likewise a reader working inside a note keeps the narration well open.
+    const reading = eventTarget.closest<HTMLElement>('[data-narration-well-body]')
+      ?.closest<HTMLElement>('[data-presentation-id]')?.dataset.presentationId;
+    if (reading && !narrationChoices.has(reading)) narrationChoices.set(reading, true);
 
     if (design.imagePreview(event, eventTarget, options.onPreviewImage)) return;
     const panelToggle = eventTarget.closest<HTMLElement>('[data-conversation-tool-panel]');
@@ -264,6 +274,14 @@ export function createConversationSurfaceEngine(
       event.preventDefault();
       toggleToolPanel(
         panelToggle.closest<HTMLElement>('[data-presentation-id]')?.dataset.presentationId || '',
+      );
+      return;
+    }
+    const narrationToggle = eventTarget.closest<HTMLElement>('[data-conversation-narration]');
+    if (narrationToggle) {
+      event.preventDefault();
+      toggleNarration(
+        narrationToggle.closest<HTMLElement>('[data-presentation-id]')?.dataset.presentationId || '',
       );
       return;
     }
@@ -402,6 +420,7 @@ export function createConversationSurfaceEngine(
         };
       });
       const windowSignature = regionWindowSignature(windows);
+      const narrationWellOpen = narrationOpen(turn);
       const activePlanDecision = latestViewModel?.planDecision;
       const planDecisionForTurn = activePlanDecision
           && activePlanDecision.sourceTurnId === turn.turnId
@@ -417,6 +436,7 @@ export function createConversationSurfaceEngine(
           && turnNode._tofuTurnEntries === visibleBlocks
           && turnNode._tofuTurnWindowSignature === windowSignature
           && turnNode._tofuTurnPlanDecision === planDecisionForTurn
+          && turnNode._tofuTurnNarrationOpen === narrationWellOpen
           && turnNode._tofuTurnSurfaceOptions === options) {
         if (turnCursor === turnNode) turnCursor = turnNode.nextElementSibling;
         else moveRetainedNodeBefore(turnsContainer, turnNode, turnCursor);
@@ -428,7 +448,7 @@ export function createConversationSurfaceEngine(
         design.decorate(turnNode, 'turn');
       }
       turnRenderer.renderTurn(turnNode, turn, lane, {
-        visibleBlocks, windows, windowSignature, planDecisionForTurn,
+        visibleBlocks, windows, windowSignature, planDecisionForTurn, narrationOpen: narrationWellOpen,
       });
       if (turnCursor === turnNode) turnCursor = turnNode.nextElementSibling;
       else moveRetainedNodeBefore(turnsContainer, turnNode, turnCursor);
@@ -816,6 +836,16 @@ export function createConversationSurfaceEngine(
     commit();
   };
 
+  /* Folding the narration well is the same reader gesture; its notes stay
+   * mounted, so no window changes. */
+  const toggleNarration = (presentationId: string): void => {
+    const turn = findTurn(presentationId);
+    if (disposed || !turn || !groupedTurnLayout(turn)) return;
+    narrationChoices.set(presentationId, !narrationOpen(turn));
+    scrollAnchor?.suspendFollow?.();
+    commit();
+  };
+
   const moveWindow = (
     direction: 'earlier' | 'later',
     laneId = 'main',
@@ -938,8 +968,7 @@ export function createConversationSurfaceEngine(
         ManagedBlocksContainerElement | null;
       const windows = blocksContainer?._tofuBlockWindows;
       if (!blocksContainer || blocksContainer.hidden || !windows?.length) continue;
-      const keyed = (Array.from(blocksContainer.children) as HTMLElement[])
-        .filter(child => child.dataset.blockId !== undefined);
+      const keyed = keyedBlockNodes(blocksContainer);
       // Each region measures only its own window's nodes; pinned head/trail
       // entries and in-place boundary rows never enter its geometry.
       for (const window of windows) {
@@ -1045,7 +1074,7 @@ export function createConversationSurfaceEngine(
       const reset = !previous || previous.conversationId !== viewModel.conversationId;
       if (reset) {
         clearBlockWindows();
-        toolPanelChoices.clear(); historyFlights.clear(); historyEpoch += 1;
+        toolPanelChoices.clear(); narrationChoices.clear(); historyFlights.clear(); historyEpoch += 1;
         cancelHistoryDemand();
         readerTravel = 0;
       }
@@ -1141,7 +1170,7 @@ export function createConversationSurfaceEngine(
       finishSurfaceCleanup([
         () => ownedScrollAnchor?.dispose?.(),
         () => removeRenderedNode(root),
-        () => toolPanelChoices.clear(),
+        () => { toolPanelChoices.clear(); narrationChoices.clear(); },
         () => {
           latestViewModel = null;
           lanesById.clear(); laneWindows.clear(); laneBudgets.clear(); laneCaps.clear();

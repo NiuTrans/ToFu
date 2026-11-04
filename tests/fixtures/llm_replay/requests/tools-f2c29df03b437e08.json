@@ -219,6 +219,608 @@
  },
  {
   "function": {
+   "description": "Search project file content and return paths, line numbers, and matches. Prefer this over shell grep/rg: a persistent file index plus ripgrep over exact candidates avoids recursive walks on huge/network (FUSE) trees, includes hidden files, skips ignored paths unless `path` is inside one, and is case-insensitive by default. Prefer short literal keywords; regex uses Rust/ripgrep syntax (`A|B`, `\\.` for a literal dot, per-line `^`/`$`), not GNU BRE. `path` is one relative path or project root. For independent roots/patterns use one `searches` batch; every operation runs and avoids sequential model rounds.",
+   "name": "search_files",
+   "parameters": {
+    "properties": {
+     "context_lines": {
+      "description": "Lines before/after each match. Default 0, max 10; use 3-5 to avoid a follow-up read.",
+      "type": "integer"
+     },
+     "count_only": {
+      "description": "Return the full matching-line count only; `max_results` is ignored in count_only mode.",
+      "type": "boolean"
+     },
+     "from_line": {
+      "description": "Only report matches on lines ≥ N (per-file floor for paging).",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "include": {
+      "description": "Optional file glob such as `*.py`.",
+      "type": "string"
+     },
+     "max_results": {
+      "description": "Matching-line cap, default 50; use 5-20 for samples/existence checks.",
+      "type": "integer"
+     },
+     "path": {
+      "description": "One relative path; omit for project root.",
+      "type": "string"
+     },
+     "pattern": {
+      "description": "Short literal substring preferred; Rust/ripgrep regex is supported.",
+      "type": "string"
+     },
+     "searches": {
+      "description": "Batch operations; all entries execute. Faster than separate calls.",
+      "items": {
+       "properties": {
+        "context_lines": {
+         "description": "Context lines (optional)",
+         "type": "integer"
+        },
+        "count_only": {
+         "description": "Count only mode (optional)",
+         "type": "boolean"
+        },
+        "from_line": {
+         "description": "Per-file line floor (optional)",
+         "minimum": 1,
+         "type": "integer"
+        },
+        "include": {
+         "description": "File glob filter (optional)",
+         "type": "string"
+        },
+        "max_results": {
+         "description": "Max results per search (optional)",
+         "type": "integer"
+        },
+        "path": {
+         "description": "Relative path to search in (optional)",
+         "type": "string"
+        },
+        "pattern": {
+         "description": "Search pattern",
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Find files by name pattern (glob) in the project. Useful for discovering test files, configs, etc.\n\n**Prefer this over ``run_command find``** — find_files is served from a persistent project file index (near-instant even on huge or network-mounted trees), supports ``max_results``, includes hidden files, and auto-filters ignored paths (node_modules, .venv, .gitignore matches, etc.) unless ``path`` points inside one.\n\nFor MULTIPLE searches, provide a 'searches' array — each entry has the same fields as the top-level parameters. Batch mode cuts round trips.",
+   "name": "find_files",
+   "parameters": {
+    "properties": {
+     "max_results": {
+      "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample.",
+      "type": "integer"
+     },
+     "path": {
+      "description": "Relative path to search in (optional)",
+      "type": "string"
+     },
+     "pattern": {
+      "description": "File name glob pattern, e.g. '*.test.py', 'Dockerfile', '*.config.*'",
+      "type": "string"
+     },
+     "searches": {
+      "description": "Array of find operations. All entries execute with the same fields as the top-level parameters. Faster than separate find_files calls.",
+      "items": {
+       "properties": {
+        "max_results": {
+         "description": "Max results per search (optional)",
+         "type": "integer"
+        },
+        "path": {
+         "description": "Relative path to search in (optional)",
+         "type": "string"
+        },
+        "pattern": {
+         "description": "File name glob pattern",
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Return a compact structural outline of the project: which source files define which functions/classes/methods, ranked by how often other files reference them. Use this FIRST when you need to orient in an unfamiliar area — it is much cheaper than repeated ls/grep rounds. The map contains ONLY definition lines (signature + 1-based line number), never bodies; hand its paths and line numbers to read_files to see the actual code. Read-only, makes no changes.\n\nFilters: `path` scopes the map to one subdirectory (e.g. \"lib/storage\"); `focus` keeps only files whose path contains the given text. Returns all definitions in the selected scope; shared L0 handles long results without producer truncation.\n\nBoth filters are optional: call with `{}` to map the whole project.",
+   "name": "repo_map",
+   "parameters": {
+    "properties": {
+     "focus": {
+      "description": "Case-insensitive substring filter on file paths (e.g. \"storage\" or \"_test.py\"). Optional.",
+      "type": "string"
+     },
+     "path": {
+      "description": "Project-relative subdirectory to map (default: whole project). Use this on huge repos to zoom in.",
+      "type": "string"
+     }
+    },
+    "required": [],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Create or replace one whole file, or append to its end. For new files/major rewrites; use edit_file for mid-file changes. Set append=true to append to the end (a missing file is created): send only the new bytes, no read or anchor needed. Read an existing file first and supply its complete replacement—omitted lines are deleted. Relative paths use the current project. An absolute path outside registered roots needs allow_outside_workspace=true after the user confirms it (the containing directory then registers as a new root); system paths (/etc, /usr, $HOME itself) are refused outright. Give exactly one source: content (an empty string creates an empty file) or content_ref to reuse all/a slice of a previous tool result.",
+   "name": "write_file",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "allow_outside_workspace": {
+      "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused with an error naming this flag.",
+      "type": "boolean"
+     },
+     "append": {
+      "description": "Append content to the end of the file instead of replacing it. Default false.",
+      "type": "boolean"
+     },
+     "content": {
+      "description": "Complete replacement; may be empty.",
+      "type": "string"
+     },
+     "content_ref": {
+      "description": "Reuse prior tool output without regenerating it.",
+      "properties": {
+       "end": {
+        "description": "Exclusive end; default content end.",
+        "type": "integer"
+       },
+       "start": {
+        "description": "First character; default 0.",
+        "type": "integer"
+       },
+       "tool_round": {
+        "description": "Prior roundNum.",
+        "type": "integer"
+       }
+      },
+      "required": [
+       "tool_round"
+      ],
+      "type": "object"
+     },
+     "description": {
+      "description": "Optional pre-write caption shown before execution. Omit it to use the file-path label.",
+      "type": "string"
+     },
+     "path": {
+      "description": "Project-relative or allowed absolute file path.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "path"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Apply ordered anchored edits; read/write targets in an earlier round. Prefer replace, including additions: content is the complete desired replacement, including retained anchor text and all line breaks. After A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"A\\nB\"}`; before A: `{\"operation\":\"replace\",\"anchor\":\"A\",\"content\":\"B\\nA\"}`. For insert_after/insert_before, content is only new text; the anchor stays automatically. Append at end-of-file with write_file(append=true). Name the batch's file once in `path` and leave each edit's own `path` out; set an edit's `path` only to target a different file. Anchors match exactly once; replace_all permits multiple matches only for replace. Later edits see earlier changes. Atomic preflight defaults true: any validation failure writes nothing. With atomic=false, one failure neither rolls back nor stops the others. I/O failures may leave partial writes.",
+   "name": "edit_file",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "allow_outside_workspace": {
+      "description": "Set true only after the user explicitly confirmed this exact out-of-workspace destination; its containing directory registers as a new root. Default false: refused.",
+      "type": "boolean"
+     },
+     "atomic": {
+      "default": true,
+      "description": "Preflight all edits before writing. False permits partial application.",
+      "type": "boolean"
+     },
+     "description": {
+      "description": "Optional pre-edit caption (max 120 chars). Omit it to use the file-path label.",
+      "maxLength": 120,
+      "type": "string"
+     },
+     "edits": {
+      "description": "Shortest-unique-anchor operations, in order.",
+      "items": {
+       "properties": {
+        "anchor": {
+         "description": "Exact, normally unique existing text. For replace, this is the old text being removed.",
+         "minLength": 1,
+         "type": "string"
+        },
+        "content": {
+         "description": "Replace: complete new text, including anchor parts to keep and all newlines; empty to delete. Insert: added lines only, without copied anchor/context.",
+         "type": "string"
+        },
+        "operation": {
+         "description": "Prefer replace for complete old-to-new edits, including additions. insert_after adds content below anchor; insert_before above it.",
+         "enum": [
+          "replace",
+          "insert_after",
+          "insert_before"
+         ],
+         "type": "string"
+        },
+        "path": {
+         "description": "File for this edit, when it differs from the batch `path`. Never inherited from the previous edit; omit it rather than sending an empty string.",
+         "minLength": 1,
+         "type": "string"
+        },
+        "replace_all": {
+         "description": "Replace every match; ignored by inserts.",
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "operation",
+        "anchor",
+        "content"
+       ],
+       "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+     },
+     "path": {
+      "description": "File this batch edits. Write it once here for a single-file batch instead of repeating it on every edit; an edit's own `path` overrides it.",
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "required": [
+     "edits"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. A command still running after 120 s, or when a new message arrives, moves to the background and returns a `bg_*` handle; results arrive automatically. Avoid waiting for stdin.\n\nFresh subprocess; no persistent shell or environment changes. Prefer absolute paths and `working_dir` over `cd`.\n\nUse `read_files`, `search_files`, `find_files`, `edit_file`, `write_file` for repository data. Filesystem grep uses a bounded FUSE-safe engine or returns a `search_files` translation; filtering command output is allowed. `browser_download_url_to_server` handles authenticated browser downloads. Text helpers: `sd`, `mlr`, `goawk`.\n\nNever use a shell no-op as a placeholder (`true`, `:`, `exit 0`); repetition is a tool loop.",
+   "name": "run_command",
+   "parameters": {
+    "properties": {
+     "background": {
+      "description": "Start in background and return a command_id handle. Completion is delivered automatically — end the turn or do other work. `poll` reads its status or waits for it; `kill` stops it.",
+      "type": "boolean"
+     },
+     "command": {
+      "description": "Shell command, for example `pytest` or `git status`.",
+      "type": "string"
+     },
+     "credentials": {
+      "description": "Vault entry names for THIS child process only; use names from <credential_vault>. Values never enter the command/chat.",
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 16,
+      "type": "array"
+     },
+     "description": {
+      "description": "Short user-language caption: what runs and why.",
+      "type": "string"
+     },
+     "working_dir": {
+      "description": "Optional directory. In multi-root workspaces use `rootname:subdir`. STICKY: an explicit `working_dir` becomes the default for later run_command calls in this conversation; a `cd` INSIDE a command never persists. Default: the explicit sticky directory, then the project root.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "command"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Render one page in a headless browser ON THE SERVER; return screenshot, console, uncaught JS errors, and failed requests. Use after frontend edits for layout/runtime. Give exactly one source: a project-relative .html path, served from project root so relative assets/ES modules work and external requests are blocked/reported; or an HTTP(S) url such as a dev server. Not for text (use fetch_url/browser_read_page) or the user's browser extension.",
+   "name": "browser_preview_page",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "full_page": {
+      "description": "Capture the full scrollable page; default false.",
+      "type": "boolean"
+     },
+     "height": {
+      "description": "Viewport height px; default 800.",
+      "maximum": 2160,
+      "minimum": 240,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Project-relative .html/.htm file.",
+      "minLength": 1,
+      "type": "string"
+     },
+     "url": {
+      "description": "HTTP(S) page URL.",
+      "minLength": 1,
+      "type": "string"
+     },
+     "wait_ms": {
+      "description": "Settle after DOM load in ms; default 1500.",
+      "maximum": 15000,
+      "minimum": 0,
+      "type": "integer"
+     },
+     "width": {
+      "description": "Viewport width px; default 1280.",
+      "maximum": 3840,
+      "minimum": 320,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Search other conversations when the user explicitly asks for past-conversation information. A bound project Coordinator may also inspect same-owner, same-project worker evidence needed to delegate, review or follow the current authorized request. Otherwise do not browse history proactively. Project mode scopes to siblings; scope=all requires an explicit user request beyond that project. The current conversation is never listed; the result names its ID for get_conversation. A keyword match in message text names the matching Turn ID and a snippet (also for the current conversation); read that page with get_conversation(conversation_id, turn_id).",
+   "name": "list_conversations",
+   "parameters": {
+    "properties": {
+     "keyword": {
+      "type": "string"
+     },
+     "limit": {
+      "type": "integer"
+     },
+     "scope": {
+      "enum": [
+       "auto",
+       "project",
+       "all"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Retrieve a conversation by ID when the user explicitly requests past-conversation information. A bound project Coordinator may also inspect same-owner, same-project worker evidence needed to delegate, review or follow the current authorized request. Otherwise do not browse history proactively. Use an ID from list_conversations or the current assignment/result evidence.\n\nThe current conversation's own ID needs no user request: it returns this conversation's durable transcript, including Turns that may be outside your current working view (for example after compaction). Page to those older Turns with before=N.\n\nTo read a specific Turn (for example a list_conversations match), pass turn_id: the page around that Turn, with older/newer before=N hints in the header.\n\n`raw` defaults to true: a structured, unsummarized DB record with row metadata/settings and every field of each delivered message, including full tool rounds. Set `raw=false` only for a readable transcript; it drops per-message metadata and condenses tool rounds.\n\nLong histories return a parseable head+tail window of whole messages. Check `DELIVERED N of M`; use its positive `before=N` hint for older pages. `limit` widens the window but may clamp fields, which the header reports.",
+   "name": "get_conversation",
+   "parameters": {
+    "properties": {
+     "before": {
+      "description": "Exclusive 1-based end cursor (min 1) for an older page. Omit for latest; use the header's positive before=N hint. Never pass 0.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "conversation_id": {
+      "description": "Conversation ID, usually from list_conversations; the current conversation's own ID reads its durable transcript.",
+      "type": "string"
+     },
+     "include_tool_details": {
+      "description": "For raw=false only, include full tool arguments/results (default true); false shortens them. Raw mode always includes them.",
+      "type": "boolean"
+     },
+     "limit": {
+      "description": "Recent-message count (min 1). Omit for a budget-fit whole-message window; too large may clamp fields, reported in the header.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "raw": {
+      "description": "Default true: structured raw record with all fields of each delivered message. False returns readable prose that drops message metadata and condenses tool rounds.",
+      "type": "boolean"
+     },
+     "turn_id": {
+      "description": "Read the page containing this main-transcript Turn, e.g. a Turn ID named by a list_conversations match. Exclusive with before.",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "required": [
+     "conversation_id"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Capture the current isolated writer workspace as a checkpoint. The runtime binds this call to this execution's automatic work ID.",
+   "name": "integration_checkpoint",
+   "parameters": {
+    "properties": {
+     "note": {
+      "description": "Optional one-line milestone note.",
+      "type": "string"
+     }
+    },
+    "required": [],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Save a checkpoint of this execution. Automatic task changes are merged into the current canonical workspace at successful completion, independently of commits and release gates. Explicit candidate submissions retain their review/checker policy.",
+   "name": "integration_submit",
+   "parameters": {
+    "properties": {
+     "summary": {
+      "description": "What changed and how it was verified.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "summary"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Send bounded agent-authored context or a scoped request to an explicitly known same-project conversation. Commits durably, but starts no model call or worker. Idle recipients see it at their next authorized turn. Use get_project_messages to read actual input and consideration receipts. Agent text grants no human authority. Preserve the same idempotency_key/content after uncertainty. Use reply_to only for a message exchanged between the same two participants; no transcript access is implied. Subagents must ask their delegating parent to relay.",
+   "name": "send_project_message",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "content": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+     },
+     "conversation_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+     },
+     "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+     },
+     "kind": {
+      "default": "reference",
+      "enum": [
+       "reference",
+       "consult",
+       "report",
+       "question",
+       "assign",
+       "steer"
+      ],
+      "type": "string"
+     },
+     "reply_to": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "required": [
+     "conversation_id",
+     "content",
+     "idempotency_key"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Read a bounded incoming or outgoing mailbox for this same-project conversation. Does not read private transcripts or start work. State input_confirmed is distinct from an explicit recipient consideration decision, and accepted is not proof of execution or delivery. Do not busy-poll. A conversation_id is required for outgoing; it identifies the recipient mailbox.",
+   "name": "get_project_messages",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "before_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     },
+     "conversation_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+     },
+     "direction": {
+      "default": "incoming",
+      "enum": [
+       "incoming",
+       "outgoing"
+      ],
+      "type": "string"
+     },
+     "message_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
+   "description": "Record your explicit accepted/rejected/deferred/conflict decision for an incoming message and explain why. Reads the immutable original message; this action never starts another worker, grants tools, or proves delivery. accepted is a stated commitment only and does not authorize new external side effects. Use expected_revision from get_project_messages; a conflict requires reading current authority, not overwriting another decision. No automatic ACK-of-ACK notification is generated.",
+   "name": "consider_project_message",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "decision": {
+      "enum": [
+       "accepted",
+       "rejected",
+       "deferred",
+       "conflict"
+      ],
+      "type": "string"
+     },
+     "expected_revision": {
+      "minimum": 1,
+      "type": "integer"
+     },
+     "message_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+     },
+     "note": {
+      "maxLength": 2048,
+      "type": "string"
+     }
+    },
+    "required": [
+     "message_id",
+     "decision",
+     "note",
+     "expected_revision"
+    ],
+    "type": "object"
+   }
+  },
+  "type": "function"
+ },
+ {
+  "function": {
    "description": "Stage one remote file ON THE TOFU SERVER for download/save/install/unzip/export/copy. Supply its exact HTTP(S) url. text/selector (+ optional tab_id) instead names an <a href>, data-download-url or <img>/<video>/<audio> element whose full signed link is recovered; action buttons have no link — use browser_click. It tries bounded server HTTP first, then the selected logged-in browser; cookies stay in Chrome—never use browser_get_cookies, curl/wget, or browser Downloads, and never call a device-local file server-side. Success: location=server_staging, absolute path, byte size, SHA-256, transport. Staging is temporary; a named final project path needs a separately authorized copy/move and verified destination.",
    "name": "browser_download_url_to_server",
    "parameters": {
@@ -4419,7 +5021,7 @@
  },
  {
   "function": {
-   "description": "Check or wait on background work: background shell commands (bg_* handles from run_command background=true), swarm sub-agents from spawn_agents, or tasks running in other conversations. With no id, returns a snapshot of everything currently running. With an id, returns that handle's status — and its full result once finished. Set wait_s to block until completion: the wait returns as soon as the handle finishes, new input arrives for this turn, or the task is stopped, so a long wait costs no extra model requests (capped at 1500 s = 25 minutes; on cap returns the running snapshot — call again to keep waiting). Background command completions are also delivered automatically, so only wait when there is nothing else to do.",
+   "description": "Check or wait on background work: background shell commands (bg_* handles from run_command), swarm sub-agents from spawn_agents, or tasks running in other conversations. With no id, returns a snapshot of everything currently running. With an id, returns that handle's status — and its full result once finished. Set wait_s to block until completion: the wait returns as soon as the handle finishes, new input arrives for this turn, or the task is stopped, so a long wait costs no extra model requests (capped at 1500 s = 25 minutes; on cap returns the running snapshot — call again to keep waiting). Background command completions are also delivered automatically, so only wait when there is nothing else to do.",
    "name": "poll",
    "parameters": {
     "properties": {
@@ -4435,7 +5037,7 @@
       "type": "array"
      },
      "mode": {
-      "description": "With multiple swarm-agent ids: 'any' (default) returns as soon as one finishes; 'all' waits for every match.",
+      "description": "With multiple command ids or multiple swarm-agent ids: 'any' (default) returns as soon as one finishes; 'all' waits for every match.",
       "enum": [
        "any",
        "all"

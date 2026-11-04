@@ -180,7 +180,8 @@ def audit_trial(trial_dir: Path, fingerprints: set[str]) -> dict:
         if call_id not in network_calls:
             local_hidden |= received
             continue
-        for line in received:
+        # Set order follows the hash seed; sorting keeps the retained evidence reproducible.
+        for line in sorted(received):
             hidden_hits.setdefault(line, {"call_id": call_id, "tool": tool})
         if TB_CANARY_GUID in text:
             canary_results.append({"call_id": call_id, "tool": tool})

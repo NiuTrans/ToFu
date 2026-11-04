@@ -14,7 +14,9 @@ Design contract (owner ruling):
   partial-result spam — a running handle reports a compact status, a
   finished handle reports its full result once.
 * ``kill`` is THE way background work stops. run_command has no timeout:
-  commands run to completion unless killed or stopped by the user.
+  commands run to completion unless killed or stopped by the user. A
+  command still running after ``AUTO_BACKGROUND_AFTER_S`` returns a bg_*
+  handle instead of holding its tool call, in every task composition.
 * The retired per-family surfaces (``check_background_command``,
   ``await_agents``, ``await_task``, ``kill_background_command``) stay
   dispatchable for conversation-latched schemas; fresh name mistakes are
@@ -24,6 +26,12 @@ Design contract (owner ruling):
 # Below the stuck-task reaper's 30-minute silence threshold with margin; the
 # handler clamps it further when an operator lowers that threshold.
 POLL_WAIT_CAP_S = 1500
+# Owner decision 2026-11-03: a foreground command returns control to the model
+# inside the provider's 5-minute prompt-cache TTL, so the next request reads a
+# warm prefix and a stuck command cannot hold the agent. Waiting longer is the
+# model's explicit `poll`, which costs no model request. Measured from process
+# spawn (lib/tasks_pkg/handlers/_background_command.py).
+AUTO_BACKGROUND_AFTER_S = 120
 
 POLL_TOOL = {
     "type": "function",
@@ -31,7 +39,7 @@ POLL_TOOL = {
         "name": "poll",
         "description": (
             "Check or wait on background work: background shell commands "
-            "(bg_* handles from run_command background=true), swarm "
+            "(bg_* handles from run_command), swarm "
             "sub-agents from spawn_agents, or tasks running in other "
             "conversations. With no id, returns a snapshot of everything "
             "currently running. With an id, returns that handle's status — "
@@ -73,7 +81,7 @@ POLL_TOOL = {
                     "type": "string",
                     "enum": ["any", "all"],
                     "description": (
-                        "With multiple swarm-agent ids: 'any' (default) "
+                        "With multiple command ids or multiple swarm-agent ids: 'any' (default) "
                         "returns as soon as one finishes; 'all' waits for "
                         "every match."
                     )
@@ -118,4 +126,5 @@ KILL_TOOL = {
 
 BACKGROUND_TOOL_NAMES = frozenset({'poll', 'kill'})
 
-__all__ = ['POLL_TOOL', 'KILL_TOOL', 'BACKGROUND_TOOL_NAMES', 'POLL_WAIT_CAP_S']
+__all__ = ['POLL_TOOL', 'KILL_TOOL', 'BACKGROUND_TOOL_NAMES', 'POLL_WAIT_CAP_S',
+           'AUTO_BACKGROUND_AFTER_S']

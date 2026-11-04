@@ -94,12 +94,18 @@ def validate_turns(turns) -> None:
         or turns.get("attemptDispatchableIndexNamespace")
         != "generation_attempts_dispatchable"
         or turns.get("maximumDispatchableAttemptsPerQuery") != 32
+        or turns.get("dispatchableResponseAdmission")
+        != "complete-requested-configurations-over-storage-v2-chunks-without-aggregate-byte-quota"
+        or turns.get("syncResponseAdmission")
+        != "complete-requested-events-over-storage-v2-chunks-without-aggregate-byte-quota"
         or turns.get("laneCompactionIndexNamespace")
         != "turns_by_lane_compaction"
         or turns.get("maximumCompactionMetadataRows") != 100_000
         or turns.get("maximumCompactionProjectionUpdates") != 512
         or turns.get("maximumCompactionReparentedTurns") != 512
-        or turns.get("maximumCompactionProjectionBytes") != 8 * 1024 * 1024
+        or turns.get("compactionProjectionAdmission")
+        != "complete-summary-and-retained-updates-without-aggregate-byte-quota"
+        or "maximumCompactionProjectionBytes" in turns
         or turns.get("maximumCompactionMaterializedBytes") != 64 * 1024 * 1024
         or turns.get("attemptRecoveryIndexNamespace")
         != "generation_attempts_live_by_created"
@@ -123,7 +129,7 @@ def validate_turns(turns) -> None:
         or turns.get("maximumTurnProjectionTextPageBytes") != 16 * 1024
         or turns.get("maximumTurnProjectionTextAppendBytes") != 64 * 1024
         or turns.get("maximumTurnProjectionPatchBytes") != 1024 * 1024
-        or turns.get("maximumTurnProjectionWirePatchBytes") != 8 * 1024 * 1024
+        or "maximumTurnProjectionWirePatchBytes" in turns
         or turns.get("maximumTurnProjectionPatchDepth") != 128
         or turns.get("maximumTurnProjectionPatchOperations") != 65_536
         or turns.get("maximumLegacyTurnImages") != 20

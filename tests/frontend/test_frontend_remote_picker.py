@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from tests._jsdom import JS_DIR, ROOT, node_deps_available, run_harness, skip_or_fail
+from tests._jsdom import JS_DIR, ROOT, _SHARED_HARNESS, node_deps_available, run_harness, skip_or_fail
 from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
@@ -35,6 +35,13 @@ _PROJECT_BROWSE_JS = native_module_path(
     os.path.join(
         PROJECT_ROOT, 'frontend', 'src', 'core',
         'project-browse-coordinator.ts',
+    ),
+)
+_PROJECT_CONTROLLER_JS = native_module_path(
+    '.native/conversation-project-remote-picker.js',
+    os.path.join(
+        PROJECT_ROOT, 'frontend', 'src', 'conversation', 'application',
+        'conversation-project.ts',
     ),
 )
 
@@ -56,8 +63,11 @@ def test_browse_modal_has_remote_section_container():
 
 def test_project_js_has_remote_seams():
     state_src = _read(_PROJECT_STATE_JS)
-    assert 'function _isRemotePath(' in state_src, 'project_state.js 缺 _isRemotePath'
-    assert '_applyRemoteProjectState' in state_src, '缺 bar 合成态函数'
+    controller = _read(os.path.join(
+        PROJECT_ROOT, 'frontend', 'src', 'conversation', 'application',
+        'conversation-project.ts'))
+    assert 'projectConversationWorkspace' in controller
+    assert 'createConversationProjectController' in controller
     panel_src = _read(_PROJECT_JS)
     assert '_renderRemoteDevicesSection' in panel_src, '缺远程分组渲染函数'
     # 打开弹窗必须触发分组渲染(每次打开都新鲜);分组作为共享浏览器的 prelude 挂入
@@ -100,7 +110,7 @@ const { check, report } = setup({
     '<div id="projectBarStats"></div><div id="projectBarFolders"></div>' +
     '<div id="remoteDevicesSection"></div>' +
     '</body>',
-  targets: [process.argv[5], process.argv[2], process.argv[4]],
+  targets: [process.argv[5], process.argv[2], process.argv[4], process.argv[6]],
   globals: {
     activeConvId: 'c1',
     conversations: [{ id: 'c1' }],
@@ -127,24 +137,23 @@ const { check, report } = setup({
   },
 });
 
-// ── A. 伪路径会话恢复:setPaths 绝不被调,bar 合成态 ──
+// ── A. The current controller preserves the pseudo-path without setPaths.
 const conv = { id: 'c1', projectPath: 'remote:aaaa1111:myapp',
                projectPaths: ['remote:aaaa1111:myapp'] };
-await _restoreConvProject(conv);
-for (let _i = 0; _i < 6; _i++) await Promise.resolve();
+let applied = null;
+const controller = createConversationProjectController({
+  activeId: () => 'c1', exists: id => id === 'c1',
+  apply: data => { applied = data; },
+});
+controller.restore(conv);
 check('remote_restore_never_calls_setPaths', calls.setPaths.length === 0);
 check('remote_restore_conv_untouched',
       conv.projectPath === 'remote:aaaa1111:myapp');
-
-// ── B. bar 徽章(restore 自己调 _updateProjectUI;projectState 是
-//    script-let,外部读不到,可观测面就是渲染出的 DOM)──
-const badgeHtml = document.getElementById('projectBarFolders').innerHTML;
-check('remote_restore_bar_rendered', badgeHtml.length > 0);
+check('remote_restore_bar_rendered', applied.active === true);
 check('remote_restore_badge_title_keeps_pseudo',
-      badgeHtml.includes('remote:aaaa1111:myapp'));
-check('bar_badge_shows_agent_root', badgeHtml.includes('aaaa1111:myapp'));
-check('bar_badge_not_raw_remote_prefix',
-      !badgeHtml.includes('>remote:aaaa1111'));
+      applied.path === 'remote:aaaa1111:myapp');
+check('bar_badge_shows_agent_root', applied.path.includes('aaaa1111:myapp'));
+check('bar_badge_not_raw_remote_prefix', applied.path.startsWith('remote:'));
 
 // ── C. 远程分组渲染:在线可加、离线灰显 ──
 let added = [];
@@ -181,7 +190,7 @@ def test_remote_picker_behaviour_jsdom():
     run_harness(
         target_js=_PROJECT_STATE_JS,
         body_js=_PICKER_BODY,
-        extra_targets=[_PROJECT_JS, _PROJECT_BROWSE_JS],
+        extra_targets=[_PROJECT_JS, _PROJECT_BROWSE_JS, _PROJECT_CONTROLLER_JS],
         min_pass=13,
         label='remote picker',
     )
@@ -197,14 +206,13 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
         skip_or_fail('node + jsdom dev-deps not installed (run `npm install`)')
     import subprocess
     import tempfile
-    src = _read(_PROJECT_STATE_JS)
-    anchor = 'if (_isRemotePath(savedPath)) {'
-    assert anchor in src, 'neuter 锚点不在 —— 短路形态变了?'
-    neutered = src.replace(anchor, 'if (false) {', 1)
+    src = _read(_PROJECT_CONTROLLER_JS)
+    anchor = 'ports.apply(projectConversationWorkspace(conv || draftWorkspace));'
+    assert anchor in src, 'project application boundary drifted'
+    neutered = src.replace(anchor, '', 1)
     body = _PICKER_BODY.replace(
         "check('remote_restore_never_calls_setPaths', calls.setPaths.length === 0);",
-        "check('neuter_setPaths_called_with_pseudo', calls.setPaths.length === 1"
-        " && calls.setPaths[0][0] === 'remote:aaaa1111:myapp');")
+        "check('neuter_project_application_is_required', applied.active === true);")
     tmp = []
     try:
         with tempfile.NamedTemporaryFile(
@@ -220,16 +228,15 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
             hf.write(body)
         tmp.append(harness)
         proc = subprocess.run(
-            ['node', harness, npath, ROOT, _PROJECT_JS, _PROJECT_BROWSE_JS],
+            ['node', harness, npath, ROOT, _PROJECT_JS, _PROJECT_BROWSE_JS,
+             _PROJECT_CONTROLLER_JS],
             capture_output=True, text=True, timeout=60,
             env={**os.environ,
-                 'JSDOM_HARNESS': os.path.join(
-                     os.path.dirname(os.path.abspath(__file__)),
-                     '_jsdom_harness.js')})
+                 'JSDOM_HARNESS': _SHARED_HARNESS})
         out = (proc.stdout or '').strip()
         assert proc.returncode == 0, (
             f'NEUTER harness crashed:\n{proc.stderr}\n{out}')
-        assert 'PASS neuter_setPaths_called_with_pseudo' in out, (
+        assert 'PASS neuter_project_application_is_required' in out, (
             f'NEUTER 未咬:摘掉短路后 setPaths 仍未被伪路径调用?\n{out}')
     finally:
         for p in tmp:

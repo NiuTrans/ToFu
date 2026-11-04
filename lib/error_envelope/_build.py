@@ -263,7 +263,18 @@ def from_exception(exc: BaseException, *, model: str = '',
                        if field.endswith('Tokens'))
         source = 'prompt-admission'
         retryable = False
-    from lib.agent_core.context_errors import TurnRequirementsDeadlineError
+    from lib.agent_core.context_errors import MessageInputScopeError, TurnRequirementsDeadlineError
+    if isinstance(exc, MessageInputScopeError):
+        source, model = 'context-admission', ''
+        message = ('⚠️ 本地输入上下文校验失败，本次模型请求未发送\n'
+                   'Local input context validation failed; this model request was not sent')
+        hint = ('请检查会话所属项目、消息来源及当前执行权限，确认有效后重新发起任务。'
+                '若持续失败，请检查 logs/error.log。\n'
+                'Check the conversation project, message source and current execution '
+                'authority before starting a new turn. If this persists, inspect logs/error.log.')
+        retryable = False
+        extensions = {'origin': 'local', 'providerReached': False,
+                      'failureStage': exc.failure_stage}
     if isinstance(exc, TurnRequirementsDeadlineError):
         source, model = 'context-acquisition', ''
         message = ('⚠️ 本地任务要求读取超时，尚未发送本轮模型请求\n'

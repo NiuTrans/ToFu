@@ -188,7 +188,7 @@
   display: none;
 }
 
-.conversation-surface .conversation-block + .conversation-block--text[data-deliverable="true"] {
+.conversation-surface :is(.conversation-block, .conversation-narration) + .conversation-block--text[data-deliverable="true"] {
   margin-block-start: var(--conversation-answer-gap);
 }
 

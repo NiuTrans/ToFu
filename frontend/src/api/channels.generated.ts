@@ -2,6 +2,7 @@
 export const CHANNEL_DISCLOSURE_LABEL = "[Tofu 代发]";
 export const CHANNEL_DEFAULT_MODE_BY_KIND = {"uid": "mentions", "gid": "ignore", "pid": "ignore", "issue": "mentions"} as const;
 export const CHANNEL_DEFAULT_REPLY_POLICY = "draft";
+export const CHANNEL_MIS_PATTERN = "^[a-z0-9][a-z0-9._-]{0,63}$";
 
 export type Channel = "dx" | "github";
 
@@ -17,13 +18,15 @@ export type ConfigurableThreadMode = "watch" | "mentions" | "ignore";
 
 export type ReplyPolicy = "auto" | "draft" | "never";
 
-export type AccountState = "disabled" | "starting" | "connected" | "disconnected" | "needs_login" | "kicked" | "error";
+export type AccountState = "disabled" | "starting" | "authorizing" | "connected" | "disconnected" | "needs_login" | "kicked" | "error";
+
+export type Mis = string;
 
 export type EventDisposition = "command" | "candidate" | "context";
 
 export type OutboxState = "draft" | "queued" | "sending" | "unknown" | "sent" | "failed" | "discarded";
 
-export type OutboxOriginKind = "router_reply" | "tool";
+export type OutboxOriginKind = "router_receipt" | "router_content" | "router_progress" | "router_reply" | "router_status" | "tool";
 
 export type ChannelIdentity = {
   uid: string;
@@ -41,6 +44,7 @@ export type ChannelAccountStatus = {
 export type ChannelAccountView = {
   channel: Channel;
   enabled: boolean;
+  loginMis: Mis | null;
   identity: ChannelIdentity | null;
   commandChat: ThreadKey | null;
   status: ChannelAccountStatus;
@@ -50,6 +54,7 @@ export type ChannelAccountView = {
 
 export type ChannelAccountUpdate = {
   enabled?: boolean;
+  mis?: Mis;
   commandChat?: ThreadKey | null;
 };
 

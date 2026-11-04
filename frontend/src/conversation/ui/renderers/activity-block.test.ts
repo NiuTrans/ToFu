@@ -38,6 +38,28 @@ function render(
 }
 
 describe('clickable compact compression receipts', () => {
+  it('opens a newly failed receipt but preserves the reader closing it', () => {
+    const { dom, node, update } = render({ status: 'running', archiveId: undefined });
+    try {
+      expect(node.querySelector<HTMLDetailsElement>('details')!.open).toBe(false);
+      update({ status: 'failed', severity: 'warning' });
+      const details = node.querySelector<HTMLDetailsElement>('details')!;
+      expect(details.open).toBe(true);
+      details.open = false;
+      update({ summary: 'Could not save compacted context; original context retained.' });
+      expect(details.open).toBe(false);
+    } finally { dom.window.close(); }
+  });
+  it('exposes a failed archive without requiring a diagnostic disclosure', () => {
+    const { dom, node } = render({
+      status: 'failed', severity: 'warning', archiveId: undefined,
+      summary: 'Could not save compacted context; original context retained.',
+    });
+    try {
+      expect(node.querySelector<HTMLDetailsElement>('details')?.open).toBe(true);
+      expect(node.querySelector('[data-conversation-action="open-compaction"]')).toBeNull();
+    } finally { dom.window.close(); }
+  });
   it('puts the recorded model beside the status and opens the receipt without a Details label', () => {
     const { dom, node } = render({ summaryModel: 'Luna', summarySelectedModel: 'chosen-Luna',
       taskModel: 'Sol', tokensBefore: 100000, tokensAfter: 15000, trigger: 'working_set' });
@@ -235,6 +257,36 @@ describe('compact compression diagnostics', () => {
       node.querySelector<HTMLDetailsElement>('details')!.open = false;
       update({durationMs: 42000});
       expect(node.querySelector<HTMLDetailsElement>('details')!.open).toBe(false);
+    } finally { dom.window.close(); }
+  });
+
+  it.each([
+    ['en', en, 'Context compaction discarded on resume',
+      'Not reused after the interruption: no reusable checkpoint was recorded.'],
+    ['zh', zh, '上下文已收束 · 续跑时作废', '中断后续跑未复用这次收束：未记录可复用的检查点。'],
+  ] as const)('shows in %s why a resume discarded a real compaction', (_language, catalog, summary, detail) => {
+    const localizedText: ClassicConversationRendererPorts['localizedText'] = (key, fallback, values) => (
+      (catalog[key as keyof typeof catalog] ?? fallback).replace(/\{(\w+)\}/g,
+        (match, name: string) => String(values?.[name] ?? match))
+    );
+    const {dom, node} = render({
+      status: 'superseded', trigger: 'working_set', tokensBefore: 249_784, tokensAfter: 30_628,
+      summary: 'Context compaction discarded on resume', summaryKey: 'activity.compaction.superseded',
+      detail: 'Not reused after the interruption: no reusable checkpoint was recorded.',
+      detailKey: 'activity.compaction.supersededDetail',
+      detailArgs: {reason: 'no reusable checkpoint was recorded',
+        reasonKey: 'activity.compaction.resumeReason.noWitness'},
+    }, localizedText);
+    try {
+      const row = node.querySelector('.activity-event--compaction')!;
+      expect(row.classList.contains('activity-event--superseded')).toBe(true);
+      expect(row.querySelector('.activity-event__summary')?.textContent).toBe(summary);
+      // The cause is the row's point, not a folded diagnostic.
+      expect(row.querySelector('.activity-event__body > .activity-event__detail')?.textContent)
+        .toBe(detail);
+      // The discarded work keeps its real accounting and snapshot.
+      expect(row.querySelector('.compaction-token-flow')).not.toBeNull();
+      expect(row.querySelector('[data-conversation-action="open-compaction"]')).not.toBeNull();
     } finally { dom.window.close(); }
   });
 

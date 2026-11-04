@@ -51,7 +51,8 @@ def declared_deadline(monkeypatch):
     monkeypatch.setattr(
         'lib.tasks_pkg.tool_dispatch._heartbeat.threading.Timer', ControlledTimer)
     monkeypatch.setattr(
-        'lib.tools.registry.declared_tool_timeout_ms', lambda _name: 1000)
+        'lib.tools.registry.declared_tool_timeout_ms',
+        lambda _name, arguments=None, tool_schemas=None: 1000)
     return lambda: timers[-1].callback()
 
 

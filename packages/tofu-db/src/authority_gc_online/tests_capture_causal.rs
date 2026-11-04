@@ -32,7 +32,6 @@ fn gc_capture_same_volume_child() {
                     capture.blocks.visit_history_payload_metadata_selection(selection, |id| {
                         capture.snapshot.history_payload_metadata_ids.push(id); Ok(())
                     }).unwrap();
-                    capture.snapshot.history_metadata_resident_bytes = 0;
                 }
                 capture
             };

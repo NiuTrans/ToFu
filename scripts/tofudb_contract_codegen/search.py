@@ -17,7 +17,7 @@ def render_search(search: dict) -> tuple[str, dict | None]:
     native = search['nativeProjection']
     if type(native['headerScanBatch']) is not int or not 1 <= native['headerScanBatch'] <= search['limits']['candidateScanPage']:
         raise ValueError('invalid native search header batch')
-    if native['formatVersion'] != 4 or native['invalidationTokenBytes'] != 16 or native['legacyInvalidationTokenBytes'] != 8:
+    if native['formatVersion'] != 6 or native['invalidationTokenBytes'] != 16 or native['legacyInvalidationTokenBytes'] != 8:
         raise ValueError('native search projection encoding differs')
     search_lines.extend([
         f"pub const PROJECTION_FORMAT_VERSION: u8 = {native['formatVersion']};",

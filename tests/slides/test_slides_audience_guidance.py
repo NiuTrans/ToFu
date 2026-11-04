@@ -2,7 +2,7 @@
 
 import pytest
 
-from lib.design_sys.themes import classify_scenario, design_bible_text
+from lib.design_sys.themes import classify_scenario, design_bible_text, list_themes
 from lib.slides._creative_plan import normalise_deck_plan
 from lib.slides.recipe import _build_outline_prompt
 
@@ -27,6 +27,19 @@ def test_planning_and_bounded_author_guidance_carry_evidence_rules(topic, scenar
         topic, lang=lang, max_pages=6, scenarios_doc=scenario, style_hint='')
     assert required in prompt
     assert required in design_bible_text(scenario, limit=2500)
+
+
+@pytest.mark.parametrize('lang', ['zh', 'en'])
+def test_outline_prompt_offers_the_curated_theme_choices(lang):
+    # theme_id is a closed set: an id the planner cannot see is guessed, and a
+    # guessed id silently degrades to the scenario default (light for interviews).
+    prompt = _build_outline_prompt(
+        '面试项目复盘', lang=lang, max_pages=6,
+        scenarios_doc='career-interview(面试/工作整理)',
+        style_hint='深石板底 + 暖金单点强调')
+    for theme in list_themes():
+        assert theme.id in prompt
+        assert theme.mood in prompt
 
 
 @pytest.mark.parametrize('scenario', ['academic-research', 'career-interview'])

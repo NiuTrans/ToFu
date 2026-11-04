@@ -357,7 +357,6 @@ pub(crate) struct OnlineGcMarkSnapshot {
     pub history_segments: Vec<HistorySegmentReference>,
     pub history_payload_metadata_ids: Vec<BlockId>,
     pub selected_history_metadata: Option<crate::block::HistoryPayloadMetadataSelection>,
-    pub history_metadata_resident_bytes: u64,
     pub staged_history: Vec<HistorySegmentReference>,
     pub committed_block_ids: Vec<BlockId>,
     pub payload_manifest_block_id: Option<BlockId>,
@@ -2666,16 +2665,14 @@ impl Engine {
             .flat_map(|transaction| transaction.envelope.block_ids.iter().copied())
             .chain(self.blocks.publication_window_block_ids())
             .collect();
-        let (selected_history_metadata, history_metadata_resident_bytes, history_payload_metadata_ids) =
+        let (selected_history_metadata, history_payload_metadata_ids) =
             match (maximum_snapshot_bytes, self.history_manifest.as_ref()) {
-                (Some(budget), Some(manifest)) => {
-                    let selected = crate::block::HistoryPayloadMetadataSelection::capture(manifest, budget)?;
-                    let bytes = selected.resident_bytes();
-                    (Some(selected), bytes, Vec::new())
-                }
-                (None, Some(manifest)) =>
-                    (None, 0, self.blocks.history_payload_metadata_ids(manifest)?),
-                (_, None) => (None, 0, Vec::new()),
+                (Some(budget), Some(manifest)) => (
+                    Some(crate::block::HistoryPayloadMetadataSelection::capture(manifest, budget)?),
+                    Vec::new(),
+                ),
+                (None, Some(manifest)) => (None, self.blocks.history_payload_metadata_ids(manifest)?),
+                (_, None) => (None, Vec::new()),
             };
         Ok(OnlineGcMarkSnapshot {
             authority_state_root,
@@ -2687,7 +2684,6 @@ impl Engine {
                 .map_or_else(Vec::new, |manifest| manifest.segments.clone()),
             history_payload_metadata_ids,
             selected_history_metadata,
-            history_metadata_resident_bytes,
             staged_history: self.staged_history.clone(),
             committed_block_ids,
             payload_manifest_block_id: self.state.payload_manifest_block_id,

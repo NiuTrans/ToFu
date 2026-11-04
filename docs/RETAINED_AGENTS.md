@@ -12,7 +12,11 @@ Archive recovery with explicit current authority retains all witnesses for norma
 validation; foreign/malformed ones still fail closed. Same-run child checkpoints
 retain and revalidate both confirmed and pending carriers before dispatch.
 Canonical and physical validation share request-scoped, nonretryable
-`MessageInputScopeError` (the existing request-rejected envelope); cancellation keeps
+`MessageInputScopeError`; its envelope identifies a local context-admission
+failure (`internal`, nonretryable, `providerReached=false`) without claiming an
+upstream HTTP status or blaming a model. The shared evidence type lives in
+`agent_core.context_errors`; request-scoped dispatch still forbids route retry,
+fallback and provider-health penalties. Cancellation keeps
 its type and no provider fallback can repair missing/revoked/foreign authority.
 **Rejected alternatives:** metadata-derived bindings forge authority; ignoring
 unbound live carriers hides pending delivery; deleting text loses context;

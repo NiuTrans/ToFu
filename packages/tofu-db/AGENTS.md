@@ -513,8 +513,9 @@ Turn retirement; verify selected-store crash/Continue/query parity and recovery 
   suite; ordinary correctness does not establish conversation-capacity SLOs.
 - `src/turn/sync_attempt_reference.rs` owns compact canonical Attempt-event
   references in the replay journal. Contract: `docs/STORAGE_EVENT_REPLAY.md`.
-  Preserve expanded byte admission, same-owner source/version checks and atomic
-  retention release; export emits public envelopes, never internal locators.
+  Preserve complete live replay, same-owner source/version checks and atomic
+  retention release; the transport chunks large responses. Operator export
+  follows its own transfer contract and emits public envelopes, never locators.
 - `src/turn/event_retirement.rs` owns deletion-time identity pins and bounded
   cleanup cursors on the existing event-maintenance path. Verify generation,
   identity reuse, empty-event progress and cursor/pin crash tests; lifecycle and

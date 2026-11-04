@@ -1,7 +1,7 @@
 /**
  * Turn avatar, header, actions and footer DOM projections. Reads typed route
  * and timing evidence; emits delegated intent datasets.
- * Entry points: initiatorRoleLabel, renderClassicTurnAvatar, renderTurnHeader,
+ * Entry points: renderClassicTurnAvatar, renderTurnHeader,
  * renderTurnActions, renderTurnFooter.
  * Dependencies: conversation-view-model, turn-finish, ports, stable-dom,
  * icons, localized-copy.
@@ -27,7 +27,7 @@ import {
   formatDuration,
 } from './localized-copy';
 
-export function initiatorRoleLabel(
+function initiatorRoleLabel(
   origin: ConversationTurnViewModel['metadata']['origin'],
 ): string {
   const initiator = origin?.initiator;

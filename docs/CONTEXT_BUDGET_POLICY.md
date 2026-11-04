@@ -38,6 +38,26 @@ capacity. Model pricing tiers and economic targets cannot force a summary below
 safety pressure, and mandatory pressure cannot justify an incomplete summary:
 failure preserves history and refuses the overfull dispatch.
 
+**Post-loop synthesis.** An empty normal completion after web reads may make
+one synthesis request. It uses a detached copy of the current working context,
+including accepted compaction and owner corrections, then admits the fetched
+evidence through the same final round-context gate before building the body or
+request snapshot. Counting and output reservation use the synthesis model and
+output cap; the task's configured selection is restored afterward. A failed
+admission leaves source messages intact and never dispatches the main request.
+The existing recovery of an exhausted empty response remains available only
+with typed evidence of an observed normal provider stop. Its error clears only
+after a verified, nonempty synthesis answer. Other terminal errors, refusals,
+output limits and owner Stop settle through their original owner without
+synthesis. Preparation failures settle as synthesis errors; Stop during
+preparation remains cancellation.
+**Problem:** rebuilding from the invocation's original history resurrected
+already-compacted input and a second failure could mask the loop's real cause.
+**Alternatives rejected:** raising the model window or truncating original
+history hides the stale-source bug; retrying after terminal failure bypasses
+the existing recovery policy. Specs: `test_post_loop_fallback_admission.py` and
+`test_noprose_fallback_evidence.py`.
+
 **Problem.** Folding only tool spans retained every intervening assistant row
 in a long single turn. A preservation budget therefore did not bound the
 actual working projection, and a complete summary could still fail admission.
@@ -391,6 +411,35 @@ failures=4, 2400 s); filtering health again at mint (the race raised `planned
 route changed` outside outage handling and failed the summary); catching that
 error and reselecting (more machinery than trusting the selected plan).
 
+**Recorded billing stops (2026-11-03).** Problem: a paid auxiliary route whose
+account ran out of credit answered HTTP 402. Dispatch recorded the key-wide stop
+in key-stats (`docs/modules/auth_providers_billing.md`, daily key health), but
+`select_auxiliary_route` read only learned route health, and ordinary admission
+promoted the sole stopped credential as last resort. Every later compaction
+ranked the same dead route first and paid nothing for another 402, ending
+`summary_dispatch_failed` with 0% reduction (163 402s across 9 tasks in one
+day) while the task's own route stayed healthy. Decision: an owner-wide
+auxiliary summary is optional work. Selection drops a candidate when
+`lib.key_stats.is_key_refused_for_optional_work` refuses its minted slot's
+identity (`candidate_key_stats_identity`: owner+Provider namespace,
+Credential, Deployment wire model): a key-wide stop, a stop for that wire
+model, or an explicit user disable. A stop recorded this day beats a manual ON,
+as strict admission requires; an explicit re-enable clears it and the route
+returns. `SummaryTransport` dispatches every request-owned route under
+`strict_billing_stop_admission()`, so a stop recorded between selection and
+mint is refused before ingress instead of promoted; the task's own route keeps
+attended user-supremacy admission. As with cooldowns the plan changes and the
+request identity stays the health-blind leader, so the failed request is never
+re-bought; a later compaction over new source routes around the stop. A
+wholly stopped supply leaves the authorized main route as the only summary
+route, under the existing rules. Rejected: copying 402 into
+`owner_health_registry` (a second billing authority with a TTL that would
+re-try a dead account every cooldown and ignore an explicit re-enable); a
+per-summary 402 retry/fallback ladder (each later compaction would still pay
+one failed attempt first); reading key-stats again at mint (the same race the
+cooldown record rejects, now covered by strict dispatch admission). Spec:
+`tests/compaction/test_summary_billing_stop.py`.
+
 These controls assume host-local source availability can change after discovery;
 remove them only when the common auxiliary dispatch owner provides equivalent
 whole-attempt ingress, exact-source, quote and joined-cleanup guarantees. All
@@ -404,6 +453,7 @@ speed/fidelity result is implied. Specs:
 `tests/compaction/test_auxiliary_offering_cost.py`,
 `tests/compaction/test_summary_routing.py`,
 `tests/compaction/test_summary_completion_policy.py`,
+`tests/compaction/test_summary_billing_stop.py`,
 `tests/compaction/test_compaction_receipt_contract.py`.
 
 ## Route-budget model knowledge
@@ -545,8 +595,37 @@ that witness before reading the saved `postMessages`. It then restores managed
 runtime context through the ordinary composer and replays only uncovered tool
 rounds. Full checkpoint records still own display, accounting and execution
 recovery. Missing/legacy/unaccepted archives, edits, permission/model changes,
-steering, media and storage errors retain full canonical replay. No new store
-or transcript authority is introduced.
+unconsumed inbox carriers, unreproducible media and storage errors retain full
+canonical replay. No new store or transcript authority is introduced.
+
+Steering does not suppress the witness; it follows the steered-turn
+publication rule ([CONTEXT_COMPACTION.md](CONTEXT_COMPACTION.md#continuation-checkpoints)).
+A consumed steer stays in the witnessed view, the only place its carrier
+survives. The round-drain mark `_inboxDeliveryUnverified` withholds the witness
+until the provider consumes every drained inbox carrier, because an unconsumed
+one is salvaged to the queue or redelivered from its durable row and restoring
+it would deliver it twice. Problem: the witness refused every Turn carrying
+`_userSteerInjects`, so an interrupted steered run re-summarized its whole
+replay and the rebuild dropped steers the model had already acted on.
+Rejected: keeping the refusal; rebuilding steers from the 1,200-character Turn
+preview (lossy, a second transcript authority).
+
+Media does not suppress the witness. Image references in the snapshot
+(`/api/images/`, `tofu-media:`, remote URLs) are resolved again at dispatch;
+captured bytes restore only when `retained_images_reproducible`
+(`lib/tasks_pkg/model_images.py`) proves each payload equals one in the fresh
+authoritative projection or the bytes a source recorded on the same message
+resolves to now for this owner. A deleted or replaced source refuses as
+`media_unavailable`; unprojected attachment refs and provider-native media
+have no such proof and refuse. Problem: users attach a screenshot to most
+requests, so the old blanket media refusal left every accepted archive without
+a witness and each Continue re-summarized the whole replay (one Turn paid three
+summaries for one context). Rejected: a separate media witness digest (pinned
+and unpinned projections of the same source differ, so it would refuse the
+common case) and trusting captured bytes (would resurrect revoked media).
+Each checkpoint resume reports its outcome as the `compaction_resume` event;
+the Turn timeline marks earlier compactions it did not reuse `superseded`
+(`docs/contracts/EVENTS.md`, activity timeline projection).
 
 Resume reads at most eight archive metadata candidates and one matching post
 snapshot, bounded by the existing 8 MiB/16,384-message continuation contract.

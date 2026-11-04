@@ -71,8 +71,13 @@ def inherit_child_config(parent_config: dict, overrides: dict | None = None) -> 
     return config
 
 
-def delegated_tool_discovery_policy(parent: dict, tools: list) -> dict:
-    """Copy discovery metadata only for the child's already-authorized catalog."""
+def delegated_tool_discovery_policy(parent: dict, tools: list, direct_names=()) -> dict:
+    """Copy discovery metadata only for the child's already-authorized catalog.
+
+    ``direct_names`` were selected by exact name (a spawn ``tools`` allowlist):
+    the child sees them directly, because a narrowed catalog may hold none of
+    the discovery tools through which the parent reached a deferred tool.
+    """
     from lib.swarm.routing import tool_schema_name
     names = {tool_schema_name(tool) for tool in tools}
     source = {**(parent.get('config') or {}), **parent}
@@ -91,6 +96,8 @@ def delegated_tool_discovery_policy(parent: dict, tools: list) -> dict:
                        for name, value in (source.get(key) or {}).items() if name in names}
     for key in ('_requiredDirectToolNames', '_frontendSelectedToolNames'):
         policy[key] = [name for name in (source.get(key) or []) if name in names]
+    policy['_requiredDirectToolNames'] += sorted(
+        (set(direct_names) & names) - set(policy['_requiredDirectToolNames']))
     return policy
 
 
@@ -282,6 +289,7 @@ def create_child_invocation(
     progress_beacon=None, progress_key: str = '',
     execution_limits: dict | None = None,
     output_schema: dict | None = None,
+    direct_tool_names=(),
 ) -> dict:
     """Allocate a task-local carrier; borrow authority, never parent lifecycle."""
     from lib.identity import PrincipalContext
@@ -374,7 +382,8 @@ def create_child_invocation(
     child.update(
         _parentTaskId=parent['id'],
         _invocationTools=copy.deepcopy(tools),
-        _invocationToolDiscoveryPolicy=delegated_tool_discovery_policy(parent, tools),
+        _invocationToolDiscoveryPolicy=delegated_tool_discovery_policy(
+            parent, tools, direct_tool_names),
         _invocationToolContracts=copy.deepcopy(
             frozen_policy['tool_contracts'] if frozen_policy is not None
             else parent.get('_toolContractDocumentsByName') or {}),
@@ -436,6 +445,8 @@ def create_child_invocation(
         if requirements is not None:
             child['_turnRequirementSource'] = requirements.validate(child)
         inherit_execution_budget(parent, child)
+        from lib.project_dispatch.admission import share_dispatch_root
+        share_dispatch_root(parent, child)
         register_child_invocation(child, parent,discard_on_failure=False)
         if native_child_owner is not None:
             native_child_owner.bind_transient_child(child, parent_task_id=parent['id'], parent_task=execution_parent)

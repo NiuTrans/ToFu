@@ -386,6 +386,11 @@ def sweep_conversation_translations(
     shared skip gate. Fail-soft per turn and overall: the sweep runs on
     boot / conversation open and must never wedge the caller.
 
+    Turns are walked newest-first one bounded page at a time across every
+    lane (``iter_turns_newest_first``), so recent turns are recovered first
+    and a conversation whose whole history exceeds one storage response is
+    still swept.
+
     ``config`` is the per-conversation settings mapping; when omitted it is
     resolved from the stored conversation settings (autoTranslate + uiLang),
     so boot-time callers need not re-implement that lookup.
@@ -394,6 +399,7 @@ def sweep_conversation_translations(
     """
     if not conversation_id or user_id in (None, ""):
         return 0
+    respawned = 0
     try:
         from lib.conv_config import (
             resolve_auto_translate,
@@ -401,7 +407,7 @@ def sweep_conversation_translations(
             target_lang_code,
         )
         from lib.translate.skip_policy import should_skip_automatic_translation
-        from lib.turn_lifecycle import list_turns
+        from lib.turn_lifecycle import iter_turns_newest_first
 
         resolved_config = config
         if resolved_config is None:
@@ -412,11 +418,9 @@ def sweep_conversation_translations(
         target = resolve_translate_target(resolved_config)
         target_code = target_lang_code(target)
 
-        page = list_turns(conversation_id, user_id=user_id, light=True)
-        rows = (page or {}).get("turns") or []
         active_keys = _active_whole_turn_keys()
-        respawned = 0
-        for row in rows:
+        for row in iter_turns_newest_first(
+                conversation_id, user_id=user_id, light=True):
             if respawned >= max_respawn:
                 break
             try:
@@ -477,7 +481,7 @@ def sweep_conversation_translations(
             "[AutoTranslate] conversation sweep failed conv=%s: %s",
             conversation_id[:8], exc,
         )
-        return 0
+        return respawned
 
 
 def _active_whole_turn_keys() -> set[tuple[str, str]]:

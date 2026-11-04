@@ -7,13 +7,14 @@ single pre-authentication hook used for an atomic v4 cutover.
 
 from __future__ import annotations
 
+# pyright: strict
+
 import hashlib
 import json
 import os
-from copy import copy
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from quart import Blueprint, Response, current_app, has_request_context, request
 
@@ -46,7 +47,7 @@ class NativeContractBlueprint(Blueprint):
     """
 
     def __init__(self, name: str, import_name: str, *, contract_id: str):
-        if not isinstance(contract_id, str) or not 1 <= len(contract_id) <= 128:
+        if not 1 <= len(contract_id) <= 128:
             raise ValueError('A native blueprint requires its canonical contract ID')
         super().__init__(name, import_name)
         self.native_contract_id = contract_id
@@ -54,7 +55,9 @@ class NativeContractBlueprint(Blueprint):
 
 def request_uses_native_response_contract() -> bool:
     """Use matched route ownership, never a path-prefix exemption."""
-    blueprint = current_app.blueprints.get(request.blueprint or '')
+    app = cast(Any, current_app)._get_current_object()
+    blueprints = cast(dict[str, Any], app.blueprints)
+    blueprint = blueprints.get(request.blueprint or '')
     return isinstance(blueprint, NativeContractBlueprint)
 
 
@@ -246,15 +249,20 @@ def _is_route_lambda(func: Any) -> bool:
     )
 
 
-def _copy_registration_containers(registrations: dict) -> dict:
+_RegistrationValue = TypeVar('_RegistrationValue')
+
+
+def _copy_registration_containers(
+    registrations: dict[str, _RegistrationValue],
+) -> dict[str, _RegistrationValue]:
     """Separate registration maps/lists without cloning callback owners."""
-    copied = copy(registrations)
+    copied = cast(dict[str, Any], dict(registrations))
     for key, value in registrations.items():
         if isinstance(value, dict):
             copied[key] = _copy_registration_containers(value)
         elif isinstance(value, list):
             copied[key] = list(value)
-    return copied
+    return cast(dict[str, _RegistrationValue], copied)
 
 
 def copy_blueprint_to_v4(source: Any, *, name: str) -> Any:
@@ -304,7 +312,7 @@ def copy_blueprint_to_v4(source: Any, *, name: str) -> Any:
             # blueprint-scoped hooks (before/after, error handlers) survive.
             target.record(deferred)
             continue
-        cells = [c.cell_contents for c in deferred.__closure__]
+        cells = [c.cell_contents for c in cast(tuple[Any, ...], deferred.__closure__)]
         provide_automatic_options, options, endpoint, rule, view_func = cells
         new_rule = _rewrite_path(rule)
         # Endpoint must be unique per rule: several rules may share one view
@@ -344,11 +352,15 @@ def product_blueprints_for_policy(
     return tuple(projections)
 
 
-def success_envelope(data: Any, *, request_id: str, server_time_ms: int) -> dict:
+def success_envelope(
+    data: Any, *, request_id: str, server_time_ms: int,
+) -> dict[str, Any]:
     """Project one domain JSON value without inventing a domain wrapper."""
-    body = dict(data) if isinstance(data, dict) else data
-    if isinstance(body, dict) and body.get('ok') is True:
-        body.pop('ok')
+    body: Any = dict(cast(Mapping[str, Any], data)) if isinstance(data, dict) else data
+    if isinstance(body, dict):
+        envelope_body = cast(dict[str, Any], body)
+        if envelope_body.get('ok') is True:
+            envelope_body.pop('ok')
     return {
         'data': body,
         'meta': {'requestId': request_id, 'serverTimeMs': server_time_ms},
@@ -405,7 +417,8 @@ async def translate_v4_envelope(response: Any) -> Any:
     import time as _time
 
     if has_request_context():
-        handler = current_app.view_functions.get(request.endpoint)
+        app = cast(Any, current_app)._get_current_object()
+        handler = app.view_functions.get(request.endpoint or '')
         if getattr(handler, 'tofu_raw_success_response', False):
             return response
     if not _is_product_json_success(response):
@@ -440,7 +453,7 @@ async def translate_v4_envelope(response: Any) -> Any:
             for header in ('Content-Type', 'Content-Length'):
                 response.headers.pop(header, None)
             return response
-    enveloped = success_envelope(
+    enveloped: dict[str, Any] = success_envelope(
         payload,
         request_id=req_id() or 'unassigned',
         server_time_ms=int(_time.time() * 1000),

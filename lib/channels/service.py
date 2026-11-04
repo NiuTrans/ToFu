@@ -1,8 +1,9 @@
 """Channel application service: owner-facing views and commands.
 
 Responsibility: the one owner-scoped command/query surface shared by the HTTP
-routes and the model tools — account configuration (enable resolves the
-owner identity with ``whoami``), command-chat selection or creation, thread
+routes and the model tools — account configuration (enable/disable and the
+login MIS; the supervisor confirms the identity with ``whoami`` afterwards, so
+no command waits for a 大象 login), command-chat selection or creation, thread
 listing and configuration, subscriptions, outbox listing and decisions.
 Handlers stay stateless; state lives in ``ChannelStore``.
 
@@ -35,6 +36,7 @@ def account_view(owner: int, *, store: ChannelStore | None = None) -> dict[str, 
     """Contract ``ChannelAccountView``."""
     from lib.channels.delivery import RouterUnavailable, global_router_binding
     from lib.channels.dx.adapter import launch_spec
+    from lib.channels.dx.login import account_login_mis
     store = _store(owner, store)
     account = store.account(CHANNEL) or {}
     status = dict(account.get('status') or {})
@@ -45,6 +47,7 @@ def account_view(owner: int, *, store: ChannelStore | None = None) -> dict[str, 
     return {
         'channel': CHANNEL,
         'enabled': bool(account.get('enabled')),
+        'loginMis': account_login_mis(account),
         'identity': account.get('identity') or None,
         'commandChat': account.get('commandChat') or None,
         'status': {'state': status.get('state') or 'disabled', 'detail': status.get('detail') or '',
@@ -55,13 +58,20 @@ def account_view(owner: int, *, store: ChannelStore | None = None) -> dict[str, 
     }
 
 
-def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | None = None,
-                   identity_resolver=None) -> dict[str, Any]:
-    """Apply ``ChannelAccountUpdate``; enabling resolves the owner identity first."""
+def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | None = None) -> dict[str, Any]:
+    """Apply ``ChannelAccountUpdate`` and return at once.
+
+    The supervisor confirms the identity of the login MIS before a session
+    starts (``starting``/``authorizing``); a MIS other than the bound
+    identity's clears that identity and the command chat of the old account,
+    and ingress of the new one starts now.
+    """
+    from lib.channels.dx.login import normalize_mis
     store = _store(owner, store)
-    unknown = set(update) - {'enabled', 'commandChat'}
+    unknown = set(update) - {'enabled', 'commandChat', 'mis'}
     if unknown:
         raise ChannelError('invalid_update', f'Unknown fields: {sorted(unknown)}')
+    mis = normalize_mis(update['mis']) if 'mis' in update else _UNSET
     command_chat = _UNSET
     if 'commandChat' in update:
         value = update['commandChat']
@@ -71,32 +81,34 @@ def update_account(owner: int, update: dict[str, Any], *, store: ChannelStore | 
     enabled = update.get('enabled')
     if enabled is not None and not isinstance(enabled, bool):
         raise ChannelError('invalid_update', 'enabled must be a boolean')
-    identity = None
-    if enabled:
-        if identity_resolver is None:
-            from lib.channels.dx.adapter import resolve_identity as identity_resolver
-        try:
-            identity = identity_resolver(store.owner)
-        except ChannelError as error:
-            if error.code == 'needs_login':
-                store.set_status(CHANNEL, 'needs_login', str(error))
-            raise
+
+    def starting():
+        return {'state': 'starting', 'detail': '', 'updatedAtMs': now_ms(), 'connectedAtMs': None}
 
     def change(account):
+        switched = False
+        if mis is not _UNSET and mis != account.get('mis'):
+            account['mis'] = mis
+            if (account.get('identity') or {}).get('mis') != mis:
+                # Another 大象 account: the old identity and its command chat
+                # group do not carry over, and ingress starts afresh.
+                switched = True
+                account.update(identity=None, commandChat=None, commandChatCreation=None,
+                               frontierAtMs=now_ms() if account.get('enabled') else None)
         if enabled is True:
-            keep_status = session_owns_status(account)
+            keep_status = session_owns_status(account) and not switched
             account['enabled'] = True
-            account['identity'] = identity
             if account.get('frontierAtMs') is None:
                 # Ingress starts at enable time; earlier history is not replayed.
                 account['frontierAtMs'] = now_ms()
             if not keep_status:
-                account['status'] = {'state': 'starting', 'detail': '', 'updatedAtMs': now_ms(),
-                                     'connectedAtMs': None}
+                account['status'] = starting()
         elif enabled is False:
             account['enabled'] = False
             account['status'] = {'state': 'disabled', 'detail': '', 'updatedAtMs': now_ms(),
                                  'connectedAtMs': None}
+        elif switched and account.get('enabled'):
+            account['status'] = starting()
         if command_chat is not _UNSET:
             account['commandChat'] = command_chat
         return account
@@ -139,8 +151,10 @@ def create_command_chat(owner: int, *, store: ChannelStore | None = None,
         raise ChannelError('creation_in_progress', 'A Tofu Router group creation is already in progress')
     if group_creator is None:
         from lib.channels.dx.adapter import create_command_group as group_creator
+    from lib.channels.dx.login import account_login_mis
     try:
-        gid = group_creator(store.owner, name=COMMAND_CHAT_TITLE, member_uid=identity['uid'])
+        gid = group_creator(store.owner, name=COMMAND_CHAT_TITLE, member_uid=identity['uid'],
+                            mis=account_login_mis(account))
     except BaseException:
         store.update_account(CHANNEL, lambda value: {**value, 'commandChatCreation': None})
         raise
@@ -249,10 +263,13 @@ def _titles(store: ChannelStore, items: list[OutboxItem]) -> dict[str, str]:
     return titles
 
 
-def outbox_page(owner: int, *, thread: str | None = None,
+def outbox_page(owner: int, *, thread: str | None = None, channel: str | None = None,
                 store: ChannelStore | None = None) -> dict[str, Any]:
+    """Active outbox items, optionally of one ``thread`` or one ``channel``."""
     store = _store(owner, store)
-    items = store.active_outbox(str(ThreadKey.parse(thread)) if thread else None)
+    if channel is not None and channel not in CHANNELS:
+        raise ChannelError('invalid_channel', f'channel must be one of {list(CHANNELS)}')
+    items = store.active_outbox(str(ThreadKey.parse(thread)) if thread else None, channel=channel)
     titles = _titles(store, items)
     return {'items': [item.view(titles[item.thread]) for item in items]}
 

@@ -153,6 +153,8 @@ _INSTALL_OUTCOME="failed"
 _INSTALL_STARTED=$SECONDS
 _RUNTIME_URL=""
 _TOFU_INSTALL_LOCK=""
+_TOFU_UV_CANDIDATE=""
+_TOFU_CONDA_CANDIDATE=""
 # BASHPID is unavailable in the Bash 3.2 shipped by macOS.
 BASHPID="${BASHPID:-$$}"
 
@@ -428,12 +430,6 @@ fi
 _tofu_exit_reminder() {
     local rc=$?
     trap - EXIT
-    if [[ -n "${_TOFU_CONDA_LOCK:-}" ]]; then
-        rmdir "$_TOFU_CONDA_LOCK" 2>/dev/null || :
-    fi
-    if [[ -n "$_TOFU_INSTALL_LOCK" ]]; then
-        rmdir "$_TOFU_INSTALL_LOCK" 2>/dev/null || :
-    fi
     if [[ -n "${_UV_LINK_DIR:-}" ]]; then
         rm -f -- "${_UV_LINK_DIR}/uv"
         rmdir "$_UV_LINK_DIR" 2>/dev/null || :
@@ -464,6 +460,29 @@ PYEOF
             echo "Could not write --result-json receipt (requires a working Python)." >&2
             [[ "$rc" -ne 0 ]] || rc=1
         fi
+    fi
+    if [[ -n "$_TOFU_UV_CANDIDATE" || -n "$_TOFU_CONDA_CANDIDATE" ]]; then
+        local cleanup_python="${ENV_PYTHON:-}"
+        [[ -x "$cleanup_python" ]] || cleanup_python="${_TOFU_UV_CANDIDATE}/bin/python"
+        [[ -x "$cleanup_python" ]] || cleanup_python="$(command -v python3 || command -v python || :)"
+        if [[ -n "$cleanup_python" ]] && "$cleanup_python" - "$INSTALL_DIR" \
+                "$_TOFU_UV_CANDIDATE" "$_TOFU_CONDA_CANDIDATE" <<'PYEOF'
+from pathlib import Path
+import sys
+from bootstrap_pkg.install_transaction import discard_candidates
+discard_candidates(Path(sys.argv[1]), [Path(value) for value in sys.argv[2:] if value])
+PYEOF
+        then
+            :
+        else
+            warn "Candidate cleanup could not prove ownership or complete; environments were left for review."
+        fi
+    fi
+    if [[ -n "${_TOFU_CONDA_LOCK:-}" ]]; then
+        rmdir "$_TOFU_CONDA_LOCK" 2>/dev/null || :
+    fi
+    if [[ -n "$_TOFU_INSTALL_LOCK" ]]; then
+        rmdir "$_TOFU_INSTALL_LOCK" 2>/dev/null || :
     fi
     if [[ $rc -ne 0 ]]; then
         echo "" >&2
@@ -913,6 +932,7 @@ _try_uv_install() {
     mkdir -p "${INSTALL_DIR}/.tofu-envs"
     local _venv
     _venv="$(mktemp -d "${INSTALL_DIR}/.tofu-envs/uv.XXXXXX")" || return 1
+    _TOFU_UV_CANDIDATE="$_venv"
     if [[ -L "$_venv" ]]; then
         warn "Refusing to modify a symlinked .venv; select a project-local environment."
         _UV_CONFIG_CONFLICT=1
@@ -1565,6 +1585,7 @@ _TOFU_SEARCH_WHL="$(_install_run 360 "${CONDA_BASE}/bin/python" -m bootstrap_pkg
     || fail "Required search artifact unavailable; selected environment was preserved"
 [[ -f "$_TOFU_SEARCH_WHL" ]] || fail "Search preflight did not produce a wheel"
 CONDA_ENV_PREFIX="$(mktemp -d "${INSTALL_DIR}/.tofu-envs/conda.XXXXXX")"
+_TOFU_CONDA_CANDIDATE="$CONDA_ENV_PREFIX"
 _install_run 600 "$CONDA_BIN" create -p "$CONDA_ENV_PREFIX" -c conda-forge --override-channels -y "python=${PY_VER}"
 ok "Created staging environment: ${CONDA_ENV_PREFIX}"
 
@@ -2177,11 +2198,13 @@ fi
 
 # ── tofu-search — the standalone search + content-fetch pipeline ──
 # server.py lists tofu_search.fetch / tofu_search.search as CRITICAL imports,
-# so the server refuses to boot without it. Two install sources:
-#   1. A bundled wheel under vendor/ (personal/internal exports) — used when
-#      present, because corp networks point pip at an internal mirror that
-#      does NOT carry tofu-search (only public PyPI does).
-#   2. Public PyPI (opensource installs / fresh git clone on a vanilla host).
+# so the server refuses to boot without it. The only install source is the
+# wheel bootstrap_pkg/install_artifacts.py admitted before staging
+# ($_TOFU_SEARCH_WHL): every export pins, in vendor/install-manifest.json, the
+# wheel it built from its own packages/tofu-search snapshot (version, sha256
+# and floor are checked); a checkout without that manifest uses a bundled
+# wheel at the floor or builds one from the retained source. It installs with
+# --no-index, so no package index can substitute a different build.
 # --no-deps is safe: its deps (requests / trafilatura / bs4 / lxml /
 # python-dateutil) are installed above, and --no-deps keeps pip from
 # shadowing conda's lxml 6.

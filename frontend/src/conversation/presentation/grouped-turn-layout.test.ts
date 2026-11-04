@@ -90,6 +90,27 @@ describe('grouped turn layout', () => {
     expect(ids(proposal.content)).toContain('proposed-plan');
   });
 
+  it('folds interim narration by the same settlement, independent of the calls', () => {
+    expect(groupedTurnLayout(reply('running'))!.narrationDefaultOpen).toBe(true);
+    expect(groupedTurnLayout(reply('failed'))!.narrationDefaultOpen).toBe(true);
+    expect(groupedTurnLayout(reply('completed'))!.narrationDefaultOpen).toBe(false);
+    // Without an explicit answer the narration is the reply's content.
+    const unanswered = reply('completed', { content: '', segments: [
+      { type: 'text', blockId: 'narrate-0', llmRound: 0, ...scope, text: 'Reading.' },
+      tool('tool-a', 0),
+      { type: 'text', blockId: 'narrate-1', llmRound: 1, ...scope, text: 'Still reading.' },
+    ] });
+    expect(groupedTurnLayout(unanswered)!.narrationDefaultOpen).toBe(true);
+    // A call still running keeps the panel open; the settled notes still fold.
+    const running = groupedTurnLayout(reply('completed', { segments: [
+      { type: 'text', blockId: 'narrate-0', llmRound: 0, ...scope, text: 'Starting the watcher.' },
+      tool('tool-a', 0, 'running'),
+      { type: 'text', blockId: 'answer', llmRound: 1, ...scope, text: 'Final answer.', terminal: true, deliverable: true },
+    ] }))!;
+    expect(running.panel!.defaultOpen).toBe(true);
+    expect(running.narrationDefaultOpen).toBe(false);
+  });
+
   it('windows calls and prose-with-receipts as separate regions and pins only the head', () => {
     const failed = reply('failed', {}, { error: { kind: 'provider_error', message: 'Upstream failed' } });
     const layout = groupedTurnLayout(failed)!;

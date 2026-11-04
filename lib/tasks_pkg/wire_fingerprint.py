@@ -999,7 +999,26 @@ def wire_byte_field_prefix(messages: list) -> list[dict]:
     return out
 
 
-def wire_byte_region(system: Any, tools: Any) -> dict[str, str]:
+def cache_relevant_controls(body: Any) -> dict[str, Any]:
+    """Top-level request controls whose change invalidates cached messages.
+
+    Anthropic prompt caching ("What invalidates the cache"): ``speed``,
+    ``tool_choice``, the ``thinking`` configuration and
+    ``output_config.effort``. They are not prompt bytes, so the byte hashes
+    alone would call a client change of one of them an upstream miss.
+    """
+    if not isinstance(body, dict):
+        return {}
+    controls = {key: body[key] for key in ('speed', 'tool_choice', 'thinking')
+                if key in body}
+    output_config = body.get('output_config')
+    if isinstance(output_config, dict) and 'effort' in output_config:
+        controls['effort'] = output_config['effort']
+    return controls
+
+
+def wire_byte_region(system: Any, tools: Any,
+                     controls: Any = None) -> dict[str, str]:
     """TRUE-byte hash of the HOISTED ``system`` + ``tools`` cached-prefix region.
 
     The true-byte counterpart of ``system_fingerprint`` — and the reason it is
@@ -1023,7 +1042,10 @@ def wire_byte_region(system: Any, tools: Any) -> dict[str, str]:
     ``_text_of`` collapsing, NO param key sorting — a block reorder or a key
     reorder DOES change the hash here, which is the whole point.
 
-    Returns ``{'system': md5, 'tools': md5}``.
+    ``controls`` (``cache_relevant_controls``) are hashed canonically: the
+    provider keys on their values, not their serialization.
+
+    Returns ``{'system': md5, 'tools': md5, 'controls': md5}``.
     """
     def _dump(obj: Any) -> str:
         try:
@@ -1041,7 +1063,13 @@ def wire_byte_region(system: Any, tools: Any) -> dict[str, str]:
     else:
         _sys_raw = _dump(system)     # block list — order-sensitive by design
     _tools_raw = _dump(tools or [])
-    return {'system': _md5(_sys_raw), 'tools': _md5(_tools_raw)}
+    try:
+        _controls_raw = json.dumps(controls or {}, ensure_ascii=False,
+                                   sort_keys=True)
+    except (TypeError, ValueError):
+        _controls_raw = str(controls)
+    return {'system': _md5(_sys_raw), 'tools': _md5(_tools_raw),
+            'controls': _md5(_controls_raw)}
 
 
 def static_prefix_hash(messages: list) -> str:

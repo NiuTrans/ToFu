@@ -94,6 +94,8 @@ def nonretryable_failure_signature(
         except (TypeError, ValueError):
             from lib.tools.result_projection_text import load_text_field
             from lib.tools.result_surfaces_generated import CONTRACT
+            if not isinstance(result, str):
+                return None
             payload = load_text_field(result, CONTRACT['errorProjectionText']['bodyField'])
         items = payload.get('items') if isinstance(payload, dict) else None
         if (not isinstance(items, list) or not items or not isinstance(items[0], dict)
