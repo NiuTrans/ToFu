@@ -167,6 +167,21 @@ def test_fresh_dispatch_heartbeat_exempts_slow_turn(reaper_env, put_task):
     assert t['aborted'] is False
 
 
+def test_reaper_diagnostic_reports_silence_instead_of_task_age(reaper_env, put_task, monkeypatch, caplog):
+    from lib.tasks_pkg.manager import _maintenance
+    from types import SimpleNamespace
+
+    now = time.time()
+    monkeypatch.setattr(_maintenance, 'time', SimpleNamespace(time=lambda: now))
+    put_task(_mk_task('wedged-diagnostic', created_at=now - 7200,
+                      _t_last_event=now - 600, _dispatch_heartbeat=now - 400))
+
+    assert _reap() == 1
+    warnings = [record.getMessage() for record in caplog.records if 'WEDGED —' in record.getMessage()]
+    assert len(warnings) == 1
+    assert 'no event/dispatch progress for 400s' in warnings[0]
+
+
 def test_fresh_event_clock_exempts_retrying_turn(reaper_env, put_task):
     """Symmetric neuter: retry phases keep _t_last_event fresh → not reaped."""
     now = time.time()
