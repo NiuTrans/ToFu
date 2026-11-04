@@ -5018,6 +5018,8 @@
     "stream.phase.retryRouteUnavailable": "9cf2b28b010b3ac4",
     "stream.phase.subscriptionQuotaReached": "6fca4088f60cd9be",
     "stream.phase.retrying": "82ee0269bdabdd8d",
+    "stream.phase.runningTools": "13b8c05e3fee591e",
+    "stream.phase.runningToolIntent": "cef164d14ce386a2",
     "stream.phase.semanticProgressTimeoutRetry": "a66c88f048e18839",
     "stream.phase.sendingRequest": "9ff518cf764d88ea",
     "stream.phase.startupConfig": "090348920bee81cc",

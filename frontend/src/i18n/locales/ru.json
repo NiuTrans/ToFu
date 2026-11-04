@@ -5016,6 +5016,8 @@
   "stream.phase.retryRouteUnavailable": "⚠️ Для {model} на этом маршруте нет доступного канала шлюза — переход на другие маршруты или ожидание восстановления (попытка {attempt}): {message}",
   "stream.phase.subscriptionQuotaReached": "⛔ Квота подписки для модели {model} исчерпана (сбрасывается по фиксированному периоду, часто через несколько часов или дней) — автоматически НЕ восстановится; смените модель или дождитесь сброса… (попытка {attempt})",
   "stream.phase.retrying": "Повторная попытка…",
+  "stream.phase.runningTools": "Выполняется {tools}…",
+  "stream.phase.runningToolIntent": "Выполняется {tool}: {intent}",
   "stream.phase.semanticProgressTimeoutRetry": "Модель {model} уже {elapsed} с не выдает новых рассуждений, текста ответа или вызовов инструментов (запрос выполняется {requestElapsed} с). Повтор через другой слот подключения ({attempt}/{max})…",
   "stream.phase.sendingRequest": "Отправка сообщения на сервер…",
   "stream.phase.startupConfig": "Определение параметров модели и рабочей области…",

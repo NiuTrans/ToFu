@@ -11,10 +11,10 @@ This directory owns content projection into the Surface-provided node:
 | `context-blocks.ts` | Origin block; places the context fold/rail rendered by `../turn-context-rail/` |
 | `plan-blocks.ts` | Proposed-plan and execution evidence |
 | `compaction-block.ts` | Compaction receipt and shared token-flow subprojection |
-| `text-blocks.ts` | Prose, reasoning disclosure, translation and live status |
+| `text-blocks.ts` | Prose, reasoning disclosure, translation and live status (including its elapsed-call clock) |
 | `answer-navigation.ts` | Retained answer toolbar and bounded navigation over the current Markdown headings |
 | `tool-blocks.ts` | Tool, program and injection projection |
-| `../tool-summary.ts` | Shared exact tool identity and full-intent tooltip on native headers; reused after lazy evidence hydration |
+| `../tool-summary.ts` | Places the exact identity from `../../presentation/tool-summary-identity.ts` and the full-intent tooltip on native headers; reused after lazy evidence hydration |
 | `tool-effect-notice.ts` | Shared uncertainty notice from effect metadata and Turn lifecycle; no retry authority |
 | `activity-block.ts` | Chronology-local activity rows and the collapsed retry/failure group |
 | `failure-receipt.ts` | Selectable diagnostics and document-scoped copy lifecycle |

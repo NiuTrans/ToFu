@@ -23,7 +23,7 @@ consumer owns a second graph index; cyclic graphs retain explicit placeholders.
 | `block-coalescing.ts` | Adjacent thinking/notes, retry-storm groups and settled activity presentation |
 | `translation-blocks.ts` | Translated plan and execution display projection |
 | `turn-metadata.ts` | Header metadata and authoritative action capabilities |
-| `live-turns.ts` | Live attempt presentation and durable autopilot-run notices |
+| `live-turns.ts` | Live attempt presentation, projected live activity (active calls, unsettled reasoning) and durable autopilot-run notices |
 | `projection-values.ts` | Safe record/text narrowing and block identity claims |
 
 ## Dependencies and verification

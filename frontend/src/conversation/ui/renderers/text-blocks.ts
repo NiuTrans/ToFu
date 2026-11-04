@@ -29,7 +29,7 @@ import {
   disclosureChevron,
   actionIcon,
 } from './icons';
-import { textFor } from './localized-copy';
+import { formatDuration, textFor } from './localized-copy';
 import { updateAnswerNavigation } from './answer-navigation';
 
 import { liveStatusPhase, presentLivePhaseLabel } from '../../presentation/live-phase';
@@ -331,7 +331,13 @@ interface WaitTickState {
   suffix: string;
 }
 const waitTickStates = new WeakMap<HTMLElement, WaitTickState>();
+/* Live-status node -> backend epoch-ms start of the call it reports. */
+const elapsedTickStates = new WeakMap<HTMLElement, number>();
 let waitTickTimer: ReturnType<typeof setInterval> | null = null;
+
+function elapsedSince(startedAt: number): string {
+  return formatDuration((Date.now() - startedAt) / 1000);
+}
 
 function waitTickEligible(block: Extract<ConversationBlockViewModel, { kind: 'live-status' }>): boolean {
   const value = block.value;
@@ -351,6 +357,12 @@ function ensureWaitTickTimer(): void {
     for (const node of Array.from(
       document.querySelectorAll<HTMLElement>('.conversation-block--live-status'),
     )) {
+      const startedAt = elapsedTickStates.get(node);
+      const clock = startedAt == null ? null : node.querySelector<HTMLElement>('.stream-phase-elapsed');
+      if (clock && startedAt != null) {
+        const elapsed = elapsedSince(startedAt);
+        if (clock.textContent !== elapsed) clock.textContent = elapsed;
+      }
       const state = waitTickStates.get(node);
       if (!state) continue;
       const target = node.querySelector<HTMLElement>('.stream-phase-text');
@@ -447,6 +459,20 @@ export function renderLiveStatusBlock(
       { n: value.thinkingLength },
     );
     textNode.appendChild(counter);
+  }
+  const startedAt = value.startedAt;
+  if (startedAt != null) {
+    const clock = document.createElement('span');
+    clock.className = 'stream-phase-ctx stream-phase-elapsed';
+    /* A per-second rewrite inside the polite live region would be announced
+     * every second; the phase text carries the announcement. */
+    clock.setAttribute('aria-hidden', 'true');
+    clock.textContent = elapsedSince(startedAt);
+    textNode.appendChild(clock);
+    elapsedTickStates.set(node, startedAt);
+    ensureWaitTickTimer();
+  } else {
+    elapsedTickStates.delete(node);
   }
   const dots = document.createElement('span');
   dots.className = 'stream-phase-dots';
