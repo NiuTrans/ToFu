@@ -187,8 +187,6 @@ def render_execution(tables, worker, inputs) -> list[str]:
         f'{turns["maximumTurnProjectionTextAppendBytes"]};',
         "pub const MAX_TURN_PROJECTION_PATCH_BYTES: usize = "
         f'{turns["maximumTurnProjectionPatchBytes"]};',
-        "pub const MAX_TURN_PROJECTION_WIRE_PATCH_BYTES: usize = "
-        f'{turns["maximumTurnProjectionWirePatchBytes"]};',
         "pub const MAX_TURN_PROJECTION_PATCH_DEPTH: usize = "
         f'{turns["maximumTurnProjectionPatchDepth"]};',
         "pub const MAX_TURN_PROJECTION_PATCH_OPERATIONS: usize = "

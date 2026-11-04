@@ -123,7 +123,7 @@ def validate_turns(turns) -> None:
         or turns.get("maximumTurnProjectionTextPageBytes") != 16 * 1024
         or turns.get("maximumTurnProjectionTextAppendBytes") != 64 * 1024
         or turns.get("maximumTurnProjectionPatchBytes") != 1024 * 1024
-        or turns.get("maximumTurnProjectionWirePatchBytes") != 8 * 1024 * 1024
+        or "maximumTurnProjectionWirePatchBytes" in turns
         or turns.get("maximumTurnProjectionPatchDepth") != 128
         or turns.get("maximumTurnProjectionPatchOperations") != 65_536
         or turns.get("maximumLegacyTurnImages") != 20

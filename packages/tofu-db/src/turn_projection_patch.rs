@@ -12,7 +12,6 @@ use serde_json::{json, Map, Value};
 
 use crate::generated_tofudb_ir::{
     MAX_TURN_PROJECTION_PATCH_DEPTH, MAX_TURN_PROJECTION_PATCH_OPERATIONS,
-    MAX_TURN_PROJECTION_WIRE_PATCH_BYTES,
 };
 
 pub(crate) const PROJECTION_PATCH_VERSION: u64 = 1;
@@ -125,20 +124,6 @@ fn remove_at_path(root: &mut Value, path: &[PathPart]) -> Result<(), ProjectionP
     }
 }
 
-// A single logical update may exceed the compact head's cumulative 1 MiB
-// budget. The Turn writer checkpoints it; that physical budget must never
-// reject an otherwise admissible projection document.
-fn validate_patch_budget(raw_patch: &Map<String, Value>) -> Result<(), ProjectionPatchError> {
-    if serde_json::to_vec(raw_patch)
-        .map_err(|_| error("Projection patch cannot be encoded"))?
-        .len()
-        > MAX_TURN_PROJECTION_WIRE_PATCH_BYTES
-    {
-        return Err(error("Projection patch exceeds its byte bound"));
-    }
-    Ok(())
-}
-
 pub(crate) fn apply_projection_patch(
     projection: Option<&Map<String, Value>>,
     raw_patch: &Map<String, Value>,
@@ -160,7 +145,9 @@ pub(crate) fn apply_projection_patch_owned(
 pub(crate) fn checked_projection_patch_operations(
     raw_patch: &Map<String, Value>,
 ) -> Result<&[Value], ProjectionPatchError> {
-    validate_patch_budget(raw_patch)?;
+    // Byte admission belongs to the request, reconstructed Turn and durable
+    // event envelopes. A private patch quota used to reject checkpoint
+    // reconstruction even when all three enclosing documents were admissible.
     if raw_patch.get("version").and_then(Value::as_u64) != Some(PROJECTION_PATCH_VERSION) {
         return Err(error("Projection patch version is unsupported"));
     }
@@ -400,7 +387,6 @@ pub(crate) fn build_projection_patch(
         "targetRevision": target_revision,
         "operations": operations,
     }) else { unreachable!("projection patch construction is an object"); };
-    validate_patch_budget(&patch)?;
     Ok(patch)
 }
 
@@ -577,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_depth_operation_and_byte_budgets_reject_before_application() {
+    fn patch_depth_and_operation_budgets_reject_before_application() {
         let deep_path = (0..=MAX_TURN_PROJECTION_PATCH_DEPTH)
             .map(|index| Value::String(format!("level-{index}")))
             .collect::<Vec<_>>();
@@ -595,19 +581,11 @@ mod tests {
         });
         assert!(apply_projection_patch(None, too_many.as_object().unwrap()).is_err());
 
-        let too_large = json!({
-            "version": 1,
-            "operations": [{
-                "op": "set", "path": ["content"],
-                "value": "x".repeat(MAX_TURN_PROJECTION_WIRE_PATCH_BYTES),
-            }],
-        });
-        assert!(apply_projection_patch(None, too_large.as_object().unwrap()).is_err());
     }
     #[test]
     fn wire_patch_can_exceed_the_compact_head_budget_without_losing_bytes() {
         let before = serde_json::Map::new();
-        let after = json!({"content": "x".repeat(1280 * 1024)})
+        let after = json!({"content": "x".repeat(9 * 1024 * 1024)})
             .as_object()
             .unwrap()
             .clone();

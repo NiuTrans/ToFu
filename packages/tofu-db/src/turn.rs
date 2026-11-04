@@ -3854,19 +3854,20 @@ pub(crate) fn append_attempt_event(
         let logical_key = format!("{conversation_id}\u{1f}{sync_sequence:020}");
         let mut encoded_key = conversation_prefix(conversation_id)?;
         encoded_key.extend_from_slice(&sync_sequence.to_be_bytes());
+        let publication = sync_attempt_reference::prepare(&envelope, event_json_bytes)?;
         crate::versioned_document::put(
             database,
             transaction,
             crate::versioned_document::PutRequest {
                 key: entity_key(transaction, CONVERSATION_SYNC_EVENT_NAMESPACE, &encoded_key)?,
-                namespace: sync_attempt_reference::DOCUMENT_IDENTITY.to_owned(),
+                namespace: publication.document_identity.to_owned(),
                 logical_key,
-                value_json: sync_attempt_reference::encode(&envelope, event_json_bytes)?,
+                value_json: publication.value_json,
                 expected_version: Some(0),
                 updated_at_ms: occurred_at_ms,
             },
         )?;
-        store_sync_retention_indexes(database, transaction, &envelope)?;
+        store_sync_retention_indexes(database, transaction, &publication.envelope)?;
         database.entity_put(
             transaction,
             sync_head_key,

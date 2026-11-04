@@ -5023,7 +5023,7 @@
   "stream.phase.startupConfig": "正在解析模型与工作区设置…",
   "stream.phase.startupContext": "正在加载项目上下文与相关记忆…",
   "stream.phase.startupTools": "正在准备工具与工作区…",
-  "stream.phase.storageWedged": "存储写入受阻，正在重试（内容未丢失）…",
+  "stream.phase.storageWedged": "执行记录保存失败，状态更新已暂停；后台正在重试。",
   "stream.phase.streamInterruptedRetryDirect": "{model} 的直连数据流在 {elapsed}s 后异常结束，系统正避开当前接入槽重试（{attempt}/{max}）…",
   "stream.phase.streamStalled": "{model} 已有 {idle}s 没有新的模型进展（请求共 {elapsed}s），连接仍保持中…",
   "stream.phase.vuAssembleContext": "目标模式正在整理对话上下文，准备生成下一条用户回复…",
