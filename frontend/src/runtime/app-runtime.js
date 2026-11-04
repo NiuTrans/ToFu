@@ -9225,6 +9225,7 @@ const _SEG_NOTE_REASON_CHIP = {
   memory_guidance: { labelKey: 'systemNote.reasonMemoryGuidance', tone: 'info' },
   modified_files: { labelKey: 'systemNote.reasonModifiedFiles', tone: 'warn' },
   output_contract: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
+  output_limit_recovery: { labelKey: 'systemNote.reasonTerminalRecovery', tone: 'info' },
   paper_tool_guidance: { labelKey: 'systemNote.reasonPaperTools', tone: 'info' },
   parallel_execution: { labelKey: 'systemNote.reasonParallelExecution', tone: 'info' },
   partial_stream_retry: { labelKey: 'systemNote.reasonStreamRetry', tone: 'info' },
