@@ -371,7 +371,7 @@ def _programmatic_guidance(request: ComposeRequest) -> str:
         logger.debug("[ContextComposer] programmatic mode unavailable: %s", exc)
         return ""
     return """<programmatic_execution>
-Prefer direct tools for single actions and execute_tools for known independent batches. Use execute_program for useful computation or data-dependent workflows: write statements ending in return, not an async wrapper. Return routine results; tools.observe ends the script only for unresolved judgment. The sandbox has no IO/imports/timers and uses ordinary tool approvals. Never replay completed actions to repair a later script error.
+Prefer direct tools for single actions and execute_tools for known independent batches. Use execute_program for useful computation or data-dependent workflows: write statements ending in return, not an async wrapper. Fit many items into one program within its call limit, never one per item. Return routine results; tools.observe ends the script only for unresolved judgment. Never replay completed actions to repair a later script error.
 </programmatic_execution>"""
 
 

@@ -28,7 +28,7 @@
     "type": "text"
    },
    {
-    "text": "<!-- tofu-context:programmatic_execution:start -->\n<system-reminder>\n[Context authority: workflow; source: tools.programmatic]\n<programmatic_execution>\nPrefer direct tools for single actions and execute_tools for known independent batches. Use execute_program for useful computation or data-dependent workflows: write statements ending in return, not an async wrapper. Return routine results; tools.observe ends the script only for unresolved judgment. The sandbox has no IO/imports/timers and uses ordinary tool approvals. Never replay completed actions to repair a later script error.\n</programmatic_execution>\n</system-reminder>\n<!-- tofu-context:programmatic_execution:end -->",
+    "text": "<!-- tofu-context:programmatic_execution:start -->\n<system-reminder>\n[Context authority: workflow; source: tools.programmatic]\n<programmatic_execution>\nPrefer direct tools for single actions and execute_tools for known independent batches. Use execute_program for useful computation or data-dependent workflows: write statements ending in return, not an async wrapper. Fit many items into one program within its call limit, never one per item. Return routine results; tools.observe ends the script only for unresolved judgment. Never replay completed actions to repair a later script error.\n</programmatic_execution>\n</system-reminder>\n<!-- tofu-context:programmatic_execution:end -->",
     "type": "text"
    },
    {
