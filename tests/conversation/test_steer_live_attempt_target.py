@@ -8,11 +8,11 @@ the steer that resolves its target from it, must name that attempt's Turn.
 """
 from __future__ import annotations
 
-import json
 import time
 
 import pytest
 
+from tests.support.response_bound import BoundedReads
 from tests.support.semantic_authorities import semantic_authority as semantic_authority
 
 pytest_plugins = ('tests.support.postgres_cluster',)
@@ -45,29 +45,7 @@ def lane(semantic_authority, monkeypatch):
     agent_inbox.reset_for_test(conversation)
 
 
-# Stands in for the native MAX_TURN_RESPONSE_BYTES (64 MiB less 4 KiB) at a size a unit
-# test can build: every single Turn fits, the whole lane does not.
-_RESPONSE_BOUND_BYTES = 96 * 1024
 _LARGE_REPORT_TEXT = 'Milestone evidence. ' * 1600
-
-
-class _BoundedReads:
-    """Refuse an oversized read with the authority's deterministic resource bound."""
-
-    def __init__(self, client):
-        self._client = client
-
-    def query(self, operation, payload, *args, **kwargs):
-        from lib.storage.errors import StorageError
-        result = self._client.query(operation, payload, *args, **kwargs)
-        if len(json.dumps(result, ensure_ascii=False).encode()) > _RESPONSE_BOUND_BYTES:
-            raise StorageError('database_resource_exhausted',
-                               f'{operation} exceeds its bounded streamed payload',
-                               operation_id=operation)
-        return result
-
-    def __getattr__(self, name):
-        return getattr(self._client, name)
 
 
 @pytest.fixture
@@ -83,9 +61,9 @@ def oversized_lane(lane, semantic_authority, monkeypatch):
                                         'origin': {'initiator': 'brain'}})
     client = semantic_authority[0]
     monkeypatch.setattr('lib.storage.get_storage_client',
-                        lambda **kwargs: _BoundedReads(client(**kwargs)))
+                        lambda **kwargs: BoundedReads(client(**kwargs)))
     with pytest.raises(StorageError, match='bounded streamed payload'):
-        _BoundedReads(client()).query('turn.list', {
+        BoundedReads(client()).query('turn.list', {
             'conversation_id': conversation, 'user_id': owner, 'lane_id': 'main'})
     return lane
 

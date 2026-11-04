@@ -520,6 +520,13 @@ conversation inside one atomic transaction; a chunked multi-transaction clone
 loses the single-snapshot guarantee the contract states. The cost is decoding
 the source twice (identity pass, then content pass).
 
+The full conversation read (`GET /api/v4/conversations/{id}` without `window`,
+and the preview, message-activity and debug-message projections built on it)
+has no aggregate transcript-size ceiling either. A transcript above one
+storage response is read back in message windows that must all report one
+conversation revision; a write between windows returns 409
+`database_conflict`, and the client retries the read.
+
 Export is the human-facing record, not a model read: `format=markdown` pages
 the authority and renders **every** message, refusing the file when the pages
 cannot be stitched from one conversation revision or do not cover

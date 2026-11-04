@@ -67,7 +67,13 @@ recovery pass (`schedule_translation_recovery`): reopening a conversation is
 the observable evidence that its untranslated turn matters, and it was
 previously the one moment that never retried anything. Both drivers skip turns
 that already carry a live translation task (`_active_whole_turn_spawns`), so
-overlapping triggers cannot pay twice for the same text.
+overlapping triggers cannot pay twice for the same text. A pass walks the
+conversation's Turns newest-first, one bounded `turn.sync.page` at a time,
+across the main lane and every branch lane a Turn names in `_branchLanes`
+(`iter_turns_newest_first`). A whole-history read is refused once a long
+conversation exceeds one storage response, so paging keeps such conversations
+recoverable and recovers recent Turns first; a failed page ends the pass
+without discarding the translations it already admitted.
 
 Translation budgets are split by question, not by size alone. One physical
 attempt is bounded by the size table's dispatch timeout (`60/120/180s`),

@@ -294,9 +294,8 @@ def test_sweep_respawns_only_untranslated_settled_turns(monkeypatch):
     import lib.turn_lifecycle as lifecycle
     monkeypatch.setattr(
         lifecycle,
-        'list_turns',
-        lambda conv, user_id=None, light=False: {
-            'turns': [
+        'iter_turns_newest_first',
+        lambda conv, user_id=None, light=False: iter([
                 # untranslated settled turn -> respawn
                 {'turnId': 't1', 'status': 'completed',
                  'projection': {'content': 'hello world'}},
@@ -325,8 +324,7 @@ def test_sweep_respawns_only_untranslated_settled_turns(monkeypatch):
                 # a human input (a request's authorization source) -> skip
                 {'turnId': 't8', 'actor': 'human', 'status': 'completed',
                  'projection': {'content': 'hello world'}},
-            ]
-        },
+        ]),
     )
 
     count = terminal.sweep_conversation_translations(
@@ -352,11 +350,37 @@ def test_sweep_is_fail_soft_on_turn_listing_error(monkeypatch):
 
     monkeypatch.setattr(
         lifecycle,
-        'list_turns',
+        'iter_turns_newest_first',
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError('storage down')))
     assert terminal.sweep_conversation_translations(
         'conv', user_id=1,
         config={'autoTranslate': True, 'uiLang': 'zh'}) == 0
+
+
+def test_sweep_reports_translations_admitted_before_a_failed_page(monkeypatch):
+    import lib.translate.skip_policy as skip_policy
+    import lib.translate.terminal as terminal
+    import lib.turn_lifecycle as lifecycle
+
+    monkeypatch.setattr(
+        skip_policy, 'should_skip_automatic_translation',
+        lambda *a, **k: False)
+    monkeypatch.setattr(terminal, '_active_whole_turn_keys', lambda: set())
+    spawned = []
+    monkeypatch.setattr(
+        terminal, '_spawn_whole_turn_translation',
+        lambda **kw: spawned.append(kw['turn_id']) is None)
+
+    def walk(conv, user_id=None, light=False):
+        yield {'turnId': 'newest', 'status': 'completed',
+               'projection': {'content': 'hello world'}}
+        raise RuntimeError('older page refused')
+
+    monkeypatch.setattr(lifecycle, 'iter_turns_newest_first', walk)
+    assert terminal.sweep_conversation_translations(
+        'conv', user_id=1,
+        config={'autoTranslate': True, 'uiLang': 'zh'}) == 1
+    assert spawned == ['newest']
 
 
 @pytest.mark.parametrize('use_default_clock', [True, False])
