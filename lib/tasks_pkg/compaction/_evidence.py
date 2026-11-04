@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any
 
@@ -13,6 +14,69 @@ from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pair
 
 
 logger = get_logger(__name__)
+
+COMPACTED_OBSERVATION_FIELD = '_compactionObservation'
+
+
+def _projection_digest(call: dict, message: dict, packet: dict) -> str:
+    binding = {'callId': call.get('id'), 'function': call.get('function'),
+               'resultCallId': message.get('tool_call_id'),
+               'content': message.get('content'), 'packet': packet}
+    return hashlib.sha256(json.dumps(binding, ensure_ascii=False, sort_keys=True,
+                                    separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def retain_compacted_observation(message: dict, call: dict, original_content,
+                                 task: dict | None) -> None:
+    """Carry one original execution observation through a lossy L1 view.
+
+    The small source record travels with its occurrence, never in a second
+    task ledger. Its excerpt is visible; private provenance binds the exact
+    projected bytes, adjacent invocation and owner for the later L2 fold.
+    """
+    from ._continuity import PRESERVED_TYPES
+    from ._ownership import compaction_owner_key
+    original = {key: value for key, value in message.items()
+                if key != COMPACTED_OBSERVATION_FIELD}
+    original['content'] = original_content
+    ledger = build_evidence_ledger(
+        [{'role': 'assistant', 'tool_calls': [call]}, original],
+        {'config': (task or {}).get('config') or {}})
+    entries = [entry for entry in ledger['entries']
+               if entry['type'] in PRESERVED_TYPES | {'command_result'}
+               and entry.get('observationKey')]
+    if not entries:
+        return
+    entry, = entries
+    # Replace the weak first-line preview instead of adding a second excerpt.
+    content = str(message.get('content') or '')
+    if '\nPreview: ' in content:
+        content = content.split('\nPreview: ', 1)[0]
+    message['content'] = (content + '\nObserved execution excerpt (historical):\n'
+                          + entry['value'])
+    packet = {'version': 1, 'ownerKey': compaction_owner_key(task), 'entry': entry}
+    message[COMPACTED_OBSERVATION_FIELD] = {
+        **packet, 'projectionDigest': _projection_digest(call, message, packet)}
+
+
+def read_compacted_observation(message: dict, call: dict, task: dict | None) -> dict | None:
+    """Validate producer-owned projection evidence; text cannot mint it."""
+    from ._ownership import compaction_owner_key
+    value = message.get(COMPACTED_OBSERVATION_FIELD)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError('Invalid compacted execution observation')
+    packet = {key: child for key, child in value.items() if key != 'projectionDigest'}
+    entry = packet.get('entry')
+    owner = compaction_owner_key(task)
+    if (packet.get('version') != 1 or not isinstance(entry, dict)
+            or any(not isinstance(entry.get(key), str)
+                   for key in ('id', 'type', 'source', 'value', 'sourceDigest', 'observationKey'))
+            or (owner and packet.get('ownerKey') != owner)
+            or _projection_digest(call, message, packet) != value.get('projectionDigest')):
+        raise ValueError('Invalid compacted execution observation')
+    return deepcopy(entry)
 
 
 _MAX_PREVIEW = 600
@@ -205,6 +269,11 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
             if not isinstance(args, dict):
                 args = {}
         else:
+            continue
+        retained = read_compacted_observation(message, paired_call, task)
+        if retained is not None:
+            observations.pop(retained['id'], None)
+            observations[retained['id']] = retained
             continue
         content = _text(message.get('content') or '')
         command = _text(args.get('command') or args.get('cmd') or '')

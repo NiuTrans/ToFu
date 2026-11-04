@@ -275,22 +275,38 @@ def recompose_context_after_compaction(messages: list, task: dict | None = None)
         tool_names=set(task.get('_contextToolNames') or ()),
         disabled_blocks=disabled_context_blocks(cfg),
     )
+    # This is already a compaction boundary: no consumed cache prefix is
+    # being preserved. Retire only verified superseded snapshots, including
+    # replacements acquired while the summary was being generated.
+    from lib.tasks_pkg.context_composer import compact_context_snapshots
+    messages[:] = compact_context_snapshots(messages)
     logger.info('[PostCompact] Re-composed managed context after compaction')
-    _settle_rebuilt_request_size(messages, task)
 
 
-def _settle_rebuilt_request_size(messages: list, task: dict) -> None:
-    """Report the size of the request a compaction actually leaves.
+def settle_compaction_request_size(messages: list, task: dict, *,
+                                   measurement: dict | None = None,
+                                   tool_schema=_TASK_TOOL_SCHEMA) -> None:
+    """Report the final prepared request, after all injections and admission.
 
-    The compactor's receipt counts its own message list: no managed context
-    (restored just above) and no tool schemas, although both ride along on the
-    very next request. Its Turn row settles on this measurement instead, using
-    the counter the compaction gate uses for the request before compaction.
+    Ordinary rounds reuse their complete admission measurement. Reactive
+    request rebuilding has no such measurement and uses the same canonical
+    counter after restoration with its actual selected tool schema.
     """
-    pending = task.pop('_compactionRequestSize', None)
-    if not pending:
+    pending = task.get('_compactionRequestSize')
+    if not pending or task.get('aborted'):
         return
-    tokens_after, method = _count_tokens_authoritative(messages, task)
+    tokens_after = (measurement or {}).get('totalTokens')
+    if type(tokens_after) is int and tokens_after >= 0:
+        method = str((measurement or {}).get('method') or 'final_admission')
+    else:
+        try:
+            tokens_after, method = _count_tokens_authoritative(
+                messages, task, tool_schema=tool_schema)
+        except Exception as exc:
+            logger.warning('[PostCompact] final request size unavailable: %s',
+                           type(exc).__name__)
+            return
+    task.pop('_compactionRequestSize', None)
     tokens_before = int(pending['tokensBefore'])
     reduction = (1 - tokens_after / max(1, tokens_before)) * 100
     conv_id = compaction_owner_key(task)
