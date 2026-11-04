@@ -1333,6 +1333,87 @@ mod tests {
     }
 
     #[test]
+    fn previous_format_projection_rebuilds_instead_of_failing_every_round() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(source_dir.path()).unwrap();
+        {
+            let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+            crate::conversation_header::create(
+                &database,
+                &mut transaction,
+                &CreateRequest {
+                    conversation_id: "conversation".into(),
+                    title: "fixture".into(),
+                    settings_json: b"{}".to_vec(),
+                    created_at_ms: 100,
+                    updated_at_ms: 100,
+                    committed_at_ms: 100,
+                },
+            )
+            .unwrap();
+            database.commit(transaction).unwrap();
+        }
+        append_turn(
+            &mut database,
+            "turn-before",
+            "human",
+            "main",
+            "completed",
+            serde_json::json!({"content": "indexed before upgrade"}),
+            200,
+        );
+        let authority = Arc::new(Mutex::new(database));
+        let projection = Arc::new(Mutex::new(
+            TurnSearchProjection::initialize(target_dir.path(), 16 * 1024 * 1024).unwrap(),
+        ));
+        let scope = crate::maintenance::MaintenanceScope::new(7, 11).unwrap();
+        let drain = || {
+            for _ in 0..16 {
+                let metrics = process_turn_search_batch(&authority, &projection, scope)
+                    .unwrap_or_else(|error| panic!("search round failed: {error}"));
+                if metrics.dirty_conversations == 0
+                    && !projection.lock().unwrap().owner_indexing(7, 11).unwrap()
+                {
+                    return;
+                }
+            }
+            panic!("search maintenance did not drain");
+        };
+        drain();
+        assert_eq!(search(&projection, "indexed before upgrade").len(), 1);
+        // The owner was indexed by the previous binary, whose projection format
+        // the current reader no longer decodes.
+        let previous = crate::generated_conversation_search::PROJECTION_FORMAT_VERSION - 1;
+        projection
+            .lock()
+            .unwrap()
+            .set_format_marker_version_for_test(7, 11, previous)
+            .unwrap();
+        append_turn(
+            &mut authority.lock().unwrap(),
+            "turn-after",
+            "human",
+            "main",
+            "completed",
+            serde_json::json!({"content": "indexed after upgrade"}),
+            300,
+        );
+        drain();
+        assert_eq!(search(&projection, "indexed before upgrade").len(), 1);
+        assert_eq!(search(&projection, "indexed after upgrade").len(), 1);
+        assert_eq!(
+            projection
+                .lock()
+                .unwrap()
+                .gram_index_state_for_test(7, 11)
+                .unwrap(),
+            Some(1),
+            "the rebuilt owner must republish its gram index"
+        );
+    }
+
+    #[test]
     fn initial_backfill_and_dirty_queue_rebuild_each_conversation_once() {
         let source_dir = tempfile::tempdir().unwrap();
         let target_dir = tempfile::tempdir().unwrap();
