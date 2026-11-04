@@ -157,6 +157,52 @@ describe('recovered failure chain presentation', () => {
   });
 });
 
+describe('gateway child failure ownership', () => {
+  const parent = {
+    roundNum: 67, toolCallId: 'gateway-call', toolName: 'execute_tools',
+    taskId: 'task-a', attemptId: 'attempt-a', status: 'error',
+    toolContent: JSON.stringify({ items: [{ results: [
+      { call_id: 'child-a', name: 'read_doc', status: 'error', resultId: 'receipt-a' },
+      { call_id: 'child-b', name: 'read_doc', status: 'error', resultId: 'receipt-b' },
+    ] }] }),
+  };
+  const fallback = (suffix: string) => entry({
+    id: `activity:batch:gateway-${suffix}`, kind: 'tool', status: 'failed',
+    toolName: 'read_doc', toolCallId: `child-${suffix}`,
+    anchorToolRoundNum: 67, taskId: 'task-a', attemptId: 'attempt-a',
+    summaryKey: 'activity.tool.failed', detail: `failure ${suffix}`,
+  });
+  const child = (suffix: string): ConversationBlockViewModel => ({
+    kind: 'tool', blockId: `tool:child-${suffix}`, identitySource: 'contract',
+    source: { blockId: `tool:child-${suffix}`, roundNum: 8700000 + suffix.charCodeAt(0),
+      taskId: 'task-a', attemptId: 'attempt-a' },
+    toolCallId: `child-${suffix}`, name: 'read_doc', input: {}, result: {},
+    round: { roundNum: 8700000 + suffix.charCodeAt(0), toolCallId: `child-${suffix}`,
+      toolName: 'read_doc', taskId: 'task-a', attemptId: 'attempt-a', status: 'error',
+      toolResultEvidence: { resultId: `receipt-${suffix}`, executionStatus: 'error' } },
+  } as unknown as ConversationBlockViewModel);
+
+  it('drops every batch fallback whose exact child card owns the execution receipt', () => {
+    expect(visibleActivityEntries(timeline([fallback('a'), fallback('b')]),
+      [parent as never], [child('a'), child('b')])).toEqual([]);
+  });
+
+  it.each(['missing', 'ambiguous'] as const)('keeps the fallback when the receipt owner is %s', scenario => {
+    const cards = scenario === 'ambiguous' ? [child('a'), child('a')] : [child('b')];
+    expect(visibleActivityEntries(timeline([fallback('a')]), [parent as never], cards))
+      .toEqual([fallback('a')]);
+  });
+
+  it('keeps the fallback when its parent has duplicate receipt descriptors', () => {
+    const duplicate = { ...parent, toolContent: JSON.stringify({ results: [
+      { call_id: 'child-a', resultId: 'receipt-a' },
+      { call_id: 'child-a', resultId: 'receipt-other' },
+    ] }) };
+    expect(visibleActivityEntries(timeline([fallback('a')]), [duplicate as never], [child('a')]))
+      .toEqual([fallback('a')]);
+  });
+});
+
 describe('a tool whose completion frame was lost', () => {
   const span = entry({
     id: 'tool-span', kind: 'tool', status: 'aborted', severity: 'warning',
