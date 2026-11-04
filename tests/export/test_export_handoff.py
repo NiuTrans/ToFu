@@ -152,17 +152,15 @@ class TestHandoffArtifacts:
         assert 'feishu' not in cfg
         assert {p['id'] for p in cfg['providers']} == {'example-corp', 'openai'}
 
-        # Every MCP registration travels, made host-portable: no personal
-        # login ids, and the absolute interpreter wrapper becomes a bare
-        # command plus a credential-vault reference.
+        # Only registrations served by a bundled internal MCP repo travel
+        # (owner decision 2026-11-04), without personal login ids; the
+        # personal GitHub wrapper and the Overleaf session stay behind.
         mcp = _tar_json(out / 'tofu_state.tar.gz', 'data/config/mcp_servers.json')
-        assert set(mcp) == {'hope', 'xuecheng', 'github', 'overleaf'}
+        assert set(mcp) == {'hope', 'xuecheng'}
         assert 'HOPE_USERNAME' not in mcp['hope']['env']
         assert 'XUECHENG_MIS' not in mcp['xuecheng']['env']
         assert mcp['xuecheng']['env']['XUECHENG_TOOLSET'] == 'all'
-        assert mcp['github']['command'] == 'npx'
-        assert mcp['github']['env']['GITHUB_PERSONAL_ACCESS_TOKEN'] == 'vault:github_token'
-        assert mcp['overleaf']['env']['OVERLEAF_SESSION'] == 'shared-session-token'
+        assert 'shared-session-token' not in json.dumps(mcp)
 
     def test_internal_bakes_corp_proxy_default_when_source_has_none(self, fake_project, tmp_path):
         # Exporter's shell often carries the proxy in env, not in

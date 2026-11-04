@@ -264,13 +264,14 @@ Maintainers produce archives with `scripts/build_tofudb_prebuilt.py`.
 
 Owner decision 2026-11-01: an internal export must work **out of the box** —
 a colleague must not have to re-add MCP servers, skills or API keys, and must
-not need any special export flag. `export.py --mode internal` and
+not need any special export flag. Owner decision 2026-11-04 narrows the MCP
+part to the shared internal servers (below). `export.py --mode internal` and
 `export.py --handoff` therefore carry, by default:
 
 | Carried | From | Lands at |
 |---|---|---|
 | Live provider authority + current API keys | the running app's model-routing v2 store, via the audited loopback reveal endpoint | `data/config/carried_model_routing.json`, imported once at the destination's first boot |
-| Every MCP registration | the live owner store `mcp_servers/<uid>.json` | `data/config/mcp_servers.json` (migrated into the destination owner store) |
+| MCP registrations served by a bundled internal MCP repo (command `hope-mcp`, `xuecheng-mcp` or `llm-mcp`), per-person login ids stripped | the live owner store `mcp_servers/<uid>.json` | `data/config/mcp_servers.json` (migrated into the destination owner store) |
 | Credential vault + its key | `data/config/` | same paths, mode 0600 |
 | All installed skill packages, vendored engines included | `.tofu/skills`, `data/skills` | same paths |
 | Shareable platform config | `features.json`, `pricing.json`, `private_hosts.json`, `site_packs/` | same paths |
@@ -282,6 +283,25 @@ one: per-person SSO/MIS identity (the destination's own session supplies it),
 OAuth/SSO sessions whose refresh tokens are single-use (a second copy would
 log the first one out), the Feishu bot binding (two installs would split one
 event stream), per-install keys, machine-bound state and personal history.
+Every other MCP registration stays behind too: third-party and personal
+servers (GitHub, Overleaf, `npx` packages, URL endpoints) authenticate as
+their owner with personal tokens, so a colleague registers them with their own.
+
+**MCP registrations (owner decision 2026-11-04).** Problem: carrying every
+live registration shipped the owner's personal and third-party servers to
+colleagues together with the personal tokens they authenticate with.
+Decision: a registration travels iff its command is the bare launcher of an
+internal MCP repo the export bundles under `vendor/`; one tuple
+(`_BUNDLED_INTERNAL_MCP_REPOS` in `export_pkg/_lists.py`) drives both the
+bundler and the carry filter. Such a server launches from the bundled source
+on any host and signs in through the destination's own SSO session. Matching
+is exact: a host-pinned path to a bundled launcher does not resolve to
+`vendor/` on another host and stays behind. Alternatives considered: a
+hand-kept allowlist of registration names, rejected because it drifts from
+what is actually bundled; carrying every registration, rejected because it
+ships personal servers and their tokens; rewriting personal launch wrappers
+into `vault:` env references, rejected because the reference still resolves to
+the owner's personal token.
 
 Two packaging rules keep this safe to ship: carried secret material lives only
 under gitignored `data/`/`.tofu/` paths, so the internal release-repo snapshot
@@ -310,9 +330,10 @@ result, before the installation commit:
 ```
 
 A missing launcher is a warning, not a failure: it names what will not work
-instead of leaving the user to discover it at first use. Public `npx` entries
-report as unavailable because release installs deliberately carry no Node
-runtime. Opensource installs have neither path and skip the step.
+instead of leaving the user to discover it at first use. Public `npx` entries,
+which only a personal copy carries, report as unavailable because release
+installs deliberately carry no Node runtime. Opensource installs have neither
+path and skip the step.
 
 Problem: a carried skill or MCP server can be present but unusable — an
 unresolved Python import, an absent launcher — and the old installer reported a
