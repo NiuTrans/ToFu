@@ -437,8 +437,10 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
     from lib.tasks_pkg.workspace_delivery import (
         ensure_execution_roots, execution_root_key, route_project_tool_args)
-    ensure_execution_roots(task)
-    fn_args = route_project_tool_args(task, fn_name, fn_args)
+    from lib.tools.execution_timing import timing_phase
+    with timing_phase('project_admission'):
+        ensure_execution_roots(task)
+        fn_args = route_project_tool_args(task, fn_name, fn_args)
     # ── content_ref resolution for write_file ──
     if fn_name == 'write_file' and 'content_ref' in fn_args and 'content' not in fn_args:
         ref = fn_args.pop('content_ref')
@@ -493,9 +495,10 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
 
     from lib.tasks_pkg.project_guidance import check_project_guidance, freeze_project_command_cwd
-    if fn_name == 'run_command':
-        fn_args = freeze_project_command_cwd(task, fn_args)
-    guidance_refusal = check_project_guidance(task, fn_name, fn_args)
+    with timing_phase('project_admission'):
+        if fn_name == 'run_command':
+            fn_args = freeze_project_command_cwd(task, fn_args)
+        guidance_refusal = check_project_guidance(task, fn_name, fn_args)
     if guidance_refusal:
         meta = build_project_tool_meta(fn_name, fn_args, guidance_refusal)
         meta.update(notRun=True, badge='review project guidance')
@@ -506,7 +509,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # absolute paths. Binding must also cover these structured tool inputs,
     # rather than just changing the default cwd in task config.
     from lib.tasks_pkg.workspace_delivery import rebind_project_tool_arguments
-    fn_args = rebind_project_tool_arguments(task, fn_args)
+    with timing_phase('project_admission'):
+        fn_args = rebind_project_tool_arguments(task, fn_args)
     if fn_name == 'run_command':
         from lib.tasks_pkg.workspace_delivery import prepare_worker_command_runtime
         prepare_worker_command_runtime(task, fn_args.get('command') or '')

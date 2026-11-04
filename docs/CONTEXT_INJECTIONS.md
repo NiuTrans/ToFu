@@ -369,6 +369,9 @@ own subtree label.
 Read acquisition is descriptor-relative/no-follow on POSIX and stops at remaining
 aggregate file/byte budgets, without clipping or publishing a partial snapshot.
 Verified removals are pruned before validating replacement bounds.
+One tool admission memoizes rule reads by their exact arguments (path, root and
+remaining byte/file budget), so root rules shared by several targets are read
+once per admission; nothing is cached across admissions.
 
 Project command dispatch pins explicit/sticky CWD once before guidance and
 foreground/background handoff. The shared command parser's concrete targets

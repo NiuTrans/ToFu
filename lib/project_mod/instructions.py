@@ -68,20 +68,25 @@ def _read_rule(path: Path, root: Path, *, remaining_bytes=MAX_GUIDANCE_BYTES,
             'hash': sha256(raw).hexdigest()}
 
 
-def _append_rule(rows: list[dict], path: Path, root: Path) -> None:
+def _append_rule(rows: list[dict], path: Path, root: Path, reads: dict | None = None) -> None:
     remaining = MAX_GUIDANCE_BYTES - sum(len(row['content'].encode('utf-8')) for row in rows)
-    row = _read_rule(path, root, remaining_bytes=remaining,
-                     remaining_files=MAX_GUIDANCE_FILES - len(rows))
+    request = (path, root, remaining, MAX_GUIDANCE_FILES - len(rows))
+    if reads is not None and request in reads:
+        row = reads[request]
+    else:
+        row = _read_rule(path, root, remaining_bytes=remaining, remaining_files=request[3])
+        if reads is not None:
+            reads[request] = row
     if row is not None:
         rows.append(row)
         check_guidance_bounds(rows)
 
 
-def read_root_guidance(root: str) -> list[dict]:
+def read_root_guidance(root: str, *, reads: dict | None = None) -> list[dict]:
     root_path = Path(root).expanduser().resolve()
     rows = []
     for name in ROOT_RULE_FILES:
-        _append_rule(rows, root_path / name, root_path)
+        _append_rule(rows, root_path / name, root_path, reads)
     check_guidance_bounds(rows)
     return rows
 
@@ -91,16 +96,21 @@ def read_rule_file(path: str, root: str) -> dict | None:
     return _read_rule(Path(path), Path(root).expanduser().resolve())
 
 
-def read_scoped_guidance(root: str, target: str) -> list[dict]:
+def read_scoped_guidance(root: str, target: str, *, reads: dict | None = None) -> list[dict]:
+    """Root and nested rules for one target.
+
+    ``reads`` is one acquisition's memo of rule reads keyed by their exact
+    arguments, so an acquisition naming several targets reads each file once.
+    """
     root_path = Path(root).expanduser().resolve()
     selected = Path(target).expanduser().resolve()
     if not selected.is_relative_to(root_path):
         raise PermissionError('Instruction target is outside its declared root')
-    rows = read_root_guidance(str(root_path))
+    rows = read_root_guidance(str(root_path), reads=reads)
     directory = selected if selected.is_dir() else selected.parent
     chain = [directory, *directory.parents]
     for ancestor in reversed(chain[:chain.index(root_path)] if root_path in chain else []):
-        _append_rule(rows, ancestor / 'AGENTS.md', root_path)
+        _append_rule(rows, ancestor / 'AGENTS.md', root_path, reads)
     check_guidance_bounds(rows)
     return rows
 
