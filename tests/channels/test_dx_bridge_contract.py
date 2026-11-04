@@ -34,9 +34,44 @@ export class BrowserlessDxRuntime {
     if (MODE !== 'no-login-status') constants.LOGIN_STATUS = LOGIN_STATUS;
     // A kick reports DISCONNECTED('terminated') first, then its kick event in the same call.
     const kick = (event) => { emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'terminated']); emit(event, {}); };
+    let logins = 0;
+    let mints = 0;
+    this.authenticated = false;
+    this.credentials = () => ({ logins, mints });
+    const runtime = this;
+    let socketConnected = true;
+    this.disconnect = () => {
+      socketConnected = false;
+      this.authenticated = false;
+      emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'onClose']);
+    };
     this.webSdkRuntime = {
-      instance: { CONSTANT: constants },
-      async login() {
+      instance: { CONSTANT: constants, reconnect() { socketConnected = true; } },
+      async login(timeout, forceRefresh = false) {
+        logins += 1;
+        if (logins === 1 || forceRefresh) mints += 1;
+        if (logins > 1) {
+          if (!socketConnected) throw new Error('SDK login needs a connected socket');
+          if (MODE === 'drop-fail') throw new Error('SDK reconnect failed');
+          if (MODE === 'drop-pending') return new Promise(() => {});
+          if (MODE === 'drop-kick') { kick('KickOff'); return new Promise(() => {}); }
+          if (MODE === 'drop-identity') return { credentials: { uid: 'another-owner' } };
+          if (MODE === 'drop-expired') {
+            // The engine owns AuthFail recovery: it refreshes once and logs in
+            // on the same instance. Its intermediate disconnect is not a new loss.
+            socketConnected = false;
+            emit('AuthFail', {});
+            emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'authenticate_fail']);
+            mints += 1;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          if (!socketConnected) throw new Error('SDK auth retry needs a connected socket');
+          runtime.authenticated = true;
+          setImmediate(() => emit('IM_message', { mid: '7000000000000000004', uuid: 'after-reconnect',
+                                                 from: '2002', gid: '500', message: { text: 'recovered' } }));
+          return { credentials: { uid: '1001' }, events: ['AuthSuccess'] };
+        }
+        runtime.authenticated = true;
         // Messages arrive with no command in flight: only persistent handlers see them.
         setTimeout(() => emit('IM_message', { mid: { low: 1, high: 2, toString() { return '7000000000000000001'; } },
                                               uuid: 'm1', from: '2002', gid: '500', type: 1,
@@ -48,10 +83,12 @@ export class BrowserlessDxRuntime {
                                                 { message: JSON.stringify({ mid: '6999', fromUid: '1001' }) }]) } }), 90);
         if (MODE === 'kick') setTimeout(() => kick('KickOff'), 150);
         if (MODE === 'kick-same-device') setTimeout(() => kick('KickOffWithSameDeviceId'), 150);
-        if (MODE === 'drop') setTimeout(() => {
-          // Transitional statuses keep the session; only DISCONNECTED ends the channel.
+        if (MODE.startsWith('drop')) setTimeout(() => {
+          runtime.authenticated = false;
+          socketConnected = false;
           emit('ConnStatusChange', [LOGIN_STATUS.CONNECTING, 'connecting']);
           emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'disconnected']);
+          emit('ConnStatusChange', [LOGIN_STATUS.DISCONNECTED, 'duplicate']);
         }, 150);
         return { credentials: { uid: '1001' }, events: ['AuthSuccess'] };
       },
@@ -61,15 +98,23 @@ export class BrowserlessDxRuntime {
         return () => handlers.get(event).delete(handler);
       },
     };
+    if (MODE === 'no-reconnect') delete this.webSdkRuntime.instance.reconnect;
   }
   async handle(request) {
     const action = request.action;
-    if (action === 'get_current_uid') return { action, ok: true, uid: '1001', name: 'Owner', mis: 'owner' };
+    if (action === 'get_current_uid') return { action, ok: true, uid: '1001', name: 'Owner', mis: 'owner',
+                                             ...this.credentials() };
     if (action === 'get_history_messages') return { action, ok: true, nextCursor: '', target: request.gid,
                                                     limit: request.limit, cursor: request.cursorMsg ?? null,
                                                     messages: [{ id: '7000000000000000001', text: 'first' }] };
     if (action === 'get_session_list') return { action, ok: true, sessions: [{ id: '500', type: 'group', all: request.all }] };
     if (action === 'send_markdown') {
+      if (!this.authenticated) return { action, ok: false, error: { code: 'not_connected' } };
+      if (MODE === 'send-fails') {
+        this.sendAttempts = (this.sendAttempts || 0) + 1;
+        this.disconnect();
+        return { action, ok: false, error: { code: 'send_outcome_unknown' }, attempts: this.sendAttempts };
+      }
       setTimeout(() => this.emit('IM_message', { mid: '7000000000000000009', uuid: 'sent-1', from: '1001',
                                                  gid: request.gid, message: { text: request.text },
                                                  extension: request.extension }), 10);
@@ -139,9 +184,12 @@ def test_persistent_handlers_commands_and_clean_stop(engine):
 @pytest.mark.parametrize('mode, status, code', [
     ('kick', 'kicked', 43),
     ('kick-same-device', 'kicked', 43),
-    ('drop', 'disconnected', 3),
+    ('drop-fail', 'failed', 4),
+    ('drop-kick', 'kicked', 43),
+    ('drop-identity', 'failed', 4),
     # Without the SDK's own status vocabulary a lost channel would go unnoticed.
     ('no-login-status', 'failed', 4),
+    ('no-reconnect', 'failed', 4),
 ])
 def test_kickoff_and_disconnect_exit_with_their_status(engine, mode, status, code):
     bridge = _bridge(engine, mode)
@@ -154,6 +202,53 @@ def test_kickoff_and_disconnect_exit_with_their_status(engine, mode, status, cod
     with pytest.raises(Exception):
         bridge.request('whoami')
     bridge.close(5)
+
+
+@pytest.mark.parametrize('mode, mints', [('drop', 1), ('drop-expired', 2)])
+def test_disconnect_reuses_credentials_and_keeps_commands_and_pushes(engine, mode, mints):
+    bridge = _bridge(engine, mode)
+    try:
+        events = _events(bridge, 5)
+        assert [e.get('status') for e in events if e['type'] == 'status'] == ['connected', 'disconnected']
+        # Submitted while the reconnect is pending: it must wait for login and
+        # execute once, so it cannot provoke a second login/credential mint.
+        sent = bridge.request('send_markdown', gid='500', text='hi')
+        assert sent['ok']
+        received = _events(bridge, 3)
+        assert received[0]['status'] == 'connected'
+        assert {e['message']['uuid'] for e in received[1:]} == {'after-reconnect', 'sent-1'}
+        assert next(e for e in received[1:] if e['message']['uuid'] == 'sent-1')['ownConnection'] is True
+        identity = bridge.request('whoami')['result']
+        assert (identity['logins'], identity['mints']) == (2, mints)
+        assert bridge.alive()
+    finally:
+        assert bridge.close(5)
+    assert bridge.returncode == 0
+
+
+def test_parent_close_stops_a_pending_reconnect(engine):
+    bridge = _bridge(engine, 'drop-pending')
+    try:
+        assert _events(bridge, 5)[-1]['status'] == 'disconnected'
+    finally:
+        assert bridge.close(5)
+    assert bridge.returncode == 0
+
+
+def test_disconnect_never_replays_an_inflight_write(engine):
+    bridge = _bridge(engine, 'send-fails')
+    try:
+        assert _events(bridge, 4)[0]['status'] == 'connected'
+        result = bridge.request('send_markdown', gid='500', text='once')
+        assert result['ok'] is False
+        assert result['error']['code'] == 'send_outcome_unknown'
+        recovered = _events(bridge, 3)
+        assert [e.get('status') for e in recovered[:2]] == ['disconnected', 'connected']
+        assert recovered[2]['message']['uuid'] == 'after-reconnect'
+        assert result['result']['attempts'] == 1
+        assert bridge.request('whoami')['result']['mints'] == 1
+    finally:
+        assert bridge.close(5)
 
 
 def test_one_shot_commands_print_one_response(engine):
