@@ -45,6 +45,10 @@ export type LivePhaseText = (
  * Caller owns DOM and Goal role context; storage warnings always stay local. */
 export function presentLivePhaseLabel(value: TransientTurnPresentation, text: LivePhaseText): string {
   const phase = value.phase || 'working';
+  if (phase === 'storage_wedged') {
+    return text('stream.phase.storageWedged',
+      'Execution records could not be saved. Status updates are paused while the server retries.');
+  }
   const phaseFallback = phase === 'executor_preparing'
     ? "Task accepted; binding it to this server's task scheduler…"
     : phase === 'executor_queued'
@@ -58,7 +62,6 @@ export function presentLivePhaseLabel(value: TransientTurnPresentation, text: Li
   else if (phase === 'llm_thinking' && !label) label = text('stream.phase.generatingResponse', 'Generating response…');
   else if (phase === 'tool_exec' && value.tools?.length) label = value.detail || value.tools.join(', ');
   else if (phase === 'retrying' && !localizedDetail && !value.detail) label = text('stream.phase.retrying', 'Retrying…');
-  else if (phase === 'storage_wedged') label = text('stream.phase.storageWedged', 'Storage write stalled — retrying…');
   else if (phase === 'waiting' && !localizedDetail && !value.detail) label = text('stream.phase.waitingWorkerStatus', 'Waiting for an execution status update…');
   else if (phase === 'responding' && !value.detail) label = text('autopilot.warming', 'Autopilot is responding…');
   if (!label && phase === 'waiting_model') label = text('stream.phase.waitingModel', 'Sent to the model, waiting for it to start replying…');

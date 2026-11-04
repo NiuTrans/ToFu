@@ -9,6 +9,14 @@ function root(currentPhase: TransientTurnPresentation): TransientTurnPresentatio
     goalProgress: { iteration: '4', role: 'worker', rootSummary: true, workers: [], currentPhase } };
 }
 describe('shared live phase presentation', () => {
+  it('shows the persistence blockage without stale model-routing progress', () => {
+    const value = liveAttemptPresentation({
+      phase: 'storage_wedged',
+      modelRoute: { selectedModel: 'auto', resolvedModel: 'model-a',
+        role: 'worker', tier: 'standard', kind: 'role_tier' },
+    }, 'running');
+    expect(presentLivePhaseLabel(value, text)).toBe('localized:stream.phase.storageWedged');
+  });
   it.each([
     { phase: 'waiting_model' }, { phase: 'llm_thinking' }, { phase: 'thinking_active' },
     { phase: 'retrying' }, { phase: 'tool_exec', tools: ['read_file', 'inspect_runtime'] },

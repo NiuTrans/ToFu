@@ -1501,6 +1501,17 @@ def test_push_withheld_wedge_rides_snapshot_and_heartbeat(
             task["status"] = "completed"
             assert task_runtime_module.push_withheld_for_conv(
                 "conv-sync-a") is None
+
+            # Executor failure is not a durable terminal verdict. A failed
+            # event FIFO keeps the Turn running until its result can commit.
+            task["status"] = "error"
+            task["_terminalPersistencePending"] = True
+            pending = flask_client.get(
+                "/api/v4/conversations/conv-sync-a/sync").get_json()
+            assert pending["pushWithheld"] is True
+            task.pop("_terminalPersistencePending")
+            assert task_runtime_module.push_withheld_for_conv(
+                "conv-sync-a") is None
             task["status"] = "running"
 
             # Recovery: the marker popped → the next snapshot clears the flag
@@ -1513,6 +1524,7 @@ def test_push_withheld_wedge_rides_snapshot_and_heartbeat(
             assert task_runtime_module.push_withheld_for_conv(
                 "conv-sync-a") is None
         finally:
+            task.pop("_terminalPersistencePending", None)
             task_runtime_module._clear_latest_task(
                 "conv-sync-a", expect_task_id="task-wedge-a")
 

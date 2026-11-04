@@ -39,6 +39,14 @@ Non-transient errors, revoked authority, cancellation and shutdown still refuse
 admission. Repair and terminal visibility reuse the existing terminal
 maintenance/eviction fence.
 
+The read-side `pushWithheld` signal includes an executor that has exited while
+`_terminalPersistencePending` still retains its result. An in-memory terminal
+status is not a durable Turn settlement. Problem: filtering out exited workers
+hid the failed FIFO behind a generic waiting placeholder. Decision: retain the
+storage warning through terminal persistence debt and clear it after successful
+settlement; stale markers on fully settled tasks remain ignored. Inferring
+completion from worker exit would publish uncommitted results.
+
 Problem: retry exhaustion previously turned a temporary write outage into a
 producer admission error that aborted the managed task on its next progress
 event. Decision: retain the transient failure as persistence debt while still

@@ -5023,7 +5023,7 @@
   "stream.phase.startupConfig": "Resolving model and workspace settings…",
   "stream.phase.startupContext": "Loading project context and relevant memory…",
   "stream.phase.startupTools": "Preparing tools and workspace…",
-  "stream.phase.storageWedged": "Storage write stalled, retrying (nothing is lost)…",
+  "stream.phase.storageWedged": "Execution records could not be saved. Status updates are paused while the server retries.",
   "stream.phase.streamInterruptedRetryDirect": "{model}'s direct stream ended unexpectedly after {elapsed}s. Retrying away from the current slot ({attempt}/{max})…",
   "stream.phase.streamStalled": "No new model progress for {idle}s ({elapsed}s total) — {model} is still connected…",
   "stream.phase.vuAssembleContext": "Goal mode is assembling conversation context to compose a reply…",

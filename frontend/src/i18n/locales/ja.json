@@ -5023,7 +5023,7 @@
   "stream.phase.startupConfig": "モデルとワークスペースの設定を確認しています…",
   "stream.phase.startupContext": "プロジェクトのコンテキストと関連するメモリを読み込んでいます…",
   "stream.phase.startupTools": "ツールとワークスペースを準備しています…",
-  "stream.phase.storageWedged": "ストレージへの書き込みが停滞しています。再試行中です（データは失われていません）…",
+  "stream.phase.storageWedged": "実行記録を保存できませんでした。サーバーが再試行している間、状態の更新は一時停止されます。",
   "stream.phase.streamInterruptedRetryDirect": "{model}の直接ストリームが{elapsed}秒後に予期せず終了しました。現在のスロットを避けて再試行しています（{attempt}/{max}）…",
   "stream.phase.streamStalled": "{idle}秒間モデルの新しい進捗がありません（合計{elapsed}秒） — {model}への接続は維持されています…",
   "stream.phase.vuAssembleContext": "目標モードで返信を作成するため、会話のコンテキストをまとめています…",
