@@ -405,6 +405,128 @@ def test_cancelled_worker_background_completion_preserves_evidence_without_model
             background_commands._registry.pop(command_id, None)
 
 
+def test_unbound_worker_completion_after_cancel_preserves_evidence_without_model_turn(
+        runtime, monkeypatch):
+    """A turn that ran without the Worker's binding cannot keep waking it after cancel."""
+    from lib import message_queue
+    from lib.background_command_delivery import settle_revoked_dispatch_completion
+    from lib.tasks_pkg import background_commands
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    r = runtime
+    monkeypatch.setattr('lib.project_dispatch.service.ProjectDispatchService', lambda repo: r.service)
+    worker = r.call('delegate_project_work', **r.args)
+    conversation = worker['conversation_id']
+    assignment = r.c.repo.read(worker['assignment_id'])
+    execution = assignment['execution']
+    r.attempts[execution['attemptId']]['status'] = 'interrupted'
+    r.turns[execution['turnId']]['status'] = 'interrupted'
+    r.service.turn_get = r.c.repo.turn_get
+    r.service.attempt_get = r.c.repo.attempt_get
+    # An unbound turn's command receipts carry ordinary config, no dispatch binding.
+    unbound = {'model': 'model-a', 'projectPath': '/project'}
+    receipts = [{
+        'queueId': 'unbound-result-receipt', 'kind': message_queue.KIND_BACKGROUND_RECEIPT,
+        'timestamp': 1, 'config': unbound,
+        'payload': {'text': 'unbound-turn-result', '_backgroundCommand': 'bg_unbound'},
+        'backgroundCommand': {'commandId': 'bg_unbound', 'resultPreview': 'unbound-turn-result'},
+    }]
+    # A live grant and an ordinary conversation keep the ordinary wake.
+    assert settle_revoked_dispatch_completion(
+        unbound, receipts, conv_id=conversation, user_id=7) is False
+    assert settle_revoked_dispatch_completion(
+        unbound, receipts, conv_id='coordinator', user_id=7) is False
+
+    queued, model_starts, retired = [], [], []
+
+    class QueueClient:
+        def command(self, operation, payload, command_id):
+            queued.append((operation, payload, command_id))
+            return {'queueId': payload['queue_id']}
+
+        def query(self, operation, payload):
+            return []
+
+    monkeypatch.setattr(message_queue, '_queue_client', lambda **kwargs: QueueClient())
+    monkeypatch.setattr(message_queue, 'next_dispatchable_turn', lambda *args, **kwargs: None)
+    monkeypatch.setattr(message_queue, 'dispatch_next_queued', lambda *args, **kwargs: None)
+    monkeypatch.setattr(message_queue, '_background_receipts', lambda *args, **kwargs: receipts)
+    monkeypatch.setattr(message_queue, '_finalize_queue_dispatch',
+                        lambda *args, **kwargs: retired.append(args))
+    monkeypatch.setattr(background_commands, 'conversation_results_complete', lambda **kwargs: True)
+    monkeypatch.setattr(chat_task_runtime, 'snapshot_owned', lambda **kwargs: [])
+    from lib.conversation_sync.runtime import conversation_turn_commands
+    monkeypatch.setattr(conversation_turn_commands, 'create_turn',
+                        lambda *args, **kwargs: model_starts.append((args, kwargs)))
+    monkeypatch.setattr(conversation_turn_commands, 'resume_turn',
+                        lambda *args, **kwargs: model_starts.append((args, kwargs)))
+
+    def attach(conversation_id, turn_id, *, projection, expected_projection_revision, user_id, **kwargs):
+        current = r.turns[turn_id]
+        assert (conversation_id, expected_projection_revision, user_id) == (
+            conversation, current['projectionRevision'], 7)
+        current.update(projection=projection,
+                       projectionRevision=expected_projection_revision + 1)
+        return {'turn': deepcopy(current)}
+    monkeypatch.setattr('lib.turn_lifecycle.update_turn_projection', attach)
+    monkeypatch.setattr(r.service, '_cancel_execution', lambda *args: {'stopped': True})
+    assert r.call('cancel_project_work', assignment_id=assignment['id'])['revoked'] is True
+
+    assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
+    assert model_starts == []
+    assert not [call for call in queued if call[1].get('kind') == message_queue.KIND_WORKFLOW]
+    evidence = r.call('get_project_assignment', assignment_id=assignment['id'])
+    assert evidence['execution']['attemptId'] == execution['attemptId']
+    injections = evidence['execution']['result']['_bgCommandInjects']
+    assert [preview['commandId'] for preview in injections[0]['previews']] == ['bg_unbound']
+    assert 'unbound-turn-result' in injections[0]['previews'][0]['text']
+
+    wake = {'queueId': 'unbound-queued-wake', 'kind': message_queue.KIND_WORKFLOW}
+    assert message_queue._dispatch_queued_turn(
+        conversation, wake, {'_backgroundBatchWake': ['unbound-result-receipt']},
+        unbound, None, user_id=7) is None
+    assert model_starts == []
+    assert [args[:2] for args in retired] == [(conversation, 'unbound-queued-wake')]
+
+
+def test_cancel_stops_every_live_attempt_of_the_worker_conversation(runtime, monkeypatch):
+    """The association can name a long-settled attempt while an unbound turn runs."""
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    r = runtime
+    monkeypatch.setattr('lib.project_dispatch.service.ProjectDispatchService', lambda repo: r.service)
+    first = r.call('delegate_project_work', **r.args)
+    second = r.call('delegate_project_work', **{**r.args, 'idempotency_key': 'part-two'})
+    live = [{'id': 'coordinator-task', 'convId': 'coordinator', 'status': 'running',
+             '_attemptId': 'coordinator-attempt'}]
+    for index, worker in enumerate((first, second)):
+        execution = r.c.repo.read(worker['assignment_id'])['execution']
+        r.attempts[execution['attemptId']]['status'] = 'interrupted'
+        live += [{'id': f'unbound-task-{index}', 'convId': worker['conversation_id'],
+                  'status': 'running', '_attemptId': f'unbound-attempt-{index}'},
+                 {'id': f'stopped-task-{index}', 'convId': worker['conversation_id'],
+                  'status': 'running', 'aborted': True, '_attemptId': f'stopped-attempt-{index}'}]
+    monkeypatch.setattr(chat_task_runtime, 'snapshot_owned',
+                        lambda *, user_id: deepcopy(live) if user_id == 7 else [])
+    cancelled = []
+    monkeypatch.setattr(r.service, '_cancel_execution',
+                        lambda attempt_id, owner, provenance: cancelled.append(
+                            (attempt_id, owner, provenance)))
+
+    assert r.call('cancel_project_work', assignment_id=first['assignment_id'])['revoked'] is True
+    stale = r.c.repo.read(first['assignment_id'])['execution']['attemptId']
+    assert [row[:2] for row in cancelled] == [(stale, 7), ('unbound-attempt-0', 7)]
+    assert all('cancel_project_work' in row[2] and first['assignment_id'] in row[2]
+               for row in cancelled)
+
+    cancelled.clear()
+    row = r.c.repo.read(second['assignment_id'])
+    r.service.revoke(second['assignment_id'], principal=r.c.principal,
+                     expected_revision=row['grant']['revision'])
+    assert [item[:2] for item in cancelled] == [
+        (row['execution']['attemptId'], 7), ('unbound-attempt-1', 7)]
+
+
 def test_wait_uses_terminal_notification_and_removes_subscription(runtime):
     from lib.agent_core import admission
     r = runtime

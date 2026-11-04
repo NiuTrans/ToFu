@@ -8,6 +8,7 @@ the steer that resolves its target from it, must name that attempt's Turn.
 """
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -42,6 +43,51 @@ def lane(semantic_authority, monkeypatch):
     bind_task(pair['attempt']['attemptId'], 'coordinator-task', user_id=owner)
     yield owner, conversation, pair['turn']['turnId']
     agent_inbox.reset_for_test(conversation)
+
+
+# Stands in for the native MAX_TURN_RESPONSE_BYTES (64 MiB less 4 KiB) at a size a unit
+# test can build: every single Turn fits, the whole lane does not.
+_RESPONSE_BOUND_BYTES = 96 * 1024
+_LARGE_REPORT_TEXT = 'Milestone evidence. ' * 1600
+
+
+class _BoundedReads:
+    """Refuse an oversized read with the authority's deterministic resource bound."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def query(self, operation, payload, *args, **kwargs):
+        from lib.storage.errors import StorageError
+        result = self._client.query(operation, payload, *args, **kwargs)
+        if len(json.dumps(result, ensure_ascii=False).encode()) > _RESPONSE_BOUND_BYTES:
+            raise StorageError('database_resource_exhausted',
+                               f'{operation} exceeds its bounded streamed payload',
+                               operation_id=operation)
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+@pytest.fixture
+def oversized_lane(lane, semantic_authority, monkeypatch):
+    """A busy lane whose whole-history read exceeds the response bound."""
+    from lib.storage.errors import StorageError
+    from lib.turn_lifecycle import append_settled_turn
+    owner, conversation, _reply = lane
+    for index in range(4):
+        append_settled_turn(conversation, command_id=f'large-report-{index}', actor='assistant',
+                            user_id=owner, kind='coordinator_report.progress',
+                            projection={'content': _LARGE_REPORT_TEXT,
+                                        'origin': {'initiator': 'brain'}})
+    client = semantic_authority[0]
+    monkeypatch.setattr('lib.storage.get_storage_client',
+                        lambda **kwargs: _BoundedReads(client(**kwargs)))
+    with pytest.raises(StorageError, match='bounded streamed payload'):
+        _BoundedReads(client()).query('turn.list', {
+            'conversation_id': conversation, 'user_id': owner, 'lane_id': 'main'})
+    return lane
 
 
 def _report(owner, conversation):
@@ -84,6 +130,28 @@ def test_a_steer_reaches_the_live_reply_behind_a_coordinator_report(lane):
     assert _steers_on(owner, conversation, reply) == ['steer-after-report']
     [item] = agent_inbox.drain(conversation, modes=['user-steer'])
     assert item['injectionId'] == 'steer-after-report'
+
+
+def test_lane_busy_names_the_live_turn_when_the_whole_lane_exceeds_the_response_bound(
+        oversized_lane):
+    from lib.turn_lifecycle import LifecycleConflict, create_turn_pair
+    owner, conversation, reply = oversized_lane
+    with pytest.raises(LifecycleConflict) as busy:
+        create_turn_pair(conversation, command_id='human-oversized',
+                         input_projection={'content': 'Hello?'}, config={}, user_id=owner)
+    assert busy.value.code == 'lane_busy'
+    assert busy.value.turn['turnId'] == reply
+
+
+def test_queue_and_steer_deliver_when_the_whole_lane_exceeds_the_response_bound(
+        oversized_lane):
+    owner, conversation, reply = oversized_lane
+    queued = _command(owner, conversation, 'queued-oversized', 'queue')
+    assert queued.get('queued') is True, queued
+    assert queued['latestTurn']['turnId'] == reply
+    result = _command(owner, conversation, 'steer-oversized', 'steer')
+    assert result.get('steered') is True and not result.get('steerFallback'), result
+    assert _steers_on(owner, conversation, reply) == ['steer-oversized']
 
 
 def test_a_steer_passes_queued_input_waiting_behind_the_live_reply(lane):
