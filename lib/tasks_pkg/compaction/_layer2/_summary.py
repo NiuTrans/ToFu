@@ -449,8 +449,11 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             logger.warning('%s Summary route identity conflict; keeping source intact', tag)
             return None
         if model:
+            # Keep waitable upstream failures inside the common dispatcher.
+            # A summary-only 429 ceiling turns temporary TPM/gateway pressure
+            # into a failed compaction before the authorized route can recover.
             dispatch_options = dict(prefer_model=model, strict_model=True,
-                                    max_429_attempts=2, thinking_enabled=False)
+                                    thinking_enabled=False)
 
     if model_admission is not None:
         dispatch_options['model_budget_admit'] = model_admission
