@@ -5023,7 +5023,7 @@
   "stream.phase.startupConfig": "Modell- und Arbeitsbereichseinstellungen werden ermittelt…",
   "stream.phase.startupContext": "Projektkontext und relevante Erinnerungen werden geladen…",
   "stream.phase.startupTools": "Tools und Arbeitsbereich werden vorbereitet…",
-  "stream.phase.storageWedged": "Schreiben in den Speicher stockt, neuer Versuch (nichts geht verloren)…",
+  "stream.phase.storageWedged": "Ausführungsprotokolle konnten nicht gespeichert werden. Statusupdates sind angehalten, während der Server es erneut versucht.",
   "stream.phase.streamInterruptedRetryDirect": "Der direkte Stream von {model} wurde nach {elapsed} s unerwartet beendet. Neuer Versuch über einen anderen Slot ({attempt}/{max})…",
   "stream.phase.streamStalled": "Seit {idle} s kein neuer Modellfortschritt ({elapsed} s insgesamt) — {model} ist weiterhin verbunden…",
   "stream.phase.vuAssembleContext": "Zielmodus stellt den Unterhaltungskontext für eine Antwort zusammen…",

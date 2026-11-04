@@ -245,8 +245,9 @@ def push_withheld_for_conv(conv_id: str) -> dict | None:
     paths (sync snapshot + SSE heartbeat) poll this probe instead.
 
     Returns ``{'taskId': ..., 'sinceMs': ..., 'count': ...}`` while the
-    conv's latest task is live (pending/running) with withheld pushes, else
-    None. Best-effort like the successor probes: any lookup failure yields
+    conv's latest task is live or still owes terminal persistence, with
+    withheld pushes. An exited executor does not prove durable settlement.
+    Best-effort like the successor probes: any lookup failure yields
     None, never raises into a request/stream tick.
     """
     if not conv_id:
@@ -256,7 +257,8 @@ def push_withheld_for_conv(conv_id: str) -> dict | None:
         if not task_id:
             return None
         task = chat_task_runtime.get(task_id)
-        if not task or task.get('status') not in ('pending', 'running'):
+        if not task or (task.get('status') not in ('pending', 'running')
+                        and not task.get('_terminalPersistencePending')):
             return None
         withheld_at = task.get('_pushWithheldAt')
         if not withheld_at:

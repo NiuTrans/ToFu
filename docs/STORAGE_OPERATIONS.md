@@ -1643,6 +1643,25 @@ file growth equals outstanding spilled canonical bodies, reclaimed after
 settlement/cancellation; this adds no durable store or persistent cache.
 
 
+## Large native Turn event publication
+
+Checkpoint reconstruction can change historical segment positions and produce
+a large structural patch. An isolated reconstruction measured an 8,804,963-byte
+patch over a 27,771,257-byte resulting projection. These fit the existing native
+Turn and attempt-event documents, while the expanded conversation replay
+envelope does not fit its 8 MiB boundary. The complete attempt event now commits
+with a small `conversation.activity` / `requiresSnapshot` notification in the
+same transaction (285 JSON bytes with the reconstruction's identities).
+Snapshot recovery reads the exact committed projection.
+
+This adds no journal, index, worker or retention setting. The existing canonical
+attempt-event retention owns the complete evidence; ordinary sync references
+retain their source protection, while an invalidation has no source reference
+to protect. Sync retention owns only the small notification. Native write/sync
+fault tests cover all-or-none source, cursor and invalidation recovery; producer
+tests cover exact content, carried event and terminal settlement above the old
+patch quota. See [STORAGE_TOFUDB.md](STORAGE_TOFUDB.md) for the publication boundaries.
+
 ## SQLite demand and connection ownership
 
 Problem: writer job slots, fixed lane waits and read-pool slots refused or

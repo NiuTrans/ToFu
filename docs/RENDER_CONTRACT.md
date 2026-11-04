@@ -2062,3 +2062,9 @@ real HTTP/browser `tests/visual/test_visual_dynamic_surfaces.py` and
 `tests/visual/test_visual_rich_responses.py` (including durable batch answers).
 `designs/ui-gallery/dynamic-response.html` uses the actual presenter and explicitly
 illustrative data; its desktop/320px screenshots cover all three themes.
+
+Storage-delivery warnings take precedence over stale model-routing progress. The
+read-side `pushWithheld` signal stays visible while an exited executor owes
+terminal persistence; only a committed terminal outcome ends that wait. The
+warning names record persistence and paused status delivery, without promising
+that unacknowledged data is already safe. See `docs/TASK_EVENT_DELIVERY.md`.

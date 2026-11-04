@@ -5023,7 +5023,7 @@
   "stream.phase.startupConfig": "Résolution des paramètres du modèle et de l’espace de travail…",
   "stream.phase.startupContext": "Chargement du contexte du projet et de la mémoire pertinente…",
   "stream.phase.startupTools": "Préparation des outils et de l’espace de travail…",
-  "stream.phase.storageWedged": "Écriture dans le stockage bloquée, nouvelle tentative (aucune perte de données)…",
+  "stream.phase.storageWedged": "Impossible d’enregistrer l’historique d’exécution. Les mises à jour d’état sont suspendues pendant que le serveur effectue de nouvelles tentatives.",
   "stream.phase.streamInterruptedRetryDirect": "Le flux direct de {model} s’est terminé de façon inattendue après {elapsed} s. Nouvelle tentative sur un autre emplacement ({attempt}/{max})…",
   "stream.phase.streamStalled": "Aucune nouvelle progression du modèle depuis {idle} s ({elapsed} s au total) — {model} est toujours connecté…",
   "stream.phase.vuAssembleContext": "Le mode objectif rassemble le contexte de la conversation pour rédiger une réponse…",

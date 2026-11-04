@@ -5023,7 +5023,7 @@
   "stream.phase.startupConfig": "모델 및 작업 영역 설정을 확인하는 중…",
   "stream.phase.startupContext": "프로젝트 컨텍스트와 관련 메모리를 불러오는 중…",
   "stream.phase.startupTools": "도구와 작업 영역을 준비하는 중…",
-  "stream.phase.storageWedged": "스토리지 쓰기가 지연되어 다시 시도하는 중(손실된 내용 없음)…",
+  "stream.phase.storageWedged": "실행 기록을 저장하지 못했습니다. 서버에서 다시 시도하는 동안 상태 업데이트가 일시 중지됩니다.",
   "stream.phase.streamInterruptedRetryDirect": "{model}의 직접 연결 스트림이 {elapsed}초 후 예기치 않게 종료되었습니다. 현재 슬롯을 피해 다시 시도하는 중({attempt}/{max})…",
   "stream.phase.streamStalled": "{idle}초 동안 새로운 모델 진행 없음(총 {elapsed}초) — {model}에 계속 연결되어 있습니다…",
   "stream.phase.vuAssembleContext": "목표 모드에서 다음 사용자 응답을 작성하기 위해 대화 컨텍스트를 정리하는 중…",

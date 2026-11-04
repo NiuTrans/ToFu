@@ -2,7 +2,9 @@
 // growth and stable-segment repair can cross 8 MiB inside the authority.
 #[test]
 fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
-    for stable_segments in [false, true] {
+    for (stable_segments, append_bytes) in [
+        (false, 30_000), (true, 10_000), (true, 9 * 1024 * 1024),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
         execute(
@@ -78,7 +80,6 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
         )
         .unwrap();
         let revision = live["projection_revision"].as_u64().unwrap();
-        let append_bytes = if stable_segments { 10_000 } else { 30_000 };
         let patch_request = request(
             "turn.event.record",
             11,
@@ -93,7 +94,7 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
             }),
             Some("large-patch-event"),
         );
-        assert!(patch_request.payload.len() < 32_000);
+        assert!(patch_request.payload.len() < append_bytes + 2048);
         let patched = execute(&mut db, &patch_request, 1_500).unwrap();
         assert_eq!(patched["applied"], true);
         let get = request(
