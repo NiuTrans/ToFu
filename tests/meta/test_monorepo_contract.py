@@ -102,3 +102,33 @@ def test_script_mentions_only_narrow_which_retained_tests_are_read(tmp_path):
     assert check_declared_scripts(
         tmp_path, tracked, script_mentions={'tests/test_release.py'}) == missing
     assert check_declared_scripts(tmp_path, tracked, script_mentions=set()) == []
+
+
+_TABLE = ['pyproject.toml: project.license must be an SPDX expression string, not a table']
+_OLD_FLOOR = ['pyproject.toml: an SPDX project.license needs build-system setuptools>=77']
+_CLASSIFIER = ['pyproject.toml: remove License :: classifiers; setuptools rejects them '
+               'beside an SPDX project.license']
+
+
+@pytest.mark.parametrize(('license_line', 'requirement', 'expected'), [
+    ('license = {text = "MIT"}', 'setuptools==80.10.2', _TABLE),
+    ('license = {file = "LICENSE"}', 'setuptools==80.10.2', _TABLE),
+    ('license = "MIT"', 'setuptools>=68.0', _OLD_FLOOR),
+    ('license = "MIT"', 'setuptools<81', _OLD_FLOOR),
+    ('license = "MIT"', 'setuptools-scm>=80', _OLD_FLOOR),
+    ('license = "MIT"', 'setuptools>=77,<81', []),
+    ('license = "MIT AND Apache-2.0"', 'setuptools==80.10.2', []),
+    ('license = "MIT"\nclassifiers = ["License :: OSI Approved :: MIT License"]',
+     'setuptools==80.10.2', _CLASSIFIER),
+    ('license = "MIT"\nclassifiers = ["Programming Language :: Python :: 3"]',
+     'setuptools==80.10.2', []),
+    ('', 'setuptools>=68', []),
+])
+def test_package_license_stays_buildable_by_current_setuptools(
+        tmp_path, license_line, requirement, expected):
+    from scripts.check_monorepo import check_package_license_metadata
+    (tmp_path / 'pyproject.toml').write_text(
+        f'[build-system]\nrequires = ["{requirement}", "wheel"]\n'
+        'build-backend = "setuptools.build_meta"\n\n'
+        f'[project]\nname = "member"\nversion = "1.0"\n{license_line}\n')
+    assert check_package_license_metadata(tmp_path, {'pyproject.toml'}) == expected
