@@ -197,17 +197,33 @@ timestamps (equal milliseconds reorder a thread).
   `message`, `response`) to stdout and executes JSON-lines commands from stdin
   (`whoami`, `send_text`, `send_markdown`, `reply_message`, `history`,
   `sessions`, `create_group`), each answered with its request ID. It decodes
-  quote parts so reply facts survive, flags its own sends, and exits on
-  disconnect (3), kick-off (43) or a closed stdin (0). Disconnect is the SDK's
-  own `CONSTANT.LOGIN_STATUS.DISCONNECTED`: the SDK reports every channel loss
-  (heartbeat degrade, authentication timeout or failure, kick-off) with that
-  status and, with `autoConnect` off, never reconnects, so a bridge that missed
-  it would stay alive and deaf. A kick-off reports `DISCONNECTED` first and its
-  kick event in the same synchronous dispatch, so the disconnect exit is
-  deferred one turn and the kick decides; an SDK without `LOGIN_STATUS` fails
-  the session (4) rather than run unable to notice a loss. It holds no policy
-  and no durable state. One-shot mode (`--command whoami|create_group`) serves
-  identity confirmation and command-chat creation.
+  quote parts so reply facts survive and flags its own sends. Disconnect is
+  the SDK's own `CONSTANT.LOGIN_STATUS.DISCONNECTED`. On a transport loss it
+  reports `disconnected`, reconnects the existing SDK socket and calls the
+  engine's `login()` with its in-memory credentials. The engine owns rejection
+  recovery and its existing login deadline; its `AuthFail` retry also needs a
+  new socket because `autoConnect` is off. Concurrent loss notifications and
+  commands join that login. Only successful authentication for the same uid
+  reports `connected`, triggering the adapter's ordinary catch-up again.
+  Commands already dispatched are never replayed. Failed recovery exits (4)
+  for the supervisor/launcher to refresh the session; kick-off exits (43) and
+  stdin close exits (0), including during recovery. A kick-off reports
+  `DISCONNECTED` before its kick event in the same synchronous dispatch, so
+  recovery defers one event-loop turn to let the kick decide. An SDK without
+  the required status or socket-reconnect interface fails closed (4).
+  It holds no policy and no durable state. One-shot mode
+  (`--command whoami|create_group`) serves identity confirmation and
+  command-chat creation.
+
+  **Problem:** exiting on every socket close discarded valid IM credentials;
+  repeated network closes therefore called `/login/im_token/generate` on each
+  restart and left ingress offline until the scheduler tick. **Decision:**
+  reconnect in the existing process, retaining the engine's credential cache
+  and using its authentication outcome as the validity check. **Alternatives
+  rejected:** ignoring disconnect leaves ingress deaf; the engine's
+  `reconnect()` unconditionally invalidates credentials; a disk token cache or
+  guessed TTL duplicates authentication policy; a new refresh/backoff timer
+  adds a tuning knob. No new timer, retry budget or credential store is added.
 - **Adapter** (`lib/channels/dx/adapter.py`): normalization of live pushes and
   history rows (server time from the snowflake ID), reconnect catch-up,
   sequential ingest, and the outbox sender port. Provider limits are named in

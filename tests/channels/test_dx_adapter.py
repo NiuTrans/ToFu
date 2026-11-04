@@ -177,6 +177,28 @@ def test_reconnect_catch_up_replays_after_watermarks_and_frontier(channel, dispa
     assert channel.account('dx')['status']['state'] == 'connected'
 
 
+def test_same_bridge_reconnect_replays_gap_without_duplicate_delivery(channel, dispatch):
+    first = mid_at(1_761_000_002_000)
+    gap = mid_at(1_761_000_003_000)
+    bridge = FakeBridge([{'type': 'group', 'id': '500', 'name': 'Team'}],
+                        {'dx:gid:500': [history_row(first, text='before drop')]})
+    adapter = DxAdapter(OWNER, store=channel, bridge_factory=lambda owner: bridge)
+    adapter._bridge = bridge
+    connected = {'type': 'status', 'status': 'connected', 'selfUid': OWNER_UID}
+    adapter._on_status(connected)
+    adapter._on_status({'type': 'status', 'status': 'disconnected', 'detail': 'status 8 onClose'})
+    assert not adapter._connected.is_set()
+    bridge.history['dx:gid:500'].append(history_row(gap, text='during gap'))
+    adapter._on_status(connected)
+    adapter._on_status(connected)  # a repeated ready notification cannot redeliver
+    contents = [call['message']['content'] for call in dispatch.to(ROUTER)]
+    assert len(contents) == 2
+    assert 'before drop' in contents[0] and 'during gap' in contents[1]
+    assert 'before drop' not in contents[1]
+    assert channel.thread(GROUP)['watermark'] == gap
+    assert adapter._connected.is_set() and bridge.alive()
+
+
 def test_first_connection_starts_at_the_frontier_without_history(store, enabled, router, dispatch):
     enabled()
     store.update_account('dx', lambda account: {**account, 'frontierAtMs': None})
