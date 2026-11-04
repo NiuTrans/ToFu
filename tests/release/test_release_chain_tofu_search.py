@@ -8,14 +8,15 @@ this suite landed, since bumped 0.6.0 → 0.7.3 — each bump's rationale lives
 in the comment block above the pin). Recent floors are on NO pip index:
 public PyPI topped at 0.5.1 (measured 2026-07-31, pinned by
 tests/release/test_requirements_public_resolvable.py — RED until the publish), and
-the internal mirror carries none. The only verified artifacts live in the
-monorepo member's ``dist/``.
+the internal mirror carries none. The only matching artifact is the one the
+export builds from the monorepo member source it ships.
 
 So the chain must carry the floor itself, at all three of its points:
 
   1. **export** — ``_bundle_tofu_search_wheel`` used to skip opensource on
      the assumption "a vanilla host reaches public PyPI fine". Measured
-     false; the wheel is bundled for EVERY mode now.
+     false; the wheel is bundled for EVERY mode now, always built from the
+     member source the export ships.
   2. **CI** — each build-desktop.yml leg installs the bundled wheel BEFORE
      ``pip install -r requirements.txt``, so pip sees the floor as already
      satisfied. Absence + an index that lacks the floor fails LOUD at the
@@ -32,7 +33,12 @@ CI step harmless).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import shutil
+import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -45,45 +51,76 @@ _REQUIREMENTS = _ROOT / 'requirements.txt'
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  1. export bundles the wheel for EVERY mode
+#  1. export builds the wheel from the shipped member, for EVERY mode
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.3-py3-none-any.whl',),
-               floor='0.5.3', src_version='0.5.3'):
-    """A minimal ROOT/workspace/dest tree around the bundling function."""
+def _write_wheel(path, version, origin):
+    with zipfile.ZipFile(path, 'w') as archive:
+        archive.writestr(f'tofu_search-{version}.dist-info/METADATA',
+                         f'Name: tofu-search\nVersion: {version}\n')
+        archive.writestr('tofu_search/origin.txt', origin)
+    return path
+
+
+def _fake_tree(tmp_path, monkeypatch, *, member_version='0.5.3', floor='0.5.3',
+               checkout_wheels=()):
+    """A live checkout (``ROOT``) beside the export destination it produced.
+
+    ``dest`` holds the exported member source and requirements floor. The
+    checkout carries an uncommitted version bump, its own floor and whatever
+    was last built into ``dist/``; none of them may influence the export.
+    The fake builder records the source it was given and stamps its wheel.
+    """
     internal = pytest.importorskip(
         'export_pkg._internal', reason='export internals not shipped in opensource')
     root = tmp_path / 'tofu'
-    member = root / 'packages' / 'tofu-search'
-    (member / 'dist').mkdir(parents=True)
-    (member / 'pyproject.toml').write_text(
-        f'[project]\nversion = "{src_version}"\n', encoding='utf-8')
-    for w in wheels:
-        import zipfile
-        with zipfile.ZipFile(member / 'dist' / w, 'w') as archive:
-            version = w.split('-')[1]
-            archive.writestr(f'tofu_search-{version}.dist-info/METADATA',
-                             f'Name: tofu-search\nVersion: {version}\n')
-    (root / 'requirements.txt').write_text(
-        f'tofu-search>={floor}\n', encoding='utf-8')
+    live_member = root / 'packages' / 'tofu-search'
+    (live_member / 'dist').mkdir(parents=True)
+    (live_member / 'pyproject.toml').write_text(
+        '[project]\nversion = "0.9.0"\n', encoding='utf-8')
+    for version in checkout_wheels:
+        _write_wheel(live_member / 'dist' / f'tofu_search-{version}-py3-none-any.whl',
+                     version, 'checkout dist/')
+    (root / 'requirements.txt').write_text('tofu-search>=0.1.0\n', encoding='utf-8')
     dest = tmp_path / 'dest'
-    dest.mkdir()
+    shipped = dest / 'packages' / 'tofu-search'
+    shipped.mkdir(parents=True)
+    (shipped / 'pyproject.toml').write_text(
+        f'[project]\nversion = "{member_version}"\n', encoding='utf-8')
+    (dest / 'requirements.txt').write_text(f'tofu-search>={floor}\n', encoding='utf-8')
+    builds = []
+
+    def fake_build(member, out):
+        source = (member / 'pyproject.toml').read_text(encoding='utf-8')
+        builds.append(source)
+        # A real setuptools build litters its project directory.
+        (member / 'build').mkdir()
+        (member / 'tofu_search.egg-info').mkdir()
+        version = re.search(r'version = "([^"]+)"', source).group(1)
+        return _write_wheel(out / f'tofu_search-{version}-py3-none-any.whl',
+                            version, 'exported member')
+
     # Patch the helper's canonical module so the test cannot accidentally read
-    # a developer's real sibling checkout. Importing the full publish facade
-    # would also cross into secret-bearing release setup that this unit does
-    # not exercise.
+    # a developer's real checkout. Importing the full publish facade would
+    # also cross into secret-bearing release setup that this unit does not
+    # exercise.
     monkeypatch.setattr(internal, 'ROOT', root)
-    return internal, dest
+    monkeypatch.setattr(internal, '_build_search_wheel', fake_build)
+    return internal, dest, builds
+
+
+def _vendored(dest):
+    return sorted(p.name for p in (dest / 'vendor').glob('tofu_search-*.whl'))
 
 
 def test_the_wheel_is_bundled_for_opensource_too(tmp_path, monkeypatch):
     """The opensource skip assumed public PyPI carries the floor — it does
     not (max 0.5.1 vs a 0.5.3 HARD floor), so skipping produced an export
     whose install.sh could never satisfy requirements.txt."""
-    ex, dest = _fake_tree(tmp_path, monkeypatch)
+    ex, dest, _ = _fake_tree(tmp_path, monkeypatch)
     ex._bundle_tofu_search_wheel(dest, 'opensource')
-    shipped = list((dest / 'vendor').glob('tofu_search-*.whl'))
+    shipped = _vendored(dest)
     assert len(shipped) == 1, (
         f'opensource export carries no tofu-search wheel: {shipped}. '
         'With the floor unsatisfiable from every index, that export cannot '
@@ -94,36 +131,78 @@ def test_the_wheel_is_bundled_for_opensource_too(tmp_path, monkeypatch):
 def test_the_wheel_is_still_bundled_for_internal_modes(tmp_path,
                                                        monkeypatch, mode):
     """Complement: widening the gate must not drop the existing modes."""
-    ex, dest = _fake_tree(tmp_path, monkeypatch)
+    ex, dest, _ = _fake_tree(tmp_path, monkeypatch)
     ex._bundle_tofu_search_wheel(dest, mode)
-    assert len(list((dest / 'vendor').glob('tofu_search-*.whl'))) == 1
+    assert len(_vendored(dest)) == 1
 
 
-def test_the_newest_wheel_wins(tmp_path, monkeypatch):
-    ex, dest = _fake_tree(
-        tmp_path, monkeypatch,
-        wheels=('tofu_search-0.5.1-py3-none-any.whl',
-                'tofu_search-0.5.3-py3-none-any.whl'))
+def test_a_checkout_dist_wheel_is_never_shipped(tmp_path, monkeypatch):
+    """The installer pins the vendored wheel instead of building the shipped
+    member, so the export builds that wheel from the snapshot it ships.
+
+    The checkout's ``dist/`` is an untracked build product: a wheel there
+    with the current version number may predate unreleased commits or hold a
+    concurrent writer's uncommitted edits. Admitted by version number, it
+    published search code the exported snapshot does not contain.
+    """
+    ex, dest, builds = _fake_tree(tmp_path, monkeypatch,
+                                  checkout_wheels=('0.5.3', '0.9.0'))
     ex._bundle_tofu_search_wheel(dest, 'opensource')
-    names = [p.name for p in (dest / 'vendor').glob('tofu_search-*.whl')]
-    assert names == ['tofu_search-0.5.3-py3-none-any.whl'], names
+    assert _vendored(dest) == ['tofu_search-0.5.3-py3-none-any.whl']
+    assert builds == ['[project]\nversion = "0.5.3"\n']
+    wheel = dest / 'vendor' / 'tofu_search-0.5.3-py3-none-any.whl'
+    with zipfile.ZipFile(wheel) as archive:
+        assert archive.read('tofu_search/origin.txt') == b'exported member'
+    manifest = json.loads((dest / 'vendor' / 'install-manifest.json').read_text())
+    assert manifest['artifacts']['tofu_search'] == {
+        'version': '0.5.3', 'filename': wheel.name,
+        'sha256': hashlib.sha256(wheel.read_bytes()).hexdigest()}
 
 
-def test_a_missing_dist_dir_refuses_release(tmp_path, monkeypatch):
-    """A host without the sibling repo must not crash the export — it just
-    gets no wheel (and install.sh then reports the gap loudly)."""
-    internal = pytest.importorskip(
-        'export_pkg._internal', reason='export internals not shipped in opensource')
-    root = tmp_path / 'tofu'
-    root.mkdir()
-    (root / 'requirements.txt').write_text('tofu-search>=0.5.3\n',
-                                           encoding='utf-8')
-    dest = tmp_path / 'dest'
-    dest.mkdir()
-    monkeypatch.setattr(internal, 'ROOT', root)
-    with pytest.raises(RuntimeError, match='wheel missing'):
-        internal._bundle_tofu_search_wheel(dest, 'opensource')
-    assert not list(dest.glob('vendor/tofu_search-*.whl'))
+def test_a_lagging_checkout_never_aborts_and_the_build_leaves_no_litter(
+        tmp_path, monkeypatch):
+    """A lagging checkout ``dist/`` must not abort the export (2026-10: it
+    held 0.12.21 under a 0.12.25 floor and every export of either mode
+    died), and the builder's scratch output stays out of the shipped member.
+    """
+    ex, dest, builds = _fake_tree(tmp_path, monkeypatch, checkout_wheels=('0.5.1',))
+    ex._bundle_tofu_search_wheel(dest, 'internal')
+    assert _vendored(dest) == ['tofu_search-0.5.3-py3-none-any.whl']
+    assert builds == ['[project]\nversion = "0.5.3"\n']
+    shipped = dest / 'packages' / 'tofu-search'
+    assert sorted(p.name for p in shipped.iterdir()) == ['pyproject.toml']
+
+
+def test_a_missing_member_refuses_release(tmp_path, monkeypatch):
+    """Without the member source there is nothing to build the wheel from;
+    a checkout wheel is no substitute."""
+    ex, dest, builds = _fake_tree(tmp_path, monkeypatch, checkout_wheels=('0.5.3',))
+    shutil.rmtree(dest / 'packages')
+    with pytest.raises(RuntimeError, match='member source is missing'):
+        ex._bundle_tofu_search_wheel(dest, 'opensource')
+    assert builds == []
+    assert not (dest / 'vendor').exists()
+
+
+def test_a_failed_build_refuses_release(tmp_path, monkeypatch):
+    ex, dest, _ = _fake_tree(tmp_path, monkeypatch)
+
+    def failing_build(member, out):
+        raise subprocess.CalledProcessError(1, ['uv', 'build'])
+
+    monkeypatch.setattr(ex, '_build_search_wheel', failing_build)
+    with pytest.raises(RuntimeError, match='from the exported source failed'):
+        ex._bundle_tofu_search_wheel(dest, 'opensource')
+    assert not (dest / 'vendor').exists()
+
+
+def test_a_build_below_the_exported_floor_refuses_release(tmp_path, monkeypatch):
+    """The installer rejects a manifest version below the shipped floor, so
+    the export refuses first instead of publishing an uninstallable tree."""
+    ex, dest, _ = _fake_tree(tmp_path, monkeypatch, member_version='0.5.1')
+    with pytest.raises(RuntimeError, match=r'0\.5\.1 .*below .*>=0\.5\.3'):
+        ex._bundle_tofu_search_wheel(dest, 'opensource')
+    assert not (dest / 'vendor').exists()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -219,45 +298,3 @@ def test_the_floor_pin_carries_its_rationale():
         f'the {floor} rationale is a stub ({len(body)} chars) — name the '
         'capability that requires the floor')
 
-
-def test_stale_search_wheel_refuses_release(tmp_path, monkeypatch):
-    ex, dest = _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.1-py3-none-any.whl',))
-    monkeypatch.setattr(ex, '_build_search_wheel', lambda member, out: None)
-    with pytest.raises(RuntimeError, match='STALE'):
-        ex._bundle_tofu_search_wheel(dest, 'opensource')
-    assert not list(dest.glob('vendor/tofu_search-*.whl'))
-
-
-def test_stale_search_wheel_is_rebuilt_from_the_shipped_member(tmp_path, monkeypatch):
-    """An export must not die because dist/ lags the source version.
-
-    The member source is in the tree being exported, so the wheel that
-    install.sh will need is rebuilt from it instead of failing the export
-    (2026-10: dist/ held 0.12.21 under a 0.12.25 floor and every export of
-    either mode aborted before the tree was usable).
-    """
-    import zipfile
-    ex, dest = _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.1-py3-none-any.whl',))
-    shipped = dest / 'packages' / 'tofu-search'
-    shipped.mkdir(parents=True)
-    (shipped / 'pyproject.toml').write_text('[project]\nversion = "0.5.3"\n', encoding='utf-8')
-    built = []
-
-    def fake_build(member, out):
-        built.append((member / 'pyproject.toml').read_text(encoding='utf-8'))
-        (member / 'build').mkdir()
-        (member / 'tofu_search.egg-info').mkdir()
-        wheel = out / 'tofu_search-0.5.3-py3-none-any.whl'
-        with zipfile.ZipFile(wheel, 'w') as archive:
-            archive.writestr('tofu_search-0.5.3.dist-info/METADATA',
-                             'Name: tofu-search\nVersion: 0.5.3\n')
-        return wheel
-
-    monkeypatch.setattr(ex, '_build_search_wheel', fake_build)
-    ex._bundle_tofu_search_wheel(dest, 'internal')
-    assert [p.name for p in (dest / 'vendor').glob('tofu_search-*.whl')] == [
-        'tofu_search-0.5.3-py3-none-any.whl']
-    # Built from the exact (sanitized) source the export ships, never the
-    # developer's working tree, and the builder's litter stays out of it.
-    assert built == ['[project]\nversion = "0.5.3"\n']
-    assert sorted(p.name for p in shipped.iterdir()) == ['pyproject.toml']
