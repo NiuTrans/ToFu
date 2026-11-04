@@ -73,6 +73,9 @@ class AdmittedCall:
     their own receipt (with any effect evidence) is kept.
     The worker records ``entered``/``deadline`` when the handler starts, so time
     spent waiting for order, approval or a human never consumes the ceiling.
+    A gateway child also waits for ``sibling_predecessors``, the settlement of
+    earlier sibling gateway calls of its response; ``on_finished`` settles a
+    gateway occurrence itself once its worker is done, whatever the outcome.
     """
 
     item: tuple
@@ -80,6 +83,8 @@ class AdmittedCall:
     bounded: bool = True
     deadline: float = math.inf
     entered: bool = False
+    sibling_predecessors: tuple[Future, ...] = ()
+    on_finished: Callable[[], None] | None = None
 
 
 class _EntryDeadlines(Mapping):
@@ -142,7 +147,7 @@ class ToolExecutionPorts:
 
 
 def _await_predecessors(task: dict, predecessors: tuple[Future, ...]) -> bool:
-    """Wait for earlier same-target calls; False when Stop wins first."""
+    """Wait for the earlier calls ``_ordering`` names; False when Stop wins first."""
     pending = {future for future in predecessors if not future.done()}
     while pending and not task.get('aborted'):
         _done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
@@ -434,10 +439,13 @@ def execute_admitted_tools(
                 (declared_tool_timeout_ms(
                     call.item[1], call.item[3], tool_schemas=batch.tools) or 0) / 1000.0)
             predecessors = tuple(futures_by_id[call_id] for call_id in call.predecessors
-                                 if call_id in futures_by_id)
+                                 if call_id in futures_by_id) + call.sibling_predecessors
             future, start_generation = ports.submit(
                 pool, partial(_run_admitted_call, batch, ports, call, predecessors,
                               timeout_seconds, copy_context()))
+            if call.on_finished is not None:
+                # Runs once the worker returns, raises or is cancelled unstarted.
+                future.add_done_callback(lambda _done, finish=call.on_finished: finish())
             futures[future] = (call.item[2], call.item[1], start_generation)
             calls_by_future[future] = call
             futures_by_id[call.item[2]] = future

@@ -275,9 +275,10 @@ for (const collapsed of [false, true]) {
     settings.getAttribute('aria-label').includes('cadtrans') && !settings.closest('.folder-tab'));
   settings.querySelector('svg').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const dialog = document.querySelector('dialog[open]');
+  const roots = dialog ? [...dialog.querySelectorAll('.folder-settings-workbench .pm-rail .mp-folder-list > .mp-row[data-path]')] : [];
   check('settings_dialog_' + collapsed, !!dialog && dialog.querySelector('input[type="text"]').value === 'cadtrans' &&
-    !!dialog.querySelector('select') && dialog.querySelector('.folder-settings-root-path').textContent === '/workspace/demo' &&
-    dialog.querySelector('.folder-settings-root [data-action="readonly"]').getAttribute('aria-pressed') === 'true');
+    !!dialog.querySelector('select') && roots.length === 1 && roots[0].dataset.path === '/workspace/demo' &&
+    roots[0].querySelector('.mp-row-lock').getAttribute('aria-pressed') === 'true');
   check('settings_no_switch_' + collapsed, _ACTIVE_FOLDER === before && _setActiveCalls.length === 0);
   [...dialog.querySelectorAll('button')].find(button => button.textContent === 'folder.cancel').click();
 }

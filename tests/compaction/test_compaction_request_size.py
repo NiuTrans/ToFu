@@ -70,6 +70,16 @@ def _task():
             'config': {'model': 'gpt-6-astra'}}
 
 
+def _admit(messages, task, monkeypatch):
+    from lib.tasks_pkg.orchestrator._root_agent_loop import admit_round_context
+    monkeypatch.setattr('lib.tasks_pkg.context_composer.execution_allowance.notice_decision',
+                        lambda *a, **k: None)
+    monkeypatch.setattr('lib.tasks_pkg.compaction._prompt_admission.enforce_dispatch_prompt_limit',
+                        lambda messages, *a, **k: {'totalTokens': _request_tokens(messages),
+                                                   'toolSchemaTokens': 16000})
+    return admit_round_context(task, messages, [], round_num=1, model='gpt-6-astra')
+
+
 def test_compaction_row_settles_on_the_rebuilt_request(monkeypatch, events):
     messages, task = _conversation(), _task()
     request_before = _request_tokens(messages)
@@ -81,19 +91,55 @@ def test_compaction_row_settles_on_the_rebuilt_request(monkeypatch, events):
     assert done[0]['tokensAfter'] == _estimate_total_tokens(compacted)
 
     pipeline.recompose_context_after_compaction(messages, task=task)
+    assert not [event for event in events if event['type'] == 'compaction_request_size']
+    # Inbox and per-round input arrive after the compaction/composer stage.
+    late = {'role': 'user', 'content': 'New owner steering after compaction. ' * 200}
+    messages.append(late)
+    # Final settlement must reuse the admitted count, not scan the prompt again.
+    monkeypatch.setattr(pipeline, '_count_tokens_authoritative',
+                        lambda *a, **k: pytest.fail('redundant final measurement'))
+    _admit(messages, task, monkeypatch)
     sizes = [event for event in events if event['type'] == 'compaction_request_size']
     assert len(sizes) == 1
     size = sizes[0]
     assert size['archiveId'] == 'archive-1' and size['tokenCountKind'] == 'estimated'
     assert size['tokensBefore'] == request_before
-    assert size['tokensAfter'] == _request_tokens(compacted) + len(RESTORED['content'])
+    assert size['tokensAfter'] == _request_tokens(compacted) + len(RESTORED['content']) + len(late['content'])
     assert size['msgsAfter'] == len(messages) and RESTORED in messages
     assert size['reductionPct'] == round(
         (1 - size['tokensAfter'] / size['tokensBefore']) * 100, 1)
 
     # One compaction is reported once; a later restoration pass adds nothing.
     pipeline.recompose_context_after_compaction(messages, task=task)
+    _admit(messages, task, monkeypatch)
     assert len([event for event in events if event['type'] == 'compaction_request_size']) == 1
+
+
+def test_refused_final_admission_does_not_report_a_completed_request_size(monkeypatch, events):
+    from lib.tasks_pkg.orchestrator._root_agent_loop import admit_round_context
+    messages, task = _conversation(), _task()
+    assert _compact(messages, task, monkeypatch, 'complete')
+    pipeline.recompose_context_after_compaction(messages, task)
+    monkeypatch.setattr('lib.tasks_pkg.context_composer.execution_allowance.notice_decision',
+                        lambda *a, **k: None)
+    def refuse(*args, **kwargs):
+        raise ValueError('final request not admitted')
+    monkeypatch.setattr('lib.tasks_pkg.compaction._prompt_admission.enforce_dispatch_prompt_limit', refuse)
+    with pytest.raises(ValueError, match='not admitted'):
+        admit_round_context(task, messages, [], round_num=1, model='gpt-6-astra')
+    assert not [event for event in events if event['type'] == 'compaction_request_size']
+    assert task['_compactionRequestSize']['archiveId'] == 'archive-1'
+
+
+def test_size_diagnostic_failure_does_not_break_a_prepared_retry(monkeypatch, events):
+    messages, task = _conversation(), _task()
+    task['_compactionRequestSize'] = {'archiveId': 'archive-1', 'tokensBefore': 100000}
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('counter unavailable')
+    monkeypatch.setattr(pipeline, '_count_tokens_authoritative', unavailable)
+    pipeline.settle_compaction_request_size(messages, task)
+    assert not [event for event in events if event['type'] == 'compaction_request_size']
+    assert task['_compactionRequestSize']['archiveId'] == 'archive-1'
 
 
 def test_unadopted_compaction_reports_no_request_size(monkeypatch, events):

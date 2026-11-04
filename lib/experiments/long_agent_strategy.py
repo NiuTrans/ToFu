@@ -15,7 +15,7 @@ CONTROL_POLICY = {
     "schemaBudgetTokens": 0,
     "resultEnvelope": "legacy",
     "contextBudgetTokens": 0,
-    "compactionStrategy": "fixed",
+    "compactionStrategy": "unified",
     "orchestrationPolicy": "v1",
 }
 
@@ -32,7 +32,6 @@ LONG_AGENT_POLICIES = {
     "context_budget_64k_v2": _candidate(contextBudgetTokens=64_000),
     "context_budget_v2": _candidate(contextBudgetTokens=96_000),
     "context_budget_128k_v2": _candidate(contextBudgetTokens=128_000),
-    "adaptive_compaction_v2": _candidate(compactionStrategy="adaptive"),
     "orchestration_v2": _candidate(orchestrationPolicy="v2"),
     "prompt_ablate_url": _candidate(promptProfile="lean_no_url"),
     "prompt_ablate_safety": _candidate(promptProfile="lean_no_safety"),
@@ -44,7 +43,7 @@ LONG_AGENT_POLICIES = {
         "schemaBudgetTokens": 4_000,
         "resultEnvelope": "v2",
         "contextBudgetTokens": 96_000,
-        "compactionStrategy": "adaptive",
+        "compactionStrategy": "unified",
         "orchestrationPolicy": "v2",
     },
 }

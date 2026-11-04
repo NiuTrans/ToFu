@@ -353,6 +353,7 @@ class LLMDispatcher:
                     kind='initial',
                 )
                 from lib.model_routing.inference import candidate_inference_metadata
+                from lib.model_routing.serving_locality import candidate_is_local_inference
                 slot = Slot(
                     key_name=(candidate.credential['credential_id'] + ':'
                               + candidate.deployment['deployment_id']),
@@ -369,6 +370,7 @@ class LLMDispatcher:
                     route_deployment_id=candidate.deployment['deployment_id'],
                     route_connection_id=candidate.connection['connection_id'],
                     route_credential_id=candidate.credential['credential_id'],
+                    local_inference=candidate_is_local_inference(candidate),
                     max_output_tokens=int(
                         candidate.deployment.get('max_output_tokens') or 0),
                     route_snapshot=snapshot.finalize(candidate),

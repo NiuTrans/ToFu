@@ -7,9 +7,11 @@
  * in-progress task shows its note (one line); every other note is its row's
  * tooltip and stays in the accessibility tree. A display translation
  * (`progressTranslation`) replaces each text it covers, and an "Original"
- * toggle shows the board as written. Sessions, Workers, references, graphs,
- * usage and questions never appear here; questions are ask_human cards in the
- * chat. Rendering reads nothing, acknowledges nothing and starts no work.
+ * toggle shows the board as written. The head is one line (title, state,
+ * summary, update time) that stays readable while the card is folded.
+ * Sessions, Workers, references, graphs, usage and questions never appear
+ * here; questions are ask_human cards in the chat. Rendering reads nothing,
+ * acknowledges nothing and starts no work.
  *
  * The card persists across renders: the owner's footer control (a Router's
  * Worker model) stays attached, and the fold, scroll and focus survive live
@@ -185,51 +187,45 @@ export function createCoordinatorProgress(ports: CoordinatorProgressPorts): Coor
   function render(view: CoordinatorProgressView, actionPorts: CoordinatorProgressActions) {
     last = [view, actionPorts];
     card.dataset.state = view.kind;
-    const titleRow = document.createElement('span');
-    titleRow.className = 'coordinator-progress-title-row';
     const title = document.createElement('span');
     title.className = 'coordinator-progress-title';
     title.textContent = t('coordinatorProgress.title');
-    titleRow.append(title);
-    const headNodes: Node[] = [titleRow];
+    const headNodes: Node[] = [title];
+    const headline = (text: string) => {
+      const line = document.createElement('span');
+      line.className = 'coordinator-progress-summary';
+      line.textContent = text;
+      headNodes.push(line);
+      return line;
+    };
     const contentNodes: Node[] = [];
     const commandNodes: Node[] = [];
     let translated = false;
 
     if (view.kind === 'unavailable') {
-      const notice = document.createElement('p');
-      notice.className = 'coordinator-progress-note';
-      notice.setAttribute('role', 'status');
-      notice.textContent = t('coordinatorProgress.unavailable');
-      contentNodes.push(notice);
+      headline(t('coordinatorProgress.unavailable')).setAttribute('role', 'status');
       commandNodes.push(createButton({ label: t('projectCoordination.retry'), size: 'sm', variant: 'ghost', onClick: actionPorts.retry }));
     } else if (view.kind === 'empty') {
-      const notice = document.createElement('p');
-      notice.className = 'coordinator-progress-note';
-      notice.textContent = t('coordinatorProgress.empty');
-      contentNodes.push(notice);
+      headline(t('coordinatorProgress.empty'));
     } else {
       const { board, translation } = view;
       translated = !!translation?.texts.some(entry => entry.text !== entry.source);
       const shown = translated && !original && translation
         ? new Map(translation.texts.map(entry => [entry.source, entry.text])) : null;
       const say = (text: string) => shown?.get(text) ?? text;
-      const headline = coordinatorProgressHeadline(board);
-      if (headline) {
+      const state = coordinatorProgressHeadline(board);
+      if (state) {
         const tally = document.createElement('span');
         tally.className = 'coordinator-progress-tally';
-        tally.textContent = headline;
-        titleRow.append(tally);
+        tally.textContent = state;
+        headNodes.push(tally);
       }
+      headline(say(board.summary));
       const updated = document.createElement('time');
       updated.className = 'coordinator-progress-updated';
       updated.dateTime = new Date(board.updatedAt).toISOString();
       updated.textContent = updatedLabel(board.updatedAt, ports.now?.() ?? Date.now());
-      titleRow.append(updated);
-      const summary = document.createElement('span');
-      summary.className = 'coordinator-progress-summary';
-      summary.textContent = say(board.summary);
-      headNodes.push(summary);
+      headNodes.push(updated);
 
       const open = board.tasks.filter(task => OPEN.has(task.status));
       const finished = board.tasks.filter(task => !OPEN.has(task.status));

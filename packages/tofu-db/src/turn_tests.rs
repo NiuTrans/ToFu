@@ -589,7 +589,7 @@
 
     pub(super) fn live_projection_request(attempt_id: &str, content: &str, now_ms: u64) -> EventRecordRequest {
         EventRecordRequest {
-            model_continuation: Value::Null,
+            worker_claim: None, model_continuation: Value::Null,
             attempt_id: attempt_id.to_owned(),
             task_id: "projection-head-task".to_owned(),
             terminal: false,
@@ -3541,7 +3541,7 @@ mod event_evidence_witness_tests {
     use super::*;
     fn request() -> EventRecordRequest {
         EventRecordRequest {
-            model_continuation: Value::Null, attempt_id: "a".to_owned(), task_id: "task".to_owned(),
+            worker_claim: None, model_continuation: Value::Null, attempt_id: "a".to_owned(), task_id: "task".to_owned(),
             terminal: false, status: "running".to_owned(), slim: false,
             content: "汉字\"\\\n".repeat(8192), thinking: "思考\"\\\n".to_owned(),
             projection: Value::Null, projection_patch: None, projection_segments_stable: false,

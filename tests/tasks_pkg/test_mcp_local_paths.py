@@ -103,6 +103,30 @@ def test_invalid_paths_refuse_without_invocation_or_parent_creation(workspace, t
     assert not (isolated / 'new').exists()
 
 
+def test_outside_refusal_names_target_and_admitted_roots(workspace, tmp_path):
+    task, primary, _, isolated, reference = workspace
+    target = tmp_path / 'outside/doc.md'
+    result = call(Bridge(), task, {'out_path': str(target)})
+    assert result.is_error
+    assert str(target) in result
+    assert f'autoharness={primary}' in result
+    assert f'llm-mcp={isolated}' in result
+    assert f'reference={reference} (read-only)' in result
+    assert 'rootname:' in result
+
+
+def test_symlink_refusal_names_where_the_target_resolves(workspace, tmp_path):
+    task, primary, *_ = workspace
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (primary / 'escape').symlink_to(outside, target_is_directory=True)
+    result = call(Bridge(), task, {'out_path': 'escape/doc.md'})
+    assert result.is_error
+    assert str(primary / 'escape/doc.md') in result
+    assert 'symlink' in result
+    assert str((outside / 'doc.md').resolve()) in result
+
+
 @pytest.mark.parametrize('transport', ['sse', 'streamable-http'])
 def test_remote_server_path_is_not_interpreted_as_local(workspace, transport):
     task, primary, *_ = workspace

@@ -2,11 +2,12 @@
 
 The typed browser owns navigation, rendering and the optimistic delete
 (``frontend/src/features/project/folder-browser.test.ts``). This suite drives
-the REAL retained bridge under jsdom: the staged workspace list and the
-browser's added markers stay one state; a confirmed directory delete unstages
-its workspace tag in the same task as the confirmation and re-stages it, with
-its read-only flag, when the server refuses; the file drop zone resolves rows
-through the browser markup; and closing the modal aborts the in-flight read.
+the REAL retained bridge under jsdom: the staged workspace list, the shared
+workspace rail's root rows and the browser's added markers stay one state; a
+confirmed directory delete unstages its workspace row in the same task as the
+confirmation and re-stages it, with its read-only flag, when the server
+refuses; the file drop zone resolves rows through the browser markup; and
+closing the modal aborts the in-flight read.
 """
 
 from __future__ import annotations
@@ -38,9 +39,9 @@ const { check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body>' +
     '<div id="projectModal" class="open"><div class="modal project-modal pm-workbench">' +
+    '<span id="pmMobileCount"></span><div class="pm-body">' +
     '<div class="pm-browser-pane"><div id="remoteDevicesSection" style="display:none"></div></div>' +
-    '<div id="mpFolderTags"></div><span id="mpFolderCount"></span><span id="pmMobileCount"></span>' +
-    '</div></div></body>',
+    '</div></div></div></body>',
   targets: [process.argv[2]],
   globals: {
     runtimeScope: {},
@@ -61,7 +62,10 @@ const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve()
 const browser = () => document.getElementById('folderBrowser');
 const row = (path) => document.querySelector(
   '#folderBrowser .folder-browser-row[data-dir-path="' + path + '"]');
-const tags = () => document.getElementById('mpFolderTags').innerHTML;
+const tags = () => [...document.querySelectorAll(
+  '#projectModal .pm-rail .mp-folder-list > li.mp-row[data-path]')]
+  .map((li) => ({ path: li.dataset.path, readOnly: li.classList.contains('mp-row-readonly') }));
+const staged = (path) => tags().find((tag) => tag.path === path);
 
 await browseDirectory('/root');
 check('browser_mounted_in_pane', !!document.querySelector('.pm-browser-pane > #folderBrowser'));
@@ -69,13 +73,13 @@ check('remote_group_adopted_as_prelude', !!browser().querySelector('#remoteDevic
 check('rows_rendered', !!row('/root/alpha') && !!row('/root/beta'));
 
 row('/root/alpha').querySelector('[data-action="add"]').click();
-check('add_stages_workspace_tag', tags().includes('/root/alpha'));
+check('add_stages_workspace_tag', !!staged('/root/alpha'));
 check('add_marks_row', row('/root/alpha').dataset.added === 'true');
 _mpRemove(0);
 check('removing_tag_clears_marker', row('/root/alpha').dataset.added === 'false');
 mpAddBrowsedPath('/root/alpha');
 _mpToggleReadOnly(0);
-check('staged_root_read_only', tags().includes('mp-row-readonly'));
+check('staged_root_read_only', !!staged('/root/alpha') && staged('/root/alpha').readOnly);
 
 check('drop_target_row',
   _folderDropTargetDir(row('/root/beta').querySelector('.folder-browser-name')) === '/root/beta');
@@ -86,7 +90,7 @@ row('/root/alpha').querySelector('[data-action="delete"]').click();
   .find((button) => button.textContent === 'common.delete').click();
 check('rmdir_called', calls.rmdir.join(',') === '/root/alpha');
 check('row_removed_instantly', !row('/root/alpha'));
-check('tag_unstaged_instantly', !tags().includes('/root/alpha'));
+check('tag_unstaged_instantly', !staged('/root/alpha'));
 
 if (scenario === 'ok') {
   serverHasAlpha = false;
@@ -94,12 +98,12 @@ if (scenario === 'ok') {
   await flush();
   check('success_toast', calls.toasts.some((args) => args[0] === 'folder.deleted' && args[1] === 'success'));
   check('row_stays_gone', !row('/root/alpha'));
-  check('tag_stays_gone', !tags().includes('/root/alpha'));
+  check('tag_stays_gone', !staged('/root/alpha'));
 } else {
   settleDelete({ ok: false, json: async () => ({ detail: 'boom' }) });
   await flush();
   check('row_restored_from_server', !!row('/root/alpha'));
-  check('tag_restaged_read_only', tags().includes('/root/alpha') && tags().includes('mp-row-readonly'));
+  check('tag_restaged_read_only', !!staged('/root/alpha') && staged('/root/alpha').readOnly);
   check('server_reason_visible', browser().querySelector('.folder-browser-alert').textContent.includes('boom'));
 }
 

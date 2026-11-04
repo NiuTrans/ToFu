@@ -205,6 +205,13 @@ decision record is "Worker workspace preflight" in `docs/PROJECT_COORDINATION.md
 `test_managed_repository.py`, `test_worker_workspace_refusal.py` and the plain-folder
 file-lifecycle and reclamation tests.
 
+`glob_match.py` is the one dialect for the `search_files` include and the
+`find_files` pattern on every backend: the index prefilter and Python walkers
+call `ProjectGlob.matches`, rg gets the validated glob, fd only `name_only`
+globs, GNU grep only `grep_includes`. Never filter those with `fnmatch` or a
+second translation; the run-command `find -name` lane keeps GNU fnmatch.
+Verify `test_glob_match.py` and `test_tree_index.py::TestGlobSyntax`.
+
 `tree_index.py` owns coalesced root builds and directory scans; `read_tools.py`
 owns index-search/count chunks. Both use the shared demand executor with idle
 reuse hints, never active count quotas. Incomplete index candidates stay out of

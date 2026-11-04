@@ -198,7 +198,8 @@ def execute_program_schema() -> dict[str, Any]:
             'description': _PROGRAM_EXECUTION_SCOPE + (
                 'Async JS body, no wrapper; return, not console.log. '
                 'Example: return {sum:1+2+3}; '
-                'await tools.invoke(name,args) runs NEW calls; Promise.all batches. '
+                'await tools.invoke(name,args) runs NEW calls and stops on failure; Promise.all batches. '
+                'await tools.call(name,args) returns a receipt: check .status, then await tools.value(receipt). '
                 'programInput is metadata, NOT a global; paste programInput.read. '
                 'tools.result(name,args) or tools.result({ref}): retained decoded data only; unavailable hands off. '
                 'tools.inputs({name,offset:0,limit:16}): {inputs,total,nextOffset}; check inputs.length before inputs[i].ref. '

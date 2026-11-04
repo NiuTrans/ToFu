@@ -17,6 +17,9 @@ from lib.tasks_pkg.compaction._constants import (
     _SUMMARY_DISPATCH_MAX_TOKENS,
 )
 from lib.tasks_pkg.compaction._layer2._source_plan import CompactionSources
+from lib.tasks_pkg.compaction._layer2._projection import (
+    _retained_projection, _with_restoration_reserve,
+)
 
 # Preserve the entrypoint diagnostic stream across phase extraction.
 logger = get_logger('lib.tasks_pkg.compaction._layer2._compact')
@@ -143,10 +146,15 @@ def admit_compaction_sources(
         source_messages=messages)
     # Managed snapshots are restored later. Do not sell their removal as
     # permanent savings, even during optimistic preflight.
-    _restored_context_reserve = ports.estimate_tokens([
-        message for message in sources.summary_input if message.get('_contextComposer')])
-    _best_candidate_tokens = max(0, tokens_before - _foldable_tokens
-                                 + _restored_context_reserve)
+    retained = _retained_projection(
+        sources.old_messages, sources.recent_messages, sources.anchor_msg,
+        sources.retained_entries, task=task)
+    if sources.continuity_handoff is not None:
+        from lib.tasks_pkg.compaction._handoff import insert_compaction_handoff
+        insert_compaction_handoff(retained, sources.continuity_handoff)
+    _best_candidate_tokens = ports.estimate_tokens(
+        _with_restoration_reserve(retained, messages, task=task))
+    _restored_context_reserve = max(0, _best_candidate_tokens - ports.estimate_tokens(retained))
     if unverified_pricing_deferral:
         # No route price can repay a rewrite whose current input is unpriced.
         _projected_route = {'reason': 'main_route_pricing_unverified'}
@@ -241,13 +249,11 @@ def admit_compaction_candidate(
         # Keep paid usage accounting; restoration estimates here serve ROI only.
         return CandidateEconomics(ports.summary_usage_tokens(summary_usage), None, None)
 
-    # A bounded, conservative reserve from existing managed carriers; no
-    # provider reads or live-task mutation during an economic dry run. Multiple
-    # old versions can over-reserve, but cannot invent savings from restoration.
-    _kept_ids = {id(message) for message in new_messages}
-    _restored_context_reserve = ports.estimate_tokens([
-        message for message in messages
-        if message.get('_contextComposer') and id(message) not in _kept_ids])
+    # Share the actual restoration projection with capacity admission. Count
+    # current managed sections once, including surviving mixed-carrier siblings;
+    # inactive project scopes no longer return. No provider reads or task writes.
+    _restored_context_reserve = max(0, ports.estimate_tokens(
+        _with_restoration_reserve(new_messages, messages, task=task)) - candidate_tokens)
     _economic_candidate_tokens = candidate_tokens + _restored_context_reserve
 
     _summary_cost_tokens = ports.summary_usage_tokens(summary_usage)

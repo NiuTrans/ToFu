@@ -246,6 +246,8 @@ class TaskTextDeltaCoalescer:
         self._on_first_delta = on_first_delta
         self._on_after_delta = on_after_delta
         self._log_prefix = log_prefix
+        self._held_content: list[str] = []
+        self._held_lock = threading.Lock()
         deadline = None
         attempt_id = task.get('_attemptId') or task.get('attemptId')
         if attempt_id:
@@ -278,13 +280,39 @@ class TaskTextDeltaCoalescer:
         self._coalescer.add(thinking=value)
         self._on_after_delta()
 
+    def _release_held_content(self, *, discard: bool = False) -> None:
+        from lib.tasks_pkg.stream_handler._router_silence import hold_silent_text_delta
+        with self._held_lock:
+            candidate = ''.join(self._held_content)
+            if not candidate:
+                return
+            if discard or not hold_silent_text_delta(self._task, candidate):
+                self._held_content.clear()
+                if not discard:
+                    self._coalescer.add(content=candidate)
+
     def on_content(self, value: str) -> None:
         self._on_first_delta()
-        self._coalescer.add(content=value)
+        with self._held_lock:
+            self._held_content.append(value)
+        self._release_held_content()
         self._on_after_delta()
 
     def flush(self) -> bool:
+        # Before tools/retries an incomplete declaration is ordinary text. Only
+        # the terminal close may discard an exactly recognized silent outcome.
+        with self._held_lock:
+            candidate = ''.join(self._held_content)
+            if candidate and not candidate.rstrip().endswith(']'):
+                self._held_content.clear()
+                self._coalescer.add(content=candidate)
+        self._release_held_content()
         return self._coalescer.flush()
+
+    def discard_held_content(self) -> None:
+        """Drop a candidate only when its provider attempt is discarded."""
+        with self._held_lock:
+            self._held_content.clear()
 
     def wrap_boundary(self, callback: Callable) -> Callable:
         """Return a callback that flushes text before one structural action."""
@@ -295,6 +323,7 @@ class TaskTextDeltaCoalescer:
         return _after_text
 
     def close(self) -> bool:
+        self.flush()
         flushed = self._coalescer.close()
         stats = self._coalescer.stats
         if stats['raw_chunks'] > stats['emitted_events']:

@@ -55,6 +55,23 @@ test guards the large-history case.
 
 ## Test layers
 
+Turn delivery tests import their shared fixture functions explicitly from
+`tests/turn_lifecycle/test_task_event_delivery.py`. A collectable test module
+cannot also supply them reliably through `pytest_plugins`: collecting that
+module first scopes its fixtures to its own node, so later consumers can lose
+`storage`/`turn_service` or their backend parametrization. Explicit fixture
+imports preserve each consumer's SQL/native cases regardless of collection
+order. Verify the provider module followed by `test_turn_event_encode_once.py`
+with `-k test_snapshot_delta_is_encoded_once`, plus the batch delivery tests.
+
+The lean installer portability job installs every plugin explicitly loaded by
+the repository's pytest configuration, even with `--noconftest` and plugin
+autoload disabled. `tests/installer/test_installer_portability_workflow.py`
+compares the declared tools with plugin distribution metadata. Problem: an
+omitted plugin prevents collection before any installation behavior is tested.
+Decision: keep the job lean while declaring its actual test dependencies;
+removing required plugins would bypass the shared test contract.
+
 | Layer | Purpose | Typical command |
 |---|---|---|
 | Unit | Pure policy, reducer, parser, repository and lifecycle behavior | `make test-unit` |
@@ -755,6 +772,9 @@ and no other exception is reclassified, so an owner that refuses a mismatched
 engine raises `EnginePreparationError` itself, private benchmark authorities
 such as the native HTML corpus (`benchmarks/knowledge_html/durable.py`)
 included; a bare `RuntimeError` bypasses the wrappers and fails every worktree.
+Binary discovery uses the same typed refusal for an absent executable or an
+invalid explicit binary path. The selected native backend still refuses to
+start; only the existing test prerequisite boundary classifies the failure.
 `tests/conftest.py` verifies the selected artifact once per process; native
 `semantic_authority` pins its recorded `TOFUDB_EXPECTED_SHA256` instead of
 repeating the source fingerprint and `--build-info` probe for each test.

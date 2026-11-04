@@ -980,7 +980,7 @@ def test_auto_summary_cost_declines_before_model_dispatch(
 
 
 @pytest.mark.unit
-def test_adaptive_expected_horizon_survives_fixed_one_round_gate(
+def test_observed_horizon_applies_to_legacy_configuration(
         monkeypatch, priced_summary_route):
     """The adaptive PEV decision must reach both exact L2 ROI checks.
 
@@ -1038,10 +1038,9 @@ def test_adaptive_expected_horizon_survives_fixed_one_round_gate(
             'model': 'kimi-k3',
             'compaction': {'strategy': 'adaptive'},
         },
-        '_adaptiveCompactionDecision': {
-            'shouldTrigger': True,
-            'remainingRoundsMedian': 6.0,
-        },
+        '_compactionCadenceLastRound': 4,
+        '_compactionCadenceRoundGaps': [6],
+        'round_num': 10,
     }
     meta = {}
 
@@ -1054,7 +1053,7 @@ def test_adaptive_expected_horizon_survives_fixed_one_round_gate(
     assert meta['compacted'] is True
     assert meta['economics']['payback_rounds'] == 3.0
     assert meta['economics']['payback_limit_rounds'] == 6.0
-    assert meta['economics']['payback_policy'] == 'adaptive_expected_horizon'
+    assert meta['economics']['payback_policy'] == 'observed_compaction_cadence'
 
     assert economics_calls == [
         ({'costUsd': priced_summary_route['projectedCostUsd']}, None),
@@ -1280,6 +1279,9 @@ def test_NC_count_only_hot_tail_leaves_projected_over_ceiling(stub_summary, monk
     # Neuter: the convergence check calls this and drops nothing.
     monkeypatch.setattr(reactive_mod, '_head_truncate',
                         lambda *a, **k: 0)
+    # Isolate whole-round retention: the joint L1 pass independently removes
+    # consumed bulk even when this negative control disables L2's safeguards.
+    monkeypatch.setattr(compact_mod, 'prepare_l2_projection', lambda messages, task: messages)
 
     task = {'convId': 'conv_nc', 'id': 't', 'config': {'model': 'gpt-4'}}
     ceiling = _ceiling_for(task)

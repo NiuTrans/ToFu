@@ -1,4 +1,5 @@
 """Warm-prefix L1 candidates and L2 share one budget and one adoption decision."""
+import json
 from copy import deepcopy
 
 import pytest
@@ -161,3 +162,125 @@ def test_proactive_l1_adoption_does_not_publish_an_l2_receipt(harness, monkeypat
     assert layer2.force_compact_if_needed(messages, task, _compaction_round=8) is False
     assert _estimate_total_tokens(messages) <= 30_000
     assert events and len(notices) == 1
+
+
+def _refetch_history(*, live_copies=1, refetch_chars=8000):
+    """A compacted read, its identical re-fetch(es), then newer evidence."""
+    messages = [{'role': 'system', 'content': 'Keep the objective.'},
+                {'role': 'user', 'content': 'Fix the parser.'}]
+
+    def call(call_id, path, content):
+        messages.extend([
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': call_id, 'type': 'function',
+                'function': {'name': 'read_files',
+                             'arguments': json.dumps({'path': path})}}]},
+            {'role': 'tool', 'name': 'read_files', 'tool_call_id': call_id,
+             'content': content},
+        ])
+
+    call('first', 'parser.py',
+         '[read_files result compacted — was 8,000 chars]\nPreview: def parse\n'
+         '[Re-call tool if full content needed]')
+    for copy in range(live_copies):
+        # Same request, key order changed: identity is canonical arguments.
+        messages.append({'role': 'assistant', 'content': '', 'tool_calls': [{
+            'id': f'refetch-{copy}', 'type': 'function',
+            'function': {'name': 'read_files',
+                         'arguments': '{ "path" : "parser.py" }'}}]})
+        messages.append({'role': 'tool', 'name': 'read_files',
+                         'tool_call_id': f'refetch-{copy}',
+                         'content': f'parser v{copy}\n' + 'p' * refetch_chars})
+    for index in range(10):
+        call(f'newer-{index}', f'other_{index}.py',
+             f'other {index}\n' + 'o' * 8000)
+    return messages
+
+
+def _tool_content(messages, call_id):
+    return next(message['content'] for message in messages
+                if message.get('tool_call_id') == call_id)
+
+
+def _accept_optional_economics(monkeypatch):
+    monkeypatch.setattr(
+        'lib.tasks_pkg.compaction._cache_economics._proactive_cache_economics',
+        lambda *a, **k: {'cache_read_tokens': 0, 'warm_prefix_tokens': 0,
+                         'payback_rounds': 0})
+
+
+def _two_result_target(messages):
+    """Target whose quarter hot budget holds two results but never three."""
+    from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
+    result = _estimate_msg_tokens(next(
+        message for message in messages
+        if message.get('tool_call_id') == 'newer-0'))
+    return 4 * (2 * result + result // 2)
+
+
+def _is_live(messages, call_id):
+    return not _tool_content(messages, call_id).startswith('[')
+
+
+def test_optional_pressure_keeps_refetched_evidence_within_the_same_budget(
+        harness, monkeypatch):
+    """Incident mw2008zee91571: economic passes evicted the re-read working set."""
+    task, _, _ = harness
+    _accept_optional_economics(monkeypatch)
+    messages = _refetch_history()
+    target = _two_result_target(messages)
+    assert try_pressure_l1(messages, task, target_tokens=target,
+                           total_tokens=_estimate_total_tokens(messages))
+    assert _estimate_total_tokens(messages) <= target
+    assert _is_live(messages, 'refetch-0')
+    assert _is_live(messages, 'newer-9')  # newest batch stays protected
+    # The unchanged budget paid for the re-fetch instead of the next-newest.
+    assert not _is_live(messages, 'newer-8')
+
+
+def test_mandatory_pressure_keeps_historical_recency_selection(harness):
+    task, _, _ = harness
+    messages = _refetch_history()
+    target = _two_result_target(messages)
+    assert try_pressure_l1(messages, task, target_tokens=target,
+                           total_tokens=_estimate_total_tokens(messages),
+                           mandatory=True)
+    assert not _is_live(messages, 'refetch-0')
+    assert _is_live(messages, 'newer-8') and _is_live(messages, 'newer-9')
+
+
+def test_only_the_newest_live_refetch_copy_is_preferred(harness, monkeypatch):
+    task, _, _ = harness
+    _accept_optional_economics(monkeypatch)
+    messages = _refetch_history(live_copies=2)
+    target = _two_result_target(messages)
+    assert try_pressure_l1(messages, task, target_tokens=target,
+                           total_tokens=_estimate_total_tokens(messages))
+    assert _is_live(messages, 'refetch-1')
+    assert not _is_live(messages, 'refetch-0')
+    assert not _is_live(messages, 'newer-8')
+
+
+def test_oversized_refetch_never_blocks_the_recency_tail(harness, monkeypatch):
+    task, _, _ = harness
+    _accept_optional_economics(monkeypatch)
+    messages = _refetch_history(refetch_chars=40_000)
+    target = _two_result_target(messages)
+    assert try_pressure_l1(messages, task, target_tokens=target,
+                           total_tokens=_estimate_total_tokens(messages))
+    assert not _is_live(messages, 'refetch-0')
+    assert _is_live(messages, 'newer-8') and _is_live(messages, 'newer-9')
+
+
+def test_default_l1_selection_ignores_refetch_history(harness):
+    """Cache-safe per-round L1 keeps its recency contract byte-for-byte."""
+    from lib.tasks_pkg.compaction._layer1 import micro_compact
+    from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
+    task, _, _ = harness
+    messages = _refetch_history()
+    budget = 2 * _estimate_msg_tokens(messages[-1]) + 10
+    micro_compact(messages, task=dict(task), steps=['compact_tool_results'],
+                  ignore_cache_prefix=True,
+                  constant_overrides={'MICRO_HOT_TAIL_TOKENS': budget})
+    assert not _is_live(messages, 'refetch-0')
+    assert _is_live(messages, 'newer-8') and _is_live(messages, 'newer-9')

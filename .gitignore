@@ -126,6 +126,7 @@ __pycache__/
 !/benchmarks/catalog_origin_reads.py
 !/benchmarks/owned_inventory_reads.py
 !/benchmarks/dispatch_contention.py
+!/benchmarks/route_group_retirement.py
 !/benchmarks/wire_fingerprint_compare.py
 !/benchmarks/tool_call_identity_compare.py
 !/benchmarks/turn_trace_compare.py
@@ -197,6 +198,7 @@ __pycache__/
 # belong beside their owning docs or in the canonical static asset tree.
 /propaganda/
 /scripts/*
+!/scripts/analyze_agent_load.py
 !/scripts/gen_packaged_search_runtime.py
 !/scripts/gen_packaged_local_models.py
 !/scripts/gen_working_facts_contract.py

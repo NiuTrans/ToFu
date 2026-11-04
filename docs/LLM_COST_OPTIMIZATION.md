@@ -47,7 +47,7 @@ environment:    TOFU_WORKING_CONTEXT_TOKENS=128000
 opt out:        set either value to 0
 ```
 
-Fixed automatic L2 starts with a one-round ROI horizon, then predicts prefix lifetime from the shortest of the four most recent successful compaction gaps and the current window's already-observed age, capped at six and by the hard remaining API-round budget. Total task age no longer grants a longer horizon. Break-even resolves prices separately for the current and candidate prompt, compares only the observed warm prefix before/after, and records any pricing tier crossing. Manual, reactive and hard-window compaction still bypass the economic gate; adaptive policy retains its explicit expected-value horizon.
+Unified automatic L2 starts with a one-round ROI horizon, then predicts prefix lifetime from the shortest of the four most recent successful compaction gaps and the current window's already-observed age, capped at six and by the hard remaining API-round budget. Total task age no longer grants a longer horizon. Break-even resolves prices separately for the current and candidate prompt, compares only the observed warm prefix before/after, and records any pricing tier crossing. Manual, reactive and hard-window compaction still bypass the economic gate. There is no separate Adaptive horizon.
 
 Default L1 request projection is bounded by both 40 results and 48K estimated tokens. The newest complete tool-call batch always survives even if it alone exceeds the token budget; older results become placeholders only in the current model request, either outside the previously sent request or in its last tool step when the next-request price admits the edit ([section 8](#8-l1-edits-of-the-previously-sent-request)). Settled Turn projections remain byte-identical: L1 performs no transcript-authority read or write. This slows working-set growth before an expensive L2 prefix rewrite without deleting durable user history.
 
@@ -457,13 +457,12 @@ catalog behind the local Tool Search gateway; eager tools stay direct:
   route's hosted-search support; `off` sends every schema directly. Each model turn assembles its
   wire catalog and discovery metadata from current settings; provider
   conversion uses that request-local projection.
-- L2 always receives a bounded in-memory working-state ledger of modified
-  files, tests, errors, query conclusions, command/agent results and unfinished
-  work. This closes the state-loss gap created by intentionally excluding raw
-  tool messages from the prose summary input. Stable evidence IDs make retained
-  and lost facts auditable after compaction; the transient ledger is released
-  after that measurement. Entries are past observations rather than proof of
-  current mutable state, so the summary tells the agent to revalidate when freshness matters.
+- L2 always uses the source-derived continuity packet in
+  [CONTEXT_COMPACTION.md](CONTEXT_COMPACTION.md), independently of model prose.
+  Selected source observations use the existing request budget without a
+  newest-N prefilter. The exact checklist and folded execution observations are
+  appended by the runtime and digest-verified on reuse; receipt retention is
+  computed from that accepted packet, not substring matches in model output.
 - `compaction.evidenceLedger=true` additionally persists exact L1 cold tool
   results and adds their recovery handles to that ledger. It remains opt-in
   because durable raw-result storage has a different privacy/I/O trade-off.
@@ -609,6 +608,12 @@ Codex uses local compaction and its pinned 0.149.1 fallback: 272,000 context tok
 metrics separate raw wall, proxy CPU, translation CPU and Codex-favored wall.
 Namespace functions flatten; native `web_search` is suppressed and recorded;
 unknown native types fail closed. A real CLI smoke proves one Kimi call.
+Proxy shutdown joins accepted request handlers before closing their shared HTTP
+client, so both global and per-trial metrics are durable when close returns.
+Daemon handlers were rejected because a completed response could outlive teardown
+and leave evaluation evidence incomplete. Verify
+`tests/evaluations/test_codex_kimi_proxy_lifecycle.py` and the loopback proxy
+contract in `tests/tasks_pkg/test_long_agent_v2_contracts.py`.
 The formal Harbor `codex-kimi` profile now owns the proxy for the whole
 start/resume lifecycle, uploads and re-hashes the pinned CLI inside each
 disposable guest, removes the Kimi URL/key variables from Harbor's child

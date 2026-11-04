@@ -114,6 +114,7 @@ function _folderSettingsPorts(assignConvId) {
     rmdir: path => Api.project.rmdir(path),
     browseStorage: () => window.sessionStorage,
     recent: () => Api.project.recentList(),
+    recentClear: () => Api.project.recentClear(),
     remove: async id => {
       const result = await deleteFolder(id);
       if (!result) throw new Error(t('folder.deleteFailed'));

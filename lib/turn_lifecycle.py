@@ -762,6 +762,7 @@ def bind_task(
 def mark_task_started(
     attempt_id: str, task_id: str, *, user_id: Any,
     automation_context: dict[str, Any] | None = None,
+    worker_claim: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Publish the pending→running transition at physical worker entry."""
     user_id = require_user_id(user_id, context='start bound turn task')
@@ -771,6 +772,7 @@ def mark_task_started(
             'task_id': task_id,
             'user_id': user_id,
             **({'automation_context': automation_context} if automation_context is not None else {}),
+            **({'worker_claim': dict(worker_claim)} if worker_claim is not None else {}),
         },
         f'turn-start:{attempt_id}:{task_id}',
     )
@@ -1163,7 +1165,7 @@ def _derive_history_rows(task, values):
             values['toolRounds'] = compacted
     if isinstance(values.get('segments'), list):
         derive('segments', _segments_without_round_mirror)
-    for field in ('_timingStatusHistory', '_checkpointToolRounds'):
+    for field in ('_timingStatusHistory', '_checkpointToolRounds', INJECTED_NOTES_FIELD):
         if isinstance(values.get(field), list) and values[field]:
             derive(field, _same_rows)
     task[_PROJECTION_ROWS_KEY] = next_memos

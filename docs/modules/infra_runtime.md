@@ -242,6 +242,27 @@ child processes fell from 5 to 3 (cold) and 4 to 2 (warm status), and warm
 checks from 61 to 48 ms idle and 709 to 343 ms with three CPU-bound threads;
 payloads were identical. Verify `tests/self_update/test_repository_observation.py`.
 
+**Update source follows the checkout's upstream.** Problem: the updater pulled
+a hardcoded `origin`/`main` and compared against GitHub release tags, so an
+internal clone whose only branch is `master` (each push one release snapshot
+that bumps `VERSION`) could not apply (no remote ref `main`) and its check
+reported an unrelated GitHub version. Decision: `resolve_update_upstream()`
+gives check and apply one remote/branch: explicit `TOFU_UPDATE_REMOTE` /
+`TOFU_UPDATE_BRANCH`, else the current branch's `branch.<name>.remote` /
+`branch.<name>.merge`, else `origin`/`main` for a detached or untracked HEAD.
+When that remote's URL (`git ls-remote --get-url`) is `github.com/<UPDATE_REPO>`
+(https, ssh or scp-like, optional `.git`) or `TOFU_UPDATE_REPO` is set, the
+check keeps the release-tags API; otherwise it fetches the upstream and compares
+the fetched commit's `VERSION`, with the same payload (`tag` is the fetched
+commit), failure kinds, result cache and failure backoff. Non-git installs keep
+the tags check and tarball overlay. A cold git-upstream check spawns at most
+seven git children per cache period; warm checks spawn none of them.
+Alternatives rejected: seeding `TOFU_UPDATE_*` into the internal export fixes
+one channel with configuration that drifts from the clone's real upstream;
+`git ls-remote` yields a commit, not a release version; reading `VERSION`
+through one Git host's REST API ties the check to that host. Verify
+`tests/self_update/test_self_update_upstream.py`.
+
 `/api/health` additionally carries `bootProfile`: the previous boot's measured per-phase startup timings (`{phases: [{key,label,index,duration_s}], ...}`), persisted by `lib/boot_profile.py` at readiness and keyed by the same 9-phase ordinal/key catalog as `lib/startup_phases.py`. The in-app restart progress bar (`frontend/src/runtime/sections/update.js`) budgets progress from this host's own observed boot shape; the field is absent on a first-ever boot, where the client falls back to its built-in weight estimate. A boot never fails over this telemetry: persist/load are best-effort and schema-gated. The bar reports three truthful stages: request preparation, a bounded drain band labelled shutdown that eases while the old process still answers, then the measured boot timeline anchored at the first failed health probe (old process gone); the changed-bootId check makes early answers from the old process harmless.
 
 Successful high-frequency `/api/live` and `/api/ready` probes are filtered from the durable access log; repeated failures retain their first-two, power-of-two, and five-minute checkpoints while request metrics keep the exact count. Probe cadence and fault detection are unchanged.

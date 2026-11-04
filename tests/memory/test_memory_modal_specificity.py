@@ -51,12 +51,28 @@ MEMORY_FEATURE_ENTRY = 'frontend/src/features/memory/panel.ts'
 
 # ─────────────────────────── CSS specificity engine ───────────────────────────
 
+def _split_outside_parens(text: str, sep: str | None = None) -> list[str]:
+    """Like ``str.split(sep)``, but only at separators outside ()/[] nesting,
+    so a `:not(.a, .b)` selector list stays one piece. Empty pieces drop."""
+    parts, current, depth = [], [], 0
+    for ch in text:
+        depth += (ch in '([') - (ch in ')]')
+        if depth == 0 and (ch.isspace() if sep is None else ch == sep):
+            parts.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append(''.join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
 def _specificity(selector: str) -> tuple[int, int, int]:
     """Compute the (a,b,c) specificity of a selector.
 
     a = #id, b = #class + #attr + #pseudo-class, c = #type + #pseudo-element.
-    `:not(...)` / `:is(...)` contribute their argument's specificity (per CSS
-    Selectors L4 / L3 for :not). Combinators and the universal selector add 0.
+    `:not(...)` / `:is(...)` contribute their most specific argument's
+    specificity (per CSS Selectors L4 / L3 for :not). Combinators and the
+    universal selector add 0.
     Good enough for the descendant + attribute + :not() selectors in play here.
     """
     sel = selector.strip()
@@ -85,7 +101,8 @@ def _specificity(selector: str) -> tuple[int, int, int]:
                 j += 1
             arg = s[m.end():j - 1]
             if name != 'where':  # :where() contributes 0
-                aa, bb, cc = _specificity(arg)
+                aa, bb, cc = max((_specificity(part) for part in _split_outside_parens(arg, ',')),
+                                 default=(0, 0, 0))
                 a += aa; b += bb; c += cc
             i = j
         return ''.join(out)
@@ -134,10 +151,8 @@ def _iter_rules(css_text: str):
             if ':' in part:
                 k, _, v = part.partition(':')
                 decls[k.strip().lower()] = v.strip()
-        for sel in sel_group.split(','):
-            s = sel.strip()
-            if s:
-                yield s, idx, decls
+        for s in _split_outside_parens(sel_group, ','):
+            yield s, idx, decls
         idx += 1
 
 
@@ -154,14 +169,17 @@ def _compound_parse(compound):
     """Parse a compound selector into its testable pieces.
 
     Returns dict with: tag (or None), pos_classes (set), neg_classes (set from
-    :not(.x)), attrs (list of raw [..]), has_id (bool), pseudo_elem (bool),
+    :not(.x) and each single-class member of :not(.x, .y)), attrs (list of raw
+    [..]), has_id (bool), pseudo_elem (bool),
     state_pseudos (set of :focus/:hover/... names)."""
     has_id = bool(re.search(r'#[\w-]+', compound))
     pseudo_elem = bool(re.search(r'::[\w-]+', compound))
     # classes NOT inside :not(...)
     stripped_not = re.sub(r':not\([^)]*\)', '', compound)
     pos_classes = set(re.findall(r'\.([\w-]+)', stripped_not))
-    neg_classes = set(re.findall(r':not\(\.([\w-]+)\)', compound))
+    neg_classes = {part[1:] for arg in re.findall(r':not\(([^)]*)\)', compound)
+                   for part in _split_outside_parens(arg, ',')
+                   if re.fullmatch(r'\.[\w-]+', part)}
     attrs = re.findall(r'\[[^\]]*\]', compound)
     # state pseudo-classes (single colon), excluding functional :not already handled
     state = set(re.findall(r'(?<!:):(focus|hover|active|checked|disabled|visited|first-child|last-child)\b', compound))
@@ -208,7 +226,7 @@ def _selector_matches(selector: str, el: _Elem) -> bool:
     match SOME ancestor (the [data-theme] compound matches an ancestor carrying
     the theme). We approximate descendant matching with subset containment,
     which is exact for the flat ancestor model used here."""
-    parts = re.split(r'\s+', selector.strip())
+    parts = _split_outside_parens(selector)
     key = parts[-1]
     if not _compound_matches_element(key, el.tag, el.classes, theme=el.theme):
         return False
@@ -377,6 +395,18 @@ def test_specificity_math_memory_beats_base_but_would_lose_to_bleed():
 
 # ─────────────────────────── 3. NO OVER-NARROWING (control) ───────────────────────────
 
+def test_engine_reads_not_selector_lists_like_a_browser():
+    """`:not(.a, .b)` is one compound: it excludes both classes and weighs as
+    its most specific argument (Selectors L4), so a rule's selector group
+    splits only at top-level commas."""
+    sel = '[data-theme="tofu"] .modal input:not(.a, .b)'
+    assert [s for s, _idx, _decls in _iter_rules(sel + ', p{color:red}')] == [sel, 'p']
+    assert _specificity(sel) == (0, 3, 1)
+    for classes, matches in (({'a'}, False), ({'b'}, False), ({'c'}, True)):
+        el = _Elem('input', classes, theme='tofu', ancestors=[{'modal'}])
+        assert _selector_matches(sel, el) is matches, classes
+
+
 def test_generic_tofu_modal_input_still_gets_theme(css_text):
     """A generic tofu .modal input (NOT memory-modal) STILL resolves to the tofu
     styling — the exclusion removed memory-modal ONLY, not the whole theme."""
@@ -391,13 +421,14 @@ def test_generic_tofu_modal_input_still_gets_theme(css_text):
 
 # NOTE: the shipped bleed selector also carries `:not(.recent-search-input)`
 # (see tests/search/test_recent_search_tofu_specificity.py), `:not(.settings-panel)`
-# (2026-09-04 Settings soft redesign) and `:not(.folder-browser-input)` (the
-# shared folder browser). This neuter removes ONLY the `:not(.memory-modal)`
-# carve-out (its purpose) and preserves the others, so it stays surgical.
+# (2026-09-04 Settings soft redesign) and `:not(.folder-browser-input,
+# .mp-path-input)` (the shared folder browser and workspace rail). This neuter
+# removes ONLY the `:not(.memory-modal)` carve-out (its purpose) and preserves
+# the others, so it stays surgical.
 _NC1_FIND = ('[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-             'input:not(.recent-search-input):not(.folder-browser-input){')
+             'input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){')
 _NC1_REPL = ('[data-theme="tofu"] .modal:not(.settings-panel) '
-             'input:not(.recent-search-input):not(.folder-browser-input){')
+             'input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){')
 
 
 def test_nc1_reverting_exclusion_reintroduces_bleed(css_text):

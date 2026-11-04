@@ -34,7 +34,8 @@
       "properties": {
         "format": {"type": "string", "maxLength": 64},
         "phase": {"enum": ["pre_turn", "mid_turn"]},
-        "placement": {"enum": ["before_latest_human", "after_retained_execution"]}
+        "placement": {"enum": ["before_latest_human", "after_retained_execution"]},
+        "continuityDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Integrity of the source-derived continuation packet; does not certify narrative semantics."}
       },
       "description": "Automatic context_handoff phase/placement additionally follows compaction_handoff_v1.schema.json; metadata does not prove dispatch."
     },

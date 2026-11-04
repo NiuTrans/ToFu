@@ -131,6 +131,10 @@
       "guard": "tests/compaction/test_compaction_receipt_contract.py"
     },
     {
+      "path": "contracts/compaction_continuity_v1.schema.json",
+      "guard": "tests/compaction/test_unified_continuity.py"
+    },
+    {
       "path": "contracts/compaction_handoff_v1.schema.json",
       "guard": "tests/compaction/test_compaction_handoff.py"
     },

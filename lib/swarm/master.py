@@ -352,6 +352,8 @@ def _retained_assignment_proxy(spec: SubTaskSpec, session_parent: dict) -> tuple
         if isinstance(documents, dict):
             parent['_toolContractDocumentsByName'] = deepcopy(
                 {name: value for name, value in documents.items() if name in names})
+    from lib.project_dispatch.admission import share_dispatch_root
+    share_dispatch_root(current if current is not None else session_parent, parent)
     return parent, context
 
 
@@ -643,6 +645,9 @@ class MasterOrchestrator:
         self.search_mode = search_mode
         self.on_progress = on_progress
         self.abort_check = abort_check or (lambda: False)
+        from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
+        self._child_cancellation = ChildCancellationScope(
+            lambda: self._aborted or self.abort_check())
 
         self.before_agent_admission = before_agent_admission
         self.all_tools = all_tools or []
@@ -755,6 +760,8 @@ class MasterOrchestrator:
         if parent_task is not None:
             from lib.agent_core.execution_budget import share_execution_budget
             share_execution_budget(parent_task, self._parent_task_proxy)
+            from lib.project_dispatch.admission import share_dispatch_root
+            share_dispatch_root(parent_task, self._parent_task_proxy)
             # A spawned swarm is fire-and-forget: sub-agents keep running (and
             # dependency-blocked specs keep WAITING) long after the spawning
             # chat task settles 'done'. Yet the shared execution-budget
@@ -914,7 +921,7 @@ class MasterOrchestrator:
 
         parent, tools, model = self._parent_task_proxy, self.all_tools, self.model
         project_path, thinking = self.project_path, self.thinking_enabled
-        abort = lambda: self._aborted or self.abort_check()
+        abort = self._child_cancellation
         if spec.retained_agent_id or spec.retained_execution_context is not None:
             parent, context = _retained_assignment_proxy(spec, self._parent_task_proxy)
             tools, model = context['tools'], context['model']

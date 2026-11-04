@@ -5,14 +5,18 @@
  */
 import type { ConversationBlockViewModel, ConversationTurnViewModel } from '../presentation/conversation-view-model';
 import type { GroupedTurnEntry } from '../presentation/grouped-turn-layout';
-import { toolBlockOwnsSummary, toolBlockActivityState, selectRoundOutline,
-  type ActionActivityState, type RoundOutlineSection } from '../presentation/round-outline';
+import { toolBlockOwnsSummary, toolBlockActivityState, selectProgramBatches, selectRoundOutline,
+  type ActionActivityState, type ProgramBatchSection, type RoundOutlineSection } from '../presentation/round-outline';
+import { programBatchLabelParts, type ProgramBatchLabel } from '../presentation/program-batch-presentation';
 import { hasAcceptedWorkUnit } from '../presentation/tool-execution-groups';
-import { decorateToolSummary, toolSummaryIdentity } from './tool-summary';
+import { toolSummaryIdentity } from '../presentation/tool-summary-identity';
+import { decorateToolSummary } from './tool-summary';
+import { disclosureChevron } from './renderers/icons';
 import { setStableData as setData } from './renderers/stable-dom';
 
 export type RoundOutlineLabel = `roundOutline.${'active' | 'background' | 'attention' | 'returned'
-  | 'activity' | 'round' | 'tools' | 'search' | 'matches' | 'moreMatches' | 'previousMatches'}`;
+  | 'activity' | 'round' | 'tools' | 'search' | 'matches' | 'moreMatches' | 'previousMatches'}`
+  | ProgramBatchLabel;
 export type RoundOutlineTranslator = (key: RoundOutlineLabel, count?: number) => string;
 const english: RoundOutlineTranslator = (key, n) => ({
   'roundOutline.active': 'In progress', 'roundOutline.background': `${n} in background`,
@@ -21,9 +25,16 @@ const english: RoundOutlineTranslator = (key, n) => ({
   'roundOutline.tools': `${n} tool calls`, 'roundOutline.search': 'Find a call',
   'roundOutline.matches': `${n} matching calls`, 'roundOutline.moreMatches': 'More matches',
   'roundOutline.previousMatches': 'Previous matches',
+  'roundOutline.programs': `Programs: ${n}`, 'roundOutline.programsRunning': `${n} running`,
+  'roundOutline.programsWaiting': `${n} waiting`, 'roundOutline.programsCompleted': `${n} completed`,
+  'roundOutline.programsReturned': `${n} returned`,
+  'roundOutline.programsHandoff': `${n} returned for model judgment`,
+  'roundOutline.programsFailed': `${n} failed`, 'roundOutline.programsIncomplete': `${n} incomplete`,
 })[key];
 
-type MountedAction = { state: ActionActivityState; initialized?: boolean };
+/* `revealed` is the disclosure first paint opened; a program batch that later
+ * claims the block withdraws that reveal from its card. */
+type MountedAction = { state: ActionActivityState; initialized?: boolean; revealed?: HTMLDetailsElement };
 
 /** Adjacent operational leaves share a visual surface. This is decoration of
  * the mounted sequence, never grouping, reparenting or disclosure ownership.
@@ -41,12 +52,20 @@ type RoundControls = {
   search: HTMLInputElement; results: HTMLElement;
   blocks: ConversationBlockViewModel[]; limit: number;
 };
+/* One head per multi-program batch. `choice` is the reader's explicit fold;
+ * without one the batch follows its presentation default as outcomes arrive. */
+type ProgramBatchControls = {
+  section: ProgramBatchSection; head: HTMLButtonElement; label: HTMLElement;
+  choice?: boolean; expanded: boolean; labelKey: string;
+};
 
 export class RoundOutline {
   private readonly actions = new Map<string, MountedAction>();
   private readonly processEdges = new Map<string, ProcessEdge>();
   private readonly translate: RoundOutlineTranslator;
   private readonly rounds = new Map<string, RoundControls>();
+  private readonly programBatches = new Map<string, ProgramBatchControls>();
+  private readonly programMembers = new Map<string, ProgramBatchControls>();
   private readonly beforeBlocks = new Map<string, HTMLElement[]>();
 
   constructor(private readonly container: HTMLElement, translate?: RoundOutlineTranslator,
@@ -60,6 +79,7 @@ export class RoundOutline {
     this.reveal = undefined;
     for (const controls of this.rounds.values()) controls.blocks = [];
     this.actions.clear(); this.processEdges.clear(); this.rounds.clear();
+    this.programBatches.clear(); this.programMembers.clear();
     this.beforeBlocks.clear();
   }
 
@@ -114,11 +134,93 @@ export class RoundOutline {
       controls.search.setAttribute('aria-label', `${this.translate('roundOutline.search')} · ${
         this.translate('roundOutline.round', section.identity.llmRound + 1)}`);
       const first = tools.find(block => mountedIds.has(block.blockId));
-      if (first) this.beforeBlocks.set(first.blockId, [controls.header]);
+      if (first) this.placeBefore(first.blockId, controls.header);
       else controls.header.remove();
       // Search DOM is reader-owned while streaming. Recompute only on input,
       // so an arriving result cannot replace the focused result button.
     }
+    this.updateProgramBatches(turn, mountedIds);
+  }
+
+  private placeBefore(blockId: string, control: HTMLElement): void {
+    const controls = this.beforeBlocks.get(blockId);
+    if (controls) controls.push(control);
+    else this.beforeBlocks.set(blockId, [control]);
+  }
+
+  /* Members stay mounted, keyed and in authored order; a fold only hides
+   * them. The head sits immediately before the first mounted member. */
+  private updateProgramBatches(turn: ConversationTurnViewModel, mountedIds: ReadonlySet<string>): void {
+    const sections = selectProgramBatches(turn);
+    const retained = new Set(sections.map(section => section.id));
+    for (const [id, controls] of this.programBatches) {
+      if (!retained.has(id)) { controls.head.remove(); this.programBatches.delete(id); }
+    }
+    this.programMembers.clear();
+    for (const section of sections) {
+      let controls = this.programBatches.get(section.id);
+      if (!controls) { controls = this.createProgramBatch(section); this.programBatches.set(section.id, controls); }
+      controls.section = section;
+      controls.expanded = controls.choice ?? !section.summary.defaultCollapsed;
+      this.paintProgramBatch(controls);
+      for (const id of section.blockIds) this.programMembers.set(id, controls);
+      const first = section.blockIds.find(id => mountedIds.has(id));
+      if (first) this.placeBefore(first, controls.head);
+      else controls.head.remove();
+    }
+  }
+
+  private createProgramBatch(section: ProgramBatchSection): ProgramBatchControls {
+    const doc = this.container.ownerDocument;
+    const head = doc.createElement('button'); head.type = 'button';
+    head.className = 'conversation-program-batch';
+    const label = doc.createElement('span'); label.className = 'conversation-program-batch__label';
+    head.append(label, disclosureChevron(doc, 'conversation-program-batch__chevron'));
+    const controls: ProgramBatchControls = { section, head, label, expanded: false, labelKey: '' };
+    head.addEventListener('click', () => {
+      controls.choice = !controls.expanded;
+      controls.expanded = controls.choice;
+      this.paintProgramBatch(controls);
+      const members = new Set(controls.section.blockIds);
+      for (const node of this.container.querySelectorAll<HTMLElement>(':scope > [data-block-id]')) {
+        if (members.has(node.dataset.blockId!)) {
+          setData(node, 'programBatchFolded', controls.expanded ? undefined : 'true');
+        }
+      }
+    });
+    return controls;
+  }
+
+  private paintProgramBatch(controls: ProgramBatchControls): void {
+    const { head, label, section } = controls;
+    const parts = programBatchLabelParts(section.summary);
+    const labelKey = JSON.stringify(parts);
+    if (controls.labelKey !== labelKey) {
+      controls.labelKey = labelKey;
+      const doc = this.container.ownerDocument;
+      label.replaceChildren(...parts.flatMap((part, index) => {
+        const item = doc.createElement('span');
+        if (part.status) item.dataset.programStatus = part.status;
+        item.textContent = this.translate(part.key, part.count);
+        return index ? [doc.createTextNode(' · '), item] : [item];
+      }));
+    }
+    setData(head, 'attention', section.summary.attention);
+    const expanded = String(controls.expanded);
+    if (head.getAttribute('aria-expanded') !== expanded) head.setAttribute('aria-expanded', expanded);
+    const title = [this.translate('roundOutline.round', section.identity.llmRound + 1),
+      section.identity.attemptId, section.identity.taskId].filter(Boolean).join(' · ');
+    if (head.title !== title) head.title = title;
+    // Counts change as programs run; announce them like the tool panel label.
+    if (section.summary.attention === 'active') {
+      if (label.getAttribute('role') !== 'status') label.setAttribute('role', 'status');
+    } else label.removeAttribute('role');
+  }
+
+  /** A search hit inside a folded batch expands it, as the reader would. */
+  private unfoldProgramBatchOf(blockId: string): void {
+    const controls = this.programMembers.get(blockId);
+    if (controls && !controls.expanded) controls.head.click();
   }
 
   private createControls(section: RoundOutlineSection): RoundControls {
@@ -159,6 +261,7 @@ export class RoundOutline {
       hit.textContent = `${identity.name} · ${identity.intent}${identity.target ? ` · ${identity.target}` : ''}`;
       hit.title = blockId;
       hit.addEventListener('click', () => {
+        this.unfoldProgramBatchOf(blockId);
         this.reveal?.(blockId);
         const node = [...this.container.querySelectorAll<HTMLElement>(':scope > [data-block-id]')]
           .find(node => node.dataset.blockId === blockId);
@@ -191,24 +294,39 @@ export class RoundOutline {
    * a reply streams; an unchanged value is never rewritten. */
   patchBlock(node: HTMLElement, block: ConversationBlockViewModel): void {
     const item = this.actions.get(block.blockId);
+    const batch = this.programMembers.get(block.blockId);
     setData(node, 'deliverable', String(block.kind === 'text' && block.deliverable));
     setData(node, 'processEdge', this.processEdges.get(block.blockId));
     setData(node, 'toolSummary', item ? 'self-contained' : undefined);
     setData(node, 'actionState', item?.state);
+    setData(node, 'programBatch', batch?.section.id);
+    setData(node, 'programBatchFolded', batch && !batch.expanded ? 'true' : undefined);
   }
 
   completeBlock(node: HTMLElement, block: ConversationBlockViewModel): void {
     decorateToolSummary(node, block);
     const item = this.actions.get(block.blockId);
     if (!item) return;
+    const batched = this.programMembers.has(block.blockId);
     if (!item.initialized) {
-      const details = this.evidenceDisclosure(node);
+      // A program batch head summarizes its members, so none opens here; a
+      // program card's presenter still reveals its own failure.
+      const details = batched ? null : this.evidenceDisclosure(node);
       // Actionable evidence opens on first paint, except generic raw failures:
       // their concise diagnostic is already visible in the sole summary. Keep
       // raw envelopes folded; replays never override the reader's choice.
       if (details && item.state !== 'returned'
-          && details.dataset.toolFailureEvidence !== 'collapsed') details.open = true;
+          && details.dataset.toolFailureEvidence !== 'collapsed') {
+        details.open = true;
+        item.revealed = details;
+      }
       item.initialized = true;
+    } else if (item.revealed && batched) {
+      // A live round announces its programs one by one, so the first one
+      // painted alone. Once siblings join, the batch head carries its
+      // attention; a failure keeps its reveal.
+      if (item.state !== 'attention') item.revealed.open = false;
+      item.revealed = undefined;
     }
     // Generic results otherwise lack a verdict. Merge it into their sole row;
     // commands, approvals and rich warning cards already own explicit states.

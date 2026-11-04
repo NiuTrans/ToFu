@@ -373,6 +373,16 @@ impl TurnSearchProjection {
     ) -> io::Result<Option<u8>> {
         self.opened()?.gram_index_state_for_test(tenant, owner)
     }
+    #[cfg(test)]
+    pub(crate) fn set_format_marker_version_for_test(
+        &mut self,
+        tenant: u64,
+        owner: u64,
+        version: u8,
+    ) -> io::Result<()> {
+        self.writable()?
+            .set_format_marker_version_for_test(tenant, owner, version)
+    }
     pub(crate) fn mark_gram_index_ready(&mut self, tenant: u64, owner: u64) -> io::Result<()> {
         self.writable()?.mark_gram_index_ready(tenant, owner)
     }

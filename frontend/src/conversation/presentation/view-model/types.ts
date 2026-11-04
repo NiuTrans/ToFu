@@ -152,7 +152,7 @@ export interface InjectionsBlockViewModel extends ConversationBlockBase {
 export interface SystemNoteBlockViewModel extends ConversationBlockBase {
   kind: 'system-note';
   noteKind: 'intent-stall' | 'todo-continuation' | 'system-intervention'
-    | 'context-injection' | 'session-context';
+    | 'context-injection' | 'session-context' | 'deliberate-silence';
   injectionId?: string;
   action?: 'prompt' | 'stop' | 'tool-policy' | 'continue';
   reason?: string;

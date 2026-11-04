@@ -71,7 +71,7 @@ def test_analyser_enforces_task_wide_cap_after_tools(phases):
     assert task['error']['kind'] == 'abnormal_stop'
 
 
-@pytest.mark.parametrize('finish', ['error', 'aborted', 'cancelled', 'length', 'content_filter'])
+@pytest.mark.parametrize('finish', ['error', 'aborted', 'cancelled', 'content_filter'])
 def test_other_terminal_causes_have_precedence(finish, phases):
     task = {}
     assert decide(task, finish=finish) is None
@@ -143,45 +143,86 @@ def test_flag_excludes_actual_tool_rounds_cancellation_and_answers(message, task
     assert usage == {}
 
 
-def test_reasoning_blowout_triggers_degrade_and_own_budget(phases):
-    """A length-capped, content-empty, reasoning-only round must recover
-    with a reasoning degrade — not silently re-feed the blowout."""
-    task = {'content': 'Earlier narration', 'thinking': 'Earlier reasoning'}
-    msg = {'content': '', 'reasoning_content': 'x' * 200_000}
-
-    first = recovery.recover_abnormal_terminal(
-        msg, 'length', task, round_num=3, model='glm-5.3-m17',
-        result={'action': 'proceed', 'premature_retry_count': 0,
-                'abort_detected_phase': None})
-    assert first['action'] == 'continue'
-    assert task['_reasoning_blowout_degrade_next'] is True
-    assert task['_reasoning_blowout_recovery_count'] == 1
-    assert '_abnormal_terminal_recovery_count' not in task
-
-    task.pop('_reasoning_blowout_degrade_next')
-    second = recovery.recover_abnormal_terminal(
-        msg, 'length', task, round_num=5, model='glm-5.3-m17',
-        result={'action': 'proceed', 'premature_retry_count': 0,
-                'abort_detected_phase': None})
-    assert second['action'] == 'continue'
-    assert task['_reasoning_blowout_recovery_count'] == 2
-
-    third = recovery.recover_abnormal_terminal(
-        msg, 'length', task, round_num=7, model='glm-5.3-m17',
-        result={'action': 'proceed', 'premature_retry_count': 0,
-                'abort_detected_phase': None})
-    assert third['action'] == 'break'
-    assert third['last_finish_reason'] == 'abnormal_stop'
+def _analyse(task, messages, message, finish, round_num):
+    from lib.tasks_pkg.stream_handler._analyse import analyse_stream_result
+    return analyse_stream_result(message, finish, task, 'limit-test', 'glm-5.3-m17',
+                                 round_num, 0, messages, usage={})
 
 
-def test_reasoning_blowout_exclusions(phases):
+@pytest.mark.parametrize('finish', ['length', 'max_tokens'])
+def test_output_limit_stop_keeps_the_cut_response_and_resumes_from_it(finish, phases):
+    """A response finished at the output limit is unfinished work, not a
+    transport cut: the next request carries it, so the model resumes from its
+    own analysis instead of regenerating it from the unchanged request."""
+    task = {'id': 'limit-test', 'aborted': False, 'config': {'thinkingDepth': 'max'}}
+    config = deepcopy(task['config'])
+    messages = [{'role': 'user', 'content': 'Build the circuit generator.'}]
+    analysis = 'Gate layout: first the integer square root, then Fibonacci...'
+    result = _analyse(task, messages, {'content': '', 'reasoning_content': analysis},
+                      finish, round_num=2)
+    assert result['action'] == 'continue'
+    assert messages[0] == {'role': 'user', 'content': 'Build the circuit generator.'}
+    cut = messages[1]
+    assert cut['role'] == 'assistant' and cut['reasoning_content'] == analysis
+    assert not cut.get('tool_calls')
+    notice = messages[2]['content']
+    assert messages[2]['role'] == 'user' and 'output-token limit' in notice
+    assert 'no tool call from it ran' in notice and 'Resume directly' in notice
+    # Recovery changes the conversation, never the turn's reasoning settings.
+    assert task['config'] == config
+    assert phases[-1]['bucket'] == 'output_limit'
+
+
+def test_output_limit_budget_counts_consecutive_stops_without_progress(phases):
+    task = {'id': 'limit-test', 'aborted': False}
+    messages = [{'role': 'user', 'content': 'Solve it.'}]
+    cut = {'content': '', 'reasoning_content': 'still planning'}
+    assert _analyse(task, messages, dict(cut), 'length', 1)['action'] == 'continue'
+    assert _analyse(task, messages, dict(cut), 'length', 2)['action'] == 'continue'
+    # An admitted tool batch is progress and starts a new streak.
+    call = {'id': 'call-1', 'type': 'function',
+            'function': {'name': 'read_file', 'arguments': '{"path": "sim.c"}'}}
+    progress = _analyse(task, messages, {'content': '', 'tool_calls': [call]},
+                        'tool_calls', 3)
+    assert progress['action'] == 'proceed'
+    for round_num in (4, 5):
+        assert _analyse(task, messages, dict(cut), 'length', round_num)['action'] == 'continue'
+    exhausted = _analyse(task, messages, dict(cut), 'length', 6)
+    assert exhausted['action'] == 'break'
+    assert exhausted['last_finish_reason'] == 'abnormal_stop'
+    assert task['error']['kind'] == 'abnormal_stop'
+    assert 'output-token limit' in task['error']['message']
+    assert [event['attempt'] for event in phases] == [1, 2, 1, 2]
+    assert all(event['max'] == 2 for event in phases)
+
+
+def test_cut_answer_resumes_then_settles_with_its_text_when_exhausted(phases):
+    task = {'id': 'limit-test', 'aborted': False, 'content': 'The report begins'}
+    messages = [{'role': 'user', 'content': 'Write the report.'}]
+    answer = {'content': 'The report begins'}
+    for round_num in (1, 2):
+        assert _analyse(task, messages, dict(answer), 'length', round_num)['action'] == 'continue'
+        assert task['content'].startswith('The report begins')
+    assert [m['content'] for m in messages if m['role'] == 'assistant'] == ['The report begins'] * 2
+    final = _analyse(task, messages, dict(answer), 'length', 3)
+    # The provider-limit settlement keeps the delivered text; no error replaces it.
+    assert final['action'] == 'break' and final['last_finish_reason'] == 'length'
+    assert not task.get('error')
+
+
+def test_output_limit_exclusions(phases):
     task = {'content': ''}
     assert recovery.abnormal_terminal_kind(
         {'content': 'an answer', 'reasoning_content': 'x'}, 'length',
-        task) is None
+        task) == 'output_limit'
+    # A projected cut call is filtered and resumed by the output-limit owner,
+    # never admitted into ordinary tool-stream repair.
     assert recovery.abnormal_terminal_kind(
         {'content': '', 'reasoning_content': 'x',
-         'tool_calls': [{'id': 'c1'}]}, 'length', task) is None
+         'tool_calls': [{'id': 'c1'}]}, 'length', task) == 'output_limit'
+    assert recovery.abnormal_terminal_kind({'content': ''}, 'length', {'aborted': True}) is None
+    assert recovery.abnormal_terminal_kind(
+        {'content': ''}, 'length', {'pendingGuidanceId': 'guidance-1'}) is None
     assert recovery.abnormal_terminal_kind(
         {'content': ''}, 'stop', task) == 'empty_stop'
 
@@ -203,7 +244,7 @@ def test_core_terminal_analysis_does_not_import_standalone_cli(monkeypatch, mode
     assert result is None
 
 
-def test_reasoning_recovery_preserves_structured_code_delivery_without_tools(phases):
+def test_output_limit_recovery_preserves_structured_code_delivery_without_tools(phases):
     task={'config':{'responseFormat':{'type':'json_object'},'toolSpecAllowlist':[]}}
     messages=[{'role':'user','content':'Return a complete JSON object containing Python code.'}]
     original=deepcopy(messages[0]);config=deepcopy(task['config'])
@@ -211,10 +252,11 @@ def test_reasoning_recovery_preserves_structured_code_delivery_without_tools(pha
         {'content':'','reasoning_content':'Long internal analysis'},'length',task,
         round_num=1,model='test-model',messages=messages,
         result={'action':'proceed','premature_retry_count':0,'abort_detected_phase':None})
-    assert result['action']=='continue' and task['_reasoning_blowout_degrade_next'] is True
-    assert task['config']==config
-    text=str(messages)
-    assert 'required output format' in text
-    assert 'Do not replace requested code or structured output' in text
-    assert 'short final answer stating' not in text
-    assert original['content'] in text
+    assert result['action']=='continue'
+    assert task['config']==config and messages[0]==original
+    notice=messages[-1]['content']
+    # Toward the requested result: tools only when available, never a status note.
+    assert 'required output format' in notice
+    assert 'if more work is needed and a native tool is available' in notice
+    assert 'Do not replace requested code or structured output' in notice
+    assert 'short final answer stating' not in notice

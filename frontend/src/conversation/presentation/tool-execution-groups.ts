@@ -209,6 +209,17 @@ export function shouldCollapseToolBatch(
 }
 
 /**
+ * Explicit program rule: a model round's sibling programs, with their
+ * execution children, fold under one head whatever their count. Every program
+ * outcome returns to the model (a handoff is not a reader action), and the head
+ * counts live work and failures. Only a member awaiting the reader keeps the
+ * batch open.
+ */
+export function shouldCollapseProgramBatch(members: readonly unknown[]): boolean {
+  return summarizeToolAttention(members).interactiveCount === 0;
+}
+
+/**
  * Build the complete bounded panel header from typed attention facts.
  * Dynamic text crosses an explicit escaping port; `chevronHtml` is the
  * caller-owned trusted icon slot used by the retained composition adapter.

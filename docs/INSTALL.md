@@ -97,9 +97,29 @@ by fast-forward; `--no-update` skips that step. Matching frontend artifacts are
 reused without a download or Node. `--port` overrides an inherited `PORT` for
 both configuration and child startup. No occupied port is silently changed and
 no unrelated listener is killed. A healthy worker identified by the existing
-lifecycle manager is verified, not restarted.
+lifecycle manager is verified, not restarted, when it provably runs this
+checkout's code: its `processStartedAt` (`serverctl.py status --json`) is at
+least one second after HEAD last moved (the newest HEAD reflog entry, which has
+whole-second resolution). A worker keeps the code it imported at boot, so after
+`git pull` or the installer's own fast-forward an older worker is stale. An
+unavailable start time or reflog entry (no `.git`, no `/proc`) also counts as
+stale; uncommitted edits do not move HEAD and are not detected. For a stale
+worker an interactive rerun runs `serverctl.py restart`, which asks for
+confirmation, then verifies the restarted worker. A non-interactive rerun
+(`--non-interactive` or non-TTY stdin) leaves the worker untouched; it, a
+declined restart (exit 3) and a restart that reports no ready worker end, after
+runtime verification passes, with a warning, the exact restart command and
+`restart-required` instead of `ready`. If no healthy worker remains,
+verification fails as for any launch.
+Problem: rerunning the installer after an update reported `ready` while the
+old worker kept serving the old code. Decision: compare the worker start with
+the last HEAD move and restart only through the human-approved lifecycle owner.
+Alternatives rejected: always restarting interrupts live work when nothing
+changed; scanning source mtimes is slow on large checkouts and flags unrelated
+generated or uncommitted writes; `TOFU_AUTO_RESTART` is a separate, default-off
+policy.
 
-The JSON receipt has `schema: 1`, `exit_code`, `status` (`installed`, `ready`, `failed`), `phase`, `install_dir`, `python`, `url`, `log`, and `duration_seconds`. Only a verified live launch earns `ready`; `--no-launch` earns `installed` with no URL. Runtime failure remains nonzero with `failed`. Receipts contain no provider credentials, but do contain local paths. They require a working Python at exit. Help/usage errors are side-effect-free and do not produce a receipt.
+The JSON receipt has `schema: 1`, `exit_code`, `status` (`installed`, `ready`, `restart-required`, `failed`), `phase`, `install_dir`, `python`, `url`, `log`, and `duration_seconds`. Only a verified live launch earns `ready`; `--no-launch` earns `installed` with no URL. `restart-required` exits 0: installation and runtime verification passed, but the verified worker at `url` may predate this checkout's code until `serverctl.py restart` runs. Runtime failure remains nonzero with `failed`. Receipts contain no provider credentials, but do contain local paths. They require a working Python at exit. Help/usage errors are side-effect-free and do not produce a receipt.
 Use a unique result path per invocation.
 
 Install-directory and selected conda-environment locks reject concurrent
@@ -264,13 +284,14 @@ Maintainers produce archives with `scripts/build_tofudb_prebuilt.py`.
 
 Owner decision 2026-11-01: an internal export must work **out of the box** —
 a colleague must not have to re-add MCP servers, skills or API keys, and must
-not need any special export flag. `export.py --mode internal` and
+not need any special export flag. Owner decision 2026-11-04 narrows the MCP
+part to the shared internal servers (below). `export.py --mode internal` and
 `export.py --handoff` therefore carry, by default:
 
 | Carried | From | Lands at |
 |---|---|---|
 | Live provider authority + current API keys | the running app's model-routing v2 store, via the audited loopback reveal endpoint | `data/config/carried_model_routing.json`, imported once at the destination's first boot |
-| Every MCP registration | the live owner store `mcp_servers/<uid>.json` | `data/config/mcp_servers.json` (migrated into the destination owner store) |
+| MCP registrations served by a bundled internal MCP repo (command `hope-mcp`, `xuecheng-mcp` or `llm-mcp`), per-person login ids stripped | the live owner store `mcp_servers/<uid>.json` | `data/config/mcp_servers.json` (migrated into the destination owner store) |
 | Credential vault + its key | `data/config/` | same paths, mode 0600 |
 | All installed skill packages, vendored engines included | `.tofu/skills`, `data/skills` | same paths |
 | Shareable platform config | `features.json`, `pricing.json`, `private_hosts.json`, `site_packs/` | same paths |
@@ -282,6 +303,25 @@ one: per-person SSO/MIS identity (the destination's own session supplies it),
 OAuth/SSO sessions whose refresh tokens are single-use (a second copy would
 log the first one out), the Feishu bot binding (two installs would split one
 event stream), per-install keys, machine-bound state and personal history.
+Every other MCP registration stays behind too: third-party and personal
+servers (GitHub, Overleaf, `npx` packages, URL endpoints) authenticate as
+their owner with personal tokens, so a colleague registers them with their own.
+
+**MCP registrations (owner decision 2026-11-04).** Problem: carrying every
+live registration shipped the owner's personal and third-party servers to
+colleagues together with the personal tokens they authenticate with.
+Decision: a registration travels iff its command is the bare launcher of an
+internal MCP repo the export bundles under `vendor/`; one tuple
+(`_BUNDLED_INTERNAL_MCP_REPOS` in `export_pkg/_lists.py`) drives both the
+bundler and the carry filter. Such a server launches from the bundled source
+on any host and signs in through the destination's own SSO session. Matching
+is exact: a host-pinned path to a bundled launcher does not resolve to
+`vendor/` on another host and stays behind. Alternatives considered: a
+hand-kept allowlist of registration names, rejected because it drifts from
+what is actually bundled; carrying every registration, rejected because it
+ships personal servers and their tokens; rewriting personal launch wrappers
+into `vault:` env references, rejected because the reference still resolves to
+the owner's personal token.
 
 Two packaging rules keep this safe to ship: carried secret material lives only
 under gitignored `data/`/`.tofu/` paths, so the internal release-repo snapshot
@@ -310,9 +350,10 @@ result, before the installation commit:
 ```
 
 A missing launcher is a warning, not a failure: it names what will not work
-instead of leaving the user to discover it at first use. Public `npx` entries
-report as unavailable because release installs deliberately carry no Node
-runtime. Opensource installs have neither path and skip the step.
+instead of leaving the user to discover it at first use. Public `npx` entries,
+which only a personal copy carries, report as unavailable because release
+installs deliberately carry no Node runtime. Opensource installs have neither
+path and skip the step.
 
 Problem: a carried skill or MCP server can be present but unusable — an
 unresolved Python import, an absent launcher — and the old installer reported a
@@ -445,6 +486,14 @@ match the target interpreter's accepted tags. Archives reject traversal, links,
 duplicates and undeclared members; lock and wheel hashes are checked before use.
 Cache slots `.tofu-install-cache/wheels/{uv,conda}` keep one complete generation
 per backend; replacement reclaims the previous generation after publication.
+Both uv and the pip-only acquisition path apply an adjacent
+`install-constraints.txt` when supplied by the release builder. Falling back
+to pip must not silently select a different dependency graph.
+Release certification installs that exact hashed lock with uv configuration
+discovery disabled, matching the installer. Problem: reapplying the project's
+unpinned resolver floors during hashed installation rejects an already verified
+wheelhouse. Re-resolving or dropping hash enforcement would weaken admission;
+the lock is the installation authority after resolution has finished.
 Archives are bounded to 1 GiB compressed / 4 GiB unpacked / 2048 members;
 temporary files are reclaimed. Download socket/whole-file deadlines are 10/60
 seconds; resolver/acquisition steps retain 900-second deadlines.
@@ -732,14 +781,44 @@ Installation stages a fresh candidate interpreter and configuration. Required
 artifact/import/runtime checks must pass before the selected environment pointer
 changes. Publication failure restores the previous configuration and interpreter;
 provider credentials, source edits, storage authority and user data remain intact.
+The candidate must name a distinct environment directory below `.tofu-envs/`
+and an interpreter entry inside that directory. A virtualenv's interpreter may
+symlink to its managed base Python; an unrelated interpreter path is rejected
+before configuration changes. Problem: checking only that an executable exists
+does not establish the candidate's ownership. Decision: verify its containing
+directory independently from the executable's symlink target. Rejecting all
+interpreter symlinks would break ordinary virtualenvs.
+Configuration staging owns its file descriptor until it is closed, even when
+stream creation fails. Unlinking the temporary pathname alone does not release
+that descriptor; the selected configuration stays intact on this failure.
 Use `--no-launch` to prepare without starting a worker; `--no-update` preserves
 source but still permits artifact downloads. Locks reject competing installers.
+While still holding the install lock, completion removes only unpublished
+candidate environments created by that invocation. The selected environment
+and all pre-existing environments remain untouched, including after a launch
+failure. An unreadable selection marker or an unsafe path stops cleanup rather
+than guessing ownership. Problem: every failed attempt previously left another
+full environment on disk. Decision: reclaim invocation-owned staging on settled
+exit; sweeping old environments could remove a running or rollback interpreter.
+Hard kills cannot run cleanup; such leftovers are preserved for explicit review.
+Retention validation with three synthetic 1 MiB failed environments reclaimed
+all 3 MiB while retaining the selected environment; this adds no persistent
+cache or retention setting.
 
 Native artifacts copied between containers still require actual host execution:
 matching wheel tags and versions alone cannot prove loader compatibility. The
 Wasmtime reactor/host-tool and PDF checks run before candidate publication;
 `healthcheck.py --runtime` verifies launched application readiness separately.
 Supported repair and diagnostic commands are documented above.
+
+Installer diagnostics redact provider and package-index secrets supplied in
+either the parent environment or an explicit child environment, for both live
+output and the retained error tail. A separate child environment must not bypass
+the existing log privacy boundary.
+
+On Linux, bootstrap treats both raw subprocess SIGINT/SIGTERM exits and their
+shell-encoded equivalents as intentional stops. They never enter dependency
+repair or the external-SIGKILL restart path.
 
 ## Desktop clients
 

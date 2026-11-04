@@ -63,24 +63,11 @@ def build_round_request(task, rs, messages, tool_list, *,
     from lib.tasks_pkg.model_images import pin_model_images, task_image_reuse
     pin_model_images(messages, model=rs.model, user_id=task.get('_userId'))
 
-    # Reasoning-blowout recovery (set by _terminal_recovery after a round
-    # that burned the whole completion budget on analysis with zero content
-    # and zero tool calls): compile THIS round with thinking off — the
-    # cheapest legal rung on cannot-disable models (GLM-5.3/Kimi K3),
-    # disabled elsewhere. One-shot; the recovery budget bounds repeats.
-    _thinking_this_round = rs.thinking_enabled
-    if task.pop('_reasoning_blowout_degrade_next', False):
-        _thinking_this_round = False
-        from lib.log import get_logger as _get_logger
-        _get_logger(__name__).info(
-            '[Task %s] reasoning degraded for one round after '
-            'reasoning-channel blowout (round %d)', tid, round_num)
-
     _snapshot_arguments = {
         'tid': tid,
         'round_num': round_num,
         'model': rs.model,
-        'thinking_enabled': _thinking_this_round,
+        'thinking_enabled': rs.thinking_enabled,
         'thinking_depth': thinking_depth,
         'preset': rs.preset,
         'temperature': temperature,
@@ -95,7 +82,7 @@ def build_round_request(task, rs, messages, tool_list, *,
             rs.model, messages,
             max_tokens=max_tokens,
             temperature=temperature,
-            thinking_enabled=_thinking_this_round,
+            thinking_enabled=rs.thinking_enabled,
             preset=rs.preset,
             thinking_depth=thinking_depth,
 

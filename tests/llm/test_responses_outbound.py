@@ -358,8 +358,7 @@ class TestRequestConversion:
         assert 'conversation-secret' not in out['prompt_cache_key']
         marker = out['input'][0]['content'][0]['prompt_cache_breakpoint']
         assert marker == {'mode': 'explicit'}
-        assert out['context_management'] == [{
-            'type': 'compaction', 'compact_threshold': 128000}]
+        assert 'context_management' not in out
         assert 'reasoning.encrypted_content' in out['include']
         assert out['reasoning']['context'] == 'all_turns'
 

@@ -1,8 +1,8 @@
 """lib/self_update/_apply.py — the two update strategies + dispatcher.
 
-``_apply_via_git`` (git pull --ff-only), ``_overlay_skip`` +
-``_apply_via_tarball`` (download + overlay for non-git deployments), and
-``apply_update`` which picks between them automatically.
+``_apply_via_git`` (git pull --ff-only from the resolved upstream),
+``_overlay_skip`` + ``_apply_via_tarball`` (download + overlay for non-git
+deployments), and ``apply_update`` which picks between them automatically.
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from lib.http_transport.client import http_stream
 from lib.log import audit_log, log_context
 from lib.runtime.runtime_layout import is_overlay_skipped as _rl_is_overlay_skipped
 from lib.self_update._config import (
-    UPDATE_BRANCH,
-    UPDATE_REMOTE,
     _DOWNLOAD_TIMEOUT,
     _GIT_TIMEOUT,
     _ROOT,
@@ -27,6 +25,7 @@ from lib.self_update._git import (
     _run_git,
     _run_git_streaming,
     git_available,
+    resolve_update_upstream,
 )
 from lib.self_update._requirements import (
     _install_requirements,
@@ -100,9 +99,11 @@ def _facade(name, default):
 
 
 def _apply_via_git(progress=None) -> dict:
-    """Run ``git fetch`` + ``git pull --ff-only``. Returns a result dict.
+    """Fast-forward from the resolved upstream. Returns a result dict.
 
-    Refuses (without mutating anything) when:
+    Runs ``git pull --ff-only <remote> <branch>`` for
+    ``resolve_update_upstream()``, the same remote/branch the update check
+    compares against. Refuses (without mutating anything) when:
       * git is unavailable, or
       * the working tree has blocking (non-runtime) changes.
 
@@ -159,6 +160,7 @@ def _apply_via_git(progress=None) -> dict:
         _emit('fetch', 'error', result['detail'])
         return result
 
+    upstream = resolve_update_upstream()
     before_sha = _head_sha()
 
     # Forward git's own ``<phase>: <pct>%`` progress (Receiving objects /
@@ -202,7 +204,7 @@ def _apply_via_git(progress=None) -> dict:
             # dominant cost on a slow connection.
             _emit('fetch', 'active')
             pull_cp = _run_git_streaming(
-                ['pull', '--ff-only', UPDATE_REMOTE, UPDATE_BRANCH],
+                ['pull', '--ff-only', upstream.remote, upstream.branch],
                 timeout=_GIT_TIMEOUT, on_progress=_git_progress)
             if pull_cp.returncode != 0:
                 blob = (pull_cp.stderr or pull_cp.stdout)[:500]
@@ -216,7 +218,8 @@ def _apply_via_git(progress=None) -> dict:
                     result['error'] = 'git fetch/pull failed.'
                     _emit('fetch', 'error', blob)
                 result['detail'] = blob
-                logger.error('[Update] git pull failed: %s', result['detail'])
+                logger.error('[Update] git pull %s %s failed: %s',
+                             upstream.remote, upstream.branch, result['detail'])
                 return result
             # If no progress frames arrived at all (e.g. a tiny fast-forward,
             # or git built without progress), ensure fetch is closed and the
@@ -304,8 +307,8 @@ def _apply_via_git(progress=None) -> dict:
 
     audit_log('self_update',
               old_version=old, new_version=new,
-              changed=result['changed'], remote=UPDATE_REMOTE,
-              branch=UPDATE_BRANCH, method='git',
+              changed=result['changed'], remote=upstream.remote,
+              branch=upstream.branch, method='git',
               deps_changed=result['deps_changed'],
               deps_installed=result['deps_installed'])
     logger.info('[Update] applied via git: %s → %s (changed=%s deps_changed=%s '

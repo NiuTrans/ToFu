@@ -201,6 +201,17 @@ textarea.ui-input{
   pointer-events:none;
 }
 
+/* Compact inline field (createField size 'sm'): the label sits beside a
+   control on the small height ramp, for header and toolbar rows; hint and
+   error keep their own line below. */
+.ui-field--sm{flex-direction:row;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2)}
+.ui-field--sm .ui-field__label{font-size:var(--font-size-sm);font-weight:var(--weight-regular);color:var(--text-secondary)}
+.ui-field--sm .ui-field__hint,.ui-field--sm .ui-field__error{flex-basis:100%}
+.ui-field--sm .ui-input{flex:1 1 auto;width:auto;min-width:0;height:var(--control-h-sm);padding:0 var(--space-2);font-size:var(--font-size-sm)}
+.ui-field--sm .ui-select{width:auto;min-width:0;max-width:100%}
+.ui-field--sm .ui-select>select{height:var(--control-h-sm);padding:0 var(--space-6) 0 var(--space-2);font-size:var(--font-size-sm);text-overflow:ellipsis}
+.ui-field--sm .ui-select::after{right:var(--space-2)}
+
 /* ── Card ──────────────────────────────────────────────────────────────── */
 .ui-card{
   background:var(--bg-secondary);

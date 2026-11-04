@@ -9,6 +9,13 @@ Read `docs/modules/context_engineering.md` and
 `_receipt.py` owns archive metadata, not model authority. Read these owners
 before changing composer/replay/recovery boundaries; handoff and provider-wire
 tests are the executable compatibility matrix.
+`_continuity.py` carries source-derived folded execution state independently
+of model prose; its schema is `contracts/compaction_continuity_v1.schema.json`.
+Verify identity/digest before reuse and reserve the complete packet before a
+summary call. Verify `test_unified_continuity.py`, including manual rebuild.
+`_evidence.py` binds L1's original observations to their compacted occurrences;
+verify `test_compaction_chain.py` for L1/L2, restored snapshots and provider wire.
+Final request-size settlement follows all injections/admission, not recomposition.
 `_resume_projection.py` validates accepted archive snapshots against fresh
 history/policy/tool-prefix evidence for Continue; its focused regressions are
 `test_dispatch_context_recovery.py` (including isolated storage restart).
@@ -18,6 +25,9 @@ L2. Their contract is `docs/CONTEXT_BUDGET_POLICY.md`; verify with
 `test_compaction_pressure_policy.py` and `test_route_context_budget.py`.
 `_budget.py` fits the final tool view, including host outcomes and recovery
 metadata; candidate finalizers are pure and retention stays outside the search.
+`_idle.py` owns the cloud idle L1 trigger and request activity evidence;
+`model_replay.py` carries that evidence through the existing continuation.
+Verify `test_cloud_idle_l1.py` and `tests/model_routing/test_context_activity.py`.
 Verify final-result budget facts/backends, aggregate recovery and source round
 budget tests. Source-policy ceilings must agree across every fitting stage.
 Canonical verdict overrides must reconcile prior views and manifest references
@@ -49,6 +59,7 @@ focused changed stage tests. Add manual-compaction route/reload or long-agent
 context-plan tests when those boundaries change.
 
 Local L2 stages live under `_layer2/`: `_source_plan.py` selects source units,
+`_preparation.py` borrows deterministic L1 transforms for the detached candidate,
 `_candidate_policy.py` owns pre/post-summary economics, `_summary_acceptance.py`
 validates critical state, and `_projection.py` constructs/converges candidates.
 `_compact.py` retains cancellation, archive/adoption order and receipt settlement;

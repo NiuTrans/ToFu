@@ -60,7 +60,7 @@ export function presentLivePhaseLabel(value: TransientTurnPresentation, text: Li
   if (phase === 'warming') label = text('autopilot.warming', 'Autopilot is starting…');
   else if (phase === 'thinking_active') label = text('stream.thinking.active', 'Thinking…');
   else if (phase === 'llm_thinking' && !label) label = text('stream.phase.generatingResponse', 'Generating response…');
-  else if (phase === 'tool_exec' && value.tools?.length) label = value.detail || value.tools.join(', ');
+  else if (phase === 'tool_exec' && value.tools?.length && !localizedDetail) label = value.detail || value.tools.join(', ');
   else if (phase === 'retrying' && !localizedDetail && !value.detail) label = text('stream.phase.retrying', 'Retrying…');
   else if (phase === 'waiting' && !localizedDetail && !value.detail) label = text('stream.phase.waitingWorkerStatus', 'Waiting for an execution status update…');
   else if (phase === 'responding' && !value.detail) label = text('autopilot.warming', 'Autopilot is responding…');

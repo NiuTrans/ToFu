@@ -7,6 +7,10 @@ things that must still stay behind for FUNCTIONAL reasons (per-person SSO
 identity, per-install keys, personal history) and the packaging defects that
 previously broke carried skills (dropped vendored engines, shipped session
 tickets).
+
+Owner decision 2026-11-04 narrows the MCP part: only registrations served by
+an internal MCP repo the export bundles travel. Third-party and personal
+servers need their user's own tokens and stay behind.
 """
 from __future__ import annotations
 
@@ -45,25 +49,78 @@ def _write_mcp(root: Path, config: dict, *, owner_store: bool) -> None:
             json.dumps(config), encoding='utf-8')
 
 
+# The owner store's real registration shapes, with synthetic values.
+_OWNER_REGISTRATIONS = {
+    'github': {'command': '/mnt/personal/env/bin/python',
+               'args': ['-c', 'import sys; sys.path.insert(0, "/mnt/personal/tofu")'],
+               'enabled': True, 'env': {}},
+    'github-batch': {'command': '/mnt/personal/env/bin/python', 'args': ['-c', '...'],
+                     'enabled': True, 'env': {}},
+    'hope': {'command': 'hope-mcp', 'args': [], 'enabled': True,
+             'env': {'HOPE_USERNAME': 'operator'}},
+    'overleaf': {'command': 'tofu-overleaf-mcp', 'args': [], 'enabled': True,
+                 'env': {'OVERLEAF_SESSION': 'session-value',
+                         'OVERLEAF_GIT_TOKEN': 'git-token-value'}},
+    'xuecheng': {'command': 'xuecheng-mcp', 'args': [], 'enabled': True,
+                 'env': {'XUECHENG_MIS': 'operator', 'XUECHENG_TOOLSET': 'all'}},
+    'llm': {'command': 'llm-mcp', 'args': [], 'enabled': False,
+            'env': {'LLM_MIS': 'operator'}},
+    '12306-train': {'command': 'npx', 'args': ['-y', '12306-mcp'], 'enabled': True},
+    'rollinggo-flight': {'enabled': False, 'url': 'https://example.invalid/mcp',
+                         'env': {'ROLLINGGO_API_KEY': 'key-value'}},
+    # A host-pinned path to a bundled launcher: only the bare launcher name
+    # resolves to the bundled vendor/ source on another host.
+    'hope-pinned': {'command': '/mnt/personal/env/bin/hope-mcp', 'args': [],
+                    'enabled': True, 'env': {}},
+}
+
+
 def test_mcp_reads_the_live_owner_store_not_the_stale_legacy_file(project):
-    _write_mcp(project, {'legacy': {'command': 'npx', 'enabled': True}}, owner_store=False)
+    _write_mcp(project, {'xuecheng': {'command': 'xuecheng-mcp', 'enabled': True}},
+               owner_store=False)
     _write_mcp(project, {'hope': {'command': 'hope-mcp', 'enabled': True, 'env': {}}},
                owner_store=True)
     carried = internal._carried_mcp_config()
     assert set(carried) == {'hope'}, 'the runtime authority is the owner store'
 
 
-def test_mcp_carries_disabled_and_secret_bearing_entries(project):
-    _write_mcp(project, {
-        'overleaf': {'command': 'tofu-overleaf-mcp', 'enabled': True,
-                     'env': {'OVERLEAF_SESSION': 'session-value'}},
-        'rollinggo-flight': {'enabled': False, 'url': 'https://example.invalid/mcp',
-                             'env': {'ROLLINGGO_API_KEY': 'key-value'}},
-    }, owner_store=False)
+def test_mcp_carries_only_registrations_served_by_a_bundled_repo(project):
+    _write_mcp(project, _OWNER_REGISTRATIONS, owner_store=True)
     carried = internal._carried_mcp_config()
-    assert carried['overleaf']['env']['OVERLEAF_SESSION'] == 'session-value'
-    assert carried['rollinggo-flight']['enabled'] is False
-    assert carried['rollinggo-flight']['env']['ROLLINGGO_API_KEY'] == 'key-value'
+    assert set(carried) == {'hope', 'xuecheng', 'llm'}
+    assert carried['hope'] == {'command': 'hope-mcp', 'args': [], 'enabled': True, 'env': {}}
+    assert carried['xuecheng']['env'] == {'XUECHENG_TOOLSET': 'all'}
+    assert carried['llm']['enabled'] is False, 'the operator on/off state travels as is'
+
+
+def test_mcp_third_party_and_personal_servers_stay_behind(project):
+    _write_mcp(project, _OWNER_REGISTRATIONS, owner_store=True)
+    carried = internal._carried_mcp_config()
+    for name in ('github', 'github-batch', 'overleaf', '12306-train',
+                 'rollinggo-flight', 'hope-pinned'):
+        assert name not in carried, f'{name} is not served by a bundled internal MCP repo'
+    serialized = json.dumps(carried)
+    for personal_secret in ('session-value', 'git-token-value', 'key-value'):
+        assert personal_secret not in serialized
+
+
+def test_mcp_carry_follows_the_bundled_repo_set(project, tmp_path):
+    """Carried launchers are exactly the vendored ones, never a second list."""
+    for sibling in ('hope-mcp', 'xuecheng-mcp', 'llm-mcp', 'unrelated-mcp'):
+        (tmp_path / sibling).mkdir()
+        (tmp_path / sibling / 'pyproject.toml').write_text(
+            f'[project]\nname="{sibling}"\n', encoding='utf-8')
+    dest = tmp_path / 'dest'
+    internal._bundle_internal_mcp_repos(dest, 'internal')
+    vendored = {path.name for path in (dest / 'vendor').iterdir() if path.is_dir()}
+    assert vendored == {'hope-mcp', 'xuecheng-mcp', 'llm-mcp'}
+
+    _write_mcp(project, {
+        f'server-{launcher}': {'command': launcher, 'args': [], 'enabled': True}
+        for launcher in ('hope-mcp', 'xuecheng-mcp', 'llm-mcp', 'unrelated-mcp')
+    }, owner_store=True)
+    carried = internal._carried_mcp_config()
+    assert {entry['command'] for entry in carried.values()} == vendored
 
 
 def test_mcp_strips_only_personal_login_identity(project):
@@ -78,23 +135,6 @@ def test_mcp_strips_only_personal_login_identity(project):
     assert carried['hope']['env'] == {'HOPE_ENDPOINT': 'https://example.invalid'}
     assert carried['xuecheng']['env'] == {'XUECHENG_TOOLSET': 'all'}
     assert carried['llm']['env'] == {}
-
-
-def test_mcp_absolute_vault_wrapper_becomes_a_portable_launcher(project):
-    _write_mcp(project, {
-        'github': {'command': '/mnt/personal/env/bin/python',
-                   'args': ['-c', 'import sys; sys.path.insert(0, "/mnt/personal/tofu")'],
-                   'enabled': True, 'env': {}},
-        'github-batch': {'command': '/mnt/personal/env/bin/python',
-                         'args': ['-c', '...'], 'enabled': True, 'env': {}},
-    }, owner_store=False)
-    carried = internal._carried_mcp_config()
-    assert carried['github']['command'] == 'npx'
-    assert carried['github']['args'] == ['-y', '@modelcontextprotocol/server-github@2025.4.8']
-    assert carried['github-batch']['command'] == 'github-batch-mcp'
-    assert carried['github-batch']['args'] == []
-    for name in ('github', 'github-batch'):
-        assert carried[name]['env']['GITHUB_PERSONAL_ACCESS_TOKEN'] == 'vault:github_token'
 
 
 def test_carried_mcp_config_is_written_owner_only(project, tmp_path):

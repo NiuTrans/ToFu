@@ -400,9 +400,44 @@ closed panel mounts none of its calls, so it hydrates no lazy outputs; opening
 an oversized panel windows its calls from the first one. A reply without calls
 has no panel; its process rows render inline before the prose.
 
-When reasoning and calls are both present, their independent disclosures form
-one activity card: two full-width, equal-height rows with matching glyph tiles
-and trailing chevrons, separated by the card's rule rather than a detached pill.
+Interim round prose shares ONE bounded, scrolling narration well
+(`interimNarrationIds` in `grouped-turn-layout.ts`; design ports
+`narrationWell`/`paintNarrationWell`; styles in `23-reading-prose.css`), so a
+long run of rounds no longer stretches the reply. Members are the contiguous
+run of non-deliverable, non-terminal text starting at the first one, excluding
+the reply's latest text: that text may still stream or become the answer, so
+a leaf is reparented at most once, when a later round's text follows it. The
+answer always reads on the open page below. Per-block caps were rejected: many
+short rounds still stretched the reply.
+
+The well is the activity card's last fold (owner report 2026-11-04: a
+separate notes box under the reasoning and tool rows read as a second card
+that could not be put away). Its header is a Surface-owned native button in
+the panel header's grammar: glyph tile, "N notes" label, trailing chevron
+(design port `paintNarrationWell` returns it; the engine owns its state and
+delegation). `23-reading-tool-panel.css` joins it under the reasoning row, the
+panel header or the panel's last call; with no adjacent card row it is a card
+of its own. Without a reader choice it follows the panel's settlement rule
+(`narrationDefaultOpen`): open while the reply works, folded once it has
+completed with an explicit answer and nothing left to act on; a still-running
+call keeps only the panel open. An explicit toggle, or any click inside a
+note, is a reader choice keyed by Turn presentation, cleared with the panel's
+choices. A folded body stays mounted and hidden, so notes keep their identity
+and the well never reparents a leaf to fold; every reopening rests at the
+newest note. The body scrolls with edge shadows and is keyboard-focusable
+(`23-reading-prose.css`). Unmounting folded notes was rejected: every fold
+would remount and re-render each note. Open reasoning (`.thinking-content`)
+is the same kind of scroller: shared `--conversation-process-scroll-max`, edge
+shadows covered with the surface it sits on, a labelled focusable region.
+Both read newest-first through `endAnchoredScroller` (`renderers/stable-dom.ts`):
+they rest at their end when first laid out, when reasoning is (re)opened and
+as content grows, until the reader scrolls up; scrolling back to the end
+resumes following. Starting at the top was rejected: the latest progress is
+what the reader wants.
+
+When reasoning, calls and notes sit together, their independent disclosures
+form one activity card: full-width, equal-height rows with matching glyph tiles
+and trailing chevrons, separated by the card's rule rather than detached pills.
 The reasoning glyph is the shared brain icon; the former dot was only a
 streaming-status decoration, not a necessary control or content state.
 `23-reading-tool-panel.css` joins the existing keyed siblings visually without
@@ -410,7 +445,8 @@ reparenting either disclosure, so streaming identity, focus and reader-owned
 expansion remain unchanged. Expanded reasoning starts at the card's normal
 inset rather than a second indent under the header label; it never toggles
 the tool panel. A reply without
-calls keeps the ordinary reasoning disclosure, not an empty activity section.
+calls or notes keeps the ordinary reasoning disclosure, not an empty activity
+section.
 
 **Alternatives rejected:** stretching only the old pill leaves two disconnected
 cards and an unexplained status dot; a wrapper around both disclosures would
@@ -1114,12 +1150,36 @@ evidence only: it never repopulates live phase state or renders as a chat
 timeline row.
 
 A running Turn with no live phase does not prove worker startup or transport
-recovery: older snapshots omit phases and semantic deltas clear them. Its
-fallback says “Waiting for an execution status update…”, never claims a
-resynchronization, and never uses `workerStarting`; that label requires an
-explicit worker-entry phase. A streaming text/thinking tail suppresses the
-empty-phase placeholder. Pending task binding still distinguishes scheduler
-preparation from executor queue residence.
+recovery: older snapshots omit phases and semantic deltas clear them. The row
+first reports the Turn's own projected activity (`projectLiveActivity` in
+`presentation/view-model/live-turns.ts`). Calls that the projection marks
+active read “Running {tool}: {intent}” (or the active tool list) with an
+elapsed clock from the earliest backend `tStart`; this also decorates a
+`tool_exec` frame, which is sent once per batch and goes stale as parallel calls
+finish. Unsettled reasoning reads as the client-derived `thinking_active`.
+Only without such evidence does the fallback say “Waiting for an execution
+status update…”; it never claims a resynchronization and never uses
+`workerStarting`, which requires an explicit worker-entry phase. Every other
+reported phase is shown as sent. The row is omitted only when it would restate
+the streaming block directly above it: an answer tail under the bare fallback,
+or reasoning that is the reply's last part. Pending task binding still
+distinguishes scheduler preparation from executor queue residence.
+
+**Problem (owner report 2026-11-03):** a 435-round slides reply showed only
+“Waiting for an execution status update…” under its failed work-unit card and
+file receipt for minutes at a time while it reasoned and ran commands, so the
+owner read it as stuck. A grouped reply renders reasoning above the tool panel
+and receipts below the prose, so the streaming block that the old tail-only
+rule relied on was far out of view, and one `tool_exec` frame said nothing
+about how long a call had run. **Decision:** project the Turn's own active
+calls and unsettled reasoning into the row, with elapsed time from the backend
+`tStart`; the clock is `aria-hidden` so the polite live region announces phase
+changes, not seconds. **Alternatives rejected:** a backend heartbeat phase adds
+event traffic to restate facts the projection already carries; hiding the row
+whenever any block streams leaves a long reply with no live surface in view; a
+client stopwatch restarts on every reload, unlike the backend `tStart`.
+Specs: `presentation/view-model/live-turns.test.ts` and
+`ui/renderers/text-blocks.test.ts`.
 
 `llm_thinking` denotes an opened model-generation round, not evidence of
 reasoning-channel output. Its live row preserves localized `detailKey` and
@@ -1364,6 +1424,49 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   is a sibling row that names its source; provenance never draws a rail.
   User disclosure state survives semantic repaint, and collapsing never
   removes data from Turn authority.
+- Sibling programs of one model round read as one batch
+  (`presentation/program-batch-presentation.ts`). Two or more program cards
+  of a round (synthetic parents or unowned native gateways; an owned gateway
+  stays replaced by its parent) share one head that counts them and their
+  outcomes in a fixed order — running, waiting, completed, returned, returned
+  for model judgment, failed, incomplete — e.g. `9 个程序 · 1 已完成 · 8 交回模型判断`,
+  live `9 个程序 · 1 执行中 · 8 等待执行`. Each count repeats its card's own
+  status: a live Turn's unstarted call is waiting, a settled Turn's unanswered
+  call incomplete. The explicit program rule `shouldCollapseProgramBatch`,
+  beside `shouldCollapseToolBatch`, folds the batch by default whatever its
+  size; only a member awaiting the reader keeps it open. Head attention uses
+  the direct-batch vocabulary: active while a program runs or waits, error for
+  a genuine program failure (only its count is colored), otherwise important.
+  A handoff returns to the model for judgment; it is not a reader action, so a
+  batched handoff card never opens itself, on first paint or on transition.
+  Failed and incomplete cards keep their reveal, as direct-batch failures do.
+  No other member opens on first paint: a child's failure is its program's
+  evidence, already returned to the model, and keeps its state on a closed row.
+  Members — the programs and the execution children that follow them — stay
+  keyed leaves in authored order: the fold only hides them and the head sits
+  before the first mounted member, so narration and chronology keep their
+  places. A lone program keeps its card and no head; so does a retained/classic
+  round that also made direct calls, since its head would not count them. The
+  classic batch is the `_renderTurnHead` batch whose `collapsed`/`aria-expanded`
+  reader choice the keyed reconciliation keeps; the Surface head is a
+  `RoundOutline` control keyed by round scope and occurrence, so the choice
+  survives live repaints, gateway-to-parent replacement and settlement, with
+  the outline's no-durable/cross-window guarantee above. A round search hit
+  inside a folded batch unfolds it.
+
+  Problem: one model response issued nine sibling `execute_program` calls whose
+  document reads were refused; every needs-model card opened itself, so the
+  Turn showed nine full cards with evidence and no batch head. Decision: one
+  collapsed head per round summarizes the batch and handoff cards inside it stay
+  closed. Alternatives rejected: shortening cards but keeping per-card reveal
+  (still N open cards); treating a handoff as an error to reuse the direct-batch
+  exposure rule (it is the model's input, not the reader's); a second fold state
+  machine beside the batch head and outline owners; folding a mixed classic
+  round under a head that counts only its programs. Specs:
+  `program-batch-presentation.test.ts`, `tool-execution-groups.test.ts`,
+  `round-outline.test.ts`, `tests/tool-group-presentation.test.cjs`,
+  `tests/frontend/test_rich_card_reconciliation.py` and real Chromium
+  `tests/visual/test_visual_program_batch_group.py` (desktop/mobile, EN/ZH).
 - `segments` owns render order and `toolRounds` owns the rich tool body. The
   generated browser snapshot may receive completed, uniquely matched tool
   segments as `roundRef` records to avoid carrying their input/result bytes a
@@ -1660,6 +1763,26 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   Artifact/cursor metadata remains inspectable but excluded from previews.
   Rejected: synthetic-only rendering, arbitrary code-tool aliases, and inferred
   completion/statistics from script-returned data.
+  Only the synthetic parent records that a program started, so an unanswered
+  gateway call of a live (`pending`/`running`) Turn reads Waiting to start,
+  without script activity, counters or a result, until its started parent
+  replaces it and reads Executing program. A settled Turn's unanswered call
+  is Incomplete, whatever in-flight status its round last carried. Problem:
+  sibling programs serialized behind one running program all claimed to be
+  executing and to have requested tools. Rejected: timers or elapsed-time
+  guesses, and reading any in-flight gateway status as a running program.
+  Specs: `program-execution-card.test.ts` and `program-gateway-card.test.ts`.
+  Program heads name the step once: the localized title, never clamped (the
+  exact `execute_program` identity stays in its tooltip), and a one-line
+  status that never shrinks share one compact line. A long localized status
+  that cannot fit beside the title moves beneath it whole, and is cut only
+  when it alone exceeds the head; the summary keeps its own line beneath at
+  every width. Problem: an open program row also showed the raw tool name,
+  and the generic one-line call row squeezed the summary beside them,
+  clipping the title to one glyph and wrapping the status. Rejected:
+  restyling every tool row, and a truncated single-line summary. Spec: real
+  Chromium `test_visual_program_row_status.py` (waiting, running and settled
+  rows) at desktop/mobile widths.
 
   Problem: zero-call wording made saved-result reads look like no work, and
   keeper receipt JSON exposed private references in the glanceable header.
@@ -1671,7 +1794,7 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   expanding internal references in the header.
 
   Complete SDK directory results are labelled as returned/total retained inputs; zero retained inputs never means zero experiment jobs. The original returned JSON stays independently inspectable in the result disclosure. `program-activity.ts` lexes at most 32 KiB without evaluating source, skipping strings/comments/templates/regexp text; labels say “Script” in plain language, never claim execution or inferred intent. Result display bounds depth, nodes and characters, marking excerpts explicitly. Rejected: name-only adapter hiding and speculative intent. Settled null and empty-string results remain inspectable as `null` and `""`, including observation data; absent output and waiting placeholders remain distinct. Truthiness is not evidence of absence. Hiding these valid values was rejected because it makes a returned value look like missing evidence. Problem: fallback cards exposed engine identifiers and expanded code with judgment evidence. Decision: one typed card owns all three paths. Rejected: maintaining separate fallback labels, markup and disclosure rules.
-- `activityTimeline` owns compact inline diagnostics, independently of round outlines. Attempt/task-scoped exact occurrences win; missing, mismatched or ambiguous identities never weaken to recycled call IDs. Generic round fallback stays within one monotonic producer run and proven chronology window; tool-ordinal resets also fence unscoped resumes. Otherwise a visible neutral position wins. Gateway children inherit the parent's occurrence/window. Deduplication requires an actually rendered matching tool card and its rejection/error evidence; ambiguous gateway receipts remain visible, never borrow another attempt. Specs: `presentation/activity-anchor.test.ts` and `tests/turn_lifecycle/test_activity_occurrence_anchors.py`. Compaction captures its boundary at start: `anchorPosition` is before/after a producer-scoped `anchorBlockId`, or `producer-start` for initial preflight. Completion preserves that boundary rather than re-anchoring after future output. Compaction rounds are zero-based, unlike request ordinals. Already-projected legacy rows without a boundary stay neutral; sparse replay uses producer-start conservatively, never guesses after future same-round prose. `summaryModel`/provider require observed dispatch identity aligned with bounded receipt call evidence; selection-only metadata is separately labeled. `taskModel` is the main model, never summary attribution. A typed positive call count must match the complete bounded ledger before actual identities are displayed; malformed/oversized evidence stays unknown and credential prose is redacted. Missing/mixed dispatch evidence stays unknown; no per-card archive fetch or historical Turn rewrite is introduced. Archived receipts remain inspectable. Visible rows are warnings/errors and settled `context_compaction` receipts, with estimated before → after counts and an owner-scoped archive link. Elapsed time retains the preceding phase start/summary generation; archive creation is not its start. A unique enclosing completed span may increase legacy display duration only; missing/ambiguous/incomplete timing leaves it unchanged. Routine info rows stay owned by their inline tools/live-status surface.
+- `activityTimeline` owns compact inline diagnostics, independently of round outlines. Attempt/task-scoped exact occurrences win; missing, mismatched or ambiguous identities never weaken to recycled call IDs. Generic round fallback stays within one monotonic producer run and proven chronology window; tool-ordinal resets also fence unscoped resumes. Otherwise a visible neutral position wins. Gateway children inherit the parent's occurrence/window. Deduplication requires an actually rendered matching tool card and its rejection/error evidence; ambiguous gateway receipts remain visible, never borrow another attempt. An `execute_tools` fallback also requires its parent's unique execution `resultId` to match exactly one compatible, rendered child error card; missing or repeated descriptors keep the fallback. Specs: `presentation/activity-anchor.test.ts` and `tests/turn_lifecycle/test_activity_occurrence_anchors.py`. Compaction captures its boundary at start: `anchorPosition` is before/after a producer-scoped `anchorBlockId`, or `producer-start` for initial preflight. Completion preserves that boundary rather than re-anchoring after future output. Compaction rounds are zero-based, unlike request ordinals. Already-projected legacy rows without a boundary stay neutral; sparse replay uses producer-start conservatively, never guesses after future same-round prose. `summaryModel`/provider require observed dispatch identity aligned with bounded receipt call evidence; selection-only metadata is separately labeled. `taskModel` is the main model, never summary attribution. A typed positive call count must match the complete bounded ledger before actual identities are displayed; malformed/oversized evidence stays unknown and credential prose is redacted. Missing/mixed dispatch evidence stays unknown; no per-card archive fetch or historical Turn rewrite is introduced. Archived receipts remain inspectable. Visible rows are warnings/errors and settled `context_compaction` receipts, with estimated before → after counts and an owner-scoped archive link. Elapsed time retains the preceding phase start/summary generation; archive creation is not its start. A unique enclosing completed span may increase legacy display duration only; missing/ambiguous/incomplete timing leaves it unchanged. Routine info rows stay owned by their inline tools/live-status surface.
 - The fixed composer area shows the latest main-lane turn's serving model while
   running and after settlement. An explicit fallback decision adds a visible
   warning with original model, target and cause. It never appears in reply headers.

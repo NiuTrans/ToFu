@@ -80,6 +80,8 @@ def apply_stream_decision(
         stream_result=rs.last_stream_result,
     )
     new_count = stream_decision.premature_retry_count
+    if stream_decision.action is RecoveryAction.BREAK:
+        rs.terminal_assistant_content = rs.original_assistant_content
     rs.last_finish_reason = stream_decision.last_finish_reason
     if stream_decision.abort_detected_phase:
         rs.abort_phase = stream_decision.abort_detected_phase

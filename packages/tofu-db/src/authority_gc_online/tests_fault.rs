@@ -261,8 +261,8 @@ fn crash_and_reopen(
     ))
 }
 
-/// Scenario 1: every fault point of the mark/scan phase (spill run writes,
-/// renames, directory barriers, shard scans). The faulted first epoch must
+/// Scenario 1: every fault point of the mark/scan phase (spill appends, their
+/// file and directory barriers, shard scans). The faulted first epoch must
 /// error or abort cleanly without deleting anything; the fault-free rerun
 /// completes and reclaims exactly the garbage.
 #[test]
@@ -270,7 +270,7 @@ fn every_online_epoch_mark_fault_preserves_live_blocks() {
     let seed = loose_seed(false);
     let trace = epoch_trace(&seed.vfs, 1);
     assert!(trace.contains(&Operation::Write));
-    assert!(trace.contains(&Operation::Rename));
+    assert!(trace.contains(&Operation::SyncAll));
     assert!(trace.contains(&Operation::SyncDirectory));
 
     for (operation, occurrence, action) in fault_cases(&trace) {
@@ -750,8 +750,9 @@ fn online_gc_process_restart_mid_epoch_recovers_and_cleans_spill_residue() {
         !vfs.read_directory(suspects_runs).unwrap().is_empty(),
         "previous epoch's suspect runs survived the crash"
     );
-    // A second, distinctly named stale suspect run proves the next epoch's
-    // SpillMarkSet init wipes every stale run, not just the ones it rewrites.
+    // A stale suspect run in the earlier one-file-per-run layout proves the
+    // next epoch's SpillMarkSet init wipes every stale spill entry, not just
+    // the file it rewrites.
     let stale_run = suspects_runs.join("run-0099.mark");
     {
         let mut file = vfs

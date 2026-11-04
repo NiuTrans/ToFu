@@ -280,7 +280,7 @@ CONTROL slots name the new catalog, like every other catalog publisher
 All bounds come from `generated_tofudb_ir.rs` and the launch probe, exactly
 as the offline collector: ≤ 65 536 loose victims per epoch (the offline
 round's 256 MiB victim byte cap does not apply online, see "Reclamation
-keeps its pace under foreground load"), temporary spill ≤ min(1 GiB, 2 % volume free), catalog window 16
+keeps its pace under foreground load"), rewrite and compaction scratch ≤ min(1 GiB, 2 % volume free) (the mark spill has no budget, see "Mark spill sized by its inserts"), catalog window 16
 segments, compaction floor 128 blocks (for an epoch's trailing compaction
 segment; every segment the format limits close is packed); loose directory
 listings hold one shard at a time and have no store-wide total. Loose
@@ -296,7 +296,8 @@ file per hold is structural, and the pause between holds is the previous
 hold's measured duration ("One file per deletion hold").
 A mark has no wall-clock budget; its memory is bounded by the
 captured catalog (location table) and the distinct pages it walks
-(visited-page map), and its spill by the temporary budget above.
+(visited-page map), and its spill grows with its inserts (32 bytes each,
+plus 52 bytes per 65,536-insert run).
 
 ## Observability
 
@@ -338,10 +339,12 @@ the segment-lane error or of the epoch error.
 
 ## Compatibility
 
-No on-disk format change: marks and suspect lists are spill files under
-`authority-gc/online/`, never read across process boundaries, wiped at
-thread start. The offline CLI keeps its exclusive session semantics
-unchanged. CONTROL/history/payload formats are untouched.
+Marks and suspect lists are spill files under `authority-gc/online/`, never
+read across process boundaries and wiped at thread start, so their layout
+changes without a migration: initialization removes the current spill file
+and the per-run files and temporaries of the earlier layout alike
+(`backup_gc::is_spill_entry_name`). The offline CLI keeps its exclusive
+session semantics unchanged. CONTROL/history/payload formats are untouched.
 
 ## Restart cancellation at source-I/O boundaries (2026-10-05)
 
@@ -394,7 +397,7 @@ installed root, treats a membership/cache answer as existence, or omits page IDs
 The epoch-owned metadata selection contains one optional root ID and the same
 index IDs the original helper used. Allocation is fallible and admitted before
 copying; actual Vec capacity plus selection size is charged against the existing
-probe-derived GC workspace ceiling and deducted from mark spilling allowance.
+probe-derived GC workspace ceiling at capture.
 Selection storage is released during marking or on abort. Tests measure typical
 and large 32,768-segment selections; no new pool, cache or persistent data exists.
 
@@ -1147,7 +1150,8 @@ so a mark read and inserted each shared page once per root plus once per walk
 of each persistent pin. In the shared-page fixture below a page was read 18
 times by one mark. At live scale this multiplied the work of a mark that
 already took tens of minutes, and the duplicate inserts alone exceeded the
-33.5M-insert spill budget (see "Mark spill budget at live scale").
+33.5M-insert spill cap a mark then had (since removed, see "Mark spill sized
+by its inserts").
 
 Decision. `build_marks` walks all of its roots with
 `entity::visit_entity_page_graphs_once`, which shares one map of walked pages
@@ -1231,9 +1235,9 @@ accumulates depends on how long it runs:
 - History segments are named by block ID, and only this lane deletes blocks.
   A payload segment retired during the mark makes its located reads fall back
   to the loose file and the exact catalog path.
-- The location table, the walked-page map and the spill runs are per mark,
-  bounded by the captured catalog, the distinct pages and the temporary
-  budget, and dropped with the mark.
+- The location table, the walked-page map and the spill are per mark,
+  bounded by the captured catalog, the distinct pages and the mark's inserts,
+  and dropped with the mark.
 - Deletion safety never depended on mark duration: confirmation needs two
   consecutive marks, publication windows and the relink fence cover what
   happens between a capture and its deletion hold, and both CONTROL slots are
@@ -1268,7 +1272,7 @@ takes about 35-70 minutes of serial reads, plus about 21 s for the location
 table, under a second of history decoding and 300-350 spill runs: roughly
 40-75 minutes, independent of the number of pinned roots. Walking each root
 on its own multiplied that by the roots plus the persistent pin walks and
-exceeded the spill budget. The estimate rests on the backup sample and a
+exceeded the spill cap a mark then had. The estimate rests on the backup sample and a
 component timing; a rebuilt engine reports the real figure in its
 `step=mark_built` line, `marks_built` and `epochs_completed`.
 
@@ -1343,40 +1347,91 @@ scaled to 16 entries are now collected online (40 orphans) and offline
 DolphinFS (BeeGFS FUSE) reports `d_type`, so a scan of the 19.2M-file store
 makes no per-file metadata call instead of about 19.2M.
 
-## Mark spill budget at live scale (2026-10-31)
+## Mark spill sized by its inserts (2026-11-04)
 
-Problem. A mark spills its inserts into runs of 65,536 IDs (2 MiB). The
-temporary budget, `min(1 GiB, 2% of volume free)` or 64 MiB when the launch
-probe cannot observe the volume (`contracts/tofudb_ir_v1.json`
-`authorityGarbageCollection`), and `SpillMarkSet`'s certified 511-run cap
-admit at most 33,488,896 inserts; the live volume (4.4 PB free) gets the full
-1 GiB. Inserts, not distinct IDs, consume the budget: runs deduplicate only
-internally.
+Problem. A mark spills its inserts into sorted runs of 65,536 IDs (2 MiB),
+which were files of their own, and `SpillMarkSet` refused a run beyond a byte
+limit: the temporary budget, `min(1 GiB, 2% of volume free)` or 64 MiB when
+the launch probe cannot observe the volume (`contracts/tofudb_ir_v1.json`
+`authorityGarbageCollection`; the online mark subtracted its captured history
+selection), under a certified 511-run cap. A mark therefore failed with
+`garbage-collection spill budget exceeded` past 33,488,896 inserts, whatever
+the reachable set needed; inserts, not distinct IDs, count, because runs
+deduplicate only internally. The cap is a fixed capacity that a growing store
+outgrows. The search-index authority's last successful marks held 30.9M and
+then 31.35M inserts; every epoch since 2026-11-03 has failed
+(`tofu_storage_gc_epoch_failing{collector="search"}` stays 1), so that
+authority reclaims nothing. The main authority's projected 20-23M reachable
+blocks sat at 60-70% of the same cap. The limit protected nothing: the spill
+is reconstructible scratch that never outlives the daemon run, so it is
+retention-class disk use (`docs/RESOURCE_CONTROL.md`, "Hardware never limits
+work"), and a write the volume cannot hold already fails with the volume's
+own error.
 
-Decision. Keep the contract's values in this change. With shared pages walked
-once, a mark inserts each reachable block about once: one insert per distinct
-page and per value reference of a distinct page, plus the block IDs of
-retained history (at most 64 segments of 4 MiB) and the active WAL, about
-10^5 together. The projected 20-23M reachable blocks therefore use 60-70% of
-the 33.5M-insert capacity; before, every root re-inserted its shared
-references and two roots already exceeded it. The `step=mark_built` line
-reports inserts, runs and spill bytes, so a production mark shows its
-distance to the cap. A mark still fails with `garbage-collection spill budget
-exceeded` once the reachable set passes about 33.4M blocks, when 2% of the
-volume's free space is below 1 GiB (20 GiB free admits about 13.4M inserts),
-or under the 64 MiB fallback (about 2.0M). Lifting that ceiling needs a
-structural change first: a spill sized by the reachable set (32 bytes per
-block) rather than a fixed run count; that change spans `SpillMarkSet`, the
-offline collector, backup prune and the scan, and changes this contract.
-More runs no longer multiply scan reads: a scan reads each run once
-("Shard-ranged spill reads"), though it still opens each run once per shard.
+Decision. A mark's spill is sized by its inserts and nothing else.
 
-Alternatives rejected. Raising `maximumTemporaryBytes` is tuning and makes
-the per-shard run reads grow with it. Merging runs when the cap is reached
+- A set appends its runs back to back to one file, `gc-runs/spill.mark`: at
+  most 32 bytes per insert plus 52 bytes per run (header and footer). No run
+  count, byte limit or budget parameter remains; `SpillMarkSet::initialize`
+  is the only constructor, used by the offline collector, the online mark
+  and suspect sets and backup prune. With shared pages walked once, a mark
+  inserts each reachable block about once (one insert per distinct page and
+  per value reference of a distinct page, plus about 10^5 for retained
+  history and the active WAL), so the spill stays near 32 bytes per
+  reachable block. The `step=mark_built` line reports inserts, runs and
+  spill bytes.
+- The run format is unchanged (16-byte header, sorted unique IDs, CRC32C,
+  BLAKE3). A run is written where the last recorded run ends with one
+  positioned write and the existing file barrier; only the first run also
+  runs the directory barrier, because only it names the file. A failed
+  append records nothing and keeps its marks buffered; its retry writes the
+  same offset again, and no read reaches past the last recorded run.
+- The in-memory index adds each run's offset to its footer digest and
+  per-shard offsets and digests, and every read uses them, so a run moved,
+  swapped or replaced within the file fails exactly as a swapped run file
+  did. A shard read and a segment-window pass open the spill once instead of
+  once per run (the two sections below).
+- Initialization wipes the spill file and every per-run file and `.run-new-`
+  temporary of the earlier layout (`backup_gc::is_spill_entry_name`, shared
+  with `wipe_work_directories` at thread start) and still refuses any other
+  entry.
+- The temporary budget keeps bounding what it budgets: compaction batch
+  bytes, segment rewrite candidates, the captured history selection, and the
+  offline session's release of cached marks before a rewrite whose space
+  would exceed it together with the marks (an eviction, never a refusal).
+  `OnlineGcMarkSnapshot::history_metadata_resident_bytes` existed only to
+  shrink the spill limit and is removed.
+
+Alternatives rejected. Raising the run cap or `maximumTemporaryBytes`, or
+deriving the limit from free space: a tuned value that a growing store passes
+again, livelocking its collector. Merging runs when the cap is reached:
 removes only duplicates, which shared-page walks already removed, and needs
-scratch space beyond the cap while it merges. Truncated or probabilistic
-marks would be safe (a false positive keeps garbage) but change the mark
-format that segment intersection and compaction planning read as exact IDs.
+scratch space beyond the cap while it merges. Keeping one file per run
+without a cap: correct, but each run pays an exclusive create, a rename and a
+directory barrier, and every shard read opens every run (about 164K opens per
+scan at live scale). Truncated or probabilistic marks would be safe (a false
+positive keeps garbage) but change the mark format that segment intersection
+and compaction planning read as exact IDs.
+
+Measurement (deterministic operation traces, `backup_gc::tests`). Writing a
+run costs one open, one write and two file syncs, and the first run adds two
+directory syncs; the per-run layout cost an exclusive create, one write, two
+file syncs, a rename and two directory syncs for every run. A shard read over
+N runs makes one open and at most 2N small reads instead of N opens and 2N
+reads, and a segment-window pass one open and N reads instead of N opens and
+N reads. At live scale (about 350 mark and 290 suspect runs) a scan makes at
+most 512 opens instead of about 164K. On the DolphinFS (BeeGFS FUSE) mount an
+open, two reads and a close of a small file measured about 1.07 ms against
+0.006 ms for the same reads on an open handle, so the opens of one scan drop
+from about 3 minutes to under a second (a component timing, not an epoch
+measurement). A fault campaign covers every operation of an append (error
+before it, torn write, lost sync) for the first and a later run, with and
+without a crash before the retry (`spill_appends_survive_every_fault_and_crash`).
+Certification (`spill_set_certifies_marks_past_one_gib`, release build,
+ignored by default because it writes more than 1 GiB): 512 full runs, that is
+33,554,432 distinct marks and 1,073,768,448 bytes, past the former
+33,488,896-insert cap, spill into one file and read back exact per shard in
+25.7 s on local disk with a peak RSS of 23.9 MB.
 
 ## Shard-ranged spill reads (2026-10-31)
 
@@ -1391,22 +1446,23 @@ Decision. Runs are sorted and a shard is the range of one first block-ID
 byte, so each shard owns one contiguous slice of every run. When a run is
 flushed the set records, per shard, the slice's start (a 257-entry offset
 array fixed by the 256-shard layout) and the BLAKE3 digest of the slice's
-bytes as written. `live_for_shard` still opens every run on every call and
-checks its 16-byte header (magic, format version, recorded ID count), then
-reads only its slice with one positioned read and checks that digest.
-Answers are unchanged: the same IDs per run, concatenated, sorted and
-deduplicated, with the per-shard bound checked from the recorded counts
-before any read. A corrupt header fails every shard, a flipped, truncated or
+bytes as written. `live_for_shard` opens the spill once per call, checks
+every run's 16-byte header (magic, format version, recorded ID count) at the
+run's recorded offset, then reads only its slice with one positioned read
+and checks that digest. Answers are unchanged: the same IDs per run,
+concatenated, sorted and deduplicated. No per-shard bound applies: the former
+1,000,000-ID bound was a second fixed ceiling on the reachable set, and a
+shard read holds one shard's marks just as the loose listing holds one
+shard's entries. A corrupt header fails every shard, a flipped, truncated or
 swapped slice fails each shard whose bytes it changed, all with
-`InvalidData`, and a missing run fails with `NotFound`; no shard returns
+`InvalidData`, and a missing spill fails with `NotFound`; no shard returns
 fewer or other IDs. Other shards' slices and the run footer cannot change a
 shard's answer; segment intersection still reads runs whole and checks the
-run's CRC32C and BLAKE3. The index lives in memory, not in the run file:
-only the set that wrote a run reads it (initialization wipes stale runs, and
-runs never outlive the daemon run), so the digests are out of reach of the
-bytes they verify and the run format is unchanged. It costs
-about 9 KiB per run (0.44% of a full run, at most 4.5 MiB per set at the
-511-run cap). Under at-rest encryption a positioned read decrypts the 4 KiB
+run's CRC32C and BLAKE3. The index lives in memory, not in the spill: only
+the set that wrote a run reads it (initialization wipes stale spills, and a
+spill never outlives the daemon run), so the digests are out of reach of the
+bytes they verify and the run format is unchanged. It costs about 9 KiB per
+run, 0.44% of a full run (about 3 MiB for the 350 runs of a live mark). Under at-rest encryption a positioned read decrypts the 4 KiB
 regions it covers: the first region for the header and less than 8 KiB
 beyond the slice, per run and shard.
 
@@ -1416,10 +1472,11 @@ than the run itself across 256 shards) or need a verified-table cache; the
 in-memory index is that table without the reads. CRC32C per shard instead of
 BLAKE3: 7 KiB less per run, but a 32-bit check on the IDs that decide
 deletion. Re-partitioning runs into per-shard files when the mark completes:
-one more full read and write of the spill, twice the scratch space under the
-temporary budget, and 256 more files per mark. Keeping run handles open
-across shard calls: up to 511 descriptors per set and three sets per epoch.
-Skipping runs that hold no IDs of the shard (no open, no header read): a
+one more full read and write of the spill, twice the scratch space, and 256
+more files per mark. Keeping the spill open across shard calls: saves at most
+512 opens per scan (under a second at live scale) for a descriptor whose
+lifetime would span the scan. Skipping runs that hold no IDs of the shard (no
+header read): a
 corrupt run would then pass every shard it holds no IDs for, while the
 offline collector requires a corrupt mark run to fail its scan before any
 deletion (`authority_gc::tests::corrupted_session_marks_fail_before_deletion_and_poison_further_calls`).
@@ -1428,9 +1485,10 @@ Measurement. `backup_gc::tests::all_shard_reads_together_read_each_spilled_id_on
 spills 8 runs (15,729,056 bytes) and reads all 256 shards: 4,026,638,336
 bytes before (each run 256 times), 15,761,408 after (each ID byte once plus
 256 headers of 16 bytes per run; footers are not read). At live scale a scan
-reads about 1.34 GB instead of 344 GB. Opens stay at one per run and shard,
-about 164K per scan at live scale, now each followed by two small reads
-(header and slice) instead of one 2 MiB read. Segment intersection reads
+reads about 1.34 GB instead of 344 GB. Each run and shard costs two small
+reads (header and slice) instead of one 2 MiB read; since "Mark spill sized
+by its inserts" a shard read opens the spill once, not each run (at most 512
+opens per scan instead of about 164K). Segment intersection reads
 runs whole, once per scan window ("One mark-run pass per segment window").
 
 ## One file per deletion hold (2026-10-31)
@@ -1589,13 +1647,14 @@ answers every segment.
 
 Decision. `retain_live_ids_per_segment` takes the window's segment indexes,
 each sorted, unique and at most one run's 65,536 IDs (the existing bound),
-and reads each run once: one open, one whole read and `decode_run`, then the
-existing merge-join against each segment in turn. A segment keeps an ID if
+and reads each run once: one whole read at its recorded offset (one open of
+the spill per pass) and `decode_run`, then the existing merge-join against
+each segment in turn. A segment keeps an ID if
 any run holds it; visiting runs in the outer loop and segments in the inner
 one gives every segment the answer of a call of its own, and duplicates
 across segments or empty segments need no special case. The answers are
-applied only after every run was read, so a failed, corrupt, truncated or
-missing run fails the whole window (the I/O error, `InvalidData` or
+applied only after every run was read, so a failed, corrupt or truncated run
+or a missing spill fails the whole window (the I/O error, `InvalidData` or
 `NotFound`) with every segment unchanged. `retain_live_ids` is the
 one-segment case. The online scan reads and verifies the window's segment
 indexes first (the stop flag is checked before each one and before the
@@ -1605,8 +1664,8 @@ as it did, so reading every index before planning changes no outcome.
 
 The whole-run read also became stricter. Each `SpillRun` records the run's
 footer BLAKE3 digest as written (32 bytes in memory), and a read must match
-it. Before, segment intersection accepted a run file that is valid on its own
-but is not the run the set wrote (a swapped or replaced file), which changes
+it. Before, segment intersection accepted a run that is valid on its own but
+is not the run the set wrote (a swapped or replaced run), which changes
 liveness without any error; shard reads already rejected it.
 
 Cost besides one decoded run (2 MiB): one flag per window ID. The online scan

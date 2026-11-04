@@ -6,6 +6,8 @@ Runs every round (cheap, no LLM call).  Cache-aware: the previous request's
 messages are the provider-cached prefix and stay byte-identical, except that
 the last tool step inside them may be edited when that makes the very next
 request cheaper (``_sent_step_boundary``).
+The owner-chosen cloud idle policy also lifts this fence once after six hours;
+local inference keeps the ordinary cache-aware behavior.
 
 Architecture (2026-06 step refactor):
     ``micro_compact`` is the *orchestration shell* — it computes the
@@ -129,6 +131,9 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             ``fold_paired_interstitial`` (Phase B2) right after
             ``compact_tool_results``.  A/B-verified -1.4% cache writes
             vs B-only (2026-04-27).
+        keep_refetched_results: If True, ``compact_tool_results`` prefers
+            re-fetched results inside the same hot budget (optional
+            pressure only; see ``CompactionContext``).
 
     Returns:
         Estimated number of tokens saved.
@@ -229,6 +234,11 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     # ── Cache-aware: the previous request's messages are the cached prefix ──
     ignore_cache_prefix = bool(kwargs.get('ignore_cache_prefix', False))
     dry_run = bool(kwargs.get('_dry_run', False))
+    idle_activity = 0
+    if not ignore_cache_prefix and not dry_run and task is not None:
+        from lib.tasks_pkg.compaction._idle import idle_l1_activity
+        idle_activity = idle_l1_activity(task, now=time.time())
+        ignore_cache_prefix = bool(idle_activity)
     sent_count = 0
     if conv_id and not ignore_cache_prefix:
         try:
@@ -282,10 +292,23 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
         constants=constants,
         cache_prefix_count=cache_prefix_count,
         ignore_cache_prefix=ignore_cache_prefix,
+        keep_refetched_results=bool(kwargs.get('keep_refetched_results', False)),
         dry_run=dry_run,
         stamp_fn=_stamp_l1,
     )
     tokens_saved += run_steps(step_names, ctx)
+
+    if idle_activity and not task.get('aborted'):
+        task['_lastIdleL1ActivityAtMs'] = idle_activity
+        if tokens_saved > 0:
+            task.pop('_compactionCacheObservation', None)
+            try:
+                from lib.tasks_pkg.cache_tracking._roi import notify_compaction
+                notify_compaction(conv_id, user_id=owner_id, intended_rewrite_index=0)
+            except Exception as exc:
+                logger.debug('[L1] idle cache notification failed: %s', exc)
+            logger.info('[L1] conv=%s cloud idle policy saved ~%d tokens',
+                        conv_id[:8], tokens_saved)
 
     if sent_step is not None and messages[rewrite_from:sent_count] != sent_step:
         # Admitted edit of cached bytes: the next read drop from this index on

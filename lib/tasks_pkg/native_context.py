@@ -227,6 +227,8 @@ class NativeContextPolicy:
         if (result.request.principal.require_owner(context='native context settlement') != self.owner
                 or result.request.task_id != self.task_id):
             raise ValueError('native context settlement identity differs')
+        from lib.tasks_pkg.compaction._idle import record_model_activity
+        record_model_activity(self.task)
         settled = None if self.policy is None else await self.policy.settle(result)
         if settled is not None:
             return settled  # Preserve the host's existing strict return validation.

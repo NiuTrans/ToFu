@@ -110,9 +110,9 @@ def check_project_guidance(task: dict, tool_name: str, arguments: dict) -> str:
     targets = _tool_targets(task, tool_name, arguments)
     if not targets:
         return ''
-    rows = {}
+    rows, reads = {}, {}
     for root, selected in targets:
-        for row in read_scoped_guidance(str(root), str(selected)):
+        for row in read_scoped_guidance(str(root), str(selected), reads=reads):
             rows[row['path']] = row
     state = _state(task)
     with state['lock']:
@@ -399,6 +399,81 @@ def _forget_unretained_rules(task: dict, state: dict, messages: list[dict], pres
                   state['removed'], state['inherited'] - forgotten)
     state['delivered'] = {path: digest for path, digest in state['delivered'].items()
                           if path not in forgotten}
+
+
+def compact_project_guidance(messages: list[dict], task: dict | None) -> list[dict]:
+    """Retire verified inactive scopes in a candidate, without changing delivery.
+
+    Root guidance and scopes targeted by retained tool calls stay verbatim.
+    Only the acquired/delivered owner state may identify a disposable rule;
+    unknown provenance and carriers with authored text or media stay intact.
+    Ordinary refresh forgets lost rules only after this candidate is adopted.
+    """
+    state = (task or {}).get('_projectGuidance')
+    config = (task or {}).get('config') or {}
+    if (not state or (task or {}).get('aborted') or not config.get('projectPath')
+            or config.get('project_remote')):
+        return messages
+    with state['lock']:
+        rules = dict(state['rules'])
+        delivered = dict(state['delivered'])
+    candidates = {path for path, row in rules.items()
+                  if delivered.get(path) == row['hash'] and row['scope'] != row['root']}
+    if not candidates:
+        return messages
+    targets = _retained_targets(dict(task), messages)
+    inactive = {path for path in candidates
+                if not any(target.is_relative_to(rules[path]['scope']) for target in targets)}
+    # An active scope note can refer to the full copy at another path. Keep
+    # that copy until normal delivery can select a different holder.
+    needed_hashes = {row['hash'] for path, row in rules.items() if path not in inactive}
+    removable = {_rule_block_id(path) for path in inactive
+                 if rules[path]['hash'] not in needed_hashes}
+    if not removable:
+        return messages
+
+    from lib.tasks_pkg.context_composer import verified_block_hashes
+    from lib.tasks_pkg.context_composer._sections import remove_managed_section
+    result = []
+    for message in messages:
+        rows = message.get('_contextBlocks')
+        if (message.get('role') == 'user' and message.get('_contextComposer')
+                and not message.get('_containsHumanSteer') and isinstance(rows, list)
+                and all(isinstance(row, dict) and isinstance(row.get('id'), str) for row in rows)
+                and any(row['id'] in removable for row in rows)):
+            content = message.get('content')
+            text_only = isinstance(content, str) or (isinstance(content, list) and all(
+                isinstance(part, dict) and part.get('type') == 'text'
+                and isinstance(part.get('text'), str) for part in content))
+            actual = verified_block_hashes([message]) if text_only else {}
+            if (len({row['id'] for row in rows}) == len(rows)
+                    and all(actual.get(row['id']) and actual[row['id']] == row.get('hash') for row in rows)
+                    and _only_managed_sections(content, rows)):
+                for row in rows:
+                    if row['id'] in removable:
+                        message = remove_managed_section(message, row['id'])
+                        if message is None:
+                            break
+        if message is not None:
+            result.append(message)
+    return result
+
+
+def _only_managed_sections(content, rows: list[dict]) -> bool:
+    """A validated section hash cannot authorize deletion of unrelated prose."""
+    text = content if isinstance(content, str) else '\n'.join(part['text'] for part in content)
+    for row in rows:
+        marker = re.escape(row['id'])
+        text, count = re.subn(
+            r'<!-- tofu-context:' + marker + r':start -->.*?'
+            r'<!-- tofu-context:' + marker + r':end -->', '', text, flags=re.DOTALL)
+        if count != 1:
+            return False
+    # Same-authority amalgams carry one additional outer envelope. All
+    # section-level standalone envelopes were removed with their sections.
+    text = re.sub(r'<system-reminder>\n\[Context authority: [^\]\n]+; '
+                  r'\d+ context blocks\]\n\s*</system-reminder>', '', text)
+    return not text.strip()
 
 
 def _retained_targets(task: dict, messages: list[dict]) -> list[Path]:

@@ -125,16 +125,21 @@ it('explains missing program results as a handoff instead of successful null', (
 
 
 describe('program progress before settlement', () => {
+  // Only the synthetic parent says a program started; an in-flight gateway
+  // call without one is queued behind its siblings.
   it.each(['pending', 'queued', 'executing', 'running', 'searching'])(
-    'treats a %s execute_program call as running, not as an incomplete null result', status => {
+    'shows a %s execute_program call without a started program as waiting, not running or incomplete', status => {
       const node = document.createElement('div');
       node.innerHTML = programExecutionCardHtml({ toolName: 'execute_program', toolCallId: 'call', status,
         toolArgs: { code: 'return await tools.web_search({query: "q"});' } });
-      expect(node.querySelector('.ptc-status')?.textContent).toBe('Executing program');
-      expect(node.querySelector('.ptc-card')?.getAttribute('data-program-attention')).toBe('running');
+      expect(node.querySelector('.ptc-status')?.textContent).toBe('Waiting to start');
+      expect(node.querySelector('.ptc-card')?.getAttribute('data-program-attention')).toBe('waiting');
       expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
       expect(node.querySelector('.ptc-result')).toBeNull();
-      expect(node.textContent).not.toMatch(/Incomplete|not recorded|Result: null/);
+      // A queued script has requested nothing yet: no lexical activity or counters.
+      expect(node.querySelector('.ptc-meta')).toBeNull();
+      expect(node.textContent).not.toMatch(/Executing program|Incomplete|not recorded|Result: null|Script:/);
+      expect(node.querySelector('.ptc-code code')?.textContent).toContain('tools.web_search');
     });
 
   it('names a program failure without dumping its error object into the header', () => {
@@ -169,7 +174,7 @@ describe('program progress before settlement', () => {
     expect(node.textContent).not.toContain('null');
   });
 
-  it.each([['running', 'Executing program'], ['pending', 'Executing program'], ['completed', 'Incomplete']])(
+  it.each([['running', 'Waiting to start'], ['pending', 'Waiting to start'], ['completed', 'Incomplete']])(
     'labels a call announced before its round by the %s turn lifecycle', (turnStatus, label) => {
       const node = document.createElement('div');
       renderToolBlock(node, { kind: 'tool', blockId: 'gateway', name: 'execute_program', toolCallId: 'call',
@@ -179,6 +184,34 @@ describe('program progress before settlement', () => {
       expect(node.querySelector('.ptc-result')).toBeNull();
       expect(node.querySelector('.ptc-code code')?.textContent).toContain('tools.web_search');
     });
+
+  const gatewayBlock = (status: string) => ({ kind: 'tool', blockId: 'tool:call', name: 'execute_program',
+    toolCallId: 'call', input: { code: 'return await tools.web_search({query: "q"});' },
+    round: { toolName: 'execute_program', toolCallId: 'call', status } }) as unknown as Extract<ConversationBlockViewModel, { kind: 'tool' }>;
+
+  it.each(['completed', 'interrupted', 'truncated', 'failed'])(
+    'never shows an unanswered call of a %s turn as in flight', turnStatus => {
+      const node = document.createElement('div');
+      renderToolBlock(node, gatewayBlock('searching'), { status: turnStatus } as unknown as ConversationTurnViewModel,
+        {} as Parameters<typeof renderToolBlock>[3]);
+      expect(node.querySelector('.ptc-status')?.textContent).toBe('Incomplete');
+      expect(node.textContent).not.toMatch(/Executing program|Waiting to start/);
+    });
+
+  it('waits until the started program replaces the call, then runs', () => {
+    const turn = { status: 'running' } as unknown as ConversationTurnViewModel;
+    const queued = document.createElement('div');
+    renderToolBlock(queued, gatewayBlock('searching'), turn, {} as Parameters<typeof renderToolBlock>[3]);
+    expect(queued.querySelector('.ptc-status')?.textContent).toBe('Waiting to start');
+    expect(queued.querySelector('.ptc-meta')).toBeNull();
+    const started = document.createElement('div');
+    renderProgramBlock(started, { kind: 'program', blockId: 'program:call', programCallId: 'call', round: {
+      _programSynthetic: true, _programCallId: 'call', status: 'searching', programStatus: 'running',
+      programCode: 'return await tools.web_search({query: "q"});', childCallIds: [], childToolNames: [] },
+    } as unknown as Extract<ConversationBlockViewModel, { kind: 'program' }>, turn, {} as Parameters<typeof renderProgramBlock>[3]);
+    expect(started.querySelector('.ptc-status')?.textContent).toBe('Executing program');
+    expect(started.querySelector('.ptc-card')?.getAttribute('data-program-attention')).toBe('running');
+  });
 });
 
 

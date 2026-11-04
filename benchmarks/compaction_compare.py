@@ -29,7 +29,7 @@ SUMMARY = '### Objective\nComplete the scoped synthetic fixture.\n### Next Steps
 VARIANTS = (
     'accepted', 'no_anchor', 'open_batch', 'nothing_foldable', 'summary_empty',
     'summary_error', 'utility_fallback', 'cancel_entry', 'cancel_summary',
-    'cancel_archive', 'adaptive_missing', 'utility_adaptive', 'pre_low_yield',
+    'cancel_archive', 'unreliable_narrative', 'utility_continuity', 'pre_low_yield',
     'pre_cache_negative', 'adoption_low_yield', 'adoption_cache_negative',
     'economic_accepted', 'dispatch_floor', 'managed_context',
 )
@@ -70,8 +70,8 @@ def make_case(rounds: int, variant: str = 'accepted') -> dict:
     elif variant.startswith('utility_'):
         task.pop('convId')
         options['_allow_deterministic_summary_fallback'] = True
-    if variant in {'adaptive_missing', 'utility_adaptive'}:
-        task['config']['compaction'] = {'strategy': 'adaptive'}
+    if variant in {'unreliable_narrative', 'utility_continuity'}:
+        task['_todos'] = [{'content': 'Verify fixture output.', 'status': 'pending'}]
         task['_contextEvidenceLedger'] = {'entries': [
             {'id': 'critical-fixture', 'type': 'unfinished', 'text': 'Verify fixture output.'},
         ]}
@@ -109,6 +109,8 @@ def run_case(module, case: dict, *, capture: bool = True, allocation: bool = Fal
             task['aborted'] = True
         if variant in {'summary_error', 'utility_fallback'}:
             raise RuntimeError('synthetic summary failure')
+        if variant == 'unreliable_narrative':
+            return 'Generic prose without any working state.'
         return None if variant == 'summary_empty' else SUMMARY
 
     def archive(*args, **kwargs):
@@ -194,7 +196,7 @@ def assert_same_work(before: dict, after: dict, case: dict) -> None:
         if before.get(key) != after.get(key):
             raise ValueError(f"L2 parity changed {key}: rounds={case['rounds']} variant={case['variant']}")
     accepted = case['variant'] in {
-        'accepted', 'utility_fallback', 'utility_adaptive', 'economic_accepted', 'managed_context',
+        'accepted', 'unreliable_narrative', 'utility_fallback', 'utility_continuity', 'economic_accepted', 'managed_context',
     }
     if bool(after['meta'].get('compacted')) != accepted:
         raise ValueError(f"Fixture did not reach its intended decision: {case['variant']}")

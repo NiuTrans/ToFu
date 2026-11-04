@@ -788,13 +788,6 @@ def _working_set_token_limit(task: dict | None = None) -> int:
     import os
 
     comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction')
-    if isinstance(comp_cfg, dict) and str(
-            comp_cfg.get('strategy') or 'fixed').lower() == 'adaptive':
-        # Filled only after the economic decision that triggered this attempt.
-        # Before that decision the hard window remains the sole threshold.
-        adaptive = int((task or {}).get(
-            '_adaptiveCompactionWorkingSetTokens') or 0)
-        return max(32_000, min(2_000_000, adaptive)) if adaptive > 0 else 0
     raw = comp_cfg.get('workingSetTokens') if isinstance(comp_cfg, dict) else None
     if raw is None and 'TOFU_WORKING_CONTEXT_TOKENS' in os.environ:
         raw = os.environ.get('TOFU_WORKING_CONTEXT_TOKENS')
@@ -865,7 +858,7 @@ def _record_compaction_cadence(
     return gap
 
 
-def _fixed_compaction_cadence_payback_horizon(
+def _observed_compaction_cadence_payback_horizon(
     task: dict | None,
     current_round: object = None,
     *,
@@ -956,94 +949,6 @@ def _audit_working_set_once(working_set: int) -> None:
         logger.debug('[Compact] working-set config audit skipped: %s', e)
 
 
-def _adaptive_compaction_economics(messages: list, task: dict | None, *,
-                                   total_tokens: int,
-                                   window_threshold: int) -> dict:
-    """Make one observable Kimi-priced early-compaction decision."""
-    task = task if isinstance(task, dict) else {}
-    cfg = task.get('config') or {}
-    comp_cfg = cfg.get('compaction') or {}
-    inputs = task.get('_adaptiveCompactionInputs') or {}
-    hot_tokens = _estimate_total_tokens(list(messages or [])[-12:])
-    cold_tokens = max(0, int(total_tokens) - hot_tokens)
-
-    def bounded_number(name: str, default: float, low: float,
-                       high: float) -> float:
-        try:
-            value = float(inputs.get(name, comp_cfg.get(name, default)))
-        except (TypeError, ValueError, OverflowError):
-            value = default
-        if not math.isfinite(value):
-            value = default
-        return max(low, min(high, value))
-
-    cache_ratio = bounded_number(
-        'cacheReadRatio', float(task.get('_lastCacheReadRatio') or 0.8),
-        0.0, 1.0)
-    remaining_rounds = bounded_number('remainingRoundsMedian', 6.0, 0.0, 200.0)
-    evidence_loss = bounded_number(
-        'historicalEvidenceLossRate', 0.01, 0.0, 1.0)
-    summary_input = int(bounded_number(
-        'summaryInputTokens', min(cold_tokens, 32_000), 0, 1_000_000))
-    summary_output = int(bounded_number(
-        'summaryOutputTokens', 2_000, 0, 128_000))
-    input_rate = 2.76
-    output_rate = 13.81
-    cache_read_multiplier = 0.10
-    pricing_source = 'kimi_k3_frozen_fallback'
-    try:
-        from lib.pricing import lookup_pricing
-        pricing = lookup_pricing(
-            str(cfg.get('model') or task.get('model') or ''),
-            task.get('provider_id') or None)
-        if pricing:
-            input_rate = max(0.0, float(pricing.get('input') or input_rate))
-            output_rate = max(0.0, float(pricing.get('output') or output_rate))
-            cache_read_multiplier = max(
-                0.0, float(pricing.get('cacheReadMul', cache_read_multiplier)))
-            pricing_source = str(pricing.get('_pricingSource') or 'resolved_price')
-    except Exception as exc:
-        logger.debug('[Compact] adaptive pricing lookup failed: %s', exc)
-    blended_input_rate = input_rate * (
-        (1.0 - cache_ratio) + cache_ratio * cache_read_multiplier)
-    savings_per_round = cold_tokens * blended_input_rate / 1_000_000
-    compaction_cost = (
-        summary_input * input_rate + summary_output * output_rate) / 1_000_000
-    gross_savings = savings_per_round * remaining_rounds
-    risk_penalty = gross_savings * min(1.0, evidence_loss * 5.0)
-    net_savings = gross_savings - compaction_cost - risk_penalty
-    economic_floor = int(bounded_number(
-        'minimumColdTokens', 32_000, 32_000, 256_000))
-    should_trigger = bool(
-        total_tokens >= 64_000 and cold_tokens >= economic_floor
-        and remaining_rounds >= 1 and net_savings > 0)
-    result = {
-        'strategy': 'adaptive_v2',
-        'totalTokens': int(total_tokens),
-        'hotTokens': int(hot_tokens),
-        'coldTokens': int(cold_tokens),
-        'windowThreshold': int(window_threshold),
-        'cacheReadRatio': cache_ratio,
-        'remainingRoundsMedian': remaining_rounds,
-        'summaryInputTokens': summary_input,
-        'summaryOutputTokens': summary_output,
-        'historicalEvidenceLossRate': evidence_loss,
-        'savingsPerRemainingRoundUsd': round(savings_per_round, 9),
-        'compactionCostUsd': round(compaction_cost, 9),
-        'evidenceRiskPenaltyUsd': round(risk_penalty, 9),
-        'projectedNetSavingsUsd': round(net_savings, 9),
-        'pricingSource': pricing_source,
-        'shouldTrigger': should_trigger,
-        'reason': ('positive_expected_value' if should_trigger else
-                   'insufficient_expected_value'),
-    }
-    task['_adaptiveCompactionDecision'] = result
-    if should_trigger:
-        task['_adaptiveCompactionWorkingSetTokens'] = max(
-            32_000, min(int(total_tokens), int(window_threshold)))
-    return result
-
-
 def _should_force_compact(
     messages: list,
     task: dict | None = None,
@@ -1100,39 +1005,6 @@ def _should_force_compact(
             logger.debug('[Compact] token calibration sample failed: %s',
                          _cal_exc)
 
-    # Public vendor APIs can own the economic working-set compaction at the
-    # exact rendered-token boundary (including opaque reasoning state that the
-    # local message projection cannot inspect). Keep local L1 above this gate,
-    # but defer lossy local L2 until the model-window safety threshold. Manual
-    # compaction and the reactive prompt-too-long path do not call this policy
-    # branch and remain available.
-    if ((task or {}).get('_nativeCompactionPrimary')
-            and total_tokens <= window_threshold):
-        logger.debug('[Compact] native-primary defer conv=%s mode=%s '
-                     'tokens=%d <= hard_window=%d',
-                     log_id, (task or {}).get('_nativeCompactionMode') or '?',
-                     total_tokens, window_threshold)
-        return False
-
-    comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction')
-    adaptive = (isinstance(comp_cfg, dict)
-                and str(comp_cfg.get('strategy') or '').lower() == 'adaptive')
-    if adaptive:
-        # The context-window safety gate is never bypassed by economics.
-        if total_tokens > window_threshold:
-            logger.info('[Compact] adaptive hard-window trigger conv=%s '
-                        'tokens=%d > %d', log_id, total_tokens,
-                        window_threshold)
-            return True
-        decision = _adaptive_compaction_economics(
-            messages, task, total_tokens=total_tokens,
-            window_threshold=window_threshold)
-        logger.info('[Compact] adaptive decision conv=%s trigger=%s cold=%d '
-                    'net_usd=%.6f reason=%s', log_id,
-                    decision['shouldTrigger'], decision['coldTokens'],
-                    decision['projectedNetSavingsUsd'], decision['reason'])
-        return bool(decision['shouldTrigger'])
-
     # A proactive candidate that was recently declined as low-yield or
     # cache-negative records a message-token retry floor. Do not reconsider
     # the identical hot tail every round; wait for meaningful prompt growth.
@@ -1158,7 +1030,7 @@ def _should_force_compact(
                 witnessed_payback_limit = float(
                     _AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
             current_payback_limit = (
-                _fixed_compaction_cadence_payback_horizon(
+                _observed_compaction_cadence_payback_horizon(
                     task,
                     current_round,
                     remaining_api_rounds=remaining_api_rounds,

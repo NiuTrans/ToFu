@@ -1157,13 +1157,43 @@ def _settle_unstamped_content_filter(
                     tid, last_finish_reason, loop_exit_reason)
 
 
+def _strip_end_turn_control_token(task: dict[str, Any], tid: str) -> None:
+    """Strip the END_TURN control token from the delivered answer."""
+    # The intent-stall nudge TEACHES `[END_TURN: <reason>]` so a model can
+    # declare *why* it stopped instead of being mistaken for an interrupted
+    # turn. That makes it a MACHINE signal on the same channel as the prose:
+    # the classifier reads it, then it must not reach the user. Stripped at
+    # the single point where task['content'] becomes the delivered answer,
+    # rather than at each render site — the durable turn, done event, and every
+    # reload path all read this one
+    # value, so a per-renderer strip would inevitably miss one.
+    try:
+        from lib.tasks_pkg.stream_handler._intent_stall import (
+            strip_end_turn_marker,
+        )
+        from lib.tasks_pkg.stream_handler._router_silence import silent_turn_declared
+        if silent_turn_declared(task):
+            task['content'] = ''
+            return
+        _pre_strip = task.get('content') or ''
+        if _pre_strip:
+            _stripped = strip_end_turn_marker(_pre_strip)
+            if _stripped != _pre_strip:
+                task['content'] = _stripped
+                logger.info('[%s] stripped [END_TURN:…] control token from the '
+                            'delivered answer (%d → %d chars)',
+                            tid, len(_pre_strip), len(_stripped))
+    except Exception as _et_e:  # never let display hygiene break finalization
+        logger.warning('[%s] END_TURN strip failed: %s', tid, _et_e)
+
+
 def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, thinking_depth: str | None, cfg: dict[str, Any],
                             last_finish_reason, last_usage, last_stream_result,
                             accumulated_usage, api_rounds,
                             tool_call_happened, messages, original_messages,
                             all_search_results_text, max_tokens, thinking_enabled, temperature,
                             _loop_exit_reason, _abort_detected_phase, project_path, project_enabled,
-                            round_num, assistant_msg):
+                            round_num, assistant_msg, terminal_assistant_content=None):
     """Post-loop finalization: fallback synthesis, done-event construction, and emit.
 
     Handles the fallback LLM call when the main loop produced no content,
@@ -1190,6 +1220,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # that synthesis path using typed provider evidence, never the broad
     # abnormal_stop kind alone (which also includes broken transports).
     terminal_error = task.get('error')
+    from lib.tasks_pkg.stream_handler._router_silence import silent_turn_declared
+    original_terminal_content = (terminal_assistant_content if terminal_assistant_content is not None
+                                 else (last_stream_result.message.get('content') or '')
+                                 if isinstance(last_stream_result, ProviderStreamResult) else '')
     recoverable_empty_stop = (
         isinstance(terminal_error, dict)
         and terminal_error.get('kind') == 'abnormal_stop'
@@ -1198,11 +1232,17 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         and last_stream_result.state in {
             ProviderStreamState.EMPTY_RESPONSE, ProviderStreamState.PROVIDER_FINISHED}
         and last_stream_result.provider_finish_reason == 'stop'
-        and not (last_stream_result.message.get('content') or '').strip()
+        and not original_terminal_content.strip()
         and not last_stream_result.message.get('tool_calls')
     )
+    if (isinstance(last_stream_result, ProviderStreamResult)
+            and original_terminal_content != (last_stream_result.message.get('content') or '')):
+        from dataclasses import replace
+        last_stream_result = replace(last_stream_result, message={
+            **last_stream_result.message, 'content': original_terminal_content})
+    deliberate_silence = silent_turn_declared(task)
     # ── Fallback: synthesize answer from search results if main loop produced nothing ──
-    if (not task['content'].strip() and tool_call_happened
+    if (not deliberate_silence and not task['content'].strip() and tool_call_happened
             and all_search_results_text and not task['aborted']
             and (recoverable_empty_stop or (
                 not terminal_error and last_finish_reason in ('stop', 'end_turn')))):
@@ -1240,31 +1280,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         model=model, tid=tid)
 
     # ── Strip the END_TURN control token from the delivered answer ──
-    # The intent-stall nudge TEACHES `[END_TURN: <reason>]` so a model can
-    # declare *why* it stopped instead of being mistaken for an interrupted
-    # turn. That makes it a MACHINE signal on the same channel as the prose:
-    # the classifier reads it, then it must not reach the user. Stripped HERE,
-    # at the single point where task['content'] becomes the delivered answer,
-    # rather than at each render site — the durable turn, done event, and every
-    # reload path all read this one
-    # value, so a per-renderer strip would inevitably miss one.
-    #
     # Runs BEFORE the sources footer so a stripped trailing token can never
     # sit between the prose and an appended footer.
-    try:
-        from lib.tasks_pkg.stream_handler._intent_stall import (
-            strip_end_turn_marker,
-        )
-        _pre_strip = task.get('content') or ''
-        if _pre_strip:
-            _stripped = strip_end_turn_marker(_pre_strip)
-            if _stripped != _pre_strip:
-                task['content'] = _stripped
-                logger.info('[%s] stripped [END_TURN:…] control token from the '
-                            'delivered answer (%d → %d chars)',
-                            tid, len(_pre_strip), len(_stripped))
-    except Exception as _et_e:  # never let display hygiene break finalization
-        logger.warning('[%s] END_TURN strip failed: %s', tid, _et_e)
+    _strip_end_turn_control_token(task, tid)
 
     # ── Deterministic source-citation backstop (web-research turns) ──
     # If the model opened web pages but cited none of them, append a compact
@@ -1465,7 +1483,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     )
 
     # ── Flag suspicious completions ──
-    _suspicion_reasons = _check_suspicious_completion(
+    _suspicion_reasons = [] if deliberate_silence else _check_suspicious_completion(
         task, last_finish_reason, _loop_exit_reason,
         tool_call_happened, round_num, model,
         assistant_msg=assistant_msg,
@@ -1480,8 +1498,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     #    the 29-char residue.  Must run after the fallback/synthesis paths
     #    above (which can legitimately fill empty content) and after the
     #    detector has logged its shape.
-    _maybe_preserve_accumulated_on_suspicion(
-        task, last_finish_reason, tool_call_happened, messages)
+    if not deliberate_silence:
+        _maybe_preserve_accumulated_on_suspicion(
+            task, last_finish_reason, tool_call_happened, messages)
 
     done_evt = build_done_event(
         task,

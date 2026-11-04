@@ -1,6 +1,9 @@
 /** Read-only compatibility projection for exact native execute_program history.
  * Synthetic metadata remains primary; no stats are derived from code/results.
  * Parsing is bounded and call-local. Durable records are never changed.
+ * Only a synthetic parent records that a program started, so an in-flight
+ * gateway call is waiting to start; callers clear stale in-flight statuses of
+ * settled Turns, which become incomplete.
  */
 import { isActiveToolStatus } from './tool-execution-groups';
 import { resolveToolResultText } from './tool-result-surfaces';
@@ -34,7 +37,7 @@ export function normalizeProgramPresentation(value: unknown): Row {
   }
   return { ...row, programCode: typeof source === 'string' ? source : '',
     programResult: result, programStats: undefined,
-    programStatus: isActiveToolStatus(row.status) ? 'running'
+    programStatus: isActiveToolStatus(row.status) ? 'waiting'
       : row.status === 'error' || row.status === 'failed' ? 'error'
         : row.status === 'done' ? 'returned' : 'incomplete',
     _programGatewayPresentation: true, _programResultComplete: complete,

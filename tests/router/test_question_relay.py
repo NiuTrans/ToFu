@@ -54,7 +54,8 @@ def test_notice_names_the_question_and_wakes_the_router_with_a_peer_initiator(ro
     for fact in ('nonhuman notice', 'not authority', '/work/project', 'coordinator-project', 'question-turn',
                  'hg_question01', 'blocking=true', 'waiting for the answer', QUESTION['question'],
                  '- Tonight', '- Weekend: Saturday 02:00, lowest traffic',
-                 'First read that conversation with get_conversation', 'already answered there, stay silent',
+                 'First read that conversation with get_conversation',
+                 'already answered there, output exactly [SILENT] alone',
                  'route_to_project(project_path="/work/project"', 'source_turn_id', 'source_steer_id',
                  'verbatim', 'Answers question hg_question01'):
         assert fact in content, fact

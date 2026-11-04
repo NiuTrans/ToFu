@@ -1,9 +1,8 @@
 /* Global Router (docs/ROUTER.md), shown as the main coordinator: the slot of
  * its card (the card itself wears the shared coordination-leader styles), the
- * compact header on the router conversation, and the compact Router
- * disclosures it hosts (the Worker model control also shows on Project Router
- * coordinator conversations). Tokens only; shared controls keep their ui-kit
- * styling. */
+ * compact header on the router conversation, and the compact Router controls
+ * it hosts (the Worker model select also shows on Project Router coordinator
+ * conversations). Tokens only; shared controls keep their ui-kit styling. */
 #globalRouterEntry{flex-shrink:0}
 .global-router-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-3);padding:var(--space-2) var(--space-4);border-bottom:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
 .global-router-header[hidden]{display:none}
@@ -11,10 +10,14 @@
 /* Compact disclosures: the summary is the at-a-glance value; an open one takes the row. */
 .global-router-header>details[open]{flex-basis:100%}
 .router-worker-model,.router-instructions,.router-watchdog{min-width:0;color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
-.router-worker-model>summary,.router-instructions>summary,.router-watchdog>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
-.router-worker-model>summary:hover,.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
-.router-worker-model[aria-busy="true"]>summary{cursor:progress}
-.router-worker-model-field{max-width:min(100%,32em);padding-top:var(--space-2)}
+.router-instructions>summary,.router-watchdog>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
+.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
+/* The Worker model is one labelled select on a single row; a failed read is
+ * one quiet line beside its retry. */
+.router-worker-model{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2)}
+.router-worker-model [hidden]{display:none}
+.router-worker-model[aria-busy="true"]{cursor:progress}
+.router-worker-model-failure{color:var(--text-tertiary);overflow-wrap:anywhere}
 .router-instructions-status{margin:var(--space-1) 0 0}
 .router-instructions-status:empty{display:none}
 .router-instructions-list{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0 0;padding:0;list-style:none}

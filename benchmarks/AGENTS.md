@@ -250,7 +250,10 @@ process with `--repository`; the behavior is specified in
 projection and patch time for seeded 10/100/500-round tasks, idle and beside
 CPU-bound GIL-contention threads, one fresh worker per arm; `--source-root`
 names an exported pre-change tree. Every arm of one size must produce the same
-projection/patch digest before clocks count. `--entry append` instead drives
+projection/patch digest before clocks count.
+Each seeded history also includes canonical intervention notes, and projection
+cycles introduce another note, so cumulative identity work participates.
+`--entry append` instead drives
 the production `append_event` producer entry on a delivery lane and reports
 producer-thread CPU per frame and per capture; its digest covers every admitted
 charge and captured structure. Verify
@@ -285,6 +288,12 @@ in-memory. Compare alternating fresh processes of frozen source roots and put
 `--stats-dir` on the volume class under study. Verify
 `tests/meta/test_dispatch_contention_measure.py`; never read it as chat latency.
 
+`route_group_retirement.py` compares frozen `slot_pool.py` owners using the same
+real Slot fixtures, ordered publication and shuffled retirement. Fresh alternating
+`--pool-source` processes report complete lifecycle clocks; `--allocations` adds
+separate index-only memory observations. Verify `test_route_group_retirement_measure`;
+it excludes storage, provider IO, route compilation and application capacity.
+
 `token_cold_start.py` measures one encoding's first operation in each fresh
 process using token_ingress_measure --cold-only. Verify distinct PIDs, zero warm
 calls, both clocks, identical fixtures/instrumentation and unchanged sources.
@@ -301,6 +310,12 @@ calls, both clocks, identical fixtures/instrumentation and unchanged sources.
 - Write large artifacts outside the repository or under ignored output roots;
   never commit credentials, transcripts, cloned workspaces, or raw provider
   payloads.
+
+`compaction_continuity.py` replays frozen real archives with captured model
+narratives through the production continuity owner. It checks exact state
+retention every generation and reports packet/candidate estimates and source
+hashes. No provider is called; this cannot prove semantic accuracy, fewer tool
+rounds or task latency. Verify `tests/compaction/test_unified_continuity.py`.
 
 ## Verification
 

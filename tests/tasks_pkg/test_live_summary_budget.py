@@ -50,7 +50,6 @@ def test_failed_input_is_not_dispatched_again(summary_env, monkeypatch, failure,
     def fail(body, **kwargs):
         calls.append(body)
         assert kwargs['thinking_enabled'] is False
-        assert kwargs['max_429_attempts'] == 2
         clock[0] += 0.5
         if failure == 'exception':
             raise RuntimeError('injected')

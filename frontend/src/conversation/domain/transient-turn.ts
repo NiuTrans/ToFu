@@ -27,6 +27,9 @@ export interface TransientTurnPresentation {
   model?: string;
   modelRoute?: TurnModelRoute;
   thinkingLength?: number;
+  /** Backend epoch-ms start (`tStart`) of the call(s) this row reports; the
+   * row derives elapsed time from it instead of minting a client stopwatch. */
+  startedAt?: number;
 
   /** Read-only context for a durable Goal phase; never an execution verdict. */
   goalProgress?: {

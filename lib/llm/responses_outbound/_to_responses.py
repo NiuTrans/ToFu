@@ -484,30 +484,11 @@ def _convert_body_to_responses(body: dict, *, profile: str = 'default',
                            == 'original') else ''),
     )
 
-    if cache_enabled or compaction_enabled:
+    if cache_enabled:
         from lib.llm.cache_affinity import cache_affinity_key
         cache_key = cache_affinity_key(body) if cache_enabled else ''
         if cache_key:
             out['prompt_cache_key'] = cache_key
-
-        # Server-side rendered-token compaction is the primary L2 path for the
-        # public Responses API; its opaque output is captured and replayed by
-        # the response translators. Local L1 still prunes reconstructible tool
-        # bulk, and local L2 remains the model-window/reactive fallback. Codex's
-        # subscription backend does not expose this public request field, so
-        # the codex profile keeps local compaction authoritative.
-        try:
-            compact_threshold = int(body.get('_working_set_tokens') or 0)
-        except (TypeError, ValueError) as e:
-            logger.debug('[Responses] invalid working-set threshold %r: %s',
-                         body.get('_working_set_tokens'), e)
-            compact_threshold = 0
-        if (compact_threshold > 0 and compaction_enabled
-                and not out.get('multi_agent')):
-            out['context_management'] = [{
-                'type': 'compaction',
-                'compact_threshold': compact_threshold,
-            }]
 
     tools = body.get('tools')
     if tools:

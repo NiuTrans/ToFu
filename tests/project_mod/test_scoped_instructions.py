@@ -222,6 +222,31 @@ def test_guidance_stops_before_opening_files_beyond_remaining_budget(tmp_path, m
     assert len(opened) == 3  # The fourth file exceeds remaining bytes before open.
 
 
+
+def test_one_acquisition_opens_each_rule_once_for_many_targets(tmp_path, monkeypatch):
+    import os
+    from lib.project_mod.config import build_root_policy, clear_conv_state
+    from lib.tasks_pkg.project_guidance import check_project_guidance
+    project, target = _project(tmp_path)
+    opened = []
+    real_open = os.open
+    def count(path, flags, *args, **kwargs):
+        directory = kwargs.get('dir_fd')
+        if path == 'AGENTS.md' and directory is not None:
+            opened.append(Path(f'/proc/self/fd/{directory}').resolve() / path)
+        return real_open(path, flags, *args, **kwargs)
+    task = {'id': 'many-target-task', '_userId': 7, 'config': {'projectPath': str(project)},
+            '_workspaceRootPolicy': build_root_policy(str(project))}
+    reads = [{'path': str(target.parent / name)} for name in ('a.py', 'b.py', 'c.py')]
+    monkeypatch.setattr(os, 'open', count)
+    try:
+        assert check_project_guidance(task, 'read_files', {'reads': reads}) == ''
+    finally:
+        clear_conv_state(task['id'])
+    guides = [(project / relative / 'AGENTS.md').resolve() for relative in ('.', 'src', 'src/sub')]
+    assert sorted(opened) == sorted(guides)
+    assert set(task['_projectGuidance']['rules']) == {str(guide) for guide in guides}
+
 def test_verified_deleted_rule_is_pruned_before_candidate_bound_check(tmp_path):
     from lib.project_mod.config import build_root_policy
     from lib.tasks_pkg.project_guidance import check_project_guidance, refresh_project_guidance

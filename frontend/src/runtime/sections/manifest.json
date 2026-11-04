@@ -484,9 +484,9 @@
      ]
     },
     {
-     "source": "frontend/src/features/project/presentation-assets.ts",
+     "source": "frontend/src/features/project/workspace-rail.ts",
      "bindings": [
-      "PROJECT_PRESENTATION_ASSETS"
+      "createWorkspaceRail"
      ]
     }
    ],

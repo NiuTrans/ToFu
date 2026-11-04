@@ -156,6 +156,56 @@ overlap for a microsecond update); a per-task lock dictionary on the task (state
 copied onto the task for no gain). Specs force every reader to read before any
 writer and fail on the previous code.
 
+### Sibling gateway calls run concurrently (owner decision 2026-11-04)
+
+**Problem:** `handle_execute_tools` held one per-task gateway lock across
+normalization, a whole program or child batch, and settlement. Sibling
+`execute_program` / `execute_tools` calls of one response therefore ran one at
+a time while the round showed every one of them as running, and a slow program
+held back unrelated siblings for its full duration.
+
+**Decision:** exactly-once is scoped to the receipt key, never the task: one
+occurrence executes under `_receipt_claim(task, receipt_key)`, so only replayed
+copies of that occurrence wait for it. The task-shared gateway state (receipt
+table, child round numbers, program ledger IDs, authoring-failure latches and
+the direct-sibling delegation FIFO) is published under `_gateway_lock`, now a
+leaf lock never held across normalization, execution or settlement; program
+parent rows and their adoption evidence use a module leaf lock in
+`orchestrator/_programmatic.py`. Call order survives through `_ordering`: the
+top-level pipeline (and native `prepare_response`, through
+`publish_prepared_response_siblings`) publishes the response's gateway calls in
+provider order (`GatewaySiblingOrder`) before any of them runs. A child that
+`_ordering` orders (the same-target mutations and `todo_write` above) waits
+until every earlier-issued sibling gateway call has settled: a program picks
+its next child from data, so a later sibling cannot know whether an earlier one
+will still mutate its target. Waits point only at earlier calls, so they cannot
+cycle, and Stop releases every waiter. Each published occurrence settles when
+its worker finishes and at the latest when its dispatch invocation exits,
+whether it ran, was refused, failed or never started. Native callbacks run
+`execute_tool_pipeline` with `publish_direct_gateway_siblings=False`, so a
+callback never replaces the published order. Gateway calls are outside the
+write and confirmation sets, so the native approval path never withdraws one
+before its callback.
+
+**Alternatives rejected:** keeping the task-wide lock (the serial lane this
+removes); a per-tool-name lock (two programs writing one file lose their call
+order, and the concurrent-rounds decision above already rejects it); ordering
+children across siblings by target only (an earlier program's future targets
+are unknown until it runs); ordering the gateway calls themselves at the top
+level (restores the serial lane for every program).
+
+Known limits: an ordered child of a later sibling waits for every earlier
+sibling, including ones that never touch its target. Direct (non-gateway)
+siblings of the response are not part of this order; their relation to
+gateway children is unchanged. Unordered children (reads, `run_command`, MCP
+tools) never wait. Specs: `tests/tasks_pkg/test_gateway_sibling_concurrency.py`
+runs real JavaScript programs through the real handler and pipeline: sibling
+programs meet on a barrier (a task-wide lock anywhere on the path breaks it), a
+duplicate receipt key executes once while other keys overlap, an ordered child
+of a later sibling waits for the earlier sibling whether it returned or failed,
+Stop releases that wait, a child re-entering the gateway from its worker does
+not deadlock, and native sibling program callbacks overlap.
+
 ## Native application rounds (owner decision 2026-10-28)
 
 **Problem:** the native application path kept the serial lane the Python
@@ -941,11 +991,17 @@ exemptions (`_SERIAL_BLOCKING_TOOLS`) never arm one. Declarations are
 validated at registration (names ⊆ `provides`; integer within
 [1 s, 3600 s]) — a bad declaration fails loud at load, not mid-task.
 
-Loop guards correct before they stop. A human steer resets the
-exact-repetition chain because it measured an unattended loop the operator
-has already redirected (`reset_tool_loop_guard`, called at the steer-drain
-boundary). The remind-only rung (`tool_repeat_reminder`) fires once per
-repeat digest one step below the corrective nudge: it never vetoes, advances
+Loop guards correct before they stop, and never in the same round: a round
+in which any guard issued a correction never also stops, so the model always
+answers the newest correction. A human steer resets the exact-repetition
+chain because it measured an unattended loop the operator has already
+redirected (`reset_tool_loop_guard`, called at the steer-drain boundary).
+The same reset retires redundant-read and unresolved-artifact warnings,
+because the new instruction can require re-reading; a later stop first needs
+a fresh correction. Visible read evidence, stagnation streaks and the
+explicit-noop history survive the steer. The remind-only rung
+(`tool_repeat_reminder`) fires once per repeat digest one step below the
+corrective nudge: it never vetoes, advances
 no escalation counter, and audits on its own `_toolLoopReminders` ledger so
 it cannot consume the one-correction-per-turn slot the nudge/stop escalation
 and stagnation detectors read.
@@ -1027,6 +1083,7 @@ Only connected stdio servers share host workspace paths; network servers and des
 Unrelated parameters remain opaque: names such as `path` or `out_path` alone confer no policy.
 Declared files use admitted stable roots and canonical-to-execution mappings; all targets are checked before side effects.
 Unknown roots, traversal outside roots, escaping symlinks, readonly outputs and canonical/peer writes refuse invocation.
+Refusals name the effective target: an outside target lists the admitted roots (read-only marked) and the relative or rootname:path forms; an escaping symlink reports where it resolves.
 Inputs must exist. Declared output parents are prepared only within authorized roots; no workspace lease is taken or awaited.
 Transport cancellation is forwarded and ambiguous calls are not automatically replayed; a call cancelled before invocation is refused.
 Receipts retain error, structured and media payloads and report effective absolute paths; transport failures never claim not-started.

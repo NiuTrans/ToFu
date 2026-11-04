@@ -34,7 +34,7 @@ fn logical(database: &AuthorityDatabase, owner: u64) -> Value {
 
 fn request(revision: u64, content: &str, thinking: &str) -> EventRecordRequest {
     EventRecordRequest {
-        model_continuation: Value::Null, attempt_id: "text-attempt".to_owned(),
+        worker_claim: None, model_continuation: Value::Null, attempt_id: "text-attempt".to_owned(),
         task_id: "text-task".to_owned(), terminal: false, status: "running".to_owned(),
         slim: false, content: String::new(), thinking: String::new(), projection: Value::Null,
         projection_patch: Some(json!({"version": 1, "baseRevision": revision,

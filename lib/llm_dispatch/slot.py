@@ -146,6 +146,7 @@ class Slot:
     route_deployment_id: str = ''
     route_connection_id: str = ''
     route_credential_id: str = ''
+    local_inference: bool | None = None  # Compiled serving identity, not model family.
     max_output_tokens: int = 0
     context_window: int = 0  # declared v2 Offering/Model limit; zero means unknown
     inference_profile: dict = field(default_factory=dict)

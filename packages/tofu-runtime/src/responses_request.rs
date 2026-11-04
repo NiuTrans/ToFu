@@ -263,7 +263,7 @@ impl Serialize for Input<'_> {
                             if item.get("encrypted_content").is_none_or(|v| {
                                 v.is_null() || v == &Value::String(String::new())
                             }) => {}
-                        Some("message") => {}
+                        Some("message") | Some("tofu_replay_order") | Some("tofu_state_origin") => {}
                         _ => {
                             return Err(S::Error::custom(
                                 "native Responses replay profile unsupported",

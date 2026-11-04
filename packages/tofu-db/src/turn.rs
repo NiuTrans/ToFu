@@ -426,6 +426,7 @@ pub struct PerceptionRecordRequest {
 
 #[derive(Clone, Debug)]
 pub struct EventRecordRequest {
+    pub worker_claim: Option<crate::worker_job::PublicationClaim>,
     pub model_continuation: Value,
     pub attempt_id: String,
     pub task_id: String,
@@ -7523,7 +7524,7 @@ pub(crate) fn visible_sync(
                         database,
                         transaction,
                         &EventRecordRequest {
-                            model_continuation: Value::Null,
+                            worker_claim: None, model_continuation: Value::Null,
                             attempt_id: child_attempt_id.clone(),
                             task_id: String::new(),
                             terminal: true,
@@ -13247,7 +13248,7 @@ pub(crate) fn attempt_start(
     database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
     attempt_id: &str, task_id: &str, now_ms: u64,
 ) -> io::Result<Vec<u8>> {
-    attempt_start_with_automation(database, transaction, attempt_id, task_id, now_ms, None)
+    attempt_start_with_automation(database, transaction, attempt_id, task_id, now_ms, None, None)
 }
 
 pub(crate) fn attempt_start_with_automation(
@@ -13257,6 +13258,7 @@ pub(crate) fn attempt_start_with_automation(
     task_id: &str,
     now_ms: u64,
     automation_context: Option<&crate::automation_events::TaskStartedContext>,
+    worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
     let Some(loaded) = load_attempt_for_update(database, transaction, attempt_id)? else {
         return encode_response(&Value::Null);
@@ -13279,6 +13281,8 @@ pub(crate) fn attempt_start_with_automation(
         .get("status")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_data("attempt status is malformed"))?;
+    crate::worker_job::require_conversation_publication_claim(
+        database, transaction, attempt_id, task_id, worker_claim, false)?;
     if status == "running" {
         return encode_response(&public_attempt(&loaded.document)?);
     }
@@ -13629,6 +13633,10 @@ fn load_event_record_state(
     if starts_attempt && (stored_task_id.is_empty() || stored_task_id != request.task_id) {
         return Ok(None);
     }
+
+    crate::worker_job::require_conversation_publication_claim(
+        database, transaction, &request.attempt_id, stored_task_id,
+        request.worker_claim.as_ref(), request.terminal)?;
 
     Ok(Some((loaded_attempt, loaded_turn)))
 }

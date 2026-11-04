@@ -16,20 +16,31 @@ what the sequential calls meant and keeping it is cheap:
   never its completion: a sibling refused before execution never moved the
   sticky directory.
 
+Sibling ``execute_tools``/``execute_program`` calls of one response run at once
+too (owner decision 2026-11-04). Their children reach the pipeline from inside
+a running call, so a child these rules order waits until every earlier-issued
+sibling gateway call has settled (``GatewaySiblingOrder``).
+
 Entry points: ``call_predecessors``, ``plan_command_working_dirs``
-(``CommandDirectoryPlan``) and ``restore_command_sticky_cwd``. Path resolution
-borrows the workspace owners read-only; nothing here executes a tool or holds
-a lock.
+(``CommandDirectoryPlan``), ``restore_command_sticky_cwd`` and the sibling
+gateway order (``publish_gateway_sibling_order``, ``gateway_sibling_turn``,
+``gateway_sibling_settler``). Path resolution borrows the workspace owners
+read-only; nothing here executes a tool or holds a lock.
 """
 from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
-from typing import Any
+from functools import partial
+from typing import Any, Callable
 
 from lib.log import get_logger
-from lib.tasks_pkg.tool_dispatch._flags import ORDERED_STATE_TOOLS
+from lib.tasks_pkg.tool_dispatch._flags import (
+    ORDERED_STATE_TOOLS, _execute_gateway_delegation_scope,
+)
+from lib.tools.gateway import EXECUTE_PROGRAM_NAME, EXECUTE_TOOLS_NAME
 
 logger = get_logger(__name__)
 
@@ -126,6 +137,92 @@ def call_predecessors(task: dict, project_path: str | None, items: list[tuple],
             earlier_id for earlier_id, earlier_keys in keyed[:index]
             if keys and earlier_keys and _conflicts(keys, earlier_keys))
     return predecessors
+
+
+_GATEWAY_EXECUTE_NAMES = frozenset({EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME})
+_SIBLING_ORDER_KEY = '_execute_gateway_sibling_order'
+
+
+class GatewaySiblingOrder:
+    """Provider issue order of one response's sibling gateway calls.
+
+    A program picks its next child from data, so a later sibling cannot know
+    whether an earlier one will still mutate its target. A child that
+    ``_ordering_keys`` orders therefore waits until every earlier-issued
+    sibling has settled. Waits only point at earlier calls, so they cannot form
+    a cycle, and Stop releases every waiter. The owner of each occurrence
+    settles it once its worker is done: ran, refused, failed or never started.
+    """
+
+    def __init__(self, scope: str, call_ids) -> None:
+        self.scope = scope
+        self._settled: dict[str, Future] = {}
+        for call_id in call_ids:
+            self._settled.setdefault(call_id, Future())
+
+    def __contains__(self, call_id: object) -> bool:
+        return call_id in self._settled
+
+    def settle(self, call_id: str) -> None:
+        settled = self._settled.get(call_id)
+        if settled is None:
+            return
+        try:
+            settled.set_result(None)
+        except InvalidStateError:
+            pass  # the worker and the invocation exit both settle a call
+
+    def turn(self, call_id: str) -> GatewaySiblingTurn | None:
+        if call_id not in self._settled:
+            return None
+        earlier = []
+        for other, settled in self._settled.items():
+            if other == call_id:
+                break
+            earlier.append(settled)
+        return GatewaySiblingTurn(tuple(earlier))
+
+
+@dataclass(frozen=True)
+class GatewaySiblingTurn:
+    """One gateway call's place in its response: the siblings issued before it."""
+
+    earlier: tuple[Future, ...]
+
+    def predecessors(self, task: dict, project_path: str | None, item: tuple,
+                     write_tools: frozenset) -> tuple[Future, ...]:
+        """Every earlier sibling for a child this module orders; none otherwise."""
+        if not self.earlier or not _ordering_keys(
+                task, project_path, item[1], item[3] or {}, write_tools,
+                resolve_files=False):
+            return ()
+        return self.earlier
+
+
+def publish_gateway_sibling_order(task: dict, round_num: int, items: list[tuple]) -> None:
+    """Publish one response's gateway calls in provider order before any runs."""
+    task[_SIBLING_ORDER_KEY] = GatewaySiblingOrder(
+        _execute_gateway_delegation_scope(task, round_num),
+        [item[2] for item in items if item[1] in _GATEWAY_EXECUTE_NAMES and not item[6]])
+
+
+def gateway_sibling_turn(task: dict, call_id: str,
+                         round_num: int) -> GatewaySiblingTurn | None:
+    """The turn of a gateway call in its response's published order, if any."""
+    order = task.get(_SIBLING_ORDER_KEY)
+    if (not isinstance(order, GatewaySiblingOrder)
+            or order.scope != _execute_gateway_delegation_scope(task, round_num)):
+        return None
+    return order.turn(call_id)
+
+
+def gateway_sibling_settler(task: dict, item: tuple) -> Callable[[], None] | None:
+    """Settle callback for a published gateway occurrence; None for other calls."""
+    order = task.get(_SIBLING_ORDER_KEY)
+    if (item[1] not in _GATEWAY_EXECUTE_NAMES
+            or not isinstance(order, GatewaySiblingOrder) or item[2] not in order):
+        return None
+    return partial(order.settle, item[2])
 
 
 def _execution_cwd(task: dict, frozen_cwd: str) -> str:

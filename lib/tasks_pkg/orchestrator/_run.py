@@ -356,6 +356,7 @@ def _execute_task_invocation(
             accumulated_usage=rs.accumulated_usage, api_rounds=rs.api_rounds,
             last_finish_reason=rs.last_finish_reason, last_usage=rs.last_usage,
             last_stream_result=rs.last_stream_result,
+            terminal_assistant_content=rs.terminal_assistant_content,
             tool_call_happened=rs.tool_call_happened,
             all_search_results_text=all_search_results_text,
             project_path=project_path, project_enabled=project_enabled,

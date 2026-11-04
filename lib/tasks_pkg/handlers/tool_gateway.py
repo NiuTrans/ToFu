@@ -16,6 +16,7 @@ from lib.tasks_pkg.tool_dispatch._flags import (
     _call_id_signature,
     _execute_gateway_delegation_scope,
 )
+from lib.tasks_pkg.tool_dispatch._ordering import gateway_sibling_turn
 from lib.tasks_pkg.tool_search_outcome import audit_search_outcome
 from lib.tasks_pkg.tool_search_projection import (
     tool_search_display_results,
@@ -97,9 +98,11 @@ def _remember_execute_gateway_receipt(receipts, key, content, *, ok):
             receipts.pop(stale_key, None)
 
 
-def _replay_execute_gateway_receipt(task, receipts, receipt_key, tc_id, rn,
-                                    round_entry, fn_name):
-    receipt = receipts[receipt_key]
+_NO_RECEIPT = object()
+
+
+def _replay_execute_gateway_receipt(task, receipt, tc_id, rn, round_entry,
+                                    fn_name):
     if not isinstance(receipt, dict):
         raise ValueError('execute gateway receipt must be an object')
     content = receipt.get('content') or ''
@@ -108,10 +111,19 @@ def _replay_execute_gateway_receipt(task, receipts, receipt_key, tc_id, rn,
     return tc_id, content, False
 
 # Locks are runtime coordination objects and must never enter the persisted
-# task snapshot. Active gateway callers retain the per-task lock; completed
-# task identities disappear automatically, avoiding both ID reuse and a
+# task snapshot. Active callers retain a pooled lock; completed task identities
+# and receipt keys disappear automatically, avoiding both ID reuse and a
 # process-lifetime id(task) registry.
+#
+# Sibling gateway calls of one response run concurrently (owner decision
+# 2026-11-04, docs/contracts/TOOL_EXECUTION_POLICY.md "Sibling gateway calls
+# run concurrently"). ``_gateway_lock`` is the leaf publication lock of the
+# task-shared gateway state: receipt table, child round numbers, program
+# ledger IDs, authoring-failure latches and the direct-sibling delegation
+# registry. It is never held across normalization, a program, a child batch's
+# execution or settlement. One occurrence executes under its receipt claim.
 _GATEWAY_LOCKS = WeakLockPool(threading.RLock)
+_GATEWAY_RECEIPT_CLAIMS = WeakLockPool(threading.RLock)
 # Concurrent search_tools calls of one round bump the same per-task counts.
 # Leaf lock: nothing is called while it is held.
 _SEARCH_QUERY_COUNTS_LOCK = threading.Lock()
@@ -119,6 +131,11 @@ _SEARCH_QUERY_COUNTS_LOCK = threading.Lock()
 
 def _gateway_lock(task: dict[str, Any]) -> threading.RLock:
     return _GATEWAY_LOCKS.lock_for(id(task))
+
+
+def _receipt_claim(task: dict[str, Any], receipt_key: str) -> threading.RLock:
+    """Exactly-once scope of one gateway occurrence: its receipt key only."""
+    return _GATEWAY_RECEIPT_CLAIMS.lock_for((id(task), receipt_key))
 
 
 def _json(value: Any) -> str:
@@ -507,18 +524,23 @@ def _partition_delegated_gateway_children(
 
     executing: list[tuple[int, dict[str, Any]]] = []
     delegated: dict[int, dict[str, Any]] = {}
-    for index, call in enumerate(calls):
-        name = str((call.get('function') or {}).get('name') or '')
-        signature = _call_id_signature(
-            name, call.get('_normalized_arguments') or {})
-        direct_ids = registry.get(signature)
-        if not isinstance(direct_ids, list) or not direct_ids:
-            executing.append((index, call))
-            continue
-        direct_call_id = str(direct_ids.pop(0))
-        if not direct_ids:
-            registry.pop(signature, None)
-        delegated[index] = _delegated_child_receipt(call, direct_call_id)
+    consumed: list[tuple[str, str, dict[str, Any]]] = []
+    # Sibling execute_tools calls consume one shared FIFO concurrently.
+    with _gateway_lock(task):
+        for index, call in enumerate(calls):
+            name = str((call.get('function') or {}).get('name') or '')
+            signature = _call_id_signature(
+                name, call.get('_normalized_arguments') or {})
+            direct_ids = registry.get(signature)
+            if not isinstance(direct_ids, list) or not direct_ids:
+                executing.append((index, call))
+                continue
+            direct_call_id = str(direct_ids.pop(0))
+            if not direct_ids:
+                registry.pop(signature, None)
+            delegated[index] = _delegated_child_receipt(call, direct_call_id)
+            consumed.append((name, direct_call_id, call))
+    for name, direct_call_id, call in consumed:
         audit_log(
             'execute_gateway_child_delegated',
             task_id=str(task.get('id') or ''),
@@ -538,7 +560,7 @@ def _partition_delegated_gateway_children(
 def _execute_calls_with_direct_delegation(
     task: dict[str, Any], calls: list[dict[str, Any]], execution: str, *,
     cfg: dict[str, Any], project_path: str | None, project_enabled: bool,
-    model: str, llm_round: int,
+    model: str, llm_round: int, sibling_turn: Any = None,
 ) -> list[dict[str, Any]]:
     """Execute unmatched children and restore receipts to calls[] order."""
     executing, delegated = _partition_delegated_gateway_children(
@@ -546,7 +568,8 @@ def _execute_calls_with_direct_delegation(
     executed = _execute_normalized(
         task, [call for _index, call in executing], execution,
         cfg=cfg, project_path=project_path,
-        project_enabled=project_enabled, model=model, llm_round=llm_round)
+        project_enabled=project_enabled, model=model, llm_round=llm_round,
+        sibling_turn=sibling_turn)
     if len(executed) != len(executing):
         raise RuntimeError(
             'execute_tools child receipt cardinality mismatch: '
@@ -585,6 +608,7 @@ def _execute_call_batch(
     cfg: dict[str, Any], project_path: str | None, project_enabled: bool,
     model: str, llm_round: int,
     program_result_budget: Any = None,
+    sibling_turn: Any = None,
 ) -> list[dict[str, Any]]:
     if not calls:
         return []
@@ -601,7 +625,6 @@ def _execute_call_batch(
     fresh = list(calls)
     if fresh:
         assistant = {'role': 'assistant', 'content': '', 'tool_calls': fresh}
-        base = _gateway_round_base(task)
         # Key the start-clock map by OBJECT identity, never by call id: the
         #   shared pipeline REMINTS any call id that already has a completed
         #   receipt in this task (positional-id recycle / exact re-emit),
@@ -609,9 +632,12 @@ def _execute_call_batch(
         #   raised KeyError for every reminted gateway child (latent since the
         #   remint root fix; reachable by any recycled-id program call).
         started = {id(call): time.monotonic() for call in fresh}
-        parsed, _ = parse_tool_calls(
-            assistant, task, llm_round, base, project_enabled,
-            early_announced=None)
+        # Sibling gateway calls allocate child round numbers concurrently;
+        # the allocation and its row publication form one step.
+        with _gateway_lock(task):
+            parsed, _ = parse_tool_calls(
+                assistant, task, llm_round, _gateway_round_base(task),
+                project_enabled, early_announced=None)
         row_by_call_object = {
             id(parsed_call): parsed_row
             for parsed_call, _name, _call_id, _args, _round_num, parsed_row,
@@ -639,7 +665,8 @@ def _execute_call_batch(
                 _executable_catalog(task), nested_messages,
                 [], llm_round, model,
                 internal_result_sink=internal_result_sink,
-                publish_direct_gateway_siblings=False)
+                publish_direct_gateway_siblings=False,
+                sibling_turn=sibling_turn)
         finally:
             if internal_result_sink is not None:
                 internal_result_sink.finish()
@@ -680,6 +707,7 @@ def _execute_normalized(
     cfg: dict[str, Any], project_path: str | None, project_enabled: bool,
     model: str, llm_round: int,
     program_result_budget: Any = None,
+    sibling_turn: Any = None,
 ) -> list[dict[str, Any]]:
     if execution == 'sequential':
         if program_result_budget is None:
@@ -691,51 +719,55 @@ def _execute_normalized(
                 task, [call], cfg=cfg, project_path=project_path,
                 project_enabled=project_enabled, model=model,
                 llm_round=llm_round,
-                program_result_budget=program_result_budget))
+                program_result_budget=program_result_budget,
+                sibling_turn=sibling_turn))
         return out
     # ``calls`` is one semantic gateway batch. Keep every ordered occurrence
     # intact; equal name+argument payloads at different positions are distinct
-    # model actions. The pipeline caps gateway/program children at eight
-    # workers while retaining all logical receipts and serializing
-    # writes/approval tools itself.
+    # model actions. The pipeline starts every child at once, retains all
+    # logical receipts and keeps only its call-order exceptions (_ordering).
     return _execute_call_batch(
         task, calls, cfg=cfg, project_path=project_path,
         project_enabled=project_enabled, model=model, llm_round=llm_round,
-        program_result_budget=program_result_budget)
+        program_result_budget=program_result_budget,
+        sibling_turn=sibling_turn)
 
 
 def _program_run(task: dict[str, Any], call_id: str, source: str) -> dict[str, Any]:
     from lib.tools.program_contract import (
         MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES, MAX_TOOL_CALLS,
     )
-    runs = task.setdefault('programRuns', [])
-    if not isinstance(runs, list):
-        runs = []
-        task['programRuns'] = runs
     provider_call_id = call_id
-    # Exact duplicate frames are handled by the outer round/world/argument
-    # receipt key before reaching execution. A new execution needs a new
-    # ledger occurrence even when the provider recycles its call ID.
-    used_ids = {
-        str(run.get('callId') or '')
-        for run in runs if isinstance(run, dict)
-    }
-    if call_id in used_ids:
-        ordinal = len(used_ids) + 1
-        base = str(call_id or 'program')[:80]
-        while f'{base}__tofu_local_{ordinal}' in used_ids:
-            ordinal += 1
-        call_id = f'{base}__tofu_local_{ordinal}'
-    run = {
-        'callId': call_id, 'gatewayCallId': provider_call_id,
-        'source': source, 'code': '', 'status': 'running',
-        'result': None, 'childCalls': [], 'tStart': task_execution_time_ms(task),
-        'limits': {
-            'maxSourceBytes': MAX_SOURCE_BYTES, 'maxCalls': MAX_TOOL_CALLS,
-            'maxOutputBytes': MAX_OUTPUT_BYTES,
-        },
-    }
-    runs.append(run)
+    # Sibling programs claim ledger IDs concurrently: lookup and append are
+    # one step.
+    with _gateway_lock(task):
+        runs = task.setdefault('programRuns', [])
+        if not isinstance(runs, list):
+            runs = []
+            task['programRuns'] = runs
+        # Exact duplicate frames are handled by the outer round/world/argument
+        # receipt key before reaching execution. A new execution needs a new
+        # ledger occurrence even when the provider recycles its call ID.
+        used_ids = {
+            str(run.get('callId') or '')
+            for run in runs if isinstance(run, dict)
+        }
+        if call_id in used_ids:
+            ordinal = len(used_ids) + 1
+            base = str(call_id or 'program')[:80]
+            while f'{base}__tofu_local_{ordinal}' in used_ids:
+                ordinal += 1
+            call_id = f'{base}__tofu_local_{ordinal}'
+        run = {
+            'callId': call_id, 'gatewayCallId': provider_call_id,
+            'source': source, 'code': '', 'status': 'running',
+            'result': None, 'childCalls': [], 'tStart': task_execution_time_ms(task),
+            'limits': {
+                'maxSourceBytes': MAX_SOURCE_BYTES, 'maxCalls': MAX_TOOL_CALLS,
+                'maxOutputBytes': MAX_OUTPUT_BYTES,
+            },
+        }
+        runs.append(run)
     return run
 
 
@@ -815,7 +847,7 @@ def _program_input_shapes(receipts):
 def _execute_program(
     task: dict[str, Any], source: str, gateway_call_id: str, *,
     cfg: dict[str, Any], project_path: str | None, project_enabled: bool,
-    model: str, llm_round: int,
+    model: str, llm_round: int, sibling_turn: Any = None,
 ) -> dict[str, Any]:
     from lib.tools.program_contract import ProgramExecutionError
     from lib.tools.javascript import execute_javascript_program, javascript_limits
@@ -940,7 +972,8 @@ def _execute_program(
             task, [normalized], 'sequential', cfg=cfg,
             project_path=project_path, project_enabled=project_enabled,
             model=model, llm_round=llm_round,
-            program_result_budget=program_result_budget)[0]
+            program_result_budget=program_result_budget,
+            sibling_turn=sibling_turn)[0]
         remember_children([result])
         run['childCalls'].append({
             'id': result['call_id'], 'name': result['name'],
@@ -996,7 +1029,8 @@ def _execute_program(
                 'auto', 'parallel', 'sequential') else 'auto', cfg=cfg,
             project_path=project_path, project_enabled=project_enabled,
             model=model, llm_round=llm_round,
-            program_result_budget=program_result_budget)
+            program_result_budget=program_result_budget,
+            sibling_turn=sibling_turn)
         remember_children(results)
         run['childCalls'].extend({
             'id': result['call_id'], 'name': result['name'],
@@ -1028,7 +1062,8 @@ def _execute_program(
         run['status'] = 'completed'
         # Retain the same JSON-safe evidence for live and reload projection.
         run['result'] = json.loads(_json(value))
-        task['_toolScriptConsecutiveAuthoringFailures'] = 0
+        with _gateway_lock(task):
+            task['_toolScriptConsecutiveAuthoringFailures'] = 0
         stats['result_delivery'] = program_result_budget.stats()
         # Observed byte counts, not counterfactual token or cost savings.
         stats['result_bytes'] = len(_json(run['result']).encode('utf-8'))
@@ -1078,21 +1113,25 @@ def _execute_program(
                 'result_delivery': program_result_budget.stats(),
                 'result_bytes': len(_json(run['error']).encode('utf-8'))}
         if not run['childCalls'] and error_code in _PROGRAM_AUTHORING_ERRORS:
-            failure_count = min(
-                _PROGRAM_BATCH_FALLBACK_AFTER,
-                max(0, int(task.get(
-                    '_toolScriptConsecutiveAuthoringFailures') or 0)) + 1)
-            task['_toolScriptConsecutiveAuthoringFailures'] = failure_count
+            # Sibling programs settle concurrently; each update is one step.
+            with _gateway_lock(task):
+                failure_count = min(
+                    _PROGRAM_BATCH_FALLBACK_AFTER,
+                    max(0, int(task.get(
+                        '_toolScriptConsecutiveAuthoringFailures') or 0)) + 1)
+                task['_toolScriptConsecutiveAuthoringFailures'] = failure_count
+                if failure_count >= _PROGRAM_BATCH_FALLBACK_AFTER:
+                    task['_toolScriptBatchFallback'] = True
+                    if isinstance(task.get('_ptc_local'), dict):
+                        task['_ptc_local']['tier'] = 'batch'
             if failure_count >= _PROGRAM_BATCH_FALLBACK_AFTER:
-                task['_toolScriptBatchFallback'] = True
-                if isinstance(task.get('_ptc_local'), dict):
-                    task['_ptc_local']['tier'] = 'batch'
                 logger.info(
                     '[PTC] local JavaScript authoring fallback task=%s '
                     'model=%s failures=%d next_tier=batch',
                     task.get('id'), model, failure_count)
         else:
-            task['_toolScriptConsecutiveAuthoringFailures'] = 0
+            with _gateway_lock(task):
+                task['_toolScriptConsecutiveAuthoringFailures'] = 0
         logger.info(
             '[PTC] local program rejected task=%s model=%s kind=%s '
             'children=%d elapsed_ms=%d',
@@ -1146,17 +1185,23 @@ def handle_execute_tools(
     receipts = task.setdefault('_execute_gateway_receipts', {})
     receipt_key = _execute_gateway_receipt_key(
         task, tc_id, fn_args, round_entry, fallback_round_num=rn)
-    if receipt_key in receipts:
+    receipt = receipts.get(receipt_key, _NO_RECEIPT)
+    if receipt is not _NO_RECEIPT:
         return _replay_execute_gateway_receipt(
-            task, receipts, receipt_key, tc_id, rn, round_entry, fn_name)
+            task, receipt, tc_id, rn, round_entry, fn_name)
 
-    with _gateway_lock(task):
+    with _receipt_claim(task, receipt_key):
         # The first check above is the fast path. This second check is the
         # race-closing path: two streamed/replayed copies can both miss before
-        # one acquires the lock, and a write must still execute only once.
-        if receipt_key in receipts:
+        # one claims the key, and a write must still execute only once. Only
+        # copies of this occurrence wait here; siblings run concurrently.
+        receipt = receipts.get(receipt_key, _NO_RECEIPT)
+        if receipt is not _NO_RECEIPT:
             return _replay_execute_gateway_receipt(
-                task, receipts, receipt_key, tc_id, rn, round_entry, fn_name)
+                task, receipt, tc_id, rn, round_entry, fn_name)
+        llm_round = _gateway_llm_round(round_entry, rn)
+        # Ordered children of this call follow its earlier response siblings.
+        sibling_turn = gateway_sibling_turn(task, tc_id, llm_round)
         normalized = normalize_execute_request(
             fn_args, catalog=_executable_catalog(task, all_tools),
             namespace_by_name=(
@@ -1221,14 +1266,14 @@ def handle_execute_tools(
                     task, normalized['program'], tc_id, cfg=cfg,
                     project_path=project_path, project_enabled=project_enabled,
                     model=str(task.get('model') or ''),
-                    llm_round=_gateway_llm_round(round_entry, rn))
+                    llm_round=llm_round, sibling_turn=sibling_turn)
             payload['status'] = payload['program']['status']
         else:
-            _llm_round = _gateway_llm_round(round_entry, rn)
             payload['results'] = _execute_calls_with_direct_delegation(
                 task, normalized['calls'], normalized['execution'], cfg=cfg,
                 project_path=project_path, project_enabled=project_enabled,
-                model=str(task.get('model') or ''), llm_round=_llm_round)
+                model=str(task.get('model') or ''), llm_round=llm_round,
+                sibling_turn=sibling_turn)
             _delegated_count = sum(
                 result.get('status') == 'delegated'
                 for result in payload['results'])
@@ -1294,8 +1339,9 @@ def handle_execute_tools(
         # its outer settlement is a failure verdict. Never paint a failed child
         # batch as a green/done gateway round merely because some work landed.
         ok = payload['status'] == 'ok'
-        _remember_execute_gateway_receipt(
-            receipts, receipt_key, content, ok=ok)
+        with _gateway_lock(task):
+            _remember_execute_gateway_receipt(
+                receipts, receipt_key, content, ok=ok)
         _finalize(task, rn, round_entry, fn_name, content, ok=ok)
         return tc_id, content, False
 

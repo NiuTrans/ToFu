@@ -1686,8 +1686,8 @@ def test_captured_injection_projects_before_checkpoint_and_is_idempotent(status)
     note = record_injected_note(task, llm_round=0, kind='context-injection',
                                 reason='inbox_delivery', text='worker finding')
     source = capture_task_projection_source(task, {'type': 'round_start'})
-    # The event owns a frozen receipt, not a reference to mutable task memory.
-    task[INJECTED_NOTES_FIELD][0]['text'] = 'later mutation'
+    # The event owns its receipt even if the producer replaces a settled fact.
+    task[INJECTED_NOTES_FIELD][0] = {**note, 'text': 'later mutation'}
     first = _task_projection(source, {})
     second = _task_projection(source, first)
     assert second == first
@@ -1712,7 +1712,7 @@ def test_live_note_updates_in_place_without_erasing_earlier_attempt():
     note = record_injected_note(task, llm_round=0, kind='context-injection',
                                 text='current input')
     first = _task_projection(task, previous)
-    task[INJECTED_NOTES_FIELD][0]['text'] = 'current grouped input updated'
+    task[INJECTED_NOTES_FIELD][0] = {**note, 'text': 'current grouped input updated'}
     second = _task_projection(task, first)
     notes = [s for s in second['segments'] if s['type'] == 'system_note']
     assert [(s['attemptId'], s['text']) for s in notes] == [
@@ -1782,7 +1782,7 @@ def test_pending_live_note_precedes_same_round_terminal_narration(checkpoint):
     # rather than reassembling a checkpoint or appending another note.
     before = deepcopy(first)
     task.pop('segments')
-    task[INJECTED_NOTES_FIELD][0]['text'] = 'updated grouped worker finding'
+    task[INJECTED_NOTES_FIELD][0] = {**note, 'text': 'updated grouped worker finding'}
     updated = _task_projection(task, first)
     assert first == before
     assert [s['blockId'] for s in updated['segments']] == expected_ids

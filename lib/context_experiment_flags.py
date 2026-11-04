@@ -60,7 +60,7 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
     },
     # Snapshot discovery remains opt-in until natural use shows matched benefit.
     'context': {'globalBudgetTokens': 0, 'programmaticInputs': False},
-    'compaction': {'evidenceLedger': False, 'strategy': 'fixed'},
+    'compaction': {'evidenceLedger': False, 'strategy': 'unified'},
 }
 
 _VALID_BREAKPOINT_MODES = frozenset({'implicit', 'explicit'})
@@ -84,7 +84,8 @@ _VALID_PROMPT_PROFILE = frozenset({
 _VALID_MULTI_AGENT = frozenset({'read_only', 'full'})
 _VALID_RESULT_ENVELOPE = frozenset({'legacy', 'v2'})
 _VALID_ORCHESTRATION_POLICY = frozenset({'v1', 'v2'})
-_VALID_COMPACTION_STRATEGY = frozenset({'fixed', 'adaptive'})
+# Persisted names migrate here only; they never select a runtime path.
+_VALID_COMPACTION_STRATEGY = frozenset({'unified', 'fixed', 'adaptive'})
 
 
 def _mapping(value: Any) -> dict:
@@ -147,7 +148,7 @@ def normalize_context_experiment_flags(
     evidence = compaction.get(
         'evidenceLedger', cfg.get('compaction.evidenceLedger', False))
     compaction_strategy = compaction.get(
-        'strategy', cfg.get('compaction.strategy', 'fixed'))
+        'strategy', cfg.get('compaction.strategy', 'unified'))
 
     checks = (
         ('cache.gpt56BreakpointMode', breakpoint_mode,
@@ -176,7 +177,7 @@ def normalize_context_experiment_flags(
         ('orchestration.policy', orchestration_policy,
          _VALID_ORCHESTRATION_POLICY, 'v1'),
         ('compaction.strategy', compaction_strategy,
-         _VALID_COMPACTION_STRATEGY, 'fixed'),
+         _VALID_COMPACTION_STRATEGY, 'unified'),
     )
     normalized: dict[str, str] = {}
     for field, raw, allowed, default in checks:
@@ -247,7 +248,7 @@ def normalize_context_experiment_flags(
                     'programmaticInputs': programmatic_inputs},
         'compaction': {
             'evidenceLedger': evidence,
-            'strategy': normalized['compaction.strategy'],
+            'strategy': 'unified',
         },
     }
 

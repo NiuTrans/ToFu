@@ -117,6 +117,15 @@ def invocation_abort_requested(task: dict) -> bool:
             task['aborted'] = True
             task['abort_event'].set()
             return True
+    return invocation_deadline_requested(task)
+
+
+def invocation_deadline_requested(task: dict) -> bool:
+    """Apply only this invocation's deadlines, preserving their typed cause.
+
+    Shared parent observers call this after observing their control source
+    once. Ordinary abort checks still observe that source at every boundary.
+    """
     limits = (task.get('config') or {}).get('executionLimits') or {}
     account = task.get('_executionBudget')
     account_deadline = (getattr(account, 'limits', {}) or {}).get('deadline')

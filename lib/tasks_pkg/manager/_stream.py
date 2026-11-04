@@ -484,6 +484,30 @@ def _tool_wire_projection_fields(diagnostic, *, model, parent_span_id,
     return fields
 
 
+def _waiting_phase_fields(status, status_kind, *, label, secs, idle_secs):
+    """``(phase, detailKey, detail, detailArgs)`` for one transport-wait beat."""
+    if status_kind == 'preparing_tool_call':
+        return (Phase.LLM_THINKING, 'stream.phase.generatingResponse',
+                f'{label} is preparing a tool call ({secs}s total)…', {})
+    if status_kind == 'stream_stalled':
+        return (Phase.STREAM_STALLED, 'stream.phase.streamStalled',
+                f'No new model progress for {idle_secs}s '
+                f'({secs}s total) — {label} is still connected…',
+                {'model': label, 'elapsed': secs, 'idle': idle_secs})
+    if str(getattr(status, 'cooldown_cause', '') or '') == 'quota':
+        # Subscription/billing quota hold — the slot is parked for a
+        #   KNOWN reset (often hours/days). A bare "waiting for the
+        #   model" would mislabel it as an imminent-recovery stall.
+        return (Phase.WAITING_MODEL, 'stream.phase.waitingQuotaReset',
+                f'{label} subscription quota exhausted — retrying '
+                f'automatically while waiting for the usage window to reset '
+                f'(already {secs}s)…',
+                {'model': label, 'elapsed': secs})
+    return (Phase.WAITING_MODEL, 'stream.phase.waitingForResponse',
+            f'Waiting {secs}s for {label} to respond…',
+            {'model': label, 'elapsed': secs})
+
+
 def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                         *, pool_wide=False,
                         pool_prefer_model=None,
@@ -785,6 +809,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         Deliberately NOT passed to the FloorRetry resend call — during resends
         the first attempt's text is still the fallback content and must
         survive unless a resend is adopted."""
+        _text_deltas.discard_held_content()
         # Tool callbacks own execution-bearing state too. A discarded provider
         # response must retire its early rows and quarantine its prefetch
         # futures even when it emitted no prose (tool-only responses are common).
@@ -872,37 +897,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                 _started = bool(task['content'] != _round_base_content
                                 or task['thinking'] != _round_base_thinking)
             _status_kind = 'stream_stalled' if _started else 'waiting_event'
-        if _status_kind == 'preparing_tool_call':
-            _phase = Phase.LLM_THINKING
-            _detail_key = 'stream.phase.generatingResponse'
-            _detail = f'{_label} is preparing a tool call ({_secs}s total)…'
-            _args = {}
-        elif _status_kind == 'stream_stalled':
-            _phase = Phase.STREAM_STALLED
-            _detail_key = 'stream.phase.streamStalled'
-            _detail = (f'No new model progress for {_idle_secs}s '
-                       f'({_secs}s total) — {_label} is still connected…')
-            _args = {
-                'model': _label,
-                'elapsed': _secs,
-                'idle': _idle_secs,
-            }
-        else:
-            _cooldown_cause = str(getattr(status, 'cooldown_cause', '') or '')
-            _phase = Phase.WAITING_MODEL
-            if _cooldown_cause == 'quota':
-                # Subscription/billing quota hold — the slot is parked for a
-                #   KNOWN reset (often hours/days). A bare "waiting for the
-                #   model" would mislabel it as an imminent-recovery stall.
-                _detail_key = 'stream.phase.waitingQuotaReset'
-                _detail = (f'{_label} subscription quota exhausted — retrying '
-                           f'automatically while waiting for the usage window to reset '
-                           f'(already {_secs}s)…')
-                _args = {'model': _label, 'elapsed': _secs}
-            else:
-                _detail_key = 'stream.phase.waitingForResponse'
-                _detail = f'Waiting {_secs}s for {_label} to respond…'
-                _args = {'model': _label, 'elapsed': _secs}
+        _phase, _detail_key, _detail, _args = _waiting_phase_fields(
+            status, _status_kind, label=_label, secs=_secs, idle_secs=_idle_secs)
         if not _retry_phase_budget.should_emit(
                 ('transport_wait', _status_kind,
                  str(getattr(status, 'cooldown_cause', '') or ''))):

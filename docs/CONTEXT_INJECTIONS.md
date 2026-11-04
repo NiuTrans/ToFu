@@ -282,10 +282,12 @@ neither is inferred from ad-hoc flags by the reader.
   ``stamp_initiator`` at the turn-creation seam (a fresh timer/proactive/goal/
   peer input projection, or the autopilot simulated user); ``message_queue``
   tags queued rows for operator-vs-peer before dispatch. It rides the
-  projection into ``TurnOrigin.initiator`` and the renderer shows a distinct
-  labelled banner for every non-human source
-  (``classic-conversation-renderers.ts:renderOriginBlock``) — so an autonomous
-  turn never masquerades as the human. Do not add a parallel actor enum or a
+  projection into ``TurnOrigin.initiator``; the Turn header's localized role
+  label names every non-human source, and
+  ``renderers/context-blocks.ts:renderOriginBlock`` adds a block only when the
+  origin carries more than that label (peer/operator source, Brain dispatch
+  details) — so an autonomous turn never masquerades as the human and the
+  label is never shown twice. Do not add a parallel actor enum or a
   flag the reader must pattern-match on; extend ``VALID_INITIATORS`` instead.
 * **What was injected mid-turn** — the registry ``injectionId`` /
   ``_contextInjectionId`` on the carrier, projected display-only as a
@@ -367,6 +369,9 @@ own subtree label.
 Read acquisition is descriptor-relative/no-follow on POSIX and stops at remaining
 aggregate file/byte budgets, without clipping or publishing a partial snapshot.
 Verified removals are pruned before validating replacement bounds.
+One tool admission memoizes rule reads by their exact arguments (path, root and
+remaining byte/file budget), so root rules shared by several targets are read
+once per admission; nothing is cached across admissions.
 
 Project command dispatch pins explicit/sticky CWD once before guidance and
 foreground/background handoff. The shared command parser's concrete targets
@@ -433,6 +438,11 @@ changed:
   snapshot compaction (`compact_context_snapshots`, now resolving
   instance ids through `block_spec`) retires superseded per-file versions, and
   memory-only head truncation protects the newest version of each required one;
+- after accepted L2 restoration, that same snapshot retirement runs over the
+  recomposed view too: a freshly acquired replacement removes the verified old
+  section immediately, while current siblings and authored text survive.
+  This boundary has already accepted a cache rewrite; ordinary rounds still
+  append changes without rewriting consumed history;
 - a new task re-reads, once, the rule files whose blocks its inherited history
   carries: unchanged ones cost nothing, changed or deleted ones (or files now
   outside the declared roots, or unreadable) get a superseding version or a
@@ -491,6 +501,17 @@ rule is dropped from the task's acquired set, and the next tool access to its
 subtree acquires and delivers it exactly like a first touch. Presence remains
 content-addressed in the messages. The task-local `delivered` record only
 separates a lost block from a never-delivered one.
+
+L2's retained projection also calls the pure `compact_project_guidance` owner:
+verified delivered nested sections unrelated to the retained tool targets leave
+the candidate even when they occupied the current Turn's managed shell. Root
+rules, active scopes and full-text holders referenced by active scope notes stay
+verbatim. Invalid metadata, unknown acquired state, human steering and media
+prevent retirement. Mixed carriers keep their other sections. Final capacity and
+economic restoration use the same projection; failed candidates change neither
+history nor the acquired/delivered state. Ordinary refresh forgets the retired
+rules only after successful adoption. This closes the gap where never dropping
+a managed shell prevented the restoration policy above from taking effect.
 
 **Measurement.** Replaying that archive's saved compactor result (25 messages,
 9 retained tool calls, all at the repository root or under `.tofu/memories`)

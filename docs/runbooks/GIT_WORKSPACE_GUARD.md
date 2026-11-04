@@ -810,6 +810,21 @@ lifetime races; blanket readonly-prefix rules disagree with writable child
 admission. Snapshot work is linear in the number of explicitly registered
 roots, without Git/subprocess/directory scans; memory follows task lifetime.
 
+Every project tool admission re-registers its frozen policy into that
+projection, so the process-wide `config._lock` covers dictionary updates only.
+Problem: sticky-cwd realpath containment, cross-DC latency classification and
+Git branch probes ran under it, so concurrent admissions queued behind
+filesystem and subprocess latency. Decision: those checks run after release;
+retiring a cwd the new roots no longer contain is compare-and-set against the
+exact registered roots object, and re-registering the same object keeps its
+sticky cwd (`get_conv_cwd` still re-validates every read). Rejected: caching
+realpath results needs filesystem invalidation, because a retargeted symlink
+changes containment; skipping an unchanged re-registration loses LRU recency.
+Spec: `tests/project_mod/test_root_registry_lock_io.py`. With the per-admission
+guidance read memo (`docs/CONTEXT_INJECTIONS.md`), admission on this host's
+FUSE checkout went from p90 46.0 to 20.1 ms on one thread and 81.9 to 54.3 ms
+across eight concurrent threads.
+
 Host-local measurement: 16 roots, 10 warmups and 1000 scope+lookup samples
 observed median **0.017 ms**, maximum **0.027 ms**; not a network-volume guarantee.
 

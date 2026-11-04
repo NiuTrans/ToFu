@@ -2,9 +2,11 @@
 
 Routes (mounted under ``/api/v1``):
 
-  GET  /api/v1/update/check    — compare installed VERSION vs. the newest
-                                 GitHub release tag; report git availability
-                                 and whether the working tree is safe to pull.
+  GET  /api/v1/update/check    — compare installed VERSION vs. the update
+                                 source (the checkout's git upstream, or the
+                                 newest GitHub release tag); report git
+                                 availability and whether the working tree is
+                                 safe to pull.
   POST /api/v1/update/apply    — admin: apply the update. A git checkout
                                  uses ``git pull --ff-only`` (refuses on a
                                  dirty tree); a non-git deployment (exported
@@ -158,8 +160,13 @@ def _enrich_with_code_pending(payload, *, current_head=None):
 @api_meta(
     summary='Check for an available update',
     description=(
-        'Compares the installed version against the newest release tag on '
-        'the official GitHub repository. Also reports whether this is a git '
+        'Compares the installed version against the update source: the '
+        'VERSION on the git checkout\'s upstream (the remote/branch apply '
+        'fast-forwards from), or the newest release tag of the official '
+        'GitHub repository when that upstream is the official repository, '
+        'TOFU_UPDATE_REPO is set, or the install is not a git checkout. '
+        'Checking a git upstream fetches it without touching the working '
+        'tree or local branches. Also reports whether this is a git '
         'checkout and whether the working tree is safe to fast-forward '
         '(runtime-state churn under .tofu/ is tolerated; tracked-source '
         'edits block the update). Read-only. The payload also projects the '

@@ -945,6 +945,94 @@ latency 1.8 instead of 29.4 ms (26.3 ms of it queued behind the writer). Two of
 1.99 to 0.70 ms. These fresh authorities have small overlays; the production
 holds were dominated by the full-overlay merge, which the new path never runs.
 
+### Raw-archive puts and log-aggregate flushes on the command preparation lane (2026-11-04)
+
+**Problem.** `raw_archive.put` and `log_aggregate.flush` executed exclusively:
+`compile_parallel_transaction` did not certify their IR steps, so every read
+ran inside the authority hold. A put reads its identity claim, the parent
+Attempt, one owner age-index backfill page (up to 512 rows), up to 64
+reclamation victims (each a claim, document envelope, five index rows and four
+counters) and the owner, tenant, Attempt and conversation counters
+([reclamation](LOGGING.md#raw-archives-are-reclaimed-oldest-first)). A flush
+reads the aggregate document of each of up to 500 rows, the sequence counter
+and one sweep index page with its documents. On the production BeeGFS FUSE
+volume, where an open or metadata call costs about 0.65 ms, these are cold
+entity-page and block reads. `authority_hold` records of the build deployed on
+2026-11-04 show a 15,008 ms put (`read` 7,582 ms: `vfs_read` 4,603,
+`vfs_open` 2,107, `vfs_metadata` 871; `execute` 7,424 ms; `journal` 1.7 ms);
+in the preceding 15 hours 28 puts held 169 s (156 s `read`) and 19 flushes
+78 s (68 s `read`). The contention watchdog flips readiness after 10 s and
+the foreground wire deadline is 5 s, so such a hold fails or stalls every
+concurrent write. The `execute` share belongs to the same reads: entity page
+loads, shared block reads and content verification (`entity.rs` `load_node`
+and `entity_page_source_read`, `block.rs` `block_shared_read` and
+`block_content_verify`) carry only diagnostic stage timers, so without request
+profiling everything except the VFS calls of a cold read is charged to the
+enclosing `ir_steps`. Neither step does seconds of business work.
+
+**Decision.** `compile_parallel_transaction` admits `LogAggregateFlush` and
+raw-archive puts; other raw-archive requests stay exclusive. The unchanged
+steps execute on the pinned preparation replica, which shares the authority's
+block, page and decoded-chunk caches; the archive document blob is staged
+privately against the preparation memory lease, and every read is an OCC
+witness. The writer validates the witnesses and applies the prepared delta,
+reading no storage. A change to any witnessed input (parent Attempt or Turn,
+identity claim, usage counters, age or conversation index, an aggregate row,
+the sweep range), a busy authority or rotation refuses the prepared commit
+without publication, and the command re-executes on the writer exactly as
+before, now over warm caches. A refusal found on the snapshot (missing
+parent, conversation or owner capacity, typed bounds) writes nothing and
+answers as of the capture. Neither operation stores a command receipt
+(`receiptRequired: false`): a put retry is answered by its witnessed archive
+identity claim and a flush retry merges its rows again, as before.
+Reclamation, the new archive and every counter remain one transaction. Under
+`TOFU_DB_TOMBSTONE_RECLAIM` a preparation that spans an overlay merge falls
+back to the writer, like the retention prunes. No admission, retry or tuning
+value is added.
+
+The hold keeps witness validation, the apply and the WAL frame (`journal`),
+whose physical write Normal durability performs inline
+([measurement](#turn-event-record-holds-and-long-hold-evidence-2026-11-02)).
+An archive whose staged document exceeds the carried WAL bound still
+publishes its blob blocks in the commit, writing and syncing them under the
+writer as the exclusive path did: private blobs are never published before
+validation.
+
+**Alternatives rejected.** Fewer reclamation victims, backfill rows or flush
+rows per call tune the operation while its reads stay under the writer.
+Reclaiming in a separate transaction breaks the atomic reclamation contract.
+A maintenance-lane variant turns a synchronous command into deferred work
+with a second schedule. Reading ahead without witnesses before taking the
+writer needs the same validation the lane already performs.
+
+**Verification.** `server::tests::archive_lane` pins the production overlay
+and tombstone-reclaim settings on the deterministic VFS. Its serial-parity
+test commits a reclaiming put, an identity replay, a receipt replay and a
+sweeping flush on the lane beside unrelated live writes, with and without the
+logical outbox, and compares every response and the final state with a serial
+authority. Stale preparations (parent, identity, usage, aggregate row) are
+refused without publication and retried exactly on the writer. On a cold
+authority the commit hold performs no storage reads, while preparation
+performs all of them; a refused preparation leaves the writer retry fewer
+reads than the exclusive baseline. A blocked cold preparation read lets a
+foreground write commit. The commit fault matrix injects an error, a short
+write and a lost sync at every commit operation of a carried archive, a
+spilled archive and a flush, then crashes and reopens: an acknowledged commit
+survives, every other cell recovers all or nothing, and a retry answers
+exactly. The admission tests fail without the two lane entries.
+
+**Measurement.** `archive_put_and_log_flush_paired_hold_measurement`
+(ignored; debug build; disposable authority on this host's BeeGFS FUSE mount
+through `TMPDIR`, Normal durability; 48 retained 32 KiB archives with each
+put reclaiming the oldest; 1,500 aggregates and 200-row flushes; six
+alternating pairs, each arm on a freshly opened authority). The median hold
+fell from 13.4 to 0.86 ms per put (5.3 ms of preparation off the writer) and
+from 57.8 to 4.4 ms per flush (28.6 ms of preparation). The client cache kept
+most reads warm after the first open (exclusive `read` 0.05-2.9 ms per put,
+0.4-21.4 ms per flush); production cold reads take seconds, and the lane moves
+all of them off the writer. The production effect awaits the rebuilt engine
+and its `authority_hold` and `parallel_*` counters.
+
 ## Turn event record holds and long-hold evidence (2026-11-02)
 
 **Problem.** Production `authority_hold` records named only elapsed time:

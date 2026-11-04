@@ -116,9 +116,9 @@ Identity never becomes metric labels. No config, prompt, file list, error text,
 polling loop or new durable store is introduced. Existing model/tool/compaction execution clocks
 and browser perception receipts cover the subsequent boundaries.
 
-Workspace isolation records `workspace_snapshot` and each `workspace_snapshot_observation`, `workspace_input_ref`, `workspace_metadata`, `workspace_checkout` and `workspace_registration`. Repository/destination admission has separate `*_lock_wait` and `*_lock_hold` stages; wait starts before lockfile filesystem I/O, and hold starts only after admission. Nested stages inherit only the outer caller's explicitly bounded identity through a reset-on-exit context, never config or paths. Startup histograms retain finite buckets through 600 seconds; longer observations remain in the count/sum and infinity bucket. **Problem:** the former inclusive binding/materialization timers exposed latency but could not attribute it to contention, snapshot CPU/I/O or checkout. **Decision:** reuse the paired anchors and closed stage registry rather than another watchdog, lock-owner database or polling thread. Missing completions still do not prove a hang, and these new records certify production coverage only after code reload. Tool `workspace_admission` remains an inclusive total, not pure lock wait; `undo_journal_lock_wait` measures journal admission while `post_commit_wait` and `post_commit_callback` distinguish ordered presentation delay after release.
+Workspace isolation records `workspace_snapshot` and each `workspace_snapshot_observation`, `workspace_input_ref`, `workspace_metadata`, `workspace_checkout` and `workspace_registration`. Repository/destination admission has separate `*_lock_wait` and `*_lock_hold` stages; wait starts before lockfile filesystem I/O, and hold starts only after admission. Nested stages inherit only the outer caller's explicitly bounded identity through a reset-on-exit context, never config or paths. Startup histograms retain finite buckets through 600 seconds; longer observations remain in the count/sum and infinity bucket. **Problem:** the former inclusive binding/materialization timers exposed latency but could not attribute it to contention, snapshot CPU/I/O or checkout. **Decision:** reuse the paired anchors and closed stage registry rather than another watchdog, lock-owner database or polling thread. Missing completions still do not prove a hang, and these new records certify production coverage only after code reload. Tool `project_admission` is an inclusive total of root registration, argument routing and scoped-guidance acquisition, not pure lock wait; `undo_journal_lock_wait` measures journal admission while `post_commit_wait` and `post_commit_callback` distinguish ordered presentation delay after release.
 
-Workspace tools distinguish registry-lock acquisition (`workspace_registry_wait`), lockfile filesystem setup (`workspace_lock_io`), local condition sleeping (`workspace_local_wait`) and blocked cross-process flock backoff (`workspace_flock_wait`). The sleep timers are measured backoff, not blocker identity or the total kernel-call duration. Lockfile filesystem work runs outside registry ownership; an active-opening counter under the same registry lock fences fork until each FD is registered or closed. Fork waits on the registry condition (releasing it while waiting), then retains the lock across fork. Cancellation cannot interrupt a filesystem syscall, but unrelated edits can now acquire/release their leases while it is blocked. No namespace migration, new thread, queue or durable lock-owner registry is introduced. Exactly 16 current owner-defined tool phases fit the existing 16-name bound; unknown additional phases may still be omitted rather than grow state. Slow-tool records are completion-only and over-budget-only, not an all-call latency population. Specs: `tests/observability/test_task_startup_metrics.py` and the real-Git startup evidence case in `test_integration_delivery.py`.
+Workspace tools distinguish registry-lock acquisition (`workspace_registry_wait`), lockfile filesystem setup (`workspace_lock_io`), local condition sleeping (`workspace_local_wait`) and blocked cross-process flock backoff (`workspace_flock_wait`). The sleep timers are measured backoff, not blocker identity or the total kernel-call duration. Lockfile filesystem work runs outside registry ownership; an active-opening counter under the same registry lock fences fork until each FD is registered or closed. Fork waits on the registry condition (releasing it while waiting), then retains the lock across fork. Cancellation cannot interrupt a filesystem syscall, but unrelated edits can now acquire/release their leases while it is blocked. No namespace migration, new thread, queue or durable lock-owner registry is introduced. A call scope keeps its first 16 phase names; a later name is omitted rather than growing state. The owner-defined vocabulary is larger, but only tools with an execution budget open a scope and none of them takes a workspace lease (`run_command` dependency setup can, but `run_command` has no budget), so one timed call records at most 16 names. Slow-tool records are completion-only and over-budget-only, not an all-call latency population. Specs: `tests/observability/test_task_startup_metrics.py` and the real-Git startup evidence case in `test_integration_delivery.py`.
 
 A record carries only identity that exists when it is written. A stage's start
 keeps the identity known at entry; identity the stage creates joins its
@@ -428,7 +428,10 @@ owner reclaims only its own archives (TODO(enterprise): per-owner budgets).
 Measured with `raw_archive::tests::lifecycle::measure_reclaiming_put_cost`
 (debug build, in-memory deterministic VFS, loaded 4-CPU host): 9.5 ms per put
 below the bounds, 13.7 ms per put that reclaims one archive, both one WAL write
-per commit; the first backfill put (512 rows) took 45 ms and 2 writes.
+per commit; the first backfill put (512 rows) took 45 ms and 2 writes. The
+native put prepares these reads off the authority writer and commits with
+ordinary OCC
+([command preparation lane](TOFUDB_PUBLICATION_LATENCY.md#raw-archive-puts-and-log-aggregate-flushes-on-the-command-preparation-lane-2026-11-04)).
 
 Alternatives rejected: raising the ceilings moves the cliff and lets the store
 grow without a lifecycle; a TTL or maintenance-driven prune operation adds an
@@ -858,8 +861,14 @@ aliases and actual `find_files` are covered. Model/human waits and arbitrary
 Completed or failed over-budget execution emits one `tool_execution_slow`
 WARNING into the existing app/error/incident pipeline, correlated with task,
 conversation and call identity. At most 16 demand-scoped phase rows retain
-elapsed time, invocation count, byte and record totals: undo index/payload I/O,
-file publication and file history. Phase times are inclusive when nested.
+elapsed time, invocation count, byte and record totals: project admission
+(`project_admission`: root registration, argument routing, scoped-guidance
+acquisition and worker rebinding before a project handler runs), undo
+index/payload I/O, file publication, file history, and the durable
+acknowledgements that bracket a
+side effect (`effect_intent_ack` before the handler runs,
+`effect_reconciliation_ack` before a file publication is reported). Phase times
+are inclusive when nested.
 No arguments, file paths, results or exception contents enter this evidence;
 healthy calls emit no record. There is no timer, pool or second incident store,
 and diagnostic failure cannot change business results or durability.
@@ -902,6 +911,58 @@ escaped, and text beyond 600 characters ends in `…[+N chars]`. Verification:
 `tests/project_mod/test_run_command_log_line.py` and
 `tests/project_mod/test_workspace_admission_wait_both_sides.py`.
 
+
+## Multi-agent load evidence
+
+Read the [architecture scaling map](ARCHITECTURE.md#multi-agent-execution-and-scaling-boundaries)
+before interpreting Agent counts. Existing `/metrics` exposition is protected
+by the admin scope. Save two complete authorized scrapes from the same serving
+process and record the elapsed monotonic time between capture boundaries.
+Capture the process incarnation and source/build identity separately; file
+modification times and a shared URL do not prove either. Keep raw observations
+outside tracked source and do not include credentials or conversation contents.
+
+Compare the saved observations without importing or starting the application:
+
+```sh
+python3 scripts/analyze_agent_load.py before.prom after.prom --elapsed-seconds 60
+```
+
+The elapsed value is the measured observation interval, not a polling setting.
+The script reads local files only, identifies them by SHA-256, preserves gauge
+endpoints, and calculates interval counter deltas and storage-RPC mean wall
+durations. It selects task, executor, event-delivery and storage-RPC series;
+unrelated metric labels are not copied. Missing endpoints, decreased counters
+and inconsistent histogram pairs never become zero work or successful latency
+measurements. Malformed or duplicate selected series fail with a nonzero exit.
+The report is diagnostic evidence, not a performance pass/fail gate.
+
+Interpret the populations separately:
+
+- Task counts are not a census of logical graph actors. Executor jobs, resident
+  carriers, monitoring threads and operating-system threads are different sets.
+- Delivery `pending_bytes` charges queued/in-flight events and retained
+  structural sources, including shared immutable rows. It is not unique heap
+  memory or RSS, and dividing it by pending-event count is not a frame size.
+- Event-loop lag is a point observation. Delivery `max_lag_ms` and `peak_*`
+  are process-lifetime high-water marks. Neither gives an interval percentile.
+- RPC sum/count deltas give the mean duration of completed calls in that series.
+  Concurrent durations overlap; their sum is not elapsed wall time, database
+  CPU or storage-service time alone. Successful and failed outcomes stay
+  separate. Long polls and streams must not be judged as short HTTP requests.
+- A counter decrease proves the interval cannot be differenced as one monotonic
+  series. Counters that grow do not exclude a restart followed by enough new
+  work. Confirm process incarnation externally before making rate comparisons.
+
+Pair this with process CPU/RSS/thread observations, the existing bounded log
+diagnostic and workload shape. Record truncation and read errors. Stack sampling
+locates candidate work; missed samples and nonblocking reads limit precision,
+and profiled runs cannot serve as uninstrumented performance comparisons.
+Use the application workload and failure matrix in the architecture map before
+claiming improved multi-agent throughput or capacity.
+
+Verification: `tests/meta/test_analyze_agent_load.py` covers interval arithmetic,
+quiet/missing/reset series, malformed evidence and a standalone offline CLI.
 
 ## Metric work on storage RPCs
 

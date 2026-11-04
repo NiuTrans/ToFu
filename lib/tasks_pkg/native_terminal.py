@@ -70,6 +70,12 @@ def project_native_terminal(task: dict, request: TerminalRequest) -> None:
         result = event.get('result')
         if not isinstance(result, dict):
             raise ValueError('native terminal result invalid')
+        provider_reason = result.get('finish_reason')
+        from lib.tasks_pkg.stream_handler._terminal_recovery import OUTPUT_LIMIT_FINISH_REASONS
+        if provider_reason is not None:
+            if provider_reason not in OUTPUT_LIMIT_FINISH_REASONS:
+                raise ValueError('native terminal finish reason invalid')
+            reason = provider_reason
         messages, usages = result.get('messages'), result.get('usage')
         if (not isinstance(messages, list) or not messages
                 or any(not isinstance(row, dict) for row in messages)
@@ -91,7 +97,11 @@ def project_native_terminal(task: dict, request: TerminalRequest) -> None:
             for row in usages:
                 accumulate_usage_into(usage, row)
         from lib.tasks_pkg.manager._events import reset_task_text
-        reset_task_text(task, content=content or '', thinking=(
+        from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
+        silent = declare_silent_turn(task, final, messages[:-1], llm_round=None)
+        task.pop('_silentTextCandidate', None)
+        projected_content = '' if silent else final.get('content') or ''
+        reset_task_text(task, content=projected_content, thinking=(
             task.get('thinking') or '' if thinking is None else thinking))
         task['messages'] = messages
         task['_messages_include_current_run'] = True
@@ -197,7 +207,8 @@ class NativeTaskTerminalPolicy:
         fields = ('status', 'content', 'thinking', 'finishReason', 'error',
                   '_contentEpoch', '_attemptId', 'usage', 'cost', 'apiRounds',
                   '_nativePricingRequired', '_billingUserId', '_billing_reservation_micro',
-                  '_nativeBillingSettlement')
+                  '_nativeBillingSettlement', '_silentTurn', '_silentTurnIdentity',
+                  '_silentTextCandidate')
         with self.task.get('content_lock') or nullcontext():
             encoded = json.dumps(
                 {key: self.task.get(key) for key in fields},

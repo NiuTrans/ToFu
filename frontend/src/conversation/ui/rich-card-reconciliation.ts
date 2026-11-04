@@ -7,6 +7,8 @@
  * cards use existing domain IDs, structural classes and disclosure labels.
  * This is not a sanitizer: callers retain the existing safe-HTML boundary.
  */
+import { programCardOpensItself } from '../presentation/program-batch-presentation';
+
 type ReconciliationParent = Node & ParentNode;
 
 type MovableParent = ReconciliationParent & {
@@ -73,14 +75,32 @@ function nodeIdentity(node: Node): NodeIdentity {
   return { family, explicit: false, label };
 }
 
+/** A model round's sibling-program group; Surface and classic batches mark it. */
+const PROGRAM_BATCH = '[data-program-batch]';
+const BATCHED_OPEN_CARD = `${PROGRAM_BATCH} details.ptc-card[open]`;
+
+/** A presenter that cannot see the batch (a Surface block) opens a handoff as
+ * a lone program would. Inside a multi-program batch the head counts it, so a
+ * newly mounted card keeps only the batched reveal. Mounting is never a
+ * reader choice; retained cards keep theirs. */
+function foldBatchedProgramCards(inserted: Node): void {
+  if (inserted.nodeType !== 1) return;
+  const element = inserted as Element;
+  for (const card of [element, ...element.querySelectorAll('details.ptc-card[open]')]) {
+    if (card.matches(BATCHED_OPEN_CARD)
+        && !programCardOpensItself(card.getAttribute('data-program-attention'), true)) card.removeAttribute('open');
+  }
+}
+
 function syncElementAttributes(current: Element, next: Element): void {
 
   // Reveal a newly actionable program without replacing its source/focused nodes.
   // Same-attention refreshes retain the reader's fold, including dismissed errors.
+  // Inside a multi-program batch a handoff is counted by the batch head instead.
   const attention = next.getAttribute('data-program-attention');
   const revealProgram = current.matches('details.ptc-card') && next.matches('details.ptc-card')
     && attention !== current.getAttribute('data-program-attention')
-    && (attention === 'error' || attention === 'handoff' || attention === 'incomplete');
+    && programCardOpensItself(attention, current.closest(PROGRAM_BATCH) !== null);
   if (revealProgram) current.setAttribute('open', '');
   // Read transition state BEFORE patching attributes. When a swarm agent
   // starts running or fails, the presenter's fold default wins (a failure
@@ -225,6 +245,7 @@ function reconcileChildren(currentParent: ReconciliationParent, nextParent: Reco
           && retained.isConnected) movable.moveBefore(retained, atIndex);
       else currentParent.insertBefore(retained, atIndex);
     }
+    if (!current) foldBatchedProgramCards(retained);
   });
   for (const queue of byKey.values()) {
     for (let index = queue.used; index < queue.nodes.length; index += 1) {

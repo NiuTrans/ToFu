@@ -17,9 +17,29 @@ Classification is structural, never based on the model's prose:
 
 * an entire shell command that is exactly ``true``, ``:``, or ``exit 0`` is
   an explicit sacrificial no-op;
-* a successful ``read_files`` range wholly covered by earlier reads is
-  redundant unless the same request now returned changed content;
+* a successful ``read_files`` range wholly covered by earlier reads that are
+  still visible in the model context is redundant unless the same request
+  now returned changed content;
 * a real state-changing tool clears the semantic episode and read coverage.
+
+Evidence is credited only while the model can see it. Read observations,
+partial-artifact obligations and the previous round's results are bound to
+the tool message that carried them (shape plus SHA-256 of its content). When
+compaction (L1 placeholders, pressure L1, L2 summaries, handoff) rewrites or
+removes that message the credit is dropped, so re-calling what a placeholder
+told the model to re-call is a re-fetch, not a loop (incident
+``mw2008zee91571`` was force-stopped for exactly that). Callers without a
+message lane keep the historical permanent credit.
+
+A redundant-read stop requires a warning against re-reading visible evidence
+that the model received in an earlier round of the current redundant streak;
+whatever resets the streak (new evidence, another tool, a write, an operator
+steer) also retires its warning. An unresolved-artifact stop needs its own
+artifact-specific warning for that source. Only the explicit-noop guard keeps
+the turn-wide "any earlier correction" rule, because changed reads were used
+to launder sacrificial no-ops (``mt2hn4018vm5rh``). One intervention per
+round: a round in which any guard corrected never also stops, so the model
+always answers the newest correction; the next offending round still stops.
 
 
 Two extended stagnation detectors cover loop shapes the two base guards
@@ -79,10 +99,13 @@ _STATE_KEY = '_tool_loop_guard'
 _READ_TOOL = 'read_files'
 _SHELL_TOOL_NAMES = frozenset({'run_command', 'code_exec'})
 _LINE_INFINITY = 2**63 - 1
-_MAX_TRACKED_READ_PATHS = 512
-_MAX_TRACKED_READ_REQUESTS = 1024
-_MAX_TRACKED_EVIDENCE_IDS = 1024
+_MAX_TRACKED_READ_SOURCES = 1024
 _MAX_PENDING_ARTIFACT_SCOPES = 256
+# Corrections whose text tells the model to stop re-reading evidence it can
+# already see; only these authorize a later redundant-read stop. The exact
+# repetition text instead invites "different arguments", so it does not.
+_READ_WARNING_REASONS = frozenset({'explicit_noop', 'redundant_reads'})
+_MISSING = object()
 _ARTIFACT_CONTINUATION_TOOLS = frozenset({
     'read_tool_artifact', 'search_tool_artifact',
 })
@@ -288,9 +311,9 @@ def _guard_state(task: dict[str, Any]) -> dict[str, Any]:
     state.setdefault('explicit_noop_rounds', [])
     state.setdefault('semantic_nudge_count', 0)
     state.setdefault('redundant_read_streak', 0)
-    state.setdefault('read_coverage', {})
-    state.setdefault('read_result_by_request', {})
-    state.setdefault('read_evidence_ids', {})
+    state.setdefault('read_warning_round', -1)
+    state.setdefault('read_sources', {})
+    state.setdefault('last_round_messages', [])
     state.setdefault('pending_artifacts_by_scope', {})
     state.setdefault('fail_fp', '')
     state.setdefault('fail_fp_rounds', 0)
@@ -300,11 +323,23 @@ def _guard_state(task: dict[str, Any]) -> dict[str, Any]:
     state.setdefault('poll_streak', 0)
     state.setdefault('poll_nudged', False)
     state.setdefault('poll_after_nudge', 0)
-    for key in ('read_coverage', 'read_result_by_request',
-                'read_evidence_ids', 'pending_artifacts_by_scope'):
+    for key in ('read_sources', 'pending_artifacts_by_scope'):
         if not isinstance(state.get(key), dict):
             state[key] = {}
+    if not all(isinstance(source, dict)
+               for source in state['read_sources'].values()):
+        state['read_sources'] = {
+            key: source for key, source in state['read_sources'].items()
+            if isinstance(source, dict)}
+    if not isinstance(state.get('last_round_messages'), list):
+        state['last_round_messages'] = []
+    if not _is_round_number(state.get('read_warning_round')):
+        state['read_warning_round'] = -1
     return state
+
+
+def _is_round_number(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def reset_tool_loop_guard(task: dict[str, Any]) -> bool:
@@ -314,16 +349,26 @@ def reset_tool_loop_guard(task: dict[str, Any]) -> bool:
     consecutive-identical streak the breaker measured no longer describes an
     unattended loop: keeping it would nudge/stop over behavior the human has
     already corrected. Returns True when a chain was actually cleared.
-    Stagnation streaks (fail/poll) are deliberately kept — they measure
-    world-state repetition a steer does not undo.
+    The steer also closes a redundant-read stretch: the operator's new
+    instruction can legitimately require re-reading, so any later read stop
+    needs a fresh correction first. Stagnation streaks (fail/poll), visible
+    read evidence and the explicit-noop history are deliberately kept —
+    they measure repetition a steer does not undo.
     """
     state = _guard_state(task)
     had_chain = bool(state.get('identical_repeat_count')
-                     or state.get('last_round_digest'))
+                     or state.get('last_round_digest')
+                     or state.get('redundant_read_streak')
+                     or state['read_warning_round'] >= 0)
     state['identical_repeat_count'] = 0
     state['last_round_digest'] = ''
     state['exact_nudge_digest'] = ''
     state['exact_remind_digest'] = ''
+    _end_redundant_read_stretch(state)
+    for observation in state['pending_artifacts_by_scope'].values():
+        if isinstance(observation, dict):
+            had_chain = (observation.pop('warnedRound', None) is not None
+                         or had_chain)
     return had_chain
 
 
@@ -435,11 +480,21 @@ def _round_action_kind(
     return 'opaque_action' if saw_opaque_action else ''
 
 
-def _clear_read_observations(state: dict[str, Any]) -> None:
+def _end_redundant_read_stretch(state: dict[str, Any]) -> None:
+    """A warning belongs to the redundant streak it was issued in."""
     state['redundant_read_streak'] = 0
-    state['read_coverage'] = {}
-    state['read_result_by_request'] = {}
-    state['read_evidence_ids'] = {}
+    state['read_warning_round'] = -1
+
+
+def _forget_read_coverage(state: dict[str, Any]) -> None:
+    """An opaque action may have changed files, so line coverage is stale.
+
+    Request/outcome identities stay: re-reading and receiving the identical,
+    still-visible result proves the action changed nothing the model sees.
+    """
+    _end_redundant_read_stretch(state)
+    for source in state['read_sources'].values():
+        source['spans'] = []
     state['pending_artifacts_by_scope'] = {}
 
 
@@ -447,7 +502,9 @@ def _reset_semantic_episode(state: dict[str, Any]) -> None:
     """A real action invalidates old read evidence and earns a fresh budget."""
     state['explicit_noop_rounds'] = []
     state['semantic_nudge_count'] = 0
-    _clear_read_observations(state)
+    _end_redundant_read_stretch(state)
+    state['read_sources'] = {}
+    state['pending_artifacts_by_scope'] = {}
 
 
 def _line_number(value: Any, default: int) -> int:
@@ -563,8 +620,6 @@ def _add_read_coverage(
     coverage: dict[str, list[list[int]]], path: str, start: int, end: int,
 ) -> bool:
     """Merge one interval and report whether it covers any previously unseen line."""
-    if path not in coverage and len(coverage) >= _MAX_TRACKED_READ_PATHS:
-        coverage.pop(next(iter(coverage)), None)
     existing = coverage.get(path) or []
     added = not any(left <= start and right >= end for left, right in existing)
     merged: list[list[int]] = []
@@ -598,63 +653,292 @@ def _row_failed(row: dict[str, Any]) -> bool:
     ))
 
 
+def _visible_tool_messages(messages: list | None) -> dict[str, Any] | None:
+    """Model-visible tool-result content by call id; None for an unbound caller."""
+    if messages is None:
+        return None
+    visible: dict[str, Any] = {}
+    for message in messages:
+        if isinstance(message, dict) and message.get('role') == 'tool':
+            call_id = message.get('tool_call_id')
+            if call_id:
+                visible[str(call_id)] = message.get('content')
+    return visible
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return '\n'.join(
+            str(block.get('text') or '') for block in content
+            if isinstance(block, dict) and block.get('type') == 'text')
+    return ''
+
+
+def _content_shape(content: Any) -> int:
+    """Cheap change filter; an exact digest confirms before any verdict."""
+    if isinstance(content, str):
+        return len(content)
+    if not isinstance(content, list):
+        return -1
+    size = len(content)
+    for block in content:
+        if isinstance(block, dict):
+            size += len(str(block.get('text') or ''))
+            image = block.get('image_url')
+            if isinstance(image, dict):
+                size += len(str(image.get('url') or ''))
+    return size
+
+
+def _content_digest(content: Any) -> str:
+    if isinstance(content, str):
+        payload = content
+    else:
+        try:
+            payload = json.dumps(content, ensure_ascii=False, sort_keys=True,
+                                 default=str)
+        except (TypeError, ValueError):
+            payload = repr(content)
+    return hashlib.sha256(payload.encode('utf-8', 'replace')).hexdigest()
+
+
+def _row_message_id(
+    row: dict[str, Any], visible: dict[str, Any] | None,
+) -> str | None:
+    """Return the visible tool message that carries ``row``'s result.
+
+    ``''`` means unbound (no message lane, or a row without call identity);
+    such evidence keeps the historical permanent credit. ``None`` means the
+    row has a call identity whose result the model cannot see now.
+    """
+    call_ids = [str(row.get(key) or '')
+                for key in ('toolCallId', 'parentToolCallId')]
+    call_ids = [call_id for call_id in call_ids if call_id]
+    if visible is None or not call_ids:
+        return ''
+    return next((call_id for call_id in call_ids if call_id in visible), None)
+
+
+def _round_message_identities(
+    rows: list[dict[str, Any]], visible: dict[str, Any] | None,
+) -> dict[str, tuple[int, str]]:
+    """Shape and digest of every visible message carrying this round's rows."""
+    identities: dict[str, tuple[int, str]] = {}
+    for row in rows:
+        call_id = _row_message_id(row, visible)
+        if call_id and call_id not in identities:
+            content = visible[call_id]
+            identities[call_id] = (
+                _content_shape(content), _content_digest(content))
+    return identities
+
+
+def _still_visible(
+    visible: dict[str, Any], call_id: str, shape: Any, digest: Any,
+    *, exact: bool,
+) -> bool:
+    content = visible.get(call_id, _MISSING)
+    if content is _MISSING or _content_shape(content) != shape:
+        return False
+    return not exact or _content_digest(content) == digest
+
+
+def _previous_round_still_visible(
+    state: dict[str, Any], visible: dict[str, Any] | None,
+) -> bool:
+    """Whether the model still sees the prior round's results verbatim.
+
+    Repeating a call whose earlier result was compacted or removed re-fetches
+    evidence the harness took away; it is not a repetition loop.
+    """
+    if visible is None:
+        return True
+    for entry in state['last_round_messages']:
+        if isinstance(entry, (list, tuple)) and len(entry) == 3:
+            call_id, shape, digest = entry
+            if not _still_visible(
+                    visible, str(call_id), shape, digest, exact=True):
+                return False
+    return True
+
+
+def _read_observation(
+    row: dict[str, Any], visible: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pure identity, proven spans and visibility binding of one read row."""
+    outcome_text = _outcome_text(row)
+    envelope = _tool_result_v2(row)
+    failed = _row_failed(row)
+    specs = [] if failed else _effective_read_specs(row, _read_specs(row))
+    message_id = _row_message_id(row, visible)
+    # Only a receipt the model actually sees is evidence it holds: a program's
+    # return value or a budgeted projection in the carrying message may omit
+    # it, and then neither its lines nor its identity were observed.
+    seen = message_id == '' or (
+        message_id is not None
+        and outcome_text in _message_text(visible[message_id]))
+    return {
+        'key': (str(row.get('toolCallId') or '')
+                or f'row:{row.get("llmRound")}:{row.get("roundNum")}'),
+        'messageId': message_id,
+        'request': hashlib.sha256(
+            _canonical_args(row).encode('utf-8', 'replace')).hexdigest(),
+        'outcome': hashlib.sha256(
+            (str(row.get('status') or '') + '\x00' + outcome_text)
+            .encode('utf-8', 'replace')).hexdigest(),
+        'evidence': (str(envelope.get('evidenceId')
+                         or envelope.get('artifactRef') or '')
+                     if envelope is not None else ''),
+        'failed': failed,
+        'specs': specs,
+        'seen': seen,
+    }
+
+
+def _live_read_coverage(state: dict[str, Any]) -> dict[str, list[list[int]]]:
+    """Merged line coverage of the read results the model can still see."""
+    coverage: dict[str, list[list[int]]] = {}
+    for source in state['read_sources'].values():
+        for span in source.get('spans') or ():
+            if (isinstance(span, (list, tuple)) and len(span) == 3
+                    and _is_round_number(span[1])
+                    and _is_round_number(span[2])):
+                _add_read_coverage(coverage, str(span[0]), span[1], span[2])
+    return coverage
+
+
+def _live_evidence_ids(state: dict[str, Any]) -> set[str]:
+    return {str(source['evidence'])
+            for source in state['read_sources'].values()
+            if source.get('evidence')}
+
+
+def _observation_adds_evidence(
+    observation: dict[str, Any], live_sources: list[dict[str, Any]],
+    coverage: dict[str, list[list[int]]], evidence_ids: set[str],
+) -> bool:
+    same_request = [source for source in live_sources
+                    if source.get('request') == observation['request']]
+    previous_outcome = same_request[-1].get('outcome') if same_request else None
+    if observation['failed'] or not observation['specs']:
+        # A partial V2 result proves only its visible evidence identity, not
+        # the range hidden behind its artifact. A first identity/failure is
+        # evidence; the same one under cosmetically different arguments is not.
+        if observation['evidence']:
+            return observation['evidence'] not in evidence_ids
+        return previous_outcome != observation['outcome']
+    if previous_outcome is not None and previous_outcome != observation['outcome']:
+        return True
+    if any(source.get('outcome') == observation['outcome']
+           for source in same_request):
+        return False
+    return any(
+        not any(left <= start and right >= end
+                for left, right in coverage.get(path, ()))
+        for path, start, end in observation['specs'])
+
+
+def _observations_add_evidence(
+    observations: list[dict[str, Any]], state: dict[str, Any],
+) -> bool:
+    live_sources = list(state['read_sources'].values())
+    coverage = _live_read_coverage(state)
+    evidence_ids = _live_evidence_ids(state)
+    return any(
+        _observation_adds_evidence(
+            observation, live_sources, coverage, evidence_ids)
+        for observation in observations)
+
+
+def _prune_hidden_read_sources(
+    state: dict[str, Any], visible: dict[str, Any] | None,
+    *, needs_exact=None,
+) -> int:
+    """Forget read evidence whose carrying message changed or vanished.
+
+    Every bound source gets the cheap shape test; ``needs_exact`` selects the
+    sources a redundant verdict would rest on, which must match exactly.
+    """
+    if visible is None:
+        return 0
+    sources = state['read_sources']
+    verdicts: dict[tuple[str, bool], bool] = {}
+    removed = 0
+    for key, source in list(sources.items()):
+        call_id = str(source.get('callId') or '')
+        if not call_id:
+            continue
+        exact = needs_exact is not None and needs_exact(source)
+        if (call_id, exact) not in verdicts:
+            verdicts[(call_id, exact)] = _still_visible(
+                visible, call_id, source.get('shape'), source.get('digest'),
+                exact=exact)
+        if not verdicts[(call_id, exact)]:
+            del sources[key]
+            removed += 1
+    return removed
+
+
+def _record_read_sources(
+    state: dict[str, Any], observations: list[dict[str, Any]],
+    identities: dict[str, tuple[int, str]],
+) -> None:
+    sources = state['read_sources']
+    for observation in observations:
+        if not observation['seen']:
+            continue
+        message_id = observation['messageId']
+        shape, digest = identities.get(message_id, (None, ''))
+        sources.pop(observation['key'], None)
+        while len(sources) >= _MAX_TRACKED_READ_SOURCES:
+            sources.pop(next(iter(sources)))
+        sources[observation['key']] = {
+            'callId': message_id, 'shape': shape, 'digest': digest,
+            'request': observation['request'],
+            'outcome': observation['outcome'],
+            'evidence': observation['evidence'],
+            'spans': [[path, start, end]
+                      for path, start, end in observation['specs']],
+        }
+
+
 def _read_round_added_evidence(
     rows: list[dict[str, Any]], state: dict[str, Any],
-) -> bool:
-    """Record read observations and return True iff this round learned something new."""
-    coverage = state['read_coverage']
-    results = state['read_result_by_request']
-    evidence_ids = state['read_evidence_ids']
-    added_evidence = False
-    for row in rows:
-        request_key = hashlib.sha256(
-            _canonical_args(row).encode('utf-8', 'replace')).hexdigest()
-        outcome_digest = hashlib.sha256(
-            (str(row.get('status') or '') + '\x00' + _outcome_text(row))
-            .encode('utf-8', 'replace')).hexdigest()
-        previous_outcome = results.get(request_key)
-        if request_key not in results and len(results) >= _MAX_TRACKED_READ_REQUESTS:
-            results.pop(next(iter(results)), None)
-        results[request_key] = outcome_digest
+    visible: dict[str, Any] | None, identities: dict[str, tuple[int, str]],
+) -> tuple[bool, int]:
+    """Judge one read-only round against still-visible evidence, then record it.
 
-        requested_specs = _read_specs(row)
-        specs = _effective_read_specs(row, requested_specs)
-        envelope = _tool_result_v2(row)
-        evidence_identity = ''
-        if envelope is not None:
-            evidence_identity = str(
-                envelope.get('evidenceId')
-                or envelope.get('artifactRef') or '')
-        evidence_was_seen = bool(
-            evidence_identity and evidence_identity in evidence_ids)
-        if evidence_identity:
-            if (evidence_identity not in evidence_ids
-                    and len(evidence_ids) >= _MAX_TRACKED_EVIDENCE_IDS):
-                evidence_ids.pop(next(iter(evidence_ids)), None)
-            evidence_ids[evidence_identity] = round(len(results))
-        if _row_failed(row) or not specs:
-            # A partial V2 result proves only the visible evidence identity,
-            # not the requested range hidden behind its artifact. A first
-            # identity/failure is evidence; the same one under cosmetically
-            # different arguments is not.
-            if ((evidence_identity and not evidence_was_seen)
-                    or (not evidence_identity
-                        and previous_outcome != outcome_digest)):
-                added_evidence = True
-            continue
+    Returns ``(added_evidence, dropped_sources)``. Compaction, L2 summaries
+    and handoffs rewrite or remove the messages that carried earlier reads;
+    their credit is dropped first, so re-reading what a placeholder told the
+    model to re-call is a re-fetch rather than a redundant read.
+    """
+    observations = [_read_observation(row, visible) for row in rows]
+    dropped = _prune_hidden_read_sources(state, visible)
+    added = _observations_add_evidence(observations, state)
+    if not added and visible is not None:
+        paths = {path for observation in observations
+                 for path, _, _ in observation['specs']}
+        requests = {observation['request'] for observation in observations}
+        evidence = {observation['evidence'] for observation in observations
+                    if observation['evidence']}
 
-        coverage_added = False
-        # Do not use ``any(generator)`` here: it short-circuits after the
-        # first novel batch member and would leave later paths unrecorded.
-        for path, start, end in specs:
-            if _add_read_coverage(coverage, path, start, end):
-                coverage_added = True
-        same_request_changed = (
-            previous_outcome is not None and previous_outcome != outcome_digest
-        )
-        if coverage_added or same_request_changed:
-            added_evidence = True
-    return added_evidence
+        def rests_on(source: dict[str, Any]) -> bool:
+            return (source.get('request') in requests
+                    or source.get('evidence') in evidence
+                    or any(isinstance(span, (list, tuple)) and span
+                           and span[0] in paths
+                           for span in source.get('spans') or ()))
+
+        exact_dropped = _prune_hidden_read_sources(
+            state, visible, needs_exact=rests_on)
+        if exact_dropped:
+            dropped += exact_dropped
+            added = _observations_add_evidence(observations, state)
+    _record_read_sources(state, observations, identities)
+    return added, dropped
 
 
 def _visible_action_tools(task: dict[str, Any]) -> list[str]:
@@ -735,8 +1019,8 @@ def _nudge_text(task: dict[str, Any], reason: str) -> str:
     else:
         observation = (
             'The recent read_files calls only re-read file lines already '
-            'returned in this turn, and no intervening state change made the '
-            'old observation stale.'
+            'returned and still visible in your context, and no intervening '
+            'state change made them stale.'
         )
     return (
         '[SYSTEM: TOOL ROUND MADE NO SEMANTIC PROGRESS]\n'
@@ -761,6 +1045,8 @@ def _inject_semantic_nudge(
             task, llm_round=round_num, kind='system-intervention',
             text=prompt, action='prompt', reason=reason)
     state['semantic_nudge_count'] += 1
+    if reason in _READ_WARNING_REASONS:
+        state['read_warning_round'] = round_num
     task.setdefault('_toolLoopNudges', []).append({
         'round': round_num + 2,
         'reason': reason,
@@ -1051,7 +1337,7 @@ def _classify_round_rows(
 
 def _update_stagnation_detectors(
     task: dict[str, Any], state: dict[str, Any], rows: list[dict[str, Any]],
-    *, thresholds: dict[str, int],
+    *, thresholds: dict[str, int], previous_round_visible: bool = True,
 ) -> tuple[str, str] | None:
     """Refresh streak bookkeeping; return the highest-priority trigger.
 
@@ -1078,7 +1364,9 @@ def _update_stagnation_detectors(
     # debugging instead of treating repeated symptoms as proof of stagnation.
     if len(rows) == 1 and len(failing) == 1:
         fingerprint = _failure_fingerprint(failing[0])
-        if fingerprint != state['fail_fp']:
+        # A rerun after the earlier output left the model context restarts
+        # the chain: the model could no longer see what it would repeat.
+        if fingerprint != state['fail_fp'] or not previous_round_visible:
             state['fail_fp'] = fingerprint
             state['fail_fp_rounds'] = 1
             state['fail_fp_nudged'] = False
@@ -1105,7 +1393,8 @@ def _update_stagnation_detectors(
         # state, and remote jobs can legitimately advance while the polling
         # command stays fixed. Only an identical visible result accumulates.
         poll_sig = _visible_round_fingerprint(rows)[:16]
-    if poll_sig and poll_sig == state['poll_sig']:
+    if (poll_sig and poll_sig == state['poll_sig']
+            and previous_round_visible):
         state['poll_streak'] += 1
         if state['poll_nudged']:
             state['poll_after_nudge'] += 1
@@ -1417,6 +1706,8 @@ def _handle_unresolved_artifact_retries(
     task: dict[str, Any], rs: Any, state: dict[str, Any],
     rows: list[dict[str, Any]], messages: list | None, *, round_num: int,
     tid: str, max_unresolved_artifact_retries: int,
+    visible: dict[str, Any] | None,
+    identities: dict[str, tuple[int, str]], corrected_this_round,
 ) -> bool:
     """Require recovery when re-paging a partial source does not advance.
 
@@ -1448,18 +1739,30 @@ def _handle_unresolved_artifact_retries(
                 and str(observation.get('artifactRef') or '') in consumed_refs):
             pending.pop(scope, None)
 
+    source_rows = [
+        (row, _artifact_resource_scope(row)) for row in rows
+        if str(row.get('toolName') or '') in idempotent_tools
+        and str(row.get('toolName') or '') not in _ARTIFACT_CONTINUATION_TOOLS]
+    if visible is not None:
+        # An obligation whose partial result the model no longer sees
+        # (compacted or removed) is void: re-reading re-fetches that view.
+        touched = {scope for _, scope in source_rows}
+        for scope, observation in list(pending.items()):
+            call_id = (str(observation.get('callId') or '')
+                       if isinstance(observation, dict) else '')
+            if call_id and not _still_visible(
+                    visible, call_id, observation.get('shape'),
+                    observation.get('digest'), exact=scope in touched):
+                pending.pop(scope, None)
+
     # Calls in one model response are concurrent siblings: a later row in the
     # same batch could not have consumed an artifact returned by an earlier
     # sibling. Compare every row only with obligations from prior rounds, so a
     # parallel page batch counts as one retry rather than N retries.
     prior_pending = dict(pending)
     retries: dict[str, dict[str, Any]] = {}
-    for row in rows:
+    for row, scope in source_rows:
         name = str(row.get('toolName') or '')
-        if (name not in idempotent_tools
-                or name in _ARTIFACT_CONTINUATION_TOOLS):
-            continue
-        scope = _artifact_resource_scope(row)
         previous = prior_pending.get(scope)
         artifact_ref = _artifact_ref_from_row(row)
         visible_digest = _partial_visible_digest(row)
@@ -1476,6 +1779,12 @@ def _handle_unresolved_artifact_retries(
                 pending.pop(scope, None)
                 continue
         if artifact_ref:
+            message_id = _row_message_id(row, visible)
+            if message_id is None:
+                # The model never saw this partial result or its handle.
+                pending.pop(scope, None)
+                retries.pop(scope, None)
+                continue
             retry_count = _bounded_count(
                 (previous or {}).get('retryCount')
                 if same_visible_projection else 0,
@@ -1492,6 +1801,13 @@ def _handle_unresolved_artifact_retries(
                 'round': round_num,
                 'visibleDigest': visible_digest,
             }
+            if message_id:
+                shape, digest = identities.get(message_id, (None, ''))
+                pending[scope].update(
+                    callId=message_id, shape=shape, digest=digest)
+            if (same_visible_projection and isinstance(previous, dict)
+                    and _is_round_number(previous.get('warnedRound'))):
+                pending[scope]['warnedRound'] = previous['warnedRound']
             if scope in retries:
                 retries[scope] = pending[scope]
         elif isinstance(previous, dict) and scope in retries:
@@ -1515,11 +1831,17 @@ def _handle_unresolved_artifact_retries(
         worst.get('toolName') or '?', retry_count,
         max_unresolved_artifact_retries,
     )
-    if state['semantic_nudge_count'] < 1:
+    if corrected_this_round():
+        return False
+    warned_round = worst.get('warnedRound')
+    if not (_is_round_number(warned_round) and warned_round < round_num):
+        # Each unresolved source first receives the artifact-specific
+        # recovery instruction, in a round of its own.
         _inject_semantic_nudge(
             task, state, messages, reason='unresolved_artifact',
             round_num=round_num, tid=tid,
         )
+        worst['warnedRound'] = round_num
         return False
     return _force_stop(
         task, rs, round_num=round_num, tid=tid,
@@ -1541,10 +1863,17 @@ def _handle_unresolved_artifact_retries(
 def _handle_exact_repetition(
     task: dict[str, Any], rs: Any, state: dict[str, Any], *,
     messages: list | None, round_num: int, tid: str,
-    max_consecutive_identical: int,
+    max_consecutive_identical: int, previous_round_visible: bool = True,
 ) -> bool:
     digest = _round_loop_digest(task, round_num)
-    if not digest or digest != state['last_round_digest']:
+    if (digest and digest == state['last_round_digest']
+            and not previous_round_visible):
+        logger.info(
+            '[%s] conv=%s Identical tool round %d re-fetched a result that '
+            'left the model context; repetition chain restarted',
+            tid, task.get('convId', ''), round_num + 1)
+    if (not digest or digest != state['last_round_digest']
+            or not previous_round_visible):
         state['identical_repeat_count'] = 0
         state['last_round_digest'] = digest
         state['exact_nudge_digest'] = ''
@@ -1601,13 +1930,15 @@ def _handle_exact_repetition(
 
 def _handle_semantic_stall(
     task: dict[str, Any], rs: Any, state: dict[str, Any],
-    messages: list | None, *, round_num: int, tid: str,
+    messages: list | None, *, rows: list[dict[str, Any]],
+    visible: dict[str, Any] | None,
+    identities: dict[str, tuple[int, str]], round_num: int, tid: str,
     max_explicit_noop_rounds: int, max_redundant_read_rounds: int,
-    max_unresolved_artifact_retries: int,
+    max_unresolved_artifact_retries: int, prior_corrections: int,
+    corrected_this_round,
 ) -> bool:
-    rows = _rows_for_round(task, round_num)
     if not rows:
-        state['redundant_read_streak'] = 0
+        _end_redundant_read_stretch(state)
         return False
 
     action_kind = _round_action_kind(task, rows)
@@ -1618,20 +1949,26 @@ def _handle_semantic_stall(
         # Shell and failed writes are opaque: they may have partially changed
         # files, so stale reads cannot be compared safely.  Neither is proof
         # that the model recovered from a sacrificial-noop episode, however.
-        _clear_read_observations(state)
+        _forget_read_coverage(state)
         return False
 
     if _handle_unresolved_artifact_retries(
         task, rs, state, rows, messages, round_num=round_num, tid=tid,
         max_unresolved_artifact_retries=max_unresolved_artifact_retries,
+        visible=visible, identities=identities,
+        corrected_this_round=corrected_this_round,
     ):
         return True
 
     if any(_is_explicit_noop_row(row, task) for row in rows):
         noop_rounds = state['explicit_noop_rounds']
         noop_rounds.append(round_num)
+        if corrected_this_round():
+            return False
+        # Any correction delivered in an earlier round of this turn suffices:
+        # changed reads were used to launder sacrificial no-ops.
         if (len(noop_rounds) >= max_explicit_noop_rounds
-                or state['semantic_nudge_count'] >= 1):
+                or prior_corrections >= 1):
             return _force_stop(
                 task, rs, round_num=round_num, tid=tid,
                 reason='semantic_noop_tool_loop',
@@ -1654,24 +1991,34 @@ def _handle_semantic_stall(
         str(row.get('toolName') or '') == _READ_TOOL for row in rows
     )
     if not is_read_only:
-        state['redundant_read_streak'] = 0
+        _end_redundant_read_stretch(state)
         return False
 
-    if _read_round_added_evidence(rows, state):
-        state['redundant_read_streak'] = 0
+    added_evidence, dropped = _read_round_added_evidence(
+        rows, state, visible, identities)
+    if dropped:
+        logger.info(
+            '[%s] conv=%s Read credit for %d result(s) dropped before round '
+            '%d: their messages were compacted or removed from context',
+            tid, task.get('convId', ''), dropped, round_num + 1)
+    if added_evidence:
+        _end_redundant_read_stretch(state)
         return False
 
     state['redundant_read_streak'] += 1
     streak = state['redundant_read_streak']
     logger.warning(
-        '[%s] conv=%s Redundant read-only round %d: already-covered evidence '
+        '[%s] conv=%s Redundant read-only round %d: still-visible evidence '
         '(%d/%d) model=%s',
         tid, task.get('convId', ''), round_num + 1, streak,
         max_redundant_read_rounds, rs.model,
     )
-    if streak < max_redundant_read_rounds:
+    if streak < max_redundant_read_rounds or corrected_this_round():
         return False
-    if state['semantic_nudge_count'] < 1:
+    warned_round = state['read_warning_round']
+    if not 0 <= warned_round < round_num:
+        # The model must receive a correction in an earlier round of this
+        # streak before a stop.
         _inject_semantic_nudge(
             task, state, messages, reason='redundant_reads',
             round_num=round_num, tid=tid,
@@ -1681,12 +2028,13 @@ def _handle_semantic_stall(
         task, rs, round_num=round_num, tid=tid,
         reason='semantic_redundant_read_loop',
         detail=(
-            'The model continued calling read_files only for line ranges '
-            'already returned in this turn after a corrective instruction. '
-            'No new evidence or state change was produced, so the task was '
-            'stopped instead of spending more requests.'
+            'The model kept calling read_files only for line ranges whose '
+            'earlier results were still visible in its context, after a '
+            'corrective instruction and with no new evidence or state change '
+            'since. The task was stopped instead of spending more requests.'
         ),
         raw=(f'redundant_read_streak={streak};'
+             f'warned_round={warned_round + 1};'
              f'nudges={state["semantic_nudge_count"]}'),
     )
 
@@ -1704,19 +2052,40 @@ def handle_tool_loop_circuit_breaker(
     max_unresolved_artifact_retries: int = 2,
     stagnation_thresholds: dict[str, int] | None = None,
 ) -> bool:
-    """Observe the completed tool round; return True when the loop must stop."""
+    """Observe the completed tool round; return True when the loop must stop.
+
+    ``messages`` is the live model context after this round's results were
+    appended; every credit for earlier evidence is checked against it.
+    """
     state = _guard_state(task)
     corrective_nudges_before = len(task.get('_toolLoopNudges') or ())
+    prior_corrections = state['semantic_nudge_count']
+    visible = _visible_tool_messages(messages)
+    rows = _rows_for_round(task, round_num)
+    previous_round_visible = _previous_round_still_visible(state, visible)
+    identities = _round_message_identities(rows, visible)
+    state['last_round_messages'] = [
+        [call_id, shape, digest]
+        for call_id, (shape, digest) in identities.items()]
+
+    def corrected_this_round() -> bool:
+        return (len(task.get('_toolLoopNudges') or ())
+                > corrective_nudges_before)
+
     if _handle_exact_repetition(
         task, rs, state, messages=messages, round_num=round_num, tid=tid,
         max_consecutive_identical=max_consecutive_identical,
+        previous_round_visible=previous_round_visible,
     ):
         return True
     if _handle_semantic_stall(
-        task, rs, state, messages, round_num=round_num, tid=tid,
+        task, rs, state, messages, rows=rows, visible=visible,
+        identities=identities, round_num=round_num, tid=tid,
         max_explicit_noop_rounds=max_explicit_noop_rounds,
         max_redundant_read_rounds=max_redundant_read_rounds,
         max_unresolved_artifact_retries=max_unresolved_artifact_retries,
+        prior_corrections=prior_corrections,
+        corrected_this_round=corrected_this_round,
     ):
         return True
     # Stagnation streaks refresh on every completed tool round — even one
@@ -1727,10 +2096,10 @@ def handle_tool_loop_circuit_breaker(
     if _extended_guards_enabled():
         thresholds = stagnation_thresholds or _stagnation_thresholds()
         pending_stagnation = _update_stagnation_detectors(
-            task, state, _rows_for_round(task, round_num),
-            thresholds=thresholds)
+            task, state, rows, thresholds=thresholds,
+            previous_round_visible=previous_round_visible)
     # Keep corrective prompts to one per model turn.
-    if len(task.get('_toolLoopNudges') or ()) == corrective_nudges_before:
+    if not corrected_this_round():
         if (pending_stagnation is not None
                 and _execute_stagnation_action(
                     task, rs, state, messages,

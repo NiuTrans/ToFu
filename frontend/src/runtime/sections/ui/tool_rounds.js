@@ -1047,7 +1047,7 @@ const _toolGroupPorts = {
   cleanTranslation: (content) => typeof stripNoTranslateTags === 'function' ? stripNoTranslateTags(content) : content,
   renderLine: (round, searching) => _renderUnifiedToolLine(round, searching),
   renderSwarm: (round, allRounds, inspectorAnchorHtml) => typeof _buildSwarmPanelHTML === 'function' ? _buildSwarmPanelHTML(round, allRounds, inspectorAnchorHtml) : null,
-  renderProgram: (round) => programExecutionCardHtml(round, (key, _fallback, values) => t(key, values)),
+  renderProgram: (round, batched) => programExecutionCardHtml(round, (key, _fallback, values) => t(key, values), batched),
   debugEnabled: () => typeof _featureFlags !== 'undefined' && !!_featureFlags.debug_mode,
   taskIdForRound: (round) => typeof _riTaskIdForRound === 'function' ? _riTaskIdForRound(round) : '',
   debugLog: (message) => { if (typeof debugLog === 'function') debugLog(message, 'info'); },
@@ -1084,6 +1084,7 @@ const _SEG_NOTE_KIND_PRESENTATION = {
   'system-intervention': { icon: _NOTE_STALL_ICON_SVG, labelKey: 'systemNote.interventionLabel' },
   'context-injection': { icon: _NOTE_CONTEXT_ICON_SVG, labelKey: 'systemNote.contextInjectionLabel' },
   'session-context': { icon: _NOTE_SESSION_ICON_SVG, labelKey: 'systemNote.sessionContextLabel' },
+  'deliberate-silence': { icon: _NOTE_TODO_ICON_SVG, labelKey: 'systemNote.deliberateSilenceLabel' },
 };
 /* The noteKind alone cannot tell one generic context-injection from another;
  * the durable `reason` (registry id) distinguishes the active-checklist
@@ -1131,6 +1132,7 @@ const _SEG_NOTE_REASON_CHIP = {
   memory_guidance: { labelKey: 'systemNote.reasonMemoryGuidance', tone: 'info' },
   modified_files: { labelKey: 'systemNote.reasonModifiedFiles', tone: 'warn' },
   output_contract: { labelKey: 'systemNote.reasonOutputContract', tone: 'warn' },
+  output_limit_recovery: { labelKey: 'systemNote.reasonTerminalRecovery', tone: 'info' },
   paper_tool_guidance: { labelKey: 'systemNote.reasonPaperTools', tone: 'info' },
   parallel_execution: { labelKey: 'systemNote.reasonParallelExecution', tone: 'info' },
   partial_stream_retry: { labelKey: 'systemNote.reasonStreamRetry', tone: 'info' },

@@ -54,6 +54,25 @@ def native_task_context_profile(task):
             'output_tokens': output, 'model': metadata['logical_model']}
 
 
+def native_task_local_inference(task):
+    """Read serving locality only from this task's issued route binding."""
+    record = _binding.get()
+    if record is None:
+        return None
+    owner, identity, metadata, _, _ = record
+    if type(task.get('_userId')) is not int or task['_userId'] != owner or task.get('id') != identity:
+        return None
+    model = (task.get('config') or {}).get('model') or task.get('model')
+    if model and model not in (metadata['logical_model'], metadata['wire_model']):
+        return None
+    if type(metadata.get('local_inference')) is bool:
+        return metadata['local_inference']
+    from lib.model_routing.serving_locality import is_local_inference
+    return is_local_inference(protocol=metadata.get('protocol', ''),
+        credential_kind=metadata.get('credential_kind', ''),
+        base_url=metadata.get('base_url', ''))
+
+
 def native_compaction_route_ready(task):
     """Native capacity binding cannot authorize an auxiliary model request."""
     record = _binding.get()

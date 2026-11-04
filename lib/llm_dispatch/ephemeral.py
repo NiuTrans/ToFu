@@ -32,7 +32,7 @@ calls :func:`prepare_ephemeral_slot` per candidate (no lock; a shared
 ``endpoint_verdicts`` map checks each distinct base URL once), then
 :func:`publish_ephemeral_slots` once: the whole group is registered and
 published in one dispatcher-lock critical section, in rank order.
-:func:`dispose_ephemeral_slots` withdraws it again in one pass by identity.
+:func:`dispose_ephemeral_slots` withdraws it again by indexed identity lookup.
 A task's group holds every authorized failover candidate (often dozens of
 slots), so mint/dispose write one audit record and INFO line per group
 (owner + provider pin, primary candidate, slot count); per-slot detail is
@@ -513,7 +513,7 @@ def mint_ephemeral_slot(**slot_spec) -> EphemeralSlotHandle:
 def dispose_ephemeral_slots(handles) -> list[bool]:
     """Withdraw the handles' slots from the pool in one critical section.
 
-    Removal is by identity in one pass, leaving every other slot in order.
+    Removal uses indexed identities, leaving every other slot in order.
     Idempotent per handle; returns, per handle, whether this call removed its
     slot from the pool. A prepared handle that was never published is
     retired as well. Every exemption release is attempted; the first failure

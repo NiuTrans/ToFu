@@ -8,6 +8,7 @@
 import { normalizeProgramPresentation, safeProgramPreview } from '../presentation/program-gateway-presentation';
 import { toolFailureText } from '../presentation/tool-failure-presentation';
 import { programByteSize, programExecutionPresentation } from '../presentation/program-execution-presentation';
+import { programCardOpensItself } from '../presentation/program-batch-presentation';
 
 import { boundedProgramDisplay, programActivityMembers, retainedInputDirectoryCounts, retainedProgramValueBytes } from '../presentation/program-activity';
 
@@ -37,16 +38,20 @@ const REASONS: Readonly<Record<string, readonly [string, string]>> = {
   missing_tool_output: ['ptc.reason.missing', 'The prerequisite provided no output. Review its receipt.'],
 };
 
+/** `batched`: the card is a member of its model round's multi-program batch. */
 export function programExecutionCardHtml(
-  round: unknown, text: ProgramCardText = plainText,
+  round: unknown, text: ProgramCardText = plainText, batched = false,
 ): string {
   const row = normalizeProgramPresentation(round);
   const gateway = row._programGatewayPresentation === true;
   const evidence = programExecutionPresentation(row);
-  const running = row.status === 'searching' || row.programStatus === 'running';
+  // A call queued behind sibling programs has neither run nor requested tools.
+  const waiting = row.programStatus === 'waiting';
+  const running = !waiting && (row.status === 'searching' || row.programStatus === 'running');
   const failed = !running && row.programStatus === 'error';
   const needsModel = evidence.needsModel && !running;
-  const status = running ? text('ptc.status.running', 'Executing program')
+  const status = waiting ? text('ptc.status.waiting', 'Waiting to start')
+    : running ? text('ptc.status.running', 'Executing program')
     : needsModel ? text('ptc.status.needsModel', 'Returned for model judgment')
       : failed ? text('ptc.status.failed', 'Failed')
         : row.programStatus === 'returned' ? text('ptc.status.returned', 'Returned')
@@ -70,8 +75,8 @@ export function programExecutionCardHtml(
   const done = evidence.successfulToolCalls;
   // Counters arrive with settlement; until then settled children are the live progress.
   if (running && count) summary.push(text('ptc.tasks', '{n} child tool calls', { n: count }));
-  summary.push(...activityMembers.map(member => text(...activityCopy[member])));
-  if (attempts === null && !running) summary.push(text('ptc.calls.unavailable', 'Tool call counters not recorded / unavailable'));
+  if (!waiting) summary.push(...activityMembers.map(member => text(...activityCopy[member])));
+  if (attempts === null && !running && !waiting) summary.push(text('ptc.calls.unavailable', 'Tool call counters not recorded / unavailable'));
   if (attempts !== null && attempts > 0) {
     summary.push(text('ptc.calls.attempts', '{n} tool call requests', { n: attempts }));
     if (!running && done !== null && done < attempts) {
@@ -100,7 +105,7 @@ export function programExecutionCardHtml(
   const resultValue = needsModel && row.programResult !== null && typeof row.programResult === 'object'
     ? (row.programResult as Record<string, unknown>).data : row.programResult;
   // A running program has no settled result; in-flight placeholders are not evidence.
-  const result = running ? ''
+  const result = running || waiting ? ''
     : resultValue === null ? 'null'
       : resultValue === '' ? '""' : boundedProgramDisplay(gateway ? row._programRawResult : resultValue);
   const source = String(row.programCode ?? '');
@@ -124,9 +129,9 @@ export function programExecutionCardHtml(
   }));
   if (tools.length) summary.push(tools.slice(0, 4).join(', ') + (tools.length > 4 ? '…' : ''));
   const language = 'javascript';
-  const attention = running ? 'running' : needsModel ? 'handoff' : failed ? 'error'
+  const attention = waiting ? 'waiting' : running ? 'running' : needsModel ? 'handoff' : failed ? 'error'
     : row.programStatus === 'completed' || row.programStatus === 'returned' ? 'completed' : 'incomplete';
-  const actionable = attention === 'handoff' || attention === 'error' || attention === 'incomplete';
+  const actionable = programCardOpensItself(attention, batched);
   // Expanding a quiet completed card asks for its outcome, so settled evidence
   // opens first. Gateway history stays closed until its lazy body is requested.
   const resultOpen = !running && !gateway;

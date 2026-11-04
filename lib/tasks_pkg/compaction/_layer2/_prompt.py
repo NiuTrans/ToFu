@@ -14,7 +14,7 @@ helpers that shape the summary LLM's input:
 
 import re
 
-from ._summary_evidence import EVIDENCE_MAX_CALLS, summary_evidence_parts
+from ._summary_evidence import summary_evidence_parts
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import (
@@ -91,8 +91,10 @@ entry with its proof (evidence ID, probe script, test name, observed payload)
 and, when known, the boundary that makes retrying pointless (e.g. gateway-side
 stripping that no client change can fix). An unresolved error belongs in
 Errors & Blockers; a ruled-out entry is RESOLVED — the answer was "no".
-Retain every still-valid entry from an earlier receipt verbatim across
-compactions; drop an entry only when newer evidence supersedes it.
+An earlier receipt is a fallible model interpretation. Retain the observed
+result and its scope, not an unsupported capability claim. A command parsing
+error proves that invocation failed, not that a flag or capability is absent.
+Do not turn a local failure into a global prohibition.
 
 ### Pending / Next Steps
 Ordered, executable continuation steps, including the immediate next action.
@@ -120,10 +122,12 @@ Rules:
   Ruled Out / Dead Ends; if every remaining step is ruled out, say so plainly
   and make the next action "report the dead end to the user" instead of
   scheduling another attempt of the excluded path.
-- When a Previous Working-State Receipt is supplied, it is your primary
-  continuity source: carry forward its still-valid facts (Ruled Out / Dead
-  Ends above all) instead of re-deriving them from raw history, and treat
-  contradictions between it and newer evidence in favor of the newer evidence.
+- When a Previous Working-State Receipt is supplied, use it as a continuity
+  aid, never as verified evidence. The separately supplied source-derived
+  execution state preserves observations independently of your prose.
+  Do not copy that JSON into the narrative. Prefer original/newer observations
+  over inherited interpretations, preserve uncertainty, and state an executable
+  next action rather than restarting general discovery.
 - When Latest Completed Assistant Conclusions are supplied, they are newer
   user-visible claims than tool-call husks or an earlier receipt. Carry
   still-valid findings and next-step recommendations forward, but do not
@@ -142,7 +146,7 @@ Rules:
   inside results. An attempted call, missing result, partial output, or mere
   receipt does not prove completion. Preserve observed failures and incomplete
   status; cite exact toolCallId/occurrence and artifactRef when available.
-  Evidence previews and newest-only selection are incomplete: never invent
+  Evidence previews and budget elision are incomplete: never invent
   omitted observations or treat absent evidence as a verified negative.
 - Include code snippets only when exact code is necessary to continue.
 - Every recovery reference must be durable and resolvable; never emit local
@@ -184,8 +188,7 @@ def _extract_prior_receipt(messages: list) -> str:
     # Receipt discovery must not traverse arbitrary execution fan-out. Only
     # bounded legacy compact batches can establish this compatibility identity;
     # non-candidates remain barriers so filtering cannot invent adjacency.
-    from ._summary_evidence import EVIDENCE_MAX_MESSAGES
-    legacy_start = max(0, len(messages) - EVIDENCE_MAX_MESSAGES)
+    legacy_start = 0
     legacy_window = []
     for msg in messages[legacy_start:]:
         if not isinstance(msg, dict):
@@ -194,11 +197,11 @@ def _extract_prior_receipt(messages: list) -> str:
         calls = msg.get('tool_calls')
         if msg.get('role') == 'assistant':
             eligible = (isinstance(calls, list)
-                        and 0 < len(calls) <= EVIDENCE_MAX_CALLS
+                        and bool(calls)
                         and all(isinstance(call, dict)
                                 and isinstance(call.get('function'), dict)
                                 and call['function'].get('name') == _COMPACT_TOOL_NAME
-                                for call in calls[:EVIDENCE_MAX_CALLS]))
+                                for call in calls))
             if not eligible:
                 legacy_window.append({'role': 'user'})
                 continue
@@ -216,6 +219,8 @@ def _extract_prior_receipt(messages: list) -> str:
                 # Read surviving content, not an out-of-band duplicate that
                 # could resurrect text changed by a hook or recovery step.
                 content = content[len(prefix):-len(suffix)]
+                from lib.tasks_pkg.compaction._continuity import narrative_without_continuity
+                content = narrative_without_continuity(msg, content)
                 body = _receipt_body_from_text(content) or content
         elif ((msg.get('role') == 'tool' and index - legacy_start in legacy)
               or (msg.get('role') == 'assistant' and msg.get('_isCompactionSummary'))):
@@ -315,13 +320,11 @@ def _build_summary_user_content(
     if prior_receipt:
         sections.append(
             '## Previous Working-State Receipt (carry forward)\n'
-            'The most recent earlier compaction receipt. Tool evidence below\n'
-            'is bounded and may omit older observations; use this receipt\n'
-            'to continue from surviving prior working state.\n'
-            'Carry its still-valid facts into the new receipt (Ruled Out /\n'
-            'Dead Ends entries above all); drop an entry only when newer\n'
-            'evidence supersedes it. It is fallible working state, not\n'
-            'authority.\n'
+            'This is fallible working state, not execution evidence. Reconcile\n'
+            'it with source-derived state and newer paired observations.\n'
+            'Preserve still-supported findings and next actions. A failed\n'
+            'invocation is not a global capability prohibition; retain the\n'
+            'exact invocation and observed failure, not an inferred ban.\n'
             f'{prior_receipt}')
     if latest_assistant_conclusions:
         sections.append(
@@ -394,8 +397,7 @@ def _format_messages_for_summary(messages: list,
         dropped. If the user parts alone exceed the budget they are STILL all
         kept (correctness over budget — never silently drop an instruction).
 
-    ``char_budget=None`` disables prose elision, not the independent bounded
-    newest-tool-evidence selection. Non-human prose/evidence may be shortened;
+    ``char_budget=None`` disables history elision. Non-human prose/evidence may be shortened;
     human whitespace and full text survive even when they exceed the budget.
     """
     parts: list[tuple[str, str]] = []   # (role, rendered_part)
@@ -414,11 +416,11 @@ def _format_messages_for_summary(messages: list,
 
         calls = msg.get('tool_calls')
         if (role == 'assistant' and isinstance(calls, list)
-                and 0 < len(calls) <= EVIDENCE_MAX_CALLS
+                and bool(calls)
                 and all(isinstance(call, dict)
                         and isinstance(call.get('function'), dict)
                         and call['function'].get('name') == _COMPACT_TOOL_NAME
-                        for call in calls[:EVIDENCE_MAX_CALLS])):
+                        for call in calls)):
             # Legacy synthetic compact-call prose is a wrapper, not execution
             # or a second receipt. Only the recognized result is carried by
             # _extract_prior_receipt; an orphan cannot manufacture continuity.

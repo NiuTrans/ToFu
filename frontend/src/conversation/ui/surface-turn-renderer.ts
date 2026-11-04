@@ -7,12 +7,12 @@ import type {
   PlanDecisionViewModel,
 } from '../presentation/conversation-view-model';
 import {
-  groupedTurnLayout, turnLayoutZone, type GroupedTurnEntry, type ToolPanelEntry,
+  groupedTurnLayout, interimNarrationIds, turnLayoutZone, type GroupedTurnEntry, type ToolPanelEntry,
 } from '../presentation/grouped-turn-layout';
 import type { ConversationSurfaceOptions, ConversationTurnRenderContext } from './surface-contracts';
 import type { ConversationSurfaceDesign, SurfaceRoundOutline } from './surface-design-contracts';
 import { moveRetainedNodeBefore } from './rich-card-reconciliation';
-import { setStableData } from './renderers/stable-dom';
+import { endAnchoredScroller, setStableData } from './renderers/stable-dom';
 import { finishSurfaceCleanup, releaseSurfacePresentation } from './surface-node-lifecycle';
 import {
   sameBlock, sameTurnAvatar, sameTurnHeader, sameTurnActions, sameTurnFooter, samePlanDecision,
@@ -22,7 +22,7 @@ import {
   type ManagedTurnHeaderElement, type ManagedTurnActionsElement, type ManagedTurnFooterElement,
   type ManagedTurnContextRailElement, type ManagedPlanDecisionElement, type ManagedTurnElement,
   type SurfaceRegionWindow,
-  createSurfaceDom, directPart, placeAt, placeManagedAt, hasRenderableContent,
+  createSurfaceDom, directPart, narrationWellBody, placeAt, placeManagedAt, hasRenderableContent,
 } from './surface-dom';
 
 export interface SurfaceTurnRenderPlan {
@@ -32,6 +32,8 @@ export interface SurfaceTurnRenderPlan {
   windows: ReadonlyArray<SurfaceRegionWindow>;
   windowSignature: string;
   planDecisionForTurn: PlanDecisionViewModel | null;
+  /** Fold of the reply's narration well: reader choice, else layout default. */
+  narrationOpen: boolean;
 }
 
 interface SurfaceTurnRendererPorts {
@@ -92,6 +94,7 @@ export function createSurfaceTurnRenderer(
     windows: ReadonlyArray<SurfaceRegionWindow>,
     lane: ConversationLaneViewModel,
     turn: ConversationTurnViewModel,
+    narrationOpen: boolean,
   ): void => {
     /* Entries outside every region (a grouped reply's head and trail) are
      * always mounted, so reasoning and the panel header never blink out while
@@ -141,6 +144,32 @@ export function createSurfaceTurnRenderer(
     const place = (node: HTMLElement): void => {
       if (cursor === node) cursor = node.nextElementSibling;
       else moveRetainedNodeBefore(containerNode, node, cursor);
+    };
+
+    /* Interim round prose shares ONE bounded, scrolling well so a long run of
+     * rounds never stretches the reply. Only settled text ever joins (the
+     * latest text stays outside while it may stream), so a leaf is reparented
+     * at most once, when a later round's text arrives. */
+    const wellIds = grouped ? interimNarrationIds(entries) : new Set<string>();
+    let well = containerNode.querySelector<HTMLElement>(':scope > [data-narration-well]');
+    let wellBody = well && narrationWellBody(well);
+    let wellPlaced = false;
+    let wellCursor: Element | null = null;
+    const placeInWell = (node: HTMLElement): void => {
+      if (!well || !wellBody) {
+        well = design.narrationWell(containerNode.ownerDocument);
+        wellBody = narrationWellBody(well)!;
+      }
+      if (!wellPlaced) {
+        place(well);
+        wellPlaced = true;
+        wellCursor = wellBody.firstElementChild;
+      }
+      // A node joining the well may be the outer cursor; never leave the
+      // cursor pointing inside the body.
+      if (cursor === node) cursor = node.nextElementSibling;
+      if (wellCursor === node) wellCursor = node.nextElementSibling;
+      else moveRetainedNodeBefore(wellBody, node, wellCursor);
     };
 
     /* A grouped reply's calls announce what their window hides in place,
@@ -197,22 +226,45 @@ export function createSurfaceTurnRenderer(
       outline.patchBlock(node, block);
       renderVisibleBlock(node, block);
       outline.completeBlock(node, block);
+      const placeBlock = wellIds.has(block.blockId) ? placeInWell : place;
       for (const control of outline.beforeBlock(block.blockId)) {
         // Round controls sit among the calls: they belong to the panel card.
         setStableData(control, 'turnZone', zone);
-        place(control);
+        placeBlock(control);
       }
-      place(node);
+      placeBlock(node);
       existing.delete(block.blockId);
     });
     if (openRegion) boundary(openRegion, 'later');
     for (const node of existing.values()) removeRenderedNode(node);
     for (const node of staleBoundaries) node.remove();
+    if (well && wellBody && wellPlaced) {
+      /* Surface chrome like the panel header: the retained toggle keeps focus
+       * across a fold. A folded body stays mounted, so its members keep their
+       * identity and the well never reparents a leaf to fold it. */
+      const toggle = design.paintNarrationWell(well, wellIds.size);
+      setStableData(toggle, 'conversationNarration', 'toggle');
+      const expanded = String(narrationOpen);
+      if (toggle.getAttribute('aria-expanded') !== expanded) toggle.setAttribute('aria-expanded', expanded);
+      const opening = narrationOpen && well.dataset.narrationState === 'closed';
+      setStableData(well, 'narrationState', narrationOpen ? 'open' : 'closed');
+      if (wellBody.hidden === narrationOpen) wellBody.hidden = !narrationOpen;
+      // Newest note first: the well opens at its end and follows growth until
+      // the reader scrolls up inside it; every reopening rests at the end again.
+      const end = endAnchoredScroller(wellBody, wellBody);
+      if (opening) end.pin();
+      else end.follow();
+    } else if (well) {
+      if (wellBody) endAnchoredScroller(wellBody, wellBody).dispose();
+      // Members already moved out or retired above; only the empty shell remains.
+      for (const node of Array.from(wellBody?.children ?? []) as HTMLElement[]) removeRenderedNode(node);
+      well.remove();
+    }
   };
 
   const renderTurn = (turnNode: ManagedTurnElement, turn: ConversationTurnViewModel,
     lane: ConversationLaneViewModel, plan: SurfaceTurnRenderPlan): void => {
-    const { visibleBlocks, windows, windowSignature, planDecisionForTurn } = plan;
+    const { visibleBlocks, windows, windowSignature, planDecisionForTurn, narrationOpen } = plan;
     const activePlanDecision = planDecisionForTurn;
     const presentationId = turn.presentationId || turn.turnId;
     setStableData(turnNode, 'presentationId', presentationId);
@@ -281,11 +333,13 @@ export function createSurfaceTurnRenderer(
     if (managedBlocks._tofuBlocksSource !== visibleBlocks
         || managedBlocks._tofuOutlineStatus !== turn.status
         || managedBlocks._tofuBlocksSignature !== windowSignature
+        || managedBlocks._tofuNarrationOpen !== narrationOpen
         || managedBlocks._tofuBlocksRenderer !== design.renderers.renderBlock) {
-      renderBlocks(blocksContainer, visibleBlocks, windows, lane, turn);
+      renderBlocks(blocksContainer, visibleBlocks, windows, lane, turn, narrationOpen);
       managedBlocks._tofuBlocksSource = visibleBlocks;
       managedBlocks._tofuOutlineStatus = turn.status;
       managedBlocks._tofuBlocksSignature = windowSignature;
+      managedBlocks._tofuNarrationOpen = narrationOpen;
       managedBlocks._tofuBlocksRenderer = design.renderers.renderBlock;
     }
     managedBlocks._tofuBlockWindows = windows;
@@ -423,6 +477,7 @@ export function createSurfaceTurnRenderer(
     turnNode._tofuTurnEntries = visibleBlocks;
     turnNode._tofuTurnWindowSignature = windowSignature;
     turnNode._tofuTurnPlanDecision = planDecisionForTurn;
+    turnNode._tofuTurnNarrationOpen = narrationOpen;
     turnNode._tofuTurnSurfaceOptions = options;
   };
 

@@ -123,6 +123,24 @@ def project_native_text(task: dict, delta: TextDelta) -> None:
     """
     from lib.tasks_pkg.manager import append_event
     from lib.agent_core.events import EventType, build_event
+    from lib.tasks_pkg.stream_handler._router_silence import hold_silent_text_delta
+
+    if (delta.task_id != task.get('id') or type(task.get('_userId')) is not int
+            or delta.principal.require_owner(context='native text projection') != task['_userId']
+            or task.get('status') not in {'pending', 'running'}):
+        raise ValueError('native text projection requires an owned live task')
+    if delta.channel not in {'content', 'reasoning'} or not isinstance(delta.text, str) or not delta.text:
+        raise ValueError('native text projection requires a nonempty text channel')
+    if delta.channel == 'content':
+        with task.get('content_lock') or nullcontext():
+            candidate = (task.get('_silentTextCandidate') or '') + delta.text
+            task['_silentTextCandidate'] = candidate
+            if hold_silent_text_delta(task, candidate):
+                return
+            task.pop('_silentTextCandidate', None)
+        if not candidate:
+            return
+        delta = TextDelta(delta.principal, delta.task_id, delta.sequence, delta.channel, candidate)
 
     if delta.channel not in {'content', 'reasoning'} or not isinstance(delta.text, str) or not delta.text:
         raise ValueError('native text projection requires a nonempty text channel')

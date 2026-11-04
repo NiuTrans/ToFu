@@ -1276,52 +1276,7 @@ def test_kimi_lean_prompt_and_named_ablations_are_measurable():
         **kwargs, profile="lean_no_output")
 
 
-def test_adaptive_compaction_uses_positive_expected_value():
-    from lib.tasks_pkg.compaction._tokens import _adaptive_compaction_economics
-
-    positive_task = {
-        "model": "kimi-k3", "config": {"compaction": {"strategy": "adaptive"}},
-        "_adaptiveCompactionInputs": {
-            "cacheReadRatio": 0.8, "remainingRoundsMedian": 10,
-            "historicalEvidenceLossRate": 0.0,
-        },
-    }
-    positive = _adaptive_compaction_economics(
-        [{"role": "user", "content": "small hot tail"}], positive_task,
-        total_tokens=120_000, window_threshold=800_000)
-    assert positive["shouldTrigger"] is True
-    assert positive["projectedNetSavingsUsd"] > 0
-
-    negative_task = {
-        "model": "kimi-k3", "config": {"compaction": {"strategy": "adaptive"}},
-        "_adaptiveCompactionInputs": {"remainingRoundsMedian": 0},
-    }
-    negative = _adaptive_compaction_economics(
-        [{"role": "user", "content": "small hot tail"}], negative_task,
-        total_tokens=120_000, window_threshold=800_000)
-    assert negative["shouldTrigger"] is False
-
-
-def test_adaptive_summary_rejects_missing_goal_constraints_and_pending_work():
-    from lib.tasks_pkg.compaction._layer2._compact import (
-        _summary_missing_task_state_fields,
-    )
-    from lib.tasks_pkg.context_composer import TaskStateSnapshotV1
-
-    snapshot = TaskStateSnapshotV1(
-        goal="Implement artifact cursor recovery",
-        hard_constraints=("Never expose filesystem paths",),
-        todos=("run the storage migration test",),
-    )
-    missing = _summary_missing_task_state_fields(
-        "A generic summary with no task state.", snapshot)
-    assert missing == ["goal", "hard_constraints[0]", "todos[0]"]
-    assert _summary_missing_task_state_fields(
-        "Implement artifact cursor recovery. Never expose filesystem paths. "
-        "Next, run the storage migration test.", snapshot) == []
-
-
-def test_adaptive_l2_preserves_original_context_when_summary_loses_state(monkeypatch):
+def test_l2_preserves_exact_state_independently_of_summary_prose(monkeypatch):
     import lib.tasks_pkg.compaction._layer2._compact as layer2
     from lib.tasks_pkg.compaction.api import execute_compact_tool
 
@@ -1342,7 +1297,7 @@ def test_adaptive_l2_preserves_original_context_when_summary_loses_state(monkeyp
         "id": "task-adaptive", "convId": "conv-adaptive",
         "config": {"model": "kimi-k3",
                    "compaction": {"strategy": "adaptive"}},
-        "_todos": ["run the storage migration test"],
+        "_todos": [{"content": "run the storage migration test", "status": "pending"}],
     }
     from copy import deepcopy
     original_messages = deepcopy(messages)
@@ -1350,12 +1305,11 @@ def test_adaptive_l2_preserves_original_context_when_summary_loses_state(monkeyp
         messages, task=task, preserve_budget_tokens=500,
         _compaction_skip_archive=True, _result_meta=meta)
 
-    assert meta["compacted"] is False
-    assert meta["summaryRejected"] is True
-    assert "goal" in meta["missingTaskStateFields"]
-    assert meta["summaryFailureReason"] == "critical_state_missing"
-    assert "original context preserved" in compact_result
-    assert messages == original_messages
+    assert meta['compacted'] is True
+    from lib.tasks_pkg.compaction._continuity import read_continuity
+    assert read_continuity(messages, task)['checklist'] == task['_todos']
+    assert 'Implement artifact cursor recovery; never expose paths.' in str(messages)
+    assert messages != original_messages
 
 
 def test_orchestration_v2_selects_one_explainable_shape(monkeypatch):

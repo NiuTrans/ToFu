@@ -94,13 +94,23 @@ default, and wall time at 30 seconds. Request allowance derives from the total
 byte allowance and 64 KiB chunk size rather than retaining the old 128-page cap.
 `--api-max-total-mib N` explicitly changes aggregate allowance (1–1024 MiB);
 `--full` changes presentation/history selection, not these resource bounds.
+The wall time is fixed; a read its deadline interrupts is a time-budget stop
+(`DiagnosticBudgetError`), never a transport or authorization fault.
 
 A turn is preflighted against remaining bytes/requests. The final header has a
 protected byte and request reserve throughout turn and archive reads, including
 streamed responses with no Content-Length. If resource limits stop the read,
 only fully reconstructed turns survive. Output carries the selected range,
 `diagnostic_unread_count`, archive coverage and `diagnostic_incomplete`; CLI exits
-nonzero. Exhaustion also ends verification passes, so turns not verified in the
+nonzero. A refused unread turn is `diagnostic_resume_index`; the CLI resume
+`--start-index N --max-turns 1` keeps an explicit `--api-max-total-mib`. Paging
+helps only when earlier turns' reads caused the refusal. When the turn's own
+preflight cost (a header, its descriptor, its chunks and the final-header
+reserve) exceeds the whole allowance, `DiagnosticTurnTooLarge` reports it,
+`diagnostic_resume_total_mib` carries that cost rounded up to MiB, and the resume
+adds `--api-max-total-mib` with it; beyond the 1024 MiB maximum no resume is
+offered. Requests derive from the byte allowance, so no separate request flag
+exists. Exhaustion also ends verification passes, so turns not verified in the
 final window are shown best-effort; an unaffordable final witness with no
 reconstructed turn remains an error.
 The per-response `DiagnosticResponseTooLarge` error remains distinct from total

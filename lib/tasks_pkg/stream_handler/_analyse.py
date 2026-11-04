@@ -355,6 +355,13 @@ def analyse_stream_result(
             return program_result
 
 
+        from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
+        if (last_finish_reason in ('stop', 'end_turn') and not (usage or {}).get('_stream_anomaly')
+                and declare_silent_turn(task, assistant_msg, messages, llm_round=round_num)):
+            result['action'] = 'break'
+            result['loop_exit_reason'] = f'deliberate_silence_round_{round_num}'
+            return result
+
         from lib.tasks_pkg.stream_handler._terminal_recovery import (
             recover_abnormal_terminal,
         )
@@ -505,6 +512,15 @@ def analyse_stream_result(
         )
         return result
 
+    if (last_finish_reason in ('length', 'max_tokens')
+            and not task.get('aborted') and not task.get('error')):
+        from lib.tasks_pkg.stream_handler._terminal_recovery import (
+            _continue_from_output_limit,
+        )
+        return _continue_from_output_limit(
+            assistant_msg, task, round_num=round_num, model=model,
+            result=result, usage=usage, messages=messages)
+
     tool_stream_recovery = recover_incomplete_tool_stream(
         task=task, result=result, assistant_msg=assistant_msg, usage=usage,
         round_num=round_num, phase_retry_count=_premature_retry_count,
@@ -515,6 +531,7 @@ def analyse_stream_result(
     # A validated tool call is deliverable progress. A later no-actionable
     # incident is isolated and may use the remaining phase-wide recovery budget.
     retry_budget._clear_no_actionable_retry_streak(task)
+    task.pop('_output_limit_recovery_count', None)
 
     # assistant_msg has tool_calls → proceed to tool execution (or check budget)
     return result

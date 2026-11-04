@@ -1199,6 +1199,8 @@ fn compile_turn_event_record_request(
         _ => return Err(SemanticExecutionError::InvalidPayload),
     };
     Ok(crate::turn::EventRecordRequest {
+        worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+            .map_err(|_| SemanticExecutionError::InvalidPayload)?,
         model_continuation: payload
             .get("model_continuation")
             .cloned()
@@ -2129,6 +2131,8 @@ fn compile_turn(
                 attempt_id,
                 task_id,
                 automation_context,
+                worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+                    .map_err(|_| SemanticExecutionError::InvalidPayload)?,
                 committed_at_ms: now_unix_ms,
                 slot: 0,
             }],
@@ -10551,7 +10555,9 @@ fn compile_admitted_transaction(
 /// Only explicitly certified transactional steps enter optimistic preparation.
 /// Point-delete retention (sync replay, Attempt events, task events) prepares
 /// its cold scans outside the writer and commits through ordinary OCC; a
-/// refused commit falls back to exclusive execution. Range-retiring
+/// refused commit falls back to exclusive execution. Raw-archive puts and
+/// log-aggregate flushes do the same for their parent proof, identity, quota
+/// and index reads and their private blob staging. Range-retiring
 /// maintenance is structural: any concurrent commit refuses it after the
 /// commit-time overlay merge, so it and future IR variants stay exclusive.
 pub(crate) fn compile_parallel_transaction(
@@ -10601,6 +10607,11 @@ pub(crate) fn compile_parallel_transaction(
                 | TransactionIrStep::IndexedStreamAppend { .. }
                 | TransactionIrStep::IndexedStreamAppendBatch { .. }
                 | TransactionIrStep::IndexedStreamPrune { .. }
+                | TransactionIrStep::LogAggregateFlush { .. }
+                | TransactionIrStep::RawArchive {
+                    request: crate::raw_archive::Request::Put { .. },
+                    ..
+                }
         )
     });
     Ok(safe.then_some(ir))

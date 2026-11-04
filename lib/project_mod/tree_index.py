@@ -63,7 +63,6 @@ from __future__ import annotations
 
 import array
 import bisect
-import fnmatch
 import hashlib
 import os
 import re
@@ -76,6 +75,7 @@ from collections import deque
 
 from lib.log import get_logger
 from lib.observability import InstrumentedThreadPoolExecutor
+from lib.project_mod import glob_match
 from lib.project_mod.config import IGNORE_DIRS, SESSIONS_DIR
 from runtime_guards import resolve_resource_budget
 
@@ -1160,9 +1160,6 @@ def note_write(abs_path):
 #  Query helpers
 # ═══════════════════════════════════════════════════════
 
-_GLOB_CHARS = re.compile(r'[*?\[]')
-
-
 def _prefix_bounds(entry, rel_prefix):
     """Return the [lo, hi) slice of the sorted path list under *rel_prefix*."""
     if not rel_prefix or rel_prefix == '.':
@@ -1189,31 +1186,19 @@ def covers(entry, rel_prefix):
 def find_matching(entry, rel_prefix, pattern, cap, *, case_sensitive=False):
     """In-memory find_files: ``[(rel, size), ...]`` capped at *cap*.
 
-    Glob semantics mirror the Python fallback walker: case-insensitive by
-    default, or case-sensitive for a translated GNU ``find -name``. Patterns
-    match the basename unless they contain '/', in which case they match the
-    project-relative path.
+    *pattern* is a project glob validated by the caller and matched exactly
+    like the live walkers do (``glob_match``): case-insensitive unless
+    *case_sensitive*, against the basename unless it contains '/', in which
+    case against the project-relative path.
     """
     lo, hi = _prefix_bounds(entry, rel_prefix)
     paths, sizes = entry.paths, entry.sizes
-    pat = pattern if case_sensitive else pattern.lower()
-    on_relpath = '/' in pattern
-    # Fast path: the overwhelmingly common '*.ext' shape.
-    simple_suffix = None
-    if not on_relpath and pat.startswith('*.') and not _GLOB_CHARS.search(pat[1:]):
-        simple_suffix = pat[1:]
+    matches = glob_match.compile_glob(
+        pattern, case_sensitive=case_sensitive).matches
     out = []
     for i in range(lo, hi):
         p = paths[i]
-        comparable = p if case_sensitive else p.lower()
-        if simple_suffix is not None:
-            ok = comparable.endswith(simple_suffix)
-        elif on_relpath:
-            ok = fnmatch.fnmatchcase(comparable, pat)
-        else:
-            basename = comparable.rsplit('/', 1)[-1]
-            ok = fnmatch.fnmatchcase(basename, pat)
-        if ok:
+        if matches(p):
             out.append((p, sizes[i]))
             if len(out) >= cap:
                 break
@@ -1223,8 +1208,9 @@ def find_matching(entry, rel_prefix, pattern, cap, *, case_sensitive=False):
 def grep_candidates(entry, rel_prefix, include):
     """In-memory candidate list for grep: ``(abs_paths, total_bytes)``.
 
-    Applies the include glob (rg -g semantics: basename match unless the glob
-    contains '/'). File size is telemetry, never source admission.
+    Applies the caller-validated include glob through ``glob_match``, the
+    same matcher and scope rule every live backend follows. File size is
+    telemetry, never source admission.
     ``total_bytes`` is the summed candidate size from the snapshot — the
     chunk runner uses it to tell content-heavy searches (parallelize reads
     across processes) from metadata-bound ones.
@@ -1232,19 +1218,14 @@ def grep_candidates(entry, rel_prefix, include):
     lo, hi = _prefix_bounds(entry, rel_prefix)
     paths, sizes = entry.paths, entry.sizes
     root = entry.root
-    inc_rel = include and '/' in include
-    inc_re = None
-    if include:
-        inc_re = re.compile(fnmatch.translate(include), re.IGNORECASE)
+    matches = glob_match.compile_glob(include).matches if include else None
     out = []
     total = 0
     for i in range(lo, hi):
         sz = sizes[i]
         p = paths[i]
-        if inc_re is not None:
-            target = p if inc_rel else p.rsplit('/', 1)[-1]
-            if not inc_re.match(target):
-                continue
+        if matches is not None and not matches(p):
+            continue
         out.append(root + '/' + p)
         total += sz
     return out, total

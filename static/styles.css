@@ -180,7 +180,7 @@
 }
 
 
-#presenceStrip:has(.coordinator-progress) { padding: var(--space-3) var(--space-4); }
+#presenceStrip:has(.coordinator-progress) { padding: var(--space-2) var(--space-4); }
 /* A worker conversation's strip holds the way back to its coordinator; inset
  * it from the pane corner instead of printing it flush under the topbar. */
 #presenceStrip:has(> .ui-btn) { padding: var(--space-2) var(--space-6) var(--space-0); }
@@ -321,20 +321,24 @@
 /* Session-free task board: the Coordinator's own summary of the human's tasks,
  * read as a todo list. One line per task behind a status glyph: a ring while
  * open (half filled in progress), a filled disc once done or dropped. Only
- * current work shows its note; never a progress bar or a count of sessions. */
+ * current work shows its note; never a progress bar or a count of sessions.
+ * Folded, the head is a single line (it wraps only when the pane is too narrow);
+ * open, the summary takes its own line under the title. */
 .coordinator-progress { color: var(--text-primary); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
-.coordinator-progress-head { display: flex; flex-direction: column; gap: var(--space-1); cursor: pointer; list-style: none; min-width: 0; }
+.coordinator-progress-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); cursor: pointer; list-style: none; min-width: 0; }
 .coordinator-progress-head::-webkit-details-marker { display: none; }
-.coordinator-progress-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; }
-.coordinator-progress-title { font-weight: var(--weight-semibold); }
+.coordinator-progress-title { font-weight: var(--weight-semibold); white-space: nowrap; }
+/* The flex head drops the native marker; this triangle matches the finished-task fold's. */
+.coordinator-progress-title::before { content: '\25B8'; content: '\25B8' / ''; display: inline-block; margin-inline-end: var(--space-1); color: var(--text-tertiary); font-size: var(--font-size-xs); font-weight: var(--weight-regular); }
+.coordinator-progress[open] .coordinator-progress-title::before { content: '\25BE'; content: '\25BE' / ''; }
+.coordinator-progress-head:hover .coordinator-progress-title::before { color: var(--text-primary); }
 .coordinator-progress-tally { color: var(--accent); font-size: var(--font-size-xs); font-weight: var(--weight-semibold); white-space: nowrap; }
 .coordinator-progress-updated { margin-inline-start: auto; color: var(--text-tertiary); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.coordinator-progress-summary { color: var(--text-secondary); font-size: var(--font-size-sm); line-height: var(--leading-title); }
-.coordinator-progress:not([open]) .coordinator-progress-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coordinator-progress-summary { flex: 1 1 8rem; min-width: 0; color: var(--text-secondary); font-size: var(--font-size-sm); line-height: var(--leading-title); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coordinator-progress[open] .coordinator-progress-summary { order: 1; flex-basis: 100%; white-space: normal; }
 .coordinator-progress-body { display: flex; flex-direction: column; gap: var(--space-2); padding-block-start: var(--space-2); max-height: min(40vh, 26rem); overflow: auto; overscroll-behavior: contain; }
 .coordinator-progress-content { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .coordinator-progress-content:empty { display: none; }
-.coordinator-progress-note { margin: var(--space-0); color: var(--text-secondary); font-size: var(--font-size-sm); }
 .coordinator-progress-tasks { display: flex; flex-direction: column; margin: var(--space-0); padding: var(--space-0); list-style: none; }
 .coordinator-progress-task { position: relative; display: flex; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-1); min-width: 0; font-size: var(--font-size-md); line-height: var(--leading-title); }
 /* One first-line box tall, so the glyph centers on the title's first line. */
@@ -353,14 +357,10 @@
 .coordinator-progress-finished > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--font-size-xs); }
 .coordinator-progress-finished > .coordinator-progress-tasks { padding-block-start: var(--space-1); }
 /* A Router's Worker model leads the board's commands instead of taking a line
- * of its own above the board; opened, its choice takes the row. */
+ * of its own above the board. */
 .coordinator-progress-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
-.coordinator-progress-actions > .router-worker-model[open] { flex-basis: 100%; }
 .coordinator-progress-commands { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-inline-start: auto; }
 .coordinator-progress-command-slot { display: contents; }
-/* An empty board is one line under its title: the hint beside its action. */
-.coordinator-progress[data-state="empty"] .coordinator-progress-body { flex-direction: row; flex-wrap: wrap; align-items: center; }
-.coordinator-progress[data-state="empty"] .coordinator-progress-content { flex: 1 1 16rem; }
 .coordinator-progress summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
 @media (max-width: 480px) { .coordinator-progress { padding: var(--space-2); } }
 /* Native rich response: reading visuals only; controls are UI factories. */
@@ -576,6 +576,7 @@
   --conversation-flow-gap:var(--space-0);
   --conversation-prose-gap:var(--space-3);
   --conversation-process-radius:12px;
+  --conversation-process-scroll-max:min(24rem, 50vh);
   --conversation-process-shell-inset:var(--space-0);
   --conversation-reading-inset:var(--space-0);
   --conversation-inspector-width:440px;
@@ -1767,104 +1768,33 @@ summary.thinking-header::-webkit-details-marker{display:none}
 .conv-status-review {
   color:var(--text-primary);background:var(--accent-subtle);animation:none;
 }
-/* Sidebar defaults editor. Project chrome/controls belong to the UI kit and
-   the server-folder browser to 10-project-browser.css; this owner supplies the
-   workbench layout, the default-roots rail and the searchable recents. */
+/* Sidebar defaults editor. Project chrome/controls belong to the UI kit; the
+   server-folder browser (10-project-browser.css) and the workspace rail
+   (10-project-{modal-shell,workspace,roots,recent}.css) are the Project
+   Co-Pilot's shared components. This owner supplies the dialog header, the
+   workbench layout and the sidebar project rail. */
 .folder-settings{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-width:0;min-height:0}
 .folder-settings-content{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-height:0;overflow:auto}
 .folder-settings-fields{display:flex;flex-direction:column;gap:var(--space-4);border:0;padding:0;margin:0;min-width:0}
 .folder-settings-identity{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:var(--space-4)}
-/* Two panes with a stable height: lists scroll inside instead of resizing the dialog. */
+/* Header as in the Co-Pilot: folder glyph, title, scope note as subtitle. */
+.folder-settings-title{display:flex;flex:1;align-items:flex-start;gap:var(--space-3);min-width:0}
+.folder-settings-title-icon{flex-shrink:0;width:var(--space-5);height:var(--space-5);margin-top:var(--space-1);color:var(--accent)}
+.folder-settings-title-text{display:flex;flex-direction:column;gap:var(--space-1);min-width:0}
+/* The Co-Pilot's pane proportions with a stable height: lists scroll inside
+   instead of resizing the dialog. */
 .folder-settings-workbench{
-  display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:var(--space-4);
+  display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,0.85fr);gap:var(--space-4);
   height:clamp(300px,calc(100dvh - 380px),520px);min-width:0;
 }
-.folder-settings-rail{display:flex;flex-direction:column;gap:var(--space-3);min-width:0;min-height:0}
-.folder-settings-workspace,.folder-settings-recents{
-  display:flex;flex-direction:column;gap:var(--space-3);min-width:0;min-height:0;
-  padding:var(--space-3) var(--space-4);
-  border:var(--project-panel-width) solid var(--text-primary);border-radius:var(--radius);
-  background:var(--bg-primary);
-}
-.folder-settings-workspace{flex:0 1 auto;max-height:62%}
-.folder-settings-recents{flex:1 1 0}
-.folder-settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-shrink:0}
-.folder-settings-count{display:inline-flex;align-items:center;justify-content:center;min-width:var(--space-6);height:var(--space-6);padding:0 var(--space-2);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-primary);font-size:var(--font-size-sm);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums}
-.folder-settings-count:empty{display:none}
-.folder-settings-heading{margin:0;font-size:var(--font-size-lg);font-weight:var(--weight-bold);color:var(--text-primary)}
 .folder-settings-hint{margin:0;font-size:var(--font-size-md);line-height:var(--leading-body);color:var(--text-secondary);overflow-wrap:anywhere}
-.folder-settings-path-field{flex-shrink:0}
-.folder-settings-path-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--space-2)}
-
-/* Default roots: one compact row each — primary star, name/path, controls. */
-.folder-settings-roots{display:flex;flex-direction:column;gap:var(--space-1);list-style:none;padding:0;margin:0;min-width:0;min-height:0;overflow:auto}
-.folder-settings-root{
-  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:var(--space-1);
-  flex-shrink:0;padding:var(--space-1);
-  border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);
-  background:var(--bg-secondary);min-width:0;
-}
-.folder-settings-root[data-primary="true"]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,var(--bg-primary))}
-.folder-settings-root[data-primary="true"] [data-action="primary"] svg{fill:currentColor}
-.folder-settings-root-copy{display:flex;flex-direction:column;gap:var(--control-edge-inset);min-width:0}
-.folder-settings-root-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.folder-settings-root-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-md);font-weight:var(--weight-semibold);color:var(--text-primary)}
-/* RTL box + isolated LTR path: overflow trims the start, keeping the tail. */
-.folder-settings-root-path,.folder-settings-recent-path{
-  display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;
-  font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary);
-}
-.folder-settings-root-path{user-select:text}
-.folder-settings-badge{flex-shrink:0;padding:0 var(--space-1);border-radius:var(--radius-pill);background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--text-primary);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);line-height:var(--leading-body)}
-.folder-settings-badge--muted{background:var(--bg-tertiary);color:var(--text-secondary)}
-.folder-settings-badge--warning{background:var(--warning-bg);color:var(--warning-text)}
+.folder-settings-hint:empty{display:none}
 .folder-settings-full-path{font-family:var(--font-mono);font-size:var(--font-size-sm);line-height:var(--leading-body);overflow-wrap:anywhere;color:var(--text-secondary);user-select:text}
 .folder-settings-review-roots{display:flex;flex-direction:column;gap:var(--space-2);margin:0;padding-inline-start:var(--space-4)}
 .folder-settings-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2)}
-.folder-settings-root-actions{display:flex;align-items:center;gap:var(--control-edge-inset)}
 .folder-settings-footer{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;flex-shrink:0;gap:var(--space-2);padding-top:var(--space-4);border-top:var(--control-edge-inset) solid var(--border)}
-.folder-settings-empty{padding:var(--space-2) 0;font-size:var(--font-size-md);color:var(--text-secondary);line-height:var(--leading-body)}
-.folder-settings-status{margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);overflow-wrap:anywhere}
-.folder-settings-status:empty,.folder-settings-hint:empty{display:none}
-
-/* Exact paths remain announced without duplicating each selected-root card. */
-.folder-settings-announcement{position:absolute;width:var(--control-edge-inset);height:var(--control-edge-inset);overflow:hidden;clip-path:inset(50%)}
 .folder-settings-error{padding:var(--space-3);margin:0;border:var(--control-edge-inset) solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-md);line-height:var(--leading-body);overflow-wrap:anywhere}
 .folder-settings-error[hidden]{display:none}
-
-/* Recent projects: search, pick to add, locate in the browser. */
-.folder-settings-recent-search{
-  display:flex;align-items:center;gap:var(--space-2);flex-shrink:0;
-  padding:0 var(--space-1) 0 var(--space-2);
-  border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);
-  background:var(--bg-secondary);
-}
-.folder-settings-recent-search:focus-within{border-color:var(--accent);box-shadow:var(--focus-ring)}
-.folder-settings-recent-search-icon{flex-shrink:0;width:var(--space-4);height:var(--space-4);color:var(--text-secondary)}
-.folder-settings-recent-filter{
-  flex:1;min-width:0;height:var(--control-h-md);margin:0;padding:0;
-  border:0;background:transparent;outline:none;
-  color:var(--text-primary);font-family:var(--font-ui);font-size:var(--font-size-md);
-  -webkit-appearance:none;appearance:none;
-}
-.folder-settings-recent-filter::placeholder{color:var(--text-tertiary)}
-.folder-settings-recent-filter::-webkit-search-cancel-button,
-.folder-settings-recent-filter::-webkit-search-decoration{-webkit-appearance:none;appearance:none}
-.folder-settings-recent-list{display:flex;flex:1;flex-direction:column;gap:var(--control-edge-inset);min-height:0;overflow:auto}
-.folder-settings-recent-item{display:flex;align-items:center;gap:var(--space-1);flex-shrink:0;padding-inline-end:var(--space-1);border-radius:var(--radius-sm)}
-.folder-settings-recent-item:hover{background:var(--bg-hover)}
-.folder-settings-recent-entry{
-  display:flex;align-items:center;gap:var(--space-2);flex:1;min-width:0;
-  padding:var(--space-2);border:0;border-radius:var(--radius-sm);background:transparent;
-  color:var(--text-primary);font-family:var(--font-ui);text-align:start;cursor:pointer;
-}
-.folder-settings-recent-entry:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-.folder-settings-recent-entry:disabled{cursor:default}
-.folder-settings-recent-entry:disabled .folder-settings-recent-name{color:var(--text-secondary)}
-.folder-settings-recent-copy{display:flex;flex:1;flex-direction:column;gap:var(--control-edge-inset);min-width:0}
-.folder-settings-recent-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.folder-settings-recent-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-md);font-weight:var(--weight-semibold)}
-.folder-settings-recent-count{flex-shrink:0;padding:0 var(--space-1);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-secondary);font-family:var(--font-mono);font-size:var(--font-size-xs);font-variant-numeric:tabular-nums}
 .folder-settings-delete-name{margin:0;color:var(--text-primary);font-weight:var(--weight-semibold);overflow-wrap:anywhere}
 .folder-tab-copy{display:flex;flex:1;min-width:0;text-align:start}
 /* Root details remain in the tooltip/settings, not a second row per tile. */
@@ -1903,11 +1833,11 @@ summary.thinking-header::-webkit-details-marker{display:none}
   .folder-settings-workbench{grid-template-columns:minmax(0,1fr);height:auto}
   .folder-settings-workbench .folder-browser{height:min(60dvh,420px)}
   /* Stacked panes take their content height; only the lists scroll. */
-  .folder-settings-workspace,.folder-settings-recents{flex:none;max-height:none}
-  .folder-settings-recent-list{max-height:calc(var(--control-h-lg) * 6)}
+  .folder-settings-workbench .pm-rail-workspace,.folder-settings-workbench .recent-paths{flex:none;max-height:none}
+  .folder-settings-workbench .recent-paths-list{max-height:calc(var(--control-h-lg) * 6)}
 }
 @media(max-width:480px){
-  .folder-settings-workspace,.folder-settings-recents{padding:var(--space-3)}
+  .folder-settings-workbench .pm-rail-card{padding:var(--space-3)}
   .folder-settings-identity{grid-template-columns:minmax(0,1fr)}
   .folder-settings-footer{gap:var(--space-3)}
 }
@@ -1983,10 +1913,9 @@ summary.thinking-header::-webkit-details-marker{display:none}
 .agent-dock summary:focus-visible{outline:none;box-shadow:var(--focus-ring)}
 /* Global Router (docs/ROUTER.md), shown as the main coordinator: the slot of
  * its card (the card itself wears the shared coordination-leader styles), the
- * compact header on the router conversation, and the compact Router
- * disclosures it hosts (the Worker model control also shows on Project Router
- * coordinator conversations). Tokens only; shared controls keep their ui-kit
- * styling. */
+ * compact header on the router conversation, and the compact Router controls
+ * it hosts (the Worker model select also shows on Project Router coordinator
+ * conversations). Tokens only; shared controls keep their ui-kit styling. */
 #globalRouterEntry{flex-shrink:0}
 .global-router-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-3);padding:var(--space-2) var(--space-4);border-bottom:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
 .global-router-header[hidden]{display:none}
@@ -1994,10 +1923,14 @@ summary.thinking-header::-webkit-details-marker{display:none}
 /* Compact disclosures: the summary is the at-a-glance value; an open one takes the row. */
 .global-router-header>details[open]{flex-basis:100%}
 .router-worker-model,.router-instructions,.router-watchdog{min-width:0;color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui)}
-.router-worker-model>summary,.router-instructions>summary,.router-watchdog>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
-.router-worker-model>summary:hover,.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
-.router-worker-model[aria-busy="true"]>summary{cursor:progress}
-.router-worker-model-field{max-width:min(100%,32em);padding-top:var(--space-2)}
+.router-instructions>summary,.router-watchdog>summary{cursor:pointer;color:var(--text-tertiary);overflow-wrap:anywhere}
+.router-instructions>summary:hover,.router-watchdog>summary:hover{color:var(--text-primary)}
+/* The Worker model is one labelled select on a single row; a failed read is
+ * one quiet line beside its retry. */
+.router-worker-model{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2)}
+.router-worker-model [hidden]{display:none}
+.router-worker-model[aria-busy="true"]{cursor:progress}
+.router-worker-model-failure{color:var(--text-tertiary);overflow-wrap:anywhere}
 .router-instructions-status{margin:var(--space-1) 0 0}
 .router-instructions-status:empty{display:none}
 .router-instructions-list{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0 0;padding:0;list-style:none}
@@ -9238,7 +9171,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptc-card[open] > .ptc-head > .ptc-chevron { transform: rotate(90deg); }
 .ptc-body { margin: var(--space-1) var(--space-3) var(--space-2) var(--space-4); padding-inline-start: var(--space-3); border-inline-start: var(--control-edge-inset) solid var(--border); }
 .ptc-title { font-weight: var(--weight-semibold); color: var(--text-primary); }
-.ptc-status { margin-left: auto; max-width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-xs); color: var(--text-tertiary); }
+/* One line that never shrinks: it moves under the title when both do not
+ * fit, and is cut only when it alone exceeds the head. */
+.ptc-status { flex: none; max-width: 100%; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-xs); color: var(--text-tertiary); }
 .ptc-running .ptc-status { color: var(--accent); }
 .ptc-status.ptc-status-error { color: var(--chip-err-color); background: var(--chip-err-bg); font-weight: var(--weight-semibold); }
 .ptc-meta { flex-basis: 100%; min-width: 0; padding-inline-start: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-xs); overflow-wrap: anywhere; white-space: normal; }
@@ -9293,6 +9228,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptool-turn-chev { font-size: 10px; color: var(--text-tertiary); transition: transform .18s ease; }
 /* Collapsed — hide the member rows, keep the header. */
 .ptool-turn.collapsed > [data-prn] { display: none; }
+/* A program batch head counts outcomes as text; only a genuine failure
+   colors its own count, never the handoffs beside it. */
+.ptool-turn-head [data-program-status="failed"] { color: var(--error-text); }
 
 /* Timer receipt shell, explicit state and identity. Metadata and checks own their own bodies. */
 .timer-watcher-block {
@@ -13014,12 +12952,14 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Left pane: the shared folder browser fills the column ── */
 .pm-browser-pane { display: flex; min-width: 0; min-height: 0; }
 /* Rail cards are hairline outside Tofu and ink-framed in it; frame the
-   browser card (10-project-browser.css) the same way. */
-.pm-browser-pane .folder-browser {
-  flex: 1;
-  --folder-browser-frame: var(--control-edge-inset) solid var(--border);
+   browser card (10-project-browser.css) the same way in both rail hosts. */
+.pm-browser-pane .folder-browser { flex: 1; }
+.pm-browser-pane .folder-browser,
+.folder-settings-workbench .folder-browser {
+  --folder-browser-frame: var(--control-edge-inset) solid var(--project-line);
 }
-[data-theme="tofu"] .pm-browser-pane .folder-browser {
+[data-theme="tofu"] .pm-browser-pane .folder-browser,
+[data-theme="tofu"] .folder-settings-workbench .folder-browser {
   --folder-browser-frame: var(--project-panel-width) solid var(--project-ink);
   --folder-browser-shadow: var(--clay-sm);
 }
@@ -13089,15 +13029,69 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 .mp-add-row .mp-path-input::placeholder { font-family: inherit; color: var(--text-tertiary); }
-/* Tofu: match the input's box model to the neo-brutalist Add button so the pair reads as one unit */
-[data-theme="tofu"] .mp-add-row .mp-path-input {
-  border: var(--project-panel-width) solid var(--project-ink);
-  border-radius:var(--radius-sm);
-  background: var(--project-surface);
+
+/* ── Shared workspace rail (features/project/workspace-rail): the Co-Pilot
+   modal and sidebar folder settings mount the same markup, so these rules
+   carry no host selector. ── */
+/* Host-independent context. The Co-Pilot .modal and the kit project dialog
+   differ in palette, typeface and line height, so the rail fixes its own: the
+   UI face and --project-* roles of the shared folder browser (mapped exactly
+   as dialog.ui-dialog--project maps them in 30-ui-kit.css), with the
+   Co-Pilot's original type metrics. Proven by
+   tests/visual/test_visual_project_rail_parity.py. */
+.pm-rail {
+  --text-primary: var(--project-ink);
+  --text-secondary: var(--project-muted);
+  --text-tertiary: var(--project-muted);
+  --bg-primary: var(--project-panel);
+  --bg-secondary: var(--project-surface);
+  --bg-tertiary: var(--project-band);
+  --border: var(--project-line);
+  --accent: var(--project-accent);
+  --accent-hover: var(--project-accent-hover);
+  --text-on-accent: var(--project-on-accent);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xl);
+  line-height: normal;
 }
-[data-theme="tofu"] .mp-add-row .mp-path-input:focus {
-  border-color: var(--project-ink);
-  box-shadow:var(--clay-sm);
+.pm-rail ol.mp-folder-list { list-style: none; padding: 0; }
+/* Rail-owned Add control: the legacy .btn rules are .modal-scoped and kit
+   buttons take the project dialog's overrides, so neither renders alike in
+   both hosts. Tofu draws its block look in 12-tofu-theme-project-controls.css. */
+.mp-add-row .mp-add-btn {
+  flex-shrink: 0;
+  padding: calc(var(--space-1) + var(--control-edge-inset)) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  line-height: normal;
+  cursor: pointer;
+}
+.mp-add-row .mp-add-btn:hover { background: var(--accent-hover); }
+.mp-add-row .mp-add-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.mp-add-error {
+  margin: 0 0 var(--space-2);
+  color: var(--error-text);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.mp-add-error[hidden] { display: none; }
+/* The drag grip is also the keyboard reorder handle: a bare button. */
+.mp-row .mp-row-grip { padding: 0; border: 0; background: none; cursor: grab; }
+.mp-row .mp-row-grip:focus-visible,
+.mp-row .mp-row-lock:focus-visible,
+.mp-row .mp-row-remove:focus-visible { outline: none; box-shadow: var(--focus-ring); opacity: 1; }
+/* Announcements stay readable to assistive technology without taking space. */
+.pm-rail-status {
+  position: absolute;
+  width: var(--control-edge-inset); height: var(--control-edge-inset);
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
 
 /* legacy compat — older .project-path-row markup */
@@ -13493,6 +13487,21 @@ button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ri
   margin: var(--space-1) 0 var(--space-3);
 }
 
+
+/* Shared workspace rail rows are buttons: keyboard-activatable, same look. */
+button.recent-path-item { width: 100%; font: inherit; color: inherit; text-align: start; }
+button.recent-path-item:disabled { cursor: default; }
+button.recent-path-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.recent-paths-empty:empty { display: none; }
+.recent-paths-error {
+  margin: 0 0 var(--space-2);
+  color: var(--error-text);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.recent-paths-retry { display: flex; flex-shrink: 0; margin-bottom: var(--space-2); }
+.recent-paths-error[hidden], .recent-paths-retry[hidden] { display: none; }
 /* ═══════════════════════════════════════════
    ★ Apply Code Button & Modal (NEW)
    ═══════════════════════════════════════════ */
@@ -15564,16 +15573,28 @@ button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ri
    specified BOTH the retired tofu pixel settings inputs (0,2,1) and the
    2026-09-04 unified soft settings inputs, flattening them to a 1px no-shadow
    box. Settings inputs now come solely from 07's cross-theme soft system.
-   :not(.folder-browser-input) — SAME source-exclusion: the shared folder
-   browser (10-project-browser.css) draws its own filter/create fields inside
-   the Co-Pilot .modal; this bleed would otherwise box them a second time. */
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input){
+   :not(.folder-browser-input, .mp-path-input) — SAME source-exclusion: the
+   shared folder browser (10-project-browser.css) and workspace rail draw their
+   own fields in both the Co-Pilot .modal and the folder settings <dialog>,
+   which this .modal-only bleed never reaches; the rail's path field keeps its
+   look in both through the rule below. One selector list keeps the bleed's
+   specificity unchanged. */
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){
   border-radius:var(--radius);
   border:1px solid rgba(184,176,160,0.4);
   background:#FBF6E9;
   box-shadow:none
 }
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .mp-add-row .mp-path-input{border:1px solid rgba(184,176,160,0.4);border-radius:var(--radius);background:#FBF6E9;box-shadow:none}
+[data-theme="tofu"] .mp-add-row .mp-path-input:focus{border-color:#BB9572;box-shadow:none}
+/* The rail's Add control keeps the btn-primary gold block in both hosts. */
+[data-theme="tofu"] .mp-add-row .mp-add-btn{
+  background:#C9993F;color:#3B2E1E;border:2px solid #3B2E1E;
+  box-shadow:var(--clay-sm);font-weight:800;letter-spacing:0.02em;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s}
+[data-theme="tofu"] .mp-add-row .mp-add-btn:hover{background:#D6A848;transform:translate(-1px,-1px);box-shadow:var(--clay-md)}
+[data-theme="tofu"] .mp-add-row .mp-add-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #3B2E1E;background:#BC8A35}
 
 /* ── Project modal — tofu header band + blocky close (it nests its own
       .pm-header, so the generic > h3 rule doesn't reach it). ── */
@@ -19680,12 +19701,13 @@ button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ri
   /* Single column; JS toggles which pane is visible via data-pm-view */
   .pm-body{display:flex;flex-direction:column;grid-template-columns:none;grid-template-rows:none;
     gap:0;padding:var(--space-3) 14px;min-height:0;overflow:hidden}
-  .pm-browser-pane,.pm-rail{flex:1 1 auto;min-height:0}
+  /* Scoped to the Co-Pilot: folder settings owns its own narrow rail layout. */
+  .pm-workbench .pm-browser-pane,.pm-workbench .pm-rail{flex:1 1 auto;min-height:0}
   .pm-workbench[data-pm-view="browse"] .pm-rail{display:none}
   .pm-workbench[data-pm-view="workspace"] .pm-browser-pane{display:none}
-  .pm-rail{gap:var(--space-3)}
-  .pm-rail-workspace{max-height:none;flex:1 1 auto}
-  .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
+  .pm-workbench .pm-rail{gap:var(--space-3)}
+  .pm-workbench .pm-rail-workspace{max-height:none;flex:1 1 auto}
+  .pm-workbench .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
   .pm-workbench .modal-actions{padding:var(--space-3) 14px}
   .pm-workbench #projectModalStatus:not(:empty){margin:0 14px}
 
@@ -24340,7 +24362,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   display: none;
 }
 
-.conversation-surface .conversation-block + .conversation-block--text[data-deliverable="true"] {
+.conversation-surface :is(.conversation-block, .conversation-narration) + .conversation-block--text[data-deliverable="true"] {
   margin-block-start: var(--conversation-answer-gap);
 }
 
@@ -24783,6 +24805,47 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   overflow-wrap: anywhere;
 }
 
+
+/* ---- Interim narration well ---------------------------------------------
+ * A reply's interim round prose shares ONE bounded, scrolling body, so many
+ * rounds never stretch the reply while the answer below stays on the open
+ * page. The well is the activity card's last fold: its card chrome and
+ * disclosure row live with the card (23-reading-tool-panel.css). Scroll
+ * shadows use local-attached backgrounds: they appear only on the side that
+ * has more to read. */
+.conversation-surface .conversation-narration__body {
+  --narration-shade: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  max-height: var(--conversation-process-scroll-max);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  padding-inline: var(--space-4) var(--space-3);
+  background:
+    linear-gradient(var(--turn-process-panel), transparent) top / 100% var(--space-6) no-repeat local,
+    linear-gradient(transparent, var(--turn-process-panel)) bottom / 100% var(--space-6) no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--narration-shade), transparent) top / 100% var(--space-3) no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, var(--narration-shade), transparent) bottom / 100% var(--space-3) no-repeat scroll;
+}
+
+.conversation-surface .conversation-narration__body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 0 0 var(--conversation-process-radius) var(--conversation-process-radius);
+}
+
+.conversation-surface .conversation-narration__body > .conversation-block--text {
+  margin: 0;
+  padding-block: var(--space-3);
+}
+
+.conversation-surface .conversation-narration__body > .conversation-block--text + .conversation-block--text {
+  border-block-start: var(--control-edge-inset) dashed var(--turn-process-line);
+}
+
+.conversation-surface .conversation-narration__body > .conversation-block--text > .md-content {
+  color: var(--text-secondary);
+}
 /* The rubric is a reading toolbar. Text starts on the exact prose baseline;
  * secondary navigation sits opposite it, never in an extra leading slot. */
 .conversation-surface .conversation-answer-label {
@@ -25165,8 +25228,9 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   border-radius: 0;
   background: transparent;
 }
-/* A program result already sits on the card spine; no second rail or inset. */
-.conversation-surface .ptc-result > .ptool-result-body {
+/* A program result already sits on the card spine, and settled edit rows carry
+   their own bordered chrome; neither gets a second rail or inset. */
+.conversation-surface :is(.ptc-result, .ptool-batch-done-block) > .ptool-result-body {
   margin: 0;
   padding: 0;
   border: 0;
@@ -25298,11 +25362,29 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   transform: rotate(180deg);
 }
 
+/* Open reasoning is one bounded scroller in the narration well's grammar:
+ * shared height, contained overscroll and edge shadows that appear only on
+ * the side with more to read (local-attached covers over scroll shadows). */
 .conversation-surface .thinking-content,
 .conversation-surface .thinking-block[open] .thinking-content {
-  max-height: none;
-  overflow: visible;
+  --process-scroll-cover: var(--bg-primary);
+  --process-scroll-shade: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  max-height: var(--conversation-process-scroll-max);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
   transition: none;
+  background:
+    linear-gradient(var(--process-scroll-cover), transparent) top / 100% var(--space-6) no-repeat local,
+    linear-gradient(transparent, var(--process-scroll-cover)) bottom / 100% var(--space-6) no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--process-scroll-shade), transparent) top / 100% var(--space-3) no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, var(--process-scroll-shade), transparent) bottom / 100% var(--space-3) no-repeat scroll;
+}
+
+.conversation-surface .thinking-content:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .conversation-surface .thinking-block:not([open]) .thinking-content {
@@ -27453,6 +27535,20 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   border-radius: 0;
 }
 .conversation-surface .conversation-block .sw-header[data-action-summary] > .conversation-tool-identity { display: none; }
+/* A program head (ui/program-execution-card.ts) names its step once: the
+ * localized title is the intent, never clamped or shrunk, and the exact
+ * identity (execute_program) lives only in the title tooltip. Its status
+ * stays on one line, and the head keeps wrapping so its summary takes its
+ * own line beneath instead of squeezing title and status into one row. */
+.conversation-surface .conversation-block .ptc-head[data-action-summary] { flex-wrap: wrap; }
+.conversation-surface .conversation-block .ptc-head[data-action-summary] > .ptc-title {
+  flex: none;
+  max-width: none;
+  -webkit-line-clamp: none;
+  overflow: visible;
+  white-space: nowrap;
+}
+.conversation-surface .conversation-block .ptc-head[data-action-summary] > .conversation-tool-identity { display: none; }
 .conversation-surface details[open] > [data-action-summary] > .ptool-line-preview { visibility: hidden; }
 /* Outcomes (owner report 2026-11-01): a chip in a row always means "look
  * here". Telemetry (tokens, characters), counts and routine status words are
@@ -27685,6 +27781,46 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   outline-offset: var(--space-1);
 }
 
+/* One head over a model round's sibling programs (RoundOutline). Members stay
+ * keyed leaves; the fold only hides them. Counts are text; a genuine failure
+ * also colors its own count, never the handoffs beside it. */
+.conversation-surface .conversation-program-batch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--control-h-md);
+  margin-block: var(--space-2) 0;
+  padding: var(--space-1) var(--conversation-process-inset);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+  text-align: start;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.conversation-surface .conversation-program-batch:hover { background: var(--turn-process-hover); }
+.conversation-surface .conversation-program-batch:focus-visible {
+  outline: calc(2 * var(--control-edge-inset)) solid var(--accent);
+  outline-offset: calc(-2 * var(--control-edge-inset));
+}
+.conversation-program-batch__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+.conversation-program-batch [data-program-status="failed"] { color: var(--error-text); }
+.conversation-surface .conversation-program-batch[aria-expanded="false"] .conversation-program-batch__chevron {
+  transform: rotate(-90deg);
+}
+.conversation-surface .conversation-block[data-program-batch-folded="true"] { display: none; }
+
 @media (max-width: 600px) {
   .conversation-round-search { flex: 1 1 100%; width: 100%; }
   .conversation-surface [data-action-summary] { column-gap: var(--space-2); }
@@ -27697,10 +27833,12 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
     -webkit-line-clamp: 2;
   }
 }
-/* Grouped reply reading: ONE activity card with independent reasoning and
- * tool disclosures, then the prose. Both headers use the same full-width row,
- * glyph tile and trailing chevron; a single divider joins them. Calls keep
- * their glyph, one-line intent and one outcome inside the same rounded sheet.
+/* Grouped reply reading: ONE activity card with independent reasoning, tool
+ * and narration disclosures, then the prose. Every header uses the same
+ * full-width row, glyph tile and trailing chevron; one divider joins each
+ * pair. Calls keep their glyph, one-line intent and one outcome inside the
+ * same rounded sheet; the narration fold's notes read in its bounded body
+ * (23-reading-prose.css).
  * Outcomes, identity and inks follow the shared row grammar
  * (23-reading-tool-summary.css, --tool-row-* roles); this owner adds only
  * the card and the glyph column.
@@ -27720,14 +27858,37 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   background: var(--turn-process-panel);
 }
 
+/* The narration well is the card's last fold. Alone (a reply without calls
+ * or reasoning) it is a card of its own. */
+.conversation-surface .conversation-turn-blocks > .conversation-narration {
+  margin-block: var(--space-2) var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--turn-process-panel);
+  overflow: hidden;
+}
+
 /* Keyed siblings draw one card without reparenting a streaming disclosure. */
-.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel) > .thinking-block {
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel, + .conversation-narration) > .thinking-block {
   border: var(--control-edge-inset) solid var(--turn-process-line);
   border-radius: var(--conversation-process-radius) var(--conversation-process-radius) 0 0;
   background: var(--turn-process-panel);
 }
 
-.conversation-surface .conversation-turn-blocks > .conversation-block--thinking + .conversation-tool-panel {
+/* Open, a header sits above a hairline. */
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel, + .conversation-narration) > .thinking-block[open] > .thinking-header,
+.conversation-surface .conversation-narration[data-narration-state="open"] > .conversation-narration__toggle {
+  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+/* The reasoning scroller's edge covers match the card it sits on. */
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel, + .conversation-narration) .thinking-content {
+  --process-scroll-cover: var(--turn-process-panel);
+}
+
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking + :is(.conversation-tool-panel, .conversation-narration) {
   margin-block-start: 0;
   border-block-start: 0;
   border-start-start-radius: 0;
@@ -27772,7 +27933,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
 }
 
 /* Reasoning prose uses the card inset rather than indenting under its icon. */
-.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel) .thinking-content > .thinking-text {
+.conversation-surface .conversation-turn-blocks > .conversation-block--thinking:has(+ .conversation-tool-panel, + .conversation-narration) .thinking-content > .thinking-text {
   box-sizing: border-box;
   margin: 0;
   padding: var(--space-2) var(--space-3) var(--space-3);
@@ -27807,8 +27968,24 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   border-end-end-radius: var(--conversation-process-radius);
 }
 
-/* ---- Header ------------------------------------------------------------ */
-.conversation-surface .conversation-tool-panel__toggle {
+/* The narration fold continues the card above it: the row before it keeps
+ * its rule as the divider and gives up its rounded bottom. */
+.conversation-surface .conversation-turn-blocks > .conversation-tool-panel:has(+ .conversation-narration),
+.conversation-surface .conversation-turn-blocks > .conversation-tool-panel[data-tool-panel-state="open"] ~ [data-turn-zone="process"]:has(+ .conversation-narration) {
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.conversation-surface .conversation-turn-blocks > .conversation-tool-panel + .conversation-narration,
+.conversation-surface .conversation-turn-blocks > .conversation-tool-panel[data-tool-panel-state="open"] ~ [data-turn-zone="process"] + .conversation-narration {
+  margin-block-start: 0;
+  border-block-start: 0;
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+}
+
+/* ---- Headers: tool panel and narration fold ---------------------------- */
+.conversation-surface :is(.conversation-tool-panel__toggle, .conversation-narration__toggle) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -27829,16 +28006,16 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   transition: background var(--motion-fast) var(--ease-standard);
 }
 
-.conversation-surface .conversation-tool-panel__toggle:hover {
+.conversation-surface :is(.conversation-tool-panel__toggle, .conversation-narration__toggle):hover {
   background: var(--turn-process-hover);
 }
 
-.conversation-surface .conversation-tool-panel__toggle:focus-visible {
+.conversation-surface :is(.conversation-tool-panel__toggle, .conversation-narration__toggle):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
-.conversation-surface .conversation-tool-panel__glyph {
+.conversation-surface :is(.conversation-tool-panel__glyph, .conversation-narration__glyph) {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -27850,12 +28027,12 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   color: var(--accent);
 }
 
-.conversation-surface .conversation-tool-panel__glyph svg {
+.conversation-surface :is(.conversation-tool-panel__glyph, .conversation-narration__glyph) svg {
   width: 58%;
   height: 58%;
 }
 
-.conversation-surface .conversation-tool-panel__label {
+.conversation-surface :is(.conversation-tool-panel__label, .conversation-narration__label) {
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -27884,13 +28061,14 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   display: none;
 }
 
-.conversation-surface .conversation-tool-panel__chevron.conversation-disclosure-chevron {
+.conversation-surface :is(.conversation-tool-panel__chevron, .conversation-narration__chevron).conversation-disclosure-chevron {
   color: var(--text-tertiary);
   transform: rotate(-90deg);
   transition: transform var(--motion-fast) var(--ease-standard);
 }
 
-.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] .conversation-tool-panel__chevron.conversation-disclosure-chevron {
+.conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] .conversation-tool-panel__chevron.conversation-disclosure-chevron,
+.conversation-surface .conversation-narration[data-narration-state="open"] > .conversation-narration__toggle > .conversation-narration__chevron.conversation-disclosure-chevron {
   transform: none;
 }
 
@@ -27961,9 +28139,10 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
 /* Phones keep one row per call too: the intent clamps beside its outcome
  * instead of pushing the chip onto a line of its own. A failure's reason
  * still takes its own line, as do structured summaries (saved-output
- * artifacts, repository-map parameters) and an attention step's identity. */
+ * artifacts, repository-map parameters), a program head's summary and an
+ * attention step's identity. */
 @media (max-width: 600px) {
-  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(:has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
+  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(.ptc-head, :has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
     flex-wrap: nowrap;
   }
   /* A saved-output summary keeps its responsive basis, which holds its
@@ -28945,6 +29124,17 @@ textarea.ui-input{
   mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
   pointer-events:none;
 }
+
+/* Compact inline field (createField size 'sm'): the label sits beside a
+   control on the small height ramp, for header and toolbar rows; hint and
+   error keep their own line below. */
+.ui-field--sm{flex-direction:row;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2)}
+.ui-field--sm .ui-field__label{font-size:var(--font-size-sm);font-weight:var(--weight-regular);color:var(--text-secondary)}
+.ui-field--sm .ui-field__hint,.ui-field--sm .ui-field__error{flex-basis:100%}
+.ui-field--sm .ui-input{flex:1 1 auto;width:auto;min-width:0;height:var(--control-h-sm);padding:0 var(--space-2);font-size:var(--font-size-sm)}
+.ui-field--sm .ui-select{width:auto;min-width:0;max-width:100%}
+.ui-field--sm .ui-select>select{height:var(--control-h-sm);padding:0 var(--space-6) 0 var(--space-2);font-size:var(--font-size-sm);text-overflow:ellipsis}
+.ui-field--sm .ui-select::after{right:var(--space-2)}
 
 /* ── Card ──────────────────────────────────────────────────────────────── */
 .ui-card{

@@ -17,7 +17,7 @@ import { programExecutionCardHtml } from '../program-execution-card';
 
 import { isNativeProgramGateway } from '../../presentation/program-gateway-presentation';
 
-import { programChildParentCallId } from '../../presentation/tool-execution-groups';
+import { isActiveToolStatus, programChildParentCallId } from '../../presentation/tool-execution-groups';
 import { buildToolFallbackCard } from '../../presentation/tool-fallback-presentation';
 import {
   bindLazyToolResult,
@@ -64,10 +64,12 @@ function renderToolBlockContent(
   if (isNativeProgramGateway(block.round ?? { toolName: block.name })) {
     const reference = block.round?._snapshotToolResult;
     const loaded = loadedToolResult(node, reference);
-    // A live turn announces the call (and streams its code) before a round exists.
+    // A live turn announces the call (and streams its code) before a round
+    // exists. A settled Turn's unanswered call is history, never in flight.
     const live = turn.status === 'pending' || turn.status === 'running';
+    const status = block.round?.status ?? block.result?.status;
     const round = { ...block.round, toolName: block.name, toolArgs: block.input,
-      status: block.round?.status ?? block.result?.status ?? (live ? 'pending' : undefined),
+      status: live ? status ?? 'pending' : isActiveToolStatus(status) ? undefined : status,
       result: block.result };
     if (loaded !== undefined) { delete round._snapshotToolResult; round.toolContent = loaded; }
     node.classList.remove('ptool-parent-child'); delete node.dataset.parentToolCallId;

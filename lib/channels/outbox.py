@@ -191,6 +191,41 @@ def confirm_echo(store: ChannelStore, item_id: str, *, external_id: str, client_
                             client_id=item.client_id)
 
 
+def _delivery_text(store: ChannelStore, item: OutboxItem) -> str:
+    """Translate once durably; reconciliation always retries the same provider bytes."""
+    if item.origin.get('kind') not in ('router_receipt', 'router_content', 'router_progress',
+                                       'router_reply', 'router_status'):
+        return item.text
+    if item.extra.get('deliveryTextReady'):
+        return item.text
+    from lib.conv_config import resolve_translate_target
+    from lib.conversations.repository import ConversationRepository
+    from lib.translate.display_texts import translate_display_texts
+    try:
+        snapshot = ConversationRepository().get(
+            item.origin.get('conversationId', ''), user_id=store.owner, include_messages=False)
+        settings = (snapshot.metadata.get('settings') if snapshot else None) or {}
+        target = resolve_translate_target(settings)
+        authored = str(item.extra.get('authoredText') or item.text)
+        translated = translate_display_texts(
+            [authored], target, log_tag='channel-outbox:' + item.id).get(authored)
+        if not translated:
+            translated = item.text
+        if item.extra.get('replyToExternalId') is None and not item.text.startswith(authored):
+            translated = item.text.replace(authored, translated, 1)
+        def change(current):
+            if current.state != 'sending':
+                return None
+            current.text = translated
+            current.extra['deliveryTextReady'] = True
+            return current
+        return _transition(store, item.id, change).text
+    except Exception:
+        logger.warning('[Channels] router text translation failed item=%s; sending original',
+                       item.id, exc_info=True)
+        return item.text
+
+
 def _send(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> OutboxItem:
     def claim(current):
         if current.state != 'queued':
@@ -201,7 +236,7 @@ def _send(store: ChannelStore, item: OutboxItem, sender: OutboxSender) -> Outbox
     if item.state != 'sending':
         return item
     try:
-        result = sender.send(ThreadKey.parse(item.thread), item.text, marker=item.id,
+        result = sender.send(ThreadKey.parse(item.thread), _delivery_text(store, item), marker=item.id,
                              reply_to_external_id=item.extra.get('replyToExternalId'))
     except Exception as error:
         logger.warning('[Channels] outbox send outcome unknown item=%s: %s', item.id,

@@ -61,6 +61,7 @@ from lib.tasks_pkg.compaction._layer2._candidate_policy import (
 from lib.tasks_pkg.compaction._layer2._source_plan import (
     SourcePlanningPorts, plan_compaction_sources,
 )
+from lib.tasks_pkg.compaction._layer2._preparation import prepare_l2_projection
 from lib.tasks_pkg.compaction._handoff import (
     HANDOFF_FIELD, HANDOFF_FORMAT, compaction_phase, has_open_tool_batch,
     insert_compaction_handoff, is_compaction_handoff, make_compaction_handoff,
@@ -247,25 +248,6 @@ def _summary_covers_state_value(summary: str, value: str) -> bool:
     return sum(term in rendered for term in terms) >= required
 
 
-def _summary_missing_task_state_fields(summary: str, snapshot) -> list[str]:
-    """Return named critical snapshot fields absent from a model summary."""
-    missing = []
-    if snapshot.goal and not _summary_covers_state_value(summary, snapshot.goal):
-        missing.append('goal')
-    for index, constraint in enumerate(snapshot.hard_constraints):
-        if not _summary_covers_state_value(summary, constraint):
-            missing.append(f'hard_constraints[{index}]')
-    pending_groups = (
-        ('todos', snapshot.todos),
-        ('open_questions', snapshot.open_questions),
-        ('next_steps', snapshot.next_steps),
-    )
-    for field, values in pending_groups:
-        for index, value in enumerate(values):
-            if not _summary_covers_state_value(summary, value):
-                missing.append(f'{field}[{index}]')
-    return missing
-
 
 def _summary_usage_tokens(usage: dict | None) -> int:
     return int(summary_usage_details(usage).get('totalTokens') or 0)
@@ -393,11 +375,10 @@ def _persist_compaction_candidate(messages, task, meta):
     summary_text = meta.get('summary_text') or ''
     tokens_after = _estimate_total_tokens(messages)
     msgs_after = len(messages)
-    retained, lost = [], []
-    ledger = (task or {}).get('_contextEvidenceLedger')
-    if isinstance(ledger, dict):
-        from lib.tasks_pkg.compaction._evidence import evidence_retention
-        retained, lost = evidence_retention(summary_text, ledger)
+    from lib.tasks_pkg.compaction._continuity import read_continuity
+    continuity = read_continuity(messages, task)
+    retained = [entry['id'] for entry in (continuity or {}).get('observations', [])]
+    lost = []
     budget_decision = (task or {}).get('_contextBudgetDecision') or {}
     prompt_evidence = (task or {}).get('_lastPromptAdmission') or {}
     context_budget = {**budget_decision, **prompt_evidence}
@@ -418,6 +399,7 @@ def _persist_compaction_candidate(messages, task, meta):
         mode=meta.get('mode') or 'turns',
         continuation_format=HANDOFF_FORMAT,
         continuation_phase=meta.get('handoff_phase') or '',
+        continuity_digest=meta.get('continuityDigest') or '',
         summary_generated=not bool(meta.get('summaryFallback')),
         summary_text=summary_text,
         summary_usage=meta.get('summary_usage'),
@@ -563,7 +545,7 @@ def _announce_summary_start(task: dict | None, pfx: str) -> None:
             logger.debug('%s [Compact] phase emit failed: %s', pfx, exc)
 
 
-def _compaction_handoff(compact_result: str, phase, task, messages, summary_input, kwargs) -> dict:
+def _compaction_handoff(compact_result: str, phase, task, messages, summary_input, kwargs, digest) -> dict:
     """The handoff naming the Turns it folds and the owner-scheduled request it settles.
 
     An owner-scheduled request stays proven when a later summary folds it.
@@ -575,7 +557,7 @@ def _compaction_handoff(compact_result: str, phase, task, messages, summary_inpu
         and isinstance(message[HANDOFF_FIELD].get('scheduledRequestId'), str)), '')
     return make_compaction_handoff(
         compact_result, phase=phase, coverage=summary_coverage(task, messages, summary_input),
-        scheduled_request_id=scheduled_request)
+        scheduled_request_id=scheduled_request, continuity_digest=digest)
 
 
 def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> str:
@@ -693,6 +675,10 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
 
 
+    planning_messages = (messages if _unverified_pricing_deferral
+                         else prepare_l2_projection(messages, task))
+    if cancelled():
+        return 'Context compaction cancelled — messages preserved as-is.'
     sources = plan_compaction_sources(
         messages, task, budget_tokens=budget_tokens, max_turns=max_turns,
         handoff_phase=_handoff_phase, recent_files_block=_recent_files_block,
@@ -700,9 +686,10 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         tokens_before=tokens_before, log_prefix=pfx,
         ports=SourcePlanningPorts(
             plan_tail=_plan_cross_turn_tail, anchor_index=_objective_anchor_index,
-            retained_projection=_retained_projection,
-            restoration_reserve=_with_restoration_reserve,
+            retained_projection=lambda *args: _retained_projection(*args, task=task),
+            restoration_reserve=lambda *args: _with_restoration_reserve(*args, task=task),
         ),
+        planning_messages=planning_messages,
     )
     if isinstance(sources, str):
         return sources
@@ -818,12 +805,11 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 'Messages preserved as-is.')
 
     accepted_summary = accept_summary(
-        summary_text, messages, task, fallback=_summary_fallback,
+        summary_text, sources.summary_input, task, fallback=_summary_fallback,
         recent_files_block=_recent_files_block, turn_diff_block=_diff_block,
         turn_diff_included=_turn_diff_included, result_meta=_result_meta,
-        log_prefix=pfx, missing_state_fields=_summary_missing_task_state_fields,
+        log_prefix=pfx,
         recovery_max_chars=_DETERMINISTIC_RECOVERY_MAX_CHARS,
-        is_bounded=bounded_summary_task,
     )
     if isinstance(accepted_summary, str):
         return accepted_summary
@@ -834,7 +820,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     if retained_wrapper:
         _audit_user_verbatim_once()
     new_messages = _retained_projection(
-        sources.old_messages, sources.recent_messages, sources.anchor_msg, sources.retained_entries)
+        sources.old_messages, sources.recent_messages, sources.anchor_msg, sources.retained_entries,
+        task=task)
 
     protected_history_count = sum(
         len(history_entries(message)) for message in new_messages
@@ -853,7 +840,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     # an uncounted summary or publish a folded history without continuation.
     compact_result = '## Context Compacted — Selective Summary\n\n' + summary_text
     insert_compaction_handoff(new_messages, _compaction_handoff(
-        compact_result, _handoff_phase, task, messages, sources.summary_input, kwargs))
+        compact_result, _handoff_phase, task, messages, sources.summary_input, kwargs,
+        accepted_summary.continuity_digest))
     # Task progress is a maintained state projection, not disposable prose.
     # Carry it BEFORE admission/accounting; otherwise every compaction deletes
     # and re-injects the same state as a spurious new intervention next round.
@@ -861,7 +849,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     carry_checklist_through_compaction(new_messages, task)
     _candidate_tokens = _estimate_total_tokens(new_messages)
     if (callable(sources.dispatch_measure) and isinstance(sources.dispatch_target, int)
-            and sources.dispatch_measure(_with_restoration_reserve(new_messages, messages))
+            and sources.dispatch_measure(_with_restoration_reserve(new_messages, messages, task=task))
             > sources.dispatch_target):
         if isinstance(_result_meta, dict):
             _result_meta.update(compacted=False,
@@ -1159,7 +1147,7 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     # The Turn row reports the complete provider request (messages, managed
     # context, tool schemas). The gate already counted it; a forced pass counts
     # it before the compactor replaces the list. Recomposition settles the row
-    # on the rebuilt request (_pipeline._settle_rebuilt_request_size).
+    # on the final prepared request (_pipeline.settle_compaction_request_size).
     _request_tokens_before = int(_measurement_out.get('gate_tokens') or 0)
     if task is not None:
         task.pop('_compactionRequestSize', None)
@@ -1416,19 +1404,6 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             logger.debug('%s [Compact] record_l2_compaction failed: %s', pfx, _roi_e)
 
     archive_id = _meta.get('archive_id')
-    summary_text = _meta.get('summary_text') or ''
-    retained: list[str] = []
-    lost: list[str] = []
-    if task is not None:
-        try:
-            ledger = task.get('_contextEvidenceLedger')
-            if isinstance(ledger, dict):
-                from lib.tasks_pkg.compaction._evidence import evidence_retention
-                retained, lost = evidence_retention(summary_text, ledger)
-        except Exception as _er_e:
-            logger.debug('%s [Compact] evidence retention audit failed: %s',
-                         pfx, _er_e)
-
     receipt = _meta.get('_persistedReceipt')
     if receipt is None:
         receipt = _persist_compaction_candidate(messages, task, _meta)
@@ -1463,6 +1438,9 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     if task is not None:
         try:
             from lib.context_telemetry import record_compaction_event
+            from lib.tasks_pkg.compaction._continuity import read_continuity
+            state = read_continuity(messages, task)
+            retained = [entry['id'] for entry in (state or {}).get('observations', [])]
             record_compaction_event(
                 task,
                 trigger=_meta.get('trigger') or 'force',
@@ -1471,14 +1449,13 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                 tokens_after=tokens_after,
                 archive_id=archive_id,
                 evidence_retained=retained,
-                evidence_lost=lost,
+                evidence_lost=[],
             )
         except Exception as _ct_e:
             logger.debug('%s [Compact] context telemetry failed: %s', pfx, _ct_e)
         finally:
-            # `_contextEvidenceLedger` is an in-memory bridge between summary
-            # generation and this retention measurement. Do not pin even its
-            # bounded tool previews for the rest of a long-running task.
+            # Release the legacy utility-recovery bridge. Normal summary
+            # preparation is pure; verified handoffs own continuity.
             task.pop('_contextEvidenceLedger', None)
 
     _record_compaction_cadence(task, _meta.get('round_num'))

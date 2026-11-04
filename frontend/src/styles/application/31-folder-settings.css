@@ -1,101 +1,30 @@
-/* Sidebar defaults editor. Project chrome/controls belong to the UI kit and
-   the server-folder browser to 10-project-browser.css; this owner supplies the
-   workbench layout, the default-roots rail and the searchable recents. */
+/* Sidebar defaults editor. Project chrome/controls belong to the UI kit; the
+   server-folder browser (10-project-browser.css) and the workspace rail
+   (10-project-{modal-shell,workspace,roots,recent}.css) are the Project
+   Co-Pilot's shared components. This owner supplies the dialog header, the
+   workbench layout and the sidebar project rail. */
 .folder-settings{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-width:0;min-height:0}
 .folder-settings-content{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-height:0;overflow:auto}
 .folder-settings-fields{display:flex;flex-direction:column;gap:var(--space-4);border:0;padding:0;margin:0;min-width:0}
 .folder-settings-identity{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:var(--space-4)}
-/* Two panes with a stable height: lists scroll inside instead of resizing the dialog. */
+/* Header as in the Co-Pilot: folder glyph, title, scope note as subtitle. */
+.folder-settings-title{display:flex;flex:1;align-items:flex-start;gap:var(--space-3);min-width:0}
+.folder-settings-title-icon{flex-shrink:0;width:var(--space-5);height:var(--space-5);margin-top:var(--space-1);color:var(--accent)}
+.folder-settings-title-text{display:flex;flex-direction:column;gap:var(--space-1);min-width:0}
+/* The Co-Pilot's pane proportions with a stable height: lists scroll inside
+   instead of resizing the dialog. */
 .folder-settings-workbench{
-  display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:var(--space-4);
+  display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,0.85fr);gap:var(--space-4);
   height:clamp(300px,calc(100dvh - 380px),520px);min-width:0;
 }
-.folder-settings-rail{display:flex;flex-direction:column;gap:var(--space-3);min-width:0;min-height:0}
-.folder-settings-workspace,.folder-settings-recents{
-  display:flex;flex-direction:column;gap:var(--space-3);min-width:0;min-height:0;
-  padding:var(--space-3) var(--space-4);
-  border:var(--project-panel-width) solid var(--text-primary);border-radius:var(--radius);
-  background:var(--bg-primary);
-}
-.folder-settings-workspace{flex:0 1 auto;max-height:62%}
-.folder-settings-recents{flex:1 1 0}
-.folder-settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-shrink:0}
-.folder-settings-count{display:inline-flex;align-items:center;justify-content:center;min-width:var(--space-6);height:var(--space-6);padding:0 var(--space-2);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-primary);font-size:var(--font-size-sm);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums}
-.folder-settings-count:empty{display:none}
-.folder-settings-heading{margin:0;font-size:var(--font-size-lg);font-weight:var(--weight-bold);color:var(--text-primary)}
 .folder-settings-hint{margin:0;font-size:var(--font-size-md);line-height:var(--leading-body);color:var(--text-secondary);overflow-wrap:anywhere}
-.folder-settings-path-field{flex-shrink:0}
-.folder-settings-path-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--space-2)}
-
-/* Default roots: one compact row each — primary star, name/path, controls. */
-.folder-settings-roots{display:flex;flex-direction:column;gap:var(--space-1);list-style:none;padding:0;margin:0;min-width:0;min-height:0;overflow:auto}
-.folder-settings-root{
-  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:var(--space-1);
-  flex-shrink:0;padding:var(--space-1);
-  border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);
-  background:var(--bg-secondary);min-width:0;
-}
-.folder-settings-root[data-primary="true"]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,var(--bg-primary))}
-.folder-settings-root[data-primary="true"] [data-action="primary"] svg{fill:currentColor}
-.folder-settings-root-copy{display:flex;flex-direction:column;gap:var(--control-edge-inset);min-width:0}
-.folder-settings-root-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.folder-settings-root-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-md);font-weight:var(--weight-semibold);color:var(--text-primary)}
-/* RTL box + isolated LTR path: overflow trims the start, keeping the tail. */
-.folder-settings-root-path,.folder-settings-recent-path{
-  display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;
-  font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary);
-}
-.folder-settings-root-path{user-select:text}
-.folder-settings-badge{flex-shrink:0;padding:0 var(--space-1);border-radius:var(--radius-pill);background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--text-primary);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);line-height:var(--leading-body)}
-.folder-settings-badge--muted{background:var(--bg-tertiary);color:var(--text-secondary)}
-.folder-settings-badge--warning{background:var(--warning-bg);color:var(--warning-text)}
+.folder-settings-hint:empty{display:none}
 .folder-settings-full-path{font-family:var(--font-mono);font-size:var(--font-size-sm);line-height:var(--leading-body);overflow-wrap:anywhere;color:var(--text-secondary);user-select:text}
 .folder-settings-review-roots{display:flex;flex-direction:column;gap:var(--space-2);margin:0;padding-inline-start:var(--space-4)}
 .folder-settings-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2)}
-.folder-settings-root-actions{display:flex;align-items:center;gap:var(--control-edge-inset)}
 .folder-settings-footer{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;flex-shrink:0;gap:var(--space-2);padding-top:var(--space-4);border-top:var(--control-edge-inset) solid var(--border)}
-.folder-settings-empty{padding:var(--space-2) 0;font-size:var(--font-size-md);color:var(--text-secondary);line-height:var(--leading-body)}
-.folder-settings-status{margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);overflow-wrap:anywhere}
-.folder-settings-status:empty,.folder-settings-hint:empty{display:none}
-
-/* Exact paths remain announced without duplicating each selected-root card. */
-.folder-settings-announcement{position:absolute;width:var(--control-edge-inset);height:var(--control-edge-inset);overflow:hidden;clip-path:inset(50%)}
 .folder-settings-error{padding:var(--space-3);margin:0;border:var(--control-edge-inset) solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-md);line-height:var(--leading-body);overflow-wrap:anywhere}
 .folder-settings-error[hidden]{display:none}
-
-/* Recent projects: search, pick to add, locate in the browser. */
-.folder-settings-recent-search{
-  display:flex;align-items:center;gap:var(--space-2);flex-shrink:0;
-  padding:0 var(--space-1) 0 var(--space-2);
-  border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);
-  background:var(--bg-secondary);
-}
-.folder-settings-recent-search:focus-within{border-color:var(--accent);box-shadow:var(--focus-ring)}
-.folder-settings-recent-search-icon{flex-shrink:0;width:var(--space-4);height:var(--space-4);color:var(--text-secondary)}
-.folder-settings-recent-filter{
-  flex:1;min-width:0;height:var(--control-h-md);margin:0;padding:0;
-  border:0;background:transparent;outline:none;
-  color:var(--text-primary);font-family:var(--font-ui);font-size:var(--font-size-md);
-  -webkit-appearance:none;appearance:none;
-}
-.folder-settings-recent-filter::placeholder{color:var(--text-tertiary)}
-.folder-settings-recent-filter::-webkit-search-cancel-button,
-.folder-settings-recent-filter::-webkit-search-decoration{-webkit-appearance:none;appearance:none}
-.folder-settings-recent-list{display:flex;flex:1;flex-direction:column;gap:var(--control-edge-inset);min-height:0;overflow:auto}
-.folder-settings-recent-item{display:flex;align-items:center;gap:var(--space-1);flex-shrink:0;padding-inline-end:var(--space-1);border-radius:var(--radius-sm)}
-.folder-settings-recent-item:hover{background:var(--bg-hover)}
-.folder-settings-recent-entry{
-  display:flex;align-items:center;gap:var(--space-2);flex:1;min-width:0;
-  padding:var(--space-2);border:0;border-radius:var(--radius-sm);background:transparent;
-  color:var(--text-primary);font-family:var(--font-ui);text-align:start;cursor:pointer;
-}
-.folder-settings-recent-entry:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-.folder-settings-recent-entry:disabled{cursor:default}
-.folder-settings-recent-entry:disabled .folder-settings-recent-name{color:var(--text-secondary)}
-.folder-settings-recent-copy{display:flex;flex:1;flex-direction:column;gap:var(--control-edge-inset);min-width:0}
-.folder-settings-recent-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.folder-settings-recent-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-md);font-weight:var(--weight-semibold)}
-.folder-settings-recent-count{flex-shrink:0;padding:0 var(--space-1);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-secondary);font-family:var(--font-mono);font-size:var(--font-size-xs);font-variant-numeric:tabular-nums}
 .folder-settings-delete-name{margin:0;color:var(--text-primary);font-weight:var(--weight-semibold);overflow-wrap:anywhere}
 .folder-tab-copy{display:flex;flex:1;min-width:0;text-align:start}
 /* Root details remain in the tooltip/settings, not a second row per tile. */
@@ -134,11 +63,11 @@
   .folder-settings-workbench{grid-template-columns:minmax(0,1fr);height:auto}
   .folder-settings-workbench .folder-browser{height:min(60dvh,420px)}
   /* Stacked panes take their content height; only the lists scroll. */
-  .folder-settings-workspace,.folder-settings-recents{flex:none;max-height:none}
-  .folder-settings-recent-list{max-height:calc(var(--control-h-lg) * 6)}
+  .folder-settings-workbench .pm-rail-workspace,.folder-settings-workbench .recent-paths{flex:none;max-height:none}
+  .folder-settings-workbench .recent-paths-list{max-height:calc(var(--control-h-lg) * 6)}
 }
 @media(max-width:480px){
-  .folder-settings-workspace,.folder-settings-recents{padding:var(--space-3)}
+  .folder-settings-workbench .pm-rail-card{padding:var(--space-3)}
   .folder-settings-identity{grid-template-columns:minmax(0,1fr)}
   .folder-settings-footer{gap:var(--space-3)}
 }

@@ -859,6 +859,61 @@ fn live_claim_matches(
         && job.lease_deadline_ms > now_ms
 }
 
+/// Explicit publication evidence. It never grants effect/replay authority.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationClaim {
+    pub worker_id: String,
+    pub fencing_token: u64,
+}
+
+impl PublicationClaim {
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        if !text_within(&self.worker_id, 256, false)
+            || self.fencing_token == 0 || self.fencing_token > i64::MAX as u64 {
+            return Err(invalid_input("invalid worker publication claim"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn parse(value: Option<&Value>) -> io::Result<Option<Self>> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => {
+                let claim: Self = serde_json::from_value(value.clone())
+                    .map_err(|_| invalid_input("invalid worker publication claim"))?;
+                claim.validate()?;
+                Ok(Some(claim))
+            }
+        }
+    }
+}
+
+/// Read the bound job inside the publishing transaction so its version joins
+/// OCC validation. A heartbeat/claim read in another transaction is not a fence.
+pub(crate) fn require_conversation_publication_claim(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    attempt_id: &str, task_id: &str, proof: Option<&PublicationClaim>, terminal: bool,
+) -> io::Result<()> {
+    if task_id != format!("conversation-attempt:{attempt_id}") {
+        return if proof.is_none() { Ok(()) }
+            else { Err(conflict("attempt has no durable worker binding")) };
+    }
+    let proof = proof.ok_or_else(|| conflict("durable attempt requires a worker claim"))?;
+    proof.validate()?;
+    let job = read_job(database, transaction, task_id)?
+        .ok_or_else(|| conflict("worker claim cannot publish this attempt"))?;
+    if job.user_id != transaction.owner_user_id()
+        || job.task_kind != "conversation-attempt"
+        || job.payload.get("attemptId").and_then(Value::as_str) != Some(attempt_id)
+        || !live_claim_matches(database, &job, &proof.worker_id, proof.fencing_token,
+                               database.worker_lease_now_ms()?)
+        || (!terminal && job.cancel_requested_at_ms > 0) {
+        return Err(conflict("worker claim cannot publish this attempt"));
+    }
+    Ok(())
+}
+
 pub(crate) struct HeartbeatRequest<'a> {
     pub task_id: &'a str,
     pub worker_id: &'a str,
@@ -1216,6 +1271,48 @@ mod tests {
             database.commit(tx).unwrap();
         }
         response.map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[test]
+    fn conversation_publication_dependency_rejects_a_commit_after_takeover() {
+        let (_, mut db) = prepared();
+        let task_id = "conversation-attempt:publishing";
+        let mut tx = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        enqueue(&db, &mut tx, EnqueueRequest {
+            task_id: task_id.into(), user_id: 41, tenant_id: "tenant-a".into(),
+            task_kind: "conversation-attempt".into(), payload: json!({"attemptId":"publishing"}),
+            idempotency_key: task_id.into(), request_digest: "a".repeat(64),
+            priority: 100, available_at_ms: 1_000, now_ms: 1_000,
+        }).unwrap();
+        db.commit(tx).unwrap();
+        let mut claim_tx = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        claim_next(&db, &mut claim_tx, "old", 1, 10_000, &["conversation-attempt".into()])
+            .unwrap().unwrap();
+        db.commit(claim_tx).unwrap();
+
+        let mut publication = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        require_conversation_publication_claim(&db, &mut publication,
+            "publishing", task_id, Some(&PublicationClaim {
+                worker_id: "old".into(), fencing_token: 1 }), false).unwrap();
+        // A domain write disjoint from the job: only the fence's read dependency
+        // can prevent this otherwise valid transaction from committing late.
+        let visible = EntityKey::new(7, 41, "publication_test", b"visible").unwrap();
+        db.entity_put(&mut publication, visible.clone(), b"old".to_vec()).unwrap();
+        db.set_worker_lease_test_time(110_000);
+        let mut replacement = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        let claimed = claim_next(&db, &mut replacement, "new", 1, 10_000,
+            &["conversation-attempt".into()]).unwrap().unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&claimed).unwrap()["fencingToken"], 2);
+        db.commit(replacement).unwrap();
+        assert!(db.commit(publication).is_err());
+
+        let mut current = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+        assert!(db.entity_get(&mut current, &visible).unwrap().is_none());
+        require_conversation_publication_claim(&db, &mut current,
+            "publishing", task_id, Some(&PublicationClaim {
+                worker_id: "new".into(), fencing_token: 2 }), false).unwrap();
+        db.entity_put(&mut current, visible, b"new".to_vec()).unwrap();
+        db.commit(current).unwrap();
     }
 
     #[test]

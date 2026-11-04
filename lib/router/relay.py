@@ -56,7 +56,7 @@ def render_notice(report: dict) -> str:
         '',
         'The report Turn in the Project Router conversation is the canonical record; read it and its '
         'evidence with get_conversation. Decide whether, when and where the owner needs to hear about '
-        'this; stay silent when nothing is needed.',
+        'this; output exactly [SILENT] alone when no new owner decision or action is needed.',
     ])
 
 
@@ -107,7 +107,8 @@ def render_question_notice(question: dict, command_chat: str | None = None) -> s
         *_question_lines(question),
         '',
         'The question card in the Project Router conversation is the canonical record. First read that '
-        'conversation with get_conversation: if the owner already answered there, stay silent. ' + ask,
+        'conversation with get_conversation: if the owner already answered there, output exactly '
+        '[SILENT] alone. ' + ask,
         'When the owner answers, forward their own message verbatim with route_to_project('
         f'project_path="{question["projectPath"]}", source_turn_id=<the Turn of their message>, or '
         f'source_steer_id=<id> for a message sent while you were replying, note="Answers question '

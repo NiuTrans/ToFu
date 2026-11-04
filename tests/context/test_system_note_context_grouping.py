@@ -43,10 +43,11 @@ TR_JS = runtime_section_path('ui/tool_rounds.js')
 pytestmark = pytest.mark.unit
 
 
-def _run_node(harness: str, env_extra: dict) -> str:
-    env = dict(os.environ, **env_extra)
-    proc = subprocess.run(['node', '-e', harness], capture_output=True,
-                          text=True, timeout=30, env=env)
+def _run_node(harness: str, fn_src: str) -> str:
+    # The extracted source exceeds Linux's 128 KiB limit on a single argv/env
+    # string (E2BIG), so the harness reads it from stdin instead.
+    proc = subprocess.run(['node', '-e', harness], input=fn_src,
+                          capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f'node failed: {proc.stderr}\nSTDOUT:{proc.stdout}'
     return proc.stdout.strip()
 
@@ -103,7 +104,7 @@ function _renderToolSlot(r, ctx){ return '<SLOT name=' + (r.toolName||'') + '>';
 """
 
 _HARNESS = _STUBS + r"""
-eval(process.env.FN_SRC);
+eval(require('fs').readFileSync(0, 'utf8'));
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
@@ -193,7 +194,7 @@ console.log(out.join('\n'));
 
 
 def test_adjacent_context_notes_merge_into_one_row():
-    out = _run_node(_HARNESS, {'FN_SRC': _extract_timeline_fns()})
+    out = _run_node(_HARNESS, _extract_timeline_fns())
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'context-note grouping failures:\n' + out
     assert out.count('PASS') >= 16, f'expected >=16 PASS, got:\n{out}'
@@ -201,7 +202,7 @@ def test_adjacent_context_notes_merge_into_one_row():
 
 def test_registry_classifier_unknown_keys_actions_and_scope_fail_closed():
     harness = _STUBS + r'''
-    eval(process.env.FN_SRC);
+    eval(require('fs').readFileSync(0, 'utf8'));
     const results = [];
     const note = (reason, action='prompt') => ({type:'system_note',text:'body',
       blockId:'id',noteKind:'system-intervention',llmRound:0,reason,action});
@@ -222,4 +223,4 @@ def test_registry_classifier_unknown_keys_actions_and_scope_fail_closed():
     results.push(!sameContextNoteScope({llmRound:0},{llmRound:1}));
     console.log(results.every(Boolean) ? 'PASS' : JSON.stringify(results));
     '''
-    assert _run_node(harness, {'FN_SRC': _extract_timeline_fns()}) == 'PASS'
+    assert _run_node(harness, _extract_timeline_fns()) == 'PASS'

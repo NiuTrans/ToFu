@@ -95,7 +95,7 @@ _TOFU_INTENDED_BORDER = '2px solid #3B2E1E'          # authored blocky border
 _TOFU_BLEED_BORDER = '1px solid rgba(184,176,160,0.4)'  # the over-broad bleed
 _BLEED_SELECTOR = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-    'input:not(.recent-search-input):not(.folder-browser-input)'
+    'input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input)'
 )
 # The shared folder browser's filter inside the Co-Pilot modal:
 #   <div class="modal project-modal pm-workbench"> … <section class="folder-browser">
@@ -219,13 +219,13 @@ def test_tofu_generic_modal_rules_do_not_match_settings_panel(css_text):
 
 _NC_FIND = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-    'input:not(.recent-search-input):not(.folder-browser-input){')
+    'input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){')
 _NC_REPL = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-    'input:not(.folder-browser-input){')
+    'input:not(.folder-browser-input, .mp-path-input){')
 _NC_BROWSER_REPL = (
     '[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) '
-    'input:not(.recent-search-input){')
+    'input:not(.recent-search-input):not(.mp-path-input){')
 
 
 def test_nc_reverting_exclusion_reintroduces_bleed(css_text):

@@ -48,7 +48,7 @@ fn seed_projection(database: &mut AuthorityDatabase, projection: Value, runtime:
 }
 
 fn request(revision: u64, index: usize) -> EventRecordRequest {
-    EventRecordRequest { model_continuation:Value::Null, attempt_id:ATTEMPT.into(), task_id:TASK.into(),
+    EventRecordRequest { worker_claim: None, model_continuation:Value::Null, attempt_id:ATTEMPT.into(), task_id:TASK.into(),
         terminal:false, status:"running".into(), slim:false, content:String::new(), thinking:String::new(),
         projection:Value::Null, projection_patch:Some(json!({"version":1, "baseRevision":revision,
             "targetRevision":revision+1, "operations":[

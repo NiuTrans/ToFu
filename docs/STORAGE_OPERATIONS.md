@@ -1,5 +1,18 @@
 # Storage operations and verification
 
+## Durable conversation publication
+
+The worker claim is request-scoped evidence against the existing job, not a new
+receipt, lease ledger or retained Turn field. The cross-authority specification
+`tests/storage/test_conversation_worker_publication.py` compares the complete job
+before and after start, progress and terminal Turn publication: zero job-document
+changes, while the ordinary Turn/replay writes still occur. Refused commands and
+a refused batch suffix leave the complete conversation snapshot and task-event
+log unchanged. This measures logical retained state, not filesystem bytes or
+throughput. PostgreSQL row-lock and native OCC tests cover the publication/claim
+race. Production chat worker admission remains unqualified; see
+[durable worker semantics](STORAGE.md) and [architecture](ARCHITECTURE.md).
+
 ## Payment quote retention
 
 Stripe prepares one durable payment quote before provider IO and later binds its
@@ -417,6 +430,15 @@ plus `tests/compaction/test_dispatch_context_recovery.py`; semantic authority an
 recovery rationale live in [context compaction](CONTEXT_COMPACTION.md).
 Restore and publication eligibility are separate: validated Continue may publish
 only when its final model message exactly represents delivered content.
+
+The six-hour cloud idle L1 policy adds one `lastModelActivityAtMs` integer to
+the existing completed-context checkpoint. A 13-digit millisecond timestamp
+adds 38 bytes to a nonempty compact JSON object (measured by encoding before
+and after adding the field). Replacement, ownership, validation and retention
+remain those of the existing lane checkpoint; there are no additional records,
+indexes, timers or background scans. Legacy checkpoints obtain a conservative
+activity bound from their final owned assistant Turn when restored. See
+[context compaction](CONTEXT_COMPACTION.md) for trigger semantics.
 
 Synthetic comparison: 32 rounds / 8,388,918 evidence characters / 30 calls measured 1.621 ms median and 16,656 temporary bytes on Python 3.12.13. At value one, private offset/header fields add 30/24 compact JSON bytes excluding braces/separators; no payload copy or new worker. These are comparison/storage measurements, not production cache-hit, latency or billed-savings claims.
 

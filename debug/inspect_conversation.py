@@ -1228,14 +1228,25 @@ class DiagnosticResponseTooLarge(DiagnosticBudgetError):
     """One response exceeded its bound, independently of the total allowance."""
 
 
+class DiagnosticTurnTooLarge(DiagnosticBudgetError):
+    """One Turn alone exceeds the whole aggregate allowance, so paging cannot read it."""
+
+    def __init__(self, message: str, *, total_mib: int):
+        super().__init__(message)
+        self.total_mib = total_mib
+
+
+API_TOTAL_MIB_MAX = 1024
+
+
 def _api_total_mib(value: str) -> int:
     """An explicit diagnostic allowance, never an unbounded allocation."""
     try:
         size = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError('must be an integer in 1..1024 MiB') from exc
-    if not 1 <= size <= 1024:
-        raise argparse.ArgumentTypeError('must be an integer in 1..1024 MiB')
+        raise argparse.ArgumentTypeError(f'must be an integer in 1..{API_TOTAL_MIB_MAX} MiB') from exc
+    if not 1 <= size <= API_TOTAL_MIB_MAX:
+        raise argparse.ArgumentTypeError(f'must be an integer in 1..{API_TOTAL_MIB_MAX} MiB')
     return size
 
 class _DiagnosticAPI:
@@ -1383,7 +1394,16 @@ class _DiagnosticAPI:
             if not isinstance(envelope, dict) or not isinstance(envelope.get('data'), dict):
                 raise DiagnosticAPIError('API returned an invalid v4 success envelope')
             return envelope['data']
-        except (OSError, ValueError, RecursionError, http.client.HTTPException) as exc:
+        except DiagnosticBudgetError:
+            raise
+        except (DiagnosticAPIError, OSError, ValueError, RecursionError,
+                http.client.HTTPException) as exc:
+            # The deadline timer shuts the socket down, so the interrupted read surfaces
+            # as a transport or framing fault; it is the exhausted time budget.
+            if time.monotonic() >= self.deadline:
+                raise DiagnosticBudgetError('API diagnostic exceeded its total time budget') from exc
+            if isinstance(exc, DiagnosticAPIError):
+                raise
             detail = ': '.join(
                 f'{link.__class__.__name__}: {link}'
                 for link in _exception_chain(exc))
@@ -1604,6 +1624,7 @@ class _SnapshotReader:
         self.live_seen: tuple[int, int, int] | None = None
         self.incomplete: str | None = None
         self.resume_index: int | None = None
+        self.resume_total_mib: int | None = None
         self.budget_stopped = False
         self.archives: list[dict] = []
         self.archive_count: int | str = 'unknown'
@@ -1686,13 +1707,27 @@ class _SnapshotReader:
 
     def _reconstruct(self, index: int) -> _VerifiedTurn:
         """Download one Turn under one token, following revision moves between chunks."""
-        page, size, token = self._descriptor(index)
         api = self.api
+        before = api.bytes_read
+        page, size, token = self._descriptor(index)
         chunks = (size + 65535) // 65536
         # Refuse before spending a partial Turn; the final header keeps its reserve.
         wire_bytes = ((size + 2) // 3) * 4 + chunks * 1024
         if (wire_bytes > api.remaining_bytes
                 or api.requests + chunks > api.MAX_REQUESTS - api.reserved_requests):
+            # Paging helps only when earlier turns' spend caused the refusal. A fresh read
+            # of this Turn alone still spends a header, this descriptor and the reserve.
+            # Requests derive from the byte allowance and every chunk costs more wire
+            # bytes than its 64 KiB request share, so bytes decide.
+            alone = self.header_bytes + api.bytes_read - before + api.reserved_bytes + wire_bytes
+            if alone > api.MAX_TOTAL_BYTES:
+                mib = 1024 * 1024
+                total_mib = -(-alone // mib)
+                raise DiagnosticTurnTooLarge(
+                    f'Turn {index} alone needs {total_mib} MiB of API reads at revision '
+                    f'{self.revision}, more than the whole {api.MAX_TOTAL_BYTES / mib:g} MiB '
+                    'diagnostic allowance, so paging by turn cannot read it',
+                    total_mib=total_mib)
             raise DiagnosticBudgetError(f'Turn {index} exceeds the remaining diagnostic byte/request budget')
         confirmed = self.revision
         raw = bytearray()
@@ -1813,6 +1848,8 @@ class _SnapshotReader:
                     self.incomplete, self.budget_stopped = str(exc), True
                     if index not in self.turns:
                         self.resume_index = index
+                        if isinstance(exc, DiagnosticTurnTooLarge):
+                            self.resume_total_mib = exc.total_mib
                     break
             covered = all(self._verified(index) or self._is_live(index)
                           for index in self._pending())
@@ -1901,6 +1938,8 @@ class _SnapshotReader:
             document['diagnostic_incomplete'] = self.incomplete
         if self.resume_index is not None:
             document['diagnostic_resume_index'] = self.resume_index
+        if self.resume_total_mib is not None:
+            document['diagnostic_resume_total_mib'] = self.resume_total_mib
         return document, (self.archives if archives_shown else [])
 
 
@@ -2208,8 +2247,14 @@ def _inspect(parser: argparse.ArgumentParser, args: argparse.Namespace,
     if document.get('diagnostic_incomplete'):
         print(f'  INCOMPLETE: {document["diagnostic_incomplete"]}')
         resume = document.get('diagnostic_resume_index')
-        if resume is not None:
-            print(f'  resume: --start-index {resume} --max-turns 1 '
+        # A paging resume keeps the allowance that this run was given explicitly.
+        total_mib = document.get('diagnostic_resume_total_mib', args.api_max_total_mib)
+        if resume is not None and total_mib is not None and total_mib > API_TOTAL_MIB_MAX:
+            print(f'  resume: none; Turn {resume} alone needs more than the '
+                  f'{API_TOTAL_MIB_MAX} MiB maximum --api-max-total-mib')
+        elif resume is not None:
+            allowance = '' if total_mib is None else f' --api-max-total-mib {total_mib}'
+            print(f'  resume: --start-index {resume} --max-turns 1{allowance} '
                   '(fresh revision; not a persisted snapshot)')
     live = document.get('diagnostic_live_index')
     if live is not None:

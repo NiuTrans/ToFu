@@ -9,7 +9,6 @@
 import type { ConversationBlockViewModel } from '../../presentation/conversation-view-model';
 import type { ClassicConversationRendererPorts } from './ports';
 import { textFor } from './localized-copy';
-import { initiatorRoleLabel } from './turn-chrome';
 import { renderTurnContextRailHtml } from '../turn-context-rail';
 
 export function renderOriginBlock(
@@ -21,6 +20,7 @@ export function renderOriginBlock(
   const document = node.ownerDocument;
   node.className = 'conversation-block conversation-block--origin';
   node.replaceChildren();
+  node.hidden = false;
   if (origin.initiator === 'peer' || origin.initiator === 'operator') {
     const banner = document.createElement('div');
     banner.className = `peer-msg-banner${
@@ -100,15 +100,10 @@ export function renderOriginBlock(
     node.appendChild(card);
     return;
   }
-  if (origin.initiator !== 'human' && origin.initiator !== 'autopilot') {
-    const banner = document.createElement('div');
-    banner.className = 'proactive-banner';
-    const label = document.createElement('span');
-    label.className = 'pb-text';
-    label.textContent = initiatorRoleLabel(origin);
-    banner.appendChild(label);
-    node.appendChild(banner);
-  }
+  /* The Turn header already names every initiator (localized role label), so
+   * a label-only banner would repeat it; only origins with facts beyond the
+   * label (peer source, Brain dispatch details) render a block. */
+  node.hidden = true;
 }
 
 type ContextBlock = Extract<ConversationBlockViewModel, { kind: 'context' }>;
