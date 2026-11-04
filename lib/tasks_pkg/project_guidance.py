@@ -110,9 +110,9 @@ def check_project_guidance(task: dict, tool_name: str, arguments: dict) -> str:
     targets = _tool_targets(task, tool_name, arguments)
     if not targets:
         return ''
-    rows = {}
+    rows, reads = {}, {}
     for root, selected in targets:
-        for row in read_scoped_guidance(str(root), str(selected)):
+        for row in read_scoped_guidance(str(root), str(selected), reads=reads):
             rows[row['path']] = row
     state = _state(task)
     with state['lock']:

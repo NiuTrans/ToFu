@@ -59,15 +59,38 @@ def build_root_policy(primary, extras=None, readonly_paths=None):
 
 
 def register_root_policy(key, policy):
-    """Project task-owned policy into the bounded cache, preserving labels."""
+    """Project task-owned policy into the bounded cache, preserving labels.
+
+    Every tool admission re-registers its task's policy, so this holds the
+    process-wide ``_lock`` for dictionary updates only. Re-registering the
+    registered roots object keeps the sticky cwd: those maps only gain roots
+    in place, and ``get_conv_cwd`` re-validates on every read anyway.
+    """
+    roots = policy['roots']
     with _lock:
-        _conv_roots[key] = policy['roots']
+        unchanged = (_conv_roots.get(key) is roots
+                     and _conv_primary.get(key) == policy['primaryPath'])
+        _conv_roots[key] = roots
         _conv_roots.move_to_end(key)
         _conv_primary[key] = policy['primaryPath']
-        cwd = _conv_cwd.get(key)
-        if cwd and not _cwd_within_conv_roots(key, cwd):
-            _conv_cwd.pop(key, None)
+        cwd = None if unchanged else _conv_cwd.get(key)
         _evict_conv_roots_over_cap()
+    if cwd:
+        _retire_cwd_outside_roots(key, cwd, roots)
+
+
+def _retire_cwd_outside_roots(key, cwd, roots):
+    """Drop a sticky cwd the newly registered roots no longer contain.
+
+    The containment check walks the filesystem (realpath), so it runs without
+    ``_lock``. The drop is compare-and-set: a cwd accepted, or another policy
+    registered, meanwhile is left to its own validation.
+    """
+    if _cwd_within_conv_roots(key, cwd):
+        return
+    with _lock:
+        if _conv_cwd.get(key) == cwd and _conv_roots.get(key) is roots:
+            _conv_cwd.pop(key, None)
 
 
 from lib.log import get_logger
@@ -379,22 +402,10 @@ def set_conv_roots(conv_id, primary_path, extras=None, readonly_paths=None):
     policy = build_root_policy(primary_path, extras, readonly_paths)
     abs_primary = policy['primaryPath']
     extras_list = list(extras or [])
-    with _lock:
-        conv_map = policy['roots']
-        # LRU eviction: drop oldest if over cap.  Re-insertion moves an
-        # existing conv to the end (most-recent).
-        if conv_id in _conv_roots:
-            _conv_roots.move_to_end(conv_id)
-        _conv_roots[conv_id] = conv_map
-        _conv_primary[conv_id] = abs_primary
-
-        cwd = _conv_cwd.get(conv_id)
-        if cwd and not _cwd_within_conv_roots(conv_id, cwd):
-            _conv_cwd.pop(conv_id, None)
-        # LRU eviction that PINS live-task convs (never evict a conv whose
-        # task is mid-flight — see _evict_conv_roots_over_cap). The conv we
-        # just registered is newest, so it is never the victim.
-        _evict_conv_roots_over_cap()
+    conv_map = policy['roots']
+    # Most-recent LRU position; eviction pins live-task convs (see
+    # _evict_conv_roots_over_cap) and never picks the newest registration.
+    register_root_policy(conv_id, policy)
     logger.debug('[Config] set_conv_roots conv=%s primary=%s extras=%d names=%s',
                  conv_id[:12] if conv_id else '?',
                  abs_primary, len(extras_list), list(conv_map.keys()))
@@ -801,21 +812,22 @@ def get_state():
                 if rs['path'] == primary:
                     s['readOnly'] = rs.get('access') == 'ro'
                     break
-        # Cross-DC latency indicator
-        try:
-            from lib.cross_dc import get_cluster_for_path, get_latency_class, get_latency_s
-            if primary:
-                lat_class = get_latency_class(primary)
-                if lat_class != 'unknown':
-                    s['crossDC'] = {
-                        'latencyClass': lat_class,
-                        'cluster': get_cluster_for_path(primary),
-                        'latencyMs': round(get_latency_s(primary) * 1000, 1) if get_latency_s(primary) else None,
-                    }
-        except Exception as e:
-            logger.debug('[Config] cross_dc info unavailable: %s', e)
-        _attach_git_branches(s, primary)
-        return s
+    # Cross-DC and git probes do path I/O and spawn git: never under _lock,
+    # which every tool admission takes.
+    try:
+        from lib.cross_dc import get_cluster_for_path, get_latency_class, get_latency_s
+        if primary:
+            lat_class = get_latency_class(primary)
+            if lat_class != 'unknown':
+                s['crossDC'] = {
+                    'latencyClass': lat_class,
+                    'cluster': get_cluster_for_path(primary),
+                    'latencyMs': round(get_latency_s(primary) * 1000, 1) if get_latency_s(primary) else None,
+                }
+    except Exception as e:
+        logger.debug('[Config] cross_dc info unavailable: %s', e)
+    _attach_git_branches(s, primary)
+    return s
 
 
 def get_state_for_conv(conv_id, held_roots=()):
@@ -859,42 +871,45 @@ def get_state_for_conv(conv_id, held_roots=()):
     with _lock:
         conv_map = _conv_roots.get(conv_id)
         if not conv_map:
-            if not held:
-                # No scoped registry and no held root — legacy global view.
-                return get_state()
+            if held:
+                s = dict(_state)
+                s['path'] = held[0]
+                # Same payload contract as get_state(): undo pre-images never ship.
+                s['modificationsCount'] = len(_state.get('modifications', []))
+                s.pop('modifications', None)
+                s['extraRoots'] = [
+                    {'path': path, 'name': os.path.basename(path) or 'root',
+                     'fileCount': 0, 'scanning': False, 'readOnly': False}
+                    for path in held[1:]
+                ]
+        else:
+            primary = _conv_primary.get(conv_id) or (held[0] if held else '')
             s = dict(_state)
-            s['path'] = held[0]
-            # Same payload contract as get_state(): undo pre-images never ship.
+            # The conv's own primary is authoritative for its bar — NOT the
+            # global _state['path'] (which may be another conv's project).
+            if primary:
+                s['path'] = primary
             s['modificationsCount'] = len(_state.get('modifications', []))
             s.pop('modifications', None)
-            s['extraRoots'] = [
-                {'path': path, 'name': os.path.basename(path) or 'root',
-                 'fileCount': 0, 'scanning': False, 'readOnly': False}
-                for path in held[1:]
-            ]
-            return _attach_git_branches(s, held[0])
-        primary = _conv_primary.get(conv_id) or (held[0] if held else '')
-        s = dict(_state)
-        # The conv's own primary is authoritative for its bar — NOT the
-        # global _state['path'] (which may be another conv's project).
-        if primary:
-            s['path'] = primary
-        s['modificationsCount'] = len(_state.get('modifications', []))
-        s.pop('modifications', None)
-        extra = []
-        for rn, rs in conv_map.items():
-            if rs['path'] != primary:
-                extra.append({'path': rs['path'], 'name': rn,
-                              'fileCount': rs['fileCount'],
-                              'scanning': rs['scanning'],
-                              'readOnly': rs.get('access') == 'ro'})
-        s['extraRoots'] = extra
-        # Primary root's own access flag (the primary may itself be RO).
-        if primary:
-            for rs in conv_map.values():
-                if rs['path'] == primary:
-                    s['readOnly'] = rs.get('access') == 'ro'
-                    break
+            extra = []
+            for rn, rs in conv_map.items():
+                if rs['path'] != primary:
+                    extra.append({'path': rs['path'], 'name': rn,
+                                  'fileCount': rs['fileCount'],
+                                  'scanning': rs['scanning'],
+                                  'readOnly': rs.get('access') == 'ro'})
+            s['extraRoots'] = extra
+            # Primary root's own access flag (the primary may itself be RO).
+            if primary:
+                for rs in conv_map.values():
+                    if rs['path'] == primary:
+                        s['readOnly'] = rs.get('access') == 'ro'
+                        break
+    # Git probes spawn processes: they run after _lock, which every tool
+    # admission takes, is released.
+    if not conv_map:
+        # No scoped registry and no held root — legacy global view.
+        return _attach_git_branches(s, held[0]) if held else get_state()
     # Cross-DC latency indicator (outside _lock — cross_dc has its own cache).
     try:
         from lib.cross_dc import get_cluster_for_path, get_latency_class, get_latency_s
