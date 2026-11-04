@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 from evaluations import pi_contract
-from evaluations.opencode_contract import CONTINUATION_NUDGE
 from evaluations.terminal_bench import audit, harness
 
 pytestmark = pytest.mark.unit
@@ -80,7 +79,7 @@ def test_guest_program_is_valid_bash_with_harbor_flags():
                   ["--provider", "zai", "--model", MODEL, "--thinking", "max"]):
         assert shlex.join(flags) in program
     assert '-- "$(< /logs/agent/instruction.md)"' in program
-    assert shlex.join(["--continue", "--", CONTINUATION_NUDGE]) in program
+    assert "--continue" not in program
 
 
 # A ``node`` that scripts Pi's stop reason and exit code per call and runs the
@@ -99,36 +98,30 @@ exec "$FAKE_REAL_NODE" "$@"
 
 
 @needs_node
-@pytest.mark.parametrize(("stops", "codes", "budget", "exit_code"), [
-    (["length", "stop"], [0, 0], 16, 0),
-    (["length", "length", "length"], [0, 0, 0], 2, 42),
-    (["stop"], [3], 16, 3),
-])
-def test_guest_program_resumes_only_after_output_limit_stops(tmp_path, stops, codes, budget, exit_code):
+@pytest.mark.parametrize(("stop", "code"), [("length", 0), ("stop", 0), ("stop", 3)])
+def test_guest_program_runs_pi_once_and_keeps_its_exit_code(tmp_path, stop, code):
     home, log_dir, fake = tmp_path / "runtime", tmp_path / "logs", tmp_path / "fake"
     (home / "node" / "bin").mkdir(parents=True)
     node = home / "node" / "bin" / "node"
     node.write_text(FAKE_NODE)
     node.chmod(0o755)
     fake.mkdir()
-    (fake / "stops").write_text("\n".join(stops) + "\n")
-    (fake / "codes").write_text("\n".join(map(str, codes)) + "\n")
+    (fake / "stops").write_text(stop + "\n")
+    (fake / "codes").write_text(f"{code}\n")
     write_log_files(pi_spec(), log_dir)
     program = pi_contract.guest_shell_command(home=str(home), model=MODEL, thinking="max",
-                                              log_dir=str(log_dir), max_continuations=budget)
+                                              log_dir=str(log_dir))
     env = {"PATH": os.environ["PATH"], "FAKE_PI_DIR": str(fake), "FAKE_REAL_NODE": NODE}
     done = subprocess.run(["bash", "-c", program], env=env, cwd=tmp_path, capture_output=True, timeout=60)
-    assert done.returncode == exit_code, done.stderr
-    calls = [(fake / f"call-{n}.args").read_bytes().decode().split("\0")[:-1] for n in range(1, len(stops) + 1)]
-    assert int((fake / "count").read_text()) == len(stops)
-    assert calls[0][-2:] == ["--", "Do the thing."] and "--continue" not in calls[0]
-    for call in calls:
-        assert call[1:9] == ["--print", "--mode", "json", "--session-dir", f"{log_dir}/pi/sessions",
-                             "--provider", "zai", "--model"]
-    for call in calls[1:]:
-        assert call[-3:] == ["--continue", "--", CONTINUATION_NUDGE]
+    assert done.returncode == code, done.stderr
+    # An output-limit stop ends the run exactly like any other ending.
+    assert int((fake / "count").read_text()) == 1
+    call = (fake / "call-1.args").read_bytes().decode().split("\0")[:-1]
+    assert call[1:9] == ["--print", "--mode", "json", "--session-dir", f"{log_dir}/pi/sessions",
+                         "--provider", "zai", "--model"]
+    assert call[-2:] == ["--", "Do the thing."] and "--continue" not in call
     events = (log_dir / pi_contract.GUEST_EVENTS_FILE).read_text().splitlines()
-    assert [json.loads(line)["type"] for line in events] == ["message_end"] * len(stops)
+    assert [json.loads(line)["type"] for line in events] == ["message_end"]
     assert (log_dir / "pi" / "agent" / "models.json").read_text() == (log_dir / "pi-models.json").read_text()
 
 
@@ -141,25 +134,6 @@ def test_events_helper_drops_stream_updates_across_pipe_chunks(tmp_path):
     stream = kept[0] + update + kept[1] + update + b'{"type":"agent_end"}'
     done = subprocess.run([NODE, str(helper), "filter"], input=stream, capture_output=True, timeout=60)
     assert done.returncode == 0 and done.stdout == kept[0] + kept[1] + b'{"type":"agent_end"}'
-
-
-@needs_node
-@pytest.mark.parametrize(("lines", "at_length"), [
-    ([("assistant", "toolUse"), ("toolResult", None), ("assistant", "length")], True),
-    ([("assistant", "length"), ("assistant", "stop")], False),
-    ([("assistant", "length"), ("user", None)], True),
-    ([], False),
-])
-def test_events_helper_reports_a_final_output_limit_stop(tmp_path, lines, at_length):
-    helper = tmp_path / pi_contract.GUEST_HELPER_FILE
-    helper.write_text(pi_contract.EVENTS_HELPER)
-    events = tmp_path / "pi.jsonl"
-    # Compact like Pi's JSON.stringify: the helper matches the record prefix without parsing.
-    rows = [json.dumps({"type": "message_end", "message": {"role": role, "stopReason": stop}},
-                       separators=(",", ":")) for role, stop in lines]
-    events.write_text("\n".join(["not json", *rows]) + "\n")
-    done = subprocess.run([NODE, str(helper), "ended-at-length", str(events)], timeout=60)
-    assert done.returncode == (0 if at_length else 1)
 
 
 def session_line(message: dict) -> str:
@@ -209,8 +183,7 @@ def sse(step: dict) -> bytes:
                     reason="set TB_NATIVE_PI_RUNTIME to an extracted Pi runtime tree")
 def test_pinned_pi_runs_against_a_relay_stub(tmp_path):
     script = [{"command": "printf hello > out.txt"},
-              {"text": "The file is written, and the summary is", "finish": "length"},
-              {"text": "Done.", "finish": "stop"}]
+              {"text": "The file is written, and the summary is", "finish": "length"}]
     seen: list[dict] = []
 
     class Relay(http.server.BaseHTTPRequestHandler):
@@ -246,14 +219,14 @@ def test_pinned_pi_runs_against_a_relay_stub(tmp_path):
     stderr = (log_dir / pi_contract.GUEST_STDERR_FILE).read_text(errors="replace")
     assert done.returncode == 0, (done.stdout, done.stderr, stderr)
     assert (work / "out.txt").read_text() == "hello"
-    assert len(seen) == 3 and {item["path"] for item in seen} == {"/arm/pi-x/v1/chat/completions"}
+    # Pi itself ends the run at the output-limit stop; nothing resumes it.
+    assert len(seen) == 2 and {item["path"] for item in seen} == {"/arm/pi-x/v1/chat/completions"}
     first = seen[0]["body"]
     assert first["model"] == MODEL and first["stream"] is True
     assert first["reasoning_effort"] == "max"
     assert first["thinking"] == {"type": "enabled", "clear_thinking": False}
     assert first["tool_stream"] is True
     assert {"bash", "read", "edit", "write"} <= {tool["function"]["name"] for tool in first["tools"]}
-    assert CONTINUATION_NUDGE in json.dumps(seen[2]["body"]["messages"][-1])
     stream = (log_dir / pi_contract.GUEST_EVENTS_FILE).read_text().splitlines()
     assert stream and not [line for line in stream if '"type":"message_update"' in line]
     events = audit.tool_events(log_dir)

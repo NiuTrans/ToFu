@@ -12,9 +12,8 @@ Owns Pi's pins and launch translation for both evaluation paths:
 
 No alternate agent loop, model proxy or credential lives here; the relay holds
 the model keys. Entry point: ``python -m evaluations.pi_contract build-runtime``.
-Dependencies: standard library and ``evaluations.opencode_contract`` (shared
-continuation nudge); ``build_runtime`` downloads from nodejs.org and the npm
-registry through the host proxy environment.
+Dependencies: standard library; ``build_runtime`` downloads from nodejs.org and
+the npm registry through the host proxy environment.
 """
 from __future__ import annotations
 
@@ -31,8 +30,6 @@ import sys
 import tarfile
 import urllib.request
 from pathlib import Path
-
-from evaluations.opencode_contract import CONTINUATION_NUDGE
 
 PI_AGENT = 'pi'
 PI_VERSION = '1.4.0'
@@ -66,11 +63,8 @@ _PROXY_ENV_KEYS = frozenset({'http_proxy', 'https_proxy', 'no_proxy', 'all_proxy
 # Node-only helper copied next to the logs. ``filter`` drops message_update
 # records (delta-only stream updates Harbor also drops; message_end carries the
 # authoritative message) and keeps draining after a deadline SIGTERM until Pi
-# closes the pipe. ``ended-at-length FILE`` exits 0 when the last assistant
-# message stopped at the output-token limit.
-EVENTS_HELPER = r'''import { readFileSync } from "node:fs";
-
-const [mode, file] = process.argv.slice(2);
+# closes the pipe.
+EVENTS_HELPER = r'''const [mode] = process.argv.slice(2);
 const UPDATE = Buffer.from('{"type":"message_update"');
 if (mode === "filter") {
   process.on("SIGTERM", () => {});
@@ -89,18 +83,8 @@ if (mode === "filter") {
   process.stdin.on("end", () => {
     if (pending.length) keep(pending);
   });
-} else if (mode === "ended-at-length") {
-  let stop = null;
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (!line.startsWith('{"type":"message_end"')) continue;
-    try {
-      const message = JSON.parse(line).message;
-      if (message && message.role === "assistant") stop = message.stopReason;
-    } catch {}
-  }
-  process.exit(stop === "length" ? 0 : 1);
 } else {
-  process.stderr.write("usage: pi-events.mjs filter | ended-at-length FILE\n");
+  process.stderr.write("usage: pi-events.mjs filter\n");
   process.exit(2);
 }
 '''
@@ -149,20 +133,16 @@ def guest_models_config(*, base_url: str, model: str, context_tokens: int,
     }}}
 
 
-def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = GUEST_LOG_DIR,
-                        max_continuations: int = 16) -> str:
-    """Harbor's Pi invocation, resumed while a run ends at the output-token limit.
+def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = GUEST_LOG_DIR) -> str:
+    """Harbor's single Pi invocation; Pi's exit code is the program's exit code.
 
     Harbor runs ``pi --print --mode json --session-dir /logs/agent/pi/sessions
-    --provider P --model M --thinking T <instruction>`` and saves the stream
-    without ``message_update`` records. Two deliberate differences: the
+    --provider P --model M --thinking T <instruction>`` once and saves the
+    stream without ``message_update`` records. One deliberate difference: the
     instruction follows ``--`` (Pi rejects a prompt starting with ``-`` as an
-    unknown option, e.g. TB2.1 ``pytorch-model-recovery``), and a run whose last
-    assistant message stopped at the output limit is resumed with
-    ``--continue`` and the shared nudge, exactly as the OpenCode arm is: Pi ends
-    a run on such a response when it carries no tool call. Exit codes follow the
-    OpenCode loop: Pi's nonzero code propagates; 42 means the continuation
-    budget ran out.
+    unknown option, e.g. TB2.1 ``pytorch-model-recovery``), so every task is
+    delivered. A run that ends at the output-token limit is scored as it ended;
+    the evaluation never resumes or nudges the agent.
     """
     if thinking not in PI_CLI_THINKING_LEVELS:
         raise ValueError('Pi thinking level must be one of ' + ', '.join(PI_CLI_THINKING_LEVELS))
@@ -170,32 +150,16 @@ def guest_shell_command(*, home: str, model: str, thinking: str, log_dir: str = 
     agent_dir, session_dir = f'{log_dir}/pi/agent', f'{log_dir}/pi/sessions'
     base = [node, f'{home}/{PI_CLI}', '--print', '--mode', 'json', '--session-dir', session_dir,
             '--provider', catalog_provider(model), '--model', model, '--thinking', thinking]
-    first = shlex.join(base + ['--']) + ' "$(< ' + shlex.quote(f'{log_dir}/instruction.md') + ')"'
-    resume = shlex.join(base + ['--continue', '--', CONTINUATION_NUDGE])
+    run = shlex.join(base + ['--']) + ' "$(< ' + shlex.quote(f'{log_dir}/instruction.md') + ')"'
     events = shlex.quote(f'{log_dir}/{GUEST_EVENTS_FILE}')
-    sink = (' < /dev/null 2>> ' + shlex.quote(f'{log_dir}/{GUEST_STDERR_FILE}')
-            + ' | ' + shlex.join([node, helper, 'filter']) + ' >> ' + events)
+    sink = (' < /dev/null 2> ' + shlex.quote(f'{log_dir}/{GUEST_STDERR_FILE}')
+            + ' | ' + shlex.join([node, helper, 'filter']) + ' > ' + events)
     return (
         f'mkdir -p {shlex.quote(agent_dir)} {shlex.quote(session_dir)} && '
         f'cp {shlex.quote(log_dir + "/" + GUEST_MODELS_FILE)} {shlex.quote(agent_dir + "/models.json")}'
         ' || exit 1\n'
-        'attempt=0\n'
-        f'while [ $attempt -le {int(max_continuations)} ]; do\n'
-        '  if [ $attempt -eq 0 ]; then\n'
-        f'    {first}{sink}\n'
-        '    rc=${PIPESTATUS[0]}\n'
-        '  else\n'
-        f'    {resume}{sink}\n'
-        '    rc=${PIPESTATUS[0]}\n'
-        '  fi\n'
-        '  [ $rc -ne 0 ] && exit $rc\n'
-        f'  if {shlex.join([node, helper, "ended-at-length"])} {events}; then\n'
-        '    attempt=$((attempt+1))\n'
-        '    continue\n'
-        '  fi\n'
-        '  exit 0\n'
-        'done\n'
-        'exit 42\n'
+        f'{run}{sink}\n'
+        'exit ${PIPESTATUS[0]}\n'
     )
 
 
