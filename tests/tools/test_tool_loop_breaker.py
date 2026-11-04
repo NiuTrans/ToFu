@@ -25,7 +25,10 @@ import pytest
 
 from lib.tasks_pkg.orchestrator._round_state import RoundState
 from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+    _MAX_TRACKED_READ_SOURCES,
     _failure_fingerprint,
+    _live_evidence_ids,
+    _live_read_coverage,
     _round_loop_digest,
     _shell_command_is_observation,
     finish_after_background_task_acceptance,
@@ -52,12 +55,17 @@ def _rs():
 
 def _round(task, llm_round, name='run_command', args='{"command": "pwd"}',
            content='', status='done', results=None,
-           tool_result_evidence=None):
+           tool_result_evidence=None, tool_call_id=None,
+           parent_tool_call_id=None):
     row = {
         'toolName': name, 'toolArgs': args, 'toolContent': content,
         'status': status, 'llmRound': llm_round,
         'roundNum': len(task['toolRounds']),
     }
+    if tool_call_id is not None:
+        row['toolCallId'] = tool_call_id
+    if parent_tool_call_id is not None:
+        row['parentToolCallId'] = parent_tool_call_id
     if results is not None:
         row['results'] = results
     if tool_result_evidence is not None:
@@ -99,8 +107,13 @@ def _single_tool_message_round(
     ])
     _round(
         task, llm_round, name=name, args=args, content=content,
-        status=status,
+        status=status, tool_call_id=call_id,
     )
+    return call_id
+
+
+def _coverage(task):
+    return _live_read_coverage(task['_tool_loop_guard'])
 
 
 class TestDigest:
@@ -1036,7 +1049,7 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, messages=messages,
             round_num=0, tid='abcdef12') is False
-        assert task['_tool_loop_guard']['read_coverage'] == {}
+        assert _coverage(task) == {}
 
         ranged = _v2_result(
             evidence='ev_panel_130_260',
@@ -1049,7 +1062,7 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, messages=messages,
             round_num=1, tid='abcdef12') is False
-        assert task['_tool_loop_guard']['read_coverage']['panel.ts'] == [
+        assert _coverage(task)['panel.ts'] == [
             [130, 260]]
         assert task['_tool_loop_guard']['redundant_read_streak'] == 0
 
@@ -1077,8 +1090,8 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=0, tid='abcdef12') is False
         state = task['_tool_loop_guard']
-        assert state['read_coverage'] == {}
-        assert 'ev_sparse_partial' in state['read_evidence_ids']
+        assert _live_read_coverage(state) == {}
+        assert 'ev_sparse_partial' in _live_evidence_ids(state)
 
     def test_same_partial_v2_evidence_under_changed_ranges_is_redundant(self):
         task, rs = _task(), _rs()
@@ -1093,7 +1106,7 @@ class TestSemanticProgressGuard:
         for rn in range(2):
             assert handle_tool_loop_circuit_breaker(
                 task, rs, round_num=rn, tid='abcdef12') is False
-        assert task['_tool_loop_guard']['read_coverage'] == {}
+        assert _coverage(task) == {}
         assert task['_tool_loop_guard']['redundant_read_streak'] == 1
 
     def test_truncated_file_projection_item_does_not_claim_requested_range(self):
@@ -1110,7 +1123,7 @@ class TestSemanticProgressGuard:
                content=content)
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=0, tid='abcdef12') is False
-        assert task['_tool_loop_guard']['read_coverage'] == {}
+        assert _coverage(task) == {}
 
     def test_unconsumed_partial_artifact_nudges_then_stops_across_tools(self):
         """Incident mtcyxfbwqx03h0: paging/presentation knobs cannot evade."""
@@ -1305,7 +1318,7 @@ class TestSemanticProgressGuard:
         )
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=0, tid='abcdef12') is False
-        assert task['_tool_loop_guard']['read_coverage']['small.py'] == [[1, 100]]
+        assert _coverage(task)['small.py'] == [[1, 100]]
 
         _round(task, 1, name='read_files',
                args='{"path":"small.py","start_line":60,"end_line":70}',
@@ -1327,7 +1340,7 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=1, tid='abcdef12') is False
         assert task['_tool_loop_guard']['redundant_read_streak'] == 0
-        assert task['_tool_loop_guard']['read_coverage']['build.log'] == [[1, 120]]
+        assert _coverage(task)['build.log'] == [[1, 120]]
 
     def test_large_file_refusal_does_not_poison_later_ranged_read(self):
         task, rs = _task(), _rs()
@@ -1336,7 +1349,7 @@ class TestSemanticProgressGuard:
                         'specific content, or read_files with a range.'))
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=0, tid='abcdef12') is False
-        assert task['_tool_loop_guard']['read_coverage'] == {}
+        assert _coverage(task) == {}
 
         _round(task, 1, name='read_files',
                args='{"path":"huge.log","start_line":500,"end_line":550}',
@@ -1344,7 +1357,7 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=1, tid='abcdef12') is False
         assert task['_tool_loop_guard']['redundant_read_streak'] == 0
-        assert task['_tool_loop_guard']['read_coverage']['huge.log'] == [[500, 550]]
+        assert _coverage(task)['huge.log'] == [[500, 550]]
 
     def test_batch_read_records_coverage_for_every_path(self):
         task, rs = _task(), _rs()
@@ -1357,7 +1370,7 @@ class TestSemanticProgressGuard:
         )
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=0, tid='abcdef12') is False
-        coverage = task['_tool_loop_guard']['read_coverage']
+        coverage = _coverage(task)
         assert set(coverage) == {'a.py', 'b.py'}
 
         _round(task, 1, name='read_files',
@@ -1382,6 +1395,489 @@ class TestSemanticProgressGuard:
         assert handle_tool_loop_circuit_breaker(
             task, rs, round_num=2, tid='abcdef12') is False
         assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+
+def _read_args(path, start, end):
+    return json.dumps({'path': path, 'start_line': start, 'end_line': end})
+
+
+def _bound_read(task, messages, llm_round, start, end, *, path='lib/x.py',
+                content=None):
+    return _single_tool_message_round(
+        task, messages, llm_round, name='read_files',
+        args=_read_args(path, start, end),
+        content=content if content is not None else f'lines {start}-{end}')
+
+
+def _compact(messages, *call_ids):
+    """Rewrite results in place the way L1/pressure compaction does."""
+    for message in messages:
+        if (message.get('role') == 'tool'
+                and message.get('tool_call_id') in call_ids):
+            message['content'] = (
+                '[Tool result compacted to save context. Re-call the tool '
+                'to view it again.]')
+
+
+def _summarize_away(messages, *call_ids):
+    """Remove calls and results the way an L2 summary/handoff does."""
+    kept = [
+        message for message in messages
+        if message.get('tool_call_id') not in call_ids
+        and not any(call.get('id') in call_ids
+                    for call in message.get('tool_calls') or ())]
+    messages[:] = [{'role': 'user', 'content': '[Summary of earlier work]'},
+                   *kept]
+
+
+def _nudge_reasons(task):
+    return [nudge['reason'] for nudge in task.get('_toolLoopNudges') or ()]
+
+
+def _breaker(task, rs, messages, round_num, **kwargs):
+    return handle_tool_loop_circuit_breaker(
+        task, rs, messages=messages, round_num=round_num, tid='abcdef12',
+        **kwargs)
+
+
+class TestVisibleEvidenceBinding:
+    """Read credit lasts only while the model can still see the result."""
+
+    def test_still_visible_rereads_warn_then_stop_in_production_lane(self):
+        task, rs, messages = _task(), _rs(), []
+        fired = []
+        for rn, (start, end) in enumerate(
+                ((1, 100), (10, 20), (30, 40), (50, 60), (70, 80))):
+            _bound_read(task, messages, rn, start, end)
+            fired.append(_breaker(task, rs, messages, rn))
+        assert fired == [False, False, False, False, True]
+        assert _nudge_reasons(task) == ['redundant_reads']
+        assert 'still visible' in task['_toolLoopNudges'][0]['prompt']
+        assert rs.exit_reason == 'semantic_redundant_read_loop'
+        assert 'warned_round=4;' in task['error']['raw']
+
+    def test_rereads_after_compaction_are_refetches_not_a_loop(self):
+        """Regression for mw2008zee91571 (force-stopped at round 339)."""
+        task, rs, messages = _task('mw2008zee91571'), _rs(), []
+        calls = []
+        for rn, (start, end) in enumerate(
+                ((1, 100), (10, 20), (30, 40), (50, 60))):
+            calls.append(_bound_read(task, messages, rn, start, end))
+            assert _breaker(task, rs, messages, rn) is False
+        assert _nudge_reasons(task) == ['redundant_reads']
+
+        # Pressure L1 turns every earlier result into a re-call placeholder.
+        _compact(messages, *calls)
+        _bound_read(task, messages, 4, 1, 100)
+        assert _breaker(task, rs, messages, 4) is False
+        state = task['_tool_loop_guard']
+        assert state['redundant_read_streak'] == 0
+        assert state['read_warning_round'] == -1
+
+        # The re-fetched result is visible again, so re-reading it is not.
+        _bound_read(task, messages, 5, 10, 20)
+        assert _breaker(task, rs, messages, 5) is False
+        assert state['redundant_read_streak'] == 1
+        assert 'error' not in task
+        assert _nudge_reasons(task) == ['redundant_reads']
+
+    def test_results_removed_by_summary_lose_their_credit(self):
+        task, rs, messages = _task(), _rs(), []
+        first = _bound_read(task, messages, 0, 1, 100)
+        second = _bound_read(task, messages, 1, 10, 20)
+        for rn in range(2):
+            assert _breaker(task, rs, messages, rn) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 1
+
+        _summarize_away(messages, first, second)
+        _bound_read(task, messages, 2, 10, 20)
+        assert _breaker(task, rs, messages, 2) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+        assert _coverage(task) == {'lib/x.py': [[10, 20]]}
+
+    def test_same_length_rewrite_is_caught_by_the_exact_digest(self):
+        task, rs, messages = _task(), _rs(), []
+        first = _bound_read(task, messages, 0, 1, 100, content='A' * 64)
+        _bound_read(task, messages, 1, 10, 20)
+        for rn in range(2):
+            assert _breaker(task, rs, messages, rn) is False
+        for message in messages:
+            if message.get('tool_call_id') == first:
+                message['content'] = 'B' * 64
+        _bound_read(task, messages, 2, 30, 40)
+        assert _breaker(task, rs, messages, 2) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+    @pytest.mark.parametrize('carrier', ('program_digest', 'absent'))
+    def test_receipt_the_model_never_saw_is_not_evidence(self, carrier):
+        task, rs, messages = _task(), _rs(), []
+        args = _read_args('lib/x.py', 1, 100)
+        body = 'lines 1-100 body'
+        parent = None
+        if carrier == 'program_digest':
+            parent = 'program-0'
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': parent, 'type': 'function',
+                    'function': {'name': 'execute_program',
+                                 'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': parent,
+                 'content': '{"lines": 100}'},
+            ])
+        _round(task, 0, name='read_files', args=args, content=body,
+               tool_call_id='child-0', parent_tool_call_id=parent)
+        assert _breaker(task, rs, messages, 0) is False
+        assert task['_tool_loop_guard']['read_sources'] == {}
+
+        # Same request, same bytes: the first time the model sees them.
+        _single_tool_message_round(
+            task, messages, 1, name='read_files', args=args, content=body)
+        assert _breaker(task, rs, messages, 1) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+        _bound_read(task, messages, 2, 10, 20)
+        assert _breaker(task, rs, messages, 2) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 1
+
+    def test_partial_evidence_identity_expires_with_its_message(self):
+        task, rs, messages = _task(), _rs(), []
+        envelope = _v2_result(evidence='ev_big_log',
+                              summary='first 40 lines of 5000')
+        calls = []
+        for rn, end in enumerate((5000, 4000)):
+            calls.append(_single_tool_message_round(
+                task, messages, rn, name='read_files',
+                args=_read_args('big.log', 1, end), content=envelope))
+            assert _breaker(task, rs, messages, rn) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 1
+
+        _compact(messages, *calls)
+        _single_tool_message_round(
+            task, messages, 2, name='read_files',
+            args=_read_args('big.log', 1, 3000), content=envelope)
+        assert _breaker(task, rs, messages, 2) is False
+        assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+    def test_identical_refetch_after_compaction_restarts_the_exact_chain(self):
+        task, rs, messages = _task(), _rs(), []
+        calls, fired = [], []
+
+        def search(rn):
+            calls.append(_single_tool_message_round(
+                task, messages, rn, name='web_search',
+                args='{"query":"tofu loop"}', content='same hits'))
+            fired.append(_breaker(task, rs, messages, rn))
+
+        search(0)
+        search(1)
+        _compact(messages, *calls)
+        for rn in range(2, 7):
+            search(rn)
+        assert fired == [False] * 6 + [True]
+        assert _nudge_reasons(task) == ['exact_repetition']
+        assert task['_toolLoopNudges'][0]['round'] == 5 + 2
+        assert rs.exit_reason == 'consecutive_identical_rounds_4'
+
+    def test_poll_streak_restarts_when_its_output_was_compacted(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(poll_nudge=3, poll_grace=2)
+        calls = []
+
+        def poll(rn):
+            calls.append(_single_tool_message_round(
+                task, messages, rn, args=json.dumps({'command': 'npm test'}),
+                content='12 passed\n[exit code: 0]'))
+            return _breaker(task, rs, messages, rn,
+                            stagnation_thresholds=thresholds,
+                            max_consecutive_identical=99)
+
+        with registered_chat_task(task):
+            assert poll(0) is False
+            assert poll(1) is False
+            _compact(messages, *calls)
+            assert poll(2) is False
+            assert task['_tool_loop_guard']['poll_streak'] == 1
+            assert poll(3) is False
+            assert '_toolLoopBreakerAudit' not in task
+            assert poll(4) is False
+        audit = task['_toolLoopBreakerAudit']
+        assert [row['action'] for row in audit] == ['nudge']
+
+    def test_failure_streak_restarts_when_its_output_was_compacted(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=2)
+        calls = []
+
+        def fail(rn):
+            calls.append(_single_tool_message_round(
+                task, messages, rn, args=json.dumps({'command': 'npm test'}),
+                content=(f'2026-09-01T10:00:0{rn} AssertionError: expected '
+                         '1 got 2\n[exit code: 1]')))
+            return _breaker(task, rs, messages, rn,
+                            stagnation_thresholds=thresholds,
+                            max_consecutive_identical=99)
+
+        with registered_chat_task(task):
+            assert fail(0) is False
+            assert fail(1) is False
+            _compact(messages, *calls)
+            assert fail(2) is False
+            assert task['_tool_loop_guard']['fail_fp_rounds'] == 1
+            assert fail(3) is False
+            assert '_toolLoopBreakerAudit' not in task
+            assert fail(4) is False
+        audit = task['_toolLoopBreakerAudit']
+        assert [row['action'] for row in audit] == ['nudge']
+
+    def test_compacted_partial_result_voids_its_artifact_obligation(self):
+        task, rs, messages = _task(), _rs(), []
+        calls = []
+
+        def page(rn, before):
+            calls.append(_single_tool_message_round(
+                task, messages, rn, name='get_conversation',
+                args=json.dumps({'conversation_id': 'history',
+                                 'before': before, 'limit': 10}),
+                content=_v2_result(
+                    evidence=f'ev_page_{before}',
+                    artifact='tool-result:' + str(rn) * 64,
+                    summary='same prefix; requested page is hidden')))
+            return _breaker(task, rs, messages, rn)
+
+        assert page(0, 31) is False
+        assert page(1, 29) is False
+        pending = task['_tool_loop_guard']['pending_artifacts_by_scope']
+        assert next(iter(pending.values()))['retryCount'] == 1
+
+        _compact(messages, *calls)
+        assert page(2, 20) is False
+        assert page(3, 12) is False
+        assert next(iter(pending.values()))['retryCount'] == 1
+        assert _nudge_reasons(task) == []
+        assert 'error' not in task
+
+    def test_damaged_visibility_state_is_repaired_not_trusted(self):
+        task, rs, messages = _task(), _rs(), []
+        task['_tool_loop_guard'] = {
+            'read_sources': {
+                'junk': 'not-a-source',
+                'gone': {'callId': 'missing', 'shape': 1, 'digest': 'x',
+                         'spans': [['lib/x.py', 1, 100]]},
+                'legacy': {'callId': '', 'spans': [
+                    ['lib/x.py', True, 500], ['lib/x.py', '1', 500],
+                    'bad', ['lib/x.py', 1, 50]]},
+            },
+            'last_round_messages': 'junk',
+            'read_warning_round': True,
+        }
+        _bound_read(task, messages, 0, 60, 70)
+        assert _breaker(task, rs, messages, 0) is False
+        state = task['_tool_loop_guard']
+        assert 'junk' not in state['read_sources']
+        assert 'gone' not in state['read_sources']
+        assert state['read_warning_round'] == -1
+        assert isinstance(state['last_round_messages'], list)
+        assert state['redundant_read_streak'] == 0
+
+        # The surviving well-formed legacy span still proves lines 1-50.
+        _bound_read(task, messages, 1, 10, 20)
+        assert _breaker(task, rs, messages, 1) is False
+        assert state['redundant_read_streak'] == 1
+
+    def test_read_sources_stay_bounded_and_evict_oldest(self):
+        task, rs, messages = _task(), _rs(), []
+        total = _MAX_TRACKED_READ_SOURCES + 3
+        call_ids = [f'batch-{index}' for index in range(total)]
+        messages.append({'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': call_id, 'type': 'function',
+             'function': {'name': 'read_files', 'arguments': '{}'}}
+            for call_id in call_ids]})
+        for index, call_id in enumerate(call_ids):
+            args = _read_args(f'f{index}.py', 1, 10)
+            messages.append({'role': 'tool', 'tool_call_id': call_id,
+                             'content': f'body {index}'})
+            _round(task, 0, name='read_files', args=args,
+                   content=f'body {index}', tool_call_id=call_id)
+        assert _breaker(task, rs, messages, 0) is False
+        sources = task['_tool_loop_guard']['read_sources']
+        assert len(sources) == _MAX_TRACKED_READ_SOURCES
+        assert set(call_ids[:3]).isdisjoint(sources)
+        assert call_ids[-1] in sources
+
+
+class TestCorrectionScope:
+    """A stop needs a matching correction delivered in an earlier round."""
+
+    def test_exact_nudge_round_never_also_stops_for_redundant_reads(self):
+        task, rs, messages = _task(), _rs(), []
+        fired = []
+        for rn in range(4):  # identical calls and outcomes
+            _bound_read(task, messages, rn, 1, 100)
+            fired.append(_breaker(task, rs, messages, rn))
+        # Round 3 is both the exact correction and the third redundant read.
+        assert fired == [False] * 4
+        assert _nudge_reasons(task) == ['exact_repetition']
+
+        # Following "use different arguments" toward still-visible lines is
+        # warned about specifically before any read stop.
+        _bound_read(task, messages, 4, 10, 20)
+        assert _breaker(task, rs, messages, 4) is False
+        assert _nudge_reasons(task) == ['exact_repetition', 'redundant_reads']
+        _bound_read(task, messages, 5, 30, 40)
+        assert _breaker(task, rs, messages, 5) is True
+        assert rs.exit_reason == 'semantic_redundant_read_loop'
+
+    @pytest.mark.parametrize(
+        'interruption', ('new_evidence', 'other_tool', 'opaque_action',
+                         'operator_steer'))
+    def test_streak_reset_retires_the_read_warning(self, interruption):
+        """An old warning cannot authorize a stop in a later streak."""
+        from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+            reset_tool_loop_guard,
+        )
+        task, rs, messages = _task(), _rs(), []
+        subsets = ((10, 20), (30, 40), (50, 60))
+        _bound_read(task, messages, 0, 1, 100)
+        assert _breaker(task, rs, messages, 0) is False
+        for rn, (start, end) in enumerate(subsets, start=1):
+            _bound_read(task, messages, rn, start, end)
+            assert _breaker(task, rs, messages, rn) is False
+        assert _nudge_reasons(task) == ['redundant_reads']
+
+        rn = 4
+        if interruption == 'operator_steer':
+            assert reset_tool_loop_guard(task) is True
+        else:
+            if interruption == 'new_evidence':
+                _bound_read(task, messages, rn, 101, 200)
+            elif interruption == 'other_tool':
+                _single_tool_message_round(
+                    task, messages, rn, name='web_search',
+                    args='{"query":"tofu"}', content='hits')
+            else:
+                _single_tool_message_round(
+                    task, messages, rn,
+                    args='{"command":"pytest -q"}', content='3 passed')
+            assert _breaker(task, rs, messages, rn) is False
+            rn += 1
+        assert task['_tool_loop_guard']['read_warning_round'] == -1
+
+        # Identical requests with identical, still-visible results.
+        for start, end in (subsets[1], subsets[2], subsets[0]):
+            _bound_read(task, messages, rn, start, end)
+            assert _breaker(task, rs, messages, rn) is False, rn
+            rn += 1
+        assert _nudge_reasons(task) == ['redundant_reads', 'redundant_reads']
+        _bound_read(task, messages, rn, *subsets[1])
+        assert _breaker(task, rs, messages, rn) is True
+        assert rs.exit_reason == 'semantic_redundant_read_loop'
+
+    def test_artifact_stop_waits_for_its_own_earlier_warning(self):
+        task, rs, messages = _task(), _rs(), []
+        summary = 'same prefix; requested page is hidden'
+
+        def page(rn, before):
+            _single_tool_message_round(
+                task, messages, rn, name='get_conversation',
+                args=json.dumps({'conversation_id': 'history',
+                                 'before': before, 'limit': 10}),
+                content=_v2_result(evidence='ev_same',
+                                   artifact='tool-result:' + 'a' * 64,
+                                   summary=summary))
+            return _breaker(task, rs, messages, rn,
+                            max_consecutive_identical=2)
+
+        assert page(0, 31) is False
+        assert page(1, 31) is False
+        # The exact correction owns round 2; the artifact warning defers.
+        assert page(2, 31) is False
+        assert _nudge_reasons(task) == ['exact_repetition']
+        assert page(3, 29) is False
+        assert _nudge_reasons(task) == [
+            'exact_repetition', 'unresolved_artifact']
+        assert page(4, 20) is True
+        assert rs.exit_reason == 'semantic_unresolved_artifact_loop'
+
+    def test_operator_steer_retires_artifact_warning(self):
+        from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+            reset_tool_loop_guard,
+        )
+        task, rs, messages = _task(), _rs(), []
+        fired = []
+        for rn, before in enumerate((31, 29, 20, 12, 5)):
+            if rn == 3:
+                assert reset_tool_loop_guard(task) is True
+            _single_tool_message_round(
+                task, messages, rn, name='get_conversation',
+                args=json.dumps({'conversation_id': 'history',
+                                 'before': before, 'limit': 10}),
+                content=_v2_result(
+                    evidence=f'ev_page_{before}',
+                    artifact='tool-result:' + str(rn) * 64,
+                    summary='same prefix; requested page is hidden'))
+            fired.append(_breaker(task, rs, messages, rn))
+        assert fired == [False, False, False, False, True]
+        assert _nudge_reasons(task) == [
+            'unresolved_artifact', 'unresolved_artifact']
+
+    def test_earlier_read_warning_waits_out_a_same_round_correction(self):
+        task, rs, messages = _task(), _rs(), []
+        _bound_read(task, messages, 0, 1, 100)
+        assert _breaker(task, rs, messages, 0) is False
+        for rn in (1, 2, 3):  # one still-visible subset, repeated
+            _bound_read(task, messages, rn, 10, 20)
+            assert _breaker(task, rs, messages, rn) is False, rn
+        assert _nudge_reasons(task) == ['redundant_reads']
+
+        # Round 4 is the exact correction; the earlier read warning would
+        # otherwise stop the task before the model saw that correction.
+        _bound_read(task, messages, 4, 10, 20)
+        assert _breaker(task, rs, messages, 4) is False
+        assert _nudge_reasons(task) == ['redundant_reads', 'exact_repetition']
+        assert 'error' not in task
+        _bound_read(task, messages, 5, 30, 40)
+        assert _breaker(task, rs, messages, 5) is True
+        assert rs.exit_reason == 'semantic_redundant_read_loop'
+
+    def test_earlier_artifact_warning_waits_out_a_same_round_correction(self):
+        task, rs, messages = _task(), _rs(), []
+        fired = []
+        for rn, before in enumerate((31, 31, 31, 31, 29)):
+            _unchanged_history_page(task, messages, rn, before)
+            fired.append(_breaker(task, rs, messages, rn))
+        # Round 3 repeats round 2 exactly: the exact correction owns it.
+        assert fired == [False, False, False, False, True]
+        assert _nudge_reasons(task) == [
+            'unresolved_artifact', 'exact_repetition']
+        assert rs.exit_reason == 'semantic_unresolved_artifact_loop'
+
+    def test_noop_stop_waits_out_a_same_round_correction(self):
+        task, rs, messages = _task(), _rs(), []
+        noop = '{"command":"true"}'
+        _single_tool_message_round(task, messages, 0, args=noop, content='')
+        assert _breaker(task, rs, messages, 0) is False
+        for rn in (1, 2):
+            _unchanged_history_page(task, messages, rn, 31)
+            assert _breaker(task, rs, messages, rn) is False
+        # The artifact correction and a second no-op share round 3.
+        _unchanged_history_page(task, messages, 3, 31)
+        _single_tool_message_round(task, messages, 3, args=noop, content='')
+        assert _breaker(task, rs, messages, 3) is False
+        assert _nudge_reasons(task) == ['explicit_noop', 'unresolved_artifact']
+        _single_tool_message_round(task, messages, 4, args=noop, content='')
+        assert _breaker(task, rs, messages, 4) is True
+        assert rs.exit_reason == 'semantic_noop_tool_loop'
+
+
+def _unchanged_history_page(task, messages, llm_round, before):
+    """A partial history page whose visible projection never advances."""
+    return _single_tool_message_round(
+        task, messages, llm_round, name='get_conversation',
+        args=json.dumps({'conversation_id': 'history', 'before': before,
+                         'limit': 10}),
+        content=_v2_result(evidence='ev_same',
+                           artifact='tool-result:' + 'a' * 64,
+                           summary='same prefix; requested page is hidden'))
 
 
 def _stagnation_thresholds(**over):
