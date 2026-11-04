@@ -79,6 +79,23 @@ function legacyGatewayValidationEntries(
   return children.length ? children : [entry];
 }
 
+function gatewayResultReceipt(round: TurnToolRound | undefined, callId: string): string {
+  if (round?.toolName !== 'execute_tools') return '';
+  const envelope = recordValue(round.toolContent);
+  const items = Array.isArray(envelope?.items) ? envelope.items : [];
+  const payload = recordValue(items[0]) ?? envelope;
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  let receipt = '';
+  for (const value of results) {
+    const result = recordValue(value);
+    if ((result?.call_id ?? result?.callId) !== callId) continue;
+    const resultId = result?.resultId;
+    if (typeof resultId !== 'string' || !resultId || receipt) return '';
+    receipt = resultId;
+  }
+  return receipt;
+}
+
 function toolRoundHasRejection(round: TurnToolRound): boolean {
   const record = recordValue(round) ?? {};
   if (record.rejection || record._rejected) return true;
@@ -265,6 +282,28 @@ export function visibleActivityEntries(
    * row as the last visible record. execute_tools rows are exempt: they
    * replay as actionable child-validation rows below. */
 
+  const gatewayFallbackOwner = (entry: TurnActivityEntry): TurnToolRound | undefined => {
+    if (!entry.id.includes(':gateway-') || entry.anchorToolRoundNum == null
+        || !entry.toolCallId) return undefined;
+    const parents = toolRounds.filter(round => round.toolName === 'execute_tools'
+      && round.roundNum === entry.anchorToolRoundNum
+      && (!entry.taskId || round.taskId === entry.taskId)
+      && (!entry.attemptId || round.attemptId === entry.attemptId));
+    if (parents.length !== 1) return undefined;
+    const resultId = gatewayResultReceipt(parents[0], entry.toolCallId);
+    if (!resultId) return undefined;
+    const owners = renderedBlocks.filter((block): block is ToolBlockViewModel => {
+      if (block.kind !== 'tool' || block.toolCallId !== entry.toolCallId
+          || block.name !== entry.toolName || block.round?.status !== 'error') return false;
+      const round = block.round;
+      return (!entry.taskId || !round.taskId || round.taskId === entry.taskId)
+        && (!entry.attemptId || !round.attemptId || round.attemptId === entry.attemptId)
+        && round.toolResultEvidence?.resultId === resultId
+        && round.toolResultEvidence.executionStatus === 'error';
+    });
+    return owners.length === 1 ? owners[0].round : undefined;
+  };
+
   const visible = (timeline?.entries ?? []).flatMap((entry) => {
     if (!activityEntryIsVisible(entry)) return [];
 
@@ -276,7 +315,7 @@ export function visibleActivityEntries(
     }
     if (entry.summaryKey === 'activity.tool.failed'
         && entry.toolName !== 'execute_tools'
-        && owner?.status === 'error') {
+        && (owner?.status === 'error' || gatewayFallbackOwner(entry))) {
       return [];
     }
     /* The tool card owns a settled outcome (badge + its real output). The
