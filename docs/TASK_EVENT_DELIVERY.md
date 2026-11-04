@@ -1007,10 +1007,12 @@ remains caller-owned so a failed append can roll back. Structural capture shares
 only immutable rows; replacing/truncating the list or changing legacy mutable
 rows still invalidates the derived source. Normalization preserves identical
 settled note segments. The merger indexes the first existing system-note row by
-block ID and execution scope, updates it at its original position, and searches
-anchors only for new identities. New insertion still observes existing prose,
-round, terminal and stable-order rules. This is not an incremental index for
-every segment type or a claim that initial note placement never scans history.
+block ID and execution scope and updates it at its original position. New
+identities use the existing fixed-block binary search and same-gap ordering;
+per-scope anchor maxima are derived only when a new identity needs them.
+Insertion preserves prose, round, terminal and stable-order rules. This is
+not an incremental index for every segment type or a claim that initial note
+placement never scans history.
 
 The ordinary terminal release owner drops this duplicate live note list only
 after durable acknowledgement. Pending terminal persistence retains its retry
@@ -1032,20 +1034,23 @@ legacy rows, replacement/rollback, duplicate IDs and distinct execution scopes.
 `test_turn_event_record_batch.py` verifies frozen note history through
 unknown-ACK reconciliation against both SQL and native storage authorities.
 
-Matched-source measurement (2026-11-04): the current
+Matched-source measurement (2026-11-05): the current
 `benchmarks/turn_projection_incremental.py` driver ran three fresh alternating
-pairs against source `b4a6e1c0068010fd6ae9142d5c7d1f1d793892a4`, seed 7,
+comparisons of original source `b4a6e1c0068010fd6ae9142d5c7d1f1d793892a4`,
+the parallel fixed-block optimization at `79e7a4ab2cbac744510da5992e4d0eb1de12540a`,
+and their integrated runtime at `4d7c2321e240b6f1fe252194cecea96cdce831ea`, seed 7,
 25 measured cycles (100 structural events) after warm-up, `--busy 0`. Each
 history round carries one note and each measured round adds another. Medians
 of the three per-arm medians, in milliseconds per structural event:
 
-| History tool rounds | Previous capture + projection + patch | Current | Ratio |
-|---|---:|---:|---:|
-| 10 | 1.696 | 1.079 | 1.57× |
-| 100 | 16.328 | 2.866 | 5.70× |
-| 500 | 281.918 | 8.837 | 31.90× |
+| History tool rounds | Original | Fixed-block optimization | Integrated runtime | Original / integrated |
+|---|---:|---:|---:|---:|
+| 10 | 1.673 | 1.171 | 1.052 | 1.59× |
+| 100 | 15.848 | 3.331 | 2.667 | 5.94× |
+| 500 | 280.707 | 18.987 | 8.949 | 31.37× |
 
-Every pair had identical projection/patch digests. Reproduce each pair with
+All three sources had identical projection/patch digests. Reproduce a comparison
+against either exported reference tree with
 `python3 benchmarks/turn_projection_incremental.py --source-root BASE_TREE
 --sizes 10,100,500 --busy 0 --events 25 --seed 7 --json`; alternate source order
 when comparing repeated arms. These are component wall clocks on a shared
@@ -1053,8 +1058,9 @@ host, excluding provider, storage, delivery scheduling and browser work. They
 do not establish production capacity or an end-to-end latency ratio.
 
 In separate fresh processes, capturing the 128-note/32-frame retention fixture
-above under `tracemalloc` retained a median 2,053,615 newly allocated bytes
-before and 1,355,745 after, across three alternating pairs with identical
+above under `tracemalloc` retained a median 2,053,545 newly allocated bytes
+originally, 2,054,665 after fixed-block optimization alone, and 1,355,752 after
+integration, across three alternating comparisons with identical
 snapshot JSON digests. Tracing started after note production and included
 cold capture setup; all frames remained reachable at measurement. This is
 allocation attributed to capture, not process RSS or logical delivery debt.
