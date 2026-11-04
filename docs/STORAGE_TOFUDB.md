@@ -183,6 +183,24 @@ exact supplied base; slim events cannot also carry a structural patch. Native
 normalization rejects stored states requiring unsupported full segment
 assembly instead of silently inventing a different projection.
 
+**Structural patch admission — Problem:** checkpoint reconstruction of a long
+Turn could produce an 8.8 MB patch that fit the request, reconstructed Turn and
+32 MiB attempt-event envelopes, but an additional 8 MiB patch quota rejected it
+as `database_protocol_error`. The retained event could never drain, including
+on terminal retry. **Decision:** patch application and construction use those
+existing enclosing byte boundaries; the 1 MiB compact-head budget only decides
+when to checkpoint. If the expanded replay envelope exceeds its existing
+8 MiB boundary, that same transaction retains the complete attempt event and
+publishes a small `conversation.activity` / `requiresSnapshot` invalidation.
+The existing browser recovery owner reloads authoritative state; ordinary
+events keep their exact replay references. Depth, operation validation, revision fencing, atomic event
+publication and settlement admission remain enforced. **Alternatives:** raising
+the private quota merely moves the failure; slimming or splitting the event
+would weaken its exact projection or atomicity. Codec, native reopen/settlement
+and real Python-to-native carried-event tests cover structural patches above
+8 MiB without discarding history. No new storage format or tuning setting is
+introduced.
+
 `record.get` for `task_results` resolves through the task-result owner header
 and bounded payload codec. It returns the header's current version and overlays
 abort/recovery lifecycle facts onto the stored content: those operations advance

@@ -738,7 +738,7 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         tables["conversation_turns"]["maximumTurnProjectionPatchBytes"]
         == 1024 * 1024
     )
-    assert tables["conversation_turns"]["maximumTurnProjectionWirePatchBytes"] == 8 * 1024 * 1024
+    assert "maximumTurnProjectionWirePatchBytes" not in tables["conversation_turns"]
     assert tables["conversation_turns"]["maximumTurnProjectionPatchDepth"] == 128
     assert (
         tables["conversation_turns"]["maximumTurnProjectionPatchOperations"]

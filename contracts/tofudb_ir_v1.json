@@ -3263,7 +3263,6 @@
       "maximumTurnProjectionTextPageBytes": 16384,
       "maximumTurnProjectionTextAppendBytes": 65536,
       "maximumTurnProjectionPatchBytes": 1048576,
-      "maximumTurnProjectionWirePatchBytes": 8388608,
       "maximumTurnProjectionPatchDepth": 128,
       "maximumTurnProjectionPatchOperations": 65536,
       "maximumLegacyTurnImages": 20,
@@ -3300,6 +3299,8 @@
       "lifecycle": "durable-user-state",
       "constraints": [
         "turn document, lane and compact activity indexes and head, conversation header revision/count/timestamp/index, search markers, sync event, receipt, and outbox commit atomically",
+        "projection patches share the existing request, reconstructed Turn and attempt-event document byte admission; the compact projection-head byte budget controls checkpointing only and no separate patch byte quota rejects an otherwise admissible event",
+        "an attempt event exceeding the expanded conversation-sync envelope byte boundary remains complete in its canonical journal; the same transaction publishes conversation.activity with requiresSnapshot instead of an unreadable replay reference",
         "each search invalidation gets a fresh persisted 128-bit token; exact-token acknowledgement cannot erase a later mutation even after an earlier token was acknowledged and removed; legacy 8-byte tokens remain readable until replaced",
         "turn and attempt IDs are unique across owners within a tenant through dedicated tenant-global claims",
         "new attempt documents cluster by owner and conversation while the tenant-global attempt claim stores a versioned owner/conversation locator; exact lookup remains bounded and legacy owner-only claims remain read-only compatible without startup migration",
