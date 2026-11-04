@@ -5,7 +5,8 @@ for cached replays of a retained capture); read_program_result for explicit gues
 list_program_inputs discovers owned handles without reading source bodies.
 CanonicalReceipt holds a runtime-only descriptor of
 original or computed data; serialized metadata carries no native authority.
-Dependencies: canonical captures, program contracts and launch resource policy.
+Dependencies: canonical captures, program contracts, gateway call normalization
+and launch resource policy.
 """
 from __future__ import annotations
 
@@ -134,9 +135,32 @@ def _binding(name, arguments):
     return (hashlib.sha256(encoded).hexdigest(), encoded) if len(encoded) <= MAX_SOURCE_BYTES else None
 
 
-def _key(name, arguments):
-    binding = _binding(name, arguments)
-    return binding[0] if binding is not None else None
+def _call_binding(task, name, arguments):
+    """Bind a call by the form the gateway executes, for retention and lookup alike.
+
+    Spellings the gateway executes identically (omitted schema defaults, key
+    order, coercible scalars, catalog aliases) share one binding, while any
+    different argument value still binds differently. A call the current
+    catalog cannot normalize keeps its exact spelling. Returns the executed
+    tool name with its ``(key, binding_json)``, or None for an invalid selector.
+    """
+    exact = _binding(name, arguments)
+    if exact is None:
+        return None
+    from lib.tools.gateway import normalize_gateway_call
+    normalized, error = normalize_gateway_call(
+        {'name': name, 'arguments': arguments},
+        catalog=task.get('_executable_tool_catalog') or [],
+        namespace_by_name=task.get('_executableToolNamespaceByName') or {},
+        gateway_call_id='', index=0, source='program_result',
+        contract_documents_by_name=(task.get('_toolContractDocumentsByName')
+                                    if '_toolContractDocumentsByName' in task else None))
+    if error is None:
+        executed_name = normalized['function']['name']
+        binding = _binding(executed_name, normalized['_normalized_arguments'])
+        if binding is not None:
+            return executed_name, binding
+    return name, exact
 
 
 def _complete_inline(canonical):
@@ -180,13 +204,13 @@ def retain_program_result(task, name, arguments, call_id, canonical, *, user_id)
                      and source.lstrip().startswith(('[', '{')))
     if size > MAX_OUTPUT_BYTES or (size < _LARGE_RESULT_BYTES and not is_structured):
         return
-    binding = _binding(name, arguments)
-    if binding is None:
+    bound = _call_binding(task, name, arguments)
+    if bound is None:
         return
     json_type = _snapshot_json_type(source)
     if size < _LARGE_RESULT_BYTES and json_type not in {'array', 'object'}:
         return
-    key, binding_json = binding
+    name, (key, binding_json) = bound
     with task.setdefault('_programResultLock', threading.RLock()):
         index = task.get('_programResultRefs')
         current = index.get(key) if isinstance(index, dict) else None
@@ -216,8 +240,7 @@ def replayed_program_input(task, name, arguments, content):
     """
     from lib.tools.result_envelope import TOOL_RESULT_CONTRACT_VERSION, ToolResultProgramInputV2
     index = task.get('_programResultRefs') if isinstance(task, dict) else None
-    key = _key(name, arguments)
-    if (not isinstance(index, dict) or key is None or not isinstance(content, str)
+    if (not isinstance(index, dict) or not isinstance(content, str)
             or len(content) > MAX_OUTPUT_BYTES):
         return None
     try:
@@ -227,9 +250,11 @@ def replayed_program_input(task, name, arguments, content):
     if not isinstance(value, dict) or value.get('contractVersion') != TOOL_RESULT_CONTRACT_VERSION:
         return None
     metadata = ToolResultProgramInputV2.from_dict(value.get('programInput'))
-    entry = index.get(key)
-    if (metadata is None or not isinstance(entry, _ProgramInputReceipt)
-            or entry.input_ref != metadata.ref):
+    if metadata is None:
+        return None
+    bound = _call_binding(task, name, arguments)
+    entry = index.get(bound[1][0]) if bound is not None else None
+    if not isinstance(entry, _ProgramInputReceipt) or entry.input_ref != metadata.ref:
         return None
     return entry
 
@@ -343,9 +368,10 @@ def read_program_result(task, name, arguments, *, user_id, budget, catalog_names
                       if isinstance(row, (_ProgramInputReceipt, _ProgramValueReceipt)) and row.input_ref == name['ref']), None) if isinstance(index, dict) else None
         name = entry.get('toolName') if entry is not None else None
     else:
-        key = _key(name, arguments)
-        if key is None:
+        bound = _call_binding(task, name, arguments)
+        if bound is None:
             raise ProgramExecutionError('type_error', 'tools.result expects {ref} or an exact tool name and JSON arguments object within 32 KiB')
+        name, (key, _binding_json) = bound
         entry = index.get(key) if isinstance(index, dict) else None
     if (not _active_owner(task, user_id)
             or not _accessible(entry, task, user_id, catalog_names)
