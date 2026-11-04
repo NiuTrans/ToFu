@@ -95,6 +95,38 @@ def test_parent_snapshot_retains_discovery_candidates_after_admission_projection
     assert set(snapshot['conversation_tool_policy']['_toolInitialVisibleNames']) == names(candidates)
 
 
+@pytest.mark.parametrize('mode', ['auto', 'local', 'off', 'native'])
+def test_exactly_delegated_deferred_tool_is_direct_for_the_child(monkeypatch, mode):
+    """A spawn allowlist names exact tools. A tool the parent reached only
+    through discovery must be callable by the child, not hidden behind a
+    discovery surface the narrowed child does not hold."""
+    from lib.tasks_pkg.child_invocation import delegated_tool_discovery_policy
+    parent, _candidates, _authority = prepared(monkeypatch, 'chat', mode)
+    delegated = [tool('read_files'), tool('mcp__fixture__hidden')]
+
+    def child_wire(policy):
+        config = {'model': 'claude-sonnet-4-6',
+                  'tools': {'toolSearch': mode, 'programmaticCalling': 'off'}}
+        child = {'id': 'child', 'messages': [], 'config': config,
+                 '_invocationPolicy': InvocationPolicy.child('parent'),
+                 '_invocationTools': deepcopy(delegated),
+                 '_invocationToolDiscoveryPolicy': {**policy, '_toolSearchMode': mode}}
+        mcfg = dict(project_path='', project_enabled=False, search_mode='off',
+                    search_enabled=False, fetch_enabled=False, code_exec_enabled=False,
+                    browser_enabled=False, desktop_enabled=False, image_gen_enabled=False)
+        assembly.assemble_round_tools(config, child, mcfg)
+        return names(child['_tool_schema'])
+
+    inherited = delegated_tool_discovery_policy(parent, delegated)
+    assert inherited['_requiredDirectToolNames'] == ['read_files']
+    assert 'mcp__fixture__hidden' not in child_wire(inherited)
+
+    exact = delegated_tool_discovery_policy(
+        parent, delegated, direct_names=['mcp__fixture__hidden', 'foreign'])
+    assert sorted(exact['_requiredDirectToolNames']) == ['mcp__fixture__hidden', 'read_files']
+    assert {'read_files', 'mcp__fixture__hidden'} <= child_wire(exact)
+
+
 @pytest.mark.parametrize('role', ['chat', 'coordinator', 'conversation', 'delegated'])
 def test_pins_and_required_tools_survive_visibility_without_granting_unknown_names(monkeypatch, role):
     task, candidates, authority = prepared(monkeypatch, role, policy_updates={

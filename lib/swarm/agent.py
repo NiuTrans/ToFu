@@ -545,6 +545,12 @@ class SubAgent:
             if self.result.checkpoint_phase == 'model_in_flight':
                 self.result.rounds_used = max(live_rounds, self.result.rounds_used)
 
+    def _exactly_selected_tool_names(self):
+        if not self.spec.tools:
+            return ()
+        from lib.swarm.routing import tool_schema_name
+        return [tool_schema_name(tool) for tool in self.tools]
+
     def run(self) -> SubAgentResult:
         """One canonical invocation; scheduler owns retries and aggregation."""
         from lib.tasks_pkg.child_invocation import create_child_invocation, run_child_invocation
@@ -579,7 +585,8 @@ class SubAgent:
                 timeout_seconds=timeout_seconds,
                 progress_beacon=self.progress_beacon, progress_key=self.spec.id,
                 execution_limits=self.spec.execution_limits,
-                output_schema=self.spec.output_schema)
+                output_schema=self.spec.output_schema,
+                direct_tool_names=self._exactly_selected_tool_names())
             self._child = child
             from lib.swarm.message_contract import worker_message_contracts
             child['_invocationToolContracts'] = worker_message_contracts(
