@@ -113,6 +113,39 @@ def test_effect_intent_barrier_wait_is_attributed(clock, monkeypatch, caplog, ac
     assert row['executionEffect']['state'] == ('entered' if acknowledged else 'not_started')
 
 
+def test_project_root_and_guidance_admission_is_attributed(clock, tmp_path, monkeypatch, caplog):
+    from lib.project_mod.config import build_root_policy, clear_conv_state
+    from lib.tasks_pkg import project_guidance, workspace_delivery
+    from lib.tasks_pkg.handlers import project as handler
+    (tmp_path / 'notes.txt').write_text('private-file-content')
+    task = {'id': 'admission-timing-task', '_userId': 7, 'messages': [], 'toolRounds': [],
+            'config': {'projectPath': str(tmp_path)},
+            '_workspaceRootPolicy': build_root_policy(str(tmp_path))}
+    def slow(seconds, original):
+        def run(*args, **kwargs):
+            clock.value += seconds
+            return original(*args, **kwargs)
+        return run
+    monkeypatch.setattr(project_guidance, 'check_project_guidance',
+                        slow(2, project_guidance.check_project_guidance))
+    monkeypatch.setattr(workspace_delivery, 'rebind_project_tool_arguments',
+                        slow(4, workspace_delivery.rebind_project_tool_arguments))
+    monkeypatch.setattr(handler, '_finalize_tool_round', lambda *_args, **_kwargs: None)
+    try:
+        with caplog.at_level(logging.WARNING, logger=timing.logger.name):
+            with timing.tool_execution_timing('read_files', task_id=task['id'], tool_call_id='call-1'):
+                result = handler._handle_project_tool(task, {}, 'read_files', 'call-1',
+                    {'path': 'notes.txt'}, 1, {}, task['config'], str(tmp_path), True)
+    finally:
+        clear_conv_state(task['id'])
+    assert 'private-file-content' in str(result)
+    fields = next(record.tofu_event_fields for record in caplog.records
+                  if getattr(record, 'tofu_event_name', '') == 'tool_execution_slow')
+    assert fields['phases']['project_admission'] == {
+        'elapsed_ms': 6000.0, 'calls': 3, 'bytes_read': 0, 'bytes_written': 0, 'records': 0}
+    assert 'private-file-content' not in caplog.text
+
+
 def test_streaming_prefetch_keeps_call_identity_and_same_budget(clock, monkeypatch, caplog):
     from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
     accumulator = StreamingToolAccumulator({'id':'task-123','convId':'conv-123'}, project_path=None)
