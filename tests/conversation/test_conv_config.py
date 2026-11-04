@@ -297,6 +297,27 @@ class ResolveConvConfigTest(unittest.TestCase):
         self.assertEqual(out['flowId'], 'orch_stored')
         self.assertEqual(out['flowBuiltin'], '')
 
+    def test_every_request_experiment_block_reaches_the_task_config(self):
+        from lib.context_experiment_flags import (
+            DEFAULT_CONTEXT_EXPERIMENT_FLAGS, normalize_context_experiment_flags)
+        blocks = {
+            'cache': {'gpt56BreakpointMode': 'implicit'},
+            'tools': {'toolSearch': 'off', 'programmaticCalling': 'off'},
+            'responses': {'verbosity': 'low'},
+            'orchestration': {'multiAgent': 'read_only'},
+            'context': {'programmaticInputs': True},
+            'compaction': {'strategy': 'adaptive'},
+        }
+        self.assertEqual(set(blocks), set(DEFAULT_CONTEXT_EXPERIMENT_FLAGS))
+        for is_active in (True, False):
+            out = resolve_conv_config(
+                conv_settings={}, overrides=dict(blocks), is_active=is_active)
+            for name, value in blocks.items():
+                self.assertEqual(out[name], value)
+            flags = normalize_context_experiment_flags(out)
+            self.assertEqual(flags['orchestration']['multiAgent'], 'read_only')
+            self.assertTrue(flags['context']['programmaticInputs'])
+
 
 class ResolveConvSettingsTest(unittest.TestCase):
 
