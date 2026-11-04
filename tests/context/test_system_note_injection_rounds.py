@@ -44,10 +44,11 @@ TR_JS = runtime_section_path('ui/tool_rounds.js')
 pytestmark = pytest.mark.unit
 
 
-def _run_node(harness: str, env_extra: dict) -> str:
-    env = dict(os.environ, **env_extra)
-    proc = subprocess.run(['node', '-e', harness], capture_output=True,
-                          text=True, timeout=30, env=env)
+def _run_node(harness: str, fn_src: str) -> str:
+    # The extracted source exceeds Linux's 128 KiB limit on a single argv/env
+    # string (E2BIG), so the harness reads it from stdin instead.
+    proc = subprocess.run(['node', '-e', harness], input=fn_src,
+                          capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f'node failed: {proc.stderr}\nSTDOUT:{proc.stdout}'
     return proc.stdout.strip()
 
@@ -101,7 +102,7 @@ function _renderToolSlot(r, ctx){ return '<SLOT name=' + (r.toolName||'') + '>';
 """
 
 _HARNESS = _STUBS + r"""
-eval(process.env.FN_SRC);
+eval(require('fs').readFileSync(0, 'utf8'));
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
@@ -176,7 +177,7 @@ console.log(out.join('\n'));
 
 
 def test_settled_timeline_renders_injection_rounds_with_kind_labels():
-    out = _run_node(_HARNESS, {'FN_SRC': _extract_timeline_fns()})
+    out = _run_node(_HARNESS, _extract_timeline_fns())
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'injection-round timeline failures:\n' + out
     assert out.count('PASS') >= 18, f'expected >=18 PASS, got:\n{out}'
@@ -186,7 +187,7 @@ _NC_HARNESS = _STUBS + r"""
 // NEUTER: force the generic-fallback presentation (drop kind + reason
 // resolution) so every note renders the generic intervention label, proving
 // the kind/reason presentation maps are load-bearing for the labels above.
-let src = process.env.FN_SRC;
+let src = require('fs').readFileSync(0, 'utf8');
 const needle = 'const presentation = (Object.prototype.hasOwnProperty.call(_SEG_NOTE_REASON_PRESENTATION, reason)';
 const start = src.indexOf(needle);
 const endToken = "_SEG_NOTE_KIND_PRESENTATION['system-intervention'];";
@@ -215,7 +216,7 @@ console.log(out.join('\n'));
 
 
 def test_NC_kind_presentation_map_is_load_bearing():
-    out = _run_node(_NC_HARNESS, {'FN_SRC': _extract_timeline_fns()})
+    out = _run_node(_NC_HARNESS, _extract_timeline_fns())
     assert 'FAIL nc_pattern_matched' not in out, (
         'NEUTER pattern drifted — update the presentation assignment sentinel:\n' + out)
     assert 'PASS nc_session_label_gone' in out, (
