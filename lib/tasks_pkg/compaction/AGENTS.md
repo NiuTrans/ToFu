@@ -13,6 +13,9 @@ tests are the executable compatibility matrix.
 of model prose; its schema is `contracts/compaction_continuity_v1.schema.json`.
 Verify identity/digest before reuse and reserve the complete packet before a
 summary call. Verify `test_unified_continuity.py`, including manual rebuild.
+`_evidence.py` binds L1's original observations to their compacted occurrences;
+verify `test_compaction_chain.py` for L1/L2, restored snapshots and provider wire.
+Final request-size settlement follows all injections/admission, not recomposition.
 `_resume_projection.py` validates accepted archive snapshots against fresh
 history/policy/tool-prefix evidence for Continue; its focused regressions are
 `test_dispatch_context_recovery.py` (including isolated storage restart).

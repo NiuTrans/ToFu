@@ -804,6 +804,29 @@ source and reports the floor; it does not certify semantic completeness, silentl
 clip critical state, or promise every model will make a correct next decision.
 Original Turns/archives remain the exact recall authority.
 
+**Cross-layer evidence:** L1 captures a source observation before replacing a
+cold execution result. Its bounded excerpt remains visible; the occurrence-local
+`_compactionObservation` binds that original record to the projected content,
+adjacent call and compaction owner. L2 validates and folds the original record,
+including its original digest, rather than treating a placeholder as a new
+execution outcome. A later successful occurrence can retire the same invocation's
+old failure even after L1. The metadata survives owned text replay/route changes
+but is stripped from provider requests. It creates no second task ledger and
+does not copy raw logs. Reconstructing a verdict from a first-line preview was
+rejected because failures commonly occur at the end; retaining every full log
+would defeat L1. Corrupt or foreign projections cannot establish evidence.
+
+Recomposition at an accepted compaction boundary retires verified superseded
+managed snapshots again after acquisition. A provider may have changed while
+the summary ran; retaining both versions until the next L2 wastes the newly
+created window and leaves contradictory instructions. The existing snapshot
+owner removes only proven obsolete sections, preserving current siblings,
+human text and ambiguous/unavailable replacements. Ordinary uncompressed rounds
+keep their append-only cache behavior. Verify the complete L1 → L2 → composer →
+final-admission/provider chain in `tests/compaction/test_compaction_chain.py`.
+Its next-action evidence checks and wire-byte measurements are deterministic
+contracts, not evidence of real-model task completion or latency improvement.
+
 **Alternatives rejected:** making Adaptive the default (keeps divergent policy
 and heuristic semantic acceptance); asking the same model to re-grade itself
 (adds latency without independent proof); copying an entire ledger into private
@@ -930,9 +953,13 @@ lists at the saved compaction boundary: policies, history carriers, preserved
 execution, complete handoff and live input. They are not summary-token counts.
 The Turn row (`.compaction-token-stage.is-after` on the card) starts from them
 and then settles on `compaction_request_size`: the gate counter over the complete
-request before compaction, and over the rebuilt request after
-`recompose_context_after_compaction`, restored managed context and tool schemas
-included (`docs/contracts/EVENTS.md`, activity timeline projection). The
+request before compaction, and over the final admitted request after managed
+restoration, inbox/working-fact inputs, checklist/requirements and the final
+execution-allowance notice, with tool schemas included. The ordinary round reuses
+its final admission measurement; reactive recovery measures after its final
+restoration/body rebuild. Recomposition alone cannot settle this event because
+later injections can change the request (`docs/contracts/EVENTS.md`, activity
+timeline projection). Failed admission emits no successful final-size event. The
 receipt's own list omitted both, so conversation `mw10w4j3ghfsbk` showed 82%
 where the next request was billed 49% smaller. Specs:
 `tests/compaction/test_compaction_request_size.py`.

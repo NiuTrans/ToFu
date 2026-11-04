@@ -131,6 +131,9 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             ``fold_paired_interstitial`` (Phase B2) right after
             ``compact_tool_results``.  A/B-verified -1.4% cache writes
             vs B-only (2026-04-27).
+        keep_refetched_results: If True, ``compact_tool_results`` prefers
+            re-fetched results inside the same hot budget (optional
+            pressure only; see ``CompactionContext``).
 
     Returns:
         Estimated number of tokens saved.
@@ -289,6 +292,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
         constants=constants,
         cache_prefix_count=cache_prefix_count,
         ignore_cache_prefix=ignore_cache_prefix,
+        keep_refetched_results=bool(kwargs.get('keep_refetched_results', False)),
         dry_run=dry_run,
         stamp_fn=_stamp_l1,
     )

@@ -121,8 +121,12 @@ def try_pressure_l1(messages, task, *, target_tokens, total_tokens,
     from lib.tasks_pkg.compaction._constants import MICRO_HOT_TAIL_TOKENS
     hot_budget = min(MICRO_HOT_TAIL_TOKENS,
                      max(0, (target_tokens - schema_tokens) // 4))
+    # An economic pass must not evict evidence the model re-fetched after an
+    # earlier compaction: the saving is repaid by the next re-read. Safety
+    # passes keep the historical recency selection.
     options = dict(steps=['compact_tool_results', 'strip_cold_images'],
                    ignore_cache_prefix=True,
+                   keep_refetched_results=not mandatory,
                    constant_overrides={'MICRO_HOT_TAIL_TOKENS': hot_budget})
     from lib.tasks_pkg.context_composer import compact_context_snapshots
     snapshots = compact_context_snapshots(messages)

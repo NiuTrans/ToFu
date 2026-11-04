@@ -435,6 +435,11 @@ changed:
   snapshot compaction (`compact_context_snapshots`, now resolving
   instance ids through `block_spec`) retires superseded per-file versions, and
   memory-only head truncation protects the newest version of each required one;
+- after accepted L2 restoration, that same snapshot retirement runs over the
+  recomposed view too: a freshly acquired replacement removes the verified old
+  section immediately, while current siblings and authored text survive.
+  This boundary has already accepted a cache rewrite; ordinary rounds still
+  append changes without rewriting consumed history;
 - a new task re-reads, once, the rule files whose blocks its inherited history
   carries: unchanged ones cost nothing, changed or deleted ones (or files now
   outside the declared roots, or unreadable) get a superseding version or a

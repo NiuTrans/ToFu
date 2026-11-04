@@ -991,11 +991,17 @@ exemptions (`_SERIAL_BLOCKING_TOOLS`) never arm one. Declarations are
 validated at registration (names ⊆ `provides`; integer within
 [1 s, 3600 s]) — a bad declaration fails loud at load, not mid-task.
 
-Loop guards correct before they stop. A human steer resets the
-exact-repetition chain because it measured an unattended loop the operator
-has already redirected (`reset_tool_loop_guard`, called at the steer-drain
-boundary). The remind-only rung (`tool_repeat_reminder`) fires once per
-repeat digest one step below the corrective nudge: it never vetoes, advances
+Loop guards correct before they stop, and never in the same round: a round
+in which any guard issued a correction never also stops, so the model always
+answers the newest correction. A human steer resets the exact-repetition
+chain because it measured an unattended loop the operator has already
+redirected (`reset_tool_loop_guard`, called at the steer-drain boundary).
+The same reset retires redundant-read and unresolved-artifact warnings,
+because the new instruction can require re-reading; a later stop first needs
+a fresh correction. Visible read evidence, stagnation streaks and the
+explicit-noop history survive the steer. The remind-only rung
+(`tool_repeat_reminder`) fires once per repeat digest one step below the
+corrective nudge: it never vetoes, advances
 no escalation counter, and audits on its own `_toolLoopReminders` ledger so
 it cannot consume the one-correction-per-turn slot the nudge/stop escalation
 and stagnation detectors read.

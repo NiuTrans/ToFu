@@ -1147,7 +1147,7 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     # The Turn row reports the complete provider request (messages, managed
     # context, tool schemas). The gate already counted it; a forced pass counts
     # it before the compactor replaces the list. Recomposition settles the row
-    # on the rebuilt request (_pipeline._settle_rebuilt_request_size).
+    # on the final prepared request (_pipeline.settle_compaction_request_size).
     _request_tokens_before = int(_measurement_out.get('gate_tokens') or 0)
     if task is not None:
         task.pop('_compactionRequestSize', None)

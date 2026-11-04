@@ -155,7 +155,10 @@ def _prepare_reactive_retry_body(
         return None
 
     from ._request_metadata import preserve_rebuilt_request_context
-    return preserve_rebuilt_request_context(body, retry_body, task=task)
+    retry_body = preserve_rebuilt_request_context(body, retry_body, task=task)
+    from lib.tasks_pkg.compaction.api import settle_compaction_request_size
+    settle_compaction_request_size(messages, task, tool_schema=tool_list)
+    return retry_body
 
 
 def _record_reactive_usage(

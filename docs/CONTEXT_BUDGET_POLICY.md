@@ -500,6 +500,19 @@ unknown monetary facts still cannot authorize speculative summary spending.
 A candidate that still needs L2 is discarded untouched, avoiding a partial L1
 rewrite immediately followed by an L2 rewrite. No summarized durable Turn is
 edited. Tools remain paired; unconsumed newest evidence can make L1 insufficient.
+Problem (2026-11-04, conv mw2008zee91571): beside a 55K-token tool schema the
+quarter-target hot budget was about 18K tokens, so 14 optional passes in one
+turn each evicted the working set; the model re-called what the placeholders
+named and the next economic pass evicted those re-reads again. Decision: an
+optional pass spends the unchanged count/token hot budget first on the newest
+live copy of each call whose earlier result is already compacted (same tool
+name and canonical arguments), then on recency; a re-fetch that cannot fit is
+skipped. Mandatory passes and default cache-safe L1 keep recency selection.
+Alternatives rejected: pinning re-fetches beyond the budget grows the candidate
+until optional L1 is refused and pressure falls through to L2 or the mandatory
+pass; enlarging the hot budget is a tuning knob; pinning in default L1 would
+spend its budget on cached-prefix results it never rewrites and evict recent
+uncached evidence instead.
 
 The opt-in evidence-ledger archival transform stays on its existing L2 path;
 pressure trials never create speculative files. Rejected trials emit no

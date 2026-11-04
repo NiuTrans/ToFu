@@ -3357,6 +3357,8 @@ mod tests {
         assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
     }
 
+    include!("server_archive_lane_tests.rs");
+
 }
 
 #[cfg(test)]

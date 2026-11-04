@@ -117,7 +117,8 @@ def build_continuity(messages: list, task: dict | None = None) -> dict:
     # or its prior state. Do not traverse/reintroduce settled raw history.
     observed_task = {key: value for key, value in task.items()
                      if key in {'modifiedFileList', 'modifiedFiles', '_artifacts',
-                                '_contextEvidenceArchives', 'config'}}
+                                '_contextEvidenceArchives', 'config', 'id', 'convId',
+                                '_userId', '_invocationPolicy'}}
     observation_messages = messages
     if previous is None and task.get('toolRounds'):
         from ._handoff import is_compaction_handoff
