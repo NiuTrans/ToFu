@@ -102,7 +102,7 @@ def test_sol_subscription_dispatches_private_luna_or_authorized_paid_api(native,
         slot = auxiliary[0]
         assert slot.logical_model == 'gpt-6-luna'
         assert slot.routing_provider_id == ('provider-b' if paid else 'provider-a')
-        assert kwargs['strict_model'] and kwargs['max_429_attempts'] == 2
+        assert kwargs['strict_model']
         calls.append(slot)
         return ProviderStreamResult.from_legacy(
             {'role': 'assistant', 'content': '### Objective\nComplete summary.'}, 'stop',

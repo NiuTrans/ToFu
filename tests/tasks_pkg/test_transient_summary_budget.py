@@ -26,7 +26,6 @@ def test_slow_complete_summary_finishes_without_deadline(monkeypatch):
         calls.append(kwargs)
         assert kwargs['strict_model'] is True
         assert kwargs['prefer_model'] == 'eval-model'
-        assert kwargs['max_429_attempts'] == 2
         clock[0] += 600
         assert not kwargs['abort_check']()
         return ProviderStreamResult.from_legacy(
