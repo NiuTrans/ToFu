@@ -55,7 +55,7 @@ def _coverage_line(coverage: dict) -> str:
 
 
 def make_compaction_handoff(summary: str, *, phase: str, coverage: dict | None = None,
-                            scheduled_request_id: str = '') -> dict:
+                            scheduled_request_id: str = '', continuity_digest: str = '') -> dict:
     """Render one bounded-by-summary-policy carrier without duplicating its body.
 
     The coverage line precedes the summary so receipt carry-forward, which
@@ -66,6 +66,8 @@ def make_compaction_handoff(summary: str, *, phase: str, coverage: dict | None =
     if phase not in {'pre_turn', 'mid_turn'}:
         raise ValueError('Unknown compaction handoff phase')
     metadata = {'version': HANDOFF_VERSION, 'phase': phase}
+    if continuity_digest:
+        metadata['continuityDigest'] = continuity_digest
     head = '<compaction_handoff>\n' + HANDOFF_GUIDANCE + '\n\n'
     if coverage:
         metadata['coverage'] = dict(coverage)

@@ -43,6 +43,7 @@ class CompactionSources:
     dispatch_measure: Callable | None
     dispatch_target: int | None
     summary_output_budget: int | None
+    continuity_handoff: dict | None = None
 
 
 def plan_compaction_sources(
@@ -102,6 +103,30 @@ def plan_compaction_sources(
         _, dispatch_target = resolve_admission_budget(
             task, round_num=int(options.get('_compaction_round') or 0))
         dispatch_measure = lambda candidate: _count_tokens_authoritative(candidate, task)[0]
+    def selected_sources():
+        # Original observations corresponding to folded L1 shells, in source
+        # chronology. Hot execution remains verbatim and needs no second copy.
+        selected = [message for message in old_messages
+                    if message.get('role') not in ('system', 'developer')
+                    and (message is not anchor_msg or history_entries(message))]
+        folded_ids = {id(m) for m in selected + cold_round_msgs + folded_handoffs}
+        return [originals[id(m)] for m in messages if id(m) in folded_ids]
+
+    from lib.tasks_pkg.compaction._continuity import build_continuity, render_continuity
+    def continuity_reserve():
+        return render_continuity(build_continuity(selected_sources(), task))
+
+    try:
+        continuity = continuity_reserve()
+    except (ValueError, TypeError):
+        result_meta.update(compacted=False, summaryFailureReason='continuity_invalid')
+        return 'Compaction continuity could not be verified; original context preserved.'
+    def continuation_reserve():
+        return make_compaction_handoff(
+            '## Context Compacted — Selective Summary\n\n'
+            + recent_files_block + ('\n\n' + turn_diff_block if turn_diff_block else '')
+            + '\n\n' + continuity, phase=handoff_phase)
+
     summary_output_budget = None
     if callable(dispatch_measure) and isinstance(dispatch_target, int):
         summary_output_budget = min(_SUMMARY_DISPATCH_MAX_TOKENS,
@@ -114,10 +139,7 @@ def plan_compaction_sources(
         while True:
             preview = ports.retained_projection(
                 old_messages, recent_messages, anchor_msg, retained_entries)
-            insert_compaction_handoff(preview, make_compaction_handoff(
-                '## Context Compacted — Selective Summary\n\n'
-                + recent_files_block + ('\n\n' + turn_diff_block if turn_diff_block else ''),
-                phase=handoff_phase))
+            insert_compaction_handoff(preview, continuation_reserve())
             carry_checklist_through_compaction(preview, task)
             retained_tokens = dispatch_measure(
                 ports.restoration_reserve(preview, messages))
@@ -152,20 +174,11 @@ def plan_compaction_sources(
             old_messages = [message for message in messages[:boundary]
                     if id(message) not in protected_skills]
             retained_entries = collect_history_entries(old_messages, opening_message=anchor_msg)
+            continuity = continuity_reserve()
         if isinstance(result_meta, dict):
             result_meta.update(plannedPromptTokens=reserved_tokens,
                                targetPromptTokens=dispatch_target)
-    # Keep source chronology for summary evidence. The opener is supplied
-    # separately; previously retained entries stay available as attributed
-    # history, never as a new human turn.
-    summary_input = [message for message in old_messages
-                     if message.get('role') not in ('system', 'developer')
-                     and (message is not anchor_msg or history_entries(message))]
-    folded_ids = {id(m) for m in summary_input + cold_round_msgs + folded_handoffs}
-    # L1 may have reduced a consumed result to a recovery preview. Summarize
-    # the original selected observations so errors, mutations and identifiers
-    # still pass through the existing bounded evidence formatter exactly once.
-    summary_input = [originals[id(m)] for m in messages if id(m) in folded_ids]
+    summary_input = selected_sources()
     return CompactionSources(
         old_messages=old_messages,
         recent_messages=recent_messages,
@@ -176,4 +189,7 @@ def plan_compaction_sources(
         dispatch_measure=dispatch_measure,
         dispatch_target=dispatch_target,
         summary_output_budget=summary_output_budget,
+        # Economic preflight is an optimistic floor: the packet is required;
+        # recent-file/turn-diff decorations remain optional.
+        continuity_handoff=make_compaction_handoff(continuity, phase=handoff_phase),
     )

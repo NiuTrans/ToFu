@@ -1,4 +1,4 @@
-"""Structured evidence ledger for the opt-in fidelity compaction arm."""
+"""Source-derived observations shared by summary input and continuation state."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pair
 logger = get_logger(__name__)
 
 
-_MAX_ENTRIES = 96
 _MAX_PREVIEW = 600
 _TEST_RE = re.compile(r'\b(pytest|unittest|npm test|pnpm test|cargo test|go test|'
                       r'mvn test|gradle test|ctest)\b', re.IGNORECASE)
-_ERROR_RE = re.compile(r'\b(error|failed|failure|traceback|exception|fatal)\b',
+_ERROR_RE = re.compile(r'^(?:error|failed|failure|traceback|exception|fatal)(?::|\b)',
                        re.IGNORECASE)
+_COMMAND_EXIT = re.compile(r'\[exit code: (-?\d+)\]\s*\Z')
 _QUERY_TOOLS = frozenset({
     'web_search', 'fetch_url', 'search_files', 'grep_search', 'find_files',
     'read_files', 'list_dir', 'inspect_image', 'inspect_video',
@@ -33,7 +33,7 @@ _MUTATION_TOOLS = frozenset({
 _AGENT_TOOLS = frozenset({
     'get_agent_result', 'await_agents', 'spawn_agents',
 })
-_BATCH_TOOLS = frozenset({'execute_tools'})
+_BATCH_TOOLS = frozenset({'execute_tools', 'execute_program'})
 
 
 def _text(value: Any) -> str:
@@ -51,6 +51,20 @@ def _preview(value: Any) -> str:
     if len(text) <= _MAX_PREVIEW:
         return text
     return text[:_MAX_PREVIEW // 2] + ' … ' + text[-_MAX_PREVIEW // 3:]
+
+
+def _result_preview(value: Any) -> str:
+    # Share the summary-input media/opaque-data projection. Persisting a new
+    # continuity packet must not reintroduce ciphertext stripped by that owner.
+    from ._layer2._summary_evidence import EVIDENCE_PARSE_CHARS, _preview as safe_preview
+    if isinstance(value, str) and len(value) <= EVIDENCE_PARSE_CHARS:
+        try:
+            decoded = json.loads(value)
+            if isinstance(decoded, (dict, list)):
+                value = decoded
+        except (ValueError, RecursionError):
+            pass
+    return safe_preview(value, _MAX_PREVIEW)
 
 
 def _evidence_id(kind: str, source: str, value: Any) -> str:
@@ -73,13 +87,13 @@ def _walk_artifact_ids(value: Any, out: set[str]) -> None:
 
 
 def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
-    """Extract bounded, addressable facts the summary model must not invent."""
+    """Extract chronological, addressable observations from paired receipts."""
     task = task if isinstance(task, dict) else {}
-    entries: list[dict] = []
-    seen: dict[str, int] = {}
+    observations: dict[str, dict] = {}
 
     def add(kind: str, source: str, value: Any, *,
-            identity_source: str | None = None, **fields: Any) -> None:
+            identity_source: str | None = None, preview_value: str | None = None,
+            **fields: Any) -> None:
         if value in (None, '', [], {}):
             return
         # Tool-call IDs differ even when the model repeats the exact same
@@ -87,27 +101,19 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
         # repetitions consume one bounded ledger entry, while retaining the
         # latest concrete call ID as a recovery handle.
         evidence_id = _evidence_id(kind, identity_source or source, value)
-        previous = seen.get(evidence_id)
-        if previous is not None:
-            # The observation is byte-identical, but the newest toolCallId is
-            # the most useful recovery handle if a later reader needs to
-            # inspect the original round.
-            entries[previous]['source'] = source
-            entries[previous].update({
-                key: child for key, child in fields.items()
-                if child not in (None, '', [], {})
-            })
-            return
-        seen[evidence_id] = len(entries)
+        preview = _preview(value) if preview_value is None else preview_value
         entry = {
             'id': evidence_id,
             'type': kind,
             'source': source,
-            'value': _preview(value),
+            'value': preview,
+            'sourceDigest': hashlib.sha256(_text(value).encode('utf-8')).hexdigest(),
+            'previewOnly': preview != _text(value).strip(),
         }
         entry.update({key: child for key, child in fields.items()
                       if child not in (None, '', [], {})})
-        entries.append(entry)
+        observations.pop(evidence_id, None)
+        observations[evidence_id] = entry
 
     modified = task.get('modifiedFileList') or task.get('modifiedFiles') or []
     if isinstance(modified, dict):
@@ -199,39 +205,53 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
             if not isinstance(args, dict):
                 args = {}
         else:
-            # Orphan/blank-id legacy receipts keep only their explicit name.
-            # Guessing from a conversation-global id would be less honest.
-            tool_name = str(message.get('name') or '')
-            args = {}
+            continue
         content = _text(message.get('content') or '')
         command = _text(args.get('command') or args.get('cmd') or '')
         source = f'tool:{tool_name or "unknown"}:{call_id}'
         stable_source = f'tool:{tool_name or "unknown"}'
         call_identity = f'{stable_source}:{_text(args)}'
+        if not args:
+            # Unknown invocation identity cannot supersede another occurrence.
+            call_identity += ':' + call_id
+        observation_key = hashlib.sha256(
+            (_text((task.get('config') or {}).get('projectPath') or '')
+             + '\x00' + call_identity).encode('utf-8')).hexdigest()
+        # Keep invocation identity independent of outcome class: a successful
+        # repeat must supersede that invocation's earlier error.
+        observation_fields = dict(observationKey=observation_key,
+                                  toolName=tool_name,
+                                  preview_value=_result_preview(message.get('content')))
+        if command:
+            observation_fields['command'] = _preview(command)
         if _TEST_RE.search(command) or (tool_name == 'run_command'
                                         and _TEST_RE.search(content[:200])):
             add('test_result', source, content,
-                identity_source=call_identity, command=_preview(command),
-                toolCallId=call_id)
-        elif _ERROR_RE.search(content[:2000]):
+                identity_source=call_identity,
+                toolCallId=call_id, **observation_fields)
+        elif (message.get('isError') is True
+              or (tool_name == 'run_command' and _COMMAND_EXIT.search(content)
+                  and int(_COMMAND_EXIT.search(content).group(1)) != 0)
+              or (not _COMMAND_EXIT.search(content)
+                  and _ERROR_RE.search(content[:2000]))):
             add('error', source, content, identity_source=call_identity,
-                toolCallId=call_id)
+                toolCallId=call_id, **observation_fields)
         elif tool_name in _MUTATION_TOOLS:
             add('mutation_result', source, content,
-                identity_source=call_identity, toolCallId=call_id)
+                identity_source=call_identity, toolCallId=call_id, **observation_fields)
         elif tool_name == 'run_command':
             add('command_result', source, content,
                 identity_source=call_identity,
-                command=_preview(command), toolCallId=call_id)
+                toolCallId=call_id, **observation_fields)
         elif tool_name in _AGENT_TOOLS:
             add('agent_result', source, content,
-                identity_source=call_identity, toolCallId=call_id)
+                identity_source=call_identity, toolCallId=call_id, **observation_fields)
         elif tool_name in _BATCH_TOOLS:
             add('batch_result', source, content,
-                identity_source=call_identity, toolCallId=call_id)
+                identity_source=call_identity, toolCallId=call_id, **observation_fields)
         elif tool_name in _QUERY_TOOLS:
             add('query_result', source, content,
-                identity_source=call_identity, toolCallId=call_id)
+                identity_source=call_identity, toolCallId=call_id, **observation_fields)
 
     unfinished = (task.get('_todos') or task.get('todos') or task.get('todo')
                   or task.get('_unfinishedItems') or [])
@@ -242,25 +262,12 @@ def build_evidence_ledger(messages: list, task: dict | None = None) -> dict:
     if unfinished:
         add('unfinished', 'task', unfinished)
 
-    priority = {
-        'test_result': 0, 'error': 1, 'mutation_result': 2,
-        'modified_file': 3, 'unfinished': 4, 'command_result': 5,
-        'agent_result': 6, 'batch_result': 7,
-        'tool_result_archive': 8, 'artifact': 9, 'query_result': 10,
-        'file_reference': 11,
-    }
-    ordered = sorted(
-        enumerate(entries),
-        # Within each evidence class prefer the most recent observation. Long
-        # agent turns otherwise fill the bounded ledger with early, superseded
-        # greps/tests and discard the state immediately preceding compaction.
-        key=lambda pair: (priority.get(pair[1].get('type'), 99), -pair[0]))
-    bounded = [entry for _, entry in ordered[:_MAX_ENTRIES]]
+    bounded = list(observations.values())
     return {
         'version': 1,
         'entries': bounded,
         'evidenceIds': [entry['id'] for entry in bounded],
-        'truncated': len(entries) > _MAX_ENTRIES,
+        'truncated': False,
     }
 
 

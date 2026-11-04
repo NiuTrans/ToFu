@@ -210,7 +210,7 @@ def test_prior_compact_receipts_and_typed_handoffs_have_no_duplicate_history_slo
     assert '[user] real steering' in text
 
 
-def test_newest_selection_is_deterministic_chronological_and_globally_bounded():
+def test_all_observations_reach_the_shared_history_budget():
     from lib.tasks_pkg.compaction._layer2 import _summary_evidence as owner
     messages = []
     for index in range(500):
@@ -218,13 +218,14 @@ def test_newest_selection_is_deterministic_chronological_and_globally_bounded():
                          result(f'fact-{index} ' + 'observation ' * 1000)])
     text = _format_messages_for_summary(messages)
     assert text == _format_messages_for_summary(messages)
-    assert len(text.encode()) <= owner.EVIDENCE_TOTAL_BYTES
-    assert 'probe-499' in text and 'probe-0"' not in text
-    assert 'bounded newest selection' in text
+    assert 'probe-499' in text and 'probe-0"' in text
     rows = evidence_rows(text)
     positions = [int(row['occurrence'].split(':')[1]) for row in rows]
     assert positions == sorted(positions)
-    assert len(rows) <= owner.EVIDENCE_MAX_ROWS
+    assert len(rows) == 500
+    budgeted = _format_messages_for_summary(messages, char_budget=24_576)
+    assert len(budgeted) <= 24_576
+    assert 'probe-499' in budgeted
 
 
 @pytest.fixture
@@ -275,24 +276,13 @@ def test_reused_objects_remain_distinct_occurrences():
     assert rows[0]['occurrence'] != rows[1]['occurrence']
 
 
-def test_fanout_and_content_block_work_are_capped():
-    from lib.tasks_pkg.compaction._layer2 import _summary_evidence as owner
-
-    class BoundedList(list):
-        def __iter__(self):
-            raise AssertionError('unbounded source iteration')
-
-        def __getitem__(self, key):
-            assert isinstance(key, slice) and key.stop <= owner.EVIDENCE_MAX_CALLS
-            return super().__getitem__(key)
-
-    calls = BoundedList([call('probe', str(i)) for i in range(10000)])
-    blocks = BoundedList([{'type': 'text', 'text': 'observed'}] * 10000)
-    text = _format_messages_for_summary([
-        {'role': 'assistant', 'tool_calls': calls}, result(blocks, '0')])
+def test_fanout_uses_shared_budget_and_content_blocks_stay_previews():
+    messages = [{'role': 'assistant', 'tool_calls': [
+        call('probe', str(i)) for i in range(10000)]},
+        result([{'type': 'text', 'text': 'observed'}] * 10000, '0')]
+    text = _format_messages_for_summary(messages, char_budget=24_576)
     assert 'observed' in text
-    assert 'bounded newest selection' in text
-    assert len(text.encode()) <= owner.EVIDENCE_TOTAL_BYTES
+    assert len(text) <= 24_576
 
 
 def test_malformed_ids_are_never_stringified_for_pairing():
@@ -317,9 +307,6 @@ def default_summary(monkeypatch):
     monkeypatch.setattr(_summary, '_codex_subscription_provider', lambda task: '')
     monkeypatch.setattr(_summary, '_archived_prior_receipt', lambda task: '')
     monkeypatch.setattr(_compaction_usage, 'record_compaction_usage', lambda *a, **k: None)
-    def forbidden(*args, **kwargs):
-        raise AssertionError('default must not extract the runtime ledger')
-    monkeypatch.setattr(_evidence, 'build_evidence_ledger', forbidden)
     def dispatch_fake(messages, **kwargs):
         seen.append(messages[-1]['content'])
         return '### Objective\nContinue scoped work.', {
@@ -345,25 +332,16 @@ def default_summary(monkeypatch):
 
 def test_default_dispatch_bounds_large_results_and_fanout(default_summary, owner_parses):
     from lib.tasks_pkg.compaction._layer2 import _summary_evidence as owner
-    class LargeText(str):
-        def encode(self, *args, **kwargs):
-            raise AssertionError('full result encoding/hash')
-    class Calls(list):
-        def __iter__(self):
-            raise AssertionError('full fanout iteration')
-        def __getitem__(self, key):
-            assert isinstance(key, slice) and key.stop <= owner.EVIDENCE_MAX_CALLS
-            return super().__getitem__(key)
     messages = [{'role': 'user', 'content': '  Keep exact human text.\n'},
-                {'role': 'assistant', 'tool_calls': Calls([call('probe')] * 10000)},
-                result(LargeText('HEAD failure ' + 'fact ' * 400000 + ' TAIL incomplete'),
+                {'role': 'assistant', 'tool_calls': [call('probe')] * 10000},
+                result('HEAD failure ' + 'fact ' * 400000 + ' TAIL incomplete',
                        artifactRef='tool-result:exact', isError=True)]
     prompt = default_summary(messages)
     assert '  Keep exact human text.\n' in prompt
     assert 'HEAD failure' in prompt and 'TAIL incomplete' in prompt
     assert 'tool-result:exact' in prompt and '"isError":true' in prompt
-    assert 'bounded newest selection' in prompt
-    assert len(prompt.encode()) < owner.EVIDENCE_TOTAL_BYTES + 5000
+    assert 'Source-derived execution state' in prompt
+    assert len(prompt) < 400_000
 
 
 def test_default_dispatch_shared_occurrences_and_legacy_receipt_once(default_summary):
@@ -380,5 +358,6 @@ def test_default_dispatch_shared_occurrences_and_legacy_receipt_once(default_sum
     assert len({row['occurrence'] for row in rows}) == 2
     assert all(row['observation'] == 'adjacent_result' for row in rows)
     assert prompt.count('Prior receipt only once.') == 1
-    assert prompt.count('current failure') == 2
+    # Two distinct raw occurrences plus one deduplicated continuity fact.
+    assert prompt.count('current failure') == 3
     assert 'secret' not in prompt

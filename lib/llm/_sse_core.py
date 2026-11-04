@@ -466,44 +466,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         merge_cache_affinity_headers)
     _cache_affinity_key = cache_affinity_key(body)
 
-    # Resolve native context management from the concrete selected route, not
-    # from model-name folklore. Public API feature profiles may opt in; OAuth
-    # subscription backends are intentionally excluded by the resolver.
+    # All routes use the local verified continuation owner. Legacy native
+    # compaction items remain readable, but new server rewrites bypass its
+    # evidence/admission checks and are never requested.
     _native_compaction_mode = ''
-    try:
-        from lib.llm_dispatch.compaction_policy import (
-            ANTHROPIC_MESSAGES_COMPACTION,
-            native_compaction_mode_for_route,
-        )
-        _native_compaction_mode = native_compaction_mode_for_route(
-            protocol=api_protocol,
-            model=body.get('model') or '',
-            responses_profile=_responses_feature_profile,
-            base_url=base_url or '',
-            oauth=oauth or '',
-            inference_profile=_route_inference_profile,
-        )
-        if (_native_compaction_mode == ANTHROPIC_MESSAGES_COMPACTION
-                and int(body.get('_working_set_tokens') or 0) > 0):
-            body['_anthropic_native_compaction'] = True
-            # Anthropic server compaction is a distinct public API beta. Keep
-            # it off the Claude Code subscription cloak unless that product's
-            # own captured contract explicitly adopts it.
-            extra_headers = dict(extra_headers or {})
-            _beta_key = next(
-                (key for key in extra_headers
-                 if str(key).lower() == 'anthropic-beta'),
-                'anthropic-beta',
-            )
-            _betas = [part.strip() for part in
-                      str(extra_headers.get(_beta_key) or '').split(',')
-                      if part.strip()]
-            if 'compact-2026-01-12' not in _betas:
-                _betas.append('compact-2026-01-12')
-            extra_headers[_beta_key] = ','.join(_betas)
-    except Exception as exc:
-        logger.debug('%s native compaction route resolution failed: %s',
-                     log_prefix, exc)
 
     from lib.llm.tool_wire import project_tool_wire
     projection = project_tool_wire(body, api_protocol=api_protocol, base_url=base_url,

@@ -1,7 +1,5 @@
 """Provider-native compaction routing and local-L2 fallback contracts."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from lib.llm._sse_core import prepare_request
@@ -9,25 +7,10 @@ from lib.llm_dispatch.compaction_policy import (
     ANTHROPIC_MESSAGES_COMPACTION,
     OPENAI_RESPONSES_COMPACTION,
     native_compaction_mode_for_route,
-    resolve_task_native_compaction_mode,
 )
 from lib.tasks_pkg.manager._stream import _opaque_reasoning_replay_tokens
 
 pytestmark = pytest.mark.unit
-
-
-def _slot(**overrides):
-    values = {
-        'provider_id': 'public',
-        'logical_model': 'gpt-5.6-sol',
-        'model': 'gpt-5.6-sol',
-        'protocol': 'responses',
-        'responses_profile': 'openai',
-        'base_url': 'https://api.openai.com/v1',
-        'oauth': '',
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
 
 
 def test_exact_route_separates_public_apis_from_subscription_oauth():
@@ -54,28 +37,7 @@ def test_exact_route_separates_public_apis_from_subscription_oauth():
         base_url='https://api.anthropic.com/v1') == ''
 
 
-def test_pre_dispatch_policy_requires_unanimous_candidate_slots(monkeypatch):
-    import lib.llm_dispatch.factory as factory
-
-    public = _slot()
-    subscription = _slot(
-        provider_id='oauth_codex', responses_profile='', oauth='codex',
-        base_url='https://chatgpt.com/backend-api/codex')
-    monkeypatch.setattr(
-        factory, 'get_dispatcher',
-        lambda: SimpleNamespace(slots=[public, subscription]))
-
-    assert resolve_task_native_compaction_mode(
-        {'config': {}}, model='gpt-5.6-sol') == ''
-    assert resolve_task_native_compaction_mode(
-        {'provider_id': 'public', 'config': {}},
-        model='gpt-5.6-sol') == OPENAI_RESPONSES_COMPACTION
-    assert resolve_task_native_compaction_mode(
-        {'provider_id': 'oauth_codex', 'config': {}},
-        model='gpt-5.6-sol') == ''
-
-
-def test_public_anthropic_plan_emits_compaction_beta_and_wire_strategy():
+def test_public_anthropic_uses_the_common_local_compactor():
     plan = prepare_request(
         {
             'model': 'claude-opus-5',
@@ -89,15 +51,12 @@ def test_public_anthropic_plan_emits_compaction_beta_and_wire_strategy():
         api_protocol='anthropic',
     )
 
-    assert plan.native_compaction_mode == ANTHROPIC_MESSAGES_COMPACTION
-    assert 'compact-2026-01-12' in plan.hdrs['anthropic-beta'].split(',')
-    edit = plan.body['context_management']['edits'][0]
-    assert edit['type'] == 'compact_20260112'
-    assert edit['trigger'] == {'type': 'input_tokens', 'value': 128_000}
-    assert 'Do not call tools' in edit['instructions']
+    assert plan.native_compaction_mode == ''
+    assert 'compact-2026-01-12' not in plan.hdrs.get('anthropic-beta', '')
+    assert 'context_management' not in plan.body
 
 
-def test_native_primary_defers_economic_l2_but_keeps_hard_window(monkeypatch):
+def test_legacy_native_primary_latch_cannot_bypass_common_l2(monkeypatch):
     import lib.tasks_pkg.compaction._tokens as tokens
 
     task = {
@@ -115,7 +74,7 @@ def test_native_primary_defers_economic_l2_but_keeps_hard_window(monkeypatch):
         lambda *_a, **_k: (measured['value'], 'usage_cache'))
 
     messages = [{'role': 'user', 'content': 'x'}]
-    assert tokens._should_force_compact(messages, task) is False
+    assert tokens._should_force_compact(messages, task) is True
     measured['value'] = 900_001
     assert tokens._should_force_compact(messages, task) is True
 

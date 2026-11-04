@@ -19,22 +19,22 @@ def _user(content: str) -> dict:
     ('cadence', 'current_round', 'remaining_rounds',
      'expected_horizon', 'expected_policy'),
     [
-        ({}, 64, 128, 1.0, 'fixed_one_round'),
+        ({}, 64, 128, 1.0, 'one_round'),
         ({'_compactionCadenceLastRound': 60}, 64, 128,
-         4.0, 'fixed_compaction_cadence'),
+         4.0, 'observed_compaction_cadence'),
         ({'_compactionCadenceLastRound': 60,
           '_compactionCadenceRoundGaps': [5, 3]}, 64, 128,
-         3.0, 'fixed_compaction_cadence'),
+         3.0, 'observed_compaction_cadence'),
         ({'_compactionCadenceLastRound': 40,
           '_compactionCadenceRoundGaps': [10, 12]}, 64, 128,
-         6.0, 'fixed_compaction_cadence'),
+         6.0, 'observed_compaction_cadence'),
         ({'_compactionCadenceLastRound': 60}, 64, 2,
-         2.0, 'fixed_compaction_cadence'),
+         2.0, 'observed_compaction_cadence'),
         ({'_compactionCadenceLastRound': 60}, 64, 0,
-         1.0, 'fixed_one_round'),
+         1.0, 'one_round'),
     ],
 )
-def test_fixed_policy_uses_only_budgeted_compaction_cadence(
+def test_unified_policy_uses_only_budgeted_compaction_cadence(
     cadence,
     current_round,
     remaining_rounds,
@@ -54,7 +54,7 @@ def test_fixed_policy_uses_only_budgeted_compaction_cadence(
     assert policy == expected_policy
 
 
-def test_adaptive_policy_keeps_its_explicit_expected_value_horizon():
+def test_legacy_adaptive_inputs_cannot_override_observed_horizon():
     from lib.tasks_pkg.compaction._layer2 import _compact as layer2
 
     horizon, policy = layer2._proactive_payback_policy(
@@ -69,8 +69,8 @@ def test_adaptive_policy_keeps_its_explicit_expected_value_horizon():
         remaining_api_rounds=2,
     )
 
-    assert horizon == 7.0
-    assert policy == 'adaptive_expected_horizon'
+    assert horizon == 1.0
+    assert policy == 'one_round'
 
 
 def test_longer_observed_compaction_window_invalidates_stale_economic_veto(
@@ -224,7 +224,7 @@ def test_three_round_candidate_requires_observed_three_round_window(
     assert late_meta['compacted'] is True
     assert late_meta['economics']['payback_limit_rounds'] == 3.0
     assert late_meta['economics']['payback_policy'] == (
-        'fixed_compaction_cadence')
+        'observed_compaction_cadence')
 
 
 def test_successful_rewrite_cadence_is_bounded_and_idempotent():
