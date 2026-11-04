@@ -340,11 +340,7 @@ fn collect_authority_garbage(
     }
 
     if cached_marks.is_none() {
-        let mut live = SpillMarkSet::initialize_with_spill_limit(
-            &work_directory,
-            Arc::clone(&vfs),
-            budget.maximum_temporary_bytes,
-        )?;
+        let mut live = SpillMarkSet::initialize(&work_directory, Arc::clone(&vfs))?;
         let mark_result = (|| {
             let live_cell = RefCell::new(&mut live);
             visit_entity_page_graph_with_values(
@@ -1991,16 +1987,15 @@ mod tests {
     }
 
     #[test]
-    fn gc_spill_scale_marks_spill_within_the_lean_budget() {
+    fn gc_spill_scale_marks_spill_runs_and_release_them_after_the_round() {
         // Full-scale spill threshold: the in-memory mark buffer flushes at
         // exactly 65,536 marks. 65 retained transactions each re-referencing
         // the same 1,024 live blocks produce 66,560 live references, forcing
-        // real on-volume spill runs under the documented 64 MiB lean
-        // fallback without 66,560 durable block publications (the simulator
-        // pays one full directory-namespace scan per publication sync).
-        // Distinct-mark full-run encoding, budget enforcement, and shard
-        // partitioning are covered at full per-run scale (65,536 distinct
-        // marks per run) in backup_gc::tests.
+        // real on-volume spill runs without 66,560 durable block publications
+        // (the simulator pays one full directory-namespace scan per
+        // publication sync). Distinct-mark full-run encoding, spills past the
+        // former 1 GiB cap, and shard partitioning are covered at full per-run
+        // scale (65,536 distinct marks per run) in backup_gc::tests.
         let (vfs, mut database, key) = authority_database_with_live_value();
         let payloads = (0..1_024_u32)
             .map(|index| format!("gc-spill-scale-live-{index}").into_bytes())
@@ -2024,7 +2019,6 @@ mod tests {
         let metrics = database.collect_garbage(test_budget()).unwrap();
         assert!(metrics.live_references >= 66_560);
         assert!(metrics.spill_bytes > 0);
-        assert!(metrics.spill_bytes <= LEAN_AUTHORITY_GC_TEMPORARY_BYTES);
         assert_eq!(metrics.candidate_blocks, 8);
         assert_eq!(metrics.removed_blocks, 8);
         assert!(metrics.removed_bytes <= MAX_AUTHORITY_GC_VICTIM_BYTES);
@@ -2033,7 +2027,7 @@ mod tests {
         }
         assert!(database.read_block_for_test(live_block).is_ok());
         assert_live_value(&database, &key);
-        // Spill runs are released after the round.
+        // The spill is released after the round.
         assert!(vfs
             .read_directory(Path::new("/data/authority-gc/gc-runs"))
             .unwrap()

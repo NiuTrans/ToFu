@@ -24,7 +24,7 @@ use crate::authority_gc::{
     MIN_AUTHORITY_GC_PAYLOAD_COMPACTION_BLOCKS,
 };
 use crate::backup::visit_semantic_value_references;
-use crate::backup_gc::SpillMarkSet;
+use crate::backup_gc::{is_spill_entry_name, SpillMarkSet};
 use crate::block::{
     BlockId, BlockRemovalMetrics, BlockStore, BlockTemporaryFileCandidate, LooseRemoval,
 };
@@ -172,7 +172,7 @@ pub(crate) struct MarkShape {
     pub walked_pages: usize,
     /// Page references not followed because an earlier walk covered them.
     pub skipped_pages: u64,
-    /// Mark inserts, duplicates included: the unit the spill budget counts.
+    /// Mark inserts, duplicates included; each adds at most 32 spill bytes.
     pub references: u64,
     pub spill_runs: u32,
     pub spill_bytes: u64,
@@ -948,14 +948,7 @@ impl OnlineGarbageCollector {
         ensure_directory(&marks_directory, &work_directory, epoch.capture.vfs.as_ref())?;
         let marks_runs = marks_directory.join("gc-runs");
         ensure_directory(&marks_runs, &marks_directory, epoch.capture.vfs.as_ref())?;
-        let mark_workspace_bytes = self.budget.maximum_temporary_bytes
-            .checked_sub(snapshot.history_metadata_resident_bytes)
-            .ok_or_else(|| would_block("GC history snapshot exceeds workspace budget"))?;
-        let mut live = SpillMarkSet::initialize_with_spill_limit(
-            &marks_directory,
-            Arc::clone(&epoch.capture.vfs),
-            mark_workspace_bytes,
-        )?;
+        let mut live = SpillMarkSet::initialize(&marks_directory, Arc::clone(&epoch.capture.vfs))?;
         let mark_result = (|| {
             // Each catalogued segment index is read once here, instead of a
             // witness walk plus a verified index open per block (TraversalReader).
@@ -1112,11 +1105,8 @@ impl OnlineGarbageCollector {
             &epoch.suspects_directory,
             epoch.capture.vfs.as_ref(),
         )?;
-        let mut suspects_next = SpillMarkSet::initialize_with_spill_limit(
-            &epoch.suspects_directory,
-            Arc::clone(&epoch.capture.vfs),
-            self.budget.maximum_temporary_bytes,
-        )?;
+        let mut suspects_next =
+            SpillMarkSet::initialize(&epoch.suspects_directory, Arc::clone(&epoch.capture.vfs))?;
         let scan_result = self
             .scan_loose_shards(database, epoch, &mut suspects_next, &blocks, &marks, stop)
             .and_then(|()| suspects_next.finish())
@@ -1825,10 +1815,7 @@ pub(crate) fn wipe_work_directories(data_dir: &Path, vfs: &dyn Vfs) {
             let removable = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    (name.starts_with("run-") && name.ends_with(".mark"))
-                        || name.starts_with(".run-new-")
-                });
+                .is_some_and(is_spill_entry_name);
             if removable {
                 let _ = vfs.remove_file(&path);
             }
