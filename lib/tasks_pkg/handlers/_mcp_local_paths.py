@@ -101,11 +101,20 @@ def call_with_local_paths(bridge, name, arguments, *, task, invoke, runtime_cont
                 target = Path(os.path.abspath(os.path.expanduser(os.path.join(base, relative))))
                 if len(target.parts) > limits['path_components']:
                     raise ValueError(f'{field}: path exceeds component budget')
-                matching = [state for state in policy['roots'].values()
-                            if target.is_relative_to(state['path'])
-                            and target.resolve().is_relative_to(Path(state['path']).resolve())]
+                lexical = [state for state in policy['roots'].values()
+                           if target.is_relative_to(state['path'])]
+                if not lexical:
+                    roots = ', '.join(
+                        f"{label}={state['path']}" + (' (read-only)' if state.get('access') == 'ro' else '')
+                        for label, state in policy['roots'].items())
+                    raise ValueError(f'{field}: {str(target)!r} is outside this task workspace roots ({roots}); '
+                                     'use a relative path (resolved under the primary root) or rootname:relative/path')
+                resolved = target.resolve()
+                matching = [state for state in lexical
+                            if resolved.is_relative_to(Path(state['path']).resolve())]
                 if not matching:
-                    raise ValueError(f'{field}: target is outside this task workspace or crosses an escaping symlink')
+                    raise ValueError(f'{field}: {str(target)!r} crosses a symlink that leaves its workspace root '
+                                     f'(resolves to {str(resolved)!r})')
                 owner = max(matching, key=lambda state: len(state['path']))
                 if field_policy['access'] == 'write':
                     _resolve_write_path(policy['primaryPath'], str(target), conv_id=key)
