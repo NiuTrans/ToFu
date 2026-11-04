@@ -428,7 +428,10 @@ owner reclaims only its own archives (TODO(enterprise): per-owner budgets).
 Measured with `raw_archive::tests::lifecycle::measure_reclaiming_put_cost`
 (debug build, in-memory deterministic VFS, loaded 4-CPU host): 9.5 ms per put
 below the bounds, 13.7 ms per put that reclaims one archive, both one WAL write
-per commit; the first backfill put (512 rows) took 45 ms and 2 writes.
+per commit; the first backfill put (512 rows) took 45 ms and 2 writes. The
+native put prepares these reads off the authority writer and commits with
+ordinary OCC
+([command preparation lane](TOFUDB_PUBLICATION_LATENCY.md#raw-archive-puts-and-log-aggregate-flushes-on-the-command-preparation-lane-2026-11-04)).
 
 Alternatives rejected: raising the ceilings moves the cliff and lets the store
 grow without a lifecycle; a TTL or maintenance-driven prune operation adds an
