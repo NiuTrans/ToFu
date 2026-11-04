@@ -87,6 +87,147 @@ Distributed mode uses explicit
 external PostgreSQL authority, while Redis carries only ephemeral leases and
 wake hints. `lib/process_roles.py` is the single lifecycle ownership table.
 
+## Multi-agent execution and scaling boundaries
+
+**Problem:** a Coordinator can dispatch independent conversations, and each
+conversation can invoke children. Counting conversations or measuring one
+dispatcher operation does not describe the resulting infrastructure work.
+**Decision:** assess the complete execution graph through the existing owners
+below. Separate logical delegation, physical execution, durable facts and
+observer projections. Preserve one shared invocation kernel and the distinct
+domain authorities; an additional orchestration layer is not another runtime.
+**Alternatives considered:** a global Agent-count ceiling conflicts with
+[resource policy](RESOURCE_CONTROL.md); increasing executor idle targets does
+not remove per-invocation work; distributing the current in-memory owners across
+more processes does not establish routing or takeover correctness.
+
+### Graph and authority map
+
+```mermaid
+flowchart TD
+  Human[Human command] --> Turn[Conversation command / Turn and Attempt]
+  Turn --> Coordinator[Coordinator invocation]
+  Coordinator --> Dispatch[Project dispatch claim and accepted assignment]
+  Dispatch --> Workers[Independent conversation Turns]
+  Workers --> Root[Shared root invocation]
+  Root --> Children[Swarm / Goal child invocation]
+  Children --> Kernel[Shared execution session / model and tool owners]
+  Root --> Kernel
+  Kernel --> Delivery[Task-owned ordered event delivery]
+  Delivery --> Authority[Selected storage authority / committed facts]
+  Authority --> Sync[Conversation change replay / wake hints]
+  Sync --> View[Browser Turn reducer and rendering]
+```
+
+The Coordinator itself uses the ordinary invocation path. Its dispatch-only
+policy grants conversation delegation, not a second model/tool loop. Human-created
+conversations can enter the same root path without a Coordinator. Child scopes
+may themselves delegate according to their issued policy. A graph edge alone
+does not grant authorization, durable recovery or unconditional cascading Stop.
+Some children are transient; retained and detached children have explicit
+lifetime policies. See [project coordination](PROJECT_COORDINATION.md),
+[agent lifecycle](AGENT_LIFECYCLE.md) and [retained agents](RETAINED_AGENTS.md).
+
+| Plane | Existing owners | Scaling boundary to inspect |
+|---|---|---|
+| Coordination | `lib/project_dispatch/`, `lib/conversations/`, `lib/swarm/`, graph domain owners | Assignment, dependency and completion work per actual edge; repeated roster/context reads; accepted versus unknown dispatch |
+| Execution | `lib/tasks_pkg/invocation.py`, `child_invocation.py`, `lib/agent_core/execution_session.py`, `tofu_workers/` | Active execution versus waiting carriers, driver and cancellation threads, parallel tools, subprocess lifetimes |
+| Context and accounting | `context_composer/`, request-budget/accounting owners, provider adapters | Immutable shared inputs versus per-child copies; actual provider request bytes; attributable paid usage across descendants |
+| Live state and projection | `lib/tasks_pkg/segments/`, `lib/turn_lifecycle.py`, `lib/conversation_sync/settled_rows.py` | Work per new event against retained history; identity and ordering indexes; duplicate graphs and serialization |
+| Durable delivery | `lib/tasks_pkg/event_delivery.py`, semantic storage client and selected authority | Task FIFO debt, producer capture versus commit latency, atomic barriers, write/read amplification, retry ownership |
+| Observation | `lib/conversation_sync/`, committed hints, browser sync coordinator and Turn reducer | Work per subscribed scope, change replay versus full materialization, reconnect and slow-reader isolation |
+| Recovery and shutdown | Existing task, dispatch, Swarm and graph journals; application lifespan | Exact effect and accounting evidence, owner fencing, physical joins, release only after required durable ACK |
+
+This is a map of responsibilities, not seven new services. Domain receipts keep
+their existing scope and identity; collapsing them into a generic Agent record
+would erase authorization and settlement distinctions.
+
+### Cost model and current coupling
+
+Record the graph's total invocations, simultaneously active invocations,
+delegation edges/depth, retained history per invocation, event rate, tool
+parallelism and subscribed scopes separately. Provider/tool/storage latency
+changes how long each population remains live. Hold other dimensions constant
+when measuring one dimension, then test their combinations. A flat fleet of short
+turns does not represent a nested graph of long-running tool-heavy turns.
+
+The important quantity is local work **per completed logical operation**, plus
+the resources retained while waiting and after settlement. A useful breakdown is
+execution work + coordination over edges + projection/delivery over events and
+history + replay/rendering over observers. These costs overlap in wall time;
+adding their inclusive durations does not produce user latency.
+
+Current boundaries that prevent treating Agent count as a capacity claim:
+
+- `DemandExecutor` starts accepted jobs on demand. Its worker setting controls
+  idle reuse, not admission. Synchronous provider/tool/wait work still occupies
+  a carrier. Swarm has a session driver, and `run_child_invocation` mirrors its
+  abort predicate with a per-active-child monitoring thread. The existing
+  `AbortSignal` async subscriptions and tool cancellation callbacks provide
+  event-driven seams; they do not already replace every predicate-based wait.
+- Shared settled rows and progress-source reuse avoid copying every historical
+  value on every token. They do not make every structural projection incremental.
+  For example, injected-note placement in `segments/_assemble.py` scans segment
+  history per note and searches again for an existing identity. History length
+  and note count can multiply work even when the number of Agents is unchanged.
+  Indexing must preserve attempt/task scope, continuation prose, stable note
+  order, terminal anchors and replacement semantics.
+- Delivery lanes separate execution from ordinary persistence and batch existing
+  work without a timed window. Required effect, interaction and terminal barriers
+  still wait for their ordered debt. Slow projection or storage therefore affects
+  latency and retained state before it appears as an admission problem. Frozen
+  receipts survive unknown outcomes; retrying them must never replay paid model
+  calls or completed tool effects. See [task event delivery](TASK_EVENT_DELIVERY.md).
+- Personal deployment co-locates HTTP handling, execution adapters, projection
+  and delivery machinery. Moving blocking work off the event loop does not
+  isolate Python CPU contention or process memory. Storage has its own declared
+  boundary; optional native execution is a separately admitted composition, not
+  evidence that the whole application has moved out of this process.
+- `manager/runtime.py` still documents a process-local live task/event registry.
+  A shared latest-task index decides freshness; it does not route physical Stop
+  or transport all live state. Process-role flags alone do not certify arbitrary
+  multi-worker placement. Any separation must first identify the owning worker,
+  route cancellation and subscriptions, fence takeover and join physical work.
+  The [enterprise seams](ENTERPRISE_EVOLUTION.md) remain the authority for that
+  evolution, not a requirement to introduce multi-tenancy now.
+
+Structural optimization follows these boundaries: avoid repeated derivation of
+unchanged history; share immutable inputs with exact invalidation; compose waits
+through existing lifecycle signals; preserve commit-before-observe; and isolate
+expensive execution only behind a proven ownership boundary. Hardware probes
+never become concurrency or admission limits. No new tuning interval, cap,
+sampling policy, history truncation or feature switch is justified by this map.
+
+### Whole-graph verification
+
+Existing component evidence remains useful but has explicit limits:
+`benchmarks/turn_projection_incremental.py` excludes storage and browser work;
+`benchmarks/live_pipeline.py` measures the persisted-to-browser path;
+`benchmarks/native_agent_root_measure.py` measures selected ROOT compositions.
+The [system performance contract](../benchmarks/system_performance_contract.json)
+covers component domains; passing it alone does not establish nested delegation
+capacity. Its existing parity and regression requirements are not weakened here.
+
+Before claiming the application supports a larger Agent population, retain a
+reproducible graph workload covering these independent cases and their overlap:
+
+| Workload | Required evidence |
+|---|---|
+| Independent roots, Coordinator dispatch and nested children | Same accepted graph, tool effects, outputs and accounted usage; start and completion latency; cost per completed operation |
+| Growing round/note history at fixed active population | Producer, projection and commit costs; wire bytes; unique reachable state separately from logical retained-byte charges |
+| Waiting providers, parallel tools and slow storage | Active versus parked threads; event-loop responsiveness; delivery debt and drain; unrelated task progress |
+| Additional readers, reconnect and slow consumers | Same committed revisions and final reducer state; replay/render costs; no provider cancellation caused by observer disconnect |
+| Stop, lost ACK, worker loss and recovery | Exact accepted/rejected/unknown evidence; no duplicate paid/effect work; correct ownership handoff and physical joins |
+| Complete graph quiescence | Released live registrations, wait subscriptions, lane graphs and borrowed resources; durable results and accounting retained |
+
+Use controlled provider/tool transports and disposable authorities for repeatable
+application workloads, with the real invocation, projection and persistence
+owners. Preserve the configured live backend. Record source/build identity,
+workload shape, raw measurements and completeness; profile separately from timing.
+Observe the live system read-only to locate work, not to infer a safe maximum
+from a brief sample. The [load evidence procedure](LOGGING.md#multi-agent-load-evidence)
+explains the existing metric populations and the offline comparison entry.
+
 ### Native checkpoint terminal persistence fence
 
 **Problem:** task terminal persistence and a completed recovery frontier could

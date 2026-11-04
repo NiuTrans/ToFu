@@ -903,6 +903,58 @@ escaped, and text beyond 600 characters ends in `…[+N chars]`. Verification:
 `tests/project_mod/test_workspace_admission_wait_both_sides.py`.
 
 
+## Multi-agent load evidence
+
+Read the [architecture scaling map](ARCHITECTURE.md#multi-agent-execution-and-scaling-boundaries)
+before interpreting Agent counts. Existing `/metrics` exposition is protected
+by the admin scope. Save two complete authorized scrapes from the same serving
+process and record the elapsed monotonic time between capture boundaries.
+Capture the process incarnation and source/build identity separately; file
+modification times and a shared URL do not prove either. Keep raw observations
+outside tracked source and do not include credentials or conversation contents.
+
+Compare the saved observations without importing or starting the application:
+
+```sh
+python3 scripts/analyze_agent_load.py before.prom after.prom --elapsed-seconds 60
+```
+
+The elapsed value is the measured observation interval, not a polling setting.
+The script reads local files only, identifies them by SHA-256, preserves gauge
+endpoints, and calculates interval counter deltas and storage-RPC mean wall
+durations. It selects task, executor, event-delivery and storage-RPC series;
+unrelated metric labels are not copied. Missing endpoints, decreased counters
+and inconsistent histogram pairs never become zero work or successful latency
+measurements. Malformed or duplicate selected series fail with a nonzero exit.
+The report is diagnostic evidence, not a performance pass/fail gate.
+
+Interpret the populations separately:
+
+- Task counts are not a census of logical graph actors. Executor jobs, resident
+  carriers, monitoring threads and operating-system threads are different sets.
+- Delivery `pending_bytes` charges queued/in-flight events and retained
+  structural sources, including shared immutable rows. It is not unique heap
+  memory or RSS, and dividing it by pending-event count is not a frame size.
+- Event-loop lag is a point observation. Delivery `max_lag_ms` and `peak_*`
+  are process-lifetime high-water marks. Neither gives an interval percentile.
+- RPC sum/count deltas give the mean duration of completed calls in that series.
+  Concurrent durations overlap; their sum is not elapsed wall time, database
+  CPU or storage-service time alone. Successful and failed outcomes stay
+  separate. Long polls and streams must not be judged as short HTTP requests.
+- A counter decrease proves the interval cannot be differenced as one monotonic
+  series. Counters that grow do not exclude a restart followed by enough new
+  work. Confirm process incarnation externally before making rate comparisons.
+
+Pair this with process CPU/RSS/thread observations, the existing bounded log
+diagnostic and workload shape. Record truncation and read errors. Stack sampling
+locates candidate work; missed samples and nonblocking reads limit precision,
+and profiled runs cannot serve as uninstrumented performance comparisons.
+Use the application workload and failure matrix in the architecture map before
+claiming improved multi-agent throughput or capacity.
+
+Verification: `tests/meta/test_analyze_agent_load.py` covers interval arithmetic,
+quiet/missing/reset series, malformed evidence and a standalone offline CLI.
+
 ## Metric work on storage RPCs
 
 Metric test resets clear both admitted label values and their normalization
