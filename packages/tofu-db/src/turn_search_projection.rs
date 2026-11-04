@@ -76,6 +76,10 @@ const GRAM_LIST_MAX_ENTRIES: usize = 255;
 const GRAM_APPEND_OP_CAP: usize = 5_500;
 const GRAM_REMOVE_OP_CAP: usize = 6_000;
 const FORMAT_VERSION: u8 = crate::generated_conversation_search::PROJECTION_FORMAT_VERSION;
+// Oldest owner-marker format this reader recognizes. Every format from it
+// through FORMAT_VERSION rebuilds the disposable projection; a newer marker
+// belongs to a newer binary and fails closed (downgrades need export/restore).
+const FIRST_MARKER_FORMAT_VERSION: u8 = 2;
 const BLOOM_BYTES: usize = 2_048;
 const BLOOM_HASHES: usize = 3;
 const TEXT_CHUNK_BYTES: usize = 6_000;
@@ -1087,10 +1091,11 @@ impl OpenTurnSearchProjection {
                     }
                 }
             }
-            // Legacy UUID-only markers cannot prove queue-consumer continuity.
+            // Earlier formats and legacy UUID-only markers cannot prove
+            // queue-consumer continuity; both take the versioned wipe.
             Some(bytes)
                 if [18, 34].contains(&bytes.len())
-                    && matches!(bytes[0], 2 | 3 | FORMAT_VERSION)
+                    && (FIRST_MARKER_FORMAT_VERSION..=FORMAT_VERSION).contains(&bytes[0])
                     && bytes[1] <= 1 => {}
             Some(_) => return Err(invalid_data("unsupported search projection format marker")),
             None => {}
@@ -1128,6 +1133,26 @@ impl OpenTurnSearchProjection {
         check_search_stop(&self.stop)?;
         self.database.commit(transaction)?;
         Ok((activation, true))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_format_marker_version_for_test(
+        &mut self,
+        tenant: u64,
+        owner: u64,
+        version: u8,
+    ) -> io::Result<()> {
+        let mut transaction = self.database.begin(tenant, owner)?;
+        let format_key = key(&transaction, "search_format", b"version")?;
+        let mut marker = self
+            .database
+            .entity_get(&mut transaction, &format_key)?
+            .ok_or_else(|| invalid_input("search format marker is absent"))?;
+        marker[0] = version;
+        self.database
+            .entity_put(&mut transaction, format_key, marker)?;
+        self.database.commit(transaction)?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2482,6 +2507,103 @@ mod tests {
         assert_eq!(
             projection.prepare_owner(7, 11, source, Some(next)).unwrap(),
             (next, false)
+        );
+    }
+
+    #[test]
+    fn every_earlier_format_marker_wipes_and_rebuilds_the_projection() {
+        for version in FIRST_MARKER_FORMAT_VERSION..FORMAT_VERSION {
+            for acknowledged in [false, true] {
+                for uuid_only in [false, true] {
+                    let directory = tempdir().unwrap();
+                    let source = uuid::Uuid::new_v4();
+                    let mut projection =
+                        OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+                    let (activation, _) = projection.prepare_owner(7, 11, source, None).unwrap();
+                    projection
+                        .acknowledge_owner_backfill(7, 11, source, activation)
+                        .unwrap();
+                    replace(
+                        &mut projection,
+                        11,
+                        "stale",
+                        "g",
+                        1,
+                        &[document("t", 1, "staleneedle")],
+                    );
+                    let mut transaction = projection.database.begin(7, 11).unwrap();
+                    let format_key = key(&transaction, "search_format", b"version").unwrap();
+                    let mut marker = vec![version, u8::from(acknowledged)];
+                    marker.extend_from_slice(source.as_bytes());
+                    if !uuid_only {
+                        marker.extend_from_slice(activation.as_bytes());
+                    }
+                    projection
+                        .database
+                        .entity_put(&mut transaction, format_key, marker)
+                        .unwrap();
+                    projection.database.commit(transaction).unwrap();
+
+                    let (next, pending) = projection
+                        .prepare_owner(7, 11, source, Some(activation))
+                        .unwrap_or_else(|error| {
+                            panic!("format {version} marker must rebuild, not fail: {error}")
+                        });
+                    assert!(pending);
+                    assert_ne!(next, activation);
+                    assert!(projection
+                        .search(&request(11, "staleneedle"))
+                        .unwrap()
+                        .is_empty());
+                    projection
+                        .acknowledge_owner_backfill(7, 11, source, next)
+                        .unwrap();
+                    assert_eq!(
+                        projection.prepare_owner(7, 11, source, Some(next)).unwrap(),
+                        (next, false)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn newer_format_marker_fails_closed_without_wiping() {
+        let directory = tempdir().unwrap();
+        let source = uuid::Uuid::new_v4();
+        let mut projection =
+            OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let (activation, _) = projection.prepare_owner(7, 11, source, None).unwrap();
+        projection
+            .acknowledge_owner_backfill(7, 11, source, activation)
+            .unwrap();
+        replace(
+            &mut projection,
+            11,
+            "kept",
+            "g",
+            1,
+            &[document("t", 1, "keptneedle")],
+        );
+        projection
+            .set_format_marker_version_for_test(7, 11, FORMAT_VERSION + 1)
+            .unwrap();
+        let error = projection
+            .prepare_owner(7, 11, source, Some(activation))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        projection
+            .set_format_marker_version_for_test(7, 11, FORMAT_VERSION)
+            .unwrap();
+        assert_eq!(
+            projection
+                .prepare_owner(7, 11, source, Some(activation))
+                .unwrap(),
+            (activation, false)
+        );
+        assert_eq!(
+            projection.search(&request(11, "keptneedle")).unwrap().len(),
+            1
         );
     }
 
