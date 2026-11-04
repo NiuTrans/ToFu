@@ -523,3 +523,12 @@ Required/selected tools remain visible; catalog contracts retain execution autho
 with the estimate loses native discovery. Raising limits or summarizing contracts
 hides the assembly defect or weakens validation. Verify `tests/tasks_pkg/test_agent_tool_policy.py`
 and `tests/swarm/test_swarm_startup_context.py`.
+
+**Exact spawn allowlists and deferred tools — Problem:** a parent could discover an MCP tool through Tool Search and then name it
+in a swarm child's exact `tools` allowlist, but the narrowed child held no discovery surface and saw neither the schema nor a
+callable wire tool. **Decision:** `SubAgent` passes the exact selected names into the shared child-discovery policy; those names
+join the child's required-direct set after intersection with its authorized catalog. Unknown names remain excluded and no search
+or execution authority is added. The child can call the delegated deferred tool directly; inherited discovery metadata stays
+scoped as before. **Alternatives rejected:** granting discovery tools not requested by the parent widens authority; leaving the
+tool deferred makes an exact delegation unusable; routing through the parent's `execute_program` bypasses child admission.
+Specs: `tests/swarm/test_swarm_tool_scoping.py` and `tests/tasks_pkg/test_agent_tool_policy.py`.
