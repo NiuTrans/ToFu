@@ -1768,104 +1768,33 @@ summary.thinking-header::-webkit-details-marker{display:none}
 .conv-status-review {
   color:var(--text-primary);background:var(--accent-subtle);animation:none;
 }
-/* Sidebar defaults editor. Project chrome/controls belong to the UI kit and
-   the server-folder browser to 10-project-browser.css; this owner supplies the
-   workbench layout, the default-roots rail and the searchable recents. */
+/* Sidebar defaults editor. Project chrome/controls belong to the UI kit; the
+   server-folder browser (10-project-browser.css) and the workspace rail
+   (10-project-{modal-shell,workspace,roots,recent}.css) are the Project
+   Co-Pilot's shared components. This owner supplies the dialog header, the
+   workbench layout and the sidebar project rail. */
 .folder-settings{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-width:0;min-height:0}
 .folder-settings-content{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-height:0;overflow:auto}
 .folder-settings-fields{display:flex;flex-direction:column;gap:var(--space-4);border:0;padding:0;margin:0;min-width:0}
 .folder-settings-identity{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:var(--space-4)}
-/* Two panes with a stable height: lists scroll inside instead of resizing the dialog. */
+/* Header as in the Co-Pilot: folder glyph, title, scope note as subtitle. */
+.folder-settings-title{display:flex;flex:1;align-items:flex-start;gap:var(--space-3);min-width:0}
+.folder-settings-title-icon{flex-shrink:0;width:var(--space-5);height:var(--space-5);margin-top:var(--space-1);color:var(--accent)}
+.folder-settings-title-text{display:flex;flex-direction:column;gap:var(--space-1);min-width:0}
+/* The Co-Pilot's pane proportions with a stable height: lists scroll inside
+   instead of resizing the dialog. */
 .folder-settings-workbench{
-  display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:var(--space-4);
+  display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,0.85fr);gap:var(--space-4);
   height:clamp(300px,calc(100dvh - 380px),520px);min-width:0;
 }
-.folder-settings-rail{display:flex;flex-direction:column;gap:var(--space-3);min-width:0;min-height:0}
-.folder-settings-workspace,.folder-settings-recents{
-  display:flex;flex-direction:column;gap:var(--space-3);min-width:0;min-height:0;
-  padding:var(--space-3) var(--space-4);
-  border:var(--project-panel-width) solid var(--text-primary);border-radius:var(--radius);
-  background:var(--bg-primary);
-}
-.folder-settings-workspace{flex:0 1 auto;max-height:62%}
-.folder-settings-recents{flex:1 1 0}
-.folder-settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-shrink:0}
-.folder-settings-count{display:inline-flex;align-items:center;justify-content:center;min-width:var(--space-6);height:var(--space-6);padding:0 var(--space-2);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-primary);font-size:var(--font-size-sm);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums}
-.folder-settings-count:empty{display:none}
-.folder-settings-heading{margin:0;font-size:var(--font-size-lg);font-weight:var(--weight-bold);color:var(--text-primary)}
 .folder-settings-hint{margin:0;font-size:var(--font-size-md);line-height:var(--leading-body);color:var(--text-secondary);overflow-wrap:anywhere}
-.folder-settings-path-field{flex-shrink:0}
-.folder-settings-path-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--space-2)}
-
-/* Default roots: one compact row each — primary star, name/path, controls. */
-.folder-settings-roots{display:flex;flex-direction:column;gap:var(--space-1);list-style:none;padding:0;margin:0;min-width:0;min-height:0;overflow:auto}
-.folder-settings-root{
-  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:var(--space-1);
-  flex-shrink:0;padding:var(--space-1);
-  border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);
-  background:var(--bg-secondary);min-width:0;
-}
-.folder-settings-root[data-primary="true"]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,var(--bg-primary))}
-.folder-settings-root[data-primary="true"] [data-action="primary"] svg{fill:currentColor}
-.folder-settings-root-copy{display:flex;flex-direction:column;gap:var(--control-edge-inset);min-width:0}
-.folder-settings-root-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.folder-settings-root-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-md);font-weight:var(--weight-semibold);color:var(--text-primary)}
-/* RTL box + isolated LTR path: overflow trims the start, keeping the tail. */
-.folder-settings-root-path,.folder-settings-recent-path{
-  display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;
-  font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--text-secondary);
-}
-.folder-settings-root-path{user-select:text}
-.folder-settings-badge{flex-shrink:0;padding:0 var(--space-1);border-radius:var(--radius-pill);background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--text-primary);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);line-height:var(--leading-body)}
-.folder-settings-badge--muted{background:var(--bg-tertiary);color:var(--text-secondary)}
-.folder-settings-badge--warning{background:var(--warning-bg);color:var(--warning-text)}
+.folder-settings-hint:empty{display:none}
 .folder-settings-full-path{font-family:var(--font-mono);font-size:var(--font-size-sm);line-height:var(--leading-body);overflow-wrap:anywhere;color:var(--text-secondary);user-select:text}
 .folder-settings-review-roots{display:flex;flex-direction:column;gap:var(--space-2);margin:0;padding-inline-start:var(--space-4)}
 .folder-settings-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2)}
-.folder-settings-root-actions{display:flex;align-items:center;gap:var(--control-edge-inset)}
 .folder-settings-footer{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;flex-shrink:0;gap:var(--space-2);padding-top:var(--space-4);border-top:var(--control-edge-inset) solid var(--border)}
-.folder-settings-empty{padding:var(--space-2) 0;font-size:var(--font-size-md);color:var(--text-secondary);line-height:var(--leading-body)}
-.folder-settings-status{margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);overflow-wrap:anywhere}
-.folder-settings-status:empty,.folder-settings-hint:empty{display:none}
-
-/* Exact paths remain announced without duplicating each selected-root card. */
-.folder-settings-announcement{position:absolute;width:var(--control-edge-inset);height:var(--control-edge-inset);overflow:hidden;clip-path:inset(50%)}
 .folder-settings-error{padding:var(--space-3);margin:0;border:var(--control-edge-inset) solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-md);line-height:var(--leading-body);overflow-wrap:anywhere}
 .folder-settings-error[hidden]{display:none}
-
-/* Recent projects: search, pick to add, locate in the browser. */
-.folder-settings-recent-search{
-  display:flex;align-items:center;gap:var(--space-2);flex-shrink:0;
-  padding:0 var(--space-1) 0 var(--space-2);
-  border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);
-  background:var(--bg-secondary);
-}
-.folder-settings-recent-search:focus-within{border-color:var(--accent);box-shadow:var(--focus-ring)}
-.folder-settings-recent-search-icon{flex-shrink:0;width:var(--space-4);height:var(--space-4);color:var(--text-secondary)}
-.folder-settings-recent-filter{
-  flex:1;min-width:0;height:var(--control-h-md);margin:0;padding:0;
-  border:0;background:transparent;outline:none;
-  color:var(--text-primary);font-family:var(--font-ui);font-size:var(--font-size-md);
-  -webkit-appearance:none;appearance:none;
-}
-.folder-settings-recent-filter::placeholder{color:var(--text-tertiary)}
-.folder-settings-recent-filter::-webkit-search-cancel-button,
-.folder-settings-recent-filter::-webkit-search-decoration{-webkit-appearance:none;appearance:none}
-.folder-settings-recent-list{display:flex;flex:1;flex-direction:column;gap:var(--control-edge-inset);min-height:0;overflow:auto}
-.folder-settings-recent-item{display:flex;align-items:center;gap:var(--space-1);flex-shrink:0;padding-inline-end:var(--space-1);border-radius:var(--radius-sm)}
-.folder-settings-recent-item:hover{background:var(--bg-hover)}
-.folder-settings-recent-entry{
-  display:flex;align-items:center;gap:var(--space-2);flex:1;min-width:0;
-  padding:var(--space-2);border:0;border-radius:var(--radius-sm);background:transparent;
-  color:var(--text-primary);font-family:var(--font-ui);text-align:start;cursor:pointer;
-}
-.folder-settings-recent-entry:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-.folder-settings-recent-entry:disabled{cursor:default}
-.folder-settings-recent-entry:disabled .folder-settings-recent-name{color:var(--text-secondary)}
-.folder-settings-recent-copy{display:flex;flex:1;flex-direction:column;gap:var(--control-edge-inset);min-width:0}
-.folder-settings-recent-title{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.folder-settings-recent-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-md);font-weight:var(--weight-semibold)}
-.folder-settings-recent-count{flex-shrink:0;padding:0 var(--space-1);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-secondary);font-family:var(--font-mono);font-size:var(--font-size-xs);font-variant-numeric:tabular-nums}
 .folder-settings-delete-name{margin:0;color:var(--text-primary);font-weight:var(--weight-semibold);overflow-wrap:anywhere}
 .folder-tab-copy{display:flex;flex:1;min-width:0;text-align:start}
 /* Root details remain in the tooltip/settings, not a second row per tile. */
@@ -1904,11 +1833,11 @@ summary.thinking-header::-webkit-details-marker{display:none}
   .folder-settings-workbench{grid-template-columns:minmax(0,1fr);height:auto}
   .folder-settings-workbench .folder-browser{height:min(60dvh,420px)}
   /* Stacked panes take their content height; only the lists scroll. */
-  .folder-settings-workspace,.folder-settings-recents{flex:none;max-height:none}
-  .folder-settings-recent-list{max-height:calc(var(--control-h-lg) * 6)}
+  .folder-settings-workbench .pm-rail-workspace,.folder-settings-workbench .recent-paths{flex:none;max-height:none}
+  .folder-settings-workbench .recent-paths-list{max-height:calc(var(--control-h-lg) * 6)}
 }
 @media(max-width:480px){
-  .folder-settings-workspace,.folder-settings-recents{padding:var(--space-3)}
+  .folder-settings-workbench .pm-rail-card{padding:var(--space-3)}
   .folder-settings-identity{grid-template-columns:minmax(0,1fr)}
   .folder-settings-footer{gap:var(--space-3)}
 }
@@ -13015,12 +12944,14 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* ── Left pane: the shared folder browser fills the column ── */
 .pm-browser-pane { display: flex; min-width: 0; min-height: 0; }
 /* Rail cards are hairline outside Tofu and ink-framed in it; frame the
-   browser card (10-project-browser.css) the same way. */
-.pm-browser-pane .folder-browser {
-  flex: 1;
-  --folder-browser-frame: var(--control-edge-inset) solid var(--border);
+   browser card (10-project-browser.css) the same way in both rail hosts. */
+.pm-browser-pane .folder-browser { flex: 1; }
+.pm-browser-pane .folder-browser,
+.folder-settings-workbench .folder-browser {
+  --folder-browser-frame: var(--control-edge-inset) solid var(--project-line);
 }
-[data-theme="tofu"] .pm-browser-pane .folder-browser {
+[data-theme="tofu"] .pm-browser-pane .folder-browser,
+[data-theme="tofu"] .folder-settings-workbench .folder-browser {
   --folder-browser-frame: var(--project-panel-width) solid var(--project-ink);
   --folder-browser-shadow: var(--clay-sm);
 }
@@ -13090,15 +13021,69 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 .mp-add-row .mp-path-input::placeholder { font-family: inherit; color: var(--text-tertiary); }
-/* Tofu: match the input's box model to the neo-brutalist Add button so the pair reads as one unit */
-[data-theme="tofu"] .mp-add-row .mp-path-input {
-  border: var(--project-panel-width) solid var(--project-ink);
-  border-radius:var(--radius-sm);
-  background: var(--project-surface);
+
+/* ── Shared workspace rail (features/project/workspace-rail): the Co-Pilot
+   modal and sidebar folder settings mount the same markup, so these rules
+   carry no host selector. ── */
+/* Host-independent context. The Co-Pilot .modal and the kit project dialog
+   differ in palette, typeface and line height, so the rail fixes its own: the
+   UI face and --project-* roles of the shared folder browser (mapped exactly
+   as dialog.ui-dialog--project maps them in 30-ui-kit.css), with the
+   Co-Pilot's original type metrics. Proven by
+   tests/visual/test_visual_project_rail_parity.py. */
+.pm-rail {
+  --text-primary: var(--project-ink);
+  --text-secondary: var(--project-muted);
+  --text-tertiary: var(--project-muted);
+  --bg-primary: var(--project-panel);
+  --bg-secondary: var(--project-surface);
+  --bg-tertiary: var(--project-band);
+  --border: var(--project-line);
+  --accent: var(--project-accent);
+  --accent-hover: var(--project-accent-hover);
+  --text-on-accent: var(--project-on-accent);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xl);
+  line-height: normal;
 }
-[data-theme="tofu"] .mp-add-row .mp-path-input:focus {
-  border-color: var(--project-ink);
-  box-shadow:var(--clay-sm);
+.pm-rail ol.mp-folder-list { list-style: none; padding: 0; }
+/* Rail-owned Add control: the legacy .btn rules are .modal-scoped and kit
+   buttons take the project dialog's overrides, so neither renders alike in
+   both hosts. Tofu draws its block look in 12-tofu-theme-project-controls.css. */
+.mp-add-row .mp-add-btn {
+  flex-shrink: 0;
+  padding: calc(var(--space-1) + var(--control-edge-inset)) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  line-height: normal;
+  cursor: pointer;
+}
+.mp-add-row .mp-add-btn:hover { background: var(--accent-hover); }
+.mp-add-row .mp-add-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.mp-add-error {
+  margin: 0 0 var(--space-2);
+  color: var(--error-text);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.mp-add-error[hidden] { display: none; }
+/* The drag grip is also the keyboard reorder handle: a bare button. */
+.mp-row .mp-row-grip { padding: 0; border: 0; background: none; cursor: grab; }
+.mp-row .mp-row-grip:focus-visible,
+.mp-row .mp-row-lock:focus-visible,
+.mp-row .mp-row-remove:focus-visible { outline: none; box-shadow: var(--focus-ring); opacity: 1; }
+/* Announcements stay readable to assistive technology without taking space. */
+.pm-rail-status {
+  position: absolute;
+  width: var(--control-edge-inset); height: var(--control-edge-inset);
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
 
 /* legacy compat — older .project-path-row markup */
@@ -13494,6 +13479,21 @@ button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ri
   margin: var(--space-1) 0 var(--space-3);
 }
 
+
+/* Shared workspace rail rows are buttons: keyboard-activatable, same look. */
+button.recent-path-item { width: 100%; font: inherit; color: inherit; text-align: start; }
+button.recent-path-item:disabled { cursor: default; }
+button.recent-path-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.recent-paths-empty:empty { display: none; }
+.recent-paths-error {
+  margin: 0 0 var(--space-2);
+  color: var(--error-text);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.recent-paths-retry { display: flex; flex-shrink: 0; margin-bottom: var(--space-2); }
+.recent-paths-error[hidden], .recent-paths-retry[hidden] { display: none; }
 /* ═══════════════════════════════════════════
    ★ Apply Code Button & Modal (NEW)
    ═══════════════════════════════════════════ */
@@ -15565,16 +15565,28 @@ button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ri
    specified BOTH the retired tofu pixel settings inputs (0,2,1) and the
    2026-09-04 unified soft settings inputs, flattening them to a 1px no-shadow
    box. Settings inputs now come solely from 07's cross-theme soft system.
-   :not(.folder-browser-input) — SAME source-exclusion: the shared folder
-   browser (10-project-browser.css) draws its own filter/create fields inside
-   the Co-Pilot .modal; this bleed would otherwise box them a second time. */
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input){
+   :not(.folder-browser-input, .mp-path-input) — SAME source-exclusion: the
+   shared folder browser (10-project-browser.css) and workspace rail draw their
+   own fields in both the Co-Pilot .modal and the folder settings <dialog>,
+   which this .modal-only bleed never reaches; the rail's path field keeps its
+   look in both through the rule below. One selector list keeps the bleed's
+   specificity unchanged. */
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){
   border-radius:var(--radius);
   border:1px solid rgba(184,176,160,0.4);
   background:#FBF6E9;
   box-shadow:none
 }
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .mp-add-row .mp-path-input{border:1px solid rgba(184,176,160,0.4);border-radius:var(--radius);background:#FBF6E9;box-shadow:none}
+[data-theme="tofu"] .mp-add-row .mp-path-input:focus{border-color:#BB9572;box-shadow:none}
+/* The rail's Add control keeps the btn-primary gold block in both hosts. */
+[data-theme="tofu"] .mp-add-row .mp-add-btn{
+  background:#C9993F;color:#3B2E1E;border:2px solid #3B2E1E;
+  box-shadow:var(--clay-sm);font-weight:800;letter-spacing:0.02em;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s}
+[data-theme="tofu"] .mp-add-row .mp-add-btn:hover{background:#D6A848;transform:translate(-1px,-1px);box-shadow:var(--clay-md)}
+[data-theme="tofu"] .mp-add-row .mp-add-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #3B2E1E;background:#BC8A35}
 
 /* ── Project modal — tofu header band + blocky close (it nests its own
       .pm-header, so the generic > h3 rule doesn't reach it). ── */
@@ -19681,12 +19693,13 @@ button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ri
   /* Single column; JS toggles which pane is visible via data-pm-view */
   .pm-body{display:flex;flex-direction:column;grid-template-columns:none;grid-template-rows:none;
     gap:0;padding:var(--space-3) 14px;min-height:0;overflow:hidden}
-  .pm-browser-pane,.pm-rail{flex:1 1 auto;min-height:0}
+  /* Scoped to the Co-Pilot: folder settings owns its own narrow rail layout. */
+  .pm-workbench .pm-browser-pane,.pm-workbench .pm-rail{flex:1 1 auto;min-height:0}
   .pm-workbench[data-pm-view="browse"] .pm-rail{display:none}
   .pm-workbench[data-pm-view="workspace"] .pm-browser-pane{display:none}
-  .pm-rail{gap:var(--space-3)}
-  .pm-rail-workspace{max-height:none;flex:1 1 auto}
-  .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
+  .pm-workbench .pm-rail{gap:var(--space-3)}
+  .pm-workbench .pm-rail-workspace{max-height:none;flex:1 1 auto}
+  .pm-workbench .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
   .pm-workbench .modal-actions{padding:var(--space-3) 14px}
   .pm-workbench #projectModalStatus:not(:empty){margin:0 14px}
 

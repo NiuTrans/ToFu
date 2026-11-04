@@ -203,6 +203,35 @@ dialogs and they force runtime action exports).
 Specs: `folder-browser.test.ts`, `folder-settings.test.ts`,
 `tests/frontend/test_frontend_project_folder_browser_bridge.py`.
 
+### Shared workspace rail
+
+Problem: only the browser was shared. The roots and recent-project cards beside
+it existed twice — retained HTML strings in the Co-Pilot (`index.html`,
+`project.js`) and a separate typed rail in the folder editor with its own
+stylesheet — so the two dialogs looked different and a folder-editor recent
+only staged the root (navigation sat on a separate locate icon) where a
+Co-Pilot recent staged it and showed it in the browser.
+Decision: `frontend/src/features/project/workspace-rail.ts` is the one rail. It
+renders the Co-Pilot's Workspace card (typed add, rows with grip, primary star,
+read-only lock and remove; drag, touch and grip arrow-key reorder) and Recent
+card (filter with counts and highlight, clear-all where offered, failed read
+with retry), so `10-project-{modal-shell,workspace,roots,recent}.css` and the
+Tofu overrides style both hosts and `31-folder-settings.css` keeps only the
+dialog header, pane proportions and narrow layout. Hosts own the ordered draft
+(index 0 is primary) and every effect through ports: `add` and `pickRecent`
+return an optional refusal the rail shows under the field, `move` receives
+every reorder gesture, and `relinkRecent` makes a missing recent actionable
+(Co-Pilot); without it the row stays disabled (folder editor). Picking a recent
+stages it when absent and always navigates the browser to it, in both hosts.
+The Co-Pilot binds `_mpFolders`, the recent fetch, relink and Apply; the folder
+editor binds its draft, its 32-root and 512-character refusals and Save, which
+first commits a typed but unadded path (`commitPendingPath`).
+Rejected: giving the folder editor's own renderer the Co-Pilot classes (two
+controllers drift again); opening the Co-Pilot modal for folder defaults
+(couples sidebar defaults to the active conversation's apply path).
+Specs: `workspace-rail.test.ts`, `folder-settings.test.ts`,
+`tests/frontend/test_frontend_project_folder_browser_bridge.py`.
+
 
 **Problem:** repeated outlined project cards overwhelmed navigation, and only
 projects reserved a settings column, misaligning their counts with Inbox.

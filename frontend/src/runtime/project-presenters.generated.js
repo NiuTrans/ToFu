@@ -5,7 +5,7 @@ import { t } from '../i18n/index';
 import { escapeHtml } from '../html-safety';
 import { createProjectBrowseCoordinator } from '../core/project-browse-coordinator';
 import { createFolderBrowser } from '../features/project/folder-browser';
-import { PROJECT_PRESENTATION_ASSETS } from '../features/project/presentation-assets';
+import { createWorkspaceRail } from '../features/project/workspace-rail';
 
 const Api = runtimeScope.Api;
 if (!Api || typeof Api !== 'object') throw new Error('project-presenters runtime dependency is unavailable: Api');
@@ -42,7 +42,8 @@ if (typeof showToast !== 'function') throw new Error('project-presenters runtime
 /* ===== migrated source: project.js ===== */
 /* Responsibility: demand-loaded Project workspace and folder interactions.
    Entries: project modal, local/remote browse, root policy, and folder writes.
-   Dependencies: live core project authority, Api.project, and browse owner.
+   Dependencies: live core project authority, Api.project, and the shared
+   folder browser and workspace rail (features/project).
    Coding approvals/stdin/apply-code live in execution-interactions.js. */
 // ── Multi-path folder state for the modal ──
 let _mpFolders = []; // array of path strings being edited in the modal
@@ -90,9 +91,7 @@ function openProjectModal() {
   _syncFoldersFromState();
   _mpRenderTags();
   _updateProjectModalStatus();
-  _recentFilter = "";
-  const _recentInput = document.getElementById("recentSearchInput");
-  if (_recentInput) _recentInput.value = "";
+  _projectWorkspaceRail().resetRecentFilter();
   renderRecentProjects();
   document.getElementById("projectModal").classList.add("open");
   // Tell the full-page chat-drop handler (main.js) to stand down so a file
@@ -104,8 +103,7 @@ function openProjectModal() {
   browseDirectory(_mpFolders.length ? _mpFolders[0] : "~");
   _renderRemoteDevicesSection();
   _attachFolderDropZone();
-  _attachMpReorder();
-  setTimeout(() => document.getElementById("mpPathInput").focus(), 100);
+  setTimeout(() => _projectWorkspaceRail().input.focus(), 100);
 }
 
 function closeProjectModal() {
@@ -139,68 +137,21 @@ function pmMobileTab(view) {
   });
 }
 
-/* ── Multi-path tag rendering ── */
+/* ── Workspace roots: the shared rail paints them; this section owns the
+ * ordered draft and the mobile tab count. ── */
 function _mpRenderTags() {
-  const container = document.getElementById("mpFolderTags");
-  const countEl = document.getElementById("mpFolderCount");
-  if (countEl) countEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
   const mCountEl = document.getElementById("pmMobileCount");
   if (mCountEl) mCountEl.textContent = _mpFolders.length ? `${_mpFolders.length}` : '';
-  const _t = (typeof t === "function") ? t : (k) => k;
   _syncBrowserAddedState();
-  if (!_mpFolders.length) {
-    container.innerHTML = '<div class="mp-empty-hint">' + escapeHtml(_t("pm.emptyFolders")) + '</div>';
-    return;
-  }
-  const _gripTip = escapeHtml(_t("pm.dragReorder"));
-  container.innerHTML = _mpFolders.map((p, i) => {
-    const parts = p.split('/').filter(Boolean);
-    const name = parts[parts.length - 1] || p;
-    const short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : p;
-    const isPrimary = i === 0;
-    const isRO = _mpReadOnly.has(p);
-    // Lock (read-only) / pencil (writable) toggle. Click flips the access
-    // policy for this root — sent to the backend as readOnlyPaths.
-    const lockIcon = isRO
-      ? PROJECT_PRESENTATION_ASSETS.readOnlyLock
-      : PROJECT_PRESENTATION_ASSETS.writablePencil;
-    // 6-dot grip: the drag affordance. The WHOLE row is draggable (the grip is
-    // the visual hint), except its buttons — see _attachMpReorder's dragstart.
-    const grip = '<span class="mp-row-grip icon-box" title="' + _gripTip
-      + '" aria-hidden="true">' + PROJECT_PRESENTATION_ASSETS.reorderGrip
-      + '</span>';
-    return `<div class="mp-row${isPrimary ? ' mp-row-primary' : ''}${isRO ? ' mp-row-readonly' : ''}" draggable="true" data-mp-idx="${i}" title="${escapeHtml(p)}">
-      ${grip}
-      <span class="mp-row-icon">${isPrimary
-        ? PROJECT_PRESENTATION_ASSETS.primaryStar
-        : PROJECT_PRESENTATION_ASSETS.workspaceFolder}</span>
-      <span class="mp-row-text">
-        <span class="mp-row-name">${escapeHtml(name)}</span>
-        <span class="mp-row-path">${escapeHtml(short)}</span>
-      </span>
-      ${isPrimary ? '<span class="mp-row-badge">' + escapeHtml(_t("pm.rootBadge")) + '</span>' : ''}
-      ${isRO ? '<span class="mp-row-badge mp-row-badge-ro">' + escapeHtml(_t("pm.readOnlyBadge")) + '</span>' : ''}
-      <button class="mp-row-lock${isRO ? ' active' : ''}" draggable="false" data-tofu-action="_mpToggleReadOnly(${i})" title="${escapeHtml(isRO ? _t("pm.lockRo") : _t("pm.lockRw"))}">${lockIcon}</button>
-      <button class="mp-row-remove" draggable="false" data-tofu-action="_mpRemove(${i})" title="${escapeHtml(_t("common.remove"))}">
-        ${PROJECT_PRESENTATION_ASSETS.remove}
-      </button>
-    </div>`;
-  }).join('');
+  _projectWorkspaceRail().renderRoots();
 }
 
-/* ── Drag-to-reorder the Workspace list ──────────────────────────────────
+/* ── Reorder the Workspace list ──
  * ORDER IS SEMANTIC: `_mpFolders[0]` is the PRIMARY root (star + `root`
  * badge; sent to the backend as the primary in setPaths, the rest as extra
- * roots). So dragging a folder to the top IS the "promote to root" gesture —
- * there is no separate control, and the root is always the top row.
- *
- * The rows are rebuilt wholesale by _mpRenderTags (innerHTML), so the
- * listeners are DELEGATED onto the stable #mpFolderTags container and wired
- * exactly once (_mpReorderAttached), mirroring the image-chip reorder in
- * upload.js. */
-var _mpReorderAttached = false;
-var _mpDragFrom = null;
-
+ * roots). So moving a folder to the top IS the "promote to root" gesture —
+ * there is no separate control, and the root is always the top row. The
+ * shared rail's drag, touch and keyboard (grip + arrow keys) moves land here. */
 /** Move `from` → `to` within _mpFolders and repaint. `to` is the final index
  *  the entry should occupy. No-ops on out-of-range or same-position moves.
  *  Returns true when the array actually changed (drives the tests). */
@@ -216,140 +167,14 @@ function _mpReorder(from, to) {
   return true;
 }
 
-/** Row element under the pointer, plus whether the pointer sits in its TOP
- *  half (insert before) or bottom half (insert after). */
-function _mpRowAt(target, clientY) {
-  const row = target && target.closest ? target.closest('.mp-row[data-mp-idx]') : null;
-  if (!row) return null;
-  const idx = parseInt(row.dataset.mpIdx, 10);
-  if (!Number.isInteger(idx)) return null;
-  const rect = row.getBoundingClientRect();
-  const before = rect.height ? (clientY - rect.top) < rect.height / 2 : true;
-  return { row, idx, before };
-}
-
-/** Translate a hover position into the destination index for _mpReorder. */
-function _mpDropIndex(from, hit) {
-  let to = hit.before ? hit.idx : hit.idx + 1;
-  if (from < to) to -= 1;   // removing `from` first shifts everything after it
-  return to;
-}
-
-function _mpClearDropMarks() {
-  document.querySelectorAll('.mp-row.mp-drop-before, .mp-row.mp-drop-after')
-    .forEach((el) => el.classList.remove('mp-drop-before', 'mp-drop-after'));
-}
-
-function _mpMarkDrop(hit) {
-  _mpClearDropMarks();
-  if (!hit) return;
-  hit.row.classList.add(hit.before ? 'mp-drop-before' : 'mp-drop-after');
-}
-
-function _mpEndDrag() {
-  _mpClearDropMarks();
-  document.querySelectorAll('.mp-row.mp-row-dragging')
-    .forEach((el) => el.classList.remove('mp-row-dragging'));
-  _mpDragFrom = null;
-}
-
-function _attachMpReorder() {
-  if (_mpReorderAttached) return;
-  const list = document.getElementById('mpFolderTags');
-  if (!list) return;
-  _mpReorderAttached = true;
-
-  // ── Desktop: HTML5 drag-and-drop ──
-  list.addEventListener('dragstart', (e) => {
-    // Buttons keep their click semantics — never start a drag from one.
-    if (e.target.closest && e.target.closest('button')) { e.preventDefault(); return; }
-    const hit = _mpRowAt(e.target, e.clientY);
-    if (!hit) return;
-    _mpDragFrom = hit.idx;
-    hit.row.classList.add('mp-row-dragging');
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      // Firefox refuses to start a drag without payload.
-      try { e.dataTransfer.setData('text/plain', String(hit.idx)); } catch (_e) { /* ignore */ }
-    }
-  });
-
-  list.addEventListener('dragover', (e) => {
-    if (_mpDragFrom === null) return;   // a file drag — not ours, let it pass
-    e.preventDefault();                  // accept → the OS shows the move cursor
-    e.stopPropagation();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    _mpMarkDrop(_mpRowAt(e.target, e.clientY));
-  });
-
-  list.addEventListener('dragleave', (e) => {
-    if (_mpDragFrom === null) return;
-    if (e.target === list && !list.contains(/** @type {Node} */(e.relatedTarget))) _mpClearDropMarks();
-  });
-
-  list.addEventListener('drop', (e) => {
-    if (_mpDragFrom === null) return;
-    // Swallow it: releasing over the modal must never reach the page-level
-    // file-drop handler nor paste the text/plain index anywhere.
-    e.preventDefault();
-    e.stopPropagation();
-    const from = _mpDragFrom;
-    const hit = _mpRowAt(e.target, e.clientY);
-    _mpEndDrag();
-    if (hit) _mpReorder(from, _mpDropIndex(from, hit));
-  });
-
-  list.addEventListener('dragend', () => { _mpEndDrag(); });
-
-  /* ── Touch: HTML5 DnD does not fire on touch devices, and the modal has a
-   * dedicated mobile Workspace pane. Dragging starts from the GRIP only so a
-   * finger anywhere else still scrolls the list. touchmove is non-passive
-   * because it must preventDefault to stop the page scrolling mid-drag. */
-  list.addEventListener('touchstart', (e) => {
-    const touch = e.touches && e.touches[0];
-    if (!touch || !e.target.closest || !e.target.closest('.mp-row-grip')) return;
-    const hit = _mpRowAt(e.target, touch.clientY);
-    if (!hit) return;
-    _mpDragFrom = hit.idx;
-    hit.row.classList.add('mp-row-dragging');
-  }, { passive: true });
-
-  list.addEventListener('touchmove', (e) => {
-    if (_mpDragFrom === null) return;
-    const touch = e.touches && e.touches[0];
-    if (!touch) return;
-    e.preventDefault();   // hold the page still while repositioning
-    const under = document.elementFromPoint(touch.clientX, touch.clientY);
-    _mpMarkDrop(under ? _mpRowAt(under, touch.clientY) : null);
-  }, { passive: false });
-
-  const _touchEnd = (e) => {
-    if (_mpDragFrom === null) return;
-    const touch = (e.changedTouches && e.changedTouches[0]) || null;
-    const from = _mpDragFrom;
-    const under = touch ? document.elementFromPoint(touch.clientX, touch.clientY) : null;
-    const hit = under ? _mpRowAt(under, touch.clientY) : null;
-    _mpEndDrag();
-    if (hit) _mpReorder(from, _mpDropIndex(from, hit));
-  };
-  list.addEventListener('touchend', _touchEnd);
-  list.addEventListener('touchcancel', () => { _mpEndDrag(); });
-}
-
-
-function mpAddFolder() {
-  const input = document.getElementById("mpPathInput");
-  const p = input.value.trim();
-  if (!p) return;
-  if (_mpFolders.includes(p)) {
-    input.value = '';
-    input.focus();
-    return;
+/* Rail add port: stage a typed path. Blanks and duplicates stay silent, as
+   they always have in the Co-Pilot. */
+function _mpAddTypedPath(path) {
+  if (path && !_mpFolders.includes(path)) {
+    _mpFolders.push(path);
+    _mpRenderTags();
   }
-  _mpFolders.push(p);
-  input.value = '';
-  _mpRenderTags();
-  input.focus();
+  return null;
 }
 
 function _mpRemove(index) {
@@ -459,105 +284,25 @@ async function mpApplyFolders() {
 // ── Recent Project Paths (server-side persistence) ──
 
 let _recentProjects = [];
-let _recentFilter = "";
 
+/* The rail shows a failed read with a retry instead of an empty account. */
 async function renderRecentProjects() {
-  const container = document.getElementById("recentProjectPaths");
-  const listEl = document.getElementById("recentPathsList");
-  if (!container || !listEl) return;
-  let list = [];
-  try {
-    const data = await Api.project.recentList();
-    if (data) {
-      list = Array.isArray(data) ? data : data.projects || [];
-    }
-  } catch {}
-  _recentProjects = list;
-  if (list.length === 0) {
-    container.hidden = true;
-    return;
-  }
-  container.hidden = false;
-  _renderRecentList();
-}
-
-// Basename of a path (last non-empty segment).
-function _recentName(path) {
-  const parts = String(path).split("/").filter(Boolean);
-  return parts[parts.length - 1] || path;
-}
-
-// Highlight the matched substring of `text` (case-insensitive), HTML-escaping
-// both the surrounding text and the match so a path can't inject markup.
-function _recentHighlight(text, query) {
-  const safe = escapeHtml(text);
-  if (!query) return safe;
-  const idx = text.toLowerCase().indexOf(query.toLowerCase());
-  if (idx < 0) return safe;
-  const before = escapeHtml(text.slice(0, idx));
-  const match = escapeHtml(text.slice(idx, idx + query.length));
-  const after = escapeHtml(text.slice(idx + query.length));
-  return `${before}<mark class="recent-hl">${match}</mark>${after}`;
-}
-
-function _renderRecentList() {
-  const listEl = document.getElementById("recentPathsList");
-  const countEl = document.getElementById("recentCount");
-  const clearBtn = document.getElementById("recentSearchClear");
-  if (!listEl) return;
+  const rail = _projectWorkspaceRail();
   const _t = (typeof t === "function") ? t : (k) => k;
-  const q = _recentFilter.trim();
-  const filtered = q
-    ? _recentProjects.filter(
-        (item) => item.path.toLowerCase().includes(q.toLowerCase()),
-      )
-    : _recentProjects;
-  if (countEl) countEl.textContent = q ? `${filtered.length}/${_recentProjects.length}` : String(_recentProjects.length);
-  if (clearBtn) clearBtn.hidden = !q;
-  if (filtered.length === 0) {
-    const _t = (typeof t === "function") ? t : (k) => k;
-    const msg = q ? _t("pm.recentNoMatch") : _t("pm.recentEmpty");
-    listEl.innerHTML = `<div class="recent-paths-empty">${escapeHtml(msg)}</div>`;
+  let data;
+  try {
+    data = await Api.project.recentList();
+  } catch (e) {
+    rail.setRecents({ error: (e && e.message) || _t("folder.settings.recentFailed") });
     return;
   }
-  listEl.innerHTML = filtered
-    .map((item) => {
-      const name = _recentName(item.path);
-      if (item.exists === false) {
-        // JSON-encode the path as the action's string argument, then escape it
-        // for the attribute: quotes in a directory name cannot end the string
-        // and add arguments or calls to the action expression.
-        return `<div class="recent-path-item recent-path-missing" data-tofu-action="beginRelinkRecent(${escapeHtml(JSON.stringify(item.path))})" title="${escapeHtml(_t("pm.recentMissingTitle", { path: item.path }))}">
-         <span class="recent-path-text">
-           <span class="recent-path-name">${_recentHighlight(name, q)}<span class="recent-missing-badge">${escapeHtml(_t("pm.recentMissing"))}</span></span>
-           <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
-         </span>
-       </div>`;
-      }
-      return `<div class="recent-path-item" data-tofu-action="selectRecentProject(${escapeHtml(JSON.stringify(item.path))})" title="${escapeHtml(item.path)}">
-         <span class="recent-path-text">
-           <span class="recent-path-name">${_recentHighlight(name, q)}</span>
-           <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
-         </span>
-         ${item.count > 1 ? `<span class="recent-path-count">×${item.count}</span>` : ""}
-       </div>`;
-    })
-    .join("");
-}
-
-function _filterRecentProjects(value) {
-  _recentFilter = value || "";
-  _renderRecentList();
-}
-
-function _clearRecentSearch() {
-  _recentFilter = "";
-  const input = document.getElementById("recentSearchInput");
-  if (input) {
-    input.value = "";
-    input.focus();
-  }
-  _renderRecentList();
+  const list = data ? (Array.isArray(data) ? data : data.projects || []) : [];
+  _recentProjects = list.filter((item) => item && typeof item.path === "string");
+  rail.setRecents(_recentProjects.map((item) => ({
+    path: item.path,
+    count: Math.max(0, Number(item.count) || 0),
+    exists: item.exists !== false,
+  })));
 }
 
 function selectRecentProject(path) {
@@ -763,6 +508,37 @@ function browseDirectory(path) {
 /* Repaint the browser's added markers after the staged workspace changed. */
 function _syncBrowserAddedState() {
   if (_projectFolderBrowserHandle) _projectFolderBrowserHandle.syncAdded();
+}
+
+/* ── Workspace rail ── The typed shared rail (features/project/workspace-rail)
+   renders the Workspace and Recent cards beside the browser, exactly as in
+   sidebar folder settings. This section keeps the staged roots, recent fetch,
+   relink and apply; the rail calls back through these ports. */
+let _projectWorkspaceRailHandle = null;
+
+function _projectWorkspaceRail() {
+  if (_projectWorkspaceRailHandle) return _projectWorkspaceRailHandle;
+  const rail = createWorkspaceRail({
+    t: function (key, values) {
+      return (typeof t === "function") ? t(key, values) : key;
+    },
+    roots: function () { return _mpFolders; },
+    isReadOnly: function (path) { return _mpReadOnly.has(path); },
+    add: _mpAddTypedPath,
+    remove: _mpRemove,
+    toggleReadOnly: _mpToggleReadOnly,
+    move: _mpReorder,
+    pickRecent: selectRecentProject,
+    relinkRecent: beginRelinkRecent,
+    clearRecents: clearRecentProjects,
+    retryRecents: renderRecentProjects,
+  });
+  const body = document.querySelector("#projectModal .pm-body");
+  if (body) body.append(rail.el);
+  _projectWorkspaceRailHandle = rail;
+  // The rail lives for the page; its copy follows UI language switches.
+  window.addEventListener("tofu:language-change", function () { rail.relabel(); });
+  return rail;
 }
 
 /* Add a folder shown in the browser straight into the workspace list. */
@@ -1079,19 +855,11 @@ async function _runFolderDrop(files, dir) {
 runtimeScope.ProjectModalPresentation = ProjectModalPresentation;
 // END GENERATED LAZY RUNTIME PORTS
 // BEGIN GENERATED LAZY RUNTIME ACTIONS — project-presenters
-runtimeScope._clearRecentSearch = _clearRecentSearch;
-runtimeScope._filterRecentProjects = _filterRecentProjects;
-runtimeScope._mpRemove = _mpRemove;
-runtimeScope._mpToggleReadOnly = _mpToggleReadOnly;
-runtimeScope.beginRelinkRecent = beginRelinkRecent;
 runtimeScope.cancelRelinkRecent = cancelRelinkRecent;
-runtimeScope.clearRecentProjects = clearRecentProjects;
 runtimeScope.closeProjectModal = closeProjectModal;
 runtimeScope.dismissGitRootHint = dismissGitRootHint;
-runtimeScope.mpAddFolder = mpAddFolder;
 runtimeScope.mpApplyFolders = mpApplyFolders;
 runtimeScope.openProjectModal = openProjectModal;
 runtimeScope.pmMobileTab = pmMobileTab;
-runtimeScope.selectRecentProject = selectRecentProject;
 runtimeScope.useGitRootHint = useGitRootHint;
 // END GENERATED LAZY RUNTIME ACTIONS

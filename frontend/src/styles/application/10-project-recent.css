@@ -160,3 +160,18 @@
   margin: var(--space-1) 0 var(--space-3);
 }
 
+
+/* Shared workspace rail rows are buttons: keyboard-activatable, same look. */
+button.recent-path-item { width: 100%; font: inherit; color: inherit; text-align: start; }
+button.recent-path-item:disabled { cursor: default; }
+button.recent-path-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.recent-paths-empty:empty { display: none; }
+.recent-paths-error {
+  margin: 0 0 var(--space-2);
+  color: var(--error-text);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.recent-paths-retry { display: flex; flex-shrink: 0; margin-bottom: var(--space-2); }
+.recent-paths-error[hidden], .recent-paths-retry[hidden] { display: none; }

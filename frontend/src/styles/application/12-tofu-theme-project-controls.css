@@ -329,16 +329,28 @@
    specified BOTH the retired tofu pixel settings inputs (0,2,1) and the
    2026-09-04 unified soft settings inputs, flattening them to a 1px no-shadow
    box. Settings inputs now come solely from 07's cross-theme soft system.
-   :not(.folder-browser-input) — SAME source-exclusion: the shared folder
-   browser (10-project-browser.css) draws its own filter/create fields inside
-   the Co-Pilot .modal; this bleed would otherwise box them a second time. */
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input){
+   :not(.folder-browser-input, .mp-path-input) — SAME source-exclusion: the
+   shared folder browser (10-project-browser.css) and workspace rail draw their
+   own fields in both the Co-Pilot .modal and the folder settings <dialog>,
+   which this .modal-only bleed never reaches; the rail's path field keeps its
+   look in both through the rule below. One selector list keeps the bleed's
+   specificity unchanged. */
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input){
   border-radius:var(--radius);
   border:1px solid rgba(184,176,160,0.4);
   background:#FBF6E9;
   box-shadow:none
 }
-[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):not(.folder-browser-input, .mp-path-input):focus{border-color:#BB9572;box-shadow:none}
+[data-theme="tofu"] .mp-add-row .mp-path-input{border:1px solid rgba(184,176,160,0.4);border-radius:var(--radius);background:#FBF6E9;box-shadow:none}
+[data-theme="tofu"] .mp-add-row .mp-path-input:focus{border-color:#BB9572;box-shadow:none}
+/* The rail's Add control keeps the btn-primary gold block in both hosts. */
+[data-theme="tofu"] .mp-add-row .mp-add-btn{
+  background:#C9993F;color:#3B2E1E;border:2px solid #3B2E1E;
+  box-shadow:var(--clay-sm);font-weight:800;letter-spacing:0.02em;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s}
+[data-theme="tofu"] .mp-add-row .mp-add-btn:hover{background:#D6A848;transform:translate(-1px,-1px);box-shadow:var(--clay-md)}
+[data-theme="tofu"] .mp-add-row .mp-add-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #3B2E1E;background:#BC8A35}
 
 /* ── Project modal — tofu header band + blocky close (it nests its own
       .pm-header, so the generic > h3 rule doesn't reach it). ── */

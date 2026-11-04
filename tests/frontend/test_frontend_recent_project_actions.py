@@ -1,117 +1,213 @@
-"""Recent-project rows pass the stored path to their action as one argument.
+"""Co-Pilot recent projects: the retained host feeds and answers the shared rail.
 
-``_renderRecentList`` (frontend/src/runtime/sections/project.js) renders each
-recent project as ``data-tofu-action="selectRecentProject(...)"`` (or
-``beginRelinkRecent(...)`` for a missing directory). The path used to be spliced
-into a single-quoted action argument and only HTML-escaped; the browser decodes
-``&#39;`` back to ``'`` before the action registry parses the expression, so a
-directory name could close the string and add arguments or calls, including
-other registered actions. The path is now a JSON string literal escaped as a
-whole for the attribute.
+The rail (``frontend/src/features/project/workspace-rail.ts``) renders recent
+rows, filters, counts, highlights, escapes and routes clicks; its Vitest suite
+owns that. ``project.js`` owns what this suite drives under jsdom through the
+REAL composed section and the REAL rail:
 
-The harness renders the retained section under jsdom, installs the REAL action
-registry (frontend/src/action-registry.ts bundled by esbuild) and clicks the
-rows, so it exercises the same parse the browser performs.
+  • ``renderRecentProjects()`` turns ``Api.project.recentList()`` (an array or
+    ``{projects}``) into rail rows — invalid entries dropped, counts coerced,
+    ``exists: false`` kept as a relinkable missing row; a failed read shows the
+    rail's error with a retry that reads again.
+  • A picked row reaches ``selectRecentProject`` with its exact stored path:
+    staged once, then the folder browser navigates there. A missing row (or a
+    pick of a path the host knows is missing) arms relink for that exact path
+    and browses its parent instead of staging.
+  • Clear calls the server and reloads; opening the modal resets the recent
+    filter and reloads; the rail is mounted once into ``.pm-body`` and follows
+    UI language switches.
+
+Recent rows bind click closures over the stored path, so a directory name is
+never parsed as an action expression (the escaping class the former
+``data-tofu-action`` rows had); the crafted paths below still prove the exact
+string survives the host round trip.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 
 import pytest
 
-from tests._jsdom import require_node_modules
-from tests._runtime_sections import orchestration_legacy_test_root
+from tests._jsdom import JS_DIR, run_harness
 
 pytestmark = pytest.mark.unit
 
-ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-REGISTRY = os.path.join(ROOT, 'frontend', 'src', 'action-registry.ts')
+_PROJECT_JS = os.path.join(JS_DIR, 'project.js')
 
 CRAFTED_PATHS = [
     "/tmp/x',deleteEverything(),'",
     '/tmp/quote"and\\backslash',
     "/srv/plain project",
 ]
+MISSING_PATHS = [
+    "/old/x',deleteEverything(),'",
+    '/old/quote"and\\backslash',
+]
 
-_HARNESS = r"""
-const fs = require('fs');
-const path = require('path');
-const { pathToFileURL } = require('url');
-const [SECTION, ROOT, SNAPSHOT, PATHS] = process.argv.slice(2);
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
-const dom = new JSDOM(`<!DOCTYPE html><body>
-  <div id="recentProjectPaths">
-    <span id="recentCount"></span>
-    <input id="recentSearchInput">
-    <button id="recentSearchClear" hidden></button>
-    <div id="recentPathsList"></div>
-  </div>
-</body>`, { url: 'http://localhost/' });
-global.window = dom.window;
-global.document = dom.window.document;
-global.Element = dom.window.Element;
-// jsdom only accepts an AbortSignal from its own realm for the registry's
-// document listeners.
-global.AbortController = dom.window.AbortController;
-global.escapeHtml = (s) => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-global.getConvById = () => null;
-global.getActiveConv = () => null;
-
-let src = fs.readFileSync(SECTION, 'utf8');
-src += '\n;globalThis.__seedRecent = (rows) => { _recentProjects = rows; };';
-eval(src);
-
+_BODY = r"""
 (async () => {
-  const registry = await import(pathToFileURL(SNAPSHOT).href);
-  const calls = [];
-  const injected = [];
-  registry.installActionRegistry((name) => {
-    if (name === 'selectRecentProject') return (...args) => calls.push(['select', args]);
-    if (name === 'beginRelinkRecent') return (...args) => calls.push(['relink', args]);
-    if (name === 'deleteEverything') return () => injected.push(true);
-    return undefined;
-  });
-  const paths = JSON.parse(PATHS);
-  globalThis.__seedRecent([
-    ...paths.map((p) => ({ path: p, count: 1 })),
-    ...paths.map((p) => ({ path: p, count: 1, exists: false })),
-  ]);
-  _filterRecentProjects('');
-  for (const row of document.querySelectorAll('.recent-path-item')) {
-    row.querySelector('.recent-path-name').click();
-  }
-  console.log(JSON.stringify({ calls, injected: injected.length }));
+const { setup } = require(process.env.JSDOM_HARNESS);
+const CRAFTED = JSON.parse(process.argv[4]);
+const MISSING = JSON.parse(process.argv[5]);
+const calls = { recentList: 0, recentClear: 0, browse: [] };
+let recentReply = () => ({ projects: [] });
+const { window, check, report } = setup({
+  root: process.argv[3],
+  html: '<!DOCTYPE html><body>' +
+    '<div id="projectModal"><div class="modal project-modal pm-workbench">' +
+    '<span id="pmMobileCount"></span><div class="pm-body">' +
+    '<div class="pm-browser-pane"><div id="remoteDevicesSection" style="display:none"></div></div>' +
+    '</div><div id="projectModalHint"></div></div></div></body>',
+  targets: [process.argv[2]],
+  globals: {
+    runtimeScope: {},
+    showToast: () => {},
+    t: (k, o) => (o && o.path != null ? k + ':' + o.path : k),
+    Api: { project: {
+      recentList: async () => { calls.recentList += 1; return recentReply(); },
+      recentClear: async () => { calls.recentClear += 1; return { ok: true }; },
+      browse: (path) => {
+        calls.browse.push(path);
+        return Promise.resolve({ path, parent: '/', filesCount: 0, dirs: [] });
+      },
+    } },
+  },
+});
+const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+const rail = (sel) => document.querySelector('#projectModal .pm-rail ' + sel);
+const rows = () => [...document.querySelectorAll(
+  '#projectModal .pm-rail .recent-paths-list > .recent-path-item')];
+const rowFor = (path) => rows().find((row) => row.dataset.path === path);
+const roots = () => [...document.querySelectorAll(
+  '#projectModal .pm-rail .mp-folder-list > li.mp-row[data-path]')].map((li) => li.dataset.path);
+const lastBrowse = () => calls.browse[calls.browse.length - 1];
+const hintText = () => {
+  const el = document.querySelector('#projectModalHint .pm-hint-relink .pm-hint-text');
+  return el ? el.textContent : '';
+};
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// ── Feed: Api.project.recentList → rail rows ──
+recentReply = () => ({ projects: [
+  { path: '/srv/alpha', count: '4' },
+  null,
+  { path: 42 },
+  { count: 5 },
+  { path: '/srv/beta', count: 'x' },
+  { path: '/srv/gone', count: 9, exists: false },
+] });
+await renderRecentProjects();
+_mpRenderTags();
+await renderRecentProjects();
+check('rail_mounted_once_in_body',
+  document.querySelectorAll('#projectModal .pm-rail').length === 1
+  && !!document.querySelector('#projectModal .pm-body > .pm-rail'));
+check('feed_keeps_valid_entries_in_order',
+  same(rows().map((row) => row.dataset.path), ['/srv/alpha', '/srv/beta', '/srv/gone']));
+check('feed_coerces_count',
+  (rowFor('/srv/alpha').querySelector('.recent-path-count') || {}).textContent === '×4'
+  && !rowFor('/srv/beta').querySelector('.recent-path-count'));
+check('feed_keeps_missing_row_relinkable',
+  rowFor('/srv/gone').classList.contains('recent-path-missing') && !rowFor('/srv/gone').disabled);
+recentReply = () => [{ path: '/srv/alpha' }];
+await renderRecentProjects();
+check('feed_accepts_bare_array', same(rows().map((row) => row.dataset.path), ['/srv/alpha']));
+recentReply = () => null;
+await renderRecentProjects();
+check('feed_empty_reply_hides_card', rows().length === 0 && rail('.recent-paths').hidden);
+
+// ── Pick: exact path staged once, browser navigates there ──
+recentReply = () => ({ projects: [
+  ...CRAFTED.map((path) => ({ path, count: 2 })),
+  ...MISSING.map((path) => ({ path, exists: false })),
+] });
+await renderRecentProjects();
+const navigated = [];
+for (const path of CRAFTED) {
+  rowFor(path).click();
+  await flush();
+  navigated.push(lastBrowse());
+}
+check('pick_stages_exact_paths_in_order', same(roots(), CRAFTED));
+check('pick_navigates_to_exact_path', same(navigated, CRAFTED));
+rowFor(CRAFTED[0]).click();
+await flush();
+check('pick_staged_again_navigates_without_duplicate',
+  same(roots(), CRAFTED) && lastBrowse() === CRAFTED[0]);
+
+// ── Missing: relink armed for the exact path, browser lands on its parent ──
+const relinked = [];
+for (const path of MISSING) {
+  rowFor(path).click();
+  await flush();
+  relinked.push([hintText(), lastBrowse()]);
+}
+check('missing_click_arms_relink_for_exact_path',
+  same(relinked, MISSING.map((path) => ['pm.relinkBanner:' + path, '/old'])));
+check('missing_click_never_stages', same(roots(), CRAFTED));
+cancelRelinkRecent();
+selectRecentProject(MISSING[1]);
+check('select_missing_routes_to_relink',
+  hintText() === 'pm.relinkBanner:' + MISSING[1] && same(roots(), CRAFTED));
+cancelRelinkRecent();
+
+// ── Failed read: rail error + retry that reads again ──
+recentReply = () => { throw new Error('disk gone'); };
+await renderRecentProjects();
+check('read_failure_shows_error_with_retry',
+  !rail('.recent-paths').hidden && !rail('.recent-paths-error').hidden
+  && rail('.recent-paths-error').textContent === 'disk gone'
+  && !rail('.recent-paths-retry').hidden);
+recentReply = () => { throw {}; };
+await renderRecentProjects();
+check('read_failure_without_message_uses_fallback',
+  rail('.recent-paths-error').textContent === 'folder.settings.recentFailed');
+recentReply = () => ({ projects: [{ path: '/srv/alpha' }] });
+const beforeRetry = calls.recentList;
+rail('.recent-paths-retry button').click();
+await flush();
+check('retry_refetches_and_recovers',
+  calls.recentList === beforeRetry + 1 && rail('.recent-paths-error').hidden
+  && rail('.recent-paths-retry').hidden && same(rows().map((row) => row.dataset.path), ['/srv/alpha']));
+
+// ── Clear: server first, then reload ──
+recentReply = () => ({ projects: [] });
+const beforeClear = calls.recentList;
+rail('.recent-paths-clear').click();
+await flush();
+check('clear_button_clears_then_reloads',
+  calls.recentClear === 1 && calls.recentList === beforeClear + 1 && rail('.recent-paths').hidden);
+
+// ── Open: the recent filter resets and recents reload ──
+recentReply = () => ({ projects: [{ path: '/srv/alpha' }, { path: '/srv/beta' }] });
+await renderRecentProjects();
+const filter = rail('.recent-search-input');
+filter.value = 'no-such-project';
+filter.dispatchEvent(new window.Event('input', { bubbles: true }));
+const filtered = rows().length;
+const beforeOpen = calls.recentList;
+openProjectModal();
+await flush();
+check('open_resets_filter_and_refetches',
+  filtered === 0 && filter.value === '' && calls.recentList === beforeOpen + 1 && rows().length === 2);
+
+// ── Language switch: the page-lived rail relabels ──
+global.t = window.t = (k) => 'zh:' + k;
+window.dispatchEvent(new window.Event('tofu:language-change'));
+check('language_change_relabels_rail',
+  rail('.recent-paths .pm-section-label > span').textContent === 'zh:pm.recent');
+
+report();
+process.exit(0);
 })().catch((error) => { console.error(error); process.exit(1); });
 """
 
 
-def test_recent_project_actions_receive_the_exact_path_and_run_nothing_else(tmp_path):
-    require_node_modules('jsdom', 'esbuild')
-    snapshot = tmp_path / 'action_registry.mjs'
-    subprocess.run([
-        'node', '--input-type=module', '-e',
-        "import { buildSync } from 'esbuild'; buildSync({"
-        "entryPoints:[process.argv[1]], outfile:process.argv[2],"
-        "bundle:true, format:'esm', platform:'browser'});",
-        REGISTRY, str(snapshot),
-    ], cwd=ROOT, check=True, capture_output=True, text=True, timeout=60)
-    harness = tmp_path / 'recent_actions_harness.js'
-    harness.write_text(_HARNESS, encoding='utf-8')
-
-    proc = subprocess.run(
-        ['node', str(harness),
-         os.path.join(orchestration_legacy_test_root(), 'static', 'js', 'project.js'), ROOT,
-         str(snapshot), json.dumps(CRAFTED_PATHS)],
-        capture_output=True, text=True, timeout=60)
-
-    assert proc.returncode == 0, proc.stderr
-    outcome = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert outcome['injected'] == 0, 'a directory name invoked another registered action'
-    assert outcome['calls'] == (
-        [['select', [path]] for path in CRAFTED_PATHS]
-        + [['relink', [path]] for path in CRAFTED_PATHS])
+def test_copilot_recent_projects_feed_pick_relink_retry_and_clear():
+    run_harness(
+        _PROJECT_JS, _BODY,
+        extra_targets=[json.dumps(CRAFTED_PATHS), json.dumps(MISSING_PATHS)],
+        expect_pass=18, label='co-pilot recent projects host',
+    )
