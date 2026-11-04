@@ -1,13 +1,13 @@
-//! Bounded on-volume mark runs for backup garbage collection. Segment
-//! intersection reads each run whole once per window of segments; a shard
-//! read reads each run's header and only that shard's slice.
+//! On-volume mark spill for garbage collection. A set appends its sorted runs
+//! to one file and grows with the marks it is given: no run count or byte
+//! budget caps it. A shard read opens that file once and reads each run's
+//! header and only that shard's slice; segment intersection reads each run
+//! whole once per window of segments.
 
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use uuid::Uuid;
 
 use crate::block::BlockId;
 use crate::vfs::{sync_all_barrier, sync_directory_barrier, FileKind, OpenRequest, Vfs, VfsFile};
@@ -17,12 +17,20 @@ const RUN_MAGIC: &[u8; 8] = b"TDBMRK01";
 const RUN_HEADER_BYTES: usize = 8 + 4 + 4;
 const RUN_FOOTER_BYTES: usize = 4 + 32;
 const IDS_PER_RUN: usize = 65_536;
-const MAX_RUNS: usize = 511;
-const MAX_LIVE_IDS_PER_SHARD: usize = 1_000_000;
 const RUN_MAX_BYTES: usize = RUN_HEADER_BYTES + IDS_PER_RUN * 32 + RUN_FOOTER_BYTES;
-const _: () = assert!(MAX_RUNS * RUN_MAX_BYTES <= 1024 * 1024 * 1024);
 /// A block ID's first byte names its loose shard.
 const SHARDS: usize = u8::MAX as usize + 1;
+/// Every run of one set, appended back to back.
+const SPILL_FILE_NAME: &str = "spill.mark";
+
+/// Whether `name` is a mark-spill entry: the spill file, or a per-run file or
+/// temporary of the earlier one-file-per-run layout, which the first set
+/// initialized after an upgrade wipes like any other stale spill.
+pub(crate) fn is_spill_entry_name(name: &str) -> bool {
+    name == SPILL_FILE_NAME
+        || (name.starts_with("run-") && name.ends_with(".mark"))
+        || name.starts_with(".run-new-")
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MarkMetrics {
@@ -31,17 +39,23 @@ pub(crate) struct MarkMetrics {
     pub spill_bytes: u64,
 }
 
-/// A completed run, its footer BLAKE3 digest as written and, per shard, where
-/// that shard's IDs sit in the run and the BLAKE3 digest of those bytes as
-/// written. Only the set that wrote a run reads it back (initialization wipes
-/// stale runs), so the index stays in memory, out of reach of the on-volume
-/// bytes it verifies.
+/// A completed run: where its encoding starts in the spill file, its footer
+/// BLAKE3 digest as written and, per shard, where that shard's IDs sit in the
+/// run and the BLAKE3 digest of those bytes as written. Only the set that
+/// wrote a run reads it back (initialization wipes stale spills), so the
+/// index stays in memory, out of reach of the on-volume bytes it verifies.
 struct SpillRun {
-    path: PathBuf,
+    offset: u64,
     digest: [u8; 32],
     /// Shard `s` owns the run's IDs `shard_starts[s]..shard_starts[s + 1]`.
     shard_starts: [u32; SHARDS + 1],
     shard_digests: [[u8; 32]; SHARDS],
+}
+
+impl SpillRun {
+    fn encoded_bytes(&self) -> usize {
+        RUN_HEADER_BYTES + self.shard_starts[SHARDS] as usize * 32 + RUN_FOOTER_BYTES
+    }
 }
 
 /// Byte range of one shard's IDs within an encoded run.
@@ -52,10 +66,12 @@ fn shard_byte_range(shard_starts: &[u32; SHARDS + 1], shard: usize) -> Range<usi
 
 pub(crate) struct SpillMarkSet {
     directory: PathBuf,
+    path: PathBuf,
     vfs: Arc<dyn Vfs>,
     buffer: Vec<BlockId>,
     runs: Vec<SpillRun>,
-    maximum_runs: usize,
+    /// A flush may have created the spill file; cleanup then removes it.
+    spill_opened: bool,
     metrics: MarkMetrics,
 }
 
@@ -68,39 +84,21 @@ fn invalid_data(message: &str) -> io::Error {
 }
 
 impl SpillMarkSet {
+    /// The spill is sized by the marks themselves (at most 32 bytes per
+    /// insert, plus 52 bytes per run): it holds whatever the reachable set
+    /// needs, and only the volume's actual free space limits it.
     pub(crate) fn initialize(backup_dir: &Path, vfs: Arc<dyn Vfs>) -> io::Result<Self> {
-        Self::initialize_with_spill_limit(backup_dir, vfs, 1024 * 1024 * 1024)
-    }
-
-    pub(crate) fn initialize_with_spill_limit(
-        backup_dir: &Path,
-        vfs: Arc<dyn Vfs>,
-        maximum_spill_bytes: u64,
-    ) -> io::Result<Self> {
-        let maximum_runs = usize::try_from(maximum_spill_bytes / RUN_MAX_BYTES as u64)
-            .unwrap_or(usize::MAX)
-            .min(MAX_RUNS);
-        if maximum_runs == 0 {
-            return Err(invalid_input(
-                "garbage-collection spill budget cannot hold one mark run",
-            ));
-        }
         let directory = backup_dir.join("gc-runs");
         if vfs.metadata(&directory)? != FileKind::Directory {
             return Err(invalid_data("backup GC run path is not a directory"));
         }
         let entries = vfs.read_directory(&directory)?;
-        if entries.len() > MAX_RUNS * 2 {
-            return Err(invalid_input("backup GC stale-run bound exceeded"));
-        }
         for path in &entries {
             let name = path
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| invalid_data("backup GC run filename is not UTF-8"))?;
-            if (!name.starts_with("run-") || !name.ends_with(".mark"))
-                && !name.starts_with(".run-new-")
-            {
+            if !is_spill_entry_name(name) {
                 return Err(invalid_data(
                     "backup GC run directory contains an unknown entry",
                 ));
@@ -114,18 +112,19 @@ impl SpillMarkSet {
             sync_directory_barrier(vfs.as_ref(), &directory)?;
         }
         Ok(Self {
+            path: directory.join(SPILL_FILE_NAME),
             directory,
             vfs,
             buffer: Vec::with_capacity(IDS_PER_RUN),
             runs: Vec::new(),
-            maximum_runs,
+            spill_opened: false,
             metrics: MarkMetrics::default(),
         })
     }
 
     pub(crate) fn insert(&mut self, block_id: BlockId) -> io::Result<()> {
         // A failed flush retains pending marks. Retry it before admitting
-        // another reference so repeated budget/I/O errors cannot grow memory.
+        // another reference so repeated I/O errors cannot grow memory.
         if self.buffer.len() >= IDS_PER_RUN {
             self.flush()?;
         }
@@ -149,38 +148,32 @@ impl SpillMarkSet {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if self.runs.len() == self.maximum_runs {
-            return Err(invalid_input("garbage-collection spill budget exceeded"));
-        }
         self.buffer.sort_unstable();
         self.buffer.dedup();
-        let run_index = self.runs.len();
-        let destination = self.directory.join(format!("run-{run_index:04}.mark"));
-        let temporary = self.directory.join(format!(".run-new-{}", Uuid::new_v4()));
         let encoded = encode_run(&self.buffer)?;
-        let result = (|| {
-            let mut file = self.vfs.open(
-                &temporary,
-                OpenRequest {
-                    write: true,
-                    create_new: true,
-                    ..OpenRequest::default()
-                },
-            )?;
-            file.write_all_at(0, &encoded)?;
-            sync_all_barrier(file.as_mut())?;
-            self.vfs.rename(&temporary, &destination)?;
-            sync_directory_barrier(self.vfs.as_ref(), &self.directory)
-        })();
-        if result.is_err() {
-            let _ = self.vfs.remove_file(&temporary);
-        }
-        result?;
-        self.metrics.spill_bytes = self
-            .metrics
-            .spill_bytes
+        // Each run starts where the last recorded one ends. A failed append
+        // is rewritten in place by its retry, and no read reaches bytes past
+        // the last recorded run.
+        let offset = self.metrics.spill_bytes;
+        let spill_bytes = offset
             .checked_add(encoded.len() as u64)
             .ok_or_else(|| invalid_data("backup GC spill byte count overflow"))?;
+        self.spill_opened = true;
+        let mut file = self.vfs.open(
+            &self.path,
+            OpenRequest {
+                write: true,
+                create: true,
+                ..OpenRequest::default()
+            },
+        )?;
+        file.write_all_at(offset, &encoded)?;
+        sync_all_barrier(file.as_mut())?;
+        drop(file);
+        if self.runs.is_empty() {
+            // The first run names the file; later runs only extend it.
+            sync_directory_barrier(self.vfs.as_ref(), &self.directory)?;
+        }
         let mut shard_starts = [0_u32; SHARDS + 1];
         for block_id in &self.buffer {
             shard_starts[usize::from(block_id.0[0]) + 1] += 1;
@@ -192,43 +185,38 @@ impl SpillMarkSet {
             *blake3::hash(&encoded[shard_byte_range(&shard_starts, shard)]).as_bytes()
         });
         self.runs.push(SpillRun {
-            path: destination,
+            offset,
             digest: encoded[encoded.len() - 32..].try_into().unwrap(),
             shard_starts,
             shard_digests,
         });
+        self.metrics.spill_bytes = spill_bytes;
         self.metrics.run_count = u32::try_from(self.runs.len())
             .map_err(|_| invalid_data("backup GC run count overflow"))?;
         self.buffer.clear();
         Ok(())
     }
 
-    /// One shard's sorted unique IDs across all completed runs. Every run's
-    /// header is checked, and each run contributes only its slice for
-    /// `shard`, read at the recorded offset and verified against the digest
-    /// recorded when the run was written.
+    /// One shard's sorted unique IDs across all completed runs, from one open
+    /// of the spill file. Every run's header is checked, and each run
+    /// contributes only its slice for `shard`, read at the recorded offset and
+    /// verified against the digest recorded when the run was written.
     pub(crate) fn live_for_shard(&self, shard: u8) -> io::Result<Vec<BlockId>> {
         let shard = usize::from(shard);
+        if self.runs.is_empty() {
+            return Ok(Vec::new());
+        }
         let ids = self
             .runs
             .iter()
             .map(|run| (run.shard_starts[shard + 1] - run.shard_starts[shard]) as usize)
             .sum::<usize>();
-        if ids > MAX_LIVE_IDS_PER_SHARD {
-            return Err(invalid_input("backup GC live shard bound exceeded"));
-        }
         let mut live = Vec::with_capacity(ids);
+        let mut file = self.open_spill()?;
         let mut header = [0_u8; RUN_HEADER_BYTES];
         let mut bytes = Vec::new();
         for run in &self.runs {
-            let mut file = self.vfs.open(
-                &run.path,
-                OpenRequest {
-                    read: true,
-                    ..OpenRequest::default()
-                },
-            )?;
-            read_run_bytes(file.as_mut(), 0, &mut header)?;
+            read_run_bytes(file.as_mut(), run.offset, &mut header)?;
             if header != encode_run_header(run.shard_starts[SHARDS]) {
                 return Err(invalid_data("backup GC run header is invalid"));
             }
@@ -237,7 +225,7 @@ impl SpillMarkSet {
                 continue;
             }
             bytes.resize(range.len(), 0);
-            read_run_bytes(file.as_mut(), range.start, &mut bytes)?;
+            read_run_bytes(file.as_mut(), run.offset + range.start as u64, &mut bytes)?;
             if blake3::hash(&bytes).as_bytes() != &run.shard_digests[shard] {
                 return Err(invalid_data("backup GC run shard BLAKE3 mismatch"));
             }
@@ -284,33 +272,31 @@ impl SpillMarkSet {
             .iter()
             .map(|block_ids| vec![false; block_ids.len()])
             .collect::<Vec<_>>();
-        for run in &self.runs {
-            let mut file = self.vfs.open(
-                &run.path,
-                OpenRequest {
-                    read: true,
-                    ..OpenRequest::default()
-                },
-            )?;
-            let encoded = file.read_all(RUN_MAX_BYTES)?;
-            let live_ids = decode_run(&encoded)?;
-            // A valid run other than the one this set wrote (a swapped or
-            // replaced file) would silently change liveness.
-            if encoded[encoded.len() - 32..] != run.digest {
-                return Err(invalid_data("backup GC run is not the run this set wrote"));
-            }
-            for (block_ids, retained) in segments.iter().zip(&mut retained) {
-                let mut candidate = 0;
-                for live_id in &live_ids {
-                    while candidate < block_ids.len() && block_ids[candidate] < *live_id {
-                        candidate += 1;
-                    }
-                    if candidate == block_ids.len() {
-                        break;
-                    }
-                    if block_ids[candidate] == *live_id {
-                        retained[candidate] = true;
-                        candidate += 1;
+        if !self.runs.is_empty() {
+            let mut file = self.open_spill()?;
+            let mut encoded = Vec::new();
+            for run in &self.runs {
+                encoded.resize(run.encoded_bytes(), 0);
+                read_run_bytes(file.as_mut(), run.offset, &mut encoded)?;
+                let live_ids = decode_run(&encoded)?;
+                // A valid run other than the one this set wrote (a swapped or
+                // replaced region) would silently change liveness.
+                if encoded[encoded.len() - 32..] != run.digest {
+                    return Err(invalid_data("backup GC run is not the run this set wrote"));
+                }
+                for (block_ids, retained) in segments.iter().zip(&mut retained) {
+                    let mut candidate = 0;
+                    for live_id in &live_ids {
+                        while candidate < block_ids.len() && block_ids[candidate] < *live_id {
+                            candidate += 1;
+                        }
+                        if candidate == block_ids.len() {
+                            break;
+                        }
+                        if block_ids[candidate] == *live_id {
+                            retained[candidate] = true;
+                            candidate += 1;
+                        }
                     }
                 }
             }
@@ -328,17 +314,24 @@ impl SpillMarkSet {
     }
 
     pub(crate) fn cleanup(&self) -> io::Result<()> {
-        for run in &self.runs {
-            match self.vfs.remove_file(&run.path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+        if !self.spill_opened {
+            return Ok(());
         }
-        if !self.runs.is_empty() {
-            sync_directory_barrier(self.vfs.as_ref(), &self.directory)?;
+        match self.vfs.remove_file(&self.path) {
+            Ok(()) => sync_directory_barrier(self.vfs.as_ref(), &self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
         }
-        Ok(())
+    }
+
+    fn open_spill(&self) -> io::Result<Box<dyn VfsFile>> {
+        self.vfs.open(
+            &self.path,
+            OpenRequest {
+                read: true,
+                ..OpenRequest::default()
+            },
+        )
     }
 }
 
@@ -350,8 +343,8 @@ fn encode_run_header(count: u32) -> [u8; RUN_HEADER_BYTES] {
     header
 }
 
-fn read_run_bytes(file: &mut dyn VfsFile, offset: usize, bytes: &mut [u8]) -> io::Result<()> {
-    file.read_exact_at(offset as u64, bytes)
+fn read_run_bytes(file: &mut dyn VfsFile, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+    file.read_exact_at(offset, bytes)
         .map_err(|error| match error.kind() {
             io::ErrorKind::UnexpectedEof => invalid_data("backup GC run is truncated"),
             _ => error,
@@ -531,28 +524,27 @@ mod tests {
     }
 
     /// Every shard's answer from decoding each run in full, the whole-run
-    /// read path that shard-ranged reads must reproduce exactly.
-    fn whole_run_shards(marks: &SpillMarkSet, run_count: u32) -> Vec<Vec<BlockId>> {
-        let mut shards = vec![Vec::new(); 256];
-        for index in 0..run_count {
-            let path = marks.directory.join(format!("run-{index:04}.mark"));
-            let mut file = marks
-                .vfs
-                .open(
-                    &path,
-                    OpenRequest {
-                        read: true,
-                        ..OpenRequest::default()
-                    },
-                )
-                .unwrap();
-            let run = decode_run(&file.read_all(RUN_MAX_BYTES).unwrap()).unwrap();
-            for (shard, live) in shards.iter_mut().enumerate() {
-                let start = run.partition_point(|block_id| usize::from(block_id.0[0]) < shard);
-                let end = run.partition_point(|block_id| usize::from(block_id.0[0]) <= shard);
-                live.extend_from_slice(&run[start..end]);
-            }
+    /// read path that shard-ranged reads must reproduce exactly. It walks the
+    /// spill file from its start by each run's encoded count, so it also
+    /// checks that the runs lie back to back where the set recorded them and
+    /// that the file holds nothing else.
+    fn whole_run_shards(marks: &SpillMarkSet) -> Vec<Vec<BlockId>> {
+        let mut shards = vec![Vec::new(); SHARDS];
+        if marks.runs.is_empty() {
+            return shards;
         }
+        let spill = marks.open_spill().unwrap().read_all(usize::MAX).unwrap();
+        let mut offset = 0;
+        for run in &marks.runs {
+            assert_eq!(run.offset, offset as u64);
+            let count = u32::from_le_bytes(spill[offset + 12..offset + 16].try_into().unwrap());
+            let end = offset + RUN_HEADER_BYTES + count as usize * 32 + RUN_FOOTER_BYTES;
+            for block_id in decode_run(&spill[offset..end]).unwrap() {
+                shards[usize::from(block_id.0[0])].push(block_id);
+            }
+            offset = end;
+        }
+        assert_eq!(offset, spill.len());
         for live in &mut shards {
             live.sort_unstable();
             live.dedup();
@@ -636,7 +628,7 @@ mod tests {
             for block_id in inserted.iter().copied().collect::<BTreeSet<_>>() {
                 expected[usize::from(block_id.0[0])].push(block_id);
             }
-            let whole_run = whole_run_shards(&marks, metrics.run_count);
+            let whole_run = whole_run_shards(&marks);
             for shard in 0..=u8::MAX {
                 let live = marks.live_for_shard(shard).unwrap();
                 assert_eq!(
@@ -748,21 +740,22 @@ mod tests {
         marks.cleanup().unwrap();
     }
 
-    /// Release-tree certification at the full on-volume budget: exactly
-    /// MAX_RUNS × IDS_PER_RUN marks (33,488,896 ≈ 33.4 million) must fit the
-    /// default 1 GiB spill limit, read back exact per shard, and refuse one
-    /// more run. Ignored in the default suite because it writes 1 GiB;
-    /// run explicitly with `cargo test --release -- --ignored`.
+    /// Release-tree certification past the size the spill was once capped
+    /// at (511 runs, 1 GiB): 512 full runs of distinct marks spill into one
+    /// file and read back exact per shard. Ignored in the default suite
+    /// because it writes more than 1 GiB; run explicitly with
+    /// `cargo test --release -- --ignored`.
     #[test]
-    #[ignore = "full-budget certification writes 1 GiB of spill runs"]
-    fn spill_set_certifies_full_budget_scale() {
+    #[ignore = "certification writes more than 1 GiB of spill runs"]
+    fn spill_set_certifies_marks_past_one_gib() {
+        const RUNS: usize = 512;
         let directory = tempfile::tempdir().unwrap();
         let backup = directory.path().join("backup");
         std::fs::create_dir(&backup).unwrap();
         std::fs::create_dir(backup.join("gc-runs")).unwrap();
         let vfs = Arc::new(crate::vfs::RealVfs);
         let mut marks = SpillMarkSet::initialize(&backup, vfs).unwrap();
-        let total = (IDS_PER_RUN * MAX_RUNS) as u64;
+        let total = (IDS_PER_RUN * RUNS) as u64;
         for value in 0..total {
             let mut id = [0_u8; 32];
             id[0] = (value % 256) as u8;
@@ -772,12 +765,16 @@ mod tests {
         }
         let metrics = marks.finish().unwrap();
         assert_eq!(metrics.references, total);
-        assert_eq!(metrics.run_count as usize, MAX_RUNS);
-        assert!(metrics.spill_bytes <= 1024 * 1024 * 1024);
-        assert!(
-            metrics.spill_bytes as usize > (MAX_RUNS - 1) * RUN_MAX_BYTES,
-            "full-budget run must actually spill near the 1 GiB ceiling"
-        );
+        assert_eq!(metrics.run_count as usize, RUNS);
+        assert_eq!(metrics.spill_bytes, (RUNS * RUN_MAX_BYTES) as u64);
+        assert!(metrics.spill_bytes > 1024 * 1024 * 1024);
+        let entries = || {
+            std::fs::read_dir(backup.join("gc-runs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(entries(), [SPILL_FILE_NAME]);
         for shard in [0_u8, 128, 255] {
             let live = marks.live_for_shard(shard).unwrap();
             let expected = total / 256;
@@ -790,47 +787,8 @@ mod tests {
                 first_value
             );
         }
-        // The budget is exact: one further full buffer cannot spill.
-        for value in 0..(IDS_PER_RUN - 1) as u64 {
-            let mut id = [0xff_u8; 32];
-            id[1..9].copy_from_slice(&value.to_be_bytes());
-            marks.insert(crate::block::BlockId(id)).unwrap();
-        }
-        let error = marks.insert(crate::block::BlockId([0xff; 32])).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         marks.cleanup().unwrap();
-    }
-
-    #[test]
-    fn spill_budget_rejection_remains_bounded_on_repeated_insert() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("gc-runs")).unwrap();
-        let mut marks = SpillMarkSet::initialize_with_spill_limit(
-            directory.path(),
-            Arc::new(crate::vfs::RealVfs),
-            RUN_MAX_BYTES as u64,
-        )
-        .unwrap();
-        for value in 0..(2 * IDS_PER_RUN - 1) as u64 {
-            let mut id = [0_u8; 32];
-            id[..8].copy_from_slice(&value.to_be_bytes());
-            marks.insert(BlockId(id)).unwrap();
-        }
-        assert_eq!(
-            marks.insert(BlockId([0xfe; 32])).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        let references = marks.metrics.references;
-        for _ in 0..8 {
-            assert_eq!(
-                marks.insert(BlockId([0xff; 32])).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput
-            );
-            assert_eq!(marks.buffer.len(), IDS_PER_RUN);
-            assert_eq!(marks.metrics.references, references);
-        }
-        assert!(marks.metrics.spill_bytes <= RUN_MAX_BYTES as u64);
-        marks.cleanup().unwrap();
+        assert!(entries().is_empty());
     }
 
     #[test]
@@ -883,6 +841,112 @@ mod tests {
         marks.cleanup().unwrap();
     }
 
+    /// Each operation of a spill append fails in turn (an error before it, a
+    /// torn write, or one lost sync), for the run that creates the spill file
+    /// and for a run appended after another. A failed append records nothing
+    /// and keeps its marks, the runs recorded before it stay exact (also
+    /// across a crash), its retry rewrites the run in place, and after a crash
+    /// every recorded run reads back exact.
+    #[test]
+    fn spill_appends_survive_every_fault_and_crash() {
+        use crate::vfs::{FaultAction, FaultRule, Operation};
+
+        let id_for = |value: u64| {
+            let mut id = [0_u8; 32];
+            id[0] = value as u8;
+            id[1..9].copy_from_slice(&value.to_be_bytes());
+            BlockId(id)
+        };
+        let exact = |marks: &SpillMarkSet, values: u64| {
+            let mut expected = vec![Vec::new(); SHARDS];
+            for value in 0..values {
+                expected[value as usize % SHARDS].push(id_for(value));
+            }
+            for live in &mut expected {
+                live.sort_unstable();
+            }
+            (0..=u8::MAX).all(|shard| {
+                marks.live_for_shard(shard).unwrap() == expected[usize::from(shard)]
+            })
+        };
+        // `recorded` marks fill the runs before the faulted one, which holds
+        // the 1,000 marks `finish` flushes.
+        for recorded in [0, IDS_PER_RUN as u64] {
+            let prepare = || {
+                let vfs = deterministic_backup();
+                let mut marks =
+                    SpillMarkSet::initialize(Path::new("/backup"), vfs.clone()).unwrap();
+                for value in 0..recorded + 1_000 {
+                    marks.insert(id_for(value)).unwrap();
+                }
+                vfs.arm_fault(None).unwrap();
+                (vfs, marks)
+            };
+            let (vfs, mut marks) = prepare();
+            marks.finish().unwrap();
+            let trace = vfs.trace().unwrap();
+            let mut expected_trace = vec![
+                Operation::Open,
+                Operation::Write,
+                Operation::SyncAll,
+                Operation::SyncAll,
+            ];
+            if recorded == 0 {
+                // Only the first run publishes the file's name.
+                expected_trace.extend([Operation::SyncDirectory, Operation::SyncDirectory]);
+            }
+            assert_eq!(trace, expected_trace);
+            for (index, operation) in trace.iter().enumerate() {
+                let mut actions = vec![FaultAction::ErrorBefore(io::ErrorKind::Interrupted)];
+                match operation {
+                    Operation::Write => {
+                        actions.push(FaultAction::ShortWrite(RUN_HEADER_BYTES + 500 * 32));
+                    }
+                    Operation::SyncAll | Operation::SyncDirectory => {
+                        actions.push(FaultAction::DropSync);
+                    }
+                    _ => {}
+                }
+                for action in actions {
+                    let lost_sync = action == FaultAction::DropSync;
+                    for crash_before_retry in [false, true] {
+                        if lost_sync && crash_before_retry {
+                            continue;
+                        }
+                        let case = format!(
+                            "{recorded} recorded, {action:?} at {operation:?}, \
+                             crash before retry {crash_before_retry}"
+                        );
+                        let (vfs, mut marks) = prepare();
+                        vfs.arm_fault(Some(FaultRule {
+                            operation_number: index as u64 + 1,
+                            action,
+                        }))
+                        .unwrap();
+                        let result = marks.finish();
+                        if lost_sync {
+                            // The barrier's second sync covers one lost sync.
+                            result.unwrap();
+                        } else {
+                            assert!(result.is_err(), "{case}");
+                            assert_eq!(marks.runs.len(), usize::from(recorded > 0), "{case}");
+                            assert_eq!(marks.buffer.len(), 1_000, "{case}");
+                            if crash_before_retry {
+                                vfs.crash().unwrap();
+                            }
+                            assert!(exact(&marks, recorded), "{case}");
+                            vfs.arm_fault(None).unwrap();
+                            marks.finish().unwrap();
+                        }
+                        vfs.crash().unwrap();
+                        assert!(exact(&marks, recorded + 1_000), "{case}");
+                        marks.cleanup().unwrap();
+                    }
+                }
+            }
+        }
+    }
+
     /// A full run and a 1,000-ID run, each with IDs in every shard.
     fn two_run_marks(vfs: Arc<dyn Vfs>) -> SpillMarkSet {
         let mut marks = SpillMarkSet::initialize(Path::new("/backup"), vfs).unwrap();
@@ -896,23 +960,23 @@ mod tests {
         marks
     }
 
-    fn run_bytes(vfs: &DeterministicVfs, path: &Path) -> Vec<u8> {
-        let mut file = vfs
-            .open(
-                path,
-                OpenRequest {
-                    read: true,
-                    ..OpenRequest::default()
-                },
-            )
-            .unwrap();
-        file.read_all(RUN_MAX_BYTES).unwrap()
+    fn spill_file(vfs: &DeterministicVfs, marks: &SpillMarkSet) -> Vec<u8> {
+        vfs.open(
+            &marks.path,
+            OpenRequest {
+                read: true,
+                ..OpenRequest::default()
+            },
+        )
+        .unwrap()
+        .read_all(usize::MAX)
+        .unwrap()
     }
 
-    fn rewrite_run(vfs: &DeterministicVfs, path: &Path, bytes: &[u8]) {
+    fn replace_spill(vfs: &DeterministicVfs, marks: &SpillMarkSet, bytes: &[u8]) {
         let mut file = vfs
             .open(
-                path,
+                &marks.path,
                 OpenRequest {
                     write: true,
                     create: true,
@@ -924,6 +988,15 @@ mod tests {
         file.write_all_at(0, bytes).unwrap();
     }
 
+    /// A run valid on its own, with the count and shard layout of `run` but
+    /// one ID of shard 0x10 changed: not the run the set wrote there.
+    fn forged_run(spill: &[u8], run: &SpillRun) -> Vec<u8> {
+        let start = run.offset as usize;
+        let mut block_ids = decode_run(&spill[start..start + run.encoded_bytes()]).unwrap();
+        block_ids[run.shard_starts[0x10] as usize].0[31] ^= 1;
+        encode_run(&block_ids).unwrap()
+    }
+
     #[test]
     fn shard_reads_fail_closed_on_corrupt_truncated_swapped_or_missing_runs() {
         let vfs = deterministic_backup();
@@ -931,43 +1004,54 @@ mod tests {
         let intact = (0..=u8::MAX)
             .map(|shard| marks.live_for_shard(shard).unwrap())
             .collect::<Vec<_>>();
-        let (first, second) = (marks.runs[0].path.clone(), marks.runs[1].path.clone());
-        let (first_bytes, second_bytes) = (run_bytes(&vfs, &first), run_bytes(&vfs, &second));
+        let spill = spill_file(&vfs, &marks);
+        let second = marks.runs[1].offset as usize;
         let invalid = |shard: u8| marks.live_for_shard(shard).unwrap_err().kind();
         let exact = |shard: u8| marks.live_for_shard(shard).unwrap() == intact[usize::from(shard)];
 
-        let mut renamed = first_bytes.clone();
-        renamed[..8].copy_from_slice(b"invalid!");
-        rewrite_run(&vfs, &first, &renamed);
-        for shard in [0, 7, 255] {
-            assert_eq!(invalid(shard), io::ErrorKind::InvalidData);
+        // A corrupt header of either run fails every shard.
+        for start in [0, second] {
+            let mut renamed = spill.clone();
+            renamed[start..start + 8].copy_from_slice(b"invalid!");
+            replace_spill(&vfs, &marks, &renamed);
+            for shard in [0, 7, 255] {
+                assert_eq!(invalid(shard), io::ErrorKind::InvalidData);
+            }
         }
-        rewrite_run(&vfs, &first, &first_bytes);
 
-        let mut flipped = first_bytes.clone();
+        let mut flipped = spill.clone();
         flipped[shard_byte_range(&marks.runs[0].shard_starts, 7).start + 3] ^= 0x20;
-        rewrite_run(&vfs, &first, &flipped);
+        replace_spill(&vfs, &marks, &flipped);
         assert_eq!(invalid(7), io::ErrorKind::InvalidData);
         // Every other shard's bytes are verified on their own and unchanged.
         assert!(exact(6) && exact(8));
-        rewrite_run(&vfs, &first, &first_bytes);
 
-        let cut = shard_byte_range(&marks.runs[1].shard_starts, 200).start + 16;
-        rewrite_run(&vfs, &second, &second_bytes[..cut]);
+        let cut = second + shard_byte_range(&marks.runs[1].shard_starts, 200).start + 16;
+        replace_spill(&vfs, &marks, &spill[..cut]);
         assert_eq!(invalid(200), io::ErrorKind::InvalidData);
         assert_eq!(invalid(255), io::ErrorKind::InvalidData);
         assert!(exact(199));
-        rewrite_run(&vfs, &second, &second_bytes);
 
-        rewrite_run(&vfs, &first, &second_bytes);
+        // The second run's bytes where the first was written carry another
+        // count, so the first run's header fails every shard.
+        let mut moved = spill.clone();
+        moved[..spill.len() - second].copy_from_slice(&spill[second..]);
+        replace_spill(&vfs, &marks, &moved);
         for shard in [0, 128, 255] {
             assert_eq!(invalid(shard), io::ErrorKind::InvalidData);
         }
-        rewrite_run(&vfs, &first, &first_bytes);
 
-        vfs.remove_file(&second).unwrap();
+        // A valid run with the second run's count and shard layout fails
+        // only the shard whose bytes it changed.
+        let mut swapped = spill.clone();
+        swapped[second..].copy_from_slice(&forged_run(&spill, &marks.runs[1]));
+        replace_spill(&vfs, &marks, &swapped);
+        assert_eq!(invalid(0x10), io::ErrorKind::InvalidData);
+        assert!(exact(0x0f) && exact(0x11));
+
+        vfs.remove_file(&marks.path).unwrap();
         assert_eq!(invalid(0), io::ErrorKind::NotFound);
-        rewrite_run(&vfs, &second, &second_bytes);
+        replace_spill(&vfs, &marks, &spill);
         assert!((0..=u8::MAX).all(exact));
         marks.cleanup().unwrap();
     }
@@ -981,10 +1065,16 @@ mod tests {
         vfs.arm_fault(None).unwrap();
         let expected = marks.live_for_shard(0x5a).unwrap();
         let trace = vfs.trace().unwrap();
-        // Per run: open, header, shard slice.
+        // One open, then per run its header and the shard's slice.
         assert_eq!(
             trace,
-            [Operation::Open, Operation::Read, Operation::Read].repeat(2)
+            [
+                Operation::Open,
+                Operation::Read,
+                Operation::Read,
+                Operation::Read,
+                Operation::Read,
+            ]
         );
         for index in 0..trace.len() {
             vfs.arm_fault(Some(FaultRule {
@@ -1002,30 +1092,84 @@ mod tests {
         marks.cleanup().unwrap();
     }
 
+    /// A shard of more than a million IDs across 16 runs reads back whole (no
+    /// per-shard bound applies), and a shard whose slice is empty in every run
+    /// reads only the run headers after one open.
     #[test]
-    fn shard_bound_fails_before_reading_and_empty_slices_read_only_headers() {
+    fn dense_shards_read_back_whole_and_empty_slices_read_only_headers() {
         use crate::vfs::Operation;
 
+        const DENSE_IDS: u64 = 1_000_001;
         let vfs = deterministic_backup();
         let mut marks = SpillMarkSet::initialize(Path::new("/backup"), vfs.clone()).unwrap();
-        for value in 0..=MAX_LIVE_IDS_PER_SHARD as u64 {
+        for value in 0..DENSE_IDS {
             let mut id = [0_u8; 32];
             id[1..9].copy_from_slice(&value.to_be_bytes());
             marks.insert(BlockId(id)).unwrap();
         }
         let runs = marks.finish().unwrap().run_count as usize;
+        assert_eq!(runs, 16);
+        let live = marks.live_for_shard(0).unwrap();
+        assert_eq!(live.len() as u64, DENSE_IDS);
+        assert!(live.windows(2).all(|pair| pair[0] < pair[1]));
         vfs.arm_fault(None).unwrap();
-        assert_eq!(
-            marks.live_for_shard(0).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert!(vfs.trace().unwrap().is_empty());
         assert!(marks.live_for_shard(1).unwrap().is_empty());
-        assert_eq!(
-            vfs.trace().unwrap(),
-            [Operation::Open, Operation::Read].repeat(runs)
-        );
+        let mut expected_trace = vec![Operation::Open];
+        expected_trace.extend([Operation::Read].repeat(runs));
+        assert_eq!(vfs.trace().unwrap(), expected_trace);
         marks.cleanup().unwrap();
+    }
+
+    /// Initialization durably wipes an earlier set's spill in either layout
+    /// (the spill file, or per-run files and their temporaries) and refuses a
+    /// directory holding any other entry, leaving that entry in place.
+    #[test]
+    fn initialization_wipes_stale_spills_and_refuses_unknown_entries() {
+        let vfs = deterministic_backup();
+        let runs = Path::new("/backup/gc-runs");
+        let create = |name: &str| {
+            let mut file = vfs
+                .open(
+                    &runs.join(name),
+                    OpenRequest {
+                        write: true,
+                        create_new: true,
+                        ..OpenRequest::default()
+                    },
+                )
+                .unwrap();
+            file.write_all_at(0, b"stale").unwrap();
+            sync_all_barrier(file.as_mut()).unwrap();
+            sync_directory_barrier(vfs.as_ref(), runs).unwrap();
+        };
+        let refused = || {
+            SpillMarkSet::initialize(Path::new("/backup"), vfs.clone())
+                .err()
+                .map(|error| error.kind())
+        };
+        for name in [
+            SPILL_FILE_NAME,
+            "run-0000.mark",
+            "run-0510.mark",
+            ".run-new-6f1c3a52-9d0e-4b7a-8c21-5e4f3d2a1b09",
+        ] {
+            create(name);
+        }
+        let mut marks = SpillMarkSet::initialize(Path::new("/backup"), vfs.clone()).unwrap();
+        vfs.crash().unwrap();
+        assert!(vfs.read_directory(runs).unwrap().is_empty());
+        marks.insert(BlockId([7; 32])).unwrap();
+        marks.finish().unwrap();
+        assert_eq!(marks.live_for_shard(7).unwrap(), [BlockId([7; 32])]);
+        marks.cleanup().unwrap();
+        for name in ["run-0000.mark.partial", "spill.mark.old", "notes"] {
+            create(name);
+            assert_eq!(refused(), Some(io::ErrorKind::InvalidData), "{name}");
+            assert_eq!(vfs.metadata(&runs.join(name)).unwrap(), FileKind::File);
+            vfs.remove_file(&runs.join(name)).unwrap();
+        }
+        vfs.create_dir(&runs.join("run-0001.mark")).unwrap();
+        assert_eq!(refused(), Some(io::ErrorKind::InvalidData));
     }
 
     fn random_id(state: &mut u64) -> BlockId {
@@ -1051,8 +1195,8 @@ mod tests {
     }
 
     /// A window of the full catalog width (16 segments) against a mark of
-    /// several runs opens and reads each run once, whole, so it reads no more
-    /// than the spill itself.
+    /// several runs opens the spill once and reads each run once, whole, so
+    /// it reads no more than the spill itself.
     #[test]
     fn window_intersection_reads_each_run_once() {
         use crate::vfs::Operation;
@@ -1094,10 +1238,9 @@ mod tests {
         marks.retain_live_ids_per_segment(&mut actual).unwrap();
         let bytes_read = vfs.bytes_read.load(Ordering::Relaxed);
         assert_eq!(actual, expected);
-        assert_eq!(
-            inner.trace().unwrap(),
-            [Operation::Open, Operation::Read].repeat(RUNS as usize)
-        );
+        let mut expected_trace = vec![Operation::Open];
+        expected_trace.extend([Operation::Read].repeat(RUNS as usize));
+        assert_eq!(inner.trace().unwrap(), expected_trace);
         let header_bytes = u64::from(metrics.run_count) * RUN_HEADER_BYTES as u64;
         assert!(
             bytes_read <= metrics.spill_bytes + header_bytes,
@@ -1135,9 +1278,9 @@ mod tests {
                 marks.insert(block_id).unwrap();
                 inserted.push(block_id);
             }
-            let metrics = marks.finish().unwrap();
+            marks.finish().unwrap();
             let live = inserted.iter().copied().collect::<BTreeSet<_>>();
-            let whole_run = whole_run_shards(&marks, metrics.run_count)
+            let whole_run = whole_run_shards(&marks)
                 .into_iter()
                 .flatten()
                 .collect::<BTreeSet<_>>();
@@ -1211,7 +1354,7 @@ mod tests {
         marks.retain_live_ids_per_segment(&mut actual).unwrap();
         assert_eq!(actual, expected);
         let trace = vfs.trace().unwrap();
-        assert_eq!(trace, [Operation::Open, Operation::Read].repeat(2));
+        assert_eq!(trace, [Operation::Open, Operation::Read, Operation::Read]);
         for index in 0..trace.len() {
             vfs.arm_fault(Some(FaultRule {
                 operation_number: index as u64 + 1,
@@ -1238,35 +1381,35 @@ mod tests {
             assert_eq!(actual, window, "a failed window keeps every candidate");
             kind
         };
-        let (first, second) = (marks.runs[0].path.clone(), marks.runs[1].path.clone());
-        let (first_bytes, second_bytes) = (run_bytes(&vfs, &first), run_bytes(&vfs, &second));
-        // Magic, an ID, the CRC32C and the BLAKE3 footer.
-        for (path, original, offset) in [
-            (&first, &first_bytes, 3),
-            (&first, &first_bytes, RUN_HEADER_BYTES + 7 * 32 + 5),
-            (&second, &second_bytes, second_bytes.len() - 33),
-            (&second, &second_bytes, second_bytes.len() - 1),
+        let spill = spill_file(&vfs, &marks);
+        // Magic and an ID of the first run, the CRC32C and the BLAKE3 footer
+        // of the second.
+        for offset in [
+            3,
+            RUN_HEADER_BYTES + 7 * 32 + 5,
+            spill.len() - 33,
+            spill.len() - 1,
         ] {
-            let mut flipped = original.clone();
+            let mut flipped = spill.clone();
             flipped[offset] ^= 0x20;
-            rewrite_run(&vfs, path, &flipped);
+            replace_spill(&vfs, &marks, &flipped);
             assert_eq!(
                 failed(),
                 io::ErrorKind::InvalidData,
                 "flipped byte {offset}"
             );
-            rewrite_run(&vfs, path, original);
         }
-        rewrite_run(&vfs, &second, &second_bytes[..second_bytes.len() - 1]);
+        replace_spill(&vfs, &marks, &spill[..spill.len() - 1]);
         assert_eq!(failed(), io::ErrorKind::InvalidData);
-        rewrite_run(&vfs, &second, &second_bytes);
         // Valid on its own, but not the run this set wrote there.
-        rewrite_run(&vfs, &first, &second_bytes);
+        let mut swapped = spill.clone();
+        let second = marks.runs[1].offset as usize;
+        swapped[second..].copy_from_slice(&forged_run(&spill, &marks.runs[1]));
+        replace_spill(&vfs, &marks, &swapped);
         assert_eq!(failed(), io::ErrorKind::InvalidData);
-        rewrite_run(&vfs, &first, &first_bytes);
-        vfs.remove_file(&second).unwrap();
+        vfs.remove_file(&marks.path).unwrap();
         assert_eq!(failed(), io::ErrorKind::NotFound);
-        rewrite_run(&vfs, &second, &second_bytes);
+        replace_spill(&vfs, &marks, &spill);
         let mut actual = window.clone();
         marks.retain_live_ids_per_segment(&mut actual).unwrap();
         assert_eq!(actual, expected);

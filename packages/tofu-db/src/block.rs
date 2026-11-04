@@ -7134,6 +7134,7 @@ impl HistoryPayloadMetadataSelection {
         index_ids.extend(manifest.segments.iter().filter_map(|entry| entry.payload_index_block_id));
         Ok(Self { payload_root_id: manifest.payload_index_root_id, index_ids })
     }
+    #[cfg(test)]
     pub(crate) fn resident_bytes(&self) -> u64 {
         (std::mem::size_of::<Self>() + self.index_ids.capacity() * std::mem::size_of::<BlockId>()) as u64
     }
