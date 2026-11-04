@@ -252,7 +252,9 @@ Flow and Goal phases settle as later visible Turns while settlement witnesses on
 the root Turn, so a root-frontier checkpoint would replay every phase again as the
 uncovered suffix. Routers never run visible multi-Turn flows: dispatch grants
 force `autopilot`/`activeFlow` off, and swarm auto-continue Turns already publish.
-Specs: `tests/tasks_pkg/test_steered_checkpoint_publication.py`.
+The compaction resume witness (`compaction_resume_witness`) applies the same
+consumed/unverified rule. Specs: `tests/tasks_pkg/test_steered_checkpoint_publication.py`,
+`tests/compaction/test_continue_working_context.py`.
 
 **Policy drift — Problem:** any witnessed policy drift discarded the checkpoint and
 rebuilt every Turn, and even a route switch rebuilt whenever the checkpoint held

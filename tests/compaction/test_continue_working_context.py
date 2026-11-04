@@ -177,3 +177,84 @@ def test_owner_stop_during_failed_snapshot_write_keeps_original_input(compaction
     assert not l2.force_compact_if_needed(messages, task, force=True, preserve_budget_tokens=1)
     assert task['aborted'] and messages == before
     assert not task.get('_acceptedCompactionReceipt')
+
+
+_STEER = 'Use the staging database instead of production.'
+
+
+def _drain_inbox_carrier(task, messages, monkeypatch, events, mode):
+    """Append one inbox carrier through the real round drain (not yet consumed)."""
+    from lib import agent_inbox
+    from lib.tasks_pkg.orchestrator._swarm_inbox import drain_and_inject_inbox
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator._deferred_inbox_flush.append_event',
+                        lambda _task, event: events.append(event))
+    agent_inbox.reset_for_test()
+    extra = ({'injectionId': 'cmd', 'blockId': 'injection:user-steer:cmd'}
+             if mode == 'user-steer' else {'fromConv': 'peer-conversation', 'queueId': 'q1'})
+    agent_inbox.enqueue(task['convId'], _STEER, priority='next', mode=mode, extra=extra)
+    drain_and_inject_inbox(task=task, messages=messages, round_num=1, tid='inbox')
+    assert _STEER in messages[-1]['content']
+
+
+def test_consumed_steer_keeps_the_compaction_resumable(compaction_case, monkeypatch):
+    from lib import agent_inbox
+    from lib.tasks_pkg.compaction._layer2 import _compact as l2
+    from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
+    from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+    from lib.tasks_pkg.orchestrator._deferred_inbox_flush import flush_deferred_peer_and_steer
+    task, events, saved, failure = compaction_case
+    messages = [user('Work'), {'role': 'assistant', 'content': 'earlier evidence ' * 5000}, user('Continue')]
+    task['messages'] = messages
+    try:
+        _drain_inbox_carrier(task, messages, monkeypatch, events, 'user-steer')
+        assert task[UNVERIFIED_INBOX_DELIVERY] is True
+        # The provider returned, so the steer was consumed; the Turn keeps only
+        # a display record and a canonical rebuild could not restore it.
+        flush_deferred_peer_and_steer(task, round_num=1, tid='inbox')
+    finally:
+        agent_inbox.reset_for_test()
+    assert task['_userSteerInjects'][0]['deliveryState'] == 'delivered'
+    assert l2.force_compact_if_needed(messages, task, force=True, preserve_budget_tokens=1)
+    receipt, post = saved[-1]['receipt'], saved[-1]['post_messages']
+    assert receipt['resumeWitness']['turnId'] == 'turn'
+    assert sum(_STEER in str(message.get('content')) for message in post) == 1
+
+    class Store:
+        def list_compaction_archives(self, *a, **k):
+            return [{'id': 'archive', 'resultStatus': 'completed'}]
+
+        def get_compaction_archive(self, *a, **k):
+            return {'archive': {'receipt': deepcopy(receipt)},
+                    'postMessages': deepcopy(post) if k['include_post_messages'] else None}
+
+    import lib.agent_core.store
+    monkeypatch.setattr(lib.agent_core.store, 'get_conversation_store', lambda: Store())
+    resumed_task = _task()
+    resumed_task['_attemptId'] = 'continue-attempt'
+    assert restore_compacted_resume(resumed_task, task['config'], [], fresh_messages=[]) == post
+    assert resumed_task['_compactionResumeOutcome'] == {'reason': 'restored', 'archiveId': 'archive'}
+
+
+@pytest.mark.parametrize('mode', ['user-steer', 'peer-msg'])
+def test_unconsumed_inbox_carrier_never_becomes_a_resume_point(compaction_case, monkeypatch, mode):
+    # Unconsumed carriers are salvaged to the queue (steer) or redelivered from
+    # their durable row (peer); a snapshot holding one would deliver it twice.
+    from lib import agent_inbox
+    from lib.tasks_pkg.compaction._layer2 import _compact as l2
+    from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_compaction
+    from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY
+    task, events, saved, failure = compaction_case
+    messages = [user('Work'), {'role': 'assistant', 'content': 'earlier evidence ' * 5000}, user('Continue')]
+    task['messages'] = messages
+    try:
+        _drain_inbox_carrier(task, messages, monkeypatch, events, mode)
+    finally:
+        agent_inbox.reset_for_test()
+    assert task[UNVERIFIED_INBOX_DELIVERY] is True and not task.get('_userSteerInjects')
+    # Dispatch admission compacts after the round drain, before the provider returns.
+    assert l2.force_compact_if_needed(messages, task, force=True, preserve_budget_tokens=1)
+    assert 'resumeWitness' not in saved[-1]['receipt']
+    task.update(status='aborted', aborted=True)
+    writes = len(saved)
+    preserve_suspended_compaction(task)
+    assert len(saved) == writes and not task.get('_suspendedCompactionSaved')

@@ -2,9 +2,10 @@
 
 The existing owner-scoped compaction archive is the only persisted snapshot.
 Turn history remains authoritative. Policy/history/tool-prefix mismatch, missing
-archives, unreproducible media, steering and cancellation fall back to full
-canonical replay. Each resume reports its outcome so the Turn timeline can mark
-earlier compactions it did not reuse (``report_compaction_resume``).
+archives, unreproducible media, unconsumed inbox carriers and cancellation fall
+back to full canonical replay. Each resume reports its outcome so the Turn
+timeline can mark earlier compactions it did not reuse
+(``report_compaction_resume``).
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import json
 import time
 
 from lib.log import get_logger
-from lib.tasks_pkg.model_replay import policy_witness
+from lib.tasks_pkg.model_replay import UNVERIFIED_INBOX_DELIVERY, policy_witness
 from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
 logger = get_logger(__name__)
@@ -48,9 +49,15 @@ def resume_execution_digest(content, thinking):
 
 
 def compaction_resume_witness(task):
-    """Describe the exact source prefix only at a complete accepted L2 boundary."""
+    """Describe the exact source prefix only at a complete accepted L2 boundary.
+
+    Consumed steers stay in the witnessed view: the Turn keeps only their
+    display preview, so a canonical rebuild would lose them. A carrier the
+    provider has not consumed is salvaged to the queue or redelivered from its
+    durable row, so restoring it would deliver it twice.
+    """
     if (not isinstance(task, dict) or task.get('aborted') or not task.get('_turnId')
-            or task.get('_userSteerInjects') or task.get('_turnVisibleRunTurnIds')):
+            or task.get(UNVERIFIED_INBOX_DELIVERY) or task.get('_turnVisibleRunTurnIds')):
         return None
     config = task.get('config') or {}
     if any(config.get(key) for key in ('flowId', 'flowBuiltin', 'flowDefinition')):
