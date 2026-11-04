@@ -2636,9 +2636,9 @@
       "description": ""
     },
     "TOFU_UPDATE_BRANCH": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/self_update/_config.py",
+      "description": "Branch the in-app updater checks and fast-forwards from. Unset or empty, a git checkout follows its current branch's upstream (branch.<name>.merge), and main only when HEAD is detached or the branch tracks nothing. Check and apply always use the same resolved branch."
     },
     "TOFU_UPDATE_CHECK_MIN_INTERVAL_S": {
       "status": "legacy",
@@ -2646,14 +2646,14 @@
       "description": ""
     },
     "TOFU_UPDATE_REMOTE": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/self_update/_config.py",
+      "description": "Git remote (name or URL) the in-app updater checks and pulls from. Unset or empty, a git checkout follows its current branch's upstream (branch.<name>.remote), and origin only when HEAD is detached or the branch tracks nothing. A remote other than the official GitHub repository is checked by fetching it and reading VERSION."
     },
     "TOFU_UPDATE_REPO": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
+      "status": "documented",
+      "owner": "lib/self_update/_config.py",
+      "description": "GitHub owner/repo whose release tags are the update check for the official remote and for non-git installs (which also download its release tarballs); default rangehow/ToFu. Set explicitly, a git checkout keeps this tags check whatever its upstream remote is. Read at import for the GitHub API URLs."
     },
     "TOFU_VIDEO_ANALYSIS": {
       "status": "legacy",
@@ -4406,5 +4406,5 @@
       "description": "Absolute path to an extracted runtime tree produced by python -m evaluations.pi_contract build-runtime. When set, the native Pi relay-stub test executes that pinned runtime; when unset, the offline helper and contract tests still run and the live-runtime test skips."
     }
   },
-  "legacy_count": 599
+  "legacy_count": 596
 }

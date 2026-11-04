@@ -2,7 +2,8 @@
 
 ``_git_exe`` (cached PATH/Windows probe), ``_run_git`` (subprocess in the
 project root), ``git_available`` (is this a checkout?), ``_head_sha`` and
-``observe_repository`` (both answers from one git process).
+``observe_repository`` (both answers from one git process), and
+``resolve_update_upstream`` / ``_remote_url`` (where updates come from).
 """
 
 from __future__ import annotations
@@ -13,7 +14,12 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-from lib.self_update._config import _ROOT
+from lib.self_update._config import (
+    _FALLBACK_BRANCH,
+    _FALLBACK_REMOTE,
+    _ROOT,
+    update_source_overrides,
+)
 
 from lib.log import get_logger
 
@@ -230,4 +236,70 @@ def _head_sha() -> Optional[str]:
     except (FileNotFoundError, subprocess.SubprocessError) as e:
         logger.warning('[Update] rev-parse HEAD failed: %s', e)
     return None
+
+
+@dataclass(frozen=True)
+class UpdateUpstream:
+    """The remote and branch an update is checked against and pulled from."""
+
+    remote: str
+    branch: str
+
+
+def _current_branch_upstream() -> Optional[UpdateUpstream]:
+    """``branch.<current>.remote`` / ``branch.<current>.merge``, or None.
+
+    None when HEAD is detached, the branch tracks nothing, or git fails.
+    """
+    try:
+        head = _run_git(['symbolic-ref', '--quiet', 'HEAD'])
+        ref = head.stdout.strip()
+        if head.returncode != 0 or not ref.startswith('refs/heads/'):
+            return None
+        branch = ref.removeprefix('refs/heads/')
+        remote = _run_git(['config', '--get', f'branch.{branch}.remote'])
+        merge = _run_git(['config', '--get', f'branch.{branch}.merge'])
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.warning('[Update] upstream lookup failed: %s', e)
+        return None
+    remote_name = remote.stdout.strip() if remote.returncode == 0 else ''
+    merge_ref = merge.stdout.strip() if merge.returncode == 0 else ''
+    if not remote_name or not merge_ref:
+        return None
+    return UpdateUpstream(remote=remote_name,
+                          branch=merge_ref.removeprefix('refs/heads/'))
+
+
+def resolve_update_upstream() -> UpdateUpstream:
+    """The remote/branch both the update check and the apply follow.
+
+    ``TOFU_UPDATE_REMOTE`` / ``TOFU_UPDATE_BRANCH`` win when set. Otherwise
+    the current branch's upstream decides, so a clone follows the channel it
+    was cloned from (an internal mirror's ``master`` as much as GitHub's
+    ``main``). ``origin``/``main`` stands in only when HEAD is detached or
+    the branch tracks nothing.
+    """
+    overrides = update_source_overrides()
+    if overrides.remote and overrides.branch:
+        return UpdateUpstream(remote=overrides.remote, branch=overrides.branch)
+    tracked = _current_branch_upstream() or UpdateUpstream(
+        remote=_FALLBACK_REMOTE, branch=_FALLBACK_BRANCH)
+    return UpdateUpstream(remote=overrides.remote or tracked.remote,
+                          branch=overrides.branch or tracked.branch)
+
+
+def _remote_url(remote: str) -> Optional[str]:
+    """URL git fetches ``remote`` from, or None when git cannot say.
+
+    ``ls-remote --get-url`` applies ``url.<base>.insteadOf`` rewrites, echoes
+    a remote given as a URL unchanged, and never contacts the remote.
+    """
+    try:
+        cp = _run_git(['ls-remote', '--get-url', remote])
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.warning('[Update] remote URL lookup failed: %s', e)
+        return None
+    if cp.returncode != 0:
+        return None
+    return cp.stdout.strip() or None
 

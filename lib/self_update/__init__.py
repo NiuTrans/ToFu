@@ -2,18 +2,26 @@
 
 Backs the topbar "Update" button. Two responsibilities:
 
-  1. **Check** — compare the local ``VERSION`` against the newest release
-     tag published on the official GitHub repo (``UPDATE_REPO``). We use
-     the *tags* API (``/repos/<owner>/<repo>/tags``) rather than the raw
-     ``VERSION`` file so the check respects actual cut releases, not
-     in-progress ``main`` commits. ``/releases/latest`` is intentionally
-     NOT used because the project tags releases without creating GitHub
-     "Release" objects (the endpoint 404s).
+  1. **Check** — compare the local ``VERSION`` against the version this
+     install would update to. A git checkout follows its own upstream
+     (``resolve_update_upstream``: ``TOFU_UPDATE_REMOTE`` /
+     ``TOFU_UPDATE_BRANCH`` when set, else the current branch's
+     ``branch.<name>.remote`` / ``branch.<name>.merge``, else
+     ``origin``/``main`` for a detached or untracked HEAD) — the same
+     remote/branch Apply pulls. An upstream other than the official GitHub
+     repository (e.g. an internal mirror whose every push is one release
+     snapshot) is fetched and the fetched commit's ``VERSION`` compared.
+     The official repository, an explicit ``TOFU_UPDATE_REPO`` and non-git
+     deployments use the newest release tag of ``UPDATE_REPO`` instead,
+     read through the GitHub *tags* API (``/repos/<owner>/<repo>/tags``)
+     rather than the raw ``VERSION`` file so the check respects actual cut
+     releases, not in-progress ``main`` commits. ``/releases/latest`` is
+     intentionally NOT used because the project tags releases without
+     creating GitHub "Release" objects (the endpoint 404s).
 
   2. **Apply** — two strategies, chosen automatically by ``apply_update``:
-     * **git checkout** → ``git fetch`` + ``git pull --ff-only`` against
-       the configured remote/branch (mirrors what ``install.sh`` does for
-       existing checkouts).
+     * **git checkout** → ``git pull --ff-only`` from the resolved
+       upstream (mirrors what ``install.sh`` does for existing checkouts).
      * **non-git deployment** (exported copy, zip download — no ``.git``)
        → download the release tarball from GitHub and **overlay** tracked
        source onto the project root, backing up every replaced file to
@@ -54,9 +62,9 @@ existing ``from lib.self_update import X`` call sites keep working
 byte-identically.
 
 Sub-modules:
-  _config        — project root, repo/remote/branch, URLs, timeouts
-  _git           — git executable resolution, raw runners, HEAD sha
-  _version       — semver parse, current version, release discovery
+  _config        — project root, update-source settings, URLs, timeouts
+  _git           — git executable resolution, raw runners, HEAD sha, upstream
+  _version       — semver parse, current version, release/upstream discovery
   _status        — runtime-state classification, working tree, check
   _requirements  — requirements.txt diff + pip install
   _apply         — git-pull / tarball-overlay strategies + dispatcher
@@ -76,8 +84,6 @@ from lib.http_transport.client import http_get, http_stream  # noqa: F401
 
 # ── Shared constants ──
 from lib.self_update._config import (
-    UPDATE_BRANCH,
-    UPDATE_REMOTE,
     UPDATE_REPO,
     _DOWNLOAD_TIMEOUT,
     _GIT_TIMEOUT,
@@ -92,12 +98,14 @@ from lib.self_update._config import (
 # ── git helpers ──
 from lib.self_update._git import (
     RepositoryObservation,
+    UpdateUpstream,
     _git_exe,
     _head_sha,
     _run_git,
     _run_git_streaming,
     git_available,
     observe_repository,
+    resolve_update_upstream,
 )
 
 # ── version / release discovery ──
@@ -140,7 +148,7 @@ from lib.runtime.runtime_layout import (  # noqa: F401
 )
 
 __all__ = [
-    'UPDATE_REPO', 'UPDATE_REMOTE', 'UPDATE_BRANCH',
+    'UPDATE_REPO', 'UpdateUpstream', 'resolve_update_upstream',
     'git_available', 'observe_repository', 'RepositoryObservation',
     'current_version', 'fetch_latest_release',
     '_fetch_latest_release_detailed',
