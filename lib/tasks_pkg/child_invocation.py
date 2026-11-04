@@ -445,6 +445,8 @@ def create_child_invocation(
         if requirements is not None:
             child['_turnRequirementSource'] = requirements.validate(child)
         inherit_execution_budget(parent, child)
+        from lib.project_dispatch.admission import share_dispatch_root
+        share_dispatch_root(parent, child)
         register_child_invocation(child, parent,discard_on_failure=False)
         if native_child_owner is not None:
             native_child_owner.bind_transient_child(child, parent_task_id=parent['id'], parent_task=execution_parent)
