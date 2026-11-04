@@ -19,7 +19,7 @@ from lib.tasks_pkg.compaction._history import (
 logger = get_logger('lib.tasks_pkg.compaction._layer2._compact')
 
 
-def _retained_projection(old_messages, recent_messages, anchor_msg, retained_entries):
+def _retained_projection(old_messages, recent_messages, anchor_msg, retained_entries, *, task=None):
     """Build the same attributed policy/user/execution shell for planning and adoption."""
     result = [m for m in old_messages if m.get('role') in ('system', 'developer')]
     wrapper = make_history_carrier(retained_entries)
@@ -34,20 +34,23 @@ def _retained_projection(old_messages, recent_messages, anchor_msg, retained_ent
         else:
             result.append(message)
     from lib.tasks_pkg.context_composer import compact_context_snapshots
-    return compact_context_snapshots(coalesce_history_carriers(result))
+    from lib.tasks_pkg.project_guidance import compact_project_guidance
+    return compact_project_guidance(
+        compact_context_snapshots(coalesce_history_carriers(result)), task)
 
 
-def _with_restoration_reserve(candidate, source):
+def _with_restoration_reserve(candidate, source, *, task=None):
     """Account existing managed carriers that recomposition would restore."""
     from lib.tasks_pkg.context_composer import compact_context_snapshots
+    from lib.tasks_pkg.project_guidance import compact_project_guidance
     kept = {id(m) for m in candidate}
     # Recomposition restores current snapshots, never every historical version.
     # Partial mixed carriers are copies; retire duplicate sections again after
     # joining so those siblings consume their budget exactly once. A freshly
     # carried checklist in the candidate supersedes the source's older state.
-    return compact_context_snapshots([
+    return compact_project_guidance(compact_context_snapshots([
         m for m in compact_context_snapshots(source)
-        if m.get('_contextComposer') and id(m) not in kept] + candidate)
+        if m.get('_contextComposer') and id(m) not in kept] + candidate), task)
 
 
 def converge_compaction_candidate(

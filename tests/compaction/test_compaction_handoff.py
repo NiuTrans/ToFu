@@ -286,7 +286,9 @@ def test_cancellation_at_every_local_commit_boundary_preserves_messages(compact,
         _allow_head_truncate_fallback=True, _result_meta=meta)
     assert messages == original and not meta['compacted']
     assert meta['reason'] == 'aborted'
-    assert calls == ([] if stage == 'before_dispatch' else ['summary'])
+    # File-hint acquisition precedes joint L1/L2 preparation: Stop observed
+    # there now fences the provider call as well as final adoption.
+    assert calls == ([] if stage in {'before_dispatch', 'attachments'} else ['summary'])
 
 
 @pytest.mark.parametrize('task_kind', ['utility', 'live', 'transient'])
