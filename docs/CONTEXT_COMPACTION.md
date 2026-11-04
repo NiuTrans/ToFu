@@ -396,6 +396,48 @@ Missing conversation identity keeps the legacy no-affinity path; an invalid
 explicit owner fails closed.
 ### Durable adoption and Continue
 
+**Joint L1/L2 projection.** Problem: ordinary L1 protects already-sent cache
+bytes, but L2 planned its replacement from that same bulky projection. Decision:
+L2 runs the existing deterministic L1 transforms on a detached candidate with
+the cache fence lifted, then selects whole semantic source units from it. The
+newest unread tool batch, active skills, user intent and provider-required
+reasoning keep their existing protections. Unchanged messages retain their
+identity. The summary receives the original observations for the selected
+units, so preprocessing cannot replace error or mutation evidence with a short
+preview. The archive and coverage likewise describe the original request.
+Preparation emits no L1 events, writes no artifacts and changes no task state;
+only the existing successful L2 adoption publishes the combined result. Empty,
+failed, cancelled, over-budget and uneconomic candidates preserve the original.
+Explicit L1 ablations remain respected. There is no additional model call,
+trigger, hot-tail knob or retry budget.
+
+Scoped project guidance is retained according to the same remaining tool targets
+used by its restoration owner. Root rules and guidance for retained work remain
+verbatim; verified inactive directory sections leave the candidate, including
+mixed carriers. Unknown provenance stays intact. Restoration and economic
+measurement use that same scope projection, so inactive rules are neither
+re-injected nor charged as an imaginary restore reserve. The next access
+reacquires them through ordinary project guidance. Alternatives rejected:
+eagerly mutating the live prefix before summary success; summarizing L1 previews
+instead of original execution evidence; retaining every historically acquired
+rule forever; and changing cache thresholds to compensate for these boundaries.
+Specifications: `tests/compaction/test_compaction_joint_projection.py` and the
+project-guidance delivery/retirement tests.
+
+Frozen-request measurement (47 messages, original 109,921 local estimated
+tokens; archived summary reused, acquired guidance scopes reconstructed from
+the archive): the original accepted projection is reproduced at 74,520 tokens.
+Scope retirement reduces it to 29,372; scoped-rule material falls from 50,987
+to 5,839. L1 alone leaves this particular text-heavy fixture unchanged, and its
+formatted summary history stays at 6,603 locally counted tokens. Local
+projection medians were about 10.5 ms before and 16 ms after; provider latency,
+storage and final request recomposition are excluded. These are message-view
+measurements, not the UI's calibrated full-request count or a measured reduction
+of the 42-second provider call. In the synthetic 18-image-round regression,
+joint planning reduces selected summary source messages from 28 to 20, formatted
+history tokens from 1,078 to 770, and the retained projection estimate from 3,479
+to 2,105 while preserving the newest unread batch and original summary evidence.
+
 **Local L2 ownership.** Problem: one entrypoint mixed source selection, economic
 eligibility, summary fidelity and final window checks with durable adoption.
 Decision: `_layer2/_source_plan.py` returns whole source units and output reserve;

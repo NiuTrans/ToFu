@@ -215,6 +215,47 @@ def test_compaction_drop_restores_only_rules_that_retained_work_needs(tmp_path):
     assert _round(task, messages) == ''
 
 
+@pytest.mark.parametrize('defect', ['hash', 'unowned', 'media', 'steering', 'extra_text',
+                                  'undelivered', 'malformed_id', 'duplicate'])
+def test_scope_retirement_requires_complete_owned_delivery(tmp_path, defect):
+    root, _ = _project(tmp_path)
+    task = _task(root)
+    messages = [{'role': 'user', 'content': 'Keep the request'}]
+    _round(task, messages, root / 'other' / 'file.py')
+    carrier = messages[-1]
+    if defect == 'hash':
+        carrier['_contextBlocks'][-1]['hash'] = 'unverified'
+    elif defect == 'unowned':
+        carrier.pop('_contextComposer')
+    elif defect == 'media':
+        carrier['content'].append({'type': 'image_url', 'image_url': {'url': 'fixture://image'}})
+    elif defect == 'steering':
+        carrier['_containsHumanSteer'] = True
+    elif defect == 'extra_text':
+        carrier['content'].append({'type': 'text', 'text': 'Additional authored instruction'})
+    elif defect == 'malformed_id':
+        carrier['_contextBlocks'][-1]['id'] = []
+    elif defect == 'duplicate':
+        carrier['_contextBlocks'].append(dict(carrier['_contextBlocks'][-1]))
+    else:
+        task['_projectGuidance']['delivered'].clear()
+    original = deepcopy(messages)
+    assert project_guidance.compact_project_guidance(messages, task) == original
+    assert messages == original
+
+
+def test_scope_retirement_keeps_full_copy_referenced_by_retained_alias(tmp_path):
+    root, worktree = _project(tmp_path)
+    task = _task(root)
+    messages = [{'role': 'user', 'content': 'Inspect the worktree'}]
+    _round(task, messages, root / 'sub' / 'file.py', worktree / 'sub' / 'file.py')
+    messages.extend(_tool_round('read_files', {'path': str(worktree / 'sub' / 'file.py')}))
+    projected = project_guidance.compact_project_guidance(messages, task)
+    assert SUB_BODY.strip() in _visible(projected)
+    assert f'same bytes as {root / "sub" / "AGENTS.md"}' in _visible(projected)
+    assert _round(task, projected) == ''
+
+
 def test_scope_semantics_survive_notes_and_retractions(tmp_path):
     root, worktree = _project(tmp_path)
     task = _task(root)

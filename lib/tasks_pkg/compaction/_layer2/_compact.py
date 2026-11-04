@@ -61,6 +61,7 @@ from lib.tasks_pkg.compaction._layer2._candidate_policy import (
 from lib.tasks_pkg.compaction._layer2._source_plan import (
     SourcePlanningPorts, plan_compaction_sources,
 )
+from lib.tasks_pkg.compaction._layer2._preparation import prepare_l2_projection
 from lib.tasks_pkg.compaction._handoff import (
     HANDOFF_FIELD, HANDOFF_FORMAT, compaction_phase, has_open_tool_batch,
     insert_compaction_handoff, is_compaction_handoff, make_compaction_handoff,
@@ -693,6 +694,10 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
 
 
+    planning_messages = (messages if _unverified_pricing_deferral
+                         else prepare_l2_projection(messages, task))
+    if cancelled():
+        return 'Context compaction cancelled — messages preserved as-is.'
     sources = plan_compaction_sources(
         messages, task, budget_tokens=budget_tokens, max_turns=max_turns,
         handoff_phase=_handoff_phase, recent_files_block=_recent_files_block,
@@ -700,9 +705,10 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         tokens_before=tokens_before, log_prefix=pfx,
         ports=SourcePlanningPorts(
             plan_tail=_plan_cross_turn_tail, anchor_index=_objective_anchor_index,
-            retained_projection=_retained_projection,
-            restoration_reserve=_with_restoration_reserve,
+            retained_projection=lambda *args: _retained_projection(*args, task=task),
+            restoration_reserve=lambda *args: _with_restoration_reserve(*args, task=task),
         ),
+        planning_messages=planning_messages,
     )
     if isinstance(sources, str):
         return sources
@@ -834,7 +840,8 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     if retained_wrapper:
         _audit_user_verbatim_once()
     new_messages = _retained_projection(
-        sources.old_messages, sources.recent_messages, sources.anchor_msg, sources.retained_entries)
+        sources.old_messages, sources.recent_messages, sources.anchor_msg, sources.retained_entries,
+        task=task)
 
     protected_history_count = sum(
         len(history_entries(message)) for message in new_messages
@@ -861,7 +868,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     carry_checklist_through_compaction(new_messages, task)
     _candidate_tokens = _estimate_total_tokens(new_messages)
     if (callable(sources.dispatch_measure) and isinstance(sources.dispatch_target, int)
-            and sources.dispatch_measure(_with_restoration_reserve(new_messages, messages))
+            and sources.dispatch_measure(_with_restoration_reserve(new_messages, messages, task=task))
             > sources.dispatch_target):
         if isinstance(_result_meta, dict):
             _result_meta.update(compacted=False,

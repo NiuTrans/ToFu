@@ -494,6 +494,17 @@ subtree acquires and delivers it exactly like a first touch. Presence remains
 content-addressed in the messages. The task-local `delivered` record only
 separates a lost block from a never-delivered one.
 
+L2's retained projection also calls the pure `compact_project_guidance` owner:
+verified delivered nested sections unrelated to the retained tool targets leave
+the candidate even when they occupied the current Turn's managed shell. Root
+rules, active scopes and full-text holders referenced by active scope notes stay
+verbatim. Invalid metadata, unknown acquired state, human steering and media
+prevent retirement. Mixed carriers keep their other sections. Final capacity and
+economic restoration use the same projection; failed candidates change neither
+history nor the acquired/delivered state. Ordinary refresh forgets the retired
+rules only after successful adoption. This closes the gap where never dropping
+a managed shell prevented the restoration policy above from taking effect.
+
 **Measurement.** Replaying that archive's saved compactor result (25 messages,
 9 retained tool calls, all at the repository root or under `.tofu/memories`)
 through the new rule restores 1 block (root `AGENTS.md`, 16,592 characters)
