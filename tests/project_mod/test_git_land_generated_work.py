@@ -30,7 +30,7 @@ def edit(repo, key, value):
 
 
 @pytest.fixture()
-def generated(shared, feature):
+def generated(shared, feature):  # noqa: F811
     for path in ('frontend/src/i18n/locales', 'frontend/src/i18n/generated', 'scripts'):
         (shared / path).mkdir(parents=True, exist_ok=True)
     (shared / 'frontend/src/i18n/languages.json').write_text(json.dumps({
@@ -56,7 +56,7 @@ def generated(shared, feature):
 
 @pytest.mark.parametrize('regenerated', [False, True])
 def test_dirty_sources_and_catalogs_are_rebuilt_without_committing_foreign_work(generated, regenerated):
-    shared, feature = generated
+    shared, feature = generated  # noqa: F811
     before, task = rev(shared), rev(feature)
     edit(shared, 'key9', 'Unfinished')
     if regenerated:
@@ -76,7 +76,7 @@ def test_dirty_sources_and_catalogs_are_rebuilt_without_committing_foreign_work(
 
 
 def test_generated_dry_run_preserves_every_shared_byte(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'key9', 'Unfinished')
     generate(shared)
     before = state(shared)
@@ -86,7 +86,7 @@ def test_generated_dry_run_preserves_every_shared_byte(generated):
 
 
 def test_generated_cli_runs_without_pythonpath_or_repository_cwd(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'key9', 'Unfinished')
     generate(shared)
     before = state(shared)
@@ -102,7 +102,7 @@ def test_generated_cli_runs_without_pythonpath_or_repository_cwd(generated):
 
 
 def test_manual_generated_edit_without_source_is_preserved_by_refusal(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     catalog = json.loads((shared / CATALOG).read_text())
     catalog['manual'] = 'Only in the output'
     (shared / CATALOG).write_text(json.dumps(catalog) + '\n')
@@ -116,7 +116,7 @@ def test_manual_generated_edit_without_source_is_preserved_by_refusal(generated)
 
 
 def test_authored_conflict_is_never_resolved_by_regenerating(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'key0', 'Conflicting unfinished work')
     generate(shared)
     before = state(shared)
@@ -129,7 +129,7 @@ def test_authored_conflict_is_never_resolved_by_regenerating(generated):
 
 
 def test_generator_failure_leaves_refs_index_and_files_unchanged(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'key9', 'Unfinished')
     generate(shared)
     (shared / LOCALE).write_text('{ invalid json')
@@ -142,7 +142,7 @@ def test_generator_failure_leaves_refs_index_and_files_unchanged(generated):
 
 
 def test_edit_after_generated_planning_replans_from_fresh_sources(generated, monkeypatch):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'key9', 'First edit')
     generate(shared)
     original = land._plan
@@ -165,7 +165,7 @@ def test_edit_after_generated_planning_replans_from_fresh_sources(generated, mon
 
 @pytest.mark.parametrize('check', [False, True])
 def test_staged_generated_work_refuses_even_in_check_mode(generated, check):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'key9', 'Staged unfinished work')
     generate(shared)
     git(shared, 'add', CATALOG)
@@ -179,7 +179,7 @@ def test_staged_generated_work_refuses_even_in_check_mode(generated, check):
 
 @pytest.mark.parametrize('new_file', [False, True])
 def test_generator_read_set_revalidates_inputs_outside_the_branch_delta(generated, monkeypatch, new_file):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     original = land._plan
     planned = []
     path = shared / ('frontend/src/i18n/locales/de.json' if new_file
@@ -207,7 +207,7 @@ def test_generator_read_set_revalidates_inputs_outside_the_branch_delta(generate
 
 
 def test_new_untracked_language_stays_uncommitted_with_its_catalog(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     path = shared / 'frontend/src/i18n/languages.json'
     manifest = json.loads(path.read_text())
     manifest['languages'].append({'code': 'de', 'tag': 'de', 'name': 'Deutsch', 'englishName': 'German'})
@@ -224,7 +224,7 @@ def test_new_untracked_language_stays_uncommitted_with_its_catalog(generated):
 
 
 def test_unfinished_derived_translation_uses_the_generators_working_fallback(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     edit(shared, 'unfinished', 'Pending translation')
     generate(shared)
 
@@ -237,7 +237,7 @@ def test_unfinished_derived_translation_uses_the_generators_working_fallback(gen
 
 
 def test_deleted_generated_file_without_source_change_is_not_silently_recreated(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     (shared / CATALOG).unlink()
     before = state(shared)
 
@@ -248,7 +248,7 @@ def test_deleted_generated_file_without_source_change_is_not_silently_recreated(
 
 
 def test_generated_rebuild_keeps_uncommitted_mode_changes(generated):
-    shared, _ = generated
+    shared, _ = generated  # noqa: F811
     (shared / CATALOG).chmod(0o755)
 
     land.land('feature', cwd=shared)
@@ -260,7 +260,7 @@ def test_generated_rebuild_keeps_uncommitted_mode_changes(generated):
 
 @pytest.mark.parametrize('family', ['styles', 'runtime'])
 @pytest.mark.parametrize('committed', [False, True])
-def test_composed_outputs_follow_disjoint_source_sections(shared, feature, family, committed):
+def test_composed_outputs_follow_disjoint_source_sections(shared, feature, family, committed):  # noqa: F811
     from lib.project_mod.generated_integration import GENERATORS
 
     (shared / '.gitignore').write_text('node_modules\n')
