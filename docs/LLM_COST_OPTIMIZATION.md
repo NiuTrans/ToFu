@@ -607,6 +607,12 @@ Codex uses local compaction and its pinned 0.149.1 fallback: 272,000 context tok
 metrics separate raw wall, proxy CPU, translation CPU and Codex-favored wall.
 Namespace functions flatten; native `web_search` is suppressed and recorded;
 unknown native types fail closed. A real CLI smoke proves one Kimi call.
+Proxy shutdown joins accepted request handlers before closing their shared HTTP
+client, so both global and per-trial metrics are durable when close returns.
+Daemon handlers were rejected because a completed response could outlive teardown
+and leave evaluation evidence incomplete. Verify
+`tests/evaluations/test_codex_kimi_proxy_lifecycle.py` and the loopback proxy
+contract in `tests/tasks_pkg/test_long_agent_v2_contracts.py`.
 The formal Harbor `codex-kimi` profile now owns the proxy for the whole
 start/resume lifecycle, uploads and re-hashes the pinned CLI inside each
 disposable guest, removes the Kimi URL/key variables from Harbor's child
