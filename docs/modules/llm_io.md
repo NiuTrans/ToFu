@@ -1,5 +1,12 @@
 # LLM I/O and dispatch
 
+New automatic compaction is owned by the provider-independent local L2 policy
+([context contract](../CONTEXT_COMPACTION.md#one-provider-independent-compaction-owner)).
+Responses and Anthropic adapters no longer emit server compaction triggers or
+compaction beta headers. Existing native compaction items, opaque reasoning,
+source attribution and billing remain compatible; capability declarations do
+not select another summary algorithm.
+
 This domain compiles owner-authorized v2 routes, emits canonical requests, and normalizes upstream results. Entity/selection rules live in [`../MODEL_REGISTRATION.md`](../MODEL_REGISTRATION.md); `lib.llm` and `lib.llm_dispatch` are lazy execution facades, not configuration authorities. Provider terminal tool-text classification lives in `lib/llm/terminal_tool_text.py`; the standalone harness reuses it, while task recovery owns retries and never imports the CLI runtime or executes text packets. Historical reasoning continuity: Problem: body cleanup lost the settled-Turn label. Decision: retain it through protocol conversion; live/unproven thinking stays mandatory. Alternative rejected: dropping every signature loses live continuity. `test_protocol_conversion_checked.py` verifies the real builder/adapter boundary and caller immutability.
 
 ## Ownership

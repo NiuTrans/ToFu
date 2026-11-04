@@ -804,6 +804,7 @@ def compact_conversation_now(
     _summary_usage: dict = {}
     _summarize_ms = 0.0
     _turn_diff_included = False
+    continuity_digest = ''
 
     def _manual_receipt(
         status: str,
@@ -823,6 +824,7 @@ def compact_conversation_now(
                 'durable_summary_turn' if status == 'completed' else 'none'),
             summary_generated=summary_generated,
             summary_text=summary_value,
+            continuity_digest=continuity_digest,
             summary_usage=_summary_usage,
             summary_duration_ms=_summarize_ms,
             summarized_messages=len(old_api),
@@ -910,6 +912,9 @@ def compact_conversation_now(
             _turn_diff_included = True
     except Exception as e:
         logger.debug('[ManualCompact] turn-diff block failed: %s', e)
+
+    from lib.tasks_pkg.compaction._continuity import attach_continuity
+    summary_text, continuity_digest = attach_continuity(summary_text, old_api, task)
 
     def _settle_aborted_archive(outcome_reason: str, attempts: int) -> dict:
         receipt = _manual_receipt(

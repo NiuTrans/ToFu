@@ -9,6 +9,10 @@ Read `docs/modules/context_engineering.md` and
 `_receipt.py` owns archive metadata, not model authority. Read these owners
 before changing composer/replay/recovery boundaries; handoff and provider-wire
 tests are the executable compatibility matrix.
+`_continuity.py` carries source-derived folded execution state independently
+of model prose; its schema is `contracts/compaction_continuity_v1.schema.json`.
+Verify identity/digest before reuse and reserve the complete packet before a
+summary call. Verify `test_unified_continuity.py`, including manual rebuild.
 `_resume_projection.py` validates accepted archive snapshots against fresh
 history/policy/tool-prefix evidence for Continue; its focused regressions are
 `test_dispatch_context_recovery.py` (including isolated storage restart).

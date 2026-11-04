@@ -581,6 +581,13 @@ def _build_assistant_messages(msg: dict, *, model: str = '') -> list[dict]:
     reconstruct. The lossy ``toolSummary`` fallback is used only when no round
     can form a legal call/result pair.
     """
+    if msg.get('_isCompactionSummary') and isinstance(msg.get('content'), str):
+        from lib.tasks_pkg.compaction._continuity import continuity_digest_from_text
+        from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
+        digest = continuity_digest_from_text(msg['content'])
+        if digest:
+            return [make_compaction_handoff(msg['content'], phase='pre_turn',
+                                             continuity_digest=digest)]
     raw_rounds = msg.get('toolRounds')
     rounds = raw_rounds if isinstance(raw_rounds, (list, tuple)) else []
     raw_content = msg.get('content')

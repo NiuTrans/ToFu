@@ -187,6 +187,7 @@ def build_compaction_receipt(
     mode: str = "",
     continuation_format: str = "none",
     continuation_phase: str = "",
+    continuity_digest: str = "",
     summary_generated: bool = False,
     summary_text: str = "",
     summary_usage: Mapping | None = None,
@@ -225,6 +226,8 @@ def build_compaction_receipt(
             "format": _short_text(continuation_format, 64) or "none",
         },
     }
+    if continuity_digest:
+        receipt['continuation']['continuityDigest'] = continuity_digest
     if continuation_phase in {'pre_turn', 'mid_turn'}:
         receipt['continuation']['phase'] = continuation_phase
         receipt['continuation']['placement'] = (

@@ -20,14 +20,6 @@ logger = get_logger(__name__)
 # This mirrors the local gateway threshold without importing lib.tools on this
 # protocol hot path (which would initialize the full tool registry).
 _TOOL_SEARCH_MIN_FUNCTIONS = 12
-_COMPACTION_MIN_TRIGGER_TOKENS = 50_000
-_COMPACTION_INSTRUCTIONS = (
-    'Summarize the conversation for seamless continuation in a future '
-    'context window. Preserve the user goal, constraints, exact file paths, '
-    'identifiers, code decisions, tool findings, completed work, failures, '
-    'and concrete next steps. Wrap the summary in <summary></summary>. Do not '
-    'call tools while summarizing; return summary text only.'
-)
 
 
 def _media_type_and_data(url: str):
@@ -352,35 +344,6 @@ def _convert_body_to_anthropic(body: dict) -> dict:
         output_config['effort'] = body['reasoning_effort']
     if output_config:
         out['output_config'] = output_config
-
-    # Public Anthropic API server-side compaction. The exact route capability
-    # and beta header are owned by ``llm._sse_core``; this translator only
-    # projects the already-authorized provider-neutral working-set threshold
-    # into Anthropic's wire shape. Claude Code subscription OAuth never sets
-    # this private latch.
-    if body.get('_anthropic_native_compaction'):
-        try:
-            _trigger = max(
-                _COMPACTION_MIN_TRIGGER_TOKENS,
-                int(body.get('_working_set_tokens') or 0),
-            )
-        except (TypeError, ValueError, OverflowError):
-            _trigger = 0
-        if _trigger > 0:
-            out['context_management'] = {
-                'edits': [{
-                    'type': 'compact_20260112',
-                    'trigger': {
-                        'type': 'input_tokens',
-                        'value': _trigger,
-                    },
-                    # Anthropic documents that tool-equipped requests can
-                    # otherwise call a tool during the internal summary and
-                    # return a null compaction block. This complete custom
-                    # prompt replaces the default and explicitly forbids it.
-                    'instructions': _COMPACTION_INSTRUCTIONS,
-                }],
-            }
 
     tools = _convert_tools(body.get('tools'))
     if tools and body.get('_anthropic_native_tool_search'):

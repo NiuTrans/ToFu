@@ -454,7 +454,7 @@ def test_manual_compaction_idempotent(monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Test 7 — summary survives the api rebuild as a plain assistant text
+#  Test 7 — summary survives API rebuild with typed continuity identity
 # ═══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
@@ -467,10 +467,11 @@ def test_summary_message_survives_api_rebuild(monkeypatch):
     api = _transform_messages(store.messages, {})
     ok, why = _api_ok(api)
     assert ok, why
-    # summary body survives as plain assistant text
+    # The same verified handoff is used after a durable manual boundary.
     joined = '\n'.join(m.get('content', '') for m in api
-                       if m.get('role') == 'assistant'
-                       and isinstance(m.get('content'), str))
+                       if isinstance(m.get('content'), str))
+    from lib.tasks_pkg.compaction._continuity import read_continuity
+    assert read_continuity(api, {'convId': 'c'}) is not None
     assert man._SUMMARY_HEADER in joined
 
 
@@ -497,8 +498,9 @@ def test_summary_reserve_join_no_double_assistant(monkeypatch):
     # and after api rebuild the summary text is NOT fused with a later
     # assistant turn (it stands as its own assistant message).
     api = _transform_messages(store.messages, {})
+    from lib.tasks_pkg.compaction._handoff import is_compaction_handoff
     summary_msgs = [m for m in api
-                    if m.get('role') == 'assistant'
+                    if is_compaction_handoff(m)
                     and isinstance(m.get('content'), str)
                     and man._SUMMARY_HEADER in m['content']]
     assert len(summary_msgs) == 1
@@ -680,7 +682,10 @@ def test_reconcile_preserves_tail_appended_during_summary(monkeypatch):
     preserved region, and still fold the old region into a summary."""
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
 
-    store = _FakeStore(_long_conv())
+    source = _long_conv()
+    # Include enough foldable prose to cover the complete typed handoff.
+    source[1]['content'] += 'historical implementation detail ' * 2000
+    store = _FakeStore(source)
     anchor_text = store.messages[0]['content']
 
     appended = [

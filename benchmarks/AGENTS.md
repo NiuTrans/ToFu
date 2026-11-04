@@ -308,6 +308,12 @@ calls, both clocks, identical fixtures/instrumentation and unchanged sources.
   never commit credentials, transcripts, cloned workspaces, or raw provider
   payloads.
 
+`compaction_continuity.py` replays frozen real archives with captured model
+narratives through the production continuity owner. It checks exact state
+retention every generation and reports packet/candidate estimates and source
+hashes. No provider is called; this cannot prove semantic accuracy, fewer tool
+rounds or task latency. Verify `tests/compaction/test_unified_continuity.py`.
+
 ## Verification
 
 `search_html_reference.py` scores frozen extraction outputs against external

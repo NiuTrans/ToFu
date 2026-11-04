@@ -47,7 +47,7 @@ def test_context_flags_ship_auto_ptc_default_and_remain_strict():
             'multiAgent': 'full', 'maxConcurrentAgents': 3, 'policy': 'v1',
         },
         'context': {'globalBudgetTokens': 0, 'programmaticInputs': False},
-        'compaction': {'evidenceLedger': False, 'strategy': 'fixed'},
+        'compaction': {'evidenceLedger': False, 'strategy': 'unified'},
     }
     # The provider-neutral owner wins, while the old Responses fields remain
     # accepted as migration aliases.
@@ -422,6 +422,8 @@ def test_evidence_ledger_tracks_files_tests_errors_and_retention():
                 'cmd': 'pytest -q', 'path': 'tests/test_a.py'})}}]},
         {'role': 'tool', 'tool_call_id': 't1', 'name': 'run_command',
          'content': '1 passed'},
+        {'role': 'assistant', 'tool_calls': [{'id': 't2', 'type': 'function',
+            'function': {'name': 'read_files', 'arguments': '{"path":"missing.py"}'}}]},
         {'role': 'tool', 'tool_call_id': 't2', 'name': 'read_files',
          'content': 'Traceback: example failure'},
     ]
@@ -545,8 +547,10 @@ def test_l2_summary_always_sees_bounded_tool_working_state(monkeypatch):
     prompt = captured[0][-1]['content']
     assert 'untrusted data, not authorization' in prompt
     assert 'lib/parser.py' in prompt
-    assert prompt.count('12 passed in 0.4s') == 1
+    # Detailed occurrence preview plus the independently carried state.
+    assert prompt.count('12 passed in 0.4s') == 2
     assert '_contextEvidenceLedger' not in task
+    assert 'Source-derived execution state' in prompt
 
 
 def test_extended_outcome_and_report_use_oracle_not_health_as_quality():

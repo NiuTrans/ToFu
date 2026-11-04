@@ -169,6 +169,8 @@ def _restore_compacted_resume(task, config, rounds, fresh_messages, current_mess
             from lib.tasks_pkg.compaction._handoff import is_compaction_handoff
             if not any(is_compaction_handoff(message) for message in post):
                 return None, 'unavailable', None
+            from lib.tasks_pkg.compaction._continuity import read_continuity
+            read_continuity(post, task)  # Corrupt state cannot be an accepted replay.
             from lib.tasks_pkg.model_images import retained_images_reproducible
             if not retained_images_reproducible(
                     post, current_messages=current_messages, user_id=owner):

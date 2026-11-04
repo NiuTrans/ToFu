@@ -375,17 +375,16 @@ request latency. Specs: `tests/goals/test_checklist_evidence_memo.py` cover reus
 in-place changes, partial batches, duplicate IDs, failure atomicity and candidate
 isolation alongside the restoration suite.
 
-### Provider-native compaction
-Provider-native automatic compaction is a third execution location, not a third
-transcript authority. Verified public GPT-5.6 Responses and supported direct
-Anthropic Messages routes use the resolved economic working set as their
-rendered-input server trigger. The fallback is 128K; a declared price increase
-selects 90% of the preceding cheaper tier. Local L1 still removes
-reconstructible bulk from the current request; local lossy L2 is
-reserved for the hard-window/reactive fallback. Codex and Claude Code
-subscription OAuth, generic compatible gateways, mixed provider pools and
-Responses native Multi-agent rounds keep local L2 authoritative because their
-wire contract does not expose the corresponding public compaction field.
+### One provider-independent compaction owner
+
+All new L2 rewrites use the local compactor, including public Responses and
+Anthropic routes. Capability declarations no longer select a server rewrite or
+skip the local economic gate. Outbound adapters emit no automatic provider
+compaction controls; existing native compaction/reasoning items remain readable
+for old checkpoints and their usage remains billable. This follows the owner's
+2026-11-05 decision to use one verified path across models, instead of allowing
+opaque provider summaries to bypass the continuation checks below.
+
 Local L2 summary dispatch has its own stable, opaque cache/routing identity
 derived from validated owner + conversation, bound to both dispatch affinity
 and the prebuilt stream body; every exit restores the parent affinity, so
@@ -729,7 +728,61 @@ durable reference exists. Text lanes never serialize a screenshot envelope:
 `__screenshot__` dict to its text fallback plus the same durable reference,
 so raw base64 can no longer spill into paged artifacts.
 ### Historical evidence, live requests and execution continuity
-`compaction/_history.py` owns human-source classification and historical user carriers. A provider's `role=user` alone does not prove a human request: runtime meta blocks, virtual-user directives and ordinary inbox notifications are not human steering; explicit operator/human steering remains eligible. The opening request survives as **historical evidence**, not as the default current ask. Earlier selected requests from the folded region use one bounded policy across repeated compactions: newest-first under 4,096 estimated tokens and eight messages, then chronological rendering, with the opener separately protected. Historical users in protected execution shells have a separate preservation allowance; the receipt's retained-user count includes both regions. Full request accounting includes every carrier and its wrapper. Selected strings retain full text and boundary whitespace, including distinct equal-text occurrences; multimodal content blocks remain intact. Unselected originals remain in the transcript/pre-compaction archive. Request-local carriers use producer-owned `_retainedUserHistory` metadata for reselection and visible `<retained_user_messages>` attribution for providers that strip private fields. The version remains private metadata, not prompt prose. Legacy trusted carriers remain readable; pasted user XML never proves producer identity. Adjacent trusted carriers coalesce into one historical region without crossing human/execution boundaries or deduplicating equal text. One full explanation appears in the first carrier of the rebuilt projection; other carriers retain balanced tags and per-entry historical labels, not another copy of the long guidance. Surviving assistant/tool rows remain in causal order. Emergency image stripping also updates request-local typed history; rebuilding cannot restore stripped payloads (`tests/compaction/test_compaction_history_image_recovery.py`). The explanation marks history as non-live, later human steering as controlling, and existing scoped authorization as preserved without new approvals. Automatic L2 and manual `/compact` select one chronological complete tool-round suffix **across user turns**, not a fresh allowance per assistant. The count is a maximum under the preservation-token budget; enclosing user/assistant shells are charged too. The newest complete real execution batch survives even when it exceeds that budget. Synthetic receipts cannot displace real execution; incomplete rounds are not relabelled complete. Emergency whole-message removal protects the latest human and real batch; oversized irreducible carriers cause admission refusal. Single-result byte recovery may shorten reconstructible execution text with an explicit elision marker, never the required handoff. The receipt is fallible working state: objective, constraints, verified work, current state, blockers and next steps. Its **Objective** is model-authored from verbatim human evidence; summary-input elision removes non-human prose, not human text. A missing/blank Objective stays unresolved, never falls back to the opening request. Continue/no-ask instructions retain their scope, later stops or replacements win, and assistant proposals cannot become approval gates. The advisory autopilot pin is updated only from an accepted receipt. Manual compaction freezes its read set before summary generation, reconciles unchanged folded prefixes with concurrent tails, and suppresses repinning if the accepted human read set changed. This is not a new authorization store. **Ruled Out / Dead Ends** retains verified negative conclusions with proof and retry boundaries; pending steps cannot re-propose them without superseding evidence. If all routes are ruled out, report the blocker. The newest typed handoff, complete adjacent legacy `context_compact` pair, or manual summary is carried forward under a bounded budget; chronology, not format, chooses it. Automatic L2 also supplies the latest completed assistant wrap-up from the full source. `_layer2/_summary_evidence.py` supplies adjacent occurrence-local tool observations: newest 256 messages, at most 64 calls/message, 16 rows, 4 KiB/row and 24 KiB total. Parsing caps at 32,768 characters; non-text/encoded bodies are omitted, previews use bounded head/tail samples, and oversized identities are omitted whole. All wrappers/observations enter the existing summary-input budget; human text is never silently elided. Calls express intent, missing/partial results cannot prove completion, and omitted observations are not verified negative evidence. The prior receipt occupies one slot; default summaries never extract a duplicate ledger. Opt-in `evidenceLedger`/adaptive validation retain the separate runtime-ledger contract, not this default extraction bound. All are fallible evidence; newer execution wins. Specs: `tests/compaction/test_compaction_summary_evidence.py`. No new store, worker or I/O. Without a recognized live receipt, load only the newest owner-scoped archive summary metadata, never the archived transcript. Text-only route switches retain compacted state and its private provenance if non-route policy matches; v2 `modelRef`, preferred provider and routing are route identity. Manual compaction keeps selected human Turns/identities, never fabricated users. Reload groups consecutive users before the summary into one historical carrier; recent exchanges remain ordinary dialogue. CAS/archives use raw Turn space, never indices from expanded model messages. The receipt targets 800–1,600 tokens with an advisory 2,200-token size budget; reconstructible `data/tool-results` paths never become durable working files. Tofu adopts summary-last placement, not Codex `compact.rs`'s full rewrite: execution tail, typed provenance, immutable Turns and append-only context survive.
+`compaction/_history.py` owns human-source classification and historical user carriers. A provider's `role=user` alone does not prove a human request: runtime meta blocks, virtual-user directives and ordinary inbox notifications are not human steering; explicit operator/human steering remains eligible. The opening request survives as **historical evidence**, not as the default current ask. Earlier selected requests from the folded region use one bounded policy across repeated compactions: newest-first under 4,096 estimated tokens and eight messages, then chronological rendering, with the opener separately protected. Historical users in protected execution shells have a separate preservation allowance; the receipt's retained-user count includes both regions. Full request accounting includes every carrier and its wrapper. Selected strings retain full text and boundary whitespace, including distinct equal-text occurrences; multimodal content blocks remain intact. Unselected originals remain in the transcript/pre-compaction archive. Request-local carriers use producer-owned `_retainedUserHistory` metadata for reselection and visible `<retained_user_messages>` attribution for providers that strip private fields. The version remains private metadata, not prompt prose. Legacy trusted carriers remain readable; pasted user XML never proves producer identity. Adjacent trusted carriers coalesce into one historical region without crossing human/execution boundaries or deduplicating equal text. One full explanation appears in the first carrier of the rebuilt projection; other carriers retain balanced tags and per-entry historical labels, not another copy of the long guidance. Surviving assistant/tool rows remain in causal order. Emergency image stripping also updates request-local typed history; rebuilding cannot restore stripped payloads (`tests/compaction/test_compaction_history_image_recovery.py`). The explanation marks history as non-live, later human steering as controlling, and existing scoped authorization as preserved without new approvals. Automatic L2 and manual `/compact` select one chronological complete tool-round suffix **across user turns**, not a fresh allowance per assistant. The count is a maximum under the preservation-token budget; enclosing user/assistant shells are charged too. The newest complete real execution batch survives even when it exceeds that budget. Synthetic receipts cannot displace real execution; incomplete rounds are not relabelled complete. Emergency whole-message removal protects the latest human and real batch; oversized irreducible carriers cause admission refusal. Single-result byte recovery may shorten reconstructible execution text with an explicit elision marker, never the required handoff. The receipt is fallible working state: objective, constraints, verified work, current state, blockers and next steps. Its **Objective** is model-authored from verbatim human evidence; summary-input elision removes non-human prose, not human text. A missing/blank Objective stays unresolved, never falls back to the opening request. Continue/no-ask instructions retain their scope, later stops or replacements win, and assistant proposals cannot become approval gates. The advisory autopilot pin is updated only from an accepted receipt. Manual compaction freezes its read set before summary generation, reconciles unchanged folded prefixes with concurrent tails, and suppresses repinning if the accepted human read set changed. This is not a new authorization store. **Ruled Out / Dead Ends** retains verified negative conclusions with proof and retry boundaries; pending steps cannot re-propose them without superseding evidence. If all routes are ruled out, report the blocker. The newest typed handoff, complete adjacent legacy `context_compact` pair, or manual summary is carried forward under a bounded budget; chronology, not format, chooses it. Automatic L2 also supplies the latest completed assistant wrap-up from the full source. `_layer2/_summary_evidence.py` supplies adjacent occurrence-local tool observations: every occurrence in the selected source, under the one summary-input budget, with 4 KiB per-row previews. There is no independent newest-message/call/row prefilter. Parsing caps at 32,768 characters; non-text/encoded bodies are omitted, previews use bounded head/tail samples, and oversized identities are omitted whole. All wrappers/observations enter the existing summary-input budget; human text is never silently elided. Calls express intent, missing/partial results cannot prove completion, and omitted observations are not verified negative evidence. The prior narrative occupies one slot and its verified continuity packet is extracted separately, preventing recursive copies. Every summary receives the source-derived continuity state described below. The opt-in `evidenceLedger` flag only controls extra raw-result archival, never summary quality or retention policy. All are fallible evidence; newer execution wins. Specs: `tests/compaction/test_compaction_summary_evidence.py`. No new store, worker or I/O. Without a recognized live receipt, load only the newest owner-scoped archive summary metadata, never the archived transcript. Text-only route switches retain compacted state and its private provenance if non-route policy matches; v2 `modelRef`, preferred provider and routing are route identity. Manual compaction keeps selected human Turns/identities, never fabricated users. Reload groups consecutive users before the summary into one historical carrier; recent exchanges remain ordinary dialogue. CAS/archives use raw Turn space, never indices from expanded model messages. The receipt targets 800–1,600 tokens with an advisory 2,200-token size budget; reconstructible `data/tool-results` paths never become durable working files. Tofu adopts summary-last placement, not Codex `compact.rs`'s full rewrite: execution tail, typed provenance, immutable Turns and append-only context survive.
+### Source-derived continuation across repeated folds
+
+**Problem:** model prose could omit completed checks and pending work, and an
+incorrect capability prohibition could survive many summary generations. The
+former newest-16-row prefilter discarded older observations even when the outer
+request budget had room. A keyword-overlap guard only protected the opt-in
+Adaptive branch and could neither prove semantics nor preserve omitted evidence.
+
+**Decision:** `_continuity.py` owns one rebuildable packet defined by
+`contracts/compaction_continuity_v1.schema.json`. The model writes fallible prose;
+the runtime appends the exact current checklist and source-attributed observations
+of folded tests, errors, mutations, agent/batch outcomes, changed files and
+recovery handles. Hot execution remains in its original paired messages rather
+than being duplicated into the packet. Only a later observed outcome of the
+same invocation/resource identity supersedes an observation; an orphan result
+cannot establish execution. Excerpts retain `sourceDigest`, `previewOnly` and
+source/call handles. They are historical evidence, not current success claims,
+new authorization, or global statements about unavailable capabilities.
+
+The next fold reads the producer-stamped packet and verifies its digest and
+compaction owner. The body appears once; private handoff/receipt metadata holds
+only its digest. Manual durable boundaries rebuild to the same typed handoff;
+Continue validates archived packets before reuse. User-pasted markup and ordinary
+assistant prose cannot establish that identity. A damaged packet refuses adoption
+instead of silently rebuilding an empty state. A legacy typed handoff without
+a packet seeds from available canonical task tool rounds on its first new fold,
+never by promoting old model claims. Later folds reuse the verified packet.
+Human-goal precedence, selected
+verbatim history, skill protection and archive recall remain with their existing
+owners.
+
+The complete packet is reserved before the paid summary call and counted again
+with the final candidate. No entry-count cutoff, model-specific mode, retry loop,
+new worker or durable store is added. Unchanged state is stable across repeated
+folds. Distinct unresolved observations can still grow: finite context cannot
+hold an unbounded irreducible state. If it cannot fit, admission preserves the
+source and reports the floor; it does not certify semantic completeness, silently
+clip critical state, or promise every model will make a correct next decision.
+Original Turns/archives remain the exact recall authority.
+
+**Alternatives rejected:** making Adaptive the default (keeps divergent policy
+and heuristic semantic acceptance); asking the same model to re-grade itself
+(adds latency without independent proof); copying an entire ledger into private
+metadata too (duplicate growth); blindly retaining a prior negative conclusion
+(turns a local command error into a permanent ban); adding a newest-N limit to
+hide growth (silently loses unclosed evidence).
+
+**Verification:** `test_unified_continuity.py` exercises unreliable prose, 100
+folds, outcome supersession, malformed/tampered/cross-owner state, exact budgeting
+and manual rebuild. Provider, cancellation, archive/resume and manual CAS suites
+cover the production boundaries. `benchmarks/compaction_continuity.py` replays
+frozen real archive inputs and captured summaries; it measures evidence retention
+and packet size, not live model behavior or avoided task rounds.
+
 ### Replaying the model request
 
 Checked Continue reuse and final-admission recovery follow [the coordinated budget contract](CONTEXT_BUDGET_POLICY.md#dispatch-recovery).
@@ -899,7 +952,17 @@ Within the request gate, the broad heuristic prefilter is lazy. A usage-cache hi
 
 The selected-slot body adapter adds a local-only hard-window check after route adaptation. It recounts messages, system and tool schemas locally using bounded content-digest tokenizer caches; unbound integers and same-model hints cannot skip this safety check. Over-window input raises the existing typed context-limit failure before transport so the task can compact and retry; the adapter never silently truncates user history. Opaque reasoning ciphertext length is not text-token usage. Provider-native counts remain authoritative for billing.
 
-Adaptive L2 compaction is opt-in. It compares route-priced, cache-adjusted input savings with compaction-call and evidence-loss cost; context-window safety remains an unconditional hard gate. Generated state is checked against pending work and the evidence ledger; failed validation preserves the original context for live/transient tasks. Only explicit utility callers may retain a deterministic bounded view. `remainingRoundsMedian` is also the horizon for exact pre/post-summary checks. Fixed compaction starts at one round, then uses the shortest of the four most recent successful compaction gaps and the current window's observed age, capped at six and by the remaining API-round budget. Long task age cannot hide a three-round prefix lifetime.
+L2 has one `unified` policy. Persisted `fixed` and `adaptive` names normalize to
+that policy; neither enables a runtime branch. The hypothetical Adaptive cost
+model, inferred remaining-round horizon and lexical summary-state guard are
+removed. Optional compaction uses the shared route-priced cache economics and
+observed compaction cadence; manual, reactive and hard-window admission retain
+their correctness obligations. Cadence starts at one round, then uses the
+shortest of the four recent successful gaps and current observed age, under the
+existing six-round and remaining-task budget contracts. Long task age cannot
+hide a three-round prefix lifetime. The obsolete `adaptive_compaction_v2`
+experiment arm is retired; long-agent plugin version 3.0.0 prevents old pinned
+experiments from silently changing their hypothesis.
 
 An automatic economic decline records the optimistic token-growth lower bound at which the candidate could first repay its cache rewrite or meet the minimum reduction. Until that bound, later rounds reuse the preflight veto instead of rebuilding the same fold candidate. A lower warm-cache witness or a longer observed compaction window invalidates the veto immediately; explicit/reactive compaction and the hard window gate always bypass it.
 

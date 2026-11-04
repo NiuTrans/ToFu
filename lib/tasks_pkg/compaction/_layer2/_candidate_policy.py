@@ -149,6 +149,9 @@ def admit_compaction_sources(
     retained = _retained_projection(
         sources.old_messages, sources.recent_messages, sources.anchor_msg,
         sources.retained_entries, task=task)
+    if sources.continuity_handoff is not None:
+        from lib.tasks_pkg.compaction._handoff import insert_compaction_handoff
+        insert_compaction_handoff(retained, sources.continuity_handoff)
     _best_candidate_tokens = ports.estimate_tokens(
         _with_restoration_reserve(retained, messages, task=task))
     _restored_context_reserve = max(0, _best_candidate_tokens - ports.estimate_tokens(retained))

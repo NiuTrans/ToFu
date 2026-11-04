@@ -1,25 +1,13 @@
-"""Provider-native context-compaction capability resolution.
+"""Legacy native-compaction dialect capability facts, not policy selection.
 
-Responsibility
---------------
-Keep wire/provisioning facts out of the provider-neutral compaction engine.
-The request boundary uses :func:`native_compaction_mode_for_route` for the
-exact selected slot; the task orchestrator uses
-:func:`resolve_task_native_compaction_mode` before dispatch and only trusts a
-native-first decision when every eligible slot agrees.
-
-Subscription OAuth is deliberately excluded.  Codex and Claude Code tokens
-authenticate different product backends; public API beta fields are not a
-portable capability of those credentials.
+The local compactor owns all new rewrites. Wire adapters retain recognition of
+existing provider compaction items; declaring support never enables a second
+summarization policy. Subscription backends do not inherit public API fields.
 """
 
 from __future__ import annotations
 
 from urllib.parse import urlparse
-
-from lib.log import get_logger
-
-logger = get_logger(__name__)
 
 OPENAI_RESPONSES_COMPACTION = 'openai_responses'
 ANTHROPIC_MESSAGES_COMPACTION = 'anthropic_messages'
@@ -94,71 +82,8 @@ def native_compaction_mode_for_route(
     return ''
 
 
-def resolve_task_native_compaction_mode(
-    task: dict | None,
-    *,
-    model: str,
-) -> str:
-    """Resolve a safe pre-dispatch native-first decision for one task.
-
-    Before a request is dispatched there may be several eligible provider
-    slots.  We defer local L2 only when all matching slots expose the same
-    native dialect.  Mixed or unknown pools keep the lossless local fallback;
-    the exact selected route can still enable its native field at the wire
-    boundary.
-    """
-    if not model:
-        return ''
-    task = task or {}
-    config = task.get('config') or {}
-    provider_id = str(
-        task.get('provider_id')
-        or task.get('_pinned_provider_id')
-        or config.get('providerId')
-        or config.get('provider_id')
-        or ''
-    )
-
-    try:
-        from lib.llm_dispatch.factory import get_dispatcher
-
-        dispatcher = get_dispatcher()
-        initialize = getattr(dispatcher, 'initialize', None)
-        if callable(initialize):
-            initialize()
-        candidates = []
-        for slot in list(dispatcher.slots):
-            if provider_id and str(slot.provider_id or '') != provider_id:
-                continue
-            if model not in (str(slot.logical_model or ''), str(slot.model or '')):
-                continue
-            candidates.append(slot)
-    except Exception as exc:
-        logger.debug('[CompactionPolicy] slot resolution failed: %s', exc)
-        return ''
-
-    if not candidates:
-        return ''
-    modes = {
-        native_compaction_mode_for_route(
-            protocol=slot.protocol or 'openai',
-            model=slot.model or model,
-            responses_profile=slot.responses_profile or '',
-            base_url=slot.base_url or '',
-            oauth=slot.oauth or '',
-
-            inference_profile=getattr(slot, 'inference_profile', None),
-        )
-        for slot in candidates
-    }
-    if len(modes) != 1:
-        return ''
-    return next(iter(modes))
-
-
 __all__ = [
     'ANTHROPIC_MESSAGES_COMPACTION',
     'OPENAI_RESPONSES_COMPACTION',
     'native_compaction_mode_for_route',
-    'resolve_task_native_compaction_mode',
 ]
