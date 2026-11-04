@@ -9,7 +9,9 @@ canonical result settlement and ordered replay. See `docs/modules/tools_executio
   Ports preserve execution, collection, heartbeat and settlement seams.
 - `_ordering` names the only call-order exceptions: same-target file, desktop
   file, memory and browser-tab mutations, `todo_write`, and `run_command`
-  directories frozen at admission. `api.plan_concurrent_round` exposes the same
+  directories frozen at admission. Ordered children of a sibling gateway call
+  also wait for the earlier-issued gateway calls of its response
+  (`GatewaySiblingOrder`). `api.plan_concurrent_round` exposes the same
   rules to the native gateway, whose scheduler keeps them in Rust.
   Approval and hooks run on the call's own worker; settlement is serialized by
   the invocation's settle lock.
@@ -23,5 +25,6 @@ canonical result settlement and ordered replay. See `docs/modules/tools_executio
 
 Verify collection, parallel deadlines, outcome finality, write approval/freshness,
 call identity, prefetch, `tests/tools/test_parallel_dispatch_overlap.py` and
-`tests/tools/test_tool_settle_all_lanes.py`; then native gateway, event ordering
+`tests/tools/test_tool_settle_all_lanes.py`, `tests/tasks_pkg/test_gateway_sibling_concurrency.py`;
+then native gateway, event ordering
 and hardware-unlimited policy neighbors.

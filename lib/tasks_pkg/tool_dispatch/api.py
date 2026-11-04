@@ -57,13 +57,16 @@ def repair_prepared_call_ids(task, parsed_calls, round_num, project_path):
             remap_prefetch(task, item[1], original, item[2], item[3], item[5], project_path)
 
 def publish_prepared_response_siblings(task, parsed_calls, round_num):
-    """Publish one response's direct occurrences for qualified gateway reuse."""
+    """Publish one response's direct occurrences for qualified gateway reuse,
+    and its gateway calls' provider order for their ordered children."""
     from lib.tools.gateway import EXECUTE_TOOLS_NAME, EXECUTE_PROGRAM_NAME, SEARCH_TOOLS_NAME
     from lib.tasks_pkg.tool_dispatch._flags import _publish_execute_gateway_direct_siblings
+    from lib.tasks_pkg.tool_dispatch._ordering import publish_gateway_sibling_order
     gateways={EXECUTE_TOOLS_NAME,EXECUTE_PROGRAM_NAME,SEARCH_TOOLS_NAME}
     direct=[(name,call_id,arguments) for _,name,call_id,arguments,_,_,error in parsed_calls
             if name not in gateways and not error]
     _publish_execute_gateway_direct_siblings(task,round_num,direct)
+    publish_gateway_sibling_order(task,round_num,parsed_calls)
 
 from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls, publish_tool_call_entry
 from lib.tasks_pkg.tool_dispatch._pipeline import execute_tool_pipeline

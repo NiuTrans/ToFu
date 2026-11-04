@@ -77,7 +77,8 @@ from lib.tasks_pkg.tool_dispatch._heartbeat import (
     _start_tool_heartbeat,
 )
 from lib.tasks_pkg.tool_dispatch._ordering import (
-    call_predecessors, plan_command_working_dirs, restore_command_sticky_cwd,
+    call_predecessors, gateway_sibling_settler, plan_command_working_dirs,
+    publish_gateway_sibling_order, restore_command_sticky_cwd,
 )
 from lib.tasks_pkg.tool_dispatch._unchanged import (
     UnchangedProjection,
@@ -2624,7 +2625,11 @@ def _publish_admitted_gateway_siblings(task, round_num, parsed_tcs, admitted) ->
     so a direct call they later refuse still owns its identical child: the
     child points at that refusal instead of asking twice. Nested child
     pipelines have no ``execute_tools`` carrier and cannot overwrite it.
+
+    The admitted gateway calls also publish their provider order, so ordered
+    children of a later sibling wait for the earlier ones (``_ordering``).
     """
+    publish_gateway_sibling_order(task, round_num, admitted)
     if not any(item[1] == EXECUTE_TOOLS_NAME for item in parsed_tcs):
         return
     _publish_execute_gateway_direct_siblings(task, round_num, [
@@ -2633,19 +2638,27 @@ def _publish_admitted_gateway_siblings(task, round_num, parsed_tcs, admitted) ->
         if name not in GATEWAY_TOOL_NAMES])
 
 
-def _plan_admitted_calls(task, admitted, project_path, write_tools) -> list[AdmittedCall]:
+def _plan_admitted_calls(task, admitted, project_path, write_tools,
+                         sibling_turn=None) -> list[AdmittedCall]:
     """Launch facts per admitted call: call-order predecessors and bounds.
 
     Writes, ordered state and ratified human waits keep the former serial
     lane's limits: no pool ceiling, no declared timer, their own receipt after
-    Stop. Every other call keeps the ordinary bounded-pool contract.
+    Stop. Every other call keeps the ordinary bounded-pool contract. Children
+    of a gateway call (``sibling_turn``) also follow the earlier sibling
+    gateway calls of its response, and a published gateway occurrence settles
+    its place in that order when its worker is done.
     """
     predecessors = call_predecessors(task, project_path, admitted, write_tools)
     return [
         AdmittedCall(
             item=item, predecessors=predecessors[item[2]],
             bounded=not (item[1] in write_tools or item[1] in _ORDERED_STATE_TOOLS
-                         or _is_exempt_wait(item[1], item[3] or {})))
+                         or _is_exempt_wait(item[1], item[3] or {})),
+            sibling_predecessors=(
+                sibling_turn.predecessors(task, project_path, item, write_tools)
+                if sibling_turn is not None else ()),
+            on_finished=gateway_sibling_settler(task, item))
         for item in admitted
     ]
 
@@ -2664,6 +2677,7 @@ def execute_tool_pipeline(
     *,
     internal_result_sink: Any = None,
     publish_direct_gateway_siblings: bool = True,
+    sibling_turn: Any = None,
 ) -> bool:
     """Run the full tool-execution pipeline: admission → concurrent dispatch → result append.
 
@@ -2717,7 +2731,32 @@ def execute_tool_pipeline(
         Publish the direct-call multiset for this provider response. Nested
         gateway-child pipelines pass ``False`` so they cannot replace their
         top-level carrier's response-scoped delegation state.
+    sibling_turn : ``_ordering.GatewaySiblingTurn`` | None
+        Set by a gateway call for its own children: a child that ``_ordering``
+        orders waits until the earlier sibling gateway calls of the response
+        have settled.
     """
+    try:
+        return _run_tool_pipeline(
+            task, parsed_tcs, cfg, project_path, project_enabled, tool_list,
+            messages, all_search_results_text, round_num, model,
+            internal_result_sink=internal_result_sink,
+            publish_direct_gateway_siblings=publish_direct_gateway_siblings,
+            sibling_turn=sibling_turn)
+    finally:
+        # A gateway occurrence this invocation refused, failed before starting
+        # or ran leaves its response order here at the latest (idempotent).
+        for item in parsed_tcs:
+            settle = gateway_sibling_settler(task, item)
+            if settle is not None:
+                settle()
+
+
+def _run_tool_pipeline(
+    task, parsed_tcs, cfg, project_path, project_enabled, tool_list, messages,
+    all_search_results_text, round_num, model, *, internal_result_sink,
+    publish_direct_gateway_siblings, sibling_turn,
+) -> bool:
     tid = task['id'][:8]
     # One dispatch invocation owns one settlement barrier.  In particular, a
     # nested execute_tools pipeline must not share or retain the outer call's
@@ -2921,7 +2960,8 @@ def execute_tool_pipeline(
         drain=_drain_cancelled_tool_workers,
         log=logger,
     )
-    admitted_calls = _plan_admitted_calls(task, admitted, project_path, _write_tools)
+    admitted_calls = _plan_admitted_calls(task, admitted, project_path, _write_tools,
+                                          sibling_turn)
     # A read that runs CONCURRENTLY with a sibling write may capture pre-write
     # bytes, so a round that writes never caches its write-sensitive reads.
     _pipeline_timed_out = execute_admitted_tools(
