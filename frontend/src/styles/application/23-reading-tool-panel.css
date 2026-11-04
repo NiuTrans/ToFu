@@ -262,9 +262,10 @@
 /* Phones keep one row per call too: the intent clamps beside its outcome
  * instead of pushing the chip onto a line of its own. A failure's reason
  * still takes its own line, as do structured summaries (saved-output
- * artifacts, repository-map parameters) and an attention step's identity. */
+ * artifacts, repository-map parameters), a program head's summary and an
+ * attention step's identity. */
 @media (max-width: 600px) {
-  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(:has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
+  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(.ptc-head, :has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
     flex-wrap: nowrap;
   }
   /* A saved-output summary keeps its responsive basis, which holds its
