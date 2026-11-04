@@ -111,6 +111,50 @@ def test_opted_in_linear_repo_exports_stable_not_development_head(repo):
         shutil.rmtree(snap, ignore_errors=True)
 
 
+def test_snapshot_reports_a_stable_source_trailing_head(repo, capsys):
+    """The operator sees exactly which commit ships and how far it trails HEAD.
+
+    The export output used to show only the version, so a stale stable ref
+    read as a fresh, successful export (scripts/release_open.sh postmortem:
+    a 2026-08-27 stable shipped without the `run` subcommand).
+    """
+    import export as exp
+
+    stable = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    _git(repo, 'update-ref', 'refs/tofu/stable', stable)
+    _git(repo, 'update-ref', 'refs/tofu/workspace-checkpoint-baseline', stable)
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-qm', 'development checkpoint')
+    _git(repo, 'config', 'tofu.linearCheckpoint', 'true')
+    head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+
+    snap = exp._stage_head_snapshot(repo)
+    assert snap is not None
+    try:
+        out = capsys.readouterr().out
+        assert 'refs/tofu/stable' in out and stable[:12] in out
+        assert '1 commit(s) behind HEAD' in out and head[:12] in out
+        assert 'TOFU_EXPORT_SOURCE_REF' in out, 'the override must be named'
+    finally:
+        import shutil
+        shutil.rmtree(snap, ignore_errors=True)
+
+
+def test_snapshot_reports_a_head_source_without_lag(repo, capsys):
+    import export as exp
+
+    head = _git(repo, 'rev-parse', 'HEAD').stdout.strip()
+    snap = exp._stage_head_snapshot(repo)
+    assert snap is not None
+    try:
+        out = capsys.readouterr().out
+        assert f'HEAD @ {head[:12]}' in out
+        assert 'behind HEAD' not in out
+    finally:
+        import shutil
+        shutil.rmtree(snap, ignore_errors=True)
+
+
 def test_unactivated_linear_setting_does_not_export_an_old_stable(repo):
     """The opt-in bit alone cannot regress export to an isolated-mode ref."""
     import export as exp
