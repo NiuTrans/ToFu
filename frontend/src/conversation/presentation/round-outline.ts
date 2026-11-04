@@ -1,15 +1,21 @@
 /**
  * Presentation-only model-round outline over the ordered content projection.
  *
- * Entry points: roundIdentityOf, selectRoundOutline. Never reads the bounded
- * activity timeline, transport arrival order, or Inspector round numbers to
- * invent transcript order. Noncontiguous occurrences keep separate identities.
+ * Entry points: roundIdentityOf, selectRoundOutline, selectProgramBatches.
+ * Never reads the bounded activity timeline, transport arrival order, or
+ * Inspector round numbers to invent transcript order. Noncontiguous
+ * occurrences keep separate identities.
  */
 import type {
   ConversationBlockViewModel,
   ConversationTurnViewModel,
 } from './view-model/types';
-import { hasAcceptedWorkUnit, toolExecutionLlmRound, toolRoundAttention } from './tool-execution-groups';
+import {
+  hasAcceptedWorkUnit, isActiveToolStatus, programChildParentCallId, toolExecutionLlmRound,
+  toolRoundAttention,
+} from './tool-execution-groups';
+import { isNativeProgramGateway } from './program-gateway-presentation';
+import { summarizeProgramBatch, type ProgramBatchSummary } from './program-batch-presentation';
 
 import { swarmLaunchFailure } from './swarm-agent-presentation';
 
@@ -122,6 +128,76 @@ function hasFailedResult(value: unknown): boolean {
       || (typeof exit === 'string' && /^(?:-?\d+|not-run|interrupted|timeout)$/.test(exit)
         && exit !== '0');
   });
+}
+
+export interface ProgramBatchSection {
+  /** Round scope plus occurrence: stable while gateway calls become programs
+   * and across settlement, unlike any member block ID. */
+  id: string;
+  identity: RoundIdentity;
+  /** Program cards and their execution children, in authored order. */
+  blockIds: string[];
+  summary: ProgramBatchSummary;
+}
+
+/** The round a program card renders: a parent row, or a gateway call shaped
+ * as its card shows it (`renderers/tool-blocks.ts`: a live call announced
+ * before its round exists is pending; a settled Turn's call is never in
+ * flight). Null for every other block. */
+function programCardValue(block: ConversationBlockViewModel, live: boolean): unknown {
+  if (block.kind === 'program') return block.round;
+  if (block.kind !== 'tool' || !isNativeProgramGateway(block.round ?? { toolName: block.name })) return null;
+  const status = block.round?.status ?? block.result?.status;
+  return { ...block.round, toolName: block.name, toolArgs: block.input,
+    status: live ? status ?? 'pending' : isActiveToolStatus(status) ? undefined : status,
+    result: block.result };
+}
+
+const programBatchCache = new WeakMap<ConversationTurnViewModel, ReadonlyArray<ProgramBatchSection>>();
+
+/**
+ * Contiguous runs of two or more program cards from one model round, with the
+ * execution children that follow them. One linear scan per immutable Turn;
+ * unscoped programs stay ungrouped and a lone program is never a batch.
+ */
+export function selectProgramBatches(turn: ConversationTurnViewModel): ReadonlyArray<ProgramBatchSection> {
+  const cached = programBatchCache.get(turn);
+  if (cached) return cached;
+  const batches: ProgramBatchSection[] = [];
+  if (turn.role === 'assistant') {
+    const live = turn.status === 'running' || turn.status === 'pending';
+    const occurrences = new Map<string, number>();
+    let run: { identity: RoundIdentity; blockIds: string[]; programs: unknown[]; members: unknown[] } | null = null;
+    const close = (): void => {
+      const summary = run && summarizeProgramBatch(run.programs, live, run.members);
+      if (run && summary) {
+        const occurrence = occurrences.get(run.identity.key) ?? 0;
+        occurrences.set(run.identity.key, occurrence + 1);
+        batches.push({ id: `programs:${run.identity.key}:${occurrence}`, identity: run.identity,
+          blockIds: run.blockIds, summary });
+      }
+      run = null;
+    };
+    for (const block of turn.blocks) {
+      const program = programCardValue(block, live);
+      const identity = program === null ? null : blockRoundIdentity(block);
+      if (program !== null && identity) {
+        if (run && run.identity.key !== identity.key) close();
+        run ??= { identity, blockIds: [], programs: [], members: [] };
+        run.programs.push(program);
+        run.members.push(program);
+      } else if (run && program === null && block.kind === 'tool' && programChildParentCallId(block.round)) {
+        run.members.push(block.round);
+      } else {
+        close();
+        continue;
+      }
+      run.blockIds.push(block.blockId);
+    }
+    close();
+  }
+  programBatchCache.set(turn, batches);
+  return batches;
 }
 
 /** Linear scan, O(blocks); keeps every member in the authored segment order. */

@@ -8,6 +8,7 @@
 import { normalizeProgramPresentation, safeProgramPreview } from '../presentation/program-gateway-presentation';
 import { toolFailureText } from '../presentation/tool-failure-presentation';
 import { programByteSize, programExecutionPresentation } from '../presentation/program-execution-presentation';
+import { programCardOpensItself } from '../presentation/program-batch-presentation';
 
 import { boundedProgramDisplay, programActivityMembers, retainedInputDirectoryCounts, retainedProgramValueBytes } from '../presentation/program-activity';
 
@@ -37,8 +38,9 @@ const REASONS: Readonly<Record<string, readonly [string, string]>> = {
   missing_tool_output: ['ptc.reason.missing', 'The prerequisite provided no output. Review its receipt.'],
 };
 
+/** `batched`: the card is a member of its model round's multi-program batch. */
 export function programExecutionCardHtml(
-  round: unknown, text: ProgramCardText = plainText,
+  round: unknown, text: ProgramCardText = plainText, batched = false,
 ): string {
   const row = normalizeProgramPresentation(round);
   const gateway = row._programGatewayPresentation === true;
@@ -129,7 +131,7 @@ export function programExecutionCardHtml(
   const language = 'javascript';
   const attention = waiting ? 'waiting' : running ? 'running' : needsModel ? 'handoff' : failed ? 'error'
     : row.programStatus === 'completed' || row.programStatus === 'returned' ? 'completed' : 'incomplete';
-  const actionable = attention === 'handoff' || attention === 'error' || attention === 'incomplete';
+  const actionable = programCardOpensItself(attention, batched);
   // Expanding a quiet completed card asks for its outcome, so settled evidence
   // opens first. Gateway history stays closed until its lazy body is requested.
   const resultOpen = !running && !gateway;
