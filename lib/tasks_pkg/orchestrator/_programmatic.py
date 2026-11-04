@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from lib.agent_core.execution_clock import task_execution_time_ms
@@ -21,6 +22,10 @@ from lib.tools.programmatic import (
 _PROGRAM_ROUND_BASE = 8_800_000
 _CONTENT_UNSET = object()
 logger = get_logger(__name__)
+# Sibling programs of one response project their parents at once. Leaf lock:
+# held for round allocation, row insertion and adoption evidence, never across
+# event delivery.
+_PROGRAM_PARENT_ROWS_LOCK = threading.Lock()
 
 
 def _append_program_event(task: dict[str, Any], event: dict[str, Any]) -> None:
@@ -328,37 +333,39 @@ def project_program_run(task: dict[str, Any], run: dict[str, Any], *,
     child_tools = [str(child.get('name') or '') for child in children
                    if child.get('name')]
 
-    # This is the first provider-neutral point at which a real program
-    # trajectory exists.  Request projection alone is deliberately kept in a
-    # separate evidence field and can never satisfy adoption.
     from lib.orchestration.adoption import record_orchestration_execution
-    record_orchestration_execution(
-        task, lane='programmatic', kind='program_run', backend=backend,
-        call_id=call_id, status=str(run.get('status') or 'running'),
-        child_call_count=len(children), round_index=llm_round)
-
     rounds = task.setdefault('toolRounds', [])
-    parent = next((row for row in rounds
-                   if isinstance(row, dict) and row.get('_programSynthetic')
-                   and str(row.get('_programCallId') or '') == call_id), None)
-    if parent is None:
-        parent = {
-            'roundNum': _next_round_num(rounds),
-            'llmRound': llm_round,
-            'status': 'searching',
-            'attentionKind': 'important',
-            '_programSynthetic': True,
-            '_programCallId': call_id,
-            'programCode': str(run.get('code') or ''),
-            'programStatus': 'running',
-            'programSource': source,
-            'programBackend': backend,
-            'childCallIds': child_ids,
-            'childToolNames': child_tools,
-            'programLimits': dict(run.get('limits') or {}),
-            'tStart': run.get('tStart') or task_execution_time_ms(task),
-        }
-        _insert_before_children(rounds, parent, child_ids)
+    with _PROGRAM_PARENT_ROWS_LOCK:
+        # This is the first provider-neutral point at which a real program
+        # trajectory exists.  Request projection alone is deliberately kept in
+        # a separate evidence field and can never satisfy adoption.
+        record_orchestration_execution(
+            task, lane='programmatic', kind='program_run', backend=backend,
+            call_id=call_id, status=str(run.get('status') or 'running'),
+            child_call_count=len(children), round_index=llm_round)
+        parent = next((row for row in rounds
+                       if isinstance(row, dict) and row.get('_programSynthetic')
+                       and str(row.get('_programCallId') or '') == call_id), None)
+        created = parent is None
+        if created:
+            parent = {
+                'roundNum': _next_round_num(rounds),
+                'llmRound': llm_round,
+                'status': 'searching',
+                'attentionKind': 'important',
+                '_programSynthetic': True,
+                '_programCallId': call_id,
+                'programCode': str(run.get('code') or ''),
+                'programStatus': 'running',
+                'programSource': source,
+                'programBackend': backend,
+                'childCallIds': child_ids,
+                'childToolNames': child_tools,
+                'programLimits': dict(run.get('limits') or {}),
+                'tStart': run.get('tStart') or task_execution_time_ms(task),
+            }
+            _insert_before_children(rounds, parent, child_ids)
+    if created:
         _append_program_event(task, build_event(
             EventType.PROGRAM_START,
             roundNum=parent['roundNum'], llmRound=llm_round,
