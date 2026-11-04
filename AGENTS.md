@@ -21,6 +21,8 @@ verification.
   shared checkout. Unlike `git merge`, it does not refuse when other writers
   have uncommitted edits in the same files; it carries those edits forward
   with a three-way merge, then removes the worktree and deletes the branch.
+  Known generated outputs are rebuilt from merged sources; uncommitted sources
+  and their outputs stay uncommitted. Do not reset generated files to unblock it.
   If it refuses, nothing was changed; follow its printed instruction (merge
   the current branch into the worktree branch to resolve a real conflict, or
   rerun after another writer's overlapping lines are committed). A task is

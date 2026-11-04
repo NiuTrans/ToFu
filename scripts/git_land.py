@@ -11,8 +11,9 @@ tip) without that lock:
    a real branch conflict refuses. Known generated outputs are rebuilt there.
 2. Every path the merge changes is compared with the shared checkout's
    current bytes. An unmodified file takes the merged content. A file with
-   uncommitted concurrent edits gets a three-way file merge, so those edits
-   stay in place, still uncommitted, on top of the new tip.
+   uncommitted concurrent edits gets a three-way source merge, so those edits
+   stay in place, still uncommitted, on top of the new tip. Known generated
+   outputs are rebuilt separately for the committed and working source views.
 3. Holding Git's own index.lock, the plan is revalidated, files are replaced
    atomically, the index entries of exactly those paths move to the merge,
    and the branch moves by compare-and-swap.
@@ -26,7 +27,7 @@ Usage:  python3 scripts/git_land.py BRANCH [--into CHECKOUT] [--keep] [--check]
 Exit:   0 landed or already merged; 1 refused, nothing changed; 2 Git or
         filesystem error (the message states what was written).
 Contract: docs/modules/project_integration.md, "Landing worktree branches".
-Standard library only.
+Generation uses the shared lib.project_mod.generated_integration owner.
 """
 from __future__ import annotations
 
@@ -42,6 +43,10 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# Direct CLI execution must find the same shared generator owner as imports do.
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 _MODES = frozenset({'100644', '100755', '120000'})
 _IN_PROGRESS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge',
@@ -95,6 +100,143 @@ class _Step:
     data: bytes = b''
     executable: bool = False
     carried: bool = False
+
+
+class _Plan(list):
+    """Publication steps plus the complete generated-source read set."""
+
+    def __init__(self, tree):
+        super().__init__()
+        self.tree = tree
+        self.observed = {}
+        self.roots = []
+        self.untracked = set()
+
+
+def _untracked(top, roots):
+    return set(filter(None, _git(top, 'ls-files', '--others', '--exclude-standard',
+                                '-z', '--', *roots).stdout.split('\0')))
+
+
+def _tree_files(top, revision, roots):
+    """Read the declared generator closure in one blob batch, never the entire repo."""
+    entries = {}
+    for record in _git(top, 'ls-tree', '-r', '-z', revision, '--', *roots).stdout.split('\0'):
+        if not record:
+            continue
+        meta, path = record.split('\t', 1)
+        mode, kind, oid = meta.split()
+        if kind != 'blob' or mode not in ('100644', '100755'):
+            raise Refused('generated inputs must be regular files', [path])
+        entries[path] = _Entry(mode, oid)
+    result = _git(top, 'cat-file', '--batch', binary=True,
+                  stdin=''.join(entry.oid + '\n' for entry in entries.values()).encode()).stdout
+    files, offset = {}, 0
+    for path in entries:
+        end = result.index(b'\n', offset)
+        size = int(result[offset:end].split()[2])
+        files[path] = result[end + 1:end + 1 + size]
+        offset = end + size + 2
+    return entries, files
+
+
+def _generated_tree(top, tree, outputs, old_outputs):
+    """Only reproducible outputs enter this private commit index, never WIP sources."""
+    with tempfile.TemporaryDirectory(prefix='git-land-index-') as directory:
+        env = {'GIT_INDEX_FILE': str(Path(directory) / 'index')}
+        _git(top, 'read-tree', tree, env=env)
+        records = []
+        for path in sorted(set(old_outputs) | outputs.keys()):
+            if path in outputs:
+                oid = _git(top, 'hash-object', '-w', '--stdin', binary=True,
+                           stdin=outputs[path]).stdout.decode().strip()
+                mode = old_outputs[path].mode if path in old_outputs else '100644'
+                records.append(f'{mode} {oid}\t{path}\0')
+            else:
+                records.append(f'0 {"0" * len(tree)}\t{path}\0')
+        if records:
+            _git(top, 'update-index', '-z', '--index-info', stdin=''.join(records), env=env)
+        return _git(top, 'write-tree', env=env).stdout.strip()
+
+
+def _prepare_generated(top, head, tree, changes, plan):
+    from lib.project_mod.generated_integration import (
+        affected_families, build_outputs, family_roots, output_family)
+
+    families = affected_families(path for path, _, _ in changes)
+    if not families:
+        return {}, {}, set()
+    plan.roots = family_roots(families)
+    before_entries, before = _tree_files(top, head, plan.roots)
+    merged_entries, merged = _tree_files(top, tree, plan.roots)
+    plan.untracked = _untracked(top, plan.roots)
+    for path in before.keys() | merged.keys() | plan.untracked:
+        current = _current(top, path)
+        if current.kind not in ('file', 'missing'):
+            raise Refused('generated inputs and outputs must be regular files', [path])
+        plan.observed[path] = current
+    clean_outputs = build_outputs(top, families, merged, committed=True)
+    output_paths = {path for path in plan.observed if output_family(path) in families} | clean_outputs.keys()
+    for path in output_paths - plan.observed.keys():
+        plan.observed[path] = _current(top, path)
+    plan.tree = _generated_tree(top, tree, clean_outputs,
+                                {path: entry for path, entry in merged_entries.items()
+                                 if output_family(path) in families})
+    return before_entries, before, families
+
+
+def _finish_generated(top, plan, before_entries, before, families):
+    from lib.project_mod.generated_integration import build_outputs, output_family
+
+    if not families:
+        return
+    current = {path: state.data for path, state in plan.observed.items() if state.kind == 'file'}
+    combined = dict(current)
+    for step in plan:
+        if output_family(step.path) in families:
+            continue
+        if step.action == 'write' and step.path in plan.observed:
+            combined[step.path] = step.data
+        elif step.action == 'delete':
+            combined.pop(step.path, None)
+    # A generated edit may be replaced only after proving its source exists.
+    dirty_outputs = {path for path in plan.observed
+                     if output_family(path) in families
+                     and current.get(path) != before.get(path)}
+    if dirty_outputs:
+        reproduced = build_outputs(top, families, current, committed=False)
+        unexplained = sorted(path for path in dirty_outputs if current.get(path) != reproduced.get(path))
+        if unexplained:
+            raise Refused('uncommitted generated edits are not reproducible from their sources',
+                          unexplained, 'Preserve those edits in their authored sources, regenerate, and rerun.')
+    outputs = build_outputs(top, families, combined, committed=False)
+    committed_entries, committed = _tree_files(top, plan.tree, plan.roots)
+    steps = {step.path: step for step in plan}
+    output_paths = {path for path in plan.observed if output_family(path) in families} | outputs.keys()
+    for path in sorted(output_paths):
+        if path not in plan.observed:
+            plan.observed[path] = _current(top, path)
+            if plan.observed[path].kind != 'missing':
+                raise _Replan()
+        state = plan.observed[path]
+        if state.kind not in ('file', 'missing'):
+            raise Refused('generated output has an unsafe file type', [path])
+        if path not in steps:
+            if outputs.get(path) == current.get(path) and committed.get(path) == before.get(path):
+                continue
+            step = _Step(path, before_entries.get(path), committed_entries.get(path), state)
+            plan.append(step)
+        else:
+            step = steps[path]
+        data = outputs.get(path)
+        base_executable = step.old is not None and step.old.mode == '100755'
+        new_executable = step.new is not None and step.new.mode == '100755'
+        step.executable = (state.executable if state.kind == 'file'
+                           and state.executable != base_executable else new_executable)
+        step.carried = data != committed.get(path) or step.executable != new_executable
+        step.data = data or b''
+        step.action = ('keep' if data == current.get(path) and step.executable == state.executable else
+                       'delete' if data is None else 'write')
 
 
 def _git(cwd, *args, stdin=None, env=None, check=True, binary=False):
@@ -187,10 +329,10 @@ def _all_generated(top: Path, paths: list[str]) -> bool:
     return len(values) == len(paths) and all(value in ('true', 'set') for value in values)
 
 
-def _merge_tree(top: Path, head: str, source: str) -> tuple[str, set[str]]:
-    """Merge and regenerate in a private checkout, returning recovered paths."""
+def _merge_tree(top: Path, head: str, source: str) -> str:
+    """Merge and regenerate in a private checkout."""
     if _is_ancestor(top, head, source):
-        return _git(top, 'rev-parse', f'{source}^{{tree}}').stdout.strip(), set()
+        return _git(top, 'rev-parse', f'{source}^{{tree}}').stdout.strip()
     bases = _git(top, 'merge-base', '--all', head, source, check=False)
     if bases.returncode == 1 and not bases.stdout.strip():
         raise Refused('the branch shares no history with the current branch')
@@ -218,11 +360,12 @@ def _merge_tree(top: Path, head: str, source: str) -> tuple[str, set[str]]:
                         environment.update(env or {})
                         return _git(scratch, *args, env=environment, **kwargs)
                     try:
-                        if resolve_generated_conflicts(scratch, paths, source, scratch_git) is not None:
+                        if resolve_generated_conflicts(
+                                scratch, paths, source, scratch_git, source_root=top) is not None:
                             tree = _git(scratch, 'write-tree').stdout.strip()
                             for state in ('AUTO_MERGE', 'MERGE_HEAD', 'MERGE_MODE', 'MERGE_MSG'):
                                 _git_paths(scratch, state)[0].unlink(missing_ok=True)
-                            return tree, set(paths)
+                            return tree
                     except GeneratedOutputError as error:
                         raise Refused('generated outputs could not be rebuilt', paths, str(error)) from error
                 advice = ('Merge the current branch into the worktree branch, resolve and '
@@ -240,7 +383,7 @@ def _merge_tree(top: Path, head: str, source: str) -> tuple[str, set[str]]:
             if merged.returncode:
                 raise LandingError('git merge-recursive failed: '
                                    + (merged.stderr or merged.stdout).strip()[:800])
-            return _git(scratch, 'write-tree').stdout.strip(), set()
+            return _git(scratch, 'write-tree').stdout.strip()
         finally:
             _git(top, 'worktree', 'remove', '--force', str(scratch), check=False)
 
@@ -311,15 +454,27 @@ def _merge_file(top: Path, step: _Step) -> tuple[bytes | None, str]:
     return None, 'uncommitted edits in the checkout cannot be merged (binary content?)'
 
 
-def _plan(top: Path, head: str, tree: str, file_mode: bool,
-          regenerated: set[str] = frozenset()) -> list[_Step]:
+def _plan(top: Path, head: str, tree: str, file_mode: bool) -> _Plan:
+    from lib.project_mod.generated_integration import GeneratedOutputError
+
+    try:
+        return _plan_files(top, head, tree, file_mode)
+    except GeneratedOutputError as error:
+        raise Refused('generated outputs could not be rebuilt', advice=str(error)) from error
+
+
+def _plan_files(top: Path, head: str, tree: str, file_mode: bool) -> _Plan:
+    from lib.project_mod.generated_integration import output_family
+
     refusals: list[str] = []
-    steps: list[_Step] = []
-    for path, old, new in _changes(top, head, tree):
+    steps = _Plan(tree)
+    changes = _changes(top, head, tree)
+    before_entries, before, families = _prepare_generated(top, head, tree, changes, steps)
+    for path, old, new in _changes(top, head, steps.tree):
         if '\n' in path or any(entry and entry.mode not in _MODES for entry in (old, new)):
             refusals.append(f'{path}: submodules and newline paths are not supported')
             continue
-        steps.append(_Step(path, old, new, _current(top, path)))
+        steps.append(_Step(path, old, new, steps.observed.get(path) or _current(top, path)))
     files = [step for step in steps if step.current.kind == 'file']
     oids = _git(top, 'hash-object', '--stdin-paths',
                 stdin=''.join(step.path + '\n' for step in files)).stdout.split() if files else []
@@ -351,14 +506,9 @@ def _plan(top: Path, head: str, tree: str, file_mode: bool,
         if kind == 'blocked':
             blocked.append(step)
             continue
+        if output_family(step.path) in families:
+            continue  # Sources determine these bytes in _finish_generated.
         refusal = _classify(top, step, entry_of(step, hashed.get(step.path, '')), file_mode)
-        if (refusal and step.path in regenerated and step.new is not None
-                and step.old is not None and step.current.kind == 'file'
-                and entry_of(step, hashed.get(step.path, '')) == step.old):
-            step.action, step.executable = 'write', step.new.mode == '100755'
-            step.data = _smudged(top, step.path, step.new)
-            step.carried = False
-            refusal = ''
         if refusal:
             refusals.append(f'{step.path}: {refusal}')
         elif step.action == 'delete':
@@ -374,6 +524,7 @@ def _plan(top: Path, head: str, tree: str, file_mode: bool,
     if refusals:
         raise Refused('the checkout has uncommitted work this landing would overwrite',
                       refusals, _OVERLAP_ADVICE)
+    _finish_generated(top, steps, before_entries, before, families)
     return steps
 
 
@@ -447,6 +598,12 @@ def _revalidate(top: Path, branch_ref: str, head: str, steps: list[_Step]) -> No
         now = _current(top, step.path, read=False)
         if (now.kind, now.fingerprint) != (step.current.kind, step.current.fingerprint):
             raise _Replan()
+    for path, observed in steps.observed.items():
+        now = _current(top, path, read=False)
+        if (now.kind, now.fingerprint) != (observed.kind, observed.fingerprint):
+            raise _Replan()
+    if steps.roots and _untracked(top, steps.roots) != steps.untracked:
+        raise _Replan()
 
 
 def _prepared_index(index_path: Path, top: Path, steps: list[_Step], oid_length: int) -> Path:
@@ -484,7 +641,7 @@ def _apply(top: Path, steps: list[_Step]) -> None:
         temporary = path.with_name(f'.{path.name}.git-land-{os.getpid()}')
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
-        if step.new.mode == '120000':
+        if step.new is not None and step.new.mode == '120000':
             os.symlink(os.fsdecode(step.data), temporary)
         else:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -621,15 +778,16 @@ def land(branch: str, *, into: str | None = None, keep: bool = False,
             break
         _refuse_task_input_snapshots(top, branch_ref, source)
         if merged_for != head:
-            tree, regenerated = _merge_tree(top, head, source)
+            tree = _merge_tree(top, head, source)
         merged_for = head
-        steps = _plan(top, head, tree, file_mode, regenerated)
-        result.update(paths=len(steps), carried=[step.path for step in steps if step.carried])
-        if check:
-            result['status'] = 'landable'
-            return result
-        commit = _git(top, 'commit-tree', tree, '-p', head, '-p', source, '-m', message).stdout.strip()
         try:
+            steps = _plan(top, head, tree, file_mode)
+            result.update(paths=len(steps), carried=[step.path for step in steps if step.carried])
+            if check:
+                _revalidate(top, branch_ref, head, steps)
+                result['status'] = 'landable'
+                return result
+            commit = _git(top, 'commit-tree', steps.tree, '-p', head, '-p', source, '-m', message).stdout.strip()
             _publish(top, branch_ref, head, commit, steps,
                      f'merge {label}: landed by scripts/git_land.py')
         except _Replan:
