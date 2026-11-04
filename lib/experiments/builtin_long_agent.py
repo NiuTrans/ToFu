@@ -9,10 +9,10 @@ from .registry import ExperimentPlugin
 
 
 PLUGIN_ID = "tofu.long-agent-v2"
-PLUGIN_VERSION = "2.0.0"
+PLUGIN_VERSION = "3.0.0"
 COMBINED_REQUIRED_WINNERS = frozenset({
     "prompt_lean_kimi", "tool_surface_v2", "tool_result_v2",
-    "context_budget_v2", "adaptive_compaction_v2", "orchestration_v2",
+    "context_budget_v2", "orchestration_v2",
 })
 PROMPT_ABLATION_STRATEGIES = frozenset({
     "prompt_ablate_url", "prompt_ablate_safety", "prompt_ablate_tools",

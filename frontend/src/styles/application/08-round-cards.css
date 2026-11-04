@@ -154,4 +154,7 @@
 .ptool-turn-chev { font-size: 10px; color: var(--text-tertiary); transition: transform .18s ease; }
 /* Collapsed — hide the member rows, keep the header. */
 .ptool-turn.collapsed > [data-prn] { display: none; }
+/* A program batch head counts outcomes as text; only a genuine failure
+   colors its own count, never the handoffs beside it. */
+.ptool-turn-head [data-program-status="failed"] { color: var(--error-text); }
 

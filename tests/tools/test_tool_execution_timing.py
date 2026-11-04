@@ -93,6 +93,26 @@ def test_normal_executor_uses_slow_tool_scope(clock, monkeypatch, caplog):
     assert 'secret-content' not in caplog.text
 
 
+@pytest.mark.parametrize('acknowledged', [True, None])
+def test_effect_intent_barrier_wait_is_attributed(clock, monkeypatch, caplog, acknowledged):
+    from lib.tasks_pkg import manager
+    from lib.tasks_pkg.executor._effects import begin_tool_effect, ToolEffectDurabilityError
+    def barrier(task, event):
+        clock.value += 2.5
+        return acknowledged
+    monkeypatch.setattr(manager, 'append_event', barrier)
+    task, row = {'id': 'task-123', '_turnId': 'turn-1', '_attemptId': 'attempt-1'}, {}
+    with timing.tool_execution_timing('edit_file'):
+        if acknowledged:
+            begin_tool_effect(task, 'edit_file', 'call-123', 1, row)
+        else:
+            with pytest.raises(ToolEffectDurabilityError):
+                begin_tool_effect(task, 'edit_file', 'call-123', 1, row)
+    phase = caplog.records[-1].tofu_event_fields['phases']['effect_intent_ack']
+    assert phase['elapsed_ms'] == 2500.0 and phase['calls'] == 1
+    assert row['executionEffect']['state'] == ('entered' if acknowledged else 'not_started')
+
+
 def test_streaming_prefetch_keeps_call_identity_and_same_budget(clock, monkeypatch, caplog):
     from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
     accumulator = StreamingToolAccumulator({'id':'task-123','convId':'conv-123'}, project_path=None)

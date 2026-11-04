@@ -446,7 +446,7 @@ def reap_stuck_running_tasks() -> int:
         )
         task['finishReason'] = 'error'
         task['finished_at'] = now
-        stuck.append(task)
+        stuck.append((task, verdict.silent_seconds))
 
     chat_task_runtime.update_matching(
         predicate=lambda task: (
@@ -467,11 +467,11 @@ def reap_stuck_running_tasks() -> int:
                 'its invocation owner settles the typed stall and reports to the parent',
                 str(child.get('id') or '')[:8], str(child.get('convId') or '')[:8],
                 verdict.silent_seconds)
-    for t in stuck:
+    for t, silent_seconds in stuck:
         logger.warning('[Task %s] conv=%s ⚠️ WEDGED — no event/dispatch progress for '
                        '%.0fs (had_output=%s), force-failed and finalizing',
                        t['id'][:8], (t.get('convId') or '')[:8],
-                       now - t.get('created_at', now), t.get('_reap_had_output'))
+                       silent_seconds, t.get('_reap_had_output'))
         _finalize_reaped_stuck_task(t)
         try:
             from lib.tasks_pkg.spawn import (

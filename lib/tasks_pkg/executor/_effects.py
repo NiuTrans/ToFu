@@ -95,15 +95,17 @@ def begin_tool_effect(task, name, call_id, number, round_entry):
     if scope != 'process' and policy != 'read_only':
         from lib.agent_core.events import EventType, build_event
         from lib.tasks_pkg.manager import append_event
+        from lib.tools.execution_timing import timing_phase
         event = build_event(EventType.TOOL_EFFECT, roundNum=number, toolName=name,
                             toolCallId=call_id, executionEffect=dict(effect))
         try:
-            if scope == 'invocation':
-                from lib.tasks_pkg.invocation_effects import persist_child_effect
-                persist_child_effect(task, round_entry)
-                append_event(task, event)
-            elif append_event(task, event) is not True:
-                raise ToolEffectDurabilityError('Exact tool effect intent was not durably acknowledged')
+            with timing_phase('effect_intent_ack'):
+                if scope == 'invocation':
+                    from lib.tasks_pkg.invocation_effects import persist_child_effect
+                    persist_child_effect(task, round_entry)
+                    append_event(task, event)
+                elif append_event(task, event) is not True:
+                    raise ToolEffectDurabilityError('Exact tool effect intent was not durably acknowledged')
         except BaseException:
             # This process knows it never called the handler. A lost storage
             # ACK can leave an entered record on disk; recovery remains honest
@@ -142,12 +144,14 @@ def bind_tool_effect_reconciliation(context, reference):
     # event. Both must carry the same reference before the exact ACK barrier.
     # A failed ACK retains possible evidence, never permission to publish.
     row['executionEffect'] = candidate
-    if child:
-        from lib.tasks_pkg.invocation_effects import persist_child_effect
-        persist_child_effect(context.task, row)
-        append_event(context.task, event)
-    elif append_event(context.task, event) is not True:
-        raise ToolEffectDurabilityError('File publication reference was not durably acknowledged')
+    from lib.tools.execution_timing import timing_phase
+    with timing_phase('effect_reconciliation_ack'):
+        if child:
+            from lib.tasks_pkg.invocation_effects import persist_child_effect
+            persist_child_effect(context.task, row)
+            append_event(context.task, event)
+        elif append_event(context.task, event) is not True:
+            raise ToolEffectDurabilityError('File publication reference was not durably acknowledged')
 
 
 def finish_tool_effect(round_entry, *, returned=False):

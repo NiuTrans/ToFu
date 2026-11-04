@@ -157,7 +157,7 @@ def _preserved_notes(value: Any) -> list[dict[str, Any]]:
             continue
         if identity:
             seen.add(identity)
-        notes.append(note)
+        notes.append(settle_unless_same(item, note) if type(item) is SettledDict else note)
     return notes
 
 

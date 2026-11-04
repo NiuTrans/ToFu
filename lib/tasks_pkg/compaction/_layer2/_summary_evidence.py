@@ -1,9 +1,9 @@
-"""Bounded, untrusted tool observations for L2 summary input only.
+"""Occurrence-local, untrusted tool observations for L2 summary input only.
 
-Entry point ``summary_evidence_parts`` selects newest occurrences, then emits
-chronologically. Depends on protocol-local pairing; never changes live history.
-Limits bound parsing, preview allocation, call fan-out, and total evidence even
-when the caller supplies no history budget. Omitted material is not evidence.
+Entry point ``summary_evidence_parts`` emits each occurrence
+chronologically; the existing request budget owns selection. Depends on protocol-local pairing; never changes live history.
+Per-result parsing and preview limits remain explicit. A second newest-N
+filter must not discard observations before request budgeting sees them.
 """
 import json
 import re
@@ -12,15 +12,10 @@ from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pair
 
 _TOOL_EVIDENCE_MAX_BYTES = 4096
 _TOOL_EVIDENCE_PREVIEW_BYTES = 1600
-EVIDENCE_TOTAL_BYTES = 24576
-EVIDENCE_MAX_ROWS = 16
-EVIDENCE_MAX_MESSAGES = 256
-EVIDENCE_MAX_CALLS = 64
 EVIDENCE_PARSE_CHARS = 32768
 EVIDENCE_MAX_BLOCKS = 16
 _IDENTITY_CHARS = 512
 _MARKER = '\n...[tool evidence middle omitted]...\n'
-_OMITTED = '[evidence omitted: bounded newest selection; omitted material is not evidence]'
 _OPAQUE = re.compile(r'data:[^\s"<>]+|[A-Za-z0-9+/=_-]{80,}', re.I)
 _SENSITIVE = re.compile(r'base64|ciphertext|encrypted_content|image_url|data:image', re.I)
 _FIELDS = ('artifactRef', 'artifactId', 'resultId', 'status', 'executionStatus',
@@ -123,15 +118,14 @@ def _render_tool_evidence(call, result, occurrence: str) -> str:
 
 
 def summary_evidence_parts(messages: list) -> dict[int, list[str]]:
-    """Return atomic rows by message position, with bounded newest preference.
+    """Return atomic rows by message position without a newest-N prefilter.
 
     A cut through an adjacency run leaves explicitly unpaired observations,
     never a fabricated owner. Clone only bounded shells so repeated object
     identities, as well as repeated provider IDs, remain distinct occurrences.
     """
-    start = max(0, len(messages) - EVIDENCE_MAX_MESSAGES)
+    start = 0
     window = []
-    omitted = start > 0
     for position in range(start, len(messages)):
         message = messages[position]
         clone = ({key: message[key] for key in
@@ -139,9 +133,8 @@ def summary_evidence_parts(messages: list) -> dict[int, list[str]]:
                   if key in message} if isinstance(message, dict) else {})
         calls = clone.get('tool_calls')
         if isinstance(calls, list):
-            omitted |= len(calls) > EVIDENCE_MAX_CALLS
             clone['tool_calls'] = [{key: c[key] for key in ('id', 'function') if key in c}
-                                   for c in calls[:EVIDENCE_MAX_CALLS] if isinstance(c, dict)]
+                                   for c in calls if isinstance(c, dict)]
         else:
             clone['tool_calls'] = []
         window.append(clone)
@@ -176,22 +169,7 @@ def summary_evidence_parts(messages: list) -> dict[int, list[str]]:
                 fn = call.get('function')
                 if id(call) not in paired and not (isinstance(fn, dict) and fn.get('name') == 'context_compact'):
                     candidates.append((position, call, None, f'message:{position}/call:{index}'))
-    selected = []
-    used = len(_OMITTED.encode()) + 2
-    for position, call, result, occurrence in reversed(candidates):
-        if len(selected) >= EVIDENCE_MAX_ROWS:
-            omitted = True
-            break
-        row = _render_tool_evidence(call, result, occurrence)
-        size = len(row.encode('utf-8')) + 2
-        if used + size > EVIDENCE_TOTAL_BYTES:
-            omitted = True
-            break
-        selected.append((position, row))
-        used += size
     parts = {}
-    if omitted:
-        parts[start] = [_OMITTED]
-    for position, row in reversed(selected):
-        parts.setdefault(position, []).append(row)
+    for position, call, result, occurrence in candidates:
+        parts.setdefault(position, []).append(_render_tool_evidence(call, result, occurrence))
     return parts

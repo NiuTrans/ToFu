@@ -431,8 +431,9 @@ def test_prepared_runner_cannot_complete_without_admission_or_admit_twice():
         assert journal.abort_requested()
 
 
-def test_child_monitor_start_crash_has_no_external_admission_and_releases_registry(monkeypatch):
+def test_child_control_acquisition_crash_has_no_external_admission_and_releases_registry(monkeypatch):
     import lib.tasks_pkg.child_invocation as children
+    from lib.tasks_pkg.invocation_cancellation import ChildCancellationScope
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     child_ids = []
     original = children.create_child_invocation
@@ -440,13 +441,12 @@ def test_child_monitor_start_crash_has_no_external_admission_and_releases_regist
         child = original(*args, **kwargs)
         child_ids.append(child['id'])
         return child
-    original_start = children.threading.Thread.start
-    def start(thread):
-        if thread.name.startswith('child-abort-'):
-            raise Crash()
-        return original_start(thread)
+    # Scope tests inject physical Thread.start failure and verify rollback;
+    # this graph boundary must also refuse effects when borrowing control fails.
+    def watch(scope, child):
+        raise Crash()
     monkeypatch.setattr(children, 'create_child_invocation', create)
-    monkeypatch.setattr(children.threading.Thread, 'start', start)
+    monkeypatch.setattr(ChildCancellationScope, 'watch', watch)
     definition, events, calls, engine = _production_journal_flow(monkeypatch)
     with pytest.raises(Crash):
         engine.run(initial_context='seed')

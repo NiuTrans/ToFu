@@ -27,7 +27,8 @@ export interface ToolGroupPorts {
   cleanTranslation(content: string): string;
   renderLine(round: ToolGroupRound, searching: boolean): string;
   renderSwarm(round: ToolGroupRound, allRounds: readonly ToolGroupRound[], inspectorAnchorHtml?: string): string | null;
-  renderProgram(round: ToolGroupRound): string;
+  /** `batched`: a member of its model round's multi-program batch. */
+  renderProgram(round: ToolGroupRound, batched: boolean): string;
   debugEnabled(): boolean;
   taskIdForRound(round: ToolGroupRound): string;
   debugLog(message: string): void;

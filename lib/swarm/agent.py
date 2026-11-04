@@ -350,6 +350,9 @@ class SubAgent:
         if child is None:
             return False
         child['aborted'] = True
+        event = child.get('abort_event')
+        if event is not None:
+            event.set()
         return True
 
     def _artifact_environment(self):

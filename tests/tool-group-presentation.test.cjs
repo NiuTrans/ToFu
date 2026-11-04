@@ -106,6 +106,31 @@ test('mixed program batches preserve chronology and attribute only execution chi
   assert.equal(JSON.stringify(rows),before);
 });
 
+test('sibling programs of one model round share one collapsed batch head; a lone program keeps its card',()=>{
+  const program=(n,llmRound,fields)=>round(n,{llmRound,toolName:'execute_program',_programSynthetic:true,_programCallId:'p'+n,
+    programCode:'return 1',...fields});
+  const handedBack={programStatus:'completed',status:'done',programStats:{outcome:'needs_model'},
+    programResult:{kind:'observation',reason:'Decide whether to continue.'}};
+  const rows=[program(1,0,{programStatus:'completed',status:'done',programStats:{outcome:'completed'}}),
+    program(2,0,handedBack),round(3,{llmRound:0,parentToolCallId:'p1'}),program(4,1,handedBack)];
+  // The card presenter learns batch membership: a batched handoff never opens itself.
+  const renderProgram=(r,batched)=>`<details class="ptc-card" data-call="${r._programCallId}"${batched?'':' open'}></details>`;
+  documentFor(createToolGroupPresentation(ports({renderProgram})).renderPanel(rows),d=>{
+    const [batch,lone]=d.querySelectorAll('.ptool-program-turn');
+    assert.deepEqual([...batch.querySelectorAll('[data-prn]')].map(n=>n.dataset.prn),['1','2','3']);
+    assert.deepEqual([...d.querySelectorAll('details.ptc-card')].map(n=>[n.dataset.call,n.open]),
+      [['p1',false],['p2',false],['p4',true]]);
+    assert.equal(batch.dataset.collapsible,'true');assert.ok(batch.classList.contains('collapsed'));
+    assert.ok(batch.dataset.programBatch);
+    const head=batch.querySelector(':scope > .ptool-turn-head');
+    assert.equal(head.getAttribute('aria-expanded'),'false');
+    assert.equal(head.querySelector('.ptool-turn-label').textContent,
+      'roundOutline.programs {"n":2} · roundOutline.programsCompleted {"n":1} · roundOutline.programsHandoff {"n":1}');
+    assert.equal(lone.querySelector('.ptool-turn-head'),null);
+    assert.equal(lone.hasAttribute('data-collapsible'),false);assert.equal(lone.hasAttribute('data-program-batch'),false);
+  });
+});
+
 test('durable launch evidence selects the Swarm slot without live-only flags',()=>{
   const receipt={swarm_run_id:'execution',agents:[{id:'child',role:'coder'}]};
   const fixtures=[

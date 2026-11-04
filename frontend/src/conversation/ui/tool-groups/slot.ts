@@ -6,11 +6,11 @@ import { isProgramToolRound, isSwarmToolRound } from '../../presentation/tool-ro
 import { programChildParentCallId } from '../../presentation/tool-execution-groups';
 import type { ToolGroupPorts, ToolGroupRound } from './contracts';
 export function renderToolSlot(round: ToolGroupRound, context: readonly ToolGroupRound[], suffix: string,
-  ports: ToolGroupPorts, inspector: (round: ToolGroupRound) => string): string {
+  ports: ToolGroupPorts, inspector: (round: ToolGroupRound) => string, batched = false): string {
 
   if (programOwnsGateway(round, context)) return '';
   if (isProgramToolRound(round)) {
-    return `<div data-prn="${round.roundNum}" data-prn-kind="program">${ports.renderProgram(round)}</div>`;
+    return `<div data-prn="${round.roundNum}" data-prn-kind="program">${ports.renderProgram(round, batched)}</div>`;
   }
   const displayed = suffix ? { ...round, query: String(round.query || '') + suffix } : round;
   const isSwarm = isSwarmToolRound(displayed);

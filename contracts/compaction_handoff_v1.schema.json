@@ -22,6 +22,10 @@
           "description": "Source chronology before folding: pre_turn has no execution after latest human input; mid_turn has execution or a surviving mid-turn boundary. Not the fold mode, trigger or API round. A later human steer starts a new pre-turn boundary."
         },
         "coverage": {"$ref": "#/$defs/coverage"},
+        "continuityDigest": {
+          "type": "string", "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the canonical compaction_continuity_v1 JSON in the visible content. Generated from original execution evidence, never inferred from model prose. The next compaction verifies it before carrying state forward; no duplicate state body is stored here."
+        },
         "scheduledRequestId": {
           "type": "string", "minLength": 1, "maxLength": 64,
           "description": "Owner-scheduled working-view compaction this summary served, inherited when a later summary folds it. Settlement retires the durable marker only when a stored checkpoint carries it."

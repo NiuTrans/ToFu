@@ -40,9 +40,12 @@ Pure functions; no Flask, no DB, no LLM.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from contextlib import nullcontext
+from itertools import accumulate
 from typing import Any
 
+from lib.conversation_sync.settled_rows import SettledDict, settle
 from lib.log import get_logger
 from lib.tool_results.tool_round_identity import (
     execution_batch_keys,
@@ -316,6 +319,8 @@ def record_injected_note(
             return previous
     scope = attempt_id or task_id
     entry['blockId'] = f'system-note:{scope + ":" if scope else ""}{note_kind}-{len(entries)}'
+    # Recorded facts are immutable; the caller still owns append rollback.
+    entry = settle(entry)
     entries.append(entry)
     return entry
 
@@ -428,10 +433,16 @@ def _insert_injected_note_segments(
     preserving the wire order "prose, then the nudge that re-drove the model". A nudge that fired with
     no consuming round yet (``lr`` past every segment) still falls through to
     the tail.
+
+    Each entry sees the list left by the previous ones, but only notes are
+    ever inserted or replaced, so ordinary blocks never move. ``_NotePlacement``
+    finds each anchor by binary search instead of rescanning every segment
+    per note: every structural frame of a long Turn re-projects all notes.
     """
     entries = task.get(INJECTED_NOTES_FIELD)
-    if not isinstance(entries, list):
+    if not isinstance(entries, list) or not entries:
         return
+    placement: _NotePlacement | None = None
     for position, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
@@ -453,40 +464,6 @@ def _insert_injected_note_segments(
                if isinstance(entry.get('taskId'), str)
                and entry['taskId'] else {}),
         }
-        index = len(segments)
-        for i, segment in enumerate(segments):
-            if any(identity_fields.get(field) and segment.get(field)
-                   and identity_fields[field] != segment[field]
-                   for field in ('attemptId', 'taskId')):
-                continue
-            # Live narration can still be terminal while its early tool card
-            # follows it. This is a boundary, not a fallback that a later
-            # same-round tool may override. Apply execution scope to both
-            # anchors so another attempt's terminal cannot capture this note.
-            if segment.get('terminal'):
-                index = i
-                break
-            seg_round = segment.get('llmRound')
-            if (lr is None or not isinstance(seg_round, int)
-                    or isinstance(seg_round, bool) or seg_round < lr):
-                continue
-            # Same-round vetoed prose stays ahead of the nudge that
-            # re-drove the model past it (see docstring).
-            if (seg_round == lr
-                    and str(segment.get('blockId') or '').startswith(
-                        _CONTINUATION_BLOCK_PREFIXES)):
-                continue
-            # A note already anchored at this batch head is not a
-            # boundary: later entries land AFTER it, keeping injection
-            # order (otherwise each new note bumps the previous one and
-            # a turn-start stack renders reversed). With the prose skip
-            # above this makes the head a STABLE sort — prose, then notes
-            # in entry order, then the round's own content.
-            if (seg_round == lr
-                    and segment.get('type') == SEG_SYSTEM_NOTE):
-                continue
-            index = i
-            break
         note_segment = {
             'type': SEG_SYSTEM_NOTE,
             'blockId': entry.get('blockId') or f'system-note:{kind}-{position}',
@@ -498,17 +475,168 @@ def _insert_injected_note_segments(
             'llmRound': lr,
             **identity_fields,
         }
-        existing_index = next((
-            i for i, current in enumerate(segments)
-            if current.get('type') == SEG_SYSTEM_NOTE
-            and current.get('blockId') == note_segment['blockId']
-            and execution_identity(current) == execution_identity(note_segment)
-        ), None)
-        if existing_index is None:
-            segments.insert(index, note_segment)
+        if placement is None:
+            placement = _NotePlacement(segments)
+        placement.place(note_segment, lr)
+    if placement is not None:
+        segments[:] = placement.merged()
+
+
+# A note with round ``lr`` anchors at the first in-scope segment whose
+# threshold exceeds ``lr``; a note without a round anchors only where the
+# threshold is ``_ANCHORS_EVERY_NOTE``.
+_ANCHORS_EVERY_NOTE = float('inf')
+_ANCHORS_NO_NOTE = float('-inf')
+
+
+def _note_anchor_threshold(segment: dict[str, Any]) -> int | float:
+    """Return the bound below which a note's ``llmRound`` anchors here."""
+    # Live narration can still be terminal while its early tool card
+    # follows it. This is a boundary, not a fallback that a later
+    # same-round tool may override. Execution scope applies to both
+    # anchors so another attempt's terminal cannot capture a note.
+    if segment.get('terminal'):
+        return _ANCHORS_EVERY_NOTE
+    seg_round = segment.get('llmRound')
+    if not isinstance(seg_round, int) or isinstance(seg_round, bool):
+        return _ANCHORS_NO_NOTE
+    # Same-round vetoed prose stays ahead of the nudge that re-drove the
+    # model past it (see ``_insert_injected_note_segments``). A note already
+    # anchored at this batch head is not a boundary either: later entries
+    # land AFTER it, keeping injection order (otherwise each new note bumps
+    # the previous one and a turn-start stack renders reversed). Together
+    # this makes the head a STABLE sort: prose, then notes in entry order,
+    # then the round's own content.
+    if (segment.get('type') == SEG_SYSTEM_NOTE
+            or str(segment.get('blockId') or '').startswith(
+                _CONTINUATION_BLOCK_PREFIXES)):
+        return seg_round
+    return seg_round + 1
+
+
+def _anchors_note(threshold: int | float, lr: int | None) -> bool:
+    return threshold == _ANCHORS_EVERY_NOTE if lr is None else lr < threshold
+
+
+def _outside_note_scope(attempt_id: Any, task_id: Any,
+                        note_attempt: Any, note_task: Any) -> bool:
+    """Whether a segment belongs to another execution than the note."""
+    return bool((note_attempt and attempt_id and note_attempt != attempt_id)
+                or (note_task and task_id and note_task != task_id))
+
+
+class _PlacedNote:
+    """A note segment and the index of the ordinary block it precedes."""
+
+    __slots__ = ('gap', 'segment', 'threshold', 'attempt_id', 'task_id')
+
+    def __init__(self, gap: int, segment: dict[str, Any]) -> None:
+        self.gap = gap
+        self.replace(segment)
+
+    def replace(self, segment: dict[str, Any]) -> None:
+        self.segment = segment
+        self.threshold = _note_anchor_threshold(segment)
+        self.attempt_id = segment.get('attemptId')
+        self.task_id = segment.get('taskId')
+
+
+class _NotePlacement:
+    """Index existing note identities and place new notes over fixed blocks.
+
+    Notes stay ordered by gap. Known identities retain their position without
+    consulting historical round anchors; a new identity uses the shared binary
+    search over per-scope running maxima, then preserves same-gap note order.
+    All indexes belong to this one merge and cannot outlive mutable input.
+    """
+
+    __slots__ = ('_blocks', '_thresholds', '_scope_maxima', '_notes', '_by_identity')
+
+    def __init__(self, segments: list[dict[str, Any]]) -> None:
+        self._blocks: list[dict[str, Any]] = []
+        self._thresholds: list[int | float] | None = None
+        self._scope_maxima: dict[tuple[Any, Any], list[int | float]] = {}
+        self._notes: list[_PlacedNote] = []
+        self._by_identity: dict[tuple[Any, Any], _PlacedNote] = {}
+        for segment in segments:
+            if segment.get('type') == SEG_SYSTEM_NOTE:
+                self._insert(len(self._notes), len(self._blocks), segment)
+            else:
+                self._blocks.append(segment)
+
+    @staticmethod
+    def _key(segment: dict[str, Any]) -> tuple[Any, Any] | None:
+        block_id = segment.get('blockId')
+        return (block_id, execution_identity(segment)) if isinstance(block_id, str) else None
+
+    def _insert(self, index: int, gap: int, segment: dict[str, Any]) -> None:
+        note = _PlacedNote(gap, segment)
+        self._notes.insert(index, note)
+        key = self._key(segment)
+        if key is not None:
+            # Legacy duplicate IDs still update only the first occurrence.
+            self._by_identity.setdefault(key, note)
+
+    def _first_anchoring_block(self, lr: int | None,
+                               note_attempt: Any, note_task: Any) -> int:
+        scope = (note_attempt, note_task)
+        maxima = self._scope_maxima.get(scope)
+        if maxima is None:
+            if self._thresholds is None:
+                self._thresholds = [_note_anchor_threshold(block) for block in self._blocks]
+            thresholds = self._thresholds
+            if note_attempt or note_task:
+                thresholds = [
+                    _ANCHORS_NO_NOTE if _outside_note_scope(
+                        block.get('attemptId'), block.get('taskId'),
+                        note_attempt, note_task) else threshold
+                    for block, threshold in zip(self._blocks, thresholds)
+                ]
+            maxima = list(accumulate(thresholds, max))
+            self._scope_maxima[scope] = maxima
+        if lr is None:
+            return bisect_left(maxima, _ANCHORS_EVERY_NOTE)
+        return bisect_right(maxima, lr)
+
+    def place(self, note_segment: dict[str, Any], lr: int | None) -> None:
+        notes = self._notes
+        key = self._key(note_segment)
+        if key is not None:
+            existing = self._by_identity.get(key)
         else:
-            # Grouped context can gain entries after an earlier event.
-            segments[existing_index] = note_segment
+            # Preserve equality semantics for old non-string identities.
+            identity = execution_identity(note_segment)
+            existing = next((note for note in notes
+                             if note.segment.get('blockId') == note_segment['blockId']
+                             and execution_identity(note.segment) == identity), None)
+        if existing is not None:
+            # Keep validation/encoding memos only for identical immutable rows.
+            # Mutable input still receives a detached replacement.
+            if type(existing.segment) is not SettledDict or existing.segment != note_segment:
+                existing.replace(note_segment)
+            return
+        note_attempt = note_segment.get('attemptId')
+        note_task = note_segment.get('taskId')
+        anchor = self._first_anchoring_block(lr, note_attempt, note_task)
+        for index, note in enumerate(notes):
+            if note.gap > anchor:
+                self._insert(index, anchor, note_segment)
+                return
+            if _anchors_note(note.threshold, lr) and not _outside_note_scope(
+                    note.attempt_id, note.task_id, note_attempt, note_task):
+                self._insert(index, note.gap, note_segment)
+                return
+        self._insert(len(notes), anchor, note_segment)
+
+    def merged(self) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        start = 0
+        for note in self._notes:
+            merged.extend(self._blocks[start:note.gap])
+            merged.append(note.segment)
+            start = note.gap
+        merged.extend(self._blocks[start:])
+        return merged
 
 
 def _merged_rounds(task: dict[str, Any], merged: list | None) -> list:

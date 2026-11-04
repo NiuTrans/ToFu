@@ -99,6 +99,15 @@ def test_program_rows_name_waiting_running_and_settled_calls_on_one_header(
         }));
       surface.render(selectConversationViewModel(state));
     }""", messages)
+    # Each Turn's sibling programs fold under one batch head
+    # (docs/RENDER_CONTRACT.md); the reader expands both to read every row.
+    heads = page.locator('.conversation-program-batch')
+    assert heads.count() == 2
+    for index in range(2):
+        head = heads.nth(index)
+        assert head.get_attribute('aria-expanded') == 'false'
+        head.click()
+        assert head.get_attribute('aria-expanded') == 'true'
 
     snapshot = page.evaluate("""() => {
       const lines = node => {

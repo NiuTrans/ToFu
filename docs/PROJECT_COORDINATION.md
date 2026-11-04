@@ -197,6 +197,15 @@ or idle daemon. At most the existing 128 assignment references are observed per
 call; excerpts are capped at 4,000 characters with explicit truncation. A
 timeout preserves running workers. The same ordinary Coordinator loop then
 reviews evidence and arranges further work under the original request.
+Problem: a valid 1,800 s wait could outlast the task's silent-progress window
+and be force-failed as `worker_lost`. Decision: each completed durable status
+poll refreshes the waiter's existing dispatch heartbeat. A responsive wait
+remains live even when Worker results have not changed; a blocked or failed
+read supplies no heartbeat. Transport-only ticks remain self-ticks, and the
+normal wait deadline, Stop and per-call cancellation still apply. Alternatives
+rejected: shortening the declared wait changes its contract; an unconditional
+heartbeat exemption hides a blocked handler. Verify the full execution/delivery
+wait and blocked-read cases in `tests/project_mod/test_coordinator_workers.py`.
 `wait=pending_input` yields the call to the human. It fires while the
 Coordinator conversation's inbox holds a steer (a human chat message, forwarded
 request or channel batch) or another background completion, the lanes that end

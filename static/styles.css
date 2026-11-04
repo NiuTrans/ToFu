@@ -9228,6 +9228,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptool-turn-chev { font-size: 10px; color: var(--text-tertiary); transition: transform .18s ease; }
 /* Collapsed — hide the member rows, keep the header. */
 .ptool-turn.collapsed > [data-prn] { display: none; }
+/* A program batch head counts outcomes as text; only a genuine failure
+   colors its own count, never the handoffs beside it. */
+.ptool-turn-head [data-program-status="failed"] { color: var(--error-text); }
 
 /* Timer receipt shell, explicit state and identity. Metadata and checks own their own bodies. */
 .timer-watcher-block {
@@ -27777,6 +27780,46 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .topbar{
   outline: calc(2 * var(--control-edge-inset)) solid var(--accent);
   outline-offset: var(--space-1);
 }
+
+/* One head over a model round's sibling programs (RoundOutline). Members stay
+ * keyed leaves; the fold only hides them. Counts are text; a genuine failure
+ * also colors its own count, never the handoffs beside it. */
+.conversation-surface .conversation-program-batch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--control-h-md);
+  margin-block: var(--space-2) 0;
+  padding: var(--space-1) var(--conversation-process-inset);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-title);
+  text-align: start;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.conversation-surface .conversation-program-batch:hover { background: var(--turn-process-hover); }
+.conversation-surface .conversation-program-batch:focus-visible {
+  outline: calc(2 * var(--control-edge-inset)) solid var(--accent);
+  outline-offset: calc(-2 * var(--control-edge-inset));
+}
+.conversation-program-batch__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+.conversation-program-batch [data-program-status="failed"] { color: var(--error-text); }
+.conversation-surface .conversation-program-batch[aria-expanded="false"] .conversation-program-batch__chevron {
+  transform: rotate(-90deg);
+}
+.conversation-surface .conversation-block[data-program-batch-folded="true"] { display: none; }
 
 @media (max-width: 600px) {
   .conversation-round-search { flex: 1 1 100%; width: 100%; }

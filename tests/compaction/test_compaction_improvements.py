@@ -586,7 +586,7 @@ class TestSummaryTemplate:
 
     def test_template_ruled_out_entries_carry_forward(self):
         from lib.tasks_pkg.compaction._layer2._prompt import _SUMMARY_SYSTEM_PROMPT
-        assert 'Retain every still-valid entry from an earlier receipt' \
+        assert 'Do not turn a local failure into a global' \
             in _SUMMARY_SYSTEM_PROMPT
         assert 'must never re-propose an approach listed under\n' \
             '  Ruled Out / Dead Ends' in _SUMMARY_SYSTEM_PROMPT

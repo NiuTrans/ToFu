@@ -11,9 +11,10 @@ export function createToolGroupPresentation(ports: ToolGroupPorts) {
   const standaloneSuffix = createStandaloneTitleIndex();
   const createSession = (allRounds: readonly ToolGroupRound[]): ToolGroupSession => {
     const context = createToolGroupContext(allRounds);
-    const slot = (round: ToolGroupRound) => renderToolSlot(round, allRounds, context.suffix(round), ports, inspector);
+    const slot = (round: ToolGroupRound, batched = false) =>
+      renderToolSlot(round, allRounds, context.suffix(round), ports, inspector, batched);
     return {
-      renderSlot: slot,
+      renderSlot: round => slot(round),
       renderGroups: (rounds, narration) => renderToolGroups(rounds, allRounds, context, slot, ports, narration),
     };
   };

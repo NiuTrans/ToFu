@@ -10,7 +10,7 @@ from collections.abc import Mapping
 
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._constants import _AUTO_COMPACT_MIN_PAYBACK_ROUNDS
-from lib.tasks_pkg.compaction._tokens import _fixed_compaction_cadence_payback_horizon
+from lib.tasks_pkg.compaction._tokens import _observed_compaction_cadence_payback_horizon
 
 logger = get_logger(__name__)
 
@@ -261,41 +261,8 @@ def _proactive_payback_policy(
     current_round: object = None,
     remaining_api_rounds: object = None,
 ) -> tuple[float, str]:
-    """Return the exact-ROI horizon selected by the request strategy.
-
-    ``adaptive`` already makes an observable expected-value decision before
-    entering L2.  Reapplying the fixed one-round horizon inside L2 used to
-    veto candidates that the adaptive decision had explicitly admitted.  Use
-    that same bounded remaining-round horizon for both exact candidate checks.
-    The fixed strategy starts with the shipped one-round rule, then earns a
-    bounded wider horizon from observed prefix-rewrite cadence. The task's
-    remaining hard API-round budget caps that horizon.
-    """
-    fixed = max(0.0, float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
-    cfg = ((task or {}).get('config') or {}) if isinstance(task, dict) else {}
-    comp_cfg = cfg.get('compaction') if isinstance(cfg, dict) else None
-    if not (isinstance(comp_cfg, dict)
-            and str(comp_cfg.get('strategy') or '').lower() == 'adaptive'):
-        horizon = _fixed_compaction_cadence_payback_horizon(
-            task,
-            current_round,
-            remaining_api_rounds=remaining_api_rounds,
-        )
-        if horizon > fixed:
-            return horizon, 'fixed_compaction_cadence'
-        return fixed, 'fixed_one_round'
-
-    decision = (task or {}).get('_adaptiveCompactionDecision')
-    if not (isinstance(decision, dict) and decision.get('shouldTrigger')):
-        return fixed, 'fixed_one_round'
-    try:
-        horizon = float(decision.get('remainingRoundsMedian'))
-    except (TypeError, ValueError, OverflowError):
-        return fixed, 'fixed_one_round'
-    if not math.isfinite(horizon) or horizon < fixed:
-        return fixed, 'fixed_one_round'
-    # Mirrors _adaptive_compaction_economics' established request bound.  The
-    # private decision is still validated here rather than trusted blindly.
-    return min(200.0, horizon), 'adaptive_expected_horizon'
-
-
+    """One measured-cadence ROI policy, independent of legacy strategy names."""
+    minimum = max(0.0, float(_AUTO_COMPACT_MIN_PAYBACK_ROUNDS))
+    horizon = _observed_compaction_cadence_payback_horizon(
+        task, current_round, remaining_api_rounds=remaining_api_rounds)
+    return (horizon, 'observed_compaction_cadence') if horizon > minimum else (minimum, 'one_round')

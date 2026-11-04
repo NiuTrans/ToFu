@@ -306,6 +306,11 @@ def compact_tool_results(ctx: CompactionContext) -> int:
     hot_indices = _hot_tool_result_indices(ctx, tool_indices)
     hot_indices.update(i for i in tool_indices if id(messages[i]) in protected_skills)
     cold_indices = [idx for idx in tool_indices if idx not in hot_indices]
+    if cold_indices:
+        from lib.tasks_pkg.compaction._handoff import latest_continuation_message_ids
+        continuation_ids = latest_continuation_message_ids(messages)
+        cold_indices = [idx for idx in cold_indices
+                        if id(messages[idx]) not in continuation_ids]
     if not cold_indices:
         logger.debug('[L1] %d tool results fit count=%d/token=%d hot tail; '
                      'skipping Phase B (Phase C image strip may still run)',

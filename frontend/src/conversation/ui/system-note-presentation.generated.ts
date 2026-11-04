@@ -46,6 +46,7 @@ export const SYSTEM_NOTE_REASON_PRESENTATION: Readonly<
   "memory_guidance": { labelKey: "systemNote.reasonMemoryGuidance", tone: "info", fallback: "Memory guidance", glyph: "lightbulb" },
   "modified_files": { labelKey: "systemNote.reasonModifiedFiles", tone: "warn", fallback: "Modified files", glyph: "edit" },
   "output_contract": { labelKey: "systemNote.reasonOutputContract", tone: "warn", fallback: "Output contract", glyph: "alertTriangle" },
+  "output_limit_recovery": { labelKey: "systemNote.reasonTerminalRecovery", tone: "info", fallback: "Terminal recovery", glyph: "refreshCw" },
   "paper_tool_guidance": { labelKey: "systemNote.reasonPaperTools", tone: "info", fallback: "Paper tools", glyph: "file" },
   "parallel_execution": { labelKey: "systemNote.reasonParallelExecution", tone: "info", fallback: "Parallel agents", glyph: "users" },
   "partial_stream_retry": { labelKey: "systemNote.reasonStreamRetry", tone: "info", fallback: "Stream retry", glyph: "refreshCw" },
@@ -221,6 +222,12 @@ export const SYSTEM_NOTE_DISPLAY_POLICY: Readonly<Record<string, SystemNoteDispl
     "authority": "workflow",
     "groupContext": true,
     "noteKind": "context-injection",
+    "provenanceField": ""
+  },
+  "output_limit_recovery": {
+    "authority": "workflow",
+    "groupContext": true,
+    "noteKind": "system-intervention",
     "provenanceField": ""
   },
   "paper_tool_guidance": {

@@ -34,9 +34,13 @@ def compact_cold_assistant(ctx: CompactionContext) -> int:
     assistant_tokens_saved = 0
 
     if len(all_assistant_indices) > _ASSISTANT_HOT_TAIL:
+        from lib.tasks_pkg.compaction._handoff import latest_continuation_message_ids
+        continuation_ids = latest_continuation_message_ids(messages)
         cold_assistant = all_assistant_indices[:-_ASSISTANT_HOT_TAIL]
         for idx in cold_assistant:
             msg = messages[idx]
+            if id(msg) in continuation_ids:
+                continue
             content = msg.get('content', '')
 
             if not content:

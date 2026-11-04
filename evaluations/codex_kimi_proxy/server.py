@@ -136,7 +136,8 @@ class MetricsSink:
 
 
 class CodexKimiProxy(ThreadingHTTPServer):
-    daemon_threads = True
+    # Accepted requests own durable metrics; server_close must join them.
+    daemon_threads = False
 
     def __init__(self, address: tuple[str, int], config: ProxyConfig):
         host = address[0]
@@ -155,8 +156,8 @@ class CodexKimiProxy(ThreadingHTTPServer):
         )
 
     def server_close(self) -> None:
-        self.client.close()
         super().server_close()
+        self.client.close()
 
 
 class ProxyHandler(BaseHTTPRequestHandler):

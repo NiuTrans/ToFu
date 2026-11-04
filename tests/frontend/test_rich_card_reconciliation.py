@@ -124,6 +124,32 @@ patch(root,agent('error','sw-a-open')); assert.equal(second.classList.contains('
 
 
 @pytest.mark.unit
+def test_rich_card_program_batch_member_handoff_stays_folded(round_card_stability_bundle):
+    _run(round_card_stability_bundle, r"""
+const card=(attention,open='')=>`<details data-rich-key="program" data-program-attention="${attention}" class="ptc-card"${open}><summary class="ptc-head">Program</summary><div class="ptc-body">${attention}</div></details>`;
+const reset=node=>patch(node,'<p>reset</p>');
+// A lone program still reveals a newly returned handoff.
+patch(root,card('running')); const lone=root.firstChild;
+patch(root,card('handoff',' open')); assert.equal(root.firstChild,lone); assert.equal(lone.open,true);
+// Inside a multi-program batch a handoff returns to the model; the batch head
+// counts it, so the card opens neither on first paint nor on transition.
+const member=document.createElement('section'); member.dataset.programBatch='programs:round'; root.append(member);
+patch(member,card('handoff',' open')); assert.equal(member.firstChild.open,false);
+reset(member); patch(member,card('running')); const folded=member.firstChild;
+patch(member,card('handoff',' open')); assert.equal(member.firstChild,folded); assert.equal(folded.open,false);
+// Failures and incomplete runs keep the program reveal, as direct-batch failures do.
+for (const attention of ['error','incomplete']) {
+  reset(member); patch(member,card('running')); const node=member.firstChild;
+  patch(member,card(attention,' open')); assert.equal(member.firstChild,node); assert.equal(node.open,true);
+  reset(member); patch(member,card(attention,' open')); assert.equal(member.firstChild.open,true);
+}
+// The reader's own choice survives later snapshots.
+reset(member); patch(member,card('handoff',' open')); const chosen=member.firstChild;
+chosen.open=true; patch(member,card('handoff',' open')); assert.equal(chosen.open,true);
+""")
+
+
+@pytest.mark.unit
 def test_rich_card_does_not_restore_selection_over_changed_middle(round_card_stability_bundle):
     _run(round_card_stability_bundle, r"""
 const card=middle=>`<section data-rich-key="first"><p>begin</p><p>${middle}</p><p>end</p></section>`;

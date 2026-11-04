@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Source-derived compaction continuity v1",
+  "description": "A rebuildable working projection carried independently of model-authored narrative. Original transcript/tool receipts remain authoritative. No model selects, edits or certifies these observations. The complete state participates in ordinary request admission; it is never silently clipped to make a candidate fit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "ownerKey", "taskId", "checklist", "observations"],
+  "properties": {
+    "version": {"const": "tofu.compaction-continuity/v1"},
+    "ownerKey": {"type": "string"},
+    "taskId": {"type": "string"},
+    "checklist": {"type": "array", "items": {"type": "object"}},
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "source", "value"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "type": {"type": "string", "minLength": 1},
+          "source": {"type": "string"},
+          "value": {"type": "string"},
+          "observationKey": {"type": "string"},
+          "sourceDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "previewOnly": {"type": "boolean"},
+          "toolCallId": {"type": "string"},
+          "toolName": {"type": "string"}
+        },
+        "description": "An attributed past observation, never a present success claim or capability prohibition. Only a later observation of the exact same invocation/resource key supersedes it; unrelated observations survive successive compactions. Long result previews declare previewOnly and retain a digest and recovery identity."
+      }
+    }
+  }
+}
