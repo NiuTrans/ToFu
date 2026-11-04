@@ -105,6 +105,9 @@ Opt-in linear mode: `concurrent writers → terminal task → immutable checkpoi
   logs why. An owned baseline whose stable left HEAD's history fails closed.
   Alternative rejected: always exporting HEAD would bypass the verified-stable
   gate for repositories where linear publication still works.
+  Every snapshot export prints its source ref, SHA and, when that commit is
+  not HEAD, its commit lag behind HEAD with the override; a trailing stable
+  otherwise reads as a fresh export (`tests/export/test_export_head_snapshot.py`).
 - **Rewritten history and a trailing stable.** Problem: after the history
   rebuild, candidate, stable and baseline still pointed into the abandoned
   history; every task-end checkpoint then failed with "Integration candidate
