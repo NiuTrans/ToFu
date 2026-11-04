@@ -198,7 +198,7 @@ conversation" below).
     "agentBackend": "builtin",
     "mcpEnabled": true,
     "tools": {
-      "toolSearch": "auto",
+      "toolSearch": "local",
       "programmaticCalling": "off",
       "nativeExposure": "full"
     },
@@ -209,8 +209,7 @@ conversation" below).
       "imageDetail": "auto"
     },
     "orchestration": {
-      "multiAgent": "full",
-      "maxConcurrentAgents": 3
+      "multiAgent": "full"
     },
     "disableModelFallback": false
   },
@@ -321,25 +320,30 @@ guidance and routing would still advertise the local Swarm backend, and a tool
 whose only outcome is refusal invites a wasted round).
 
 `tools.toolSearch`, `tools.programmaticCalling`, and
-`orchestration.multiAgent` apply to every tool-capable provider: `auto` uses a
-verified native implementation where available and otherwise the local
-gateway, JavaScript, or Swarm backend. `orchestration.multiAgent` defaults to
-`full` (local Swarm workers with the parent's authority catalog, minus the
-leaf-worker denylist); `read_only` is the analysis-only lane. The headless
-task routes above have no saved conversation and therefore no local Swarm
-backend; only a verified native multi-agent implementation can serve them. Multi-agent
-orchestration is permanently enabled — there is no user-facing `off`; a
-legacy persisted `off` normalizes to the `full` default. PTC and Multi-agent
-can be active in the
-same request because they solve different task shapes. Legacy
-`responses.multiAgent` and `responses.maxConcurrentSubagents` inputs remain
-accepted as migration aliases, but normalized configuration is always returned
-under `orchestration`.
+`orchestration.multiAgent` apply to every tool-capable provider. They are the
+same values the browser settings page offers; an invalid or retired value
+normalizes to the default.
 
-Tool Search `auto` uses a verified native
-implementation where available and otherwise the local `search_tools` +
-direct native tool calls; `native` still falls back locally when capability is
-unverified. The `responses.*` controls remain limited to `protocol: responses`
+- `tools.toolSearch`: `local` (default) defers the declared-searchable
+  residual catalog behind Tofu's own `search_tools` + `execute_tools` pair;
+  `off` sends every schema directly. Provider-hosted Tool Search is never
+  selected; the retired `auto` and `native` values mean `local`.
+- `tools.programmaticCalling`: `on` (default) offers programs on every
+  tool-capable route, as verified native OpenAI PTC where reviewed
+  eligibility allows and otherwise as local JavaScript (`execute_program`);
+  `off` withholds them. The retired `auto` means `on`.
+- `orchestration.multiAgent`: `full` (default) offers local Swarm workers
+  with the parent's authority catalog, minus the leaf-worker denylist;
+  `read_only` is an API-only analysis lane. Multi-agent orchestration is
+  permanently enabled and has no browser control: the retired `auto`/`off`
+  values mean `full`, and the retired `responses.multiAgent` alias is
+  ignored. Accepted workers have no concurrency ceiling, so
+  `maxConcurrentAgents` and `responses.maxConcurrentSubagents` are ignored.
+
+The headless task routes above have no saved conversation and therefore no
+local Swarm backend; only a verified native multi-agent implementation can
+serve them. PTC and Multi-agent can be active in the same request because they
+solve different task shapes. The `responses.*` controls remain limited to `protocol: responses`
 with an effective `responses_profile` of `openai`. See
 [Tool Search and direct execution](TOOL_SEARCH_EXECUTION_GATEWAY.md) and the
 [OpenAI Responses feature policy](OPENAI_RESPONSES_FEATURES.md).

@@ -265,7 +265,6 @@ def test_read_only_projection_cannot_advertise_above_resource_wave_limit(
         [],
         authority_catalog=[SPAWN_AGENTS_TOOL],
         backend='local_swarm',
-        max_concurrent_agents=8,
     )
     agents = projected[0][
         'function']['parameters']['properties']['agents']

@@ -289,36 +289,6 @@ class RequestPlan:
     model_budget_lease: Any = None
 
 
-def activate_native_tool_search_fallback(
-    status_code: int,
-    error_text: str,
-    *,
-    plan: RequestPlan,
-    canonical_body: dict,
-) -> bool:
-    """Switch a rejected native discovery request to local on its retry.
-
-    Returns ``True`` only for request-shape errors that explicitly mention
-    hosted Tool Search fields.  Unrelated 400/404/422 responses retain their
-    ordinary classification, so this cannot mask a bad prompt or model id.
-    """
-    if plan.tool_search_backend not in ('native_openai', 'native_anthropic'):
-        return False
-    if status_code not in (400, 404, 422):
-        return False
-    lower = str(error_text or '').casefold()
-    signals = (
-        'tool_search', 'tool search', 'defer_loading', 'deferred tool',
-        'tool_search_tool_bm25', 'tool namespace',
-    )
-    if not any(signal in lower for signal in signals):
-        return False
-    canonical_body['_force_local_tool_search'] = True
-    logger.warning('Native Tool Search rejected by provider (HTTP %d); '
-                   'retrying with local discovery', status_code)
-    return True
-
-
 def activate_native_orchestration_fallback(
     status_code: int,
     error_text: str,
@@ -421,7 +391,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         from lib.llm.reasoning import ReasoningContractError
         raise ReasoningContractError('unbound_reasoning', 'reasoning requires a selected destination')
     # Keep the canonical task body intact across transport retries and
-    # provider failover.  The tool-search surface below is protocol-specific;
+    # provider failover.  The tool-wire projection below trims this copy;
     # reusing an already-trimmed wire body would silently lose the immutable
     # executable catalog on the next attempt.
     body = dict(body)

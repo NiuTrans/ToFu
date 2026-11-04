@@ -11348,7 +11348,7 @@
       "path": "/api/v4/swarm/config",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Swarm registry & limits",
+      "summary": "Swarm role registry",
       "tags": [
         "agents"
       ],

@@ -16,18 +16,19 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
     'cache': {'gpt56BreakpointMode': 'explicit'},
     'tools': {
         'nativeExposure': 'routed',
-        # Auto uses native tools/JSON batches locally. JavaScript requires
-        # explicit ``on``; verified provider-native PTC remains available.
-        'programmaticCalling': 'auto',
+        # ``on`` offers the JavaScript gateway on every tool-capable route
+        # (provider-native PTC where verified); ``off`` withholds it.
+        'programmaticCalling': 'on',
         # Keep direct tools visible while adding the local gateway.  The
         # ``serial_gateway`` one-request trial remains available for explicit
         # experiments, but live long-task calibration increased cost and is
         # therefore not a shipped default.
         'programmaticExposure': 'additive',
-        # Public GPT-5.6 Responses requests automatically defer only the
-        # non-pinned portion of a large tool catalog.  Frontend/caller-selected
-        # tools are carried separately as an immutable direct-exposure set.
-        'toolSearch': 'auto',
+        # ``local`` defers the non-pinned portion of a large catalog behind
+        # Tofu's own search_tools/execute_tools pair on every provider;
+        # ``off`` sends every schema directly. Frontend/caller-selected tools
+        # are carried separately as an immutable direct-exposure set.
+        'toolSearch': 'local',
         # Schema exposure is not execution authority.  In the default mode,
         # every task-available tool remains searchable/callable by its exact
         # name even when a composer toggle keeps its schema off the wire.
@@ -46,17 +47,15 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
         'imageDetail': 'auto',
         'promptProfile': 'auto',
     },
-    # Provider-neutral orchestration policy.  Legacy callers may still send
-    # responses.multiAgent / responses.maxConcurrentSubagents; normalization
-    # accepts those aliases but this block is the sole returned owner.
-    # ``full`` (shipped default) keeps spawn_agents on the wire with the
-    # parallel-execution guidance every round and lets workers inherit the
-    # parent's full authority catalog (minus the leaf-worker denylist);
-    # ``read_only`` is the analysis-only lane, ``auto`` the legacy
-    # first-round keyword gate, and ``off`` the immediate rollback.
+    # Provider-neutral orchestration policy. ``full`` keeps spawn_agents on
+    # the wire with the parallel-execution guidance every round and lets
+    # workers inherit the parent's full authority catalog (minus the
+    # leaf-worker denylist). It is the only product mode: the browser has no
+    # control for it. ``read_only`` remains an explicit API-only lane.
+    # Accepted local work has no concurrency ceiling, so there is no
+    # concurrency setting.
     'orchestration': {
         'multiAgent': 'full',
-        'maxConcurrentAgents': 3,
         'policy': 'v1',
     },
     # Snapshot discovery remains opt-in until natural use shows matched benefit.
@@ -66,9 +65,9 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
 
 _VALID_BREAKPOINT_MODES = frozenset({'implicit', 'explicit'})
 _VALID_NATIVE_EXPOSURE = frozenset({'full', 'routed'})
-_VALID_PROGRAMMATIC_CALLING = frozenset({'off', 'auto', 'on'})
+_VALID_PROGRAMMATIC_CALLING = frozenset({'off', 'on'})
 _VALID_PROGRAMMATIC_EXPOSURE = frozenset({'additive', 'serial_gateway', 'code_api'})
-_VALID_TOOL_SEARCH = frozenset({'off', 'auto', 'native', 'local'})
+_VALID_TOOL_SEARCH = frozenset({'off', 'local'})
 _VALID_TOOL_EXECUTION_SCOPE = frozenset({'available', 'selected_only'})
 _VALID_RESPONSES_TRANSPORT = frozenset({'sse', 'websocket'})
 _VALID_REASONING_MODE = frozenset({'standard', 'pro'})
@@ -78,12 +77,11 @@ _VALID_PROMPT_PROFILE = frozenset({
     'auto', 'full', 'lean', 'lean_no_url', 'lean_no_safety',
     'lean_no_tools', 'lean_no_output', 'lean_no_autonomy',
 })
-# Multi-agent orchestration is permanently on: the settings surface dropped
-# the opt-out toggle, so users can only steer the mode, never disable it.
-# A legacy persisted 'off' normalizes to the 'full' default below (never
-# strict-raises), because a stale config must not silently re-disable the
-# lane after the product removed the switch.
-_VALID_MULTI_AGENT = frozenset({'auto', 'read_only', 'full'})
+# Multi-agent orchestration is permanently on and has no browser control.
+# Retired values (``auto``, ``off``) and the retired ``responses.multiAgent``
+# alias fall back to ``full`` on the request path, so a stale saved config can
+# neither disable the lane nor select a mode the settings page cannot show.
+_VALID_MULTI_AGENT = frozenset({'read_only', 'full'})
 _VALID_RESULT_ENVELOPE = frozenset({'legacy', 'v2'})
 _VALID_ORCHESTRATION_POLICY = frozenset({'v1', 'v2'})
 _VALID_COMPACTION_STRATEGY = frozenset({'fixed', 'adaptive'})
@@ -116,12 +114,12 @@ def normalize_context_experiment_flags(
     native_exposure = tools.get(
         'nativeExposure', cfg.get('tools.nativeExposure', 'routed'))
     programmatic = tools.get(
-        'programmaticCalling', cfg.get('tools.programmaticCalling', 'auto'))
+        'programmaticCalling', cfg.get('tools.programmaticCalling', 'on'))
     programmatic_exposure = tools.get(
         'programmaticExposure',
         cfg.get('tools.programmaticExposure', 'additive'))
     tool_search = tools.get(
-        'toolSearch', cfg.get('tools.toolSearch', 'auto'))
+        'toolSearch', cfg.get('tools.toolSearch', 'local'))
     execution_scope = tools.get(
         'executionScope', cfg.get('tools.executionScope', 'available'))
     schema_budget = tools.get(
@@ -139,14 +137,7 @@ def normalize_context_experiment_flags(
     prompt_profile = responses.get(
         'promptProfile', cfg.get('responses.promptProfile', 'auto'))
     multi_agent = orchestration.get(
-        'multiAgent', cfg.get(
-            'orchestration.multiAgent', responses.get(
-                'multiAgent', cfg.get('responses.multiAgent', 'full'))))
-    max_subagents = orchestration.get(
-        'maxConcurrentAgents', cfg.get(
-            'orchestration.maxConcurrentAgents', responses.get(
-                'maxConcurrentSubagents',
-                cfg.get('responses.maxConcurrentSubagents', 3))))
+        'multiAgent', cfg.get('orchestration.multiAgent', 'full'))
     orchestration_policy = orchestration.get(
         'policy', cfg.get('orchestration.policy', 'v1'))
     global_budget = context.get(
@@ -164,10 +155,10 @@ def normalize_context_experiment_flags(
         ('tools.nativeExposure', native_exposure,
          _VALID_NATIVE_EXPOSURE, 'routed'),
         ('tools.programmaticCalling', programmatic,
-         _VALID_PROGRAMMATIC_CALLING, 'auto'),
+         _VALID_PROGRAMMATIC_CALLING, 'on'),
         ('tools.programmaticExposure', programmatic_exposure,
          _VALID_PROGRAMMATIC_EXPOSURE, 'additive'),
-        ('tools.toolSearch', tool_search, _VALID_TOOL_SEARCH, 'auto'),
+        ('tools.toolSearch', tool_search, _VALID_TOOL_SEARCH, 'local'),
         ('tools.executionScope', execution_scope,
          _VALID_TOOL_EXECUTION_SCOPE, 'available'),
         ('responses.transport', transport,
@@ -225,19 +216,6 @@ def normalize_context_experiment_flags(
     global_budget = _bounded_tokens(
         global_budget, 'context.globalBudgetTokens', 1_000_000)
 
-    try:
-        max_subagents = int(max_subagents)
-    except (TypeError, ValueError):
-        if strict:
-            raise ValueError(
-                'orchestration.maxConcurrentAgents must be an integer')
-        max_subagents = 3
-    if not 1 <= max_subagents <= 8:
-        if strict:
-            raise ValueError(
-                'orchestration.maxConcurrentAgents must be between 1 and 8')
-        max_subagents = 3
-
     return {
         'cache': {
             'gpt56BreakpointMode': normalized[
@@ -263,7 +241,6 @@ def normalize_context_experiment_flags(
         },
         'orchestration': {
             'multiAgent': normalized['orchestration.multiAgent'],
-            'maxConcurrentAgents': max_subagents,
             'policy': normalized['orchestration.policy'],
         },
         'context': {'globalBudgetTokens': global_budget,
@@ -294,8 +271,6 @@ def context_experiment_arm(request_config: Any) -> dict:
         'imageDetail': flags['responses']['imageDetail'],
         'promptProfile': flags['responses']['promptProfile'],
         'multiAgent': flags['orchestration']['multiAgent'],
-        'maxConcurrentAgents': flags['orchestration'][
-            'maxConcurrentAgents'],
         'orchestrationPolicy': flags['orchestration']['policy'],
         'contextGlobalBudgetTokens': flags['context']['globalBudgetTokens'],
         'programmaticInputs': flags['context']['programmaticInputs'],

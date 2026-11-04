@@ -396,6 +396,11 @@ def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
     _search_mode = (task['_toolSearchMode']
                     or normalize_context_experiment_flags(
                         cfg)['tools']['toolSearch'])
+    if _search_mode != 'off':
+        # A stored child policy may still carry the retired ``auto`` or
+        # ``native``; the wire boundary resolves both to local discovery, so
+        # the admission estimate must use that same surface.
+        _search_mode = 'local'
     # Provider-boundary strategy decides whether the stable gateway schema is
     # visible. Admission remains task-owned: every nested name is resolved
     # against the immutable executable catalog and enters the ordinary
@@ -422,9 +427,10 @@ def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
 def _prepare_initial_tool_surface(cfg, task, tool_list, search_mode):
     """Keep provider candidates separate from the pre-route admission estimate.
 
-    Auto discovery can compact locally before a provider has been selected.
-    Retaining the candidates lets the final shared wire boundary choose native
-    discovery instead, where admission checks the actual routed request again.
+    Local discovery compacts the estimate before a provider has been selected.
+    Retaining the candidates lets the final shared wire boundary re-project
+    them (fail-open, live controls, pins), where admission checks the actual
+    routed request again.
     """
     from lib.context_experiment_flags import normalize_context_experiment_flags
     from lib.llm.tool_wire import provider_tool_name
@@ -454,7 +460,7 @@ def _prepare_initial_tool_surface(cfg, task, tool_list, search_mode):
         or provider_tool_name(tool) not in visible_names for tool in authority))
     task['_toolSearchMode'] = search_mode
     task['_tool_schema'] = tool_list
-    if authority and search_mode in ('auto', 'local'):
+    if authority and search_mode == 'local':
         flags = normalize_context_experiment_flags(cfg)['tools']
         task['_tool_schema'] = local_wire_tools(
             tool_list, discovery_catalog_size=len(authority),

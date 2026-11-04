@@ -53,7 +53,7 @@ def test_interfaces_agree_across_admission_context_and_wire(protocol, mode):
     plan = prepare_request(body, api_key='test-key',
                            base_url='https://gateway.example/v1', api_protocol=protocol)
     exposed = names(plan.body)
-    # The default (absent/auto) and explicit on agree: one first-class program action.
+    # The default (absent), the retired auto and on agree: one program action.
     active = mode != 'off'
     assert 'custom__read_rows' in exposed
     assert ('execute_program' in exposed) == active
@@ -74,14 +74,17 @@ def test_stale_replay_latch_cannot_enable_programs_or_override_off():
     request(task)
     old = deepcopy(task['_toolOrchestrationPromptLatch'])
     old.pop('programmaticRequestedMode')  # A replay produced before this contract.
-    for mode, programs in (('auto', True), ('off', False)):
+    # The retired auto normalizes to the on default before the latch is read.
+    for mode, requested, programs in (
+            ('on', 'on', True), ('auto', 'on', True), ('off', 'off', False)):
         current = {'config': {'tools': {'programmaticCalling': mode},
                               '_modelReplayToolLatch': old}}
         body = request(current)
         project_tool_wire(body, api_protocol='openai')
         assert ('execute_program' in names(body)) == programs
-        assert body['_programmatic_tool_calling'] == mode
-        assert current['_toolOrchestrationPromptLatch']['programmaticRequestedMode'] == mode
+        assert body['_programmatic_tool_calling'] == requested
+        assert current['_toolOrchestrationPromptLatch'][
+            'programmaticRequestedMode'] == requested
 
 
 def test_unchanged_policy_keeps_the_same_wire_after_failed_program_telemetry():

@@ -1364,7 +1364,7 @@ def test_orchestration_v2_selects_one_explainable_shape(monkeypatch):
     monkeypatch.setattr(policy, "_eligible_programmatic_names",
                         lambda _tools: {"read_files"})
     multi = policy.resolve_tool_orchestration(
-        requested_programmatic="on", requested_multi_agent="auto",
+        requested_programmatic="on", requested_multi_agent="read_only",
         messages=[{"role": "user", "content":
                    "全面并行审计多个独立模块并比较实现"}],
         tools=[], round_num=1, policy_version="v2")

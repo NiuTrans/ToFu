@@ -61,7 +61,6 @@ def test_local_wire_composes_execute_tools_and_read_only_swarm():
         '_programmatic_eligible_tools': ['read_files'],
         '_multi_agent_mode': 'read_only',
         '_multi_agent_stage': 'compare independent modules',
-        '_multi_agent_max_concurrent_agents': 2,
         '_tool_orchestration_decision_sink': decision_sink,
     }, api_key='secret', base_url='https://example.test/v1',
        api_protocol='openai')
@@ -118,7 +117,6 @@ def test_local_wire_preserves_ordinary_tools_and_stability_within_policy():
             '_programmatic_eligible_tools': ['read_files'],
             '_multi_agent_mode': 'read_only',
             '_multi_agent_stage': 'compare independent modules',
-            '_multi_agent_max_concurrent_agents': 3,
         }, api_key='secret', base_url='https://example.test/v1',
            api_protocol='openai')
 
@@ -202,13 +200,12 @@ def test_native_wire_composes_both_extensions_and_hides_local_spawn():
         '_programmatic_eligible_tools': ['read_files'],
         '_multi_agent_mode': 'read_only',
         '_multi_agent_stage': 'compare independent modules',
-        '_multi_agent_max_concurrent_agents': 3,
         '_tool_orchestration_decision_sink': decision_sink,
     }, api_key='secret', base_url='https://api.openai.com/v1',
        api_protocol='responses')
 
-    assert plan.body['multi_agent'] == {
-        'enabled': True, 'max_concurrent_subagents': 3}
+    # No subagent ceiling is sent; the provider's own default applies.
+    assert plan.body['multi_agent'] == {'enabled': True}
     assert any(tool.get('type') == 'programmatic_tool_calling'
                for tool in plan.body['tools'])
     assert 'spawn_agents' not in _wire_names(plan.body['tools'])
@@ -296,7 +293,6 @@ def test_result_metadata_keeps_compact_backend_decisions_only():
         'programmaticBackend': 'local',
         'multiAgent': 'read_only',
         'multiAgentBackend': 'local_swarm',
-        'maxConcurrentAgents': 3,
     }]
 
 
@@ -380,7 +376,7 @@ def test_local_spawn_propagates_identity_budget_and_worker_contract(
     monkeypatch.setattr(persistence, 'save_session', lambda *_a, **_k: None)
 
     decision = {
-        'multiAgent': 'read_only', 'maxConcurrentAgents': 2,
+        'multiAgent': 'read_only',
         'programmaticCalling': 'on',
         'programmaticEligibleTools': ['read_files'],
         'compositionMode': 'multi_agent_with_programmatic_workers',
@@ -493,7 +489,6 @@ def test_full_mode_wire_keeps_local_spawn_without_native_extension():
         '_programmatic_tool_calling': 'off',
         '_multi_agent_mode': 'full',
         '_multi_agent_stage': 'delegate independent workstreams',
-        '_multi_agent_max_concurrent_agents': 3,
         '_tool_orchestration_decision_sink': decision_sink,
     }, api_key='secret', base_url='https://api.openai.com/v1',
        api_protocol='responses')
@@ -558,8 +553,7 @@ def test_full_mode_spawn_wave_uses_standard_authority_handle(
         {'agents': [{'id': 'w', 'objective': 'implement'}]},
         task_id='task',
         task={'id': 'task', 'convId': 'conv', '_userId': 17,
-              '_toolOrchestration': {
-                  'multiAgent': 'full', 'maxConcurrentAgents': 2}},
+              '_toolOrchestration': {'multiAgent': 'full'}},
         cfg={}, all_tools=[_tool('read_files'), _tool('write_file')],
         model='any-model', thinking_enabled=False, project_path='',
         abort_check=None, on_event=None)

@@ -147,9 +147,29 @@ def test_conv_resolver_preserves_nested_experiment_blocks():
     out = resolve_conv_config(
         overrides={
             'model': 'gpt-5.6-sol',
-            'tools': {'toolSearch': 'auto'},
+            'tools': {'toolSearch': 'local'},
             'responses': {'transport': 'websocket'},
+            'orchestration': {'multiAgent': 'read_only'},
+            'context': {'programmaticInputs': True},
         },
         is_active=True)
-    assert out['tools'] == {'toolSearch': 'auto'}
+    assert out['tools'] == {'toolSearch': 'local'}
     assert out['responses'] == {'transport': 'websocket'}
+    assert out['orchestration'] == {'multiAgent': 'read_only'}
+    assert out['context'] == {'programmaticInputs': True}
+
+
+def test_conv_resolver_carries_every_normalized_experiment_block():
+    from lib.context_experiment_flags import (
+        DEFAULT_CONTEXT_EXPERIMENT_FLAGS, normalize_context_experiment_flags)
+    from lib.conv_config import resolve_conv_config
+
+    blocks = {name: dict(value)
+              for name, value in DEFAULT_CONTEXT_EXPERIMENT_FLAGS.items()}
+    blocks['orchestration']['multiAgent'] = 'read_only'
+    out = resolve_conv_config(
+        overrides={'model': 'gpt-5.6-sol', **blocks}, is_active=True)
+
+    assert set(normalize_context_experiment_flags({})) <= set(out)
+    assert normalize_context_experiment_flags(out)['orchestration'] == {
+        'multiAgent': 'read_only', 'policy': 'v1'}

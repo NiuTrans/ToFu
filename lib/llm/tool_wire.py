@@ -122,7 +122,7 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
     _direct_names = live_direct_names(_background_authority, _direct_declarations)
     _protected_names = _background_names | _direct_names
     if _protected_names:
-        # Native discovery must not defer controls for live handles. Pins
+        # Discovery must not defer controls for live handles. Pins
         # derive only from task authority, never search or an old projection.
         body['_frontend_selected_tool_names'] = sorted(
             set(body.get('_frontend_selected_tool_names') or ())
@@ -140,18 +140,11 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
             local_wire_tools,
             resolve_tool_search_backend,
         )
-        if body.get('_force_local_tool_search'):
-            _tool_search_backend = 'local'
-        elif body.get('_tool_search_fail_open'):
+        if body.get('_tool_search_fail_open'):
             _tool_search_backend = 'full'
         else:
             _tool_search_backend = resolve_tool_search_backend(
-                body.get('_tool_search_mode') or 'auto',
-                protocol=api_protocol, model=body.get('model') or '',
-                responses_profile=_responses_feature_profile,
-                base_url=base_url or '', oauth=oauth or '',
-                capabilities=body.get('_tool_search_capabilities'),
-                inference_profile=_route_inference_profile)
+                body.get('_tool_search_mode') or 'local')
         body['_resolved_tool_search_backend'] = _tool_search_backend
         _pins = list(body.get('_frontend_selected_tool_names') or ())
         _pin_set = {str(name) for name in _pins}
@@ -227,20 +220,17 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
                 apply_schema_budget=False,
                 on_tool_isolated=_request_activity_sink)
         else:
-            # Native discovery receives the complete catalog and lets the
-            # provider defer searchable tools.  ``off`` also gets the full
-            # catalog, without a discovery primitive.
+            # ``off`` gets the full catalog, without a discovery primitive.
             body['tools'] = full_wire_tools(_wire_catalog)
-        if _tool_search_backend == 'native_anthropic':
-            body['_anthropic_native_tool_search'] = True
         body['_frontend_selected_tool_names'] = _pins
 
     # Programmatic Tool Calling: resolve the per-request backend at the same
     # last common boundary (mirrors the Tool Search dual-backend precedent).
     # ``off`` leaves the wire untouched; ``native_openai`` lets the Responses
     # converter attach the hosted-only fields; ``local`` projects the
-    # JSON batch gateway by default. Explicit opt-in adds JavaScript. Hosted
-    # protocol support never proves proficiency on a different fallback route.
+    # JavaScript gateway (JSON batches after per-task authoring failures or
+    # the explicit batch tier). Hosted protocol support never proves
+    # proficiency on a different fallback route.
     from lib.tools.programmatic import (
         ACTIVE_PROGRAMMATIC_MODES,
         local_programmatic_tool_names,
@@ -364,9 +354,6 @@ def project_tool_wire(body, *, api_protocol, base_url='', oauth='', log_prefix='
         body['tools'] = project_multi_agent_wire_tools(
             body['tools'], authority_catalog=_multi_agent_authority_catalog,
             backend=_multi_agent_backend,
-            max_concurrent_agents=(body.get(
-                '_multi_agent_max_concurrent_agents')
-                or body.get('_multi_agent_max_concurrent_subagents') or 3),
             programmatic_workers=(
                 _ptc_backend in ('local', 'native_openai')))
 

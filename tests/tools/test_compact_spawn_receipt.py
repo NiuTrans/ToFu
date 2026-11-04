@@ -13,7 +13,7 @@ def launch():
     return {'status': 'async_launched', 'swarm_key': 'conv-owner', 'swarm_id': 'wave',
             'agents': [{'id': 'audit', 'role': 'coder', 'objective': '任务\n' * 1000,
                         'required_for_completion': True, 'future_field': {'mode': 'safe'}}],
-            'orchestration': {'mode': 'read_only', 'maxConcurrentAgents': 3},
+            'orchestration': {'mode': 'read_only'},
             'message': 'Continue useful work; poll only when waiting.',
             'deduplicated': [{'id': 'previous', 'objective': 'duplicate diagnostic'}],
             'unknown': {'opaque': 'token', 'count': 9007199254740993}}

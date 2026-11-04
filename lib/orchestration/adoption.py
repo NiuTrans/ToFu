@@ -54,7 +54,7 @@ _PUBLIC_DECISION_FIELDS = (
     "programmaticExposure", "programmaticExposureReason",
     "programmaticSerialChainLength", "programmaticHiddenDirectToolCount",
     "multiAgent", "multiAgentReason",
-    "multiAgentBackend", "maxConcurrentAgents", "expectedSavings",
+    "multiAgentBackend", "expectedSavings",
 )
 _PUBLIC_EVIDENCE_FIELDS = (
     "kind", "lane", "backend", "callId", "status", "agentCount",

@@ -16,10 +16,6 @@ from lib.model_info import model_requires_reasoning_content_replay
 
 logger = get_logger(__name__)
 
-# Keep small native catalogs flat: discovery costs more than their schemas.
-# This mirrors the local gateway threshold without importing lib.tools on this
-# protocol hot path (which would initialize the full tool registry).
-_TOOL_SEARCH_MIN_FUNCTIONS = 12
 _COMPACTION_MIN_TRIGGER_TOKENS = 50_000
 _COMPACTION_INSTRUCTIONS = (
     'Summarize the conversation for seamless continuation in a future '
@@ -383,29 +379,6 @@ def _convert_body_to_anthropic(body: dict) -> dict:
             }
 
     tools = _convert_tools(body.get('tools'))
-    if tools and body.get('_anthropic_native_tool_search'):
-        policy = body.get('_tool_discovery_policy_by_name') or {}
-        pins = {str(name) for name in (
-            body.get('_frontend_selected_tool_names') or ())}
-        deferred_tools = []
-        for tool in tools:
-            name = str(tool.get('name') or '')
-            if (name not in pins
-                    and policy.get(name, 'eager') != 'eager'):
-                deferred_tools.append(tool)
-        # Anthropic's server-hosted BM25 tool must remain non-deferred.  It
-        # searches the deferred definitions without changing the prompt-cache
-        # prefix and returns ordinary tool_use blocks for our existing parser.
-        # For a small directory, or an all-eager one, the complete native
-        # schemas are cheaper and avoid an unnecessary discovery round.
-        if (len(tools) >= _TOOL_SEARCH_MIN_FUNCTIONS
-                and deferred_tools):
-            for tool in deferred_tools:
-                tool['defer_loading'] = True
-            tools.insert(0, {
-                'type': 'tool_search_tool_bm25_20251119',
-                'name': 'tool_search_tool_bm25',
-            })
     if tools:
         out['tools'] = tools
 

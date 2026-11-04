@@ -666,9 +666,8 @@ tokens) onto every native Tool Search request; off, it hid them from native
 search entirely. Local Tool Search deferred them either way.
 Decision: the browser has no switch. The composer and the active-conversation
 resolver treat `browserEnabled` as always on, like fetch, and the family no
-longer sets `pin_on_exposure`. It stays `searchable`: local Tool Search lists
-it behind `search_tools`, native backends defer it provider-side, and only an
-explicit Tool Search `off` sends it eagerly. A connected extension remains the
+longer sets `pin_on_exposure`. It stays `searchable`: Tool Search lists it
+behind `search_tools`, and only an explicit Tool Search `off` sends it eagerly. A connected extension remains the
 sole availability gate. Callers that pass `browserEnabled=False` (evolution,
 paper, project dispatch, explicit headless runs) keep it off their wire. The
 Local Control badge, the Extras count and the per-turn chips no longer count

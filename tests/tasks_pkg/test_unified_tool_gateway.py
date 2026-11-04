@@ -8,11 +8,7 @@ import threading
 import pytest
 import lib.tools.gateway as tool_gateway
 
-from lib.llm.anthropic_outbound import openai_body_to_anthropic
-from lib.llm._sse_core import (
-    activate_native_tool_search_fallback,
-    prepare_request,
-)
+from lib.llm._sse_core import prepare_request
 from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
 from lib.tools.gateway import (
     EXECUTE_TOOLS_NAME,
@@ -1483,86 +1479,37 @@ def test_provider_boundary_injects_execute_only_for_local_search():
     assert EXECUTE_TOOLS_NAME not in _names(full.body['tools'])
 
 
-def test_provider_strategy_is_fail_closed_for_unverified_endpoints():
-    assert resolve_tool_search_backend(
-        'auto', protocol='responses', model='gpt-5.6-sol',
-        responses_profile='openai', base_url='https://api.openai.com/v1') \
-        == 'native_openai'
-    assert resolve_tool_search_backend(
-        'auto', protocol='responses', model='gpt-5.6-sol',
-        responses_profile='openai', base_url='https://proxy.example/v1') \
-        == 'local'
-    assert resolve_tool_search_backend(
-        'native', protocol='anthropic', model='claude-opus-4-1',
-        base_url='https://api.anthropic.com') == 'local'
-    assert resolve_tool_search_backend(
-        'auto', protocol='anthropic', model='claude-sonnet-4-6',
-        base_url='https://api.anthropic.com') == 'native_anthropic'
-    assert resolve_tool_search_backend(
-        'auto', protocol='openai', model='qwen-next',
-        base_url='https://gateway.example/v1',
-        capabilities={'openai_native_tool_search': True}) == 'native_openai'
+@pytest.mark.parametrize('mode,backend', [
+    ('local', 'local'), ('off', 'full'),
+    # Retired values still stored on older tasks.
+    ('auto', 'local'), ('native', 'local'), ('', 'local')])
+def test_tool_search_mode_resolves_without_route_inspection(mode, backend):
+    assert resolve_tool_search_backend(mode) == backend
 
 
-def test_native_search_rejection_downgrades_only_explicit_shape_errors():
-    plan = type('Plan', (), {'tool_search_backend': 'native_anthropic'})()
-    body = {}
-    assert activate_native_tool_search_fallback(
-        400, 'unknown field defer_loading', plan=plan,
-        canonical_body=body)
-    assert body['_force_local_tool_search'] is True
-
-    body = {}
-    assert not activate_native_tool_search_fallback(
-        400, 'invalid max_tokens', plan=plan, canonical_body=body)
-    assert '_force_local_tool_search' not in body
-    local_plan = type('Plan', (), {'tool_search_backend': 'local'})()
-    assert not activate_native_tool_search_fallback(
-        400, 'unknown tool_search field', plan=local_plan,
-        canonical_body={})
-
-
-def test_anthropic_native_search_defers_only_searchable_unpinned_tools():
-    tools = [_tool('always')] + [
-        _tool(f'later_{index}') for index in range(11)]
-    body = {
-        'model': 'claude-sonnet-4-6', 'messages': [],
-        'tools': tools,
-        '_anthropic_native_tool_search': True,
+@pytest.mark.parametrize('api_protocol,model,base_url', [
+    ('responses', 'gpt-5.6-sol', 'https://api.openai.com/v1'),
+    ('anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com'),
+    ('openai', 'qwen-next', 'https://gateway.example/v1'),
+])
+def test_official_routes_get_local_search_and_no_hosted_fields(
+        api_protocol, model, base_url):
+    catalog = [_tool(f'tool_{index}') for index in range(16)]
+    plan = prepare_request({
+        'model': model,
+        'messages': [{'role': 'user', 'content': 'find a tool'}],
+        'tools': catalog,
+        '_executable_tool_catalog': catalog,
         '_tool_discovery_policy_by_name': {
-            'always': 'eager',
-            **{f'later_{index}': 'searchable' for index in range(11)}},
-        '_frontend_selected_tool_names': [],
-    }
-    wire = openai_body_to_anthropic(body)
-    assert wire['tools'][0] == {
-        'type': 'tool_search_tool_bm25_20251119',
-        'name': 'tool_search_tool_bm25'}
-    by_name = {tool['name']: tool for tool in wire['tools'][1:]}
-    assert 'defer_loading' not in by_name['always']
-    assert all(by_name[f'later_{index}']['defer_loading'] is True
-               for index in range(11))
-    assert EXECUTE_TOOLS_NAME not in by_name
-
-
-def test_anthropic_native_search_skips_small_or_all_eager_catalogs():
-    small = [_tool('always'), _tool('later')]
-    small_wire = openai_body_to_anthropic({
-        'model': 'claude-sonnet-4-6', 'messages': [], 'tools': small,
-        '_anthropic_native_tool_search': True,
-        '_tool_discovery_policy_by_name': {
-            'always': 'eager', 'later': 'searchable'},
-    })
-    assert _names(small_wire['tools']) == ['always', 'later']
-
-    eager = [_tool(f'eager_{index}') for index in range(12)]
-    eager_wire = openai_body_to_anthropic({
-        'model': 'claude-sonnet-4-6', 'messages': [], 'tools': eager,
-        '_anthropic_native_tool_search': True,
-        '_tool_discovery_policy_by_name': {
-            f'eager_{index}': 'eager' for index in range(12)},
-    })
-    assert _names(eager_wire['tools']) == _names(eager)
+            f'tool_{index}': 'searchable' for index in range(16)},
+        '_tool_search_mode': 'auto',
+    }, api_protocol=api_protocol, base_url=base_url)
+    assert _names(plan.body['tools']) == [
+        SEARCH_TOOLS_NAME, EXECUTE_TOOLS_NAME]
+    wire = json.dumps(plan.body.wire_body())
+    for hosted in ('defer_loading', 'tool_search_tool_bm25',
+                   '"type": "tool_search"', '"type": "namespace"'):
+        assert hosted not in wire
 
 
 def test_search_results_project_to_rich_ui_cards_without_private_schema():

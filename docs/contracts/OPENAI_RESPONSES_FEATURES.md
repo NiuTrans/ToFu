@@ -31,8 +31,8 @@ the effective value.
 {
   "tools": {
     "nativeExposure": "full",
-    "programmaticCalling": "off",
-    "toolSearch": "auto"
+    "programmaticCalling": "on",
+    "toolSearch": "local"
   },
   "responses": {
     "transport": "sse",
@@ -41,25 +41,34 @@ the effective value.
     "imageDetail": "auto"
   },
   "orchestration": {
-    "multiAgent": "full",
-    "maxConcurrentAgents": 3
+    "multiAgent": "full"
   }
 }
 ```
 
 Allowed alternatives are:
 
-- `tools.toolSearch`: `off | auto | native | local`
+- `tools.toolSearch`: `local | off` (default `local`: Tofu's own
+  `search_tools`/`execute_tools` pair on every provider)
+- `tools.programmaticCalling`: `on | off` (default `on`)
 - `responses.transport`: `sse | websocket`
 - `responses.reasoningMode`: `standard | pro`
 - `responses.verbosity`: `low | medium | high`
 - `responses.imageDetail`: `auto | original`
-- `orchestration.multiAgent`: `auto | read_only | full` (multi-agent is permanently enabled; a legacy persisted `off` normalizes to the `full` default rather than disabling the lane)
-- `orchestration.maxConcurrentAgents`: integer `1..8`
+- `orchestration.multiAgent`: `full | read_only` (default `full`;
+  `read_only` is an API-only lane)
 
-These controls are available in Settings → Advanced and are carried through
-the same server-authoritative conversation-config resolver used by normal,
-regenerate, continue and recovered turns.
+Retired values normalize to the defaults on the request path: Tool Search
+`auto`/`native` to `local`, programmatic `auto` to `on`, and multi-agent
+`auto`/`off` (and the `responses.multiAgent` alias) to `full`. There is no
+concurrency setting: accepted sub-agents start on demand, and
+`maxConcurrentAgents` / `responses.maxConcurrentSubagents` are ignored.
+
+Tool Search, programmatic calling and the `responses.*` controls are
+available in Settings → Advanced and are carried through the same
+server-authoritative conversation-config resolver used by normal,
+regenerate, continue and recovered turns. Multi-agent orchestration has no
+browser control; the browser never sends an `orchestration` block.
 
 `response_format` is translated to Responses `text.format`. Pro mode,
 verbosity, original image detail and the privacy-preserving
@@ -138,18 +147,20 @@ On Codex the socket also carries the turn's `x-codex-turn-state` in
 
 ## Composable Multi-agent routing
 
-`orchestration.multiAgent=full` (shipped default) keeps the lane and its
-guidance on the wire every round with full worker authority on the local
-`spawn_agents` backend; `read_only` forces the analysis-only lane; `auto`
-enables the read_only lane only for a first-round task with independent
-complex workstreams. On a verified public GPT-5.6 Responses face, a
+`orchestration.multiAgent=full` (the only product mode) keeps the lane and
+its guidance on the wire every round with full worker authority on the local
+`spawn_agents` backend; the API-only `read_only` value forces the
+analysis-only lane. On a verified public GPT-5.6 Responses face, a
 `read_only` decision emits the native beta request/header and an explicit
-analysis-only developer constraint; a `full` decision never does. Every other
-tool-capable model uses Tofu's local `spawn_agents` backend when that tool is
-in the task-owned authority catalog. Read-only native and local workers share
-the same read-only dispatch filter, per-wave concurrency ceiling, and
-root-only final answer rule; full-authority local workers inherit the parent
-catalog minus the leaf-worker denylist.
+analysis-only developer constraint; a `full` decision never does. The native
+request sends `multi_agent: {"enabled": true}` and omits the optional
+`max_concurrent_subagents`; Tofu sets no sub-agent concurrency limit of its own.
+Every other tool-capable model uses Tofu's local `spawn_agents` backend when
+that tool is in the task-owned authority catalog; local waves have no
+agent-count or concurrency ceiling. Read-only native and local workers share
+the same read-only dispatch filter and root-only final answer rule;
+full-authority local workers inherit the parent catalog minus the
+leaf-worker denylist.
 
 Multi-agent and Programmatic Tool Calling are independent. A request may use
 agents to partition independent workstreams while the root or a local worker
@@ -202,11 +213,11 @@ structured-output constraints remain fail-closed. Reports never enter wire JSON.
 
 ## Operational prerequisite
 
-Native Programmatic Tool Calling, native Tool Search, Pro mode and native
-Multi-agent require a real public Responses provider; WebSocket mode is also
-the Codex subscription's first-party transport. Provider-neutral
+Native Programmatic Tool Calling, Pro mode and native Multi-agent require a
+real public Responses provider; WebSocket mode is also the Codex
+subscription's first-party transport. Provider-neutral
 PTC and Multi-agent semantics do not: other tool-capable faces receive the
-local `execute_tools` JavaScript and `spawn_agents` backends under the same
+local `execute_program`/`execute_tools` and `spawn_agents` backends under the same
 authority and budget contracts. Codex subscription and compatible Responses
 profiles remain deliberately excluded from public-only fields.
 
@@ -216,8 +227,8 @@ the core request returns verified generated text, change the profile to
 `openai` only for an official endpoint or a gateway whose advanced-field
 support has been independently confirmed. Probe each native capability in
 isolation before rollout; after those capability probes pass, PTC and
-Multi-agent may be composed by task shape. Tool Search may remain `auto`
-because frontend/API-selected tools are pinned direct at the protocol boundary.
+Multi-agent may be composed by task shape. Tool Search stays `local` because
+frontend/API-selected tools are pinned direct at the protocol boundary.
 If a request-shape 400/404/422 explicitly names a rejected native PTC or
 Multi-agent field, the transport retry projects only that lane onto its local
 backend. Unrelated request errors are never masked by this fallback.

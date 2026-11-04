@@ -239,7 +239,8 @@ def resolve_tool_orchestration(
     programmatic = 'off'
     programmatic_reason = 'disabled'
     programmatic_tier = ''
-    # The default ``auto`` resolves like ``on``: the program action is a
+    # ``on`` (and the retired ``auto`` still latched in older task decisions)
+    # resolves the same way: the program action is a
     # resident capability, not a guess about the request's wording.
     if requested_programmatic in ACTIVE_PROGRAMMATIC_MODES:
         if eligible:
@@ -256,10 +257,11 @@ def resolve_tool_orchestration(
         programmatic_tier = programmatic_tier(model, requested=requested_programmatic)
 
     # The output inactive state is 'disabled'. Users cannot request it —
-    # the settings surface dropped multi-agent opt-out, so the only writer
-    # is the child-invocation override in _round_request_prep, which passes
-    # the same internal sentinel. resolve_multi_agent_backend fails closed on
-    # any non-active mode, so 'disabled' never reaches a live backend.
+    # the settings surface has no multi-agent control, so the only writers
+    # are the coordinator and child-invocation overrides in
+    # _tool_request_metadata, which pass the same internal sentinel.
+    # resolve_multi_agent_backend fails closed on any non-active mode, so
+    # 'disabled' never reaches a live backend.
     multi_agent = 'disabled'
     multi_agent_reason = 'disabled'
     if requested_multi_agent in ACTIVE_MULTI_AGENT_MODES:
@@ -272,14 +274,6 @@ def resolve_tool_orchestration(
             multi_agent_reason = (
                 'explicit_read_only' if requested_multi_agent == 'read_only'
                 else 'explicit_full')
-    elif requested_multi_agent == 'auto':
-        if round_num != 1:
-            multi_agent_reason = 'first_round_only'
-        elif not multi_agent_task_shape(text):
-            multi_agent_reason = 'task_not_independently_decomposable'
-        else:
-            multi_agent = 'read_only'
-            multi_agent_reason = 'independent_complex_workstreams'
 
     if use_v2 and multi_agent in ACTIVE_MULTI_AGENT_MODES:
         # V2 exposes exactly one orchestration shape. Worker-local reductions

@@ -592,6 +592,8 @@ class IntegrationTest(unittest.TestCase):
             body = await r.get_json()
             self.assertTrue(body['available'])
             self.assertIn('roles', body)
+            # Accepted sub-agents start on demand; no concurrency cap exists.
+            self.assertNotIn('max_concurrent_agents', body)
         _run(go())
 
     def test_swarm_abort_requires_swarm_scope(self):

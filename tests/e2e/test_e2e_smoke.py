@@ -258,11 +258,11 @@ def _select_stub_model(page):
 
 @pytest.fixture
 def _programmatic_calling_enabled(page):
-    """Opt this JavaScript scenario in through Settings, not task internals.
+    """Select ``on`` for this JavaScript scenario through Settings.
 
-    ``auto`` intentionally admits JSON batches, not ``execute_program``.
-    Keep that default for the other journeys and restore this page's setting
-    even when a rendering or reload assertion fails.
+    Pin the mode through the real control instead of relying on the default,
+    and restore this page's setting even when a rendering or reload
+    assertion fails.
     """
     _wait_app_ready(page)
 

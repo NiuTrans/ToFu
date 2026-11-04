@@ -56,7 +56,6 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
             else _experiment_flags['tools']['programmaticCalling'])
         _requested_multi_agent = (
             'disabled' if _coordinator
-            else 'full' if _delegate and _orchestration_flags['multiAgent'] == 'auto'
             else _orchestration_flags['multiAgent'])
         _latched_optimization = (task.get('_toolOrchestrationPromptLatch')
                                 or (task.get('config') or {}).get('_modelReplayToolLatch'))
@@ -123,8 +122,6 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
         if _delegate:
             body['_force_local_multi_agent'] = True
         body['_multi_agent_stage'] = _optimization['multiAgentStage']
-        body['_multi_agent_max_concurrent_agents'] = (
-            _orchestration_flags['maxConcurrentAgents'])
         body['_tool_orchestration_policy_version'] = _optimization[
             'policyVersion']
         body['_tool_orchestration_composition'] = _optimization[
@@ -133,8 +130,6 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
         # synchronously when spawn_agents is selected; provider-native fields
         # are still resolved later at the wire boundary.
         _task_orchestration = dict(_optimization)
-        _task_orchestration['maxConcurrentAgents'] = (
-            _orchestration_flags['maxConcurrentAgents'])
         task['_toolOrchestration'] = _task_orchestration
 
         _decision_history = task.get('_toolOrchestrationDecisions')
@@ -184,8 +179,6 @@ def attach_tool_request_metadata(task, body, messages, tool_list, *, model, roun
     body['_tool_searchable_count'] = int(
         task.get('_toolSearchableCount') or 0)
     body['_tool_search_mode'] = str(
-        task.get('_toolSearchMode') or body.get('_tool_search_mode') or 'auto')
-    body['_tool_search_capabilities'] = dict(
-        (task.get('config') or {}).get('toolSearchCapabilities') or {})
+        task.get('_toolSearchMode') or body.get('_tool_search_mode') or 'local')
     body['_tool_search_fail_open'] = bool(
         task.get('_tool_search_fail_open'))

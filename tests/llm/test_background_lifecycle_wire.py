@@ -140,20 +140,19 @@ def test_wire_controls_survive_routing_ptc_and_tiny_budget(
     ('anthropic', 'claude-opus-4-6'),
 ])
 @pytest.mark.parametrize('stale_wire', [False, True])
-def test_native_discovery_never_defers_controls(protocol, model, stale_wire):
+@pytest.mark.parametrize('retired_mode', ['auto', 'native'])
+def test_hosted_routes_use_local_discovery_for_retired_modes(
+        protocol, model, stale_wire, retired_mode):
     body = _body(stale_wire=stale_wire)
-    body.update(model=model, _tool_search_mode='auto')
+    body.update(model=model, _tool_search_mode=retired_mode)
     plan = _request(body, protocol)
-    expected_backend = ('native_openai' if protocol == 'responses'
-                        else 'native_anthropic')
-    assert plan.tool_search_backend == expected_backend
+    assert plan.tool_search_backend == 'local'
     _assert_canonical(plan.body)
-    # Confirm native discovery was really used; this is not just a names test.
-    assert any(tool.get('type', '').startswith('tool_search')
-               for tool in plan.body['tools'])
+    assert not any(str(tool.get('type', '')).startswith('tool_search')
+                   for tool in plan.body['tools'])
     functions = _functions(plan.body)
-    assert any(tool.get('defer_loading') for name, tool in functions.items()
-               if name.startswith('lookup_'))
+    assert 'search_tools' in functions
+    assert not any(tool.get('defer_loading') for tool in functions.values())
 
 
 @pytest.mark.parametrize('protocol,model,search_mode', [
@@ -307,7 +306,7 @@ def test_runtime_gate_survives_local_swarm_projection_and_budget(storage_free):
         '_tool_wire_catalog': surface,
         '_tool_discovery_policy_by_name': ctx.discovery_policy_by_name,
         '_tool_search_mode': 'local', '_tool_schema_budget_tokens': 1,
-        '_multi_agent_mode': 'read_only', '_multi_agent_max_concurrent_agents': 2,
+        '_multi_agent_mode': 'read_only',
     }
     before = deepcopy(body)
     spawn_before = deepcopy(SPAWN_AGENTS_TOOL)

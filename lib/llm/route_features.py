@@ -13,7 +13,6 @@ from collections.abc import Mapping
 # dialect adds an installed binding here and a focused serializer, not a regex.
 _FEATURE_PROTOCOLS = {
     'chat_cache_breakpoints': 'openai',
-    'responses_tool_search': 'responses',
     'responses_programmatic': 'responses',
     'responses_multi_agent': 'responses',
     'responses_compaction': 'responses',
@@ -28,7 +27,6 @@ _FEATURE_PROTOCOLS = {
     'responses_reasoning_mode': 'responses',
     'responses_text_verbosity': 'responses',
     'responses_image_detail': 'responses',
-    'anthropic_tool_search': 'anthropic',
     'anthropic_compaction': 'anthropic',
 }
 # Gateway bindings ride HTTP headers rather than a protocol body, so one

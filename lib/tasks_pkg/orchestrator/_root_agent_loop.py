@@ -365,8 +365,7 @@ class _RootLoopHooks:
         admission_tools = round_tools
         initial_tools = self.task.get('_tool_schema')
         if (isinstance(initial_tools, list)
-                and str(self.task.get('_toolSearchMode') or '')
-                in {'auto', 'local'}):
+                and self.task.get('_toolSearchMode') == 'local'):
             admission_tools = initial_tools
         reusable_schema_evidence = (
             admission_tools is self._admission_tool_schema_source

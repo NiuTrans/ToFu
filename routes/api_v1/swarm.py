@@ -6,7 +6,7 @@ Routes the in-app debug panel, the background-agent dock and external clients us
   POST /api/v1/swarm/abort/<task_id>    — request abort of all sub-agents
   POST /api/v1/swarm/runs/<swarm_id>/agents/<agent_id>/stop
                                         — stop one running agent of a live run
-  GET  /api/v1/swarm/config             — registry: roles, max-concurrent
+  GET  /api/v1/swarm/config             — registry: roles
 
 Status/abort are also mirrored at ``/api/v1/agents/swarm/{status,abort}/<id>``
 in :mod:`routes.api_v1.agents` for the headless SDK; the routes here are
@@ -134,8 +134,11 @@ def swarm_agent_stop(swarm_id, agent_id):
 @api_v1_swarm_bp.route('/api/v1/swarm/config', methods=['GET'])
 @require_auth
 @api_meta(
-    summary='Swarm registry & limits',
-    description='Returns ``{available, version, roles, max_concurrent_agents}``.',
+    summary='Swarm role registry',
+    description=(
+        'Returns ``{available, version, roles}``. Accepted sub-agents start '
+        'on demand, so there is no concurrency limit to report.'
+    ),
     tags=['agents'],
 )
 def swarm_config():
@@ -144,7 +147,6 @@ def swarm_config():
         'available': True,
         'version': '1.0.0',
         'roles': list(AGENT_ROLES.keys()),
-        'max_concurrent_agents': 8,
     })
 
 

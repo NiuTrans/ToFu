@@ -69,10 +69,12 @@ def test_explicit_discovery_policy_and_required_tools_survive_child_startup(runt
     result = agent_for(runtime, tools=tools).run()
     assert result.status == 'completed', result.error_message
     child = runtime.children[0]
-    assert child['_toolSearchMode'] == mode
+    # The retired ``native`` value resolves to local discovery like any
+    # other non-``off`` mode.
+    assert child['_toolSearchMode'] == ('off' if mode == 'off' else 'local')
     names = {tool['function']['name'] for tool in final_local_tools(runtime.calls[0])}
     assert TOOL['function']['name'] in names
-    if mode != 'local':
+    if mode == 'off':
         assert {tool['function']['name'] for tool in runtime.calls[0]['tools']} == {
             tool['function']['name'] for tool in tools}
 
@@ -86,7 +88,7 @@ def test_parent_initial_visibility_survives_detached_child_startup(runtime, monk
     }} for index in range(32)]
     runtime.parent['_tool_schema'] = [TOOL]
     runtime.parent['config']['_executableToolCatalog'] = tools
-    runtime.parent['config']['tools'] = {'toolSearch': 'auto', 'programmaticCalling': 'off'}
+    runtime.parent['config']['tools'] = {'toolSearch': 'local', 'programmaticCalling': 'off'}
     if archived:
         snapshot = snapshot_conversation_child_policy(runtime.parent, model='fixture-model', tools=tools)
         runtime.parent['config'].update(snapshot['conversation_tool_policy'])
@@ -95,7 +97,7 @@ def test_parent_initial_visibility_survives_detached_child_startup(runtime, monk
     result = agent_for(runtime, tools=tools).run()
     assert result.status == 'completed', result.error_message
     child = runtime.children[0]
-    assert child['_toolSearchMode'] == 'auto'
+    assert child['_toolSearchMode'] == 'local'
     assert child['config']['tools']['programmaticCalling'] == 'off'
     names = {tool['function']['name'] for tool in final_local_tools(runtime.calls[0])}
     assert not any(name.startswith('mcp__fixture__hidden_') for name in names)
