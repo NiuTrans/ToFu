@@ -1263,10 +1263,12 @@ def parse_subscription_retry_after(err_msg: str, *, now: float = None):
 # or a genuinely sick key would be laundered into "external contention" and
 # stop feeding the dead-key safety nets. Observed canonical bodies (example-corp):
 #   Moonshot: "request reached project (kimi-k3) TPM/RPM rate limit"
+#   Moonshot: "request reached project (kimi-k3.1-pro) Concurrency rate limit"
 #   Gateway:  "App:**62518在模型:kimi-k3每分钟请求次数超过限制"
 _SHARED_PROJECT_LIMIT_PATTERN_GROUPS = (
     ('reached project', 'tpm rate limit'),
     ('reached project', 'rpm rate limit'),
+    ('reached project', 'concurrency rate limit'),
     ('app:', '在模型:', '每分钟请求次数超过限制'),
 )
 

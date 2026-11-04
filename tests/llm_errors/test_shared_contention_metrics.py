@@ -12,8 +12,9 @@ disabling HEALTHY keys for the day.
 
 Pinned here:
 
-  1. The narrow classifier: a 429 body naming a project-level TPM limit
-     (``reached project`` + ``tpm rate limit``), or an app/model-level RPM
+  1. The narrow classifier: a 429 body naming a project-level TPM, RPM or
+     concurrency limit (``reached project`` + ``tpm rate limit`` /
+     ``rpm rate limit`` / ``concurrency rate limit``), or an app/model-level RPM
      limit (``App:`` + model scope + the explicit per-minute request limit)
      → is_shared_contention. Generic 429s and quota 429s are NOT laundered
      into contention (quota precedence is asserted with matching bodies).
@@ -85,6 +86,19 @@ class TestContentionClassification:
         assert e.is_subscription_quota is False
         assert e.is_gateway is False
 
+    def test_moonshot_project_concurrency_body_is_contention(self):
+        """Observed 2026-10-30 on kimi-k3.1-pro-m17: the Moonshot project
+        caps in-flight requests for every key of the gateway account."""
+        e = _classify(
+            'API HTTP 429: Request rejected (429) · Your account org-0000 / '
+            'proj-0000 <ak-0000> request reached project (kimi-k3.1-pro) '
+            'Concurrency rate limit, current: 400, limit: 400, see '
+            'https://platform.moonshot.cn/docs/pricing/limits')
+        assert e.is_shared_contention is True
+        assert e.is_quota is False
+        assert e.is_subscription_quota is False
+        assert e.is_gateway is False
+
     def test_generic_429_is_not_contention(self):
         e = _classify('API HTTP 429: rate limit exceeded, slow down')
         assert e.is_shared_contention is False
@@ -107,6 +121,8 @@ class TestContentionClassification:
         assert e.is_shared_contention is False
         e2 = _classify('API HTTP 429: account TPM rate limit hit')
         assert e2.is_shared_contention is False
+        e3 = _classify('API HTTP 429: key concurrency rate limit reached')
+        assert e3.is_shared_contention is False
 
     @pytest.mark.parametrize('body', [
         'API HTTP 429: 在模型:kimi-k3每分钟请求次数超过限制',
