@@ -999,8 +999,9 @@ redirected (`reset_tool_loop_guard`, called at the steer-drain boundary).
 The same reset retires redundant-read and unresolved-artifact warnings,
 because the new instruction can require re-reading; a later stop first needs
 a fresh correction. Visible read evidence, stagnation streaks and the
-explicit-noop history survive the steer. The remind-only rung (`tool_repeat_reminder`) fires once per
-repeat digest one step below the corrective nudge: it never vetoes, advances
+explicit-noop history survive the steer. The remind-only rung
+(`tool_repeat_reminder`) fires once per repeat digest one step below the
+corrective nudge: it never vetoes, advances
 no escalation counter, and audits on its own `_toolLoopReminders` ledger so
 it cannot consume the one-correction-per-turn slot the nudge/stop escalation
 and stagnation detectors read.
