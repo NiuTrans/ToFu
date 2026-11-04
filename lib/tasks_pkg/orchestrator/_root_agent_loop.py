@@ -274,6 +274,8 @@ def admit_round_context(task, messages, tools, *, round_num, model,
     prepare(task, messages)
     from lib.tasks_pkg.compaction.api import settle_compaction_request_size
     settle_compaction_request_size(messages, task, measurement=admission)
+    from lib.tasks_pkg.compaction._idle import record_model_activity
+    record_model_activity(task)
     return admission
 
 

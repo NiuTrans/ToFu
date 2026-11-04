@@ -36,6 +36,10 @@ owns normalized authority indexes and logical/provider selector resolution;
 one compiler for primary/fallback selection and release indexes before secret
 materialization. New requests always read/validate their own owner revision.
 Extend these owners, not the facade; never add a global authority/plaintext cache.
+`serving_locality.py` classifies owned route facts for Python/native context
+policy. Model names never imply local serving; explicit cloud brands retain
+their identity through loopback proxies. Verify `test_serving_locality.py` and
+`tests/compaction/test_cloud_idle_l1.py`.
 
 ## Verification
 

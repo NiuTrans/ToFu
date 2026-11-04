@@ -364,6 +364,8 @@ def _prepare_and_publish_group(
         slot.route_deployment_id = candidate.deployment["deployment_id"]
         slot.route_connection_id = candidate.connection["connection_id"]
         slot.route_credential_id = credential["credential_id"]
+        from .serving_locality import candidate_is_local_inference
+        slot.local_inference = candidate_is_local_inference(candidate)
         slot.max_output_tokens = int(
             candidate.deployment.get("max_output_tokens") or 0)
         snapshot_builder = RouteSnapshotBuilder(selection)

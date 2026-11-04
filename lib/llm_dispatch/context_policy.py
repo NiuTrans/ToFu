@@ -81,3 +81,42 @@ def task_context_profile(task):
         config.get('model') or task.get('model') or '',
         provider_id=task.get('provider_id') or config.get('providerId') or '',
         owner_user_id=task.get('_userId'), pin=task.get('_pinned_provider_id') or '')
+
+
+def task_local_inference(task):
+    """Serving locality of this task's owned candidates; None means no binding.
+
+    A mixed group containing a local candidate keeps the local exclusion until
+    selection is narrower. Reading slots neither resolves credentials nor
+    creates a route, and cannot inspect another owner's request group.
+    """
+    from .native_context_scope import native_task_local_inference
+    native = native_task_local_inference(task)
+    if native is not None:
+        return native
+    owner = task.get('_userId')
+    if type(owner) is not int or owner <= 0:
+        return None
+    config = task.get('config') or {}
+    model = config.get('model') or task.get('model')
+    from .provider_pin import get_pinned_provider
+    pin = task.get('_pinned_provider_id') or get_pinned_provider() or ''
+    provider = task.get('provider_id') or config.get('provider_id') or config.get('providerId')
+    from .factory import get_dispatcher
+    from lib.model_routing.serving_locality import is_local_inference
+    localities = []
+    for slot in get_dispatcher().slots.scope(pin):
+        if getattr(slot, 'routing_owner_user_id', 0) != owner:
+            continue
+        if model not in (slot.model, slot.logical_model):
+            continue
+        if provider and not pin and provider not in (
+                slot.provider_id, getattr(slot, 'routing_provider_id', '')):
+            continue
+        local = getattr(slot, 'local_inference', None)
+        if type(local) is not bool:
+            credential = (getattr(slot, 'route_snapshot', {}) or {}).get('credential') or {}
+            local = is_local_inference(protocol=slot.protocol,
+                credential_kind=credential.get('kind', ''), base_url=slot.base_url)
+        localities.append(local)
+    return any(localities) if localities else None

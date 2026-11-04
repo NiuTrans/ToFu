@@ -236,7 +236,9 @@ def compile_native_route(
     if oauth_selected:
         private['oauth'] = 'codex'
         private['secret_reference'] = reference
+    from .serving_locality import candidate_is_local_inference
     metadata.update(
+        local_inference=candidate_is_local_inference(chosen),
         owner_user_id=boundary.owner_user_id,
         base_url=base,
         protocol=chosen.connection["protocol"],

@@ -192,6 +192,7 @@ def test_v2_materialization_preserves_wire_contract_and_nonchat_slots(
 
     assert set(by_wire) == {'alpha-wire-a', 'alpha-wire-b', 'whisper-wire'}
     assert by_wire['alpha-wire-a'].logical_model == 'alpha'
+    assert by_wire['alpha-wire-a'].local_inference is True
     assert by_wire['alpha-wire-a'].protocol == 'openai'
     assert by_wire['alpha-wire-a'].extra_headers == {'X-Route': 'a'}
     assert by_wire['alpha-wire-a'].rpm_limit == 31

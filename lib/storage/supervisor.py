@@ -903,12 +903,13 @@ def _resolve_tofudb_binary() -> str:
     The bundled path is what lets a pre-built release package run tofu-db
     with no toolchain and no extra install step.
     """
+    from serverctl_pkg.native_engine import EnginePreparationError
     override = os.environ.get('TOFUDB_BIN', '').strip()
     if override:
         resolved = _executable(Path(override).expanduser())
         if resolved:
             return _verify_tofudb_binary(resolved)
-        raise RuntimeError('TOFUDB_BIN must name an executable tofu-db binary')
+        raise EnginePreparationError('TOFUDB_BIN must name an executable tofu-db binary')
     for bundled in _bundled_tofudb_candidates():
         resolved = _executable(bundled)
         if resolved:
@@ -921,7 +922,7 @@ def _resolve_tofudb_binary() -> str:
     installed = shutil.which(_tofudb_binary_name())
     if installed:
         return _verify_tofudb_binary(installed)
-    raise RuntimeError('TOFUDB_BIN must name an executable tofu-db binary')
+    raise EnginePreparationError('TOFUDB_BIN must name an executable tofu-db binary')
 
 
 def _tofudb_scope_ids() -> tuple[int, int | None]:

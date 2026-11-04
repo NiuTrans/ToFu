@@ -166,6 +166,7 @@ def test_template_migration_save_reload_and_both_slots(monkeypatch):
     group = mint_routed_slot_group(repository, boundary, selection)
     try:
         scoped = group.primary.slot
+        assert scoped.local_inference is pooled.local_inference is True
         assert scoped.inference_profile == pooled.inference_profile
         assert scoped.responses_profile == pooled.responses_profile
         scoped.inference_profile['reasoning']['supported_efforts'].append('custom')

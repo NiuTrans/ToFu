@@ -232,6 +232,43 @@ def _supports_prefix_restore(config):
     return _supports_completed_publication(config) and not _has_resume_data(config)
 
 
+def _remember_context_activity(rows, config, *, cached=None, conversation_id='', user_id=None):
+    """Keep only activity time from this owner's model-history boundary.
+
+    New human messages/empty reply targets are not prior model activity. Legacy
+    checkpoints read their final witnessed Turn once; new checkpoints need no
+    extra query. Turn enrichment may delay trimming, never trigger it early.
+    """
+    from lib.tasks_pkg.compaction._idle import activity_timestamp_ms
+    activity = activity_timestamp_ms(config.get('_contextLastModelActivityAtMs'))
+    for index, row in enumerate(rows):
+        if row.get('actor') != 'assistant':
+            continue
+        projection = row.get('projection') or {}
+        if index == len(rows) - 1 and not any(
+                projection.get(key) for key in ('content', 'toolRounds', 'apiRounds')):
+            continue
+        activity = max(activity, activity_timestamp_ms(row.get('updatedAt')))
+    if isinstance(cached, dict):
+        stamp = activity_timestamp_ms(cached.get('lastModelActivityAtMs'))
+        # Uncovered model turns are newer than a retained checkpoint. Their
+        # activity already gives a sufficient conservative bound.
+        if not stamp and not activity:
+            witnesses = cached.get('turns') or []
+            last = witnesses[-1] if witnesses else None
+            if isinstance(last, list) and len(last) == 2 and isinstance(last[0], str):
+                try:
+                    from lib.turn_lifecycle import get_turn
+                    row = get_turn(conversation_id, last[0], user_id=user_id)
+                    if isinstance(row, dict) and row.get('actor') == 'assistant':
+                        stamp = activity_timestamp_ms(row.get('updatedAt'))
+                except Exception as exc:
+                    logger.debug('[ModelReplay] legacy activity unavailable: %s', type(exc).__name__)
+        activity = max(activity, stamp)
+    if activity:
+        config['_contextLastModelActivityAtMs'] = activity
+
+
 def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=None):
     """Return (retained model messages, number of covered Turn rows)."""
     config.pop('_goalWorkerState', None)
@@ -242,10 +279,12 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
     config.pop('_modelReplayToolLatch', None)
     config.pop('_modelReplayPolicyFields', None)
     config.pop('_modelReplayPolicyDrift', None)
+    config.pop('_contextLastModelActivityAtMs', None)
     config['_modelReplayStatus'] = 'cold'
     if not rows:
         config['_modelReplayStatus'] = 'empty_history'
         return [], 0
+    _remember_context_activity(rows, config)
     if validated_context is None and len(rows) > MAX_TURN_WITNESSES:
         config['_modelReplayStatus'] = 'over_budget'
         return [], 0
@@ -285,6 +324,8 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
                 'checkpoint_not_before_target', 'replay_disabled',
             } else 'checkpoint_missing')
             return [], 0
+        _remember_context_activity([], config, cached=cached,
+                                   conversation_id=conversation_id, user_id=user_id)
         if 'historyProof' in cached:
             proof = cached['historyProof']
             if (not isinstance(proof, dict) or type(proof.get('version')) is not int
@@ -546,6 +587,9 @@ def prepare_completed_task(task):
                     _publication_status(task, 'authority_changed')
                     return
                 candidate['turns'] = [turn_witness(row) for row in full['turns'][:-1]] + candidate['turns'][-1:]
+        from lib.tasks_pkg.compaction._idle import record_model_activity
+        record_model_activity(task)
+        candidate['lastModelActivityAtMs'] = task['_lastModelActivityAtMs']
         encoded = encode_projection(candidate)
         if encoded is None:
             _publication_status(task, 'invalid_or_over_budget')
