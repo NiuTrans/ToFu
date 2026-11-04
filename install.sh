@@ -2177,11 +2177,13 @@ fi
 
 # ── tofu-search — the standalone search + content-fetch pipeline ──
 # server.py lists tofu_search.fetch / tofu_search.search as CRITICAL imports,
-# so the server refuses to boot without it. Two install sources:
-#   1. A bundled wheel under vendor/ (personal/internal exports) — used when
-#      present, because corp networks point pip at an internal mirror that
-#      does NOT carry tofu-search (only public PyPI does).
-#   2. Public PyPI (opensource installs / fresh git clone on a vanilla host).
+# so the server refuses to boot without it. The only install source is the
+# wheel bootstrap_pkg/install_artifacts.py admitted before staging
+# ($_TOFU_SEARCH_WHL): every export pins, in vendor/install-manifest.json, the
+# wheel it built from its own packages/tofu-search snapshot (version, sha256
+# and floor are checked); a checkout without that manifest uses a bundled
+# wheel at the floor or builds one from the retained source. It installs with
+# --no-index, so no package index can substitute a different build.
 # --no-deps is safe: its deps (requests / trafilatura / bs4 / lxml /
 # python-dateutil) are installed above, and --no-deps keeps pip from
 # shadowing conda's lxml 6.
