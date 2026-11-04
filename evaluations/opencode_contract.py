@@ -167,15 +167,6 @@ def guest_command(*, binary: str, model: str, instruction: str) -> list[str]:
             "--model", f"benchmark/{model}", "--", instruction]
 
 
-# Shared by every native-runner arm that resumes after an output-limit stop.
-CONTINUATION_NUDGE = (
-    "Your previous response was cut off at the model output-token limit "
-    "before any tool call or final answer. Continue working on the original "
-    "task now: prefer concrete tool actions (write the required artifact "
-    "files first, then iterate) over extended analysis."
-)
-
-
 def guest_shell_command(
     *,
     binary: str,
@@ -183,29 +174,13 @@ def guest_shell_command(
     instruction_path: str,
     raw_output_path: str,
     stderr_path: str,
-    max_continuations: int = 16,
 ) -> str:
-    """Return the guest shell program running OpenCode to genuine completion.
+    """Return the guest shell program running OpenCode once, as Harbor's adapter does.
 
-    OpenCode's provider plugin ends a run as soon as one model response hits
-    the output-token cap (``step-finish`` with ``reason=\"length\"``), even
-    when that response produced zero visible output and zero tool calls.  The
-    benchmark evidence shows whole trials finishing with 13-32% of the agent
-    budget unused because of this.  Rather than accept the truncation as
-    episode end, re-invoke ``opencode run --continue`` on the same persisted
-    session: the CLI resumes exactly where it stopped with a short nudge.
-
-    Termination is fail-closed and auditable:
-      * a run whose last event is not a ``length`` step-finish ends the loop
-        with the CLI's own exit code (normal completion or tool-driven stop);
-      * exhausting the continuation budget exits 42 so the trial is marked
-        instead of being projected as a clean finish;
-      * a nonzero CLI exit code propagates unchanged.
-
-    All attempts append to one evidence stream, which therefore stays valid
-    JSONL (no separator lines).  ``--continue`` requires no new guest
-    surface: same binary, same config, same proxy route, same credential
-    boundary.
+    The run ends however OpenCode ends it, including a response stopped at the
+    output-token limit, and the CLI's exit code is the program's exit code. The
+    evaluation never resumes, nudges or retries the agent: such recovery is
+    harness behavior and is measured, not supplied.
     """
     # The instruction reaches argv through the shell so it never appears in
     # this script's own command line; only the prompt file path does.  Build
@@ -213,36 +188,6 @@ def guest_shell_command(
     # positional, then let shlex.join quote everything EXCEPT that fragment.
     argv = guest_command(binary=binary, model=model, instruction="")
     argv[-1] = "$(cat " + shlex.quote(instruction_path) + ")"
-    first = shlex.join(argv[:-1]) + ' "' + argv[-1] + '"'
-    nxt = shlex.join([
-        binary, "run", "--pure", "--auto", "--format=json",
-        "--model", f"benchmark/{model}", "--continue", "--",
-        CONTINUATION_NUDGE,
-    ])
-    raw = shlex.quote(raw_output_path)
-    err = shlex.quote(stderr_path)
-    # Detection: the last JSONL event being a step_finish whose part.reason is
-    # "length".  OpenCode emits compact JSON (no spaces), but allow optional
-    # whitespace for robustness.  POSIX grep (BRE) supports \s via [[:space:]].
-    detect = (
-        'tail -n 1 ' + raw + ' 2>/dev/null | '
-        'grep -q \'"step_finish".*"reason"[[:space:]]*:[[:space:]]*"length"\''
-    )
-    return (
-        "attempt=0\n"
-        f"while [ $attempt -le {int(max_continuations)} ]; do\n"
-        "  if [ $attempt -eq 0 ]; then\n"
-        f"    {first} < /dev/null >> {raw} 2>> {err}\n"
-        "  else\n"
-        f"    {nxt} < /dev/null >> {raw} 2>> {err}\n"
-        "  fi\n"
-        "  rc=$?\n"
-        "  [ $rc -ne 0 ] && exit $rc\n"
-        f"  if {detect}; then\n"
-        "    attempt=$((attempt+1))\n"
-        "    continue\n"
-        "  fi\n"
-        "  exit 0\n"
-        "done\n"
-        "exit 42\n"
-    )
+    run = shlex.join(argv[:-1]) + ' "' + argv[-1] + '"'
+    return (f"exec {run} < /dev/null > {shlex.quote(raw_output_path)}"
+            f" 2> {shlex.quote(stderr_path)}\n")

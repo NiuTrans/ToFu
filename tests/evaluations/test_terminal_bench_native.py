@@ -59,7 +59,8 @@ def test_trial_spec_uses_protocol_budget_and_egress_policy(tmp_path):
     timeout = harness.agent_timeout_for(task, protocol)
     agent = harness.tofu_agent(artifact=artifact("tofu"), files_url="http://relay:1/files",
                                model_base_url="http://relay:1/arm/tofu-x/v1", model="glm-5.3-flash",
-                               timeout_sec=timeout, instruction=task.instruction, context_tokens=262144)
+                               timeout_sec=timeout, instruction=task.instruction, context_tokens=262144,
+                               output_tokens=65536)
     spec = harness.build_trial_spec(task=task, arm="tofu", attempt=2, agent=agent, protocol=protocol,
                                     agent_timeout_sec=timeout, egress_upstream="http://proxy:8080")
     assert timeout == 21600 and spec["agent_timeout_sec"] == 21600
@@ -80,7 +81,7 @@ def test_agent_specs_carry_no_credentials_and_same_endpoint_shape(tmp_path):
     task = harness.load_task(make_task(tmp_path))
     tofu = harness.tofu_agent(artifact=artifact("tofu"), files_url="http://r/files",
                               model_base_url="http://r/arm/tofu/v1", model="glm-5.3-flash", timeout_sec=60,
-                              instruction=task.instruction, context_tokens=262144)
+                              instruction=task.instruction, context_tokens=262144, output_tokens=65536)
     opencode = harness.opencode_agent(artifact=artifact("opencode"), files_url="http://r/files",
                                       model_base_url="http://r/arm/opencode/v1", model="glm-5.3-flash",
                                       instruction=task.instruction, context_tokens=262144,
@@ -93,6 +94,10 @@ def test_agent_specs_carry_no_credentials_and_same_endpoint_shape(tmp_path):
     assert routing["contract_version"] == "tofu.model-routing/v2"
     assert routing["connections"][0]["base_url"] == "http://r/arm/tofu/v1"
     assert routing["offerings"][0]["context_window"] == 262144
+    # Every arm is told the same output limit the relay enforces.
+    assert routing["deployments"][0]["max_output_tokens"] == 65536
+    # Tofu runs with its product defaults: no evaluation-only fault budgets.
+    assert not {"TOFU_GATEWAY_OUTAGE_BUDGET_S", "TOFU_429_SATURATION_SECS"} & set(tofu["env"])
     assert envelope["model"] == {"creator_id": "zhipu", "model_id": "glm-5.3-flash"}
     assert list(envelope["credential_secrets"].values()) == ["relay-held"]
     assert all(agent["env"]["no_proxy"].startswith("r,") for agent in (tofu, opencode, pi))
@@ -101,11 +106,13 @@ def test_agent_specs_carry_no_credentials_and_same_endpoint_shape(tmp_path):
     assert provider["options"] == {"baseURL": "http://r/arm/opencode/v1"}
     assert provider["models"]["glm-5.3-flash"]["limit"] == {"context": 262144, "output": 65536}
     assert opencode["env"]["OPENCODE_CONFIG"] == "/logs/agent/opencode.json"
-    assert "--continue" in opencode["program"]
+    # Each baseline runs once, exactly as its upstream adapter runs it.
+    subprocess.run(["bash", "-n", "-c", opencode["program"]], check=True)
+    assert opencode["program"].count(" run ") == 1 and "--continue" not in opencode["program"]
     pi_provider = json.loads(pi["log_files"]["pi-models.json"])["providers"]["zai"]
     assert pi_provider["baseUrl"] == "http://r/arm/pi/v1" and pi_provider["apiKey"] == "relay-held"
     assert pi_provider["modelOverrides"]["glm-5.3-flash"] == {"contextWindow": 262144, "maxTokens": 65536}
-    assert "--continue" in pi["program"]
+    assert "--continue" not in pi["program"]
 
 
 class _Origin(http.server.BaseHTTPRequestHandler):

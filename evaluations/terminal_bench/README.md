@@ -13,7 +13,7 @@ trial executor inside the VM, and a host orchestrator that resumes safely.
 | `gateway.py` | pssdk session start/stop and the ingress native exec channel |
 | `runner.py` | Concurrent trials, resumable attempts, `summary.json` |
 | `relay.py` | Model relay shared by every arm: same FRIDAY deployment, same 4 keys, same sampling |
-| `../pi_contract.py` | Pi version pins, prebuilt runtime tree, guest `models.json` and launch/resume program |
+| `../pi_contract.py` | Pi version pins, prebuilt runtime tree, guest `models.json` and launch program |
 | `audit.py` | Benchmark-answer contamination flags for review |
 
 The VM-side entry point is the ingress native exec channel
@@ -105,12 +105,19 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
   thinking format and tool streaming. Pi's stdout is filtered like Harbor's
   (no `message_update` records); its session files under
   `/logs/agent/pi/sessions` are the audit source.
-- A run ending at the output-token limit without a tool call is resumed with
-  `--continue` and one shared nudge (`opencode_contract.CONTINUATION_NUDGE`)
-  for OpenCode and Pi, capped at 16 continuations; exit 42 means the cap ran
-  out.
+- Every agent runs once, as its upstream adapter runs it (OpenCode and Pi as
+  in Harbor, Tofu as `tofu-agent run`), with its own product defaults. The
+  runner never resumes, nudges or retries an agent and sets no harness tuning
+  knob: a run that ends early, for example at the output-token limit, is
+  scored as it ended. See the decision below.
 - Same container, resources (4 CPU / 16 GiB), egress policy, budgets, and
-  model facts (context window 262 144, output 65 536) for both arms.
+  model facts (context window 262 144, output 65 536) for every arm, each
+  through its own configuration surface: OpenCode's provider `limit`, Pi's
+  `modelOverrides`, Tofu's routing deployment `max_output_tokens`.
+- Tofu stops its own run at the agent budget (`--timeout-s`) and then writes
+  its result document, the audit's trajectory source; only that write gets
+  `TOFU_FINALIZE_GRACE_SEC` before the runner's kill. In the 2026-11-03 run
+  no Tofu trial needed the kill and the largest overrun was 2.0 s.
 - `vendor-6h`: 21 600 s agent budget for every task (Z.ai GLM-5.3-Flash card
   footnote); `task-default`: `task.toml` budgets.
 - Agents run as `bash -lc` in the image `WORKDIR` like Harbor, as the child of
@@ -128,6 +135,20 @@ Runtime artifacts (`artifacts.json`, served from `--files-dir`):
   lines are a weak flag.
 
 ## Decisions
+
+**Problem:** the runner resumed OpenCode and Pi with `--continue` and a
+fixed nudge (up to 16 times) when a run ended at the output-token limit,
+and gave Tofu evaluation-only upstream-fault budgets
+(`TOFU_GATEWAY_OUTAGE_BUDGET_S`, `TOFU_429_SATURATION_SECS`). Both compensate
+for, or tune, behavior of the harness under test. In the 2026-11-03 run the
+loop resumed OpenCode in 4 trials, 2 of which then passed. **Decision:** the
+evaluation layer only provisions, enforces the shared budget, collects
+evidence and verifies. Each harness runs once with its own defaults, and how
+it handles an output-limit stop is part of what is measured. **Alternatives
+rejected:** keeping the loop for every arm (it measures the runner's
+recovery policy, not the harness's); extending an equivalent loop to Tofu
+(same objection); per-harness retry knobs (tuning the subject of the
+measurement).
 
 **Problem:** Harbor + agentix wrapped the agent in layers we could not fix
 quickly (Python 3.15 interpreter selection, a 14 400 s wrapper cap below the
@@ -173,5 +194,5 @@ reward parsing, safe bundle extraction, summary, audit rules) and
 guest program and event filtering against a scripted Pi, audit of Pi session
 files). Setting `TB_NATIVE_PI_RUNTIME` to an extracted Pi runtime tree also
 runs the real pinned Pi against a local OpenAI-compatible stub, asserting the
-wire request and the output-limit resume. Live smoke: two short tasks per arm
+wire request and that an output-limit stop ends the run unresumed. Live smoke: two short tasks per arm
 on cluster 857.
