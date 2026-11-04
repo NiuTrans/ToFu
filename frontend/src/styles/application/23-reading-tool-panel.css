@@ -267,7 +267,9 @@
   .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"]:not([data-action-state="attention"]) :is(.ptool-result-header, .ptool-results-header, .ptool-cmd-header, .ptool-line, .conversation-tool-summary)[data-action-summary]:not(:has(> .ptool-error-reason, .ptool-artifact-header, .ptool-repo-map-params)) {
     flex-wrap: nowrap;
   }
-  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] [data-action-summary] > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title) {
+  /* A saved-output summary keeps its responsive basis, which holds its
+   * action beside the glyph (23-reading-responsive.css). */
+  .conversation-surface .conversation-tool-panel[data-tool-panel-state="open"] ~ .conversation-block[data-turn-zone="process"] [data-action-summary]:not(:has(.ptool-artifact-header)) > :is(.ptool-text, .ptool-cmd-desc-inline, .conversation-tool-card__title) {
     flex: 1 1 auto;
     min-width: 0;
     max-width: none;

@@ -268,12 +268,20 @@ breaks lazy loading of gateway history.
 Only explicit execution parent IDs (`parentToolCallId` / `_programCallId`) receive
 child rails. Receipts stay in original chronological slots, including unrelated
 interleaved rows and repeated call IDs; artifact reuse origins are not execution
-parents. Headerless program batches do not advertise a nonexistent collapse
-control. **Alternatives rejected:** relocating children loses chronology; hiding
-receipts destroys evidence; phase-keying the outer shell destroys focused code;
-showing raw measurements in the summary makes pure computation look like failure.
-Specs: `program-execution-card.test.ts`, tool-group contracts and
-`tests/visual/test_visual_program_execution_surfaces.py` (real Chromium).
+parents. Producers keep a saved-output read-back's source only in
+`_artifactOrigin.sourceToolCallId`; a stored `parentToolCallId` equal to it (rounds
+written before 2026-11-04) is provenance and draws no rail. A read-back is a
+sibling row: glyph and outcome on its action line in the shared intent ink, source
+and search terms beneath on the text column (owner report 2026-11-04: the rail
+nested read-backs under whichever call preceded them). Headerless program batches
+do not advertise a nonexistent collapse control. **Alternatives rejected:**
+relocating children loses chronology; hiding receipts destroys evidence;
+phase-keying the outer shell destroys focused code; showing raw measurements in
+the summary makes pure computation look like failure; rewriting stored rounds to
+drop the stale edge mutates durable user state for a presentation concern.
+Specs: `program-execution-card.test.ts`, tool-group contracts,
+`tests/visual/test_visual_program_execution_surfaces.py` and
+`tests/visual/test_visual_tool_artifact_readability.py` (real Chromium).
 
 ## Composer recent models
 
