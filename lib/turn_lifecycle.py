@@ -29,7 +29,11 @@ from lib.conversation_sync.workspace import is_conversation_workspace
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import get_logger
 from lib.storage.commit_events import CommittedEventOrder, defer_committed_events
-from lib.storage.errors import ProjectionRebaseRequired, StorageError
+from lib.storage.errors import (
+    ProjectionRebaseRequired,
+    StorageError,
+    is_resource_bound_refusal,
+)
 from lib.storage.protocol import FrozenPayload, encode_json_value
 from lib.tasks_pkg.failure_attribution import (
     ensure_failure_attribution,
@@ -415,6 +419,60 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
         raise
 
 
+def _lane_turns_newest_first(
+    conversation_id: str, lane_id: str, *, user_id: Any, limit: int,
+) -> Iterator[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """Yield one lane's Turns newest-first, each with its current attempt.
+
+    Every ``turn.sync.page`` is one bounded read at one replay head and carries
+    the current attempts of its Turns. Pages are fenced on that head, which a
+    live reply keeps advancing; lane ordinals only grow, so a stale page is read
+    again from the same cursor at the head the authority reported. A page the
+    authority refuses at its deterministic response bound is read again at half
+    the size, which later pages keep; a refused one-Turn page raises. A missing
+    conversation yields nothing.
+    """
+    client = _turn_client()
+    sync_sequence = 0
+    before_ordinal: int | None = None
+    while True:
+        payload: dict[str, Any] = {
+            'conversation_id': conversation_id, 'user_id': user_id,
+            'lane_id': lane_id, 'sync_sequence': sync_sequence, 'limit': limit,
+        }
+        if before_ordinal is not None:
+            payload['before_ordinal'] = before_ordinal
+        try:
+            page = client.query('turn.sync.page', payload)
+        except StorageError as exc:
+            if limit == 1 or not is_resource_bound_refusal(exc):
+                raise
+            limit //= 2
+            continue
+        if page is None:
+            return
+        if page.get('stale'):
+            head = page.get('syncSequence')
+            if type(head) is not int or head == sync_sequence:
+                raise StorageError(
+                    'database_protocol_error', 'Turn page stale head is malformed')
+            sync_sequence = head
+            continue
+        turns = page.get('turns') or []
+        attempts = {attempt.get('attemptId'): attempt
+                    for attempt in page.get('attempts') or []}
+        for row in reversed(turns):
+            yield row, attempts.get(row.get('currentAttemptId'))
+        if not page.get('hasMore'):
+            return
+        next_before = page.get('nextBeforeOrdinal')
+        if (not turns or type(next_before) is not int
+                or (before_ordinal is not None and next_before >= before_ordinal)):
+            raise StorageError(
+                'database_protocol_error', 'Turn page cursor did not advance')
+        before_ordinal = next_before
+
+
 def _lane_busy_turn(
     conversation_id: str, lane_id: str, *, user_id: Any,
 ) -> dict[str, Any] | None:
@@ -432,50 +490,17 @@ def _lane_busy_turn(
     conversation's projections exceed the authority's response bound, which
     would turn every input sent during its reply into an internal error.
     """
-    client = _turn_client()
-    sync_sequence = 0
-    before_ordinal: int | None = None
     tail: dict[str, Any] | None = None
-    while True:
-        payload: dict[str, Any] = {
-            'conversation_id': conversation_id, 'user_id': user_id,
-            'lane_id': lane_id, 'sync_sequence': sync_sequence, 'limit': 1,
-        }
-        if before_ordinal is not None:
-            payload['before_ordinal'] = before_ordinal
-        page = client.query('turn.sync.page', payload)
-        if page is None:
-            return tail
-        if page.get('stale'):
-            # Pages are fenced on the replay head, which the live reply keeps
-            # advancing. Lane ordinals only grow, so the walk continues from
-            # the same cursor at the head the authority reported.
-            head = page.get('syncSequence')
-            if type(head) is not int or head == sync_sequence:
-                raise StorageError(
-                    'database_protocol_error', 'Turn page stale head is malformed')
-            sync_sequence = head
-            continue
-        turns = page.get('turns') or []
-        attempts = {attempt.get('attemptId'): attempt
-                    for attempt in page.get('attempts') or []}
-        for row in reversed(turns):
-            if tail is None:
-                tail = row
-            attempt = attempts.get(row.get('currentAttemptId'))
-            if (row.get('status') in LIVE_ATTEMPT_STATUSES
-                    and attempt is not None
-                    and attempt.get('status') in LIVE_ATTEMPT_STATUSES
-                    and not attempt.get('queueBinding')):
-                return row
-        if not page.get('hasMore'):
-            return tail
-        next_before = page.get('nextBeforeOrdinal')
-        if (not turns or type(next_before) is not int
-                or (before_ordinal is not None and next_before >= before_ordinal)):
-            raise StorageError(
-                'database_protocol_error', 'Turn page cursor did not advance')
-        before_ordinal = next_before
+    for row, attempt in _lane_turns_newest_first(
+            conversation_id, lane_id, user_id=user_id, limit=1):
+        if tail is None:
+            tail = row
+        if (row.get('status') in LIVE_ATTEMPT_STATUSES
+                and attempt is not None
+                and attempt.get('status') in LIVE_ATTEMPT_STATUSES
+                and not attempt.get('queueBinding')):
+            return row
+    return tail
 
 
 def activate_queued_turn_pair(
@@ -3237,6 +3262,48 @@ def list_turns(conversation_id: str, *, user_id: Any,
         'authoritativeFull': bool(lane_id is None and after_ordinal is None
                                   and len(turns) < limit),
     }
+
+
+# The Conversation Sync v3 Turn-page default (contracts/conversation_sync_v3.yaml).
+_TURN_PAGE_DEFAULT_LIMIT = 64
+
+
+def iter_turns_newest_first(conversation_id: str, *, user_id: Any,
+                            light: bool = False) -> Iterator[dict[str, Any]]:
+    """Yield every lane's Turns newest-first in the public ``list_turns`` shape.
+
+    Lanes are read one bounded ``turn.sync.page`` at a time, so a conversation
+    whose whole history exceeds one storage response is still walked; ``light``
+    keeps the ``list_turns`` projection keys. The main lane comes first, and a
+    branch lane follows the lane whose Turn names it in ``_branchLanes``, so no
+    lane directory is needed. Pages are separate reads rather than one
+    snapshot; a consumer that needs one revision reads ``list_turns``. A missing
+    conversation yields nothing.
+    """
+    user_id = require_user_id(user_id, context='walk conversation turns')
+    lanes = ['main']
+    seen = {'main'}
+    while lanes:
+        lane_id = lanes.pop(0)
+        for row, _attempt in _lane_turns_newest_first(
+                conversation_id, lane_id, user_id=user_id,
+                limit=_TURN_PAGE_DEFAULT_LIMIT):
+            projection = row.get('projection')
+            branches = (projection.get('_branchLanes')
+                        if isinstance(projection, Mapping) else None)
+            for branch in branches if isinstance(branches, list) else ():
+                branch_id = (branch.get('laneId')
+                             if isinstance(branch, Mapping) else None)
+                if isinstance(branch_id, str) and branch_id and branch_id not in seen:
+                    seen.add(branch_id)
+                    lanes.append(branch_id)
+            row = public_turn_with_stable_segments(row)
+            if light:
+                row['projection'] = {
+                    key: row['projection'][key]
+                    for key in _LIGHT_PROJECTION_KEYS
+                    if key in row.get('projection', {})}
+            yield row
 
 
 def get_turn(conversation_id: str, turn_id: str, *, user_id: Any,
