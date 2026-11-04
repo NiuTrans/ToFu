@@ -306,6 +306,18 @@ at restore time, and same-protocol replay would lose its signatures and cache).
 Spec: `tests/conversation/test_completed_turn_reasoning.py`.
 
 L1 receives an API-form working projection and replaces only cold tool/image bulk; it performs no conversation read, projection update or change notification.
+**Continuation preservation.** Problem: once outside the hot tail, a legacy
+`context_compact` tool result could become an ordinary short placeholder, and
+the optional assistant-content pass could clip an accepted manual summary.
+Decision: those transforms preserve the newest recognized continuation using
+the shared handoff identity owner, including its complete legacy tool batch.
+This protection also applies when L2 lifts the cache fence for its detached L1
+candidate. The next L2 reads the prior summary in full and replaces it only on
+successful adoption. Superseded summaries and unmarked summary-looking tool
+text remain eligible for ordinary compaction. Alternatives rejected: protecting
+by tool name or text alone accepts orphaned/quoted content; protecting every
+past summary retains redundant state indefinitely. Specs:
+`tests/compaction/test_l1_summary_preservation.py`, `test_compaction_handoff.py`.
 Completed ordinary chat turns publish this bounded view through the owner-scoped durable continuation repository. The next turn validates it and transforms only uncovered Turns; restarts/cache eviction do not resurrect summarized history. Missing/invalid checkpoints rebuild unchanged Turns and pass fresh admission.
 **Continuation boundary:** display updates previously invalidated summaries, while shared eligibility wrongly blocked completed Continue publication. Decision: semantic proof v2 preserves typed content/tool/Attempt/policy/media fences; Continue proves its input baseline, retains fresh suffixes, and publishes only verified complete model content. Rejected: weaker witnesses, history deletion or higher thresholds. Old proofs rebuild once with explicit reasons. Details: `contracts/model_context_v1.schema.json` and [storage operations](STORAGE_OPERATIONS.md#model-context-semantic-version).
 **History length:** a lane keeps publishing and restoring checkpoints for any number of Turns. Both authorities stream the v2 proof digest over every header and materialize only the uncovered suffix; proof counts are plain counters and only legacy per-Turn witness lists keep a count bound. Rejected: raising the former 10,000-Turn ceiling. Details: [long-horizon context reads](TOFUDB_CONTEXT_READ.md#streamed-proof-walks-without-a-turn-ceiling).
