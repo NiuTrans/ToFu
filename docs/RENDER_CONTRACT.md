@@ -1660,6 +1660,15 @@ The demand-loaded slide editor now has one TypeScript session authority under `f
   Artifact/cursor metadata remains inspectable but excluded from previews.
   Rejected: synthetic-only rendering, arbitrary code-tool aliases, and inferred
   completion/statistics from script-returned data.
+  Only the synthetic parent records that a program started, so an unanswered
+  gateway call of a live (`pending`/`running`) Turn reads Waiting to start,
+  without script activity, counters or a result, until its started parent
+  replaces it and reads Executing program. A settled Turn's unanswered call
+  is Incomplete, whatever in-flight status its round last carried. Problem:
+  sibling programs serialized behind one running program all claimed to be
+  executing and to have requested tools. Rejected: timers or elapsed-time
+  guesses, and reading any in-flight gateway status as a running program.
+  Specs: `program-execution-card.test.ts` and `program-gateway-card.test.ts`.
 
   Problem: zero-call wording made saved-result reads look like no work, and
   keeper receipt JSON exposed private references in the glanceable header.

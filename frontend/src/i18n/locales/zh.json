@@ -3745,6 +3745,7 @@
   "ptc.status.failed": "执行失败",
   "ptc.status.incomplete": "未完整完成",
   "ptc.status.running": "程序执行中",
+  "ptc.status.waiting": "等待执行",
   "ptc.tasks": "{n} 个子工具调用",
   "ptc.title": "程序执行",
   "ptc.activity.inputs": "脚本：查找已有结果",

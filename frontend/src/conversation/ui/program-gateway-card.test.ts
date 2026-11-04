@@ -28,6 +28,12 @@ it('normalizes exact raw history without changing durable evidence or guessing s
   expect(JSON.stringify(raw)).toBe(before);
   expect(normalizeProgramPresentation({ ...raw, _programSynthetic: true })).toEqual({ ...raw, _programSynthetic: true });
 });
+it('maps an unanswered in-flight gateway to waiting: only a synthetic parent says a program started', () => {
+  for (const status of ['pending', 'queued', 'searching']) {
+    expect(normalizeProgramPresentation({ ...raw, status, toolContent: undefined }).programStatus).toBe('waiting');
+  }
+  expect(normalizeProgramPresentation({ ...raw, status: undefined, toolContent: undefined }).programStatus).toBe('incomplete');
+});
 it('never promotes script-returned observation/stats to host outcome', () => {
   const node = card({ ...raw, toolContent: JSON.stringify({ kind: 'observation', reason: 'tool_not_done', programStats: { tool_calls: 0 } }) });
   expect(node.querySelector('.ptc-status')?.textContent).toBe('Returned');

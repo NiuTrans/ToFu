@@ -3745,6 +3745,7 @@
   "ptc.status.failed": "실패",
   "ptc.status.incomplete": "미완료",
   "ptc.status.running": "프로그램 실행 중",
+  "ptc.status.waiting": "실행 대기 중",
   "ptc.tasks": "하위 도구 호출 {n}개",
   "ptc.title": "프로그램 실행",
   "ptc.activity.inputs": "스크립트: 이전 결과 조회",
