@@ -2611,7 +2611,7 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&response.payload).unwrap(),
             json!([{"id": "conversation-1", "snippet": "…independent projection lane…",
-                "role": "user", "match_field": "content"}])
+                "role": "user", "match_field": "content", "turn_id": "turn-1", "ordinal": 1}])
         );
     }
 
