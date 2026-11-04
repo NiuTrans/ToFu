@@ -937,6 +937,140 @@ class TestSearchCoverage:
                          '.github/workflows/ci.yml')
 
 
+@pytest.fixture()
+def braced(proj):
+    """Sources whose names exercise brace alternatives and literal braces."""
+    web = Path(proj) / 'web'
+    (web / 'ui').mkdir(parents=True)
+    for rel in _BRACED_FILES:
+        (Path(proj) / rel).write_text('needle-glob\n')
+    return proj
+
+
+_BRACED_FILES = (
+    'web/app.ts', 'web/view.tsx', 'web/main.js', 'web/style.css',
+    'web/ui/widget.ts', 'web/ui/widget.test.ts', 'web/{tmpl}.txt')
+_TS_JS = {'web/app.ts', 'web/main.js', 'web/ui/widget.ts',
+          'web/ui/widget.test.ts'}
+_BRACE_SELECTIONS = [
+    ('*.{ts,js}', _TS_JS),
+    ('*.{TS,Js}', _TS_JS),
+    ('*.{t{s,sx},js}', _TS_JS | {'web/view.tsx'}),
+    ('{app,main,view}.{ts,js}', {'web/app.ts', 'web/main.js'}),
+    ('[{]tmpl[}].txt', {'web/{tmpl}.txt'}),
+    (r'\{tmpl\}.txt', {'web/{tmpl}.txt'}),
+    # A '/' anywhere in the glob selects project-relative path matching.
+    ('web/{ui/*.test,app}.ts', {'web/ui/widget.test.ts', 'web/app.ts'}),
+]
+_REJECTED_GLOBS = [
+    '*.{ts,js',     # unclosed group
+    '*.ts}',        # unopened group
+    '*.{ts}',       # one alternative: rg reads `ts`, shells keep `{ts}`
+    '*.{,ts}',      # empty alternative: rg silently drops it
+    '*.{ts,}',
+    '{}',
+    '[ab',          # unclosed class
+    'a\\',         # dangling escape
+    '[z-a]',        # reversed range
+]
+
+
+class TestGlobSyntax:
+    """One glob dialect for `search_files` include and `find_files` pattern on
+    every backend: brace alternatives select each alternative, malformed or
+    ambiguous globs are refused before anything runs, and no glob reaches
+    outside the requested path."""
+
+    @pytest.mark.parametrize('backend', ['index', 'rg', 'gnu', 'python'])
+    @pytest.mark.parametrize('include,expected', _BRACE_SELECTIONS)
+    def test_include_selects_every_alternative(
+            self, braced, monkeypatch, backend, include, expected):
+        _route_search(monkeypatch, braced, backend)
+        out = read_tools.tool_grep(
+            braced, 'needle-glob', rel_path='web', include=include)
+        assert {rel for rel in _BRACED_FILES if _grep_hit(out, rel)} \
+            == expected, out
+
+    @pytest.mark.parametrize('include,hit,gnu_runs', [
+        ('*.{TS,js}', 'web/main.js', True),
+        # --include sees base names only
+        ('web/{ui/*.test,app}.ts', 'web/app.ts', False),
+        # '?' is one byte in ripgrep but one character in GNU grep
+        ('widget.?s', 'web/ui/widget.ts', False),
+    ])
+    def test_gnu_grep_runs_only_includes_it_can_express(
+            self, braced, monkeypatch, include, hit, gnu_runs):
+        _route_search(monkeypatch, braced, 'gnu')
+        out = read_tools.tool_grep(braced, 'needle-glob', include=include)
+        assert _grep_hit(out, hit), out
+        assert ('limited Python fallback' not in out) == gnu_runs, out
+
+    @pytest.mark.parametrize('backend', ['index', 'fd', 'python'])
+    @pytest.mark.parametrize('pattern,expected', _BRACE_SELECTIONS + [
+        ('**/*.{ts,js}', _TS_JS),
+    ])
+    def test_find_selects_every_alternative(
+            self, braced, monkeypatch, backend, pattern, expected):
+        _route_search(monkeypatch, braced, backend)
+        out = read_tools.tool_find_files(braced, pattern, rel_path='web')
+        assert {rel for rel in _BRACED_FILES if f'  {rel} (' in out} \
+            == expected, out
+
+    @pytest.mark.parametrize('backend', ['index', 'rg', 'gnu', 'python'])
+    @pytest.mark.parametrize('include', _REJECTED_GLOBS)
+    def test_rejected_include_is_an_error_not_an_empty_result(
+            self, braced, monkeypatch, backend, include):
+        _route_search(monkeypatch, braced, backend)
+        for count_only in (False, True):
+            out = read_tools.tool_grep(
+                braced, 'needle-glob', include=include, count_only=count_only)
+            assert out.startswith('Invalid pattern'), out
+            assert include in out and 'Nothing was searched' in out
+            assert 'matches' not in out
+
+    @pytest.mark.parametrize('backend', ['index', 'fd', 'python'])
+    @pytest.mark.parametrize('pattern', _REJECTED_GLOBS)
+    def test_rejected_find_pattern_is_an_error_not_an_empty_result(
+            self, braced, monkeypatch, backend, pattern):
+        _route_search(monkeypatch, braced, backend)
+        out = read_tools.tool_find_files(braced, pattern)
+        assert out.startswith('Invalid pattern'), out
+        assert pattern in out and 'Nothing was searched' in out
+        assert 'No files matching' not in out
+
+    @pytest.mark.parametrize('backend', ['index', 'rg', 'gnu', 'python'])
+    def test_alternatives_cannot_leave_the_requested_path(
+            self, braced, monkeypatch, backend):
+        _route_search(monkeypatch, braced, backend)
+        out = read_tools.tool_grep(
+            braced, 'needle', rel_path='web', include='{../docs/*,*}.md')
+        assert 'No matches found' in out and 'docs/guide.md' not in out
+
+    @pytest.mark.parametrize('backend', ['index', 'fd', 'python'])
+    def test_find_alternatives_cannot_leave_the_requested_path(
+            self, braced, monkeypatch, backend):
+        _route_search(monkeypatch, braced, backend)
+        out = read_tools.tool_find_files(
+            braced, '{../docs/*,../src/*,*}.{md,py}', rel_path='web')
+        assert 'No files matching' in out
+        assert 'docs/guide.md' not in out and 'src/top.py' not in out
+
+    def test_batch_entries_share_the_glob_rules(self, braced):
+        _build(braced)
+        out = read_tools.tool_grep_batch(braced, [
+            {'pattern': 'needle-glob', 'path': 'web', 'include': '*.{ts,js}'},
+            {'pattern': 'needle-glob', 'include': '*.{ts'},
+        ])
+        assert _grep_hit(out, 'web/main.js') and _grep_hit(out, 'web/app.ts')
+        assert 'Invalid pattern' in out and 'web/style.css' not in out
+        found = read_tools.tool_find_files_batch(braced, [
+            {'pattern': '*.{ts,js}', 'path': 'web'},
+            {'pattern': '*.{ts}'},
+        ])
+        assert 'web/main.js (' in found and 'web/style.css' not in found
+        assert 'Invalid pattern' in found
+
+
 class TestFreshness:
     def test_note_write_upserts_immediately(self, proj):
         _build(proj)

@@ -32,7 +32,7 @@ from lib.project_mod.scanner import (
     _safe_path,
 )
 from lib.project_mod.grep_engine import SearchRequest, run_search
-from lib.project_mod import grep_timeout_circuit, tree_index
+from lib.project_mod import glob_match, grep_timeout_circuit, tree_index
 
 logger = get_logger(__name__)
 
@@ -1106,6 +1106,11 @@ def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
     except ValueError as e:
         logger.debug('[Tools] grep safe_path rejected %s: %s', rel_path, e, exc_info=True)
         return str(e)
+    if include:
+        try:
+            glob_match.compile_glob(include)
+        except glob_match.GlobPatternError as error:
+            return _format_glob_rejection('include', include, error)
     ctx_n = max(0, min(10, int(context_lines))) if context_lines else 0
     cap = max(1, min(int(max_results), 500)) if max_results else MAX_GREP_RESULTS
     floor = None
@@ -1150,8 +1155,8 @@ def tool_grep(base, pattern, rel_path=None, include=None, context_lines=None,
     if result is not None:
         return result
 
-    # Both binaries failed
-    logger.info('[Tools] grep binary not found, falling back to Python grep')
+    logger.info('[Tools] GNU grep is missing or cannot express include %r; '
+                'falling back to Python grep', include)
     return _python_grep(base, target, pattern, include, cap, count_only,
                         from_line=floor)
 
@@ -1185,7 +1190,8 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
         if os.path.isfile(gitignore) and not os.path.isdir(os.path.join(base, '.git')):
             cmd.extend(['--ignore-file', gitignore])
     if include:
-        cmd.extend(['-g', include])
+        # --iglob: include globs are case-insensitive on every backend.
+        cmd.extend(['--iglob', include])
     if ctx_n > 0 and not count_only:
         cmd.extend(['-C', str(ctx_n)])
     # Do not use rg -m here: it is a PER-FILE limit. The shared executor
@@ -1195,7 +1201,8 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
 
 
 def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, count_only=False):
-    """Build GNU grep command."""
+    """Build GNU grep command, or None when GNU ``--include`` cannot select
+    exactly the files *include* selects."""
     if count_only:
         cmd = ['grep', '-rci', '--color=never', '-I']
     else:
@@ -1218,7 +1225,14 @@ def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
         if d != target_name:
             cmd.extend(['--exclude-dir', d])
     if include:
-        cmd.extend(['--include', include])
+        # GNU --include matches base names without alternation; the shared
+        # glob spells the include as an exact union of such globs, if any,
+        # within the argv budget the index lane also gives one grep process.
+        includes = glob_match.compile_glob(include).grep_includes(
+            argv_budget=_GREP_INDEX_ARGV_BUDGET)
+        if includes is None:
+            return None
+        cmd.extend(f'--include={glob}' for glob in includes)
     if ctx_n > 0 and not count_only:
         cmd.extend(['-C', str(ctx_n)])
     # GNU grep -m is also per file. Global limiting belongs to grep_engine.
@@ -1244,6 +1258,14 @@ _REJECTION_HINTS = {
     'grep': ('This fallback runs GNU grep basic regular expressions, where '
              '`(` is literal and `\\(` opens a group.'),
 }
+
+
+def _format_glob_rejection(field, glob, error):
+    """Model-facing text for a glob refused before any backend ran."""
+    return (f"Invalid pattern: `{field}` glob '{glob}': {error}.\n"
+            'Nothing was searched. Globs use ripgrep syntax: `*`, `?`, '
+            '`[abc]`, `\\` escapes and `{a,b}` alternatives, e.g. '
+            '`*.{ts,js}`.')
 
 
 def _format_backend_rejection(result, backend):
@@ -2203,8 +2225,11 @@ def _run_rg(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
 
 def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
                   count_only=False, owner_user_id=None, from_line=None):
-    """Run GNU grep. Returns formatted string on success, None on binary-not-found."""
+    """Run GNU grep. Returns formatted string on success, None when the binary
+    is missing or its ``--include`` cannot express *include* exactly."""
     cmd = _build_grep_cmd(base, target, pattern, include, ctx_n, cap, count_only)
+    if cmd is None:
+        return None
     io_timeout = _get_io_timeout(base)
     try:
         stdout, timed_out, result = _run_grep_subprocess(
@@ -2230,16 +2255,23 @@ def _run_gnu_grep(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
         return f'Grep error: {e}'
 
 
+def _glob_path(path, base):
+    """The '/'-separated project-relative path a slash-bearing glob matches."""
+    return os.path.relpath(path, base).replace(os.sep, '/')
+
+
 def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS,
                  count_only=False, from_line=None):
     capability_note = (
-        '[limited Python fallback: rg and GNU grep are unavailable; supports '
-        'case-insensitive Python regex, one include glob, and text files only]\n')
+        '[limited Python fallback: rg is unavailable and GNU grep is missing '
+        'or cannot apply this include glob; supports case-insensitive Python '
+        'regex, one include glob, and text files only]\n')
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         logger.debug('[Tools] python_grep invalid regex pattern: %s', e, exc_info=True)
         return capability_note + f'Invalid pattern: {e}'
+    include_glob = glob_match.compile_glob(include) if include else None
     gi_patterns = _load_gitignore_patterns(base)
     match_count = 0
     matches = []
@@ -2258,7 +2290,9 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS,
             pruned.append(d)
         dirs[:] = pruned
         for fname in files:
-            if include and not fnmatch.fnmatch(fname, include):
+            if include_glob is not None and not include_glob.matches(
+                    fname if include_glob.name_only
+                    else _glob_path(os.path.join(root, fname), base)):
                 continue
             if (fname in IGNORE_FILES
                     or os.path.splitext(fname)[1].lower() in BINARY_EXTENSIONS):
@@ -2412,12 +2446,14 @@ def _fd_find(target, base, pattern, cap, *, case_sensitive=False,
 
 
 def _python_find(target, base, pattern, cap, *, case_sensitive=False,
-                 respect_project_ignores=True):
-    """Find files using a bounded ``scandir`` DFS + fnmatch fallback.
+                 respect_project_ignores=True, shell_glob=False):
+    """Find files using a bounded ``scandir`` DFS + glob fallback.
 
     Unlike ``os.walk``, this does not first materialize every name in a huge
     directory. Traversal retains a directory stack; notices and returned matches have
     explicit presentation bounds. Directory depth does not discard candidates.
+    *pattern* is a project glob (``glob_match``); ``shell_glob`` instead keeps
+    GNU ``find -name`` fnmatch on the entry name for a translated shell find.
     """
     gi_patterns = (
         _load_gitignore_patterns(base) if respect_project_ignores else [])
@@ -2425,7 +2461,19 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
     scanned = 0
     timeout_val = _get_io_timeout(base, default=30)
     deadline = time.time() + timeout_val
-    comparable_pattern = pattern if case_sensitive else pattern.lower()
+    if shell_glob:
+        comparable_pattern = pattern if case_sensitive else pattern.lower()
+
+        def selected(name, path):
+            return fnmatch.fnmatchcase(
+                name if case_sensitive else name.lower(), comparable_pattern)
+    else:
+        name_glob = glob_match.compile_glob(
+            pattern, case_sensitive=case_sensitive)
+
+        def selected(name, path):
+            return name_glob.matches(
+                name if name_glob.name_only else _glob_path(path, base))
     stack = [(target, 0)]
     error_notices = 0
     while stack:
@@ -2461,9 +2509,7 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
                         continue
                     if not is_file:
                         continue
-                    comparable = name if case_sensitive else name.lower()
-                    if not fnmatch.fnmatchcase(
-                            comparable, comparable_pattern):
+                    if not selected(name, entry.path):
                         continue
                     rel = os.path.relpath(entry.path, base)
                     if gi_patterns and _gitignore_match(
@@ -2567,8 +2613,10 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None, *,
                     respect_project_ignores=True):
     """Find files by name glob pattern.
 
-    Uses fd-find when available (3-4x faster on large dirs), falls back to
-    Python os.walk + fnmatch.
+    Serves the tree index first, then fd-find (3-4x faster than a walk on
+    large dirs), then a Python walk; all select through one ``glob_match``
+    glob. A ``shell_output`` request carries a GNU ``find -name`` pattern
+    instead, so it bypasses both the project glob and the index.
 
     Args:
         base: Project root directory.
@@ -2591,6 +2639,7 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None, *,
     # Canonicalize this shared case before selecting index/fd/walk, keeping
     # directory-bearing patterns on the existing project-relative path lane.
     match_pattern = pattern
+    name_glob = None  # shell_output keeps GNU find -name semantics instead
     if not shell_output:
         prefix_chars = 0
         while pattern.startswith('**/', prefix_chars):
@@ -2598,10 +2647,15 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None, *,
         candidate = pattern[prefix_chars:]
         if '/' not in candidate:
             match_pattern = candidate
+        try:
+            name_glob = glob_match.compile_glob(
+                match_pattern, case_sensitive=case_sensitive)
+        except glob_match.GlobPatternError as error:
+            return _format_glob_rejection('pattern', pattern, error)
 
     # ── Fast path: persistent tree index (pure in-memory glob, µs–ms) ──
     matches = None
-    if respect_project_ignores:
+    if respect_project_ignores and name_glob is not None:
         matches = _find_via_index(
             base, target, match_pattern, query_cap,
             case_sensitive=case_sensitive)
@@ -2611,7 +2665,8 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None, *,
             # No index yet — build it behind the live walk. A shell-compatible
             # search deliberately skips the filtered index instead.
             tree_index.warm(base)
-        if _FD_BIN:
+        # fd globs match names only; a project-relative glob walks instead.
+        if _FD_BIN and (name_glob is None or name_glob.name_only):
             t0 = time.perf_counter()
             matches = _fd_find(
                 target, base, match_pattern, query_cap,
@@ -2626,7 +2681,8 @@ def tool_find_files(base, pattern, rel_path=None, max_results=None, *,
         matches = _python_find(
             target, base, match_pattern, query_cap,
             case_sensitive=case_sensitive,
-            respect_project_ignores=respect_project_ignores)
+            respect_project_ignores=respect_project_ignores,
+            shell_glob=shell_output)
         elapsed = (time.perf_counter() - t0) * 1000
         logger.debug('[Tools] os.walk found %d files in %.1fms', len(matches), elapsed)
 
