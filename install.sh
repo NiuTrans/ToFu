@@ -3342,12 +3342,56 @@ finally:
 PYEOF
 }
 
+# A worker keeps the code it imported at boot, so it serves this checkout's
+# code only if it started after HEAD last moved (newest HEAD reflog entry).
+# Prints why the worker may be older, or nothing when it is provably current;
+# an unavailable start time or reflog entry never counts as current.
+_running_worker_stale_reason() {
+    local head_entry=""
+    if [[ -e "${INSTALL_DIR}/.git" ]] && command -v git &>/dev/null; then
+        head_entry="$(git -C "$INSTALL_DIR" reflog -1 --date=unix --format=%gd HEAD 2>/dev/null)" \
+            || head_entry=""
+    fi
+    "$ENV_PYTHON" - "$1" "$head_entry" <<'PYEOF'
+import json
+import re
+import sys
+
+status = json.loads(sys.argv[1])
+head = re.fullmatch(r'HEAD@\{(\d+)\}', sys.argv[2].strip())
+worker = 'Tofu (PID %s)' % status['pid'] if status.get('pid') else 'Tofu'
+try:
+    started_at = float(status.get('processStartedAt') or 0)
+except (TypeError, ValueError):
+    started_at = 0.0
+if started_at <= 0:
+    print("%s is running, but its start time is unavailable to compare with "
+          "this checkout's code" % worker)
+elif head is None:
+    print('%s is running, but this checkout has no HEAD reflog entry to compare '
+          'with its start time' % worker)
+# Reflog times are whole seconds: a HEAD move within the worker's start
+# second is not provably older than the worker.
+elif started_at < int(head.group(1)) + 1:
+    print("%s started before this checkout's code last changed" % worker)
+PYEOF
+}
+
 _ALREADY_RUNNING=0
+_RUNNING_CODE_STALE=0
 if ! _port_is_free; then
-    if (cd "$INSTALL_DIR" && "$ENV_PYTHON" serverctl.py status --json) \
+    if _RUNNING_STATUS="$(cd "$INSTALL_DIR" && "$ENV_PYTHON" serverctl.py status --json)" \
+            && printf '%s' "$_RUNNING_STATUS" \
             | "$ENV_PYTHON" -c 'import json,sys; s=json.load(sys.stdin); sys.exit(not (s.get("ready") is True and s.get("applicationReachable") is True and int(s.get("port", 0)) == int(sys.argv[1])))' "$PORT"; then
         _ALREADY_RUNNING=1
-        info "This checkout is already managed and ready — verifying it without restarting"
+        _RUNNING_CODE_STALE_REASON="$(_running_worker_stale_reason "$_RUNNING_STATUS")" \
+            || _RUNNING_CODE_STALE_REASON="Tofu is running, but its start time could not be compared with this checkout's code"
+        if [[ -z "$_RUNNING_CODE_STALE_REASON" ]]; then
+            info "This checkout is already managed and ready — verifying it without restarting"
+        else
+            _RUNNING_CODE_STALE=1
+            warn "$_RUNNING_CODE_STALE_REASON"
+        fi
     else
     _PORT_OWNER=""
     if command -v ss &>/dev/null; then
@@ -3385,6 +3429,22 @@ if [[ "$_ALREADY_RUNNING" -eq 0 ]] && ! "$ENV_PYTHON" server.py; then
     echo "  Install:  ${TOFU_INSTALL_LOG}" >&2
     exit 1
 fi
+# serverctl.py owns restarts and their human approval: it prompts on this
+# terminal. Without an interactive caller the worker keeps running unchanged.
+if [[ "$_RUNNING_CODE_STALE" -eq 1 ]]; then
+    if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+        warn "Not restarting the running Tofu from a non-interactive install."
+    else
+        info "Restarting Tofu applies this checkout's code (serverctl.py asks for confirmation)."
+        _RESTART_RC=0
+        "$ENV_PYTHON" serverctl.py restart || _RESTART_RC=$?
+        if [[ "$_RESTART_RC" -eq 0 ]]; then
+            _RUNNING_CODE_STALE=0
+        else
+            warn "Tofu restart did not complete (serverctl.py restart exited ${_RESTART_RC})."
+        fi
+    fi
+fi
 
 step "Verifying the running installation"
 _RUNTIME_BROWSER_ARGS=()
@@ -3413,8 +3473,14 @@ _RUNTIME_URL="$(
 [[ -n "$_RUNTIME_URL" ]] || _RUNTIME_URL="http://localhost:${PORT}"
 
 echo ""
-ok "Installation complete — Tofu is ready: ${_RUNTIME_URL}"
-_INSTALL_OUTCOME="ready"
+if [[ "$_RUNNING_CODE_STALE" -eq 1 ]]; then
+    warn "Installation complete, but Tofu is still running the code it started with: ${_RUNTIME_URL}"
+    printf '  Apply the update: cd %q && %q serverctl.py restart\n' "$INSTALL_DIR" "$ENV_PYTHON"
+    _INSTALL_OUTCOME="restart-required"
+else
+    ok "Installation complete — Tofu is ready: ${_RUNTIME_URL}"
+    _INSTALL_OUTCOME="ready"
+fi
 echo "  Open:     ${_RUNTIME_URL}"
 printf '  Status:   %q serverctl.py status\n' "$ENV_PYTHON"
 printf '  Stop:     %q serverctl.py stop\n' "$ENV_PYTHON"
