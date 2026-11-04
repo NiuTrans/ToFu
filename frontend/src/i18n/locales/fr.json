@@ -5120,6 +5120,7 @@
   "systemNote.actionToolPolicy": "Stratégie d’outils modifiée",
   "systemNote.activeChecklistLabel": "Intervention système · Liste de contrôle active",
   "systemNote.contextInjectionLabel": "Contexte injecté",
+  "systemNote.deliberateSilenceLabel": "Notification traitée · Aucune réponse requise",
   "systemNote.detailsLabel": "Intervention enregistrée",
   "systemNote.groupItemsTitle": "Éléments : {n}",
   "systemNote.groupLabel": "Notes de contexte",

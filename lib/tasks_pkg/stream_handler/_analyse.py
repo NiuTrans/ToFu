@@ -355,6 +355,13 @@ def analyse_stream_result(
             return program_result
 
 
+        from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
+        if (last_finish_reason in ('stop', 'end_turn') and not (usage or {}).get('_stream_anomaly')
+                and declare_silent_turn(task, assistant_msg, messages, llm_round=round_num)):
+            result['action'] = 'break'
+            result['loop_exit_reason'] = f'deliberate_silence_round_{round_num}'
+            return result
+
         from lib.tasks_pkg.stream_handler._terminal_recovery import (
             recover_abnormal_terminal,
         )

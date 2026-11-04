@@ -5120,6 +5120,7 @@
   "systemNote.actionToolPolicy": "已调整工具策略",
   "systemNote.activeChecklistLabel": "系统介入 · 活动清单",
   "systemNote.contextInjectionLabel": "已注入上下文",
+  "systemNote.deliberateSilenceLabel": "通知处理 · 无需回复",
   "systemNote.detailsLabel": "介入记录",
   "systemNote.groupItemsTitle": "{n} 项",
   "systemNote.groupLabel": "上下文记录",

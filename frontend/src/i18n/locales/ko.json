@@ -5120,6 +5120,7 @@
   "systemNote.actionToolPolicy": "도구 정책 변경됨",
   "systemNote.activeChecklistLabel": "시스템 개입 · 활성 체크리스트",
   "systemNote.contextInjectionLabel": "컨텍스트 주입됨",
+  "systemNote.deliberateSilenceLabel": "알림 확인됨 · 회신 필요 없음",
   "systemNote.detailsLabel": "개입 기록",
   "systemNote.groupItemsTitle": "{n}개 항목",
   "systemNote.groupLabel": "컨텍스트 기록",

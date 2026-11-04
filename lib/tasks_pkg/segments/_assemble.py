@@ -291,6 +291,9 @@ def record_injected_note(
     body = text[:NOTE_TEXT_LIMIT] if isinstance(text, str) else ''
     if not note_kind or not body.strip() or action not in NOTE_ACTIONS:
         return None
+    entries = task.setdefault(INJECTED_NOTES_FIELD, [])
+    if not isinstance(entries, list):
+        return None
     entry: dict[str, Any] = {
         'llmRound': (llm_round if isinstance(llm_round, int)
                      and not isinstance(llm_round, bool) else None),
@@ -305,7 +308,6 @@ def record_injected_note(
         entry['attemptId'] = attempt_id
         if task_id:
             entry['taskId'] = task_id
-    entries = task.setdefault(INJECTED_NOTES_FIELD, [])
     for previous in entries:
         if isinstance(previous, dict) and all(
             previous.get(key, 'prompt' if key == 'action' else None) == value

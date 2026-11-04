@@ -97,7 +97,11 @@ def project_native_terminal(task: dict, request: TerminalRequest) -> None:
             for row in usages:
                 accumulate_usage_into(usage, row)
         from lib.tasks_pkg.manager._events import reset_task_text
-        reset_task_text(task, content=content or '', thinking=(
+        from lib.tasks_pkg.stream_handler._router_silence import declare_silent_turn
+        silent = declare_silent_turn(task, final, messages[:-1], llm_round=None)
+        task.pop('_silentTextCandidate', None)
+        projected_content = '' if silent else final.get('content') or ''
+        reset_task_text(task, content=projected_content, thinking=(
             task.get('thinking') or '' if thinking is None else thinking))
         task['messages'] = messages
         task['_messages_include_current_run'] = True
@@ -203,7 +207,8 @@ class NativeTaskTerminalPolicy:
         fields = ('status', 'content', 'thinking', 'finishReason', 'error',
                   '_contentEpoch', '_attemptId', 'usage', 'cost', 'apiRounds',
                   '_nativePricingRequired', '_billingUserId', '_billing_reservation_micro',
-                  '_nativeBillingSettlement')
+                  '_nativeBillingSettlement', '_silentTurn', '_silentTurnIdentity',
+                  '_silentTextCandidate')
         with self.task.get('content_lock') or nullcontext():
             encoded = json.dumps(
                 {key: self.task.get(key) for key in fields},

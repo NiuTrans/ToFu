@@ -1313,7 +1313,7 @@ components:
         text: {type: string, maxLength: 16384}
         noteKind:
           type: string
-          enum: [intent-stall, todo-continuation, system-intervention, context-injection, session-context]
+          enum: [intent-stall, todo-continuation, system-intervention, context-injection, session-context, deliberate-silence]
         # The registry id of the model-visible injection this note witnesses
         # (e.g. modified_files, url_prefetch). Generic kinds above use it to
         # self-describe; older clients that do not know it still render

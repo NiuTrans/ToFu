@@ -1,5 +1,6 @@
 """Service commands, auto-reply and supervisor restart policy (C5, C6)."""
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -138,7 +139,8 @@ def router_turns(monkeypatch):
     def human(origin):
         rows[(ROUTER, 'in-1')] = {'conversationId': ROUTER, 'turnId': 'in-1', 'actor': 'human',
                                   'projection': {'content': 'q', 'origin': origin}}
-        rows[(ROUTER, 'out-1')] = {'conversationId': ROUTER, 'turnId': 'out-1', 'parentTurnId': 'in-1'}
+        rows[(ROUTER, 'out-1')] = {'conversationId': ROUTER, 'turnId': 'out-1',
+                                  'actor': 'assistant', 'parentTurnId': 'in-1'}
     return human
 
 
@@ -208,6 +210,8 @@ def test_installed_push_observer_receives_a_real_chat_frame(
     monkeypatch.setattr('lib.tasks_pkg.manager.runtime.chat_task_runtime.get_owned', lambda *a, **k: task)
     monkeypatch.setattr('lib.turn_lifecycle.get_attempt',
                         lambda attempt_id, *, user_id: {'commandId': 'channel-owner-command'})
+    autoreply.acknowledge_command(OWNER, ROUTER, SimpleNamespace(
+        channel='dx', thread=COMMAND, event_id=f'{COMMAND}/1'), 'started')
     monkeypatch.setattr(autoreply, '_INSTALLED', False)
     monkeypatch.setattr('lib.tasks_pkg.manager._terminal.register_terminal_listener', lambda listener: True)
     from lib.agent_core.push import PushHub
@@ -260,6 +264,69 @@ def test_no_auto_reply_for_nonhuman_input_other_conversations_or_failures(
     enabled(command_chat=COMMAND)
     router_turns(origin)
     autoreply.on_task_terminal(task)
+    assert store.active_outbox() == []
+
+
+def test_human_steer_into_a_notice_returns_the_final_answer_to_its_command_thread(
+        store, router, enabled, monkeypatch):
+    enabled(command_chat=COMMAND)
+    from lib.turn_initiation import steer_author
+    author = steer_author({'content': 'Answer in 大象', 'origin': {
+        'initiator': 'human', 'channel': {
+            'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/42']}}},
+        actor='human')
+    rows = {
+        (ROUTER, 'in-1'): {
+            'conversationId': ROUTER, 'turnId': 'in-1', 'actor': 'human',
+            'projection': {'content': 'project notice', 'origin': {'initiator': 'peer'}},
+        },
+        (ROUTER, 'out-1'): {
+            'conversationId': ROUTER, 'turnId': 'out-1', 'actor': 'assistant',
+            'parentTurnId': 'in-1', 'projection': {'_userSteerInjects': [{
+                'blockId': 'injection:user-steer:channel-owner-42',
+                'commandId': 'channel-owner-42', 'deliveryState': 'delivered',
+                'author': author}]},
+        },
+    }
+    monkeypatch.setattr('lib.turn_lifecycle.get_turn',
+                        lambda conv, turn, *, user_id, include_projection=True: rows[(conv, turn)])
+    autoreply.on_task_terminal(_done(content='Here is the answer.'))
+    items = store.active_outbox()
+    assert [item.thread for item in items] == [COMMAND, COMMAND]
+    assert [item.text for item in items] == ['Here is the answer.', '总负责人处理完成。']
+    autoreply.on_task_terminal(_done(content='', status='error', finishReason='error'))
+    [item] = store.active_outbox()[2:]
+    assert item.thread == COMMAND and item.origin['kind'] == 'router_status'
+
+
+@pytest.mark.parametrize('origin, outcome, status', [
+    ({'blockId': 'notice', 'initiator': 'channel', 'channel': {
+        'channel': 'dx', 'thread': COMMAND, 'eventIds': [f'{COMMAND}/99']}}, 'error', 'error'),
+    ({'blockId': 'report', 'initiator': 'peer'}, 'interrupted', 'interrupted'),
+])
+def test_failed_notice_review_warns_the_command_chat_even_without_a_reply_origin(
+        store, router, enabled, router_turns, origin, outcome, status):
+    enabled(command_chat=COMMAND)
+    router_turns(origin)
+    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
+                                    status=status, finishReason=outcome))
+    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
+                                    status=status, finishReason=outcome))
+    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
+                                    status=status, finishReason=outcome))
+    [item] = store.active_outbox()
+    assert item.thread == COMMAND
+    assert '尚未完成审阅' in item.text
+    assert item.idempotency_key == f'out-1:notice-review:{outcome}'
+    assert item.reply_to == (f'{COMMAND}/99' if outcome == 'error' else None)
+
+
+def test_deliberate_silence_leaves_no_empty_reply_or_false_activity_completion(
+        store, router, enabled, router_turns, command_origin):
+    enabled(command_chat=COMMAND)
+    router_turns(command_origin)
+    autoreply.on_task_terminal(_done(content='', _silentTurn=True,
+                                    _turnId='notice-out'))
     assert store.active_outbox() == []
 
 

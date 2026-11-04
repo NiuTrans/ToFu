@@ -5120,6 +5120,7 @@
   "systemNote.actionToolPolicy": "Политика инструментов изменена",
   "systemNote.activeChecklistLabel": "Вмешательство системы · Активный чек-лист",
   "systemNote.contextInjectionLabel": "Контекст добавлен",
+  "systemNote.deliberateSilenceLabel": "Уведомление обработано · Ответ не требуется",
   "systemNote.detailsLabel": "Запись о вмешательстве",
   "systemNote.groupItemsTitle": "Элементов: {n}",
   "systemNote.groupLabel": "Записи контекста",

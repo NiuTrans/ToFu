@@ -62,6 +62,20 @@ _VALID_END_REASONS = frozenset({
     END_TURN_AWAITING_HUMAN, END_TURN_DONE, END_TURN_BLOCKED,
 })
 
+# ── Deliberate silence (nonhuman notices) ──
+# The Global Router is told to stay silent when a channel event or project
+# notice needs nothing (ROUTER_ROLE_ADDENDUM). An actually empty reply cannot
+# express that: the engine reads zero content as a lost upstream response and
+# retries, then settles abnormal_stop. Without a declared outcome, a model
+# that was asked to stay silent has to emit filler prose on every no-op event.
+#
+# The sentinel makes silence a DECLARED outcome on the same content channel
+# as END_TURN: the model writes one machine token, the engine recognises it as
+# a finished turn with no deliverable, and the token never reaches the user.
+# A closed-set exact match, like parse_end_turn_reason: prose that merely
+# mentions silence never suppresses empty-response recovery.
+SILENT_TURN_MARKER = '[SILENT]'
+
 # Display-hygiene pattern for strip_end_turn_marker: ANY token of this shape,
 # not just a valid reason (see that function's docstring for why the two differ).
 _END_TURN_TOKEN_RE = re.compile(r'\[END_TURN:[^\]]*\]')
@@ -99,6 +113,20 @@ def parse_end_turn_reason(content: str) -> str | None:
         if candidate in _VALID_END_REASONS:
             reason = candidate
     return reason
+
+
+def is_silent_turn(content: str) -> bool:
+    """Whether this round is exactly a deliberate-silence declaration.
+
+    Only a bare ``[SILENT]`` token counts (whitespace aside). Text before or
+    after it is a normal answer: a model that writes an explanation alongside
+    the token still owes the user that text, and the recovery buckets keep
+    their ordinary meaning for it. An unknown bracket token is not silence.
+    """
+    if not content or SILENT_TURN_MARKER not in content:
+        return False
+    return not _END_TURN_TOKEN_RE.sub('', content).replace(
+        SILENT_TURN_MARKER, '').strip()
 
 
 def _ordered_rounds(task: dict[str, Any]) -> list:

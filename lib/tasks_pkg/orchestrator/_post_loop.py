@@ -103,6 +103,7 @@ def finalize_after_loop(
     loop_exit_reason: str,
     abort_detected_phase: Any,
     last_stream_result: Any = None,
+    terminal_assistant_content: str | None = None,
 ) -> None:
     """Post-loop success tail — see module docstring.
 
@@ -165,6 +166,7 @@ def finalize_after_loop(
         project_path=project_path, project_enabled=project_enabled,
         round_num=round_num,
         assistant_msg=assistant_msg,
+        terminal_assistant_content=terminal_assistant_content,
     )
     # ── Autopilot now runs INSIDE _finalize_and_emit_done (before the
     #    done SSE event is emitted), so its result can ride on the same

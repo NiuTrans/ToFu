@@ -256,6 +256,26 @@ refusal that the account binding, and only it, maps to "no account".
 Alternative rejected: skipping the binding for routers (a human request would
 lose its usage account and fences).
 
+**Reviewed notices can conclude without an answer.** An exact `[SILENT]` is a
+declared outcome only for a bound Global Router Turn whose parent is a
+nonhuman channel/peer notice. The engine checks the durable parent and every
+committed or pending steer, including its live author carrier; a genuine human
+request, missing or failed evidence, an unknown initiator or any human steer
+refuses the declaration and uses ordinary answer recovery. Ordinary prose that
+mentions the token is never rewritten. Authorized silence publishes a
+`deliberate-silence` system note, retains the provider declaration for replay
+and has no deliverable text or automatic completion message. It cannot bypass
+reply policy, drafts, approval or a required owner decision. Python and Native
+stream/terminal projections share this policy; incomplete split markers flush
+as ordinary text at structural boundaries, and discarded attempts drop their
+uncommitted candidates. Automatic review failures/interruption send an
+out-of-band 大象 command-chat warning; successful silence does not suppress
+that failure. A human command steered into a notice supplies the reply origin,
+so its final answer and failure status return to that original thread.
+Alternatives rejected: an empty assistant answer (the transport recovery
+interprets it as a lost response), model-authored filler on every no-op event,
+and treating command-ID prefixes or marker text as authority.
+
 **Questions.** Problem: a Project Router's `ask_human` question was visible only
 in its own chat, so an owner who talks only to the Global Router (mostly from
 大象) never saw it, and a blocking question stalled the project until the

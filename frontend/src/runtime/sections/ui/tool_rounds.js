@@ -1084,6 +1084,7 @@ const _SEG_NOTE_KIND_PRESENTATION = {
   'system-intervention': { icon: _NOTE_STALL_ICON_SVG, labelKey: 'systemNote.interventionLabel' },
   'context-injection': { icon: _NOTE_CONTEXT_ICON_SVG, labelKey: 'systemNote.contextInjectionLabel' },
   'session-context': { icon: _NOTE_SESSION_ICON_SVG, labelKey: 'systemNote.sessionContextLabel' },
+  'deliberate-silence': { icon: _NOTE_TODO_ICON_SVG, labelKey: 'systemNote.deliberateSilenceLabel' },
 };
 /* The noteKind alone cannot tell one generic context-injection from another;
  * the durable `reason` (registry id) distinguishes the active-checklist

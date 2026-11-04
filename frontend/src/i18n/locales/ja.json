@@ -5120,6 +5120,7 @@
   "systemNote.actionToolPolicy": "ツールポリシーを変更済み",
   "systemNote.activeChecklistLabel": "システム介入 · アクティブなチェックリスト",
   "systemNote.contextInjectionLabel": "コンテキストを挿入済み",
+  "systemNote.deliberateSilenceLabel": "通知を確認済み · 返信不要",
   "systemNote.detailsLabel": "記録された介入",
   "systemNote.groupItemsTitle": "{n}件",
   "systemNote.groupLabel": "コンテキストの記録",
