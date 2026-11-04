@@ -14,10 +14,15 @@ import tempfile
 def _durable_replace(path: Path, content: bytes) -> None:
     fd, temporary = tempfile.mkstemp(prefix='.install-commit-', dir=path.parent)
     try:
-        with os.fdopen(fd, 'wb') as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            with os.fdopen(fd, 'wb', closefd=False) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(fd)
+        finally:
+            # The stream only borrows the descriptor, including when stream
+            # construction fails. Close exactly once and before Windows rename.
+            os.close(fd)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):

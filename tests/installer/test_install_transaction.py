@@ -1,6 +1,8 @@
 """Failures before commit preserve the selected interpreter and configuration."""
 import hashlib
+import errno
 import json
+import os
 from pathlib import Path
 import zipfile
 
@@ -75,6 +77,40 @@ def test_pointer_publication_failure_restores_old_configuration(tmp_path, monkey
         transaction.commit(tmp_path)
     assert (tmp_path / '.tofu_env.json').read_text() == 'old environment'
     assert (tmp_path / '.env').read_bytes() == previous
+
+
+def test_failed_configuration_stream_closes_staging_descriptor(tmp_path, monkeypatch):
+    candidate(tmp_path)
+    previous = (tmp_path / '.env').read_bytes()
+    descriptors = []
+    mkstemp = transaction.tempfile.mkstemp
+
+    def capture_descriptor(*args, **kwargs):
+        fd, path = mkstemp(*args, **kwargs)
+        descriptors.append(fd)
+        return fd, path
+
+    def fail_stream(*args, **kwargs):
+        raise OSError('cannot open staging stream')
+
+    monkeypatch.setattr(transaction.tempfile, 'mkstemp', capture_descriptor)
+    monkeypatch.setattr(transaction.os, 'fdopen', fail_stream)
+    try:
+        with pytest.raises(OSError, match='staging stream'):
+            transaction.commit(tmp_path)
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptors[0])
+        descriptors.clear()  # The verified-closed number may be reused later.
+        assert closed.value.errno == errno.EBADF
+        assert not list(tmp_path.glob('.install-commit-*'))
+        assert (tmp_path / '.env').read_bytes() == previous
+        assert (tmp_path / '.tofu_env.json').read_text() == 'old environment'
+    finally:
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def test_missing_candidate_never_changes_live_configuration(tmp_path):

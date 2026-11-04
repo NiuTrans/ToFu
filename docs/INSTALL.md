@@ -747,6 +747,9 @@ before configuration changes. Problem: checking only that an executable exists
 does not establish the candidate's ownership. Decision: verify its containing
 directory independently from the executable's symlink target. Rejecting all
 interpreter symlinks would break ordinary virtualenvs.
+Configuration staging owns its file descriptor until it is closed, even when
+stream creation fails. Unlinking the temporary pathname alone does not release
+that descriptor; the selected configuration stays intact on this failure.
 Use `--no-launch` to prepare without starting a worker; `--no-update` preserves
 source but still permits artifact downloads. Locks reject competing installers.
 While still holding the install lock, completion removes only unpublished
