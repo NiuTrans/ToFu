@@ -272,6 +272,8 @@ def admit_round_context(task, messages, tools, *, round_num, model,
                     precomputed_tool_schema_tokens=admission.get('toolSchemaTokens'))
     from lib.tasks_pkg.context_dependencies import prepare
     prepare(task, messages)
+    from lib.tasks_pkg.compaction._idle import record_model_activity
+    record_model_activity(task)
     return admission
 
 

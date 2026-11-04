@@ -319,6 +319,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         route = compile_native_route(repo, repo.boundary, selection())
         public, private = route.consume(principal())
         self.assertEqual(public["protocol"], "local")
+        self.assertTrue(public["local_inference"])
         self.assertEqual(
             public["model_ref"], {"creator_id": "creator", "model_id": "alpha"}
         )

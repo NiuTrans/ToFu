@@ -22,6 +22,9 @@ L2. Their contract is `docs/CONTEXT_BUDGET_POLICY.md`; verify with
 `test_compaction_pressure_policy.py` and `test_route_context_budget.py`.
 `_budget.py` fits the final tool view, including host outcomes and recovery
 metadata; candidate finalizers are pure and retention stays outside the search.
+`_idle.py` owns the cloud idle L1 trigger and request activity evidence;
+`model_replay.py` carries that evidence through the existing continuation.
+Verify `test_cloud_idle_l1.py` and `tests/model_routing/test_context_activity.py`.
 Verify final-result budget facts/backends, aggregate recovery and source round
 budget tests. Source-policy ceilings must agree across every fitting stage.
 Canonical verdict overrides must reconcile prior views and manifest references

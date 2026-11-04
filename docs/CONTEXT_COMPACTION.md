@@ -306,6 +306,29 @@ at restore time, and same-protocol replay would lose its signatures and cache).
 Spec: `tests/conversation/test_completed_turn_reasoning.py`.
 
 L1 receives an API-form working projection and replaces only cold tool/image bulk; it performs no conversation read, projection update or change notification.
+**Cloud idle L1 (owner decision 2026-11-05).** After six hours without model
+activity, the next request to a cloud provider may lift L1's sent-prefix fence
+once and apply its ordinary deterministic transforms. Unknown provider TTLs
+do not disable this policy. Six hours is the owner's product policy, not a
+claim that every provider cache has expired: Claude documents 5-minute/1-hour
+lifetimes, while DeepSeek documents hours to days. Local/self-hosted inference
+(including SGLang/vLLM) is excluded by the bound route's serving identity;
+ordinary budget recovery and manual compaction remain unchanged.
+The existing completed-context checkpoint carries the last model activity;
+uncovered assistant Turns and legacy checkpoints use their owned Turn update
+times as conservative activity bounds. Publication and admitted request
+preparation also provide conservative upper bounds. New human messages and
+sidebar edits do not restart this clock. Live activity takes precedence, and
+the same activity boundary cannot trigger repeated idle passes. Missing or
+invalid activity evidence cannot establish six hours of inactivity.
+This request-local pass makes no probe/summary call, starts no idle worker,
+adds no model notice, and preserves summary, intent, active skills and unread
+tool batches. Existing durable history and checkpoint validation stay intact.
+Alternatives rejected: requiring a documented TTL leaves unknown cloud routes
+untrimmed forever; treating a zero cache read as future coldness can create a
+rewrite loop; a background transcript rewrite adds another persistence owner.
+References: [Claude caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+[DeepSeek caching](https://api-docs.deepseek.com/guides/kv_cache/).
 **Continuation preservation.** Problem: once outside the hot tail, a legacy
 `context_compact` tool result could become an ordinary short placeholder, and
 the optional assistant-content pass could clip an accepted manual summary.

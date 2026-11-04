@@ -31,10 +31,9 @@ per-round cache stats at INFO for production visibility:
                               evicted-tail re-bill as benign
                               contextWrite.
 
-The whole cluster is guarded by
-``if task.get('convId') and usage:`` — non-conv turns and turns
-with no recorded usage are silent no-ops (byte-identical to the
-inline pre-extraction body).
+The accounting cluster is guarded by ``if task.get('convId') and usage:``.
+The returned round refreshes the live activity clock even without usage;
+non-conversation turns and missing usage emit no cache accounting.
 
 All three ``api_rounds[-1]`` stamps are protected by a round-match
 guard: ``api_rounds[-1].get('round') == round_num + 1`` — a bug
@@ -75,10 +74,8 @@ def stamp_round_cache_accounting(
         messages: list[dict[str, Any]]) -> None:
     """Detect cache break + stamp per-round telemetry + log stats.
 
-    Byte-identical to the inline pre-extraction body of the
-    ``if task.get('convId') and rs.last_usage:`` block in
-    ``run_task``. Safe to call unconditionally — the internal
-    guards reproduce the outer conditional's short-circuit.
+    Safe to call unconditionally. A returned round refreshes the activity
+    clock; cache accounting still requires a conversation and recorded usage.
 
     Parameters
     ----------
@@ -110,6 +107,8 @@ def stamp_round_cache_accounting(
         ``detect_cache_break`` so it can hash the system prompt +
         prefix for break-cause classification.
     """
+    from lib.tasks_pkg.compaction._idle import record_model_activity
+    record_model_activity(task)
     if not (task.get('convId') and usage):
         return
 
