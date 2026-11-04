@@ -97,9 +97,29 @@ by fast-forward; `--no-update` skips that step. Matching frontend artifacts are
 reused without a download or Node. `--port` overrides an inherited `PORT` for
 both configuration and child startup. No occupied port is silently changed and
 no unrelated listener is killed. A healthy worker identified by the existing
-lifecycle manager is verified, not restarted.
+lifecycle manager is verified, not restarted, when it provably runs this
+checkout's code: its `processStartedAt` (`serverctl.py status --json`) is at
+least one second after HEAD last moved (the newest HEAD reflog entry, which has
+whole-second resolution). A worker keeps the code it imported at boot, so after
+`git pull` or the installer's own fast-forward an older worker is stale. An
+unavailable start time or reflog entry (no `.git`, no `/proc`) also counts as
+stale; uncommitted edits do not move HEAD and are not detected. For a stale
+worker an interactive rerun runs `serverctl.py restart`, which asks for
+confirmation, then verifies the restarted worker. A non-interactive rerun
+(`--non-interactive` or non-TTY stdin) leaves the worker untouched; it, a
+declined restart (exit 3) and a restart that reports no ready worker end, after
+runtime verification passes, with a warning, the exact restart command and
+`restart-required` instead of `ready`. If no healthy worker remains,
+verification fails as for any launch.
+Problem: rerunning the installer after an update reported `ready` while the
+old worker kept serving the old code. Decision: compare the worker start with
+the last HEAD move and restart only through the human-approved lifecycle owner.
+Alternatives rejected: always restarting interrupts live work when nothing
+changed; scanning source mtimes is slow on large checkouts and flags unrelated
+generated or uncommitted writes; `TOFU_AUTO_RESTART` is a separate, default-off
+policy.
 
-The JSON receipt has `schema: 1`, `exit_code`, `status` (`installed`, `ready`, `failed`), `phase`, `install_dir`, `python`, `url`, `log`, and `duration_seconds`. Only a verified live launch earns `ready`; `--no-launch` earns `installed` with no URL. Runtime failure remains nonzero with `failed`. Receipts contain no provider credentials, but do contain local paths. They require a working Python at exit. Help/usage errors are side-effect-free and do not produce a receipt.
+The JSON receipt has `schema: 1`, `exit_code`, `status` (`installed`, `ready`, `restart-required`, `failed`), `phase`, `install_dir`, `python`, `url`, `log`, and `duration_seconds`. Only a verified live launch earns `ready`; `--no-launch` earns `installed` with no URL. `restart-required` exits 0: installation and runtime verification passed, but the verified worker at `url` may predate this checkout's code until `serverctl.py restart` runs. Runtime failure remains nonzero with `failed`. Receipts contain no provider credentials, but do contain local paths. They require a working Python at exit. Help/usage errors are side-effect-free and do not produce a receipt.
 Use a unique result path per invocation.
 
 Install-directory and selected conda-environment locks reject concurrent

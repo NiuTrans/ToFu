@@ -9,9 +9,11 @@ from __future__ import annotations
 # Synthetic repository/package fixtures, never shipped-source anchors.
 _AUDIT_SYNTHETIC_REPO_PATHS = ('lib/storage.py',)
 
+import contextlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,11 +22,81 @@ import pytest
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
+# Synthetic epoch seconds of the checkout's newest HEAD reflog entry.
+HEAD_MOVED_AT = 1_793_787_481
+
+# Module seam for the installer's port probe: bind fails only when BUSY=1.
+_PORT_SEAM = '''
+AF_INET=2
+SOCK_STREAM=1
+SOL_SOCKET=1
+SO_REUSEADDR=2
+class socket:
+    def __init__(self,*a): pass
+    def setsockopt(self,*a): pass
+    def bind(self,*a):
+        import os
+        if os.environ.get('BUSY') == '1': raise OSError('occupied')
+    def close(self): pass
+'''
+
+# Lifecycle owner of a ready worker. It records whether stdin is a terminal
+# because serverctl.py restart shows its own approval prompt there;
+# FAKE_RESTART_RC models a declined (3) or failed (1) restart.
+_READY_SERVERCTL = '''
+import json, os, sys
+from pathlib import Path
+Path(os.environ["CALLS_FILE"]).open("a").write(
+    "serverctl:%s tty=%s\\n" % (" ".join(sys.argv[1:]), sys.stdin.isatty()))
+if sys.argv[1:2] == ["restart"]:
+    raise SystemExit(int(os.environ.get("FAKE_RESTART_RC", "0")))
+status = {"ready": True, "applicationReachable": True, "port": 18677,
+          "applicationUrl": "http://localhost:18677", "pid": 4242}
+if "FAKE_WORKER_STARTED_AT" in os.environ:
+    status["processStartedAt"] = float(os.environ["FAKE_WORKER_STARTED_AT"])
+print(json.dumps(status))
+'''
 
 
 def _executable(path, body):
     path.write_text('#!/usr/bin/env bash\n' + body, encoding='utf-8')
     path.chmod(0o755)
+
+
+@contextlib.contextmanager
+def _terminal():
+    """Yield a pseudo-terminal descriptor to use as an interactive stdin."""
+    controller, terminal = os.openpty()
+    try:
+        yield terminal
+    finally:
+        os.close(terminal)
+        os.close(controller)
+
+
+def _occupy_port_with_ready_worker(project, env, *, started_at, head_moved_at):
+    """Busy the port with this checkout's ready worker started at ``started_at``.
+
+    ``None`` models a status without ``processStartedAt`` or, for
+    ``head_moved_at``, a checkout without a HEAD reflog entry.
+    """
+    (project / 'socket.py').write_text(_PORT_SEAM)
+    (project / 'serverctl.py').write_text(_READY_SERVERCTL)
+    env['BUSY'] = '1'
+    if started_at is not None:
+        env['FAKE_WORKER_STARTED_AT'] = repr(started_at)
+    if head_moved_at is not None:
+        env['FAKE_HEAD_MOVED_AT'] = str(head_moved_at)
+
+
+def _assert_update_not_claimed_live(project, stdout):
+    assert 'Tofu is ready' not in stdout
+    assert 'still running the code it started with' in stdout
+    command = next(line.split(':', 1)[1] for line in stdout.splitlines()
+                   if line.strip().startswith('Apply the update:'))
+    python = json.loads((project / '.tofu_env.json').read_text())['python']
+    assert shlex.split(command) == [
+        'cd', os.path.realpath(project), '&&', python, 'serverctl.py', 'restart']
 
 
 @pytest.fixture
@@ -104,7 +176,10 @@ class StorageSupervisor:
         'if [[ "${1:-}" == venv ]]; then mkdir -p "$2/bin"; cp "$FIXTURE_PYTHON" "$2/bin/python"; fi\n')
     _executable(fake_bin / 'git',
         'printf "git:%s\\n" "$*" >> "$CALLS_FILE"\n'
-        'if [[ "$*" == *status* && "${FAKE_DIRTY:-0}" == 1 ]]; then echo " M user.txt"; fi\n')
+        'if [[ "$*" == *status* && "${FAKE_DIRTY:-0}" == 1 ]]; then echo " M user.txt"; fi\n'
+        'if [[ "$*" == *" reflog "* && -n "${FAKE_HEAD_MOVED_AT:-}" ]]; then\n'
+        '    echo "HEAD@{${FAKE_HEAD_MOVED_AT}}"\n'
+        'fi\n')
     _executable(fake_bin / 'ldd', 'echo "ldd (GNU libc) 2.35"\n')
     for binary in ('rg', 'fd', 'sd', 'goawk', 'mlr'):
         _executable(fake_bin / binary, 'printf "fixture tool\\n"\n')
@@ -131,13 +206,15 @@ class StorageSupervisor:
     return project, env
 
 
-def _run(project, env, *args, cwd=None):
+def _run(project, env, *args, cwd=None, stdin=subprocess.DEVNULL):
     # install.sh does real work (env probe, download-cache reuse, receipt
     # writes); 25 s only fit an idle tmpfs host — a loaded FUSE checkout
     # needs an order of magnitude more while still catching a true wedge.
+    # stdin is explicit because a terminal changes installer behavior; a test
+    # never inherits the developer's terminal.
     return subprocess.run(['bash', str(project / 'install.sh'),
                            *args], cwd=cwd or project, env=env, text=True,
-                          capture_output=True, timeout=90)
+                          stdin=stdin, capture_output=True, timeout=90)
 
 
 def test_agent_install_only_no_update_and_private_receipt(installer, tmp_path):
@@ -255,25 +332,16 @@ class socket:
 @pytest.mark.parametrize('already_running', [False, True])
 def test_ready_receipt_requires_health_without_restarting_existing_worker(installer, tmp_path, already_running):
     project, env = installer
-    (project / 'socket.py').write_text('''
-AF_INET=2
-SOCK_STREAM=1
-SOL_SOCKET=1
-SO_REUSEADDR=2
-class socket:
-    def __init__(self,*a): pass
-    def setsockopt(self,*a): pass
-    def bind(self,*a):
-        import os
-        if os.environ.get('BUSY') == '1': raise OSError('occupied')
-    def close(self): pass
-''')
+    (project / 'socket.py').write_text(_PORT_SEAM)
     if already_running:
-        env['BUSY'] = '1'
-        (project / 'serverctl.py').write_text(
-            'print(\'{"ready": true, "applicationReachable": true, "port": 18677, "applicationUrl": "http://localhost:18677"}\')\n')
+        # Started after the checkout's last HEAD move, so it runs this code:
+        # even an interactive rerun only verifies it.
+        _occupy_port_with_ready_worker(project, env, started_at=HEAD_MOVED_AT + 60,
+                                       head_moved_at=HEAD_MOVED_AT)
     receipt = tmp_path / 'ready.json'
-    result = _run(project, env, '--no-update', '--port', '18677', '--result-json', str(receipt))
+    with _terminal() as terminal:
+        result = _run(project, env, '--no-update', '--port', '18677',
+                      '--result-json', str(receipt), stdin=terminal)
     assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads(receipt.read_text())
     assert data['status'] == 'ready' and data['exit_code'] == 0
@@ -281,9 +349,88 @@ class socket:
     calls = Path(env['CALLS_FILE']).read_text()
     assert 'health:18677' in calls
     assert ('launch:18677' in calls) is not already_running
+    assert 'serverctl:restart' not in calls
+    assert ('verifying it without restarting' in result.stdout) is already_running
+    assert 'still running the code it started with' not in result.stdout
     # The new candidate is owned; the caller-created .venv remains untouched.
     assert json.loads((project / '.tofu_env.json').read_text())['owned_by_tofu_install'] is True
     assert (project / ".venv/bin/python").is_file()
+
+
+@pytest.mark.parametrize('started_at', [HEAD_MOVED_AT - 3600, HEAD_MOVED_AT + 0.5, None],
+                         ids=['before-head-move', 'within-reflog-second', 'unknown-start'])
+def test_stale_worker_restarts_through_lifecycle_owner_on_terminal(installer, tmp_path, started_at):
+    project, env = installer
+    _occupy_port_with_ready_worker(project, env, started_at=started_at,
+                                   head_moved_at=HEAD_MOVED_AT)
+    receipt = tmp_path / 'restarted.json'
+    with _terminal() as terminal:
+        result = _run(project, env, '--no-update', '--port', '18677',
+                      '--result-json', str(receipt), stdin=terminal)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = Path(env['CALLS_FILE']).read_text().splitlines()
+    # serverctl.py owns the approval prompt, so it must receive the terminal.
+    restarts = [line for line in calls if line.startswith('serverctl:restart')]
+    assert restarts == ['serverctl:restart tty=True']
+    assert 'launch:18677' not in calls
+    # Runtime verification covers the restarted worker.
+    assert calls.index(restarts[0]) < calls.index('health:18677')
+    assert json.loads(receipt.read_text())['status'] == 'ready'
+    assert 'Tofu is ready: http://localhost:18677' in result.stdout
+
+
+@pytest.mark.parametrize('caller', ['pipe', 'terminal-non-interactive'])
+def test_stale_worker_without_interactive_terminal_is_not_reported_live(installer, tmp_path, caller):
+    project, env = installer
+    _occupy_port_with_ready_worker(project, env, started_at=HEAD_MOVED_AT - 3600,
+                                   head_moved_at=HEAD_MOVED_AT)
+    receipt = tmp_path / 'stale.json'
+    args = ('--no-update', '--port', '18677', '--result-json', str(receipt))
+    if caller == 'pipe':
+        result = _run(project, env, *args)
+    else:
+        with _terminal() as terminal:
+            result = _run(project, env, '--non-interactive', *args, stdin=terminal)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = Path(env['CALLS_FILE']).read_text()
+    assert 'serverctl:restart' not in calls and 'launch:' not in calls
+    assert 'health:18677' in calls
+    data = json.loads(receipt.read_text())
+    assert data['status'] == 'restart-required' and data['exit_code'] == 0
+    assert data['url'] == 'http://localhost:18677'
+    _assert_update_not_claimed_live(project, result.stdout)
+
+
+@pytest.mark.parametrize('restart_rc', ['3', '1'], ids=['declined', 'failed'])
+def test_declined_or_failed_restart_keeps_update_pending(installer, tmp_path, restart_rc):
+    project, env = installer
+    _occupy_port_with_ready_worker(project, env, started_at=HEAD_MOVED_AT - 3600,
+                                   head_moved_at=HEAD_MOVED_AT)
+    env['FAKE_RESTART_RC'] = restart_rc
+    receipt = tmp_path / 'not-restarted.json'
+    with _terminal() as terminal:
+        result = _run(project, env, '--no-update', '--port', '18677',
+                      '--result-json', str(receipt), stdin=terminal)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = Path(env['CALLS_FILE']).read_text()
+    assert calls.count('serverctl:restart') == 1 and 'launch:' not in calls
+    assert json.loads(receipt.read_text())['status'] == 'restart-required'
+    _assert_update_not_claimed_live(project, result.stdout)
+
+
+@pytest.mark.parametrize('missing', ['worker-start-time', 'head-reflog-entry'])
+def test_unknown_worker_age_is_never_reported_live(installer, tmp_path, missing):
+    project, env = installer
+    _occupy_port_with_ready_worker(
+        project, env,
+        started_at=None if missing == 'worker-start-time' else HEAD_MOVED_AT + 3600,
+        head_moved_at=None if missing == 'head-reflog-entry' else HEAD_MOVED_AT)
+    receipt = tmp_path / 'unknown.json'
+    result = _run(project, env, '--no-update', '--port', '18677', '--result-json', str(receipt))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'serverctl:restart' not in Path(env['CALLS_FILE']).read_text()
+    assert json.loads(receipt.read_text())['status'] == 'restart-required'
+    _assert_update_not_claimed_live(project, result.stdout)
 
 
 def test_replaced_home_and_missing_temp_directory_are_supported(installer, tmp_path):
