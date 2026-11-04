@@ -491,7 +491,9 @@ user turn. The existing delivery owner attaches the deterministic command receip
 before retiring only the automatic wake, including a wake already leased when
 cancellation raced it. Durable results remain readable through the assignment;
 this evidence preservation does not reclassify the cancelled attempt as completed,
-claim model consumption, or turn an authority refusal into a user Stop.
+claim model consumption, or turn an authority refusal into a user Stop. Receipts
+without a binding in a Worker conversation settle the same way through that
+conversation's assignment, and revocation stops every live attempt there.
 
 Accepted resume config carries authority-written `_resumeSource` (exact prior
 attempt/task, status and settlement cause). SQL/native acceptance overwrite any

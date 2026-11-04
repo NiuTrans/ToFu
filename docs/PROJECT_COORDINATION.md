@@ -1472,6 +1472,33 @@ leave the assignment unbound. Ordinary non-Worker completions retain their
 existing collective model wake, and restart-paused assignments continue through
 the same Continue path described above.
 
+Problem: a Worker turn that ran without its assignment binding (started by an
+older wake path, or by human input in the Worker conversation) leaves receipts
+with no binding. Their completions took the ordinary collective wake after
+cancellation, and each wake turn's own receipts were unbound again, so the Worker
+conversation kept working. Cancellation reached only the attempt named by the
+execution association, which can be long settled while such a turn runs.
+
+Decision: a Worker conversation (created with `_coordinatorSource`) is governed by
+its assignment. A background batch whose receipts carry no binding resolves the
+conversation's latest recipient admission through its canonical project
+(`recovery.worker_conversation_admission`) and follows the revoked-grant settlement
+above; a live grant keeps the existing wake. Revocation through
+`cancel_project_work` or the assignment revoke API stops the associated attempt and
+every other live attempt in the Worker conversation, with the same
+`dispatch_grant_revoked` cause and provenance. A Coordinator continuation grant
+names the Coordinator conversation as its recipient, so its turns are never swept.
+Human input in a cancelled Worker conversation still runs on the ordinary command
+path; its command results also settle as durable evidence instead of waking a
+model turn.
+
+Alternatives rejected: recording a durable conversation Stop for the Worker
+reports an authority withdrawal as a user Stop and still admits wakes requested
+after it; refusing every unbound automatic turn in Worker conversations would also
+block steering and human takeover of live Workers; rebinding an unbound wake into
+a trusted Continue fails on the stale association and would retroactively give
+that chain the assignment's authority.
+
 The existing command/start handshake owns execution, lane-idle admission and
 queued-human priority. Busy/superseded dispatch is deferred. After the existing
 human/background queues drain, the lane-settlement callback retries the same grant;
