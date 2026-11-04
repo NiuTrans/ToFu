@@ -586,6 +586,61 @@ def _report_uncached_round(conv_id, prev, *, prompt_tokens, markers) -> dict:
         f'was billed at the uncached input rate: {evidence}.')}
 
 
+def _unconfirmed_round_record(conv_id, prev, *, model, usage, cache_read,
+                              cache_write, elapsed, was_compaction,
+                              advertised_rewrite, expected_rewrite_index,
+                              markers) -> dict | None:
+    """Return the ledger record for a round with no confirmed break, or None
+    when it is a genuine ``no_break``; the detector still returns None."""
+    # ── INDETERMINATE vs genuinely-no-break ──
+    # This round paid to write a substantial prefix and read back NOTHING,
+    # yet no break gate fired. That is not "the cache was reused fine" — it
+    # is "we could not tell", and recording both under `no_break` is what
+    # let real spend hide behind a healthy-looking bucket.
+    #
+    # THE ACTUAL SUPPRESSOR IS COMPACTION, measured — not gate starvation.
+    # All three break predicates carry `and not was_compaction`, so a
+    # compacted round with a huge zero-read write is structurally exempt
+    # from every gate and lands here. (An earlier version of this fix
+    # asserted the cause was a miss-predecessor starving the gates; that is
+    # FALSE — `prev_prefix_tokens` is prev_read + prev_write, so a
+    # zero-read predecessor with a large write still satisfies no_reuse's
+    # threshold. Verified directly against _classify_break.)
+    #
+    # The exemption is right for the RETURN value: a compaction legitimately
+    # rebuilds its prefix, so it is not a confirmed break and must not be
+    # blamed on the gateway. But it is wrong for the LEDGER: the tokens were
+    # really paid for, and filing them as `no_break` makes a rebuild look
+    # like a cache hit. Recording them as indeterminate keeps the spend
+    # visible and the cause honestly unresolved.
+    #
+    # Requires a genuine PREDECESSOR. ``prev.call_count`` has already been
+    # incremented for THIS round by the time we get here, so round 1 sees
+    # it as 1 — the guard must be > 1, not > 0, or every cold start is
+    # mislabelled as an unknown. A first round had nothing to read back.
+    gates_starved = (
+        prev.call_count > 1
+        and cache_read == 0
+        and cache_write >= _MIN_NO_REUSE_TOKENS
+    )
+    if gates_starved:
+        return _report_indeterminate_round(
+            conv_id, prev, cache_write=cache_write, elapsed=elapsed,
+            was_compaction=was_compaction,
+            advertised_rewrite=advertised_rewrite,
+            expected_rewrite_index=expected_rewrite_index)
+    # A cacheable Claude round with no cache activity at all paid the base
+    # input rate for its whole prompt. Like the indeterminate case it is a
+    # ledger fact, not a confirmed break: the return value stays None.
+    prompt_tokens = split_input_tokens(usage)[1]
+    if uncached_round(claude=is_claude(model), call_count=prev.call_count,
+                      cache_read=cache_read, cache_write=cache_write,
+                      prompt_tokens=prompt_tokens):
+        return _report_uncached_round(
+            conv_id, prev, prompt_tokens=prompt_tokens, markers=markers)
+    return None
+
+
 def detect_cache_break(
     conv_id: str,
     messages: list,
@@ -955,53 +1010,12 @@ def detect_cache_break(
                 prev_cache_read, cache_read,
             )
 
-        # ── INDETERMINATE vs genuinely-no-break ──
-        # This round paid to write a substantial prefix and read back NOTHING,
-        # yet no break gate fired. That is not "the cache was reused fine" — it
-        # is "we could not tell", and recording both under `no_break` is what
-        # let real spend hide behind a healthy-looking bucket.
-        #
-        # THE ACTUAL SUPPRESSOR IS COMPACTION, measured — not gate starvation.
-        # All three break predicates carry `and not was_compaction`, so a
-        # compacted round with a huge zero-read write is structurally exempt
-        # from every gate and lands here. (An earlier version of this fix
-        # asserted the cause was a miss-predecessor starving the gates; that is
-        # FALSE — `prev_prefix_tokens` is prev_read + prev_write, so a
-        # zero-read predecessor with a large write still satisfies no_reuse's
-        # threshold. Verified directly against _classify_break.)
-        #
-        # The exemption is right for the RETURN value: a compaction legitimately
-        # rebuilds its prefix, so it is not a confirmed break and must not be
-        # blamed on the gateway. But it is wrong for the LEDGER: the tokens were
-        # really paid for, and filing them as `no_break` makes a rebuild look
-        # like a cache hit. Recording them as indeterminate keeps the spend
-        # visible and the cause honestly unresolved.
-        #
-        # Requires a genuine PREDECESSOR. ``prev.call_count`` has already been
-        # incremented for THIS round by the time we get here, so round 1 sees
-        # it as 1 — the guard must be > 1, not > 0, or every cold start is
-        # mislabelled as an unknown. A first round had nothing to read back.
-        _gates_starved = (
-            prev.call_count > 1
-            and cache_read == 0
-            and cache_write >= _MIN_NO_REUSE_TOKENS
-        )
-        if _gates_starved:
-            return _finish(None, record_as=_report_indeterminate_round(
-                conv_id, prev, cache_write=cache_write, elapsed=elapsed,
-                was_compaction=_was_compaction,
-                advertised_rewrite=_advertised_rewrite,
-                expected_rewrite_index=_expected_rewrite_index))
-        # A cacheable Claude round with no cache activity at all paid the base
-        # input rate for its whole prompt. Like the indeterminate case it is a
-        # ledger fact, not a confirmed break: the return value stays None.
-        _prompt_tokens = split_input_tokens(usage)[1]
-        if uncached_round(claude=is_claude(model), call_count=prev.call_count,
-                          cache_read=cache_read, cache_write=cache_write,
-                          prompt_tokens=_prompt_tokens):
-            return _finish(None, record_as=_report_uncached_round(
-                conv_id, prev, prompt_tokens=_prompt_tokens,
-                markers=_wire_evidence.markers))
-        _finish(None)
+        _finish(None, record_as=_unconfirmed_round_record(
+            conv_id, prev, model=model, usage=usage, cache_read=cache_read,
+            cache_write=cache_write, elapsed=elapsed,
+            was_compaction=_was_compaction,
+            advertised_rewrite=_advertised_rewrite,
+            expected_rewrite_index=_expected_rewrite_index,
+            markers=_wire_evidence.markers))
 
     return None
