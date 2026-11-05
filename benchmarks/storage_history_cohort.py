@@ -204,8 +204,10 @@ def run_case(client, owner, fixture, row, *, cycles, submission, ready=None):
     previous, previous_bytes = None, 0
     started, pushed, stages, capture_ms = {}, {}, [], []
     acknowledged, observed = {}, []
+    delivery_runs = []
 
     def persist_many(entries):
+        delivery_runs.append([entry.sequence for entry in entries])
         outcomes = turns.record_task_events(task, entries)
         if outcomes != ['carried'] * len(entries):
             raise ValueError(f'Rejected continuation: {outcomes}')
@@ -263,6 +265,7 @@ def run_case(client, owner, fixture, row, *, cycles, submission, ready=None):
               'projection_bytes': row['projection_bytes'], 'rounds': row['rounds'],
               'events': events, 'digest': work_digest, 'seed_ms': seed_ms,
               'elapsed_ms': elapsed_ms, 'capture_ms': capture_ms, 'event_stages': stages,
+              'delivery_run_sequences': delivery_runs,
               'clock_window_seconds': [wall, wall + elapsed_ms / 1000],
               'event_ms': [(pushed[i] - started[i]) * 1000 for i in range(events)],
               'push_ordered': observed == list(range(events)), 'recovered': False}

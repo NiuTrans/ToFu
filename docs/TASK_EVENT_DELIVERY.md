@@ -242,6 +242,36 @@ terminal receipt. The fix is owned by
 The measurement harness now preserves failed authorities, daemon logs and
 partial reports, and refuses them as qualifying comparisons.
 
+The subsequent release (`8d61b71d0bda…`) includes adjacent ordinary-event
+projection reuse and terminal receipts. Against `b2773bd711b4…`, a fresh
+25-history queued pair reduced summed continuation time **150.53→131.69 s**,
+event P95 **14.99→10.66 s**, and reconstructed checkpoint inputs
+**18.54→10.77 GiB** (41.9% less). Terminal summed time increased
+21.43→24.97 s. Source/input/artifact identities, exact final work and all
+625 durable carriers qualified each arm. Seed/verification are outside the
+latency clock but inside native work counters. This shared host also ran the
+native regression suite during part of this serial pair; latency values are
+observations under that load, not an isolated hardware comparison.
+
+Two fresh 25-way **queued** pairs reverse treatment order and retain all
+observations (1,250 events per arm). Their results establish no stable
+concurrent latency improvement:
+
+| Concurrent queued observation | Control | Adjacent reuse + terminal receipts |
+|---|---:|---:|
+| Cohort completion, control then candidate | 48.67 s | 41.59 s |
+| Event P95, same pair | 23.68 s | 34.18 s |
+| Cohort completion, candidate then control | 32.18 s | 35.28 s |
+| Event P95, reverse pair | 19.35 s | 20.24 s |
+
+The first concurrent pair reconstructed 13.84→8.45 GiB of checkpoint inputs.
+In the reverse pair, the real producer formed 175 versus 198 delivery runs
+for the same 600 nonterminal events; a delivery run can contain multiple RPC
+commits. The harness records those sequence groups rather than pretending
+atomic groups or scheduler interleavings are identical. Successful trials all
+passed SIGKILL recovery and offline integrity, but these results **do not
+qualify concurrent progress latency or release performance readiness**.
+
 Alternative rejected after measurement: a producer segment-normalization memo
 made a warm 51 MiB metadata microprofile substantially faster, but whole-cohort
 wait changed by −0.4% and +4.3% in the two paired runs. The extra cache and its
