@@ -63,6 +63,8 @@ def _mk(tid, conv, *, created, owner=1, status='running', aborted=False,
 def _install(monkeypatch, task_list):
     import lib.tasks_pkg.liveness as liveness
     import lib.tasks_pkg.manager._registry as _registry
+    monkeypatch.setattr('lib.durable_worker.activity.list_active_conversation_tasks',
+                        lambda **kwargs: [])
     runtime = SimpleNamespace(snapshot=lambda: list(task_list))
     monkeypatch.setattr(_registry, 'chat_task_runtime', runtime, raising=True)
     monkeypatch.setattr(liveness, 'stall_threshold_seconds',

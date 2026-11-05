@@ -18,6 +18,16 @@
     "suspended"
   ],
   "operations": {
+    "worker_job.active.list": {
+      "kind": "query",
+      "receiptRequired": false,
+      "input": {
+        "user_id": "required: positive integer owner filter or explicit null for the trusted application system scope",
+        "task_kinds": "same explicit nonempty kind filter as claim_next"
+      },
+      "result": "complete list of {taskId,userId,taskKind,conversationId,status,createdAtMs}, ordered by createdAtMs then taskId; no claim, principal or effect authority",
+      "semantics": "Read queued, running and suspended jobs through their existing active indexes in the authenticated tenant. Filter owner before projection. Terminal history is never scanned. No truncation; existing transport byte limits report a typed error."
+    },
     "worker_job.defer": {
       "kind": "command",
       "receiptRequired": false,

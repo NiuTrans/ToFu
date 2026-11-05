@@ -34,9 +34,9 @@ class _Input:
         value=json.loads(raw) if self.first or not encoded else None
         if (self.first or not encoded) and not isinstance(value,dict):
             raise NativeProcessError('native invocation frame is not an object')
-        if value is None:
-            raise NativeProcessError('native invocation frame is not an object')
         if self.first:
+            if value is None:
+                raise NativeProcessError('native invocation frame is not an object')
             if value.get('type')!='configure' or value.get('owner_user_id')!=lease.worker.owner:
                 raise NativeProcessError('native worker requires owned initial configuration')
         kind='worker_run' if self.first else 'worker_control'

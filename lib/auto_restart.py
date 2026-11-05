@@ -13,8 +13,9 @@ precondition bundle:
   * HEAD sha differs from the boot-time baseline — any commit that lands
     while the server runs (ours or a sibling's);
   * shutdown not already requested;
-  * no in-flight tasks (``list_running_tasks``) — a re-exec kills them
-    all. This is the SAME guard the manual ``POST /api/v1/update/restart``
+  * no in-flight tasks (``list_running_tasks``) — this includes durable
+    execution in another process when its code generation may be replaced.
+    This is the SAME guard the manual ``POST /api/v1/update/restart``
     endpoint enforces; active chat streams belong to running tasks, and a
     replaying client warm-reconnects (Last-Event-ID), so a tasks-empty
     server is safe to bounce.

@@ -136,6 +136,7 @@ from lib.storage_authority_sql.operations_pkg._worker_jobs import (
     _MAX_JOB_PAYLOAD_BYTES as _MAX_JOB_PAYLOAD_BYTES,
     _WORKER_JOB_COLUMNS as _WORKER_JOB_COLUMNS,
     _worker_job_get as _worker_job_get,
+    _worker_job_active_list as _worker_job_active_list,
     _worker_job_enqueue as _worker_job_enqueue,
     _worker_job_claim_next as _worker_job_claim_next,
     _worker_job_claim_horizon as _worker_job_claim_horizon,

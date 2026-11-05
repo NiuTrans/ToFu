@@ -306,6 +306,11 @@ The delivery dependencies and completion evidence are:
    reconstruct independently. Browser observation, reconnect and transcript
    hydration must not multiply execution work or require a resident executor.
    Reuse the current event and Turn owners; do not introduce a second transcript.
+   API activity now projects the existing WorkerJob active indexes and merges
+   them with legacy local carriers at the existing task visibility owner.
+   Restart protection and sidebar busy state therefore survive an absent API
+   carrier; storage read failures do not certify idle. Cross-process command
+   controls and browser wake delivery remain the next cutover dependencies.
 5. **Whole-system qualification.** Drive Coordinator → conversation → nested
    invocations with equal requested work and complete outputs. Measure API
    responsiveness, completed work, provider/tool calls, retained bytes, storage

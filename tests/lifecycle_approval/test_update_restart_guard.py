@@ -82,7 +82,7 @@ def test_restart_preparation_failure_is_visible(monkeypatch, caplog):
 
 class UpdateRestartGuardTest(unittest.TestCase):
 
-    pytestmark = pytest.mark.auth_mode('private')
+    pytestmark = [pytest.mark.unit, pytest.mark.auth_mode('private')]
 
     @classmethod
     def setUpClass(cls):
@@ -163,6 +163,17 @@ class UpdateRestartGuardTest(unittest.TestCase):
         return rec['id']
 
     # ── approval gate ────────────────────────────────────────────────
+
+    def test_unavailable_activity_cannot_authorize_an_idle_restart(self):
+        token = self._approved_token()
+        with patch('lib.tasks_pkg.manager.list_running_tasks',
+                   side_effect=RuntimeError('authority unavailable')), \
+             patch('routes.api_v1.update._deferred_reexec') as reexec, \
+             patch('lib.lifecycle_approval.consume_restart', wraps=la.consume_restart) as consume:
+            response = self._post({'approvalId': token})
+        assert response.status_code == 503
+        reexec.assert_not_called()
+        consume.assert_not_called()
 
     def test_no_token_pends_nothing_scheduled(self):
         """THE gate: without an approvalId the endpoint answers 202 and the
