@@ -532,6 +532,7 @@ def bind_account(task):
         selected['account_nonce'] = account_nonce
         def record(row):
             from .accounting import fold_settled_tools, folded_tool_event
+            from .scope import granted_tools
             if folded_tool_event(row, selected):
                 return row
             profile = profile_for(row)
@@ -546,7 +547,7 @@ def bind_account(task):
                     raise AbortedError('Tool occurrence is already terminal')
                 old.update(deepcopy(selected))
             elif selected['phase'] == 'intent':
-                if (selected['tool_name'] not in profile['tools']
+                if (selected['tool_name'] not in granted_tools(profile)
                         or profile.get('maxToolCalls') is not None and len(attempts) >= profile['maxToolCalls']
                         or any(item['root_task_id'] != selected['root_task_id']
                                or item['phase'] == 'intent' and not (

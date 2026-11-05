@@ -705,6 +705,16 @@ carrier, revoked or rebound grant, unreadable record) raises
 cooperative Stop (`task['aborted']`) keeps its cancellation. A prefetch refusal
 only defers the call; the pipeline then refuses it and fails the turn.
 
+The one task-local tool port that is not a custom environment is a swarm
+worker's `lib.swarm.agent.RunArtifactTools`: it serves only its run's artifact
+tools from the run's in-process store and resolves every other name through
+the parent's own environment. Admission pins its exact type and refuses it
+when it inherits any environment. `scope.granted_tools(profile)` is the single
+admitted-name set of the executor admission, the live tool ledger
+(`admission.bind_account`) and stored-record validation: a grant that holds
+`spawn_agents` also holds the artifact tools its runs give their children
+(`lib.swarm.tools.ARTIFACT_TOOL_NAMES`), and no grant holds them without it.
+
 Problem: the serial executor ran the Coordinator role policy first. That policy
 resolves the dispatch continuation and folds any lookup failure into a
 model-visible "Coordinator policy unavailable" result, so a Worker whose grant
@@ -720,10 +730,27 @@ Alternatives rejected: relying on catalog or contract filtering (a projection,
 not authority); disabling prefetch for dispatch tasks (drops the latency win of
 project Workers and leaves the serial ordering wrong); teaching the role
 policies to tolerate dispatch errors (two authorities, and the soft-result path
-remains). Specification:
-`tests/project_mod/test_project_dispatch_executor_admission.py` (each mode with
-the catalog removed: ungranted name, custom environment, removed carrier, Stop,
-prefetch).
+remains).
+
+Problem: project Workers may spawn agents, and those children borrow the
+Worker's live grant, but `SubAgent` installs its artifact handlers as
+`task['_tool_env']`, so each child's first tool call was refused as a custom
+environment and the child failed. The artifact tools themselves were in no
+grant (they never appear in a catalog), so the ledger and record validation
+would refuse them as well. Decision: a typed first-party port plus one
+derived name set for all three gates. Alternatives rejected: admitting any
+child environment (an inherited custom environment would shadow admitted
+tools); writing artifact names into newly issued Worker grants (existing and
+resumed grants keep failing, and the Worker's own ceiling grows); denying
+`spawn_agents` to Workers (contradicts their ordinary-conversation capability
+boundary in [PROJECT_COORDINATION.md](../PROJECT_COORDINATION.md)); exempting
+artifact calls from the ledger (unaccounted calls on a second path).
+
+Specification: `tests/project_mod/test_project_dispatch_executor_admission.py`
+(each mode with the catalog removed: ungranted name, custom environment,
+removed carrier, Stop, prefetch; a Worker's swarm child running an ordinary and
+an artifact tool; child admission with and without `spawn_agents` and under an
+inherited custom environment).
 
 ## Child process environment
 
