@@ -228,9 +228,16 @@ emitted (it would queue behind the durable FIFO being measured).
   `compaction`, `inputs`, `admission`, `build_body`, `accumulator`, `barrier`,
   `dispatch`, `receipts`, `request`, `other`; self time, so nested steps never
   double count and the values sum to `totalMs`), `inputsMs` (per-input
-  breakdown when inputs ran, including `remember`), `build_bodyMs.snapshot`
-  (Request Inspector snapshot construction and hand-off; a managed root lane
-  and a child invocation's evidence lane only enqueue it),
+  breakdown when inputs ran, including `remember`), `build_bodyMs` (the
+  request builder's sub-steps; `stepsMs.build_body` stays the whole window, so
+  its excess over their sum is the builder's own glue: `mcp_authority` the
+  root MCP grant refresh through ordinary tool assembly, `model_images` image
+  pinning, `request_body` the route context-window lookup and provider body
+  build, `snapshot` Request Inspector snapshot construction and hand-off,
+  including a failed build's fallback snapshot (a managed root lane and a
+  child invocation's evidence lane only enqueue it), `tool_metadata`
+  coordinator scope, orchestration policy and catalog metadata,
+  `context_telemetry` tool-schema evidence and round context capture),
   `barrierMs` (`sink`: the domain checkpoint write-ahead, e.g. the Swarm agent
   checkpoint; `events`: present only when a failed FIFO head forced a repair
   wait), `barrierPendingEvents` (accepted task events still undurable when the

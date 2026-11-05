@@ -1,7 +1,9 @@
 """Round-preparation timing anchors (ROUND_START -> logical MODEL_REQUEST_START).
 
 Specs: nested steps charge self time only; one ``[RoundPrepTiming]`` record at
->= 1 s and silence below; an awaited durability barrier (tool intent, ready,
+>= 1 s and silence below; the request builder names each sizeable sub-step in
+``build_bodyMs`` while ``build_body`` keeps the whole window, failure included;
+an awaited durability barrier (tool intent, ready,
 terminal) warns once when slow (emitting no task event), names its wait
 ``barrierMs.events`` and is silent when fast; the logical request start
 consumes the carrier and the TTFT line names its request clock. The
@@ -12,6 +14,7 @@ import json
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -158,6 +161,87 @@ def test_fast_prep_and_unstarted_requests_log_nothing(clock, caplog):
         rpt.note_round_prep(untimed, barrierPendingEvents=1)
     assert untimed == {'id': 'native'}
     assert _prep_records(caplog) == []
+
+
+# Fake-clock cost of each build_round_request sub-step, keyed by its child name.
+_REQUEST_BUILD_MS = {'mcp_authority': 400.0, 'model_images': 10.0, 'request_body': 300.0,
+                     'snapshot': 20.0, 'tool_metadata': 200.0, 'context_telemetry': 50.0}
+
+
+@pytest.fixture
+def request_prep(clock, monkeypatch):
+    import lib.context_telemetry as context_telemetry
+    import lib.tasks_pkg.model_images as model_images
+    import lib.tasks_pkg.orchestrator._messages_snapshot as snapshot
+    import lib.tasks_pkg.orchestrator._round_request_prep as prep
+    import lib.tasks_pkg.orchestrator._tool_assembly_prep as tool_assembly
+    import lib.tasks_pkg.orchestrator._tool_request_metadata as tool_metadata
+
+    def costs(child, result=None):
+        def step(*_args, **_kwargs):
+            clock.advance(_REQUEST_BUILD_MS[child] / 1000 if child else 0)
+            return result
+        return step
+
+    def request_body(model, messages, **kwargs):
+        costs('request_body')()
+        return {'model': model, 'messages': list(messages), 'tools': kwargs['tools']}
+
+    monkeypatch.setattr(tool_assembly, 'refresh_root_mcp_authority', costs('mcp_authority'))
+    monkeypatch.setattr(model_images, 'pin_model_images', costs('model_images'))
+    monkeypatch.setattr(prep.orchestrator_ports, 'build_request_body', request_body)
+    # The real snapshot adapter runs, so its own ``build_body.snapshot`` step is measured.
+    monkeypatch.setattr(snapshot, 'begin_round_evidence', costs('', 'ref'))
+    monkeypatch.setattr(snapshot, 'build_round_evidence', costs('', {'type': 'messages_snapshot'}))
+    monkeypatch.setattr(snapshot, 'append_event', costs('snapshot'))
+    monkeypatch.setattr(tool_metadata, 'attach_tool_request_metadata', costs('tool_metadata'))
+    monkeypatch.setattr(context_telemetry, 'capture_round_context', costs('context_telemetry'))
+    task = {'id': _TASK_ID, 'convId': 'conv-1', '_userId': 1, 'config': {}}
+    state = SimpleNamespace(model='gpt-5.6-sol', preset='medium', thinking_enabled=False)
+
+    def build():
+        rpt.begin_round_prep(task, 0)
+        with rpt.round_prep_step(task, 'build_body'):
+            clock.advance(0.03)             # the parent's own unnamed glue
+            prep.build_round_request(
+                task, state, [{'role': 'user', 'content': 'go'}], [], round_num=0,
+                tid='prep', thinking_depth=None, temperature=1.0, max_tokens=4096,
+                response_format=None)
+
+    return SimpleNamespace(task=task, build=build, ports=prep.orchestrator_ports)
+
+
+def test_request_build_names_each_sub_step_and_build_body_keeps_the_window(request_prep):
+    request_prep.build()
+
+    record = rpt.finish_round_prep(request_prep.task)
+
+    assert record['build_bodyMs'] == _REQUEST_BUILD_MS
+    # Nested children pause the parent: it charged only its own 30 ms of glue,
+    # and the group still reports parent plus children, each counted once.
+    assert record['stepsMs']['build_body'] == pytest.approx(
+        sum(_REQUEST_BUILD_MS.values()) + 30.0)
+    assert record['totalMs'] == pytest.approx(record['stepsMs']['build_body'])
+    assert sum(record['stepsMs'].values()) == pytest.approx(record['totalMs'])
+
+
+def test_failed_request_body_keeps_its_error_and_names_the_fallback_snapshot(
+        request_prep, clock, monkeypatch):
+    failure = RuntimeError('body construction failed')
+
+    def fail(*_args, **_kwargs):
+        clock.advance(0.3)
+        raise failure
+
+    monkeypatch.setattr(request_prep.ports, 'build_request_body', fail)
+    with pytest.raises(RuntimeError) as raised:
+        request_prep.build()
+
+    assert raised.value is failure
+    record = rpt.finish_round_prep(request_prep.task)
+    assert record['build_bodyMs'] == {'mcp_authority': 400.0, 'model_images': 10.0,
+                                      'request_body': 300.0, 'snapshot': 20.0}
+    assert sum(record['stepsMs'].values()) == pytest.approx(record['totalMs'])
 
 
 @pytest.fixture
