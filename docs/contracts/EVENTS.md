@@ -461,6 +461,10 @@ The compaction pair becomes one inspectable Turn row keyed by `archiveId`; its
 settled form carries the estimated token/message counts before and after plus
 the reduction percentage. The transient `phase=compacting` beat remains
 progress text and is replaced by that receipt row rather than rendered twice.
+A producer has at most one in-flight start: an earlier start still open behind
+a later compaction fact is re-paired with the unwitnessed receipt directly
+after it or dropped, and a `compaction_done` whose receipt `status` is
+`declined` retires its start without a row.
 Problem: those receipt counts describe the compactor's own message list. The
 managed context restored afterwards and the tool schemas ride on the next
 request but were missing, so conversation `mw10w4j3ghfsbk` showed 134,716 ->

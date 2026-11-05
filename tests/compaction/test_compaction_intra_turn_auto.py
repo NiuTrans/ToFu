@@ -1146,6 +1146,9 @@ def test_optional_realized_low_yield_candidate_is_not_committed(
         lambda *a, **k: telemetry_calls.append((a, k)))
     monkeypatch.setattr(
         token_counter, 'invalidate', lambda conv: invalidations.append(conv))
+    import lib.tasks_pkg.manager as manager
+    events = []
+    monkeypatch.setattr(manager, 'append_event', lambda task, event: events.append(event))
 
     meta = {}
     execute_compact_tool(
@@ -1161,8 +1164,10 @@ def test_optional_realized_low_yield_candidate_is_not_committed(
     assert telemetry_calls == []
     assert invalidations == []
     assert conv_id not in _summary_cooldowns
-    assert not any(e.get('type') in ('compaction', 'compaction_done')
-                   for e in task.get('events', []))
+    # The beat is announced before summary I/O. Settling the decline is the
+    # wrapper's job (next tests), so this owner emits no archive or done.
+    assert any(e.get('type') == 'phase' and e.get('phase') == 'compacting' for e in events)
+    assert not any(e.get('type') in ('compaction', 'compaction_done') for e in events)
 
 
 @pytest.mark.unit
@@ -1182,6 +1187,53 @@ def test_wrapper_releases_attempt_evidence_after_declined_candidate(monkeypatch)
     assert owner.force_compact_if_needed(messages, task=task, force=True) is False
     assert messages == original
     assert '_contextEvidenceLedger' not in task
+
+
+@pytest.mark.unit
+def test_wrapper_settles_a_candidate_declined_after_its_announced_beat(
+        monkeypatch, priced_summary_route):
+    """mw1sawbtu8xr3h: a proactive candidate declined after summary I/O had
+    already shown "compressing". The beat settles as a decline (no archive, no
+    failed fact), so no Turn row is left running."""
+    import lib.tasks_pkg.compaction._layer2._compact as owner
+    import lib.tasks_pkg.manager as manager
+    from lib.tasks_pkg.compaction._constants import _summary_cooldowns
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    msgs = [
+        _sys(), _user('objective'),
+        {'role': 'assistant', 'content': 'old answer ' + 'a' * 160_000},
+        _user('continue'),
+        {'role': 'assistant', 'content': 'protected recent answer ' + 'b' * 60_000},
+    ]
+    original = [dict(m) for m in msgs]
+    conv_id = 'declined-after-beat'
+    _summary_cooldowns.pop(conv_id, None)
+    task = _observed_cache_task(conv_id)
+    events = []
+    monkeypatch.setattr(manager, 'append_event', lambda task, event: events.append(event))
+    monkeypatch.setattr(owner, '_generate_query_aware_summary',
+                        lambda *a, **k: 'summary ' + 'z' * 155_000)
+    archive_calls = []
+    monkeypatch.setattr(owner, '_archive_transcript',
+                        lambda *a, **k: archive_calls.append(a) or 17)
+    real = owner.execute_compact_tool
+    # The proactive working-set pass reaches the same owner through this wrapper.
+    monkeypatch.setattr(owner, 'execute_compact_tool',
+                        lambda *a, **k: real(*a, **{**k, '_proactive_economic': True}))
+
+    assert owner.force_compact_if_needed(
+        msgs, task=task, force=True, preserve_budget_tokens=40_000) is False
+    assert msgs == original
+    assert archive_calls == []
+    assert not any(e.get('type') == 'compaction' for e in events)
+    [done] = [e for e in events if e.get('type') == 'compaction_done']
+    assert (done['receipt']['status'], done['receipt']['outcomeReason']) == (
+        'declined', 'low_yield')
+    timeline = None
+    for event in events:
+        timeline = fold_activity_timeline(timeline, event, task)
+    assert not (timeline or {}).get('entries')
 
 
 @pytest.mark.unit

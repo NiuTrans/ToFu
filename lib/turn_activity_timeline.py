@@ -894,10 +894,64 @@ def _gateway_failure_diagnostics(value: Any) -> list[dict[str, str]]:
     return diagnostics[:8]
 
 
+def _retire_superseded_compaction_starts(
+    entries: list[dict[str, Any]], producer: Mapping[str, Any], *,
+    new_start: bool = False,
+) -> None:
+    """Leave at most one in-flight compaction start for this producer.
+
+    A producer begins one L2 attempt at a time (its archive precedes the next
+    start; only the final DONE may land later), so rows are ordered by when
+    each attempt began. A start still open behind a later-begun compaction
+    fact, or an incoming start, ended without its receipt consuming it. A
+    settled receipt begun directly after it that witnessed no boundary is its
+    own receipt and takes the start's boundary and time.
+    Any other superseded start (a summary declined after its beat, rows folded
+    before this rule) was transient progress: it is dropped, never left
+    "compacting" or closed as an outcome by the terminal (mw1sawbtu8xr3h).
+    """
+    rows = sorted(
+        (entry for entry in entries
+         if _same_producer(entry, producer)
+         and entry.get('phase') == Phase.COMPACTING
+         and entry.get('reasonCode') in _COMPACTION_RECEIPT_REASON_CODES),
+        key=lambda entry: (int(entry.get('startedAt') or entry.get('occurredAt') or 0),
+                           int(entry.get('seq') or 0)))
+    retired: set[int] = set()
+    repaired: dict[int, dict[str, Any]] = {}
+    for position, start in enumerate(rows):
+        if (start.get('reasonCode') != Phase.COMPACTING
+                or start.get('status') not in {'started', 'running', 'waiting'}):
+            continue
+        following = rows[position + 1] if position + 1 < len(rows) else None
+        if following is None and not new_start:
+            continue
+        retired.add(id(start))
+        if (following is None
+                or following.get('reasonCode') != 'context_compaction'
+                or following.get('status') not in {'succeeded', 'failed'}
+                or following.get('anchorPosition') != 'producer-start'
+                or following.get('anchorBlockId')):
+            continue
+        receipt = {**following, **{key: start[key] for key in ('anchorBlockId', 'anchorPosition')
+                                    if key in start}}
+        started_at = _nonnegative_int(start.get('startedAt'))
+        ended_at = _nonnegative_int(following.get('endedAt'))
+        if started_at is not None and ended_at is not None:
+            receipt['startedAt'] = started_at
+            receipt['durationMs'] = max(int(following.get('durationMs') or 0),
+                                        ended_at - started_at)
+        repaired[id(following)] = receipt
+    if retired:
+        entries[:] = [repaired.get(id(entry), entry) for entry in entries
+                      if id(entry) not in retired]
+
+
 def _close_open_entries(
     entries: list[dict[str, Any]], *, status: str, severity: str | None,
     ended_at: int, identity: Mapping[str, Any],
 ) -> None:
+    _retire_superseded_compaction_starts(entries, identity)
     for index, source in enumerate(entries):
         if not _same_producer(source, identity):
             continue
@@ -1364,6 +1418,7 @@ def _fold_phase(
     if phase == Phase.COMPACTING:
         # A retry/resume can compact twice at the same model round.
         span_id = _stable_span('compaction-start', anchors.get('taskId'), anchors.get('attemptId'), seq)
+        _retire_superseded_compaction_starts(entries, anchors, new_start=True)
 
         # Reactive recovery archives before L2 starts. Bind its still-pending,
         # unwitnessed placeholder rather than leave a permanent phase ghost.
@@ -1438,6 +1493,7 @@ def _fold_compaction_event(
                                and (raw_event.get('receipt') or {}).get('status') == 'failed'):
         return
     producer = _producer_identity(raw_event, task)
+    _retire_superseded_compaction_starts(entries, producer)
     span_id = _stable_span(
         'compaction', producer.get('taskId'), producer.get('attemptId'),
         archive_id or f'failed:{seq}',
@@ -1467,6 +1523,11 @@ def _fold_compaction_event(
     if phase_row:
         entries.remove(phase_row)
     receipt = raw_event.get('receipt')
+    if (raw_event.get('type') == EventType.COMPACTION_DONE and not prior
+            and isinstance(receipt, Mapping) and receipt.get('status') == 'declined'):
+        # A decline after summary I/O kept the original context: its start
+        # beat was progress and, like a declined preflight, earns no row.
+        return
 
     # Existing start wins: settling cannot move after future same-round output.
     boundary_source = prior if prior.get('anchorPosition') else phase_row
