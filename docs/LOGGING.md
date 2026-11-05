@@ -118,7 +118,7 @@ and browser perception receipts cover the subsequent boundaries.
 
 Workspace isolation records `workspace_snapshot` and each `workspace_snapshot_observation`, `workspace_input_ref`, `workspace_metadata`, `workspace_checkout` and `workspace_registration`. Repository/destination admission has separate `*_lock_wait` and `*_lock_hold` stages; wait starts before lockfile filesystem I/O, and hold starts only after admission. Nested stages inherit only the outer caller's explicitly bounded identity through a reset-on-exit context, never config or paths. Startup histograms retain finite buckets through 600 seconds; longer observations remain in the count/sum and infinity bucket. **Problem:** the former inclusive binding/materialization timers exposed latency but could not attribute it to contention, snapshot CPU/I/O or checkout. **Decision:** reuse the paired anchors and closed stage registry rather than another watchdog, lock-owner database or polling thread. Missing completions still do not prove a hang, and these new records certify production coverage only after code reload. Tool `project_admission` is an inclusive total of root registration, argument routing and scoped-guidance acquisition, not pure lock wait; `undo_journal_lock_wait` measures journal admission while `post_commit_wait` and `post_commit_callback` distinguish ordered presentation delay after release.
 
-Workspace tools distinguish registry-lock acquisition (`workspace_registry_wait`), lockfile filesystem setup (`workspace_lock_io`), local condition sleeping (`workspace_local_wait`) and blocked cross-process flock backoff (`workspace_flock_wait`). The sleep timers are measured backoff, not blocker identity or the total kernel-call duration. Lockfile filesystem work runs outside registry ownership; an active-opening counter under the same registry lock fences fork until each FD is registered or closed. Fork waits on the registry condition (releasing it while waiting), then retains the lock across fork. Cancellation cannot interrupt a filesystem syscall, but unrelated edits can now acquire/release their leases while it is blocked. No namespace migration, new thread, queue or durable lock-owner registry is introduced. A call scope keeps its first 16 phase names; a later name is omitted rather than growing state. The owner-defined vocabulary is larger, but only tools with an execution budget open a scope and none of them takes a workspace lease (`run_command` dependency setup can, but `run_command` has no budget), so one timed call records at most 16 names. Slow-tool records are completion-only and over-budget-only, not an all-call latency population. Specs: `tests/observability/test_task_startup_metrics.py` and the real-Git startup evidence case in `test_integration_delivery.py`.
+Workspace tools distinguish registry-lock acquisition (`workspace_registry_wait`), lockfile filesystem setup (`workspace_lock_io`), local condition sleeping (`workspace_local_wait`) and blocked cross-process flock backoff (`workspace_flock_wait`). The sleep timers are measured backoff, not blocker identity or the total kernel-call duration. Lockfile filesystem work runs outside registry ownership; an active-opening counter under the same registry lock fences fork until each FD is registered or closed. Fork waits on the registry condition (releasing it while waiting), then retains the lock across fork. Cancellation cannot interrupt a filesystem syscall, but unrelated edits can now acquire/release their leases while it is blocked. No namespace migration, new thread, queue or durable lock-owner registry is introduced. A call scope keeps its first 18 phase names; a later name is omitted rather than growing state. The owner-defined vocabulary is larger, but only tools with an execution budget open a scope and none of them takes a workspace lease (`run_command` dependency setup can, but `run_command` has no budget), so one timed call records at most 18 names. Slow-tool records are completion-only and over-budget-only, not an all-call latency population. Specs: `tests/observability/test_task_startup_metrics.py` and the real-Git startup evidence case in `test_integration_delivery.py`.
 
 A record carries only identity that exists when it is written. A stage's start
 keeps the identity known at entry; identity the stage creates joins its
@@ -865,24 +865,53 @@ aliases and actual `find_files` are covered. Model/human waits and arbitrary
 
 Completed or failed over-budget execution emits one `tool_execution_slow`
 WARNING into the existing app/error/incident pipeline, correlated with task,
-conversation and call identity. At most 16 demand-scoped phase rows retain
-elapsed time, invocation count, byte and record totals: project admission
-(`project_admission`: root registration, argument routing, scoped-guidance
-acquisition and worker rebinding before a project handler runs), undo
-index/payload I/O, file publication, file history, and the durable
-acknowledgements that bracket a
-side effect (`effect_intent_ack` before the handler runs,
-`effect_reconciliation_ack` before a file publication is reported). Phase times
-are inclusive when nested.
+conversation and call identity. At most 18 demand-scoped phase rows (the
+owner-defined names one timed call can reach) retain elapsed time, invocation
+count, byte and record totals:
+
+- `project_admission`: root registration, argument routing, scoped-guidance
+  acquisition and worker rebinding before a project handler runs. The streaming
+  prefetch brackets the same steps.
+- `project_guidance`, nested in it: acquisition of the applicable root and
+  `AGENTS.md` rules for the call's targets; `records` counts rule files.
+- `coordinator_policy`: the durable Coordinator-role lookup that admits a call.
+  Ordinary dispatch runs it before its scope opens, the prefetch inside it.
+- `dispatch_authority`: a project-dispatch worker's durable grant validation
+  and owned-workspace lookup, at every admission inside the scope.
+- `path_resolution`: `rootname:path` resolution of `read_files`,
+  `search_files` and `find_files` targets.
+- `file_read`: each `read_files` source (descriptor-pinned snapshot, media or
+  document conversion, uploaded attachment), with `bytes_read`.
+- `read_render`: decoding, range slicing, header/symbol outline and the
+  per-file result preview.
+- Writes: undo index/payload I/O, file publication, file history, and the
+  durable acknowledgements that bracket a side effect (`effect_intent_ack`
+  before the handler runs, `effect_reconciliation_ack` before a file
+  publication is reported).
+
+Phase times are inclusive when nested, so they may sum past `elapsed_ms`; time
+no phase covers stays unattributed. Tool-result artifact retention runs at
+result settlement, after the scope closes, and is never a tool phase.
+Streamed reads used to report `phases: {}`: the prefetch bypasses the handler
+(its result is served as a prefetch hit), skipping the handler's admission
+anchors, and the read owners had none. Decision: the shared owners define these
+anchors, so the project handler and the prefetch report the same names, and
+the prefetch brackets its admission as the handler does. It opens its scope on
+its own worker thread, so phases need no context propagation; that worker does
+not inherit the stream's request context, so its records carry task,
+conversation and call identity but no request id.
 No arguments, file paths, results or exception contents enter this evidence;
 healthy calls emit no record. There is no timer, pool or second incident store,
 and diagnostic failure cannot change business results or durability.
 Alternatives rejected: total elapsed alone cannot locate amplification;
 alerting on provider thinking/shell workloads produces misleading incidents;
-a private watchdog would duplicate lifecycle and retention owners.
+a private watchdog would duplicate lifecycle and retention owners; copying the
+stream's context into the prefetch worker adds no phase, since the scope opens
+there; prefetch-only call-site anchors would give the two paths different names.
 Verification: `tests/tools/test_tool_execution_timing.py` covers the real
-executor boundary, shared trace budget, redaction, failure, nested scopes,
-phase bounds and unavailable sinks.
+executor boundary, the streaming prefetch worker for read/search/find, shared
+trace budget, redaction, failure, nested scopes, phase bounds and unavailable
+sinks.
 
 ## Workspace lease wait evidence
 

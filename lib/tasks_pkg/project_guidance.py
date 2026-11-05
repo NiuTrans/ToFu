@@ -36,6 +36,7 @@ from lib.project_mod.instructions import (
     MAX_GUIDANCE_FILES, check_guidance_bounds, read_rule_file, read_scoped_guidance,
     render_rule,
 )
+from lib.tools.execution_timing import timing_phase
 
 logger = get_logger(__name__)
 
@@ -107,33 +108,36 @@ def check_project_guidance(task: dict, tool_name: str, arguments: dict) -> str:
     config = task.get('config') or {}
     if not config.get('projectPath') or config.get('project_remote'):
         return ''
-    targets = _tool_targets(task, tool_name, arguments)
-    if not targets:
-        return ''
-    rows, reads = {}, {}
-    for root, selected in targets:
-        for row in read_scoped_guidance(str(root), str(selected), reads=reads):
-            rows[row['path']] = row
-    state = _state(task)
-    with state['lock']:
-        candidate = {**state['rules'], **rows}
-        removed = {path: reason for path, reason in state['removed'].items() if path not in rows}
-        # Verified absence removes a previously observed rule on this same
-        # target chain, without treating acquisition failures as deletion.
-        for path, old in list(candidate.items()):
-            if (path not in rows and any(old['root'] == str(root)
-                    and selected.is_relative_to(Path(path).parent)
-                    for root, selected in targets)):
-                del candidate[path]
-                removed[path] = 'deleted'
-        inherited = frozenset(path for path in state['inherited']
-                              if path in candidate and path not in rows)
-        if inherited != state['inherited'] or _rules_differ(state['rules'], candidate):
-            acquired = [row for path, row in candidate.items() if path not in inherited]
-            if len(acquired) > MAX_GUIDANCE_FILES:
-                raise ValueError('Too many applicable rule files; no instructions were omitted')
-            check_guidance_bounds(acquired)  # Validate live rows, not removed versions.
-        _commit_rules(state, candidate, removed, inherited)
+    with timing_phase('project_guidance') as measurement:
+        targets = _tool_targets(task, tool_name, arguments)
+        if not targets:
+            return ''
+        rows, reads = {}, {}
+        for root, selected in targets:
+            for row in read_scoped_guidance(str(root), str(selected), reads=reads):
+                rows[row['path']] = row
+        if measurement is not None:
+            measurement['records'] += len(rows)
+        state = _state(task)
+        with state['lock']:
+            candidate = {**state['rules'], **rows}
+            removed = {path: reason for path, reason in state['removed'].items() if path not in rows}
+            # Verified absence removes a previously observed rule on this same
+            # target chain, without treating acquisition failures as deletion.
+            for path, old in list(candidate.items()):
+                if (path not in rows and any(old['root'] == str(root)
+                        and selected.is_relative_to(Path(path).parent)
+                        for root, selected in targets)):
+                    del candidate[path]
+                    removed[path] = 'deleted'
+            inherited = frozenset(path for path in state['inherited']
+                                  if path in candidate and path not in rows)
+            if inherited != state['inherited'] or _rules_differ(state['rules'], candidate):
+                acquired = [row for path, row in candidate.items() if path not in inherited]
+                if len(acquired) > MAX_GUIDANCE_FILES:
+                    raise ValueError('Too many applicable rule files; no instructions were omitted')
+                check_guidance_bounds(acquired)  # Validate live rows, not removed versions.
+            _commit_rules(state, candidate, removed, inherited)
     return ''
 
 

@@ -33,6 +33,7 @@ from lib.project_mod.scanner import (
 )
 from lib.project_mod.grep_engine import SearchRequest, run_search
 from lib.project_mod import glob_match, grep_timeout_circuit, tree_index
+from lib.tools.execution_timing import timing_phase
 
 logger = get_logger(__name__)
 
@@ -414,14 +415,18 @@ def _read_absolute_file(path: str, start_line=None, end_line=None, *, read_obser
         logger.debug('[ReadTools] absolute read denied for %s: %s', path, e)
         return f'Error: {e}'
 
-    snapshot = _unrooted_text_snapshot(path)
-    if snapshot is None:
-        from lib.file_reader import read_local_file as _read_local
-        result = _read_local(path)
-    else:
+    with timing_phase('file_read') as measurement:
+        snapshot = _unrooted_text_snapshot(path)
+        if snapshot is None:
+            from lib.file_reader import read_local_file as _read_local
+            result = _read_local(path)
+        elif measurement is not None:
+            measurement['bytes_read'] += snapshot.size
+    if snapshot is not None:
         from lib.file_reader import render_text_bytes
-        result = render_text_bytes(snapshot.content, os.path.basename(snapshot.path),
-                                   snapshot.size)
+        with timing_phase('read_render'):
+            result = render_text_bytes(snapshot.content, os.path.basename(snapshot.path),
+                                       snapshot.size)
 
     # Images return a dict — line ranges don't apply
     if isinstance(result, dict) and result.get('__screenshot__'):
@@ -505,16 +510,20 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
     )
     if ext in _IMG_EXT or ext in _PDF_EXT or ext in _OFF_EXT:
         from lib.file_reader import read_local_file
-        return read_local_file(target)
+        with timing_phase('file_read', bytes_read=sz):
+            return read_local_file(target)
 
     snapshot = None
     from lib.artifacts.file_snapshot import read_project_snapshot
     try:
         if source_capture is not None and os.path.abspath(base) not in source_roots:
             raise PermissionError('File source requires a verified project root')
-        snapshot = read_project_snapshot(rel_path, [os.path.abspath(base)], include_bytes=True,
-            check=source_capture.check if source_capture is not None else None,
-            utf8_text=True, allow_empty=True)
+        with timing_phase('file_read') as measurement:
+            snapshot = read_project_snapshot(rel_path, [os.path.abspath(base)], include_bytes=True,
+                check=source_capture.check if source_capture is not None else None,
+                utf8_text=True, allow_empty=True)
+            if measurement is not None:
+                measurement['bytes_read'] += snapshot.size
         sz = snapshot.size
     except (OSError, ValueError) as error:
         if source_capture is not None:
@@ -550,7 +559,7 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
         import io
         reader = (io.TextIOWrapper(io.BytesIO(snapshot.content), encoding='utf-8')
                   if snapshot is not None else open(target, errors='replace'))
-        with reader as f:
+        with timing_phase('read_render'), reader as f:
             if _has_explicit_line_range(start_line, end_line):
                 all_lines = f.readlines()
                 total = len(all_lines)
@@ -823,15 +832,16 @@ def tool_read_files(base, reads, *, result_items=None, task=None, source_capture
         if not isinstance(result_items, list):
             return
         from lib.tools.result_projection import file_read_result_projection_item
-        result_items.append(file_read_result_projection_item(
-            index=index + 1,
-            path=spec.get('_display_path', spec.get('path', '?'))
-            if isinstance(spec, dict) else '?',
-            result=result,
-            start_line=spec.get('start_line') if isinstance(spec, dict) else None,
-            end_line=spec.get('end_line') if isinstance(spec, dict) else None,
-            status=status,
-        ))
+        with timing_phase('read_render'):
+            result_items.append(file_read_result_projection_item(
+                index=index + 1,
+                path=spec.get('_display_path', spec.get('path', '?'))
+                if isinstance(spec, dict) else '?',
+                result=result,
+                start_line=spec.get('start_line') if isinstance(spec, dict) else None,
+                end_line=spec.get('end_line') if isinstance(spec, dict) else None,
+                status=status,
+            ))
 
 
     for i, spec in enumerate(reads):
@@ -871,7 +881,8 @@ def tool_read_files(base, reads, *, result_items=None, task=None, source_capture
         # durable attachment store, read as a virtual line-paged text file.
         if isinstance(rel_path, str) and rel_path.startswith(
                 ('att_media_', 'att_txt_')):
-            result = _read_attachment_text_ref(rel_path, sl, el, task=task)
+            with timing_phase('file_read'):
+                result = _read_attachment_text_ref(rel_path, sl, el, task=task)
             if (not result.startswith('Error:')
                     and isinstance(spec, dict)):
                 from lib.attachments import attachment_display_name
