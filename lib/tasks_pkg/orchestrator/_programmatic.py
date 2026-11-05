@@ -17,15 +17,18 @@ from lib.tools.programmatic import (
     eligible_programmatic_tool_names,
     encode_programmatic_output,
 )
+from lib.weak_lock_pool import WeakLockPool
 
 
 _PROGRAM_ROUND_BASE = 8_800_000
 _CONTENT_UNSET = object()
 logger = get_logger(__name__)
-# Sibling programs of one response project their parents at once. Leaf lock:
-# held for round allocation, row insertion and adoption evidence, never across
-# event delivery.
-_PROGRAM_PARENT_ROWS_LOCK = threading.Lock()
+# Sibling programs of one response project their parents at once. Per-task leaf
+# lock: held for round allocation, row insertion and adoption evidence, never
+# across event delivery. Child rows append to the same list under the gateway
+# lock; parents insert before their own children, whose indices a concurrent
+# append at the end never shifts.
+_PROGRAM_PARENT_ROWS_LOCKS = WeakLockPool(threading.Lock)
 
 
 def _append_program_event(task: dict[str, Any], event: dict[str, Any]) -> None:
@@ -335,7 +338,7 @@ def project_program_run(task: dict[str, Any], run: dict[str, Any], *,
 
     from lib.orchestration.adoption import record_orchestration_execution
     rounds = task.setdefault('toolRounds', [])
-    with _PROGRAM_PARENT_ROWS_LOCK:
+    with _PROGRAM_PARENT_ROWS_LOCKS.lock_for(id(task)):
         # This is the first provider-neutral point at which a real program
         # trajectory exists.  Request projection alone is deliberately kept in
         # a separate evidence field and can never satisfy adoption.

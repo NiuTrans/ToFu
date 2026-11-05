@@ -168,24 +168,40 @@ held back unrelated siblings for its full duration.
 occurrence executes under `_receipt_claim(task, receipt_key)`, so only replayed
 copies of that occurrence wait for it. The task-shared gateway state (receipt
 table, child round numbers, program ledger IDs, authoring-failure latches and
-the direct-sibling delegation FIFO) is published under `_gateway_lock`, now a
-leaf lock never held across normalization, execution or settlement; program
-parent rows and their adoption evidence use a module leaf lock in
-`orchestrator/_programmatic.py`. Call order survives through `_ordering`: the
-top-level pipeline (and native `prepare_response`, through
-`publish_prepared_response_siblings`) publishes the response's gateway calls in
-provider order (`GatewaySiblingOrder`) before any of them runs. A child that
-`_ordering` orders (the same-target mutations and `todo_write` above) waits
-until every earlier-issued sibling gateway call has settled: a program picks
-its next child from data, so a later sibling cannot know whether an earlier one
-will still mutate its target. Waits point only at earlier calls, so they cannot
-cycle, and Stop releases every waiter. Each published occurrence settles when
-its worker finishes and at the latest when its dispatch invocation exits,
-whether it ran, was refused, failed or never started. Native callbacks run
-`execute_tool_pipeline` with `publish_direct_gateway_siblings=False`, so a
-callback never replaces the published order. Gateway calls are outside the
-write and confirmation sets, so the native approval path never withdraws one
-before its callback.
+the direct-sibling delegation FIFO) is published under `_gateway_lock`, which
+is never held across normalization, execution or settlement. Child row
+allocation also announces those rows, so the lock is taken before the task's
+event-lane locks and never while holding one; that keeps one sibling's rows
+and events adjacent in both streams. Program parent rows and their adoption
+evidence use a per-task leaf lock in `orchestrator/_programmatic.py`. Call
+order survives through `_ordering`: the top-level pipeline (and native
+`prepare_response`, through `publish_prepared_response_siblings`) publishes
+the response's gateway occurrences in provider order (`GatewaySiblingOrder`)
+before any of them runs. A child that `_ordering` orders (the same-target
+mutations and `todo_write` above) waits until every earlier-issued sibling
+has settled: a program picks its next child from data, so a later sibling
+cannot know whether an earlier one will still mutate its target. Waits point
+only at earlier calls, so they cannot cycle, and Stop releases every waiter.
+
+An occurrence is its published call ID and round row, so a nested call that
+reuses a call ID never takes or settles a sibling's place. The worker
+submitted for an occurrence adopts it and settles it when that worker
+returns, raises or is cancelled unstarted. A collection deadline only stops
+waiting for the receipt: the expired worker keeps its place, because its
+program may still mutate, and a write is unbounded, so a program returns only
+after its own mutations ended. An occurrence no worker adopted never runs and
+is released by whoever learns that first: the dispatch invocation's exit
+(refused, failed before submission, Stop), a native callback joined without
+a worker, the native gateway's close, or the next response's publication. A
+nested `execute_tools` / `execute_program` call keeps its parent's place, so
+its ordered grandchildren follow the same earlier siblings. Native callbacks
+run `execute_tool_pipeline` with `publish_direct_gateway_siblings=False`, so
+a callback never replaces the published order. Native `prepare_response`
+publishes only the gateway calls the native runtime will dispatch without a
+host decision: parsed without refusal (the argument contract and caller
+envelope native admission checks) under a `read` permission. A call under a
+write or approval permission runs only after an approval and never when it is
+denied, so it takes no place.
 
 **Alternatives rejected:** keeping the task-wide lock (the serial lane this
 removes); a per-tool-name lock (two programs writing one file lose their call
@@ -194,17 +210,36 @@ children across siblings by target only (an earlier program's future targets
 are unknown until it runs); ordering the gateway calls themselves at the top
 level (restores the serial lane for every program).
 
+Alternatives rejected for settlement: settling every published occurrence
+when its dispatch invocation exits (releases an expired earlier program that
+is still running, so a later write can overtake it); publishing every parsed
+native gateway call (a call the runtime never dispatches holds a later
+sibling until Stop); reporting the native dispatched set from Rust before
+callbacks (exact, but a native stdio contract change; the publication rule
+already mirrors every per-call refusal for read gateway calls).
+
 Known limits: an ordered child of a later sibling waits for every earlier
 sibling, including ones that never touch its target. Direct (non-gateway)
 siblings of the response are not part of this order; their relation to
 gateway children is unchanged. Unordered children (reads, `run_command`, MCP
-tools) never wait. Specs: `tests/tasks_pkg/test_gateway_sibling_concurrency.py`
-runs real JavaScript programs through the real handler and pipeline: sibling
-programs meet on a barrier (a task-wide lock anywhere on the path breaks it), a
-duplicate receipt key executes once while other keys overlap, an ordered child
-of a later sibling waits for the earlier sibling whether it returned or failed,
-Stop releases that wait, a child re-entering the gateway from its worker does
-not deadlock, and native sibling program callbacks overlap.
+tools) never wait. A gateway call under a write or approval permission is not
+ordered against its siblings. Native publication relies on Python's parse and
+argument contract matching native admission (their differential oracles); a
+read gateway call native admission refused without that refusal in Python
+would hold a later sibling's ordered child until Stop or the native deadline.
+Siblings settle concurrently, so the program authoring-failure latch counts
+failures in settlement order. Specs:
+`tests/tasks_pkg/test_gateway_sibling_concurrency.py` runs real JavaScript
+programs through the real handler and pipeline: sibling programs meet on a
+barrier (a task-wide lock anywhere on the path breaks it), a duplicate receipt
+key executes once while other keys overlap, an ordered child of a later
+sibling waits for the earlier sibling whether it returned or failed, an
+expired earlier program still running keeps its place, Stop releases that
+wait, a child re-entering the gateway from its worker does not deadlock, a
+nested gateway call keeps its parent's place, a reused call ID never takes a
+sibling's place, native sibling program callbacks overlap and keep the order,
+and a native sibling that awaits an approval or whose callback fails first
+never holds back a later write.
 
 ## Native application rounds (owner decision 2026-10-28)
 
