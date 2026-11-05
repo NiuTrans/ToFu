@@ -44,6 +44,7 @@ def test_example_corp_catalog_models_promoted_to_vendor_windows():
         'glm-5v-turbo': 200_000,
         'hy3-preview': 256_000,
         'hy4-preview': 1_000_000,
+        'hy4': 1_000_000,
         'LongCat-2.0': 1_000_000,
         'text-embedding-3-large': 8_191,
         'text-embedding-3-small': 8_191,

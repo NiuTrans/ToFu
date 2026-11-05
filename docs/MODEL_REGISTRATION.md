@@ -342,6 +342,31 @@ Together and Chutes self-host open weights, which Moonshot will publish by
 `tests/model_routing/test_kimi_k31_pro_registration.py` and
 `bundles/yourprovider/tests/test_yourprovider_gateway_protocol_faces.py`.
 
+Tencent Hy4 exact knowledge (checked 2026-11-05): Tencent's
+[announcement](https://www.tencent.com/zh-cn/tencent-launches-hy4-joining-the-ranks-of-the-worlds-leading-open-source-ai-models/)
+releases Hy4 on 11月4日, live on Tencent Cloud TokenHub that day; OpenRouter's
+Tencent-served `tencent/hy4-20261104` endpoint fixes the year. Hy4 adds image
+understanding over Hy4 Preview and keeps its list price: ¥6/¥18 input/output
+and ¥0.3 cache hit per million, recorded like the preview row at the shared
+7.24 rate as $0.829/$2.486 with a 5% cache read. The international
+[price table](https://intl.cloud.tencent.com/zh/document/product/1300/78937)
+lists the same price as $0.834/$2.501/$0.042. TokenHub bills 50% of list until
+2026-12-31; the discount is not the list price. The TokenHub
+[model list](https://intl.cloud.tencent.com/zh/document/product/1300/78934)
+gives the `hy4` API id, a 1M window (960k max input, 64k max output), image
+understanding, structured output and function calling. The
+[deep-thinking guide](https://intl.cloud.tencent.com/zh/document/product/1300/80637)
+turns thinking on by default and documents `reasoning_effort` `high` (default)
+and `no_think`, so `no_think` is the in-ladder `disabled_effort` and every
+enabled depth resolves to `high`. The
+[tool-call guide](https://intl.cloud.tencent.com/zh/document/product/1300/80638)
+asks callers to return `reasoning_content` within a tool-call loop and accepts
+only `auto` and `none` for `tool_choice`. `hy4` is a substring of
+`hy4-preview`, so the Hy4 release and context needles follow the preview's;
+the preview's own reasoning profile stays unregistered. OpenRouter's public
+catalogue lists `tencent/hy4`, and the dynamic feed carries that wire.
+Specification: `tests/model_routing/test_hy4_registration.py`.
+
 The Models settings projection shows `ready` rows and legacy unmarked rows
 awaiting migration, not persisted `pending_*` or `disabled` drafts. Drafts
 remain in authority for research/admission and provider diagnostics; hiding
