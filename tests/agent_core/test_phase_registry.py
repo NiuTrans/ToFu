@@ -185,6 +185,11 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     'rollback': 'postgres adapter transaction stage',
     'commit': 'postgres adapter transaction stage',
     'post_commit': 'postgres adapter transaction stage',
+    # Compaction handoff continuation phase (make_compaction_handoff(...,
+    # phase=...)): where the summary sits relative to the latest human Turn,
+    # a model-context record, never an EventType.PHASE emission.
+    'pre_turn': 'compaction handoff continuation phase',
+    'mid_turn': 'compaction handoff continuation phase',
 }
 
 # Frontend ``.phase === "x"`` values that are NOT pushed PHASE values.
