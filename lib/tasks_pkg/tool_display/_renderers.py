@@ -1054,6 +1054,8 @@ def _tool_display_generic(fn_name, fn_args, tc_id, tc_args_str, *, user_id=None)
 
 
 _WORKFLOW_TOOL_LABELS = {
+    'get_conversation_status': 'Read conversation execution status',
+    'control_conversation': 'Continue, retry or stop a conversation',
     'create_conversation': 'Create a project conversation',
     'dispatch_project_assignment': 'Dispatch a project assignment',
     'get_project_assignment': 'Read a project assignment',

@@ -188,6 +188,7 @@ if __name__ == '__main__':
 
 
 @pytest.mark.parametrize('name', [
+    'get_conversation_status', 'control_conversation',
     'create_conversation', 'dispatch_project_assignment', 'get_project_assignment',
     'report_to_user',
     'evolution_explore', 'evolution_artifact', 'evolution_review', 'evolution_source',
