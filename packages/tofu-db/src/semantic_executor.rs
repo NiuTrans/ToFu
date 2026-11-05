@@ -480,7 +480,9 @@ fn command_effects_from_canonical(
         registry_version: STORAGE_REGISTRY_VERSION,
         committed_at_ms: now_unix_ms,
         outbox_payload: outbox_override.unwrap_or(canonical.bytes),
-        store_receipt: admitted.operation.receipt_required,
+        store_receipt: admitted.operation.receipt_required
+            || admitted.operation.receipt_when_true.is_some_and(|field|
+                payload.get(field) == Some(&Value::Bool(true))),
     })
 }
 

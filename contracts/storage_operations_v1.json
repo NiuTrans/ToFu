@@ -5,7 +5,7 @@
   "sourceSchemaVersion": 70,
   "sourceRegistryVersion": 54,
   "operationCount": 383,
-  "operationsSha256": "71f3e31e0da562dc21f16ddc1fd307eb9829d7e2bae4f596db39a33bb5b15293",
+  "operationsSha256": "444e7ae80de2cfe3b96c487303e915f754aa78f5fe44a0b4a2d8e11a4cdff7d2",
   "operations": [
     {
       "name": "artifact.create",
@@ -2796,6 +2796,7 @@
       "domain": "turns",
       "kind": "command",
       "receiptRequired": false,
+      "receiptWhenTrue": "terminal",
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"
     },

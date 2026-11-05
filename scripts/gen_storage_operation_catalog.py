@@ -54,6 +54,8 @@ def _document() -> dict:
                 "domain": domain,
                 "kind": spec.kind,
                 "receiptRequired": bool(spec.receipt_required),
+                **({"receiptWhenTrue": spec.receipt_when_true}
+                   if spec.receipt_when_true is not None else {}),
                 "transactionTimeoutSeconds": spec.transaction_timeout_s,
                 # Existing handlers enforce owner scope.  Making that fact
                 # explicit prevents a new backend from mistaking omission in
@@ -130,6 +132,7 @@ def _render_rust(document: dict) -> str:
         "    pub domain: &'static str,",
         "    pub kind: StorageOperationKind,",
         "    pub receipt_required: bool,",
+        "    pub receipt_when_true: Option<&'static str>,",
         "    pub transaction_timeout_millis: Option<u64>,",
         "    pub owner_scope: StorageOwnerScope,",
         "}",
@@ -161,6 +164,7 @@ def _render_rust(document: dict) -> str:
             f"        domain: {_rust_string(operation['domain'])},",
             f"        kind: StorageOperationKind::{kind},",
             f"        receipt_required: {str(operation['receiptRequired']).lower()},",
+            f"        receipt_when_true: {('Some(' + _rust_string(operation['receiptWhenTrue']) + ')') if operation.get('receiptWhenTrue') else 'None'},",
             f"        transaction_timeout_millis: {timeout_rust},",
             "        owner_scope: StorageOwnerScope::HandlerEnforced,",
             "    },",

@@ -70,6 +70,7 @@ pub struct AdmittedOperation<'request> {
     pub domain: &'static str,
     pub kind: StorageOperationKind,
     pub receipt_required: bool,
+    pub receipt_when_true: Option<&'static str>,
     pub transaction_timeout_millis: Option<u64>,
     pub owner_scope: StorageOwnerScope,
 }
@@ -81,6 +82,7 @@ impl<'request> AdmittedOperation<'request> {
             domain: metadata.domain,
             kind: metadata.kind,
             receipt_required: metadata.receipt_required,
+            receipt_when_true: metadata.receipt_when_true,
             transaction_timeout_millis: metadata.transaction_timeout_millis,
             owner_scope: metadata.owner_scope,
         }
@@ -98,6 +100,7 @@ impl<'request> AdmittedOperation<'request> {
             // The legacy contract receipts every plugin command
             // (`resolve_operation_contract` returns kind == "command").
             receipt_required: command,
+            receipt_when_true: None,
             transaction_timeout_millis: None,
             owner_scope: StorageOwnerScope::HandlerEnforced,
         }
@@ -126,6 +129,7 @@ pub(crate) struct OwnedAdmittedRequest {
     domain: &'static str,
     kind: StorageOperationKind,
     receipt_required: bool,
+    receipt_when_true: Option<&'static str>,
     transaction_timeout_millis: Option<u64>,
     owner_scope: StorageOwnerScope,
     remaining_millis: u64,
@@ -141,6 +145,7 @@ impl OwnedAdmittedRequest {
                 domain: self.domain,
                 kind: self.kind,
                 receipt_required: self.receipt_required,
+                receipt_when_true: self.receipt_when_true,
                 transaction_timeout_millis: self.transaction_timeout_millis,
                 owner_scope: self.owner_scope,
             },
@@ -175,6 +180,7 @@ pub(crate) fn admit_owned_request_preserving_request(
         domain: admitted.operation.domain,
         kind: admitted.operation.kind,
         receipt_required: admitted.operation.receipt_required,
+        receipt_when_true: admitted.operation.receipt_when_true,
         transaction_timeout_millis: admitted.operation.transaction_timeout_millis,
         owner_scope: admitted.operation.owner_scope,
         remaining_millis: admitted.remaining_millis,
@@ -487,19 +493,21 @@ mod tests {
     }
     #[test]
     fn owned_admission_moves_payload_across_threads_without_copy_or_metadata_drift() {
-        for operation in ["artifact.get", "event.append", "plugin.example.put"] {
+        for operation in ["artifact.get", "event.append", "turn.event.record", "plugin.example.put"] {
             let request = request(operation, Some("owned-command"));
             let pointer = request.payload.as_ptr() as usize;
             let expected = admit_request(&request, negotiated(), authenticated_scope(), 100_000).unwrap();
             let expected_metadata = (expected.operation.domain, expected.operation.kind,
-                expected.operation.receipt_required, expected.operation.transaction_timeout_millis,
+                expected.operation.receipt_required, expected.operation.receipt_when_true,
+                expected.operation.transaction_timeout_millis,
                 expected.operation.owner_scope, expected.remaining_millis);
             let owned = admit_owned_request(request, negotiated(), authenticated_scope(), 100_000).unwrap();
             let (actual_pointer, name, actual_metadata) = std::thread::spawn(move || {
                 let borrowed = owned.as_borrowed();
                 (borrowed.request.payload.as_ptr() as usize, borrowed.operation.name.to_owned(),
                     (borrowed.operation.domain, borrowed.operation.kind,
-                     borrowed.operation.receipt_required, borrowed.operation.transaction_timeout_millis,
+                     borrowed.operation.receipt_required, borrowed.operation.receipt_when_true,
+                     borrowed.operation.transaction_timeout_millis,
                      borrowed.operation.owner_scope, borrowed.remaining_millis))
             }).join().unwrap();
             assert_eq!(actual_pointer, pointer);

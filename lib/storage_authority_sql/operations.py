@@ -488,7 +488,7 @@ def resolve_operation_contract(
                 return spec.after(session, operation, payload, result)
             return result
 
-        return spec.receipt_required, execute, spec.transaction_timeout_s
+        return spec.requires_receipt(payload), execute, spec.transaction_timeout_s
     if operation.startswith("plugin."):
         return (
             kind == "command",

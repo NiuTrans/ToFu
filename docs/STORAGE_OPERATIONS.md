@@ -1,5 +1,20 @@
 # Storage operations and verification
 
+## Terminal event receipts
+
+The `turn.event.record` terminal branch stores its original success response in
+the existing owner-scoped command receipt transaction. Ordinary streaming and
+batch events do not gain receipts. The native lost-ACK/reopen fixture measures
+a **191-byte response and 268-byte receipt entity value** for one completion
+with one carried `done` event; entity keys, indexes, WAL framing and ordinary
+Turn/event state are additional. Payload identities change receipt size, so
+this is a fixture measurement, not a universal per-turn bound. Receipt
+retention and cleanup use the existing owner; there is no new retention knob.
+Run `turn_terminal_retry_replays_the_committed_result_after_lost_ack_and_reopen`
+with `--nocapture` to retain its size evidence. Same-command retries add no
+WAL bytes or duplicate events. Decision and alternatives:
+[storage idempotency](STORAGE.md#commands-queries-and-idempotency).
+
 ## Large-history event persistence
 
 The projection witness's version 2 recovery-size evidence adds one optional
