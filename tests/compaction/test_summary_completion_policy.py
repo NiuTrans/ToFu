@@ -158,6 +158,40 @@ def test_summary_route_conflict_never_sends_upstream(monkeypatch, streaming):
     assert source == original
 
 
+@pytest.mark.parametrize('reason', ['conflicting_provider_pins', 'conflicting_tenant_identity'])
+def test_summary_identity_refusal_settles_failure_before_dispatch(monkeypatch, caplog, reason):
+    import lib.llm_dispatch as dispatch
+    from lib.tasks_pkg.compaction import _summary_routing
+    from lib.tasks_pkg.compaction._layer2 import _summary as summary
+    from lib.tasks_pkg.compaction._summary_budget import summary_failure_reason
+
+    route = {'modelId': 'main', 'providerId': 'owner-route', 'reason': reason}
+    monkeypatch.setattr(_summary_routing, 'select_summary_route', lambda *a, **kw: route)
+    monkeypatch.setattr(summary, '_codex_subscription_provider', lambda task: '')
+    monkeypatch.setattr(summary, '_summary_input_char_budget', lambda task: 12000)
+    monkeypatch.setattr(summary, '_archived_prior_receipt', lambda task: '')
+    calls = []
+    monkeypatch.setattr(dispatch, 'dispatch_chat', lambda *a, **kw: calls.append('chat'))
+    monkeypatch.setattr(dispatch, 'dispatch_stream', lambda *a, **kw: calls.append('stream'))
+    task = {'id': 'summary-task', 'convId': 'summary-conversation', '_userId': 1,
+            'aborted': False, 'config': {'model': 'main'}}
+    source = [{'role': 'user', 'content': 'Preserve this source evidence.'}]
+    original = deepcopy(source)
+    usage = {}
+
+    for _ in range(2):
+        assert summary._generate_query_aware_summary(
+            source, 'continue', task=task, usage_out=usage) is None
+        assert summary_failure_reason(task) == 'summary_route_revalidation_failed'
+        assert usage['_summaryRoute']['reason'] == reason
+        assert usage['_summaryRequestKey']
+
+    assert calls == []
+    assert source == original
+    assert reason in caplog.text
+    assert source[0]['content'] not in caplog.text
+
+
 @pytest.mark.parametrize('task,expected', [
     (None, ''),
     ({'_summaryBudgetFailure': 'summary_dispatch_failed'}, 'summary_dispatch_failed'),

@@ -446,7 +446,11 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 return None
         if summary_route.get('reason') in {
                 'conflicting_provider_pins', 'conflicting_tenant_identity'}:
-            logger.warning('%s Summary route identity conflict; keeping source intact', tag)
+            if budget is not None:
+                budget.finish(False, failure_reason='summary_route_revalidation_failed')
+                budget.project_usage(usage_out)
+            logger.warning('%s Summary route identity conflict (%s); keeping source intact',
+                           tag, summary_route['reason'])
             return None
         if model:
             # Keep waitable upstream failures inside the common dispatcher.

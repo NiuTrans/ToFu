@@ -557,6 +557,21 @@ pin does not override a selected paid provider. Complete output and durable
 adoption checks remain unchanged; no route failure licenses source deletion.
 Scope, evidence, opt-out and ranking semantics live in
 [AA-cheapest compression-first routing](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing).
+
+**Summary identity consistency — Problem:** task registration represents an
+absent tenant as an empty string, while `PrincipalContext` represents it as
+`None`. Comparing those representations literally rejects ordinary personal
+tasks before summary dispatch, leaving an overfull request unable to compact.
+**Decision:** the summary route check treats these two absent-tenant values as
+the same scope; explicit tenant names, owner identity and provider pins must
+still match. Identity refusals settle the existing summary attempt with
+`summary_route_revalidation_failed`, retain the specific conflict reason in
+route metadata and logs, and preserve the source without provider dispatch.
+**Alternatives rejected:** removing the tenant check would allow conflicting
+identities; changing the public principal representation would affect unrelated
+owners; an unsettled early return loses the actionable cause as `summary_failed`.
+Specs: `test_summary_routing.py` and `test_summary_completion_policy.py`.
+
 ### Complete summaries without a wall-clock deadline
 **Problem.** Short timers can discard useful slow work or trigger lossy recovery;
 clipped or provider-truncated summaries cannot safely replace source context.
