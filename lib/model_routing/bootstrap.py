@@ -98,13 +98,18 @@ def _import_pending_provider(
     base_url = str(pending.get('base_url') or '').strip()
     brand = str(pending.get('brand') or 'generic').strip()
     provider_id = discovered_provider_id(brand, base_url)
+    staged_models = pending.get('models') or []
+    chosen_model_ids = [str(pending.get('default_model') or '')] + [
+        str(row.get('model_id') or '') for row in staged_models
+        if isinstance(row, dict) and row.get('catalog_pinned') is True]
     bundle = build_discovered_provider_bundle(
         provider_id=provider_id,
         display_name=str(pending.get('name') or 'Bootstrap Provider'),
         brand=brand,
         base_url=base_url,
-        models=pending.get('models') or [],
+        models=staged_models,
         protocol=str(pending.get('protocol') or 'openai'),
+        keep_model_ids=[model_id for model_id in chosen_model_ids if model_id],
     )
     credential_id = bundle['credentials'][0]['credential_id']
     fragment = {
@@ -407,7 +412,19 @@ def bootstrap_owner_model_routing(
                 'revision': current.revision,
                 'owner_user_id': boundary.owner_user_id,
             }
+        from .carried_import import import_carried_model_routing
+        carried = import_carried_model_routing(authority_repository, boundary)
+        if carried is not None and carried['status'] != 'skipped_active_authority':
+            result = carried
     else:
+        from .carried_import import import_carried_model_routing
+        carried = import_carried_model_routing(authority_repository, boundary)
+        if carried is not None:
+            # An internal export's live authority outranks the frozen legacy
+            # providers[] list, which is its own ancestor: running the
+            # incomplete-cutover repair now would resurrect providers and
+            # keys the operator deleted.
+            return carried
         server_config, private_rows = _legacy_sources(boundary)
         legacy_providers = server_config.get('providers')
         has_legacy_providers = (

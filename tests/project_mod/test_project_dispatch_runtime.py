@@ -72,9 +72,11 @@ def test_mutated_live_carrier_never_gains_more_authority(runtime, mutation):
 
 
 def test_unbound_direct_invocation_and_account_replacement_fail_closed(runtime):
-    t = runtime.task()
     with pytest.raises(AbortedError, match='bound conserved'):
-        admission.validate_task(t)
+        admission.validate_task(runtime.task())
+    # A failed probe ends the probed carrier (test_project_dispatch_abort_cause);
+    # binding is checked on a fresh carrier of the same execution.
+    t = runtime.task()
     admission.bind_account(t)
     assert admission.validate_task(t) == runtime.binding
     t['_executionBudget'] = None
@@ -140,6 +142,16 @@ def test_no_tools_catalog_actual_custom_handler_and_removed_key_are_denied(runti
             _execute_tool_one(t, {}, 'run_command', 'tc', {}, 0, {}, {}, None, False)
 
 
+def test_revoked_grant_aborts_before_the_coordinator_role_policy(runtime):
+    from lib.tasks_pkg.executor._execute import _execute_tool_one
+    r = runtime; t = r.task(); admission.bind_account(t)
+    r.c.repo.revoke(r.assignment['id'], 1)
+    # The role comes from the grant: a dead grant is the dispatch verdict, never
+    # a per-call "Coordinator policy unavailable" refusal the task outlives.
+    with pytest.raises(AbortedError, match='Project dispatch'):
+        _execute_tool_one(t, {}, 'run_command', 'tc', {}, 0, {}, {}, None, False)
+
+
 def test_service_cancel_uses_existing_attempt_and_review_never_implies_delivery(runtime):
     r = runtime
     class Commands:
@@ -167,19 +179,27 @@ def test_real_command_birth_input_provenance_budget_report_review_and_duplicate_
     import lib.conversation_sync.task_start as startup
     r = runtime
     pairs = {}; tasks = {}; launches = []
-    def create_pair(conv, *, command_id, config, input_projection, **kw):
-        assert kw['input_actor'] == 'virtual_user'
-        assert kw['require_lane_idle'] and kw['reject_if_human_queued']
-        assert input_projection['_initiator'] == 'brain'
-        assert '_goalObjective' not in config
-        if command_id in pairs:
-            return {**deepcopy(pairs[command_id]), '_needsStart': False}
-        value = {'_needsStart': True, 'turn': {'turnId': 'worker-turn', 'conversationId': conv,
-            'actor': 'assistant', 'kind': 'reply', 'projection': {}, 'projectionRevision': 1},
-            'attempt': {'attemptId': 'worker-attempt', 'turnId': 'worker-turn', 'conversationId': conv,
-                'operation': 'create', 'status': 'pending', 'config': deepcopy(config)}}
-        pairs[command_id] = deepcopy(value)
-        return value
+    class PairClient:
+        def command(self, operation, payload, command_id):
+            assert operation == 'turn.create_pair'
+            if command_id in pairs:
+                return {**deepcopy(pairs[command_id]), '_needsStart': False}
+            assert payload['input_actor'] == 'virtual_user'
+            assert payload['require_lane_idle'] and payload['reject_if_human_queued']
+            assert payload['input_projection']['origin']['initiator'] == 'brain'
+            assert '_goalObjective' not in payload['config']
+            value = {'_needsStart': True,
+                'inputProjection': deepcopy(payload['input_projection']),
+                'turn': {'turnId': 'worker-turn', 'conversationId': payload['conversation_id'],
+                    'actor': 'assistant', 'kind': 'reply', 'projection': {}, 'projectionRevision': 1},
+                'attempt': {'attemptId': 'worker-attempt', 'turnId': 'worker-turn',
+                    'conversationId': payload['conversation_id'], 'operation': 'create', 'status': 'pending', 'config': deepcopy(payload['config'])}}
+            pairs[command_id] = deepcopy(value)
+            return value
+
+    def create_pair(conv, *, command_id, **kwargs):
+        from lib.turn_lifecycle import create_turn_pair as record_pair
+        return record_pair(conv, command_id=command_id, **kwargs)
     def get_attempt(*a, include_execution_config=False, **kw):
         attempt = deepcopy(next(iter(pairs.values()))['attempt'])
         if not include_execution_config: attempt.pop('config', None)
@@ -187,7 +207,7 @@ def test_real_command_birth_input_provenance_budget_report_review_and_duplicate_
     def get_turn(*a, **kw): return deepcopy(next(iter(pairs.values()))['turn'])
 
     r.c.repo.attempt_get = get_attempt
-    monkeypatch.setattr(module, 'create_turn_pair', create_pair)
+    monkeypatch.setattr('lib.turn_lifecycle._turn_client', lambda **kw: PairClient())
     monkeypatch.setattr(module, 'claim_attempt_start', lambda *a, **kw: True)
     monkeypatch.setattr(module, 'get_attempt', get_attempt)
     monkeypatch.setattr(module, 'get_turn', get_turn)
@@ -222,6 +242,11 @@ def test_real_command_birth_input_provenance_budget_report_review_and_duplicate_
             conv, cfg, abort_after_ts=watermark, on_task_registered=bind, **kw))
     service = ProjectDispatchService(r.c.repo, commands=commands, turn_get=get_turn, attempt_get=get_attempt)
     first = service.dispatch(r.assignment['id'], principal=r.c.principal)
+    stored_input = next(iter(pairs.values()))['inputProjection']
+    assert stored_input['contextSnapshot']['snapshot'] == {
+        'model': 'model-a', 'depth': '', 'modes': [], 'tools': [],
+        'roots': [{'short': '/project', 'path': '/project', 'ro': True}],
+    }
     assert first['execution']['status'] == 'completed'
     assert first['execution']['result']['content'] == 'verified consult report'
     accepted = service.review(r.assignment['id'], principal=r.c.principal, decision='accept',
@@ -231,18 +256,44 @@ def test_real_command_birth_input_provenance_budget_report_review_and_duplicate_
     assert launches == ['task-a'] and len(pairs) == 1
 
 
-@pytest.mark.parametrize('state', ['active', 'revoked', 'unknown', 'exhausted'])
-def test_consultation_cannot_buy_auxiliary_summary(runtime, monkeypatch, state):
+@pytest.mark.parametrize('state', ['active', 'revoked', 'unknown'])
+def test_consultation_summary_is_admitted_only_through_its_grant_account(runtime, monkeypatch, state):
+    """Summaries charge the consult grant like answers; its fences still refuse."""
     from lib.tasks_pkg.compaction._layer2._summary import _generate_query_aware_summary
     r = runtime; task = r.task(); admission.bind_account(task)
     if state == 'revoked': r.c.repo.revoke(r.assignment['id'], 1)
-    elif state == 'unknown': _lease(task).mark_dispatched()
-    elif state == 'exhausted': task['_executionActualsComplete'] = False
-    def no_provider(*a, **kw): pytest.fail('Auxiliary summary bypassed the assigned account')
-    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', no_provider)
-    monkeypatch.setattr('lib.llm_dispatch.dispatch_stream', no_provider)
-    with pytest.raises(AbortedError, match='auxiliary'):
-        _generate_query_aware_summary([], 'brief', task=task)
+    elif state == 'unknown':
+        prior = _lease(task); prior.mark_dispatched(); prior.settle(None)  # Paid, usage lost.
+    sends = []
+
+    def transport(messages, **kwargs):
+        # The real transport owns exactly this reserve/mark/settle protocol.
+        lease = kwargs['model_budget_admit'](input_tokens=4, max_output_tokens=6)
+        try:
+            lease.mark_dispatched()
+        except AbortedError:
+            lease.settle(unsent=True)
+            raise
+        sends.append(messages)
+        lease.settle({'prompt_tokens': 4, 'completion_tokens': 6})
+        raise OSError('provider reply lost after a counted send')
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_chat', transport)
+    monkeypatch.setattr('lib.llm_dispatch.dispatch_stream', transport)
+    monkeypatch.setattr('lib.tasks_pkg.compaction._summary_routing.select_summary_route',
+                        lambda task, **kw: {'modelId': task['config']['model']})
+    if state == 'revoked':
+        with pytest.raises(AbortedError, match='auxiliary'):
+            _generate_query_aware_summary([], 'brief', task=task)
+        assert task['_abort_reason'] == 'dispatch_grant_revoked'
+    else:
+        assert _generate_query_aware_summary([], 'brief', task=task) is None
+    attempts = r.c.repo.read(r.assignment['id'])['modelAttempts']
+    if state == 'active':
+        assert len(sends) == 1 and [row['reported_tokens'] for row in attempts] == [10]
+    else:
+        # Revocation stops before transport; an unconfirmed prior occurrence
+        # blocks the finite consult grant at physical admission.
+        assert not sends and all(row['reported_tokens'] != 10 for row in attempts)
 
 
 def test_auto_translation_cannot_be_enabled_by_copied_config(runtime):

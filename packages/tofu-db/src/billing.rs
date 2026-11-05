@@ -413,8 +413,7 @@ fn encode(v: &Value) -> io::Result<Vec<u8>> {
         )
     })?;
     if raw.len() > MAX_BILLING_RESPONSE_BYTES {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "billing response exceeds 8 MiB",
         ));
     }
@@ -602,8 +601,7 @@ fn append(
     }
     let mut a = read_aggregate(db, t, &e.user_id)?;
     if a.count >= MAX_BILLING_LEDGER_ENTRIES_PER_USER {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::capacity_quota(
             "billing ledger quota reached",
         ));
     }
@@ -702,8 +700,7 @@ pub(crate) fn ledger_list(
         .checked_add(q.limit)
         .filter(|v| *v <= MAX_BILLING_LIST_SCAN_ROWS)
         .ok_or_else(|| {
-            err(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "billing list scan exceeds bound",
             )
         })?;
@@ -756,8 +753,7 @@ pub(crate) fn ledger_list(
         }
     }
     if rows.len() < wanted && !ended {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "billing filters exceed scan bound",
         ));
     }
@@ -1086,14 +1082,16 @@ pub(crate) fn payment_record(
     created_at: u64,
     physical_updated_at_ms: u64,
 ) -> io::Result<Vec<u8>> {
-    if !text(provider, 100, true) || !text(provider_id, 300, true) {
+    if !text(provider, 100, true) || !text(provider_id, 300, false) {
         return Err(err(
             io::ErrorKind::InvalidInput,
             "invalid billing payment provider",
         ));
     }
-    if let Some(payment) = read_payment_claim(db, t, provider, provider_id)? {
-        return encode(&json!({"created":false,"payment":payment_value(&payment)}));
+    if !provider_id.is_empty() {
+        if let Some(payment) = read_payment_claim(db, t, provider, provider_id)? {
+            return encode(&json!({"created":false,"payment":payment_value(&payment)}));
+        }
     }
     let payload: Value = decode(payload_json, "billing payment payload malformed")?;
     let map = payload.as_object().ok_or_else(|| {
@@ -1102,9 +1100,35 @@ pub(crate) fn payment_record(
             "invalid billing payment payload",
         )
     })?;
+    let payment_id = payload_text(map, "id", 200)?;
+    let user_id = payload_text(map, "user_id", 200)?;
+    if let Some(raw) = db.entity_get(t, &payment_id_claim_key(t, &payment_id)?)? {
+        let claim: PaymentClaim = decode(&raw, "billing payment ID claim malformed")?;
+        if claim.identity != [payment_id.as_str()] || claim.payment_id != payment_id {
+            return Err(err(
+                io::ErrorKind::InvalidData,
+                "billing payment ID claim differs",
+            ));
+        }
+        if provider_id.is_empty() {
+            let existing = read_payment(db, t, &payment_id)?.ok_or_else(|| {
+                err(
+                    io::ErrorKind::InvalidData,
+                    "billing payment ID target missing",
+                )
+            })?;
+            if existing.user_id == user_id && existing.provider == provider {
+                return encode(&json!({"created":false,"payment":payment_value(&existing)}));
+            }
+        }
+        return Err(err(
+            io::ErrorKind::AlreadyExists,
+            "billing payment ID exists",
+        ));
+    }
     let payment = Payment {
-        id: payload_text(map, "id", 200)?,
-        user_id: payload_text(map, "user_id", 200)?,
+        id: payment_id,
+        user_id,
         provider: provider.to_owned(),
         provider_id: provider_id.to_owned(),
         amount_minor: payload_unsigned(map, "amount_minor")?,
@@ -1115,23 +1139,12 @@ pub(crate) fn payment_record(
         settled_at: 0,
         raw: payment_raw_document(map.get("raw"))?,
     };
-    if !matches!(payment.status.as_str(), "pending" | "settled" | "failed") {
+    if !matches!(payment.status.as_str(), "pending" | "settled" | "failed")
+        || (provider_id.is_empty() && payment.status != "pending")
+    {
         return Err(err(
             io::ErrorKind::InvalidInput,
             "invalid billing payment status",
-        ));
-    }
-    if let Some(raw) = db.entity_get(t, &payment_id_claim_key(t, &payment.id)?)? {
-        let claim: PaymentClaim = decode(&raw, "billing payment ID claim malformed")?;
-        if claim.identity != [payment.id.as_str()] || claim.payment_id != payment.id {
-            return Err(err(
-                io::ErrorKind::InvalidData,
-                "billing payment ID claim differs",
-            ));
-        }
-        return Err(err(
-            io::ErrorKind::AlreadyExists,
-            "billing payment ID exists",
         ));
     }
     let count_key = payment_count_key(t)?;
@@ -1141,8 +1154,7 @@ pub(crate) fn payment_record(
         .transpose()?
         .unwrap_or(0);
     if count >= MAX_BILLING_PAYMENTS {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::capacity_quota(
             "billing payment quota reached",
         ));
     }
@@ -1156,15 +1168,17 @@ pub(crate) fn payment_record(
         payment_id_claim_key(t, &payment.id)?,
         serde_json::to_vec(&id_claim).unwrap(),
     )?;
-    let provider_claim = PaymentClaim {
-        identity: vec![provider.to_owned(), provider_id.to_owned()],
-        payment_id: payment.id.clone(),
-    };
-    db.entity_put(
-        t,
-        payment_provider_claim_key(t, provider, provider_id)?,
-        serde_json::to_vec(&provider_claim).unwrap(),
-    )?;
+    if !provider_id.is_empty() {
+        let provider_claim = PaymentClaim {
+            identity: vec![provider.to_owned(), provider_id.to_owned()],
+            payment_id: payment.id.clone(),
+        };
+        db.entity_put(
+            t,
+            payment_provider_claim_key(t, provider, provider_id)?,
+            serde_json::to_vec(&provider_claim).unwrap(),
+        )?;
+    }
     db.entity_put(
         t,
         payment_created_key(t, &payment)?,
@@ -1172,6 +1186,86 @@ pub(crate) fn payment_record(
     )?;
     db.entity_put(t, count_key, serde_json::to_vec(&(count + 1)).unwrap())?;
     encode(&json!({"created":true,"payment":payment_value(&payment)}))
+}
+
+pub(crate) fn payment_bind(
+    db: &AuthorityDatabase,
+    t: &mut AuthorityTransaction,
+    payment_id: &str,
+    payload_json: &[u8],
+    physical_updated_at_ms: u64,
+) -> io::Result<Vec<u8>> {
+    if !text(payment_id, 200, true) {
+        return Err(err(
+            io::ErrorKind::InvalidInput,
+            "invalid billing payment ID",
+        ));
+    }
+    let payload: Value = decode(payload_json, "billing payment binding payload malformed")?;
+    let map = payload.as_object().ok_or_else(|| {
+        err(
+            io::ErrorKind::InvalidInput,
+            "invalid billing payment binding",
+        )
+    })?;
+    let provider = payload_text(map, "provider", 100)?;
+    let provider_id = payload_text(map, "provider_id", 300)?;
+    let user_id = payload_text(map, "user_id", 200)?;
+    let amount_minor = payload_unsigned(map, "amount_minor")?;
+    let currency = payload_text(map, "currency", 16)?;
+    let legacy_session_id = match map.get("legacy_session_id") {
+        None => "",
+        Some(Value::String(value)) if text(value, 300, false) => value.as_str(),
+        _ => return Err(err(io::ErrorKind::InvalidInput, "invalid legacy Session identity")),
+    };
+    let rejected = || encode(&json!({"accepted":false,"payment":null}));
+    let Some(mut payment) = read_payment(db, t, payment_id)? else {
+        return rejected();
+    };
+    if payment.provider != provider
+        || payment.user_id != user_id
+        || payment.amount_minor != amount_minor
+        || payment.currency != currency
+        || !matches!(payment.status.as_str(), "pending" | "settled")
+    {
+        return rejected();
+    }
+    if !payment.provider_id.is_empty() {
+        let original = read_payment_claim(db, t, &provider, &payment.provider_id)?;
+        if original.as_ref().is_none_or(|value| value.id != payment.id) {
+            return Err(err(io::ErrorKind::InvalidData, "billing payment binding claim differs"));
+        }
+        if payment.provider_id == provider_id {
+            return encode(&json!({"accepted":true,"payment":payment_value(&payment)}));
+        }
+        let legacy_checkout = provider == "stripe" && payment.status == "pending"
+            && payment.provider_id == legacy_session_id
+            && legacy_session_id.starts_with("cs_") && legacy_session_id.len() > 3
+            && provider_id.starts_with("pi_") && provider_id.len() > 3
+            && payment.raw.get("checkout_session").and_then(Value::as_str) == Some(legacy_session_id);
+        if !legacy_checkout {
+            return rejected();
+        }
+    }
+    if payment.status != "pending" || read_payment_claim(db, t, &provider, &provider_id)?.is_some()
+    {
+        return rejected();
+    }
+    if !payment.provider_id.is_empty() {
+        db.entity_delete(t, payment_provider_claim_key(t, &provider, &payment.provider_id)?)?;
+    }
+    payment.provider_id = provider_id.clone();
+    write_payment(db, t, &payment, None, physical_updated_at_ms)?;
+    let claim = PaymentClaim {
+        identity: vec![provider.clone(), provider_id.clone()],
+        payment_id: payment.id.clone(),
+    };
+    db.entity_put(
+        t,
+        payment_provider_claim_key(t, &provider, &provider_id)?,
+        serde_json::to_vec(&claim).unwrap(),
+    )?;
+    encode(&json!({"accepted":true,"payment":payment_value(&payment)}))
 }
 
 pub(crate) fn payment_settle(
@@ -1193,6 +1287,12 @@ pub(crate) fn payment_settle(
     };
     if payment.status == "settled" {
         return encode(&json!({"found":true,"settled":false,"payment":payment_value(&payment)}));
+    }
+    if payment.provider_id.is_empty() || payment.status != "pending" {
+        return Err(err(
+            io::ErrorKind::AlreadyExists,
+            "only bound pending payments can settle",
+        ));
     }
     let payload: Value = decode(payload_json, "billing payment settlement payload malformed")?;
     let map = payload.as_object().ok_or_else(|| {
@@ -1254,8 +1354,7 @@ pub(crate) fn payment_list(
         .checked_add(request.limit)
         .filter(|value| *value <= MAX_BILLING_LIST_SCAN_ROWS)
         .ok_or_else(|| {
-            err(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::domain_bound(
                 "billing payment list scan exceeds bound",
             )
         })?;
@@ -1319,8 +1418,7 @@ pub(crate) fn payment_list(
         }
     }
     if rows.len() < wanted && !ended {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "billing payment filters exceed scan bound",
         ));
     }
@@ -1656,8 +1754,7 @@ pub(crate) fn redeem_codes_mint(
         .checked_add(request.codes.len())
         .filter(|value| *value <= MAX_BILLING_REDEEM_CODES)
         .ok_or_else(|| {
-            err(
-                io::ErrorKind::OutOfMemory,
+            crate::resource_exhaustion::capacity_quota(
                 "billing redeem-code quota reached",
             )
         })?;
@@ -1679,8 +1776,7 @@ pub(crate) fn redeem_codes_mint(
         )
     })?;
     if value_json.len() > MAX_BILLING_REDEEM_BATCH_DOCUMENT_BYTES {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "billing redeem batch exceeds logical bound",
         ));
     }
@@ -1945,8 +2041,7 @@ pub(crate) fn redeem_codes_list(
         }
     }
     if !ended {
-        return Err(err(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "redeem-code list exceeds scan bound",
         ));
     }

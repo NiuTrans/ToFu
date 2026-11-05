@@ -45,7 +45,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 # The full cache-channel alias universe known to lib/cost.py
 # (_USAGE_KEY_ALIASES + _USAGE_NESTED_ALIASES): canonical OpenAI/Anthropic
 # spellings plus every probed vendor variant (Kimi/Moonshot, DeepSeek,
-# Gemini, sankuai-gateway camelCase).
+# Gemini, example-corp-gateway camelCase).
 _FORBIDDEN_KEYS = frozenset({
     'cache_read_tokens', 'cache_read_input_tokens',
     'cache_write_tokens', 'cache_creation_input_tokens',
@@ -56,11 +56,6 @@ _FORBIDDEN_KEYS = frozenset({
 _ALLOW = {
     'lib/cost.py':
         'the SSOT itself — normalize_usage + canonicalize_usage_cache_keys',
-    'lib/tasks_pkg/compaction/_pressure.py':
-        'reads the NORMALISED accumulator returned by _proactive_cache_economics '
-        '(same process, declared schema — not a raw provider usage dict); '
-        'mock-based policy tests substitute that document, so the read must '
-        'stay on the result, not on the raw-evidence accessor',
     'lib/llm_dispatch/cache_settle.py':
         'cache write-visibility gate — probes the RAW provider wire for the '
         'PRESENCE of the Anthropic metered-write key (explicit 0 vs absent), '
@@ -75,9 +70,10 @@ _ALLOW = {
         "reads the engine's OWN normalised accumulator (usage_total is fed "
         'exclusively from normalize_usage in report_engine/__init__'
         '._accumulate_usage)',
-    'lib/tasks_pkg/compaction/_layer2/_compact.py':
+    'lib/tasks_pkg/compaction/_layer2/_candidate_policy.py':
         "reads the compaction planner's OWN canonical economics projection, "
-        'built by _proactive_cache_economics rather than provider usage',
+        'built by _proactive_cache_economics (EconomicPolicyPorts.cache_economics) '
+        'rather than provider usage',
 }
 
 

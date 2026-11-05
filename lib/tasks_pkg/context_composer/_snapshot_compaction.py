@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ._render import _managed_block_hashes
 from ._sections import remove_managed_section
-from .registry import INJECTION_REGISTRY
+from .registry import block_spec
 
 
 def compact_context_snapshots(messages: list[dict]) -> list[dict]:
@@ -38,7 +38,7 @@ def compact_context_snapshots(messages: list[dict]) -> list[dict]:
             if not isinstance(row, dict) or not isinstance(row.get('id'), str):
                 continue
             key = row['id']
-            spec = INJECTION_REGISTRY.get(key)
+            spec = block_spec(key)
             if spec is None or spec.lane != 'block' or spec.placement == 'system':
                 continue
             verified = bool(actual.get(key)) and actual[key] == row.get('hash')

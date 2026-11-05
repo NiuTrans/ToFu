@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.conversations.repository import _conversation_id, _owner_id
+from lib.error_envelope import BadRequest
 
 CHUNK_BYTES = 65536
 KINDS = frozenset({'header', 'turn', 'chunk'})
@@ -19,7 +20,9 @@ def diagnostic_payload(conversation_id: str, *, user_id: int, kind: str = 'heade
                        source_token: str | None = None) -> dict[str, Any]:
     """Reject ambiguous cursors before dispatch; storage independently validates."""
     if kind not in KINDS:
-        raise ValueError('kind must be header, turn or chunk')
+        raise BadRequest('kind must be header, turn or chunk', field='kind')
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        raise BadRequest('conversation_id is required', field='conversation_id')
     result: dict[str, Any] = {'conv_id': _conversation_id(conversation_id),
                               'user_id': _owner_id(user_id), 'kind': kind}
     values = {'revision': revision, 'index': index, 'offset': offset, 'limit': limit}
@@ -30,20 +33,20 @@ def diagnostic_payload(conversation_id: str, *, user_id: int, kind: str = 'heade
         if value is None:
             continue
         if name not in allowed or type(value) is not int or value < 0:
-            raise ValueError(f'invalid {name} for {kind} diagnostic read')
+            raise BadRequest(f'invalid {name} for {kind} diagnostic read', field=name)
         result[name] = value
     if source_token is not None:
         import re
         if kind != 'chunk' or not isinstance(source_token, str) or not re.fullmatch(r'[0-9a-f]{64}', source_token):
-            raise ValueError('invalid source_token for diagnostic read')
+            raise BadRequest('invalid source_token for diagnostic read', field='source_token')
         result['source_token'] = source_token
     if kind != 'header' and (revision is None or index is None):
-        raise ValueError('revision and index are required for turn/chunk reads')
+        raise BadRequest('revision and index are required for turn/chunk reads')
     if kind == 'chunk':
         if offset is None or source_token is None:
-            raise ValueError('offset and source_token are required for chunk reads')
+            raise BadRequest('offset and source_token are required for chunk reads')
         if limit is not None and not 1 <= limit <= CHUNK_BYTES:
-            raise ValueError(f'limit must be between 1 and {CHUNK_BYTES}')
+            raise BadRequest(f'limit must be between 1 and {CHUNK_BYTES}', field='limit')
         result.setdefault('limit', CHUNK_BYTES)
     return result
 

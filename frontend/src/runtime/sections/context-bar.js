@@ -237,11 +237,10 @@
     return [...(runtimeScope.getCompactionHistory?.(conv.id) || [])];
   }
 
+  /* Listed archive count, or null while no listing has settled. */
   function _countCompactions(conv) {
-    if (!conv) return 0;
-    const count = runtimeScope.CompactionHistoryState?.count?.(conv.id);
-    return Number.isFinite(count)
-      ? Math.max(0, count) : _collectCompactions(conv).length;
+    const count = conv ? runtimeScope.CompactionHistoryState?.count?.(conv.id) : null;
+    return Number.isFinite(count) ? Math.max(0, count) : null;
   }
 
   let _state = null;
@@ -249,6 +248,14 @@
   // One manual request per page. It may finish offscreen, but only its own
   // conversation can display progress; repeated clicks never duplicate POSTs.
   let _manualCompactionId = null;
+  // Protected or busy conversations answer with a server-held working-view
+  // request; at most one cancellation is in flight per page.
+  const _scheduledCompactions = createScheduledCompactions();
+  let _cancellingCompactionId = null;
+
+  function _turnCount(conv) {
+    return conv ? (runtimeScope.ConversationTurnRead?.ordered?.(conv) || []).length : 0;
+  }
 
   function _tt(key, fallback, vars) {
     return (typeof t === 'function') ? t(key, vars) : fallback;
@@ -260,9 +267,16 @@
 
   function _meterSnapshot() {
     const conv = _activeConv();
+    const busy = _convHasLiveTask(conv);
+    const convId = conv ? conv.id : null;
+    const scheduled = _scheduledCompactions.pending(convId, { busy, turns: _turnCount(conv) });
+    const request = scheduled ? _scheduledCompactions.current(convId) : null;
     return Object.assign({}, contextUsageSummary(), {
-      convId: conv ? conv.id : null,
-      busy: _convHasLiveTask(conv),
+      convId,
+      busy,
+      compactionScheduled: scheduled,
+      compactionAppliesAt: request ? request.appliesAt : null,
+      compactionCancelPending: !!convId && _cancellingCompactionId === convId,
 
       compacting: !!_manualCompactionId && _manualCompactionId === conv?.id,
       compactionPending: !!_manualCompactionId,
@@ -280,6 +294,7 @@
       translate: _tt,
       read: _meterSnapshot,
       onCompact: _runManualCompaction,
+      onCancelScheduled: _cancelScheduledCompaction,
       onHistory: (convId) => runtimeScope.openCompactionViewer?.(convId),
       workingFacts: {
         load: (id, signal) => Api.conversations.workingFacts(id, signal),
@@ -320,13 +335,8 @@
    * "正在压缩" and "无需压缩" can never appear together. */
   async function _runManualCompaction(convId) {
     if (!convId || _manualCompactionId) return;
-    const conv = getConvById(convId);
-    if (conv && _convHasLiveTask(conv)) {
-      if (typeof showToast === 'function') {
-        showToast(_tt('compactNow.busy', '任务进行中，无法压缩'), 'warning');
-      }
-      return;
-    }
+    /* A running task never blocks the request: the server schedules a
+     * working-view compaction for its next model call instead. */
 
     /* Resolve to a single {msg, level} terminal outcome, THEN toast once. */
     let outcome = null;
@@ -348,9 +358,7 @@
         res = await Api.compactions.compactNow(convId, {});
       } catch (err) {
         const code = err && err.code;
-        if (code === 'task_active') {
-          outcome = { msg: _tt('compactNow.busy', '任务进行中，无法压缩'), level: 'warning' };
-        } else if (code === 'nothing_to_compact') {
+        if (code === 'nothing_to_compact') {
           // Not a failure — a neutral, informative note (context already lean).
           outcome = { msg: _tt('compactNow.nothing', '上下文已很精简，暂无需压缩'), level: 'info' };
         } else {
@@ -363,11 +371,19 @@
         const code = res && res.code;
         if (code === 'nothing_to_compact') {
           outcome = { msg: _tt('compactNow.nothing', '上下文已很精简，暂无需压缩'), level: 'info' };
-        } else if (code === 'task_active') {
-          outcome = { msg: _tt('compactNow.busy', '任务进行中，无法压缩'), level: 'warning' };
         } else {
           outcome = { msg: _tt('compactNow.failed', '压缩失败'), level: 'error' };
         }
+        return;
+      }
+
+      /* Scheduled (protected or busy conversation): nothing was rewritten,
+       * so there is nothing to reload; a model call compacts the working view. */
+      const scheduledConv = getConvById(convId);
+      const scheduled = _scheduledCompactions.accept(convId, res, {
+        busy: _convHasLiveTask(scheduledConv), turns: _turnCount(scheduledConv) });
+      if (scheduled) {
+        outcome = { msg: scheduledCompactionNotice(scheduled, _tt), level: 'info' };
         return;
       }
 
@@ -417,6 +433,30 @@
       if (outcome && typeof showToast === 'function') {
         showToast(outcome.msg, outcome.level);
       }
+    }
+  }
+
+  /* Withdraw the acknowledged scheduled request; one terminal toast. */
+  async function _cancelScheduledCompaction(convId) {
+    const request = _scheduledCompactions.current(convId);
+    if (!convId || !request || _cancellingCompactionId) return;
+    _cancellingCompactionId = convId;
+    _doUpdate();
+    let outcome = null;
+    try {
+      const result = readCancelledCompaction(
+        await Api.compactions.cancelScheduled(convId, request.requestId));
+      if (!result) throw new Error('Malformed cancellation reply');
+      _scheduledCompactions.forget(convId);
+      outcome = cancelledCompactionNotice(result, _tt);
+    } catch (err) {
+      console.warn('[compactNow] cancel failed', err);
+      outcome = { msg: _tt('compactNow.cancelFailed', 'Could not cancel the scheduled compaction'),
+                  level: 'error' };
+    } finally {
+      _cancellingCompactionId = null;
+      _doUpdate();
+      if (outcome && typeof showToast === 'function') showToast(outcome.msg, outcome.level);
     }
   }
 

@@ -144,7 +144,7 @@ def test_normal_orchestrator_finalizer_stamps_before_persist(monkeypatch, termin
         lambda *_a: None,
     )
     monkeypatch.setattr(
-        _finalize, '_build_done_event_base',
+        _finalize, 'build_done_event',
         lambda *_a, **_k: {'type': 'done', 'finishReason': 'stop'},
     )
     import lib
@@ -403,3 +403,61 @@ def test_queued_abort_finalizer_settles_without_worker_entry():
     assert events == [(task, event)]
     assert persisted == [task]
     assert notified == [task]
+
+
+@pytest.mark.parametrize('outcome', ['error', 'aborted'])
+@pytest.mark.parametrize('failure', [None, 'event', 'persist', 'refused', 'notify'])
+def test_terminal_projection_failures_preserve_order_evidence_and_duplicate_fence(
+        outcome, failure):
+    task = {
+        'id': 'terminal-projection-fault', 'status': 'pending', '_userId': 41,
+        'content': 'partial answer', 'thinking': 'partial reasoning',
+    }
+    order = []
+    events = []
+
+    def observe(stage, owner):
+        assert owner is task
+        assert owner['_userId'] == 41
+        assert owner['finished_at'] > 0
+        assert owner['content'] == 'partial answer'
+        assert owner['thinking'] == 'partial reasoning'
+        order.append(stage)
+        if failure == stage:
+            raise RuntimeError(f'{stage} unavailable')
+
+    def append(owner, event):
+        events.append(event)
+        observe('event', owner)
+
+    def persist(owner):
+        observe('persist', owner)
+        if failure == 'refused':
+            return False
+        owner.pop('_terminalPersistencePending', None)
+        return True
+
+    kwargs = {
+        'append_event_fn': append,
+        'persist_task_result_fn': persist,
+        'notify_terminal_fn': lambda owner: observe('notify', owner),
+    }
+    if outcome == 'error':
+        finalize = finalize_chat_task_error
+        args = (task, {'kind': 'internal', 'message': 'original failure'})
+    else:
+        finalize = finalize_chat_task_aborted
+        args = (task,)
+
+    event = finalize(*args, **kwargs)
+    finished_at = task['finished_at']
+    assert event is events[0]
+    assert event['finishReason'] == outcome
+    assert finalize(*args, **kwargs) is None
+    assert order == ['event', 'persist', 'notify']
+    assert events == [event]
+    assert task['finished_at'] == finished_at
+    assert bool(task.get('_terminalPersistencePending')) is (failure in {'persist', 'refused'})
+    assert bool(task.get('_terminalPersistenceRetryReady')) is (failure in {'persist', 'refused'})
+    if outcome == 'error':
+        assert task['error']['message'] == 'original failure'

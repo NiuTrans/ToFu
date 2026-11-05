@@ -11,6 +11,7 @@ import ast
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import random
 import unicodedata
@@ -26,12 +27,14 @@ def canonical():
     names = {'_USAGE_KEY_ALIASES', '_USAGE_NESTED_ALIASES', '_ANTHROPIC_RESIDUAL_KEYS',
              'normalize_usage', 'usage_cache_convention', '_nested_cached',
              '_anthropic_residual_input', 'split_input_tokens', '_legacy_preset_to_model',
-             '_round', 'compute_cost'}
+             '_round', '_cache_write_1h_tokens', '_ANTHROPIC_CACHE_WRITE_1H_MUL',
+             'compute_cost'}
     tree = ast.parse(source.read_text())
     nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
              or (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and n.targets[0].id in names)]
     assert len(nodes) == len(names)
-    namespace = dict(Optional=Optional, logger=logging.getLogger('pricing-oracle'), DEFAULT_USD_CNY_RATE=7.24)
+    namespace = dict(Optional=Optional, math=math,
+                     logger=logging.getLogger('pricing-oracle'), DEFAULT_USD_CNY_RATE=7.24)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
     return namespace
 

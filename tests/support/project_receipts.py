@@ -1,7 +1,7 @@
 """Compile real Project receipt owners; fault cases mutate only a private graph copy."""
 from pathlib import Path
 
-from tests._runtime_sections import ROOT, native_module_path
+from tests._runtime_sections import ROOT, anchor_relative_imports, native_module_path
 
 OWNER = ROOT / 'frontend/src/conversation/ui/project-receipt'
 
@@ -19,8 +19,9 @@ def project_receipt_bundle(directory, *, anchor=None, replacement=None):
         assert sources[name].count(anchor) == 1
         sources[name] = sources[name].replace(anchor, replacement, 1)
     for name, source in sources.items():
-        # Preserve the shared escaping collaborator when relocating the graph.
-        source = source.replace('"../../../html-safety"', repr(str(ROOT / 'frontend/src/html-safety')))
+        # Siblings resolve inside the private copy; every other collaborator
+        # resolves to the shipped owner.
+        source = anchor_relative_imports(source, OWNER, relocated_dir=OWNER)
         (copied / name).write_text(source)
     path = native_module_path('.native/project-receipt-fault.js', copied / 'index.ts')
     for source in OWNER.glob('*.ts'):

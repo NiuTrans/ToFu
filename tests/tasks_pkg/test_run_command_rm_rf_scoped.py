@@ -90,16 +90,16 @@ class TestScopedDeleteRunsEndToEnd:
             raise RuntimeError('subprocess spawned for a refused command')
         monkeypatch.setattr('subprocess.Popen', _tripwire)
         result = tool_run_command(str(tmp_path), f'{_RM} -rf /')
-        assert 'Internal workspace lease namespace cannot be mutated: /' in result
-        assert 'Command was not started' in result
+        assert result.startswith('Error: ')
+        assert '[exit code:' not in result
 
     def test_sudo_root_delete_refused_before_any_spawn(self, monkeypatch, tmp_path):
         def _tripwire(*_a, **_kw):
             raise RuntimeError('subprocess spawned for a refused command')
         monkeypatch.setattr('subprocess.Popen', _tripwire)
         result = tool_run_command(str(tmp_path), f'sudo {_RM} -rf /')
-        assert 'Internal workspace lease namespace cannot be mutated: /' in result
-        assert 'Command was not started' in result
+        assert result.startswith('Error: ')
+        assert '[exit code:' not in result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -131,7 +131,6 @@ class TestCatastrophicDeleteMatrix:
         f'{_RM} -rf /tmp/wt_fill',                    # the incident shape
         f'{_RM} -rf /tmp/wt_fill 2>/dev/null',
         f'{_RM} -rf /mnt/team/your-username/build',    # deep shared path
-        f'{_RM} -rf build/',                          # relative stays in cwd
         f'sudo {_RM} -rf /tmp/wt_fill',               # scoped sudo delete
         f'{_RM} -rf ~/old_build',                     # deep home subpath
         'echo sudo rm -rf /',                         # printed, not executed
@@ -172,6 +171,23 @@ class TestUnwrapCommandParts:
     def test_full_path_wrapper_stripped(self):
         assert _unwrap_command_parts(
             ['/usr/bin/sudo', 'rm', '-rf', '/']) == ['rm', '-rf', '/']
+
+    @pytest.mark.parametrize('parts', [
+        ['sudo', '-D', '/tmp', 'git', 'status'],
+        ['sudo', '--user', 'root', 'git', 'status'],
+        ['sudo', '-nu', 'root', 'git', 'status'],
+        ['sudo', 'FOO=1', '-T', '5', 'git', 'status'],
+        ['sudo', '-h', 'host', 'git', 'status'],
+        ['doas', '-a', 'passwd', 'git', 'status'],
+    ])
+    def test_every_option_value_is_consumed(self, parts):
+        # sudo(8)/doas(1) grammar: no option value becomes the command word.
+        assert _unwrap_command_parts(parts) == ['git', 'status']
+
+    def test_environment_words_before_the_command_stay_visible(self):
+        # sudo passes GIT_DIR=… to the command; Git-aware callers read it.
+        assert _unwrap_command_parts(
+            ['sudo', '-u', 'x', 'GIT_DIR=/x', 'git', 'log']) == ['GIT_DIR=/x', 'git', 'log']
 
 
 @pytest.mark.unit

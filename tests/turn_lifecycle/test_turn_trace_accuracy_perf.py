@@ -16,13 +16,22 @@ def test_randomized_priority_reference():
         actual = trace._disjoint_summary(spans, 0, 50)
         expected = {bucket: 0 for _, bucket in trace._BUCKET_PRIORITY}
         expected['unattributedMs'] = 0
+        wait_split = dict(trace._WAIT_SPLIT_FIELDS)
+        orchestration_split = dict(trace._ORCHESTRATION_SPLIT_FIELDS)
+        split = {**wait_split, **orchestration_split}
+        expected.update({field: 0 for field in split.values()})
         for tick in range(50):
-            bucket = next((bucket for kind, bucket in trace._BUCKET_PRIORITY
-                           if any(s['kind'] == kind and s['tStart'] <= tick
-                                  and s['tEnd'] >= tick + 1 for s in spans)),
-                          'unattributedMs')
+            kind, bucket = next(((kind, bucket) for kind, bucket in trace._BUCKET_PRIORITY
+                                 if any(s['kind'] == kind and s['tStart'] <= tick
+                                        and s['tEnd'] >= tick + 1 for s in spans)),
+                                (None, 'unattributedMs'))
             expected[bucket] += 1
+            if kind in split:
+                expected[split[kind]] += 1
         assert actual == expected
+        assert sum(actual[field] for field in wait_split.values()) == actual['waitMs']
+        assert sum(actual[field] for field in orchestration_split.values()) \
+            == actual['orchestrationMs']
 
 
 def test_ledger_reads_each_span_once():
@@ -48,6 +57,45 @@ def _fold(monkeypatch, events, now=100):
             for i, (kind, timestamp, payload) in enumerate(events)]
     monkeypatch.setattr(trace, '_read_trace_rows', lambda _: rows)
     return trace.fold_task_trace('synthetic', now_ms=now)
+
+
+def test_duplicate_call_occurrences_keep_independent_approval_and_spawn(monkeypatch):
+    call = {'roundNum': 1, 'toolCallId': 'reused'}
+    result = _fold(monkeypatch, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1, {'roundNum': 1}),
+        ('write_approval_request', 2, call),
+        ('tool_start', 3, {**call, 'toolName': 'write_file'}),
+        ('tool_start', 4, {**call, 'toolName': 'write_file'}),
+        ('write_approval_request', 5, call),
+        ('tool_progress', 6, {**call, 'execStartTs': 6}),
+        ('tool_progress', 7, {**call, 'execStartTs': 7}),
+        ('tool_complete', 8, {**call, 'isError': True}),
+        ('tool_complete', 9, call),
+        ('done', 10, {}),
+    ])
+    tools = [span for span in result['spans'] if span['kind'] == 'tool']
+    approvals = [span for span in result['spans'] if span['kind'] == 'approval_wait']
+    assert [(span['tStart'], span['tEnd'], span['status']) for span in tools] == [
+        (3, 8, 'error'), (4, 9, 'done')]
+    assert [(span['tStart'], span['tEnd']) for span in approvals] == [(2, 6), (5, 7)]
+    assert [span['parent'] for span in approvals] == [span['spanId'] for span in tools]
+
+
+def test_unqualified_legacy_completion_waits_for_an_unambiguous_occurrence(monkeypatch):
+    result = _fold(monkeypatch, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1, {'roundNum': 1}),
+        ('tool_start', 2, {'roundNum': 1, 'toolCallId': 'a'}),
+        ('tool_start', 3, {'roundNum': 1, 'toolCallId': 'b'}),
+        ('tool_complete', 4, {}),
+        ('tool_complete', 5, {'toolCallId': 'a'}),
+        ('tool_complete', 6, {}),
+        ('done', 10, {}),
+    ])
+    tools = [span for span in result['spans'] if span['kind'] == 'tool']
+    assert [(span['attrs']['toolCallId'], span['tEnd']) for span in tools] == [
+        ('a', 5), ('b', 6)]
 
 
 def test_heartbeats_do_not_split_wait_or_ttft(monkeypatch):
@@ -190,10 +238,16 @@ def test_open_approval_follows_tool_settlement(monkeypatch, boundary):
     assert approval.get('truncated', False) == tool.get('truncated', False) == (boundary != 'live')
     assert approval['parent'] == tool['spanId']
     expected_llm = 21 if boundary == 'next-round' else 2 if boundary == 'round-close' else 1
+    # round_end -> next round_start is round settlement; the last round_end ->
+    # done stretch is final settlement; a live trace has no settlement yet.
+    expected_orchestration = {'next-round': 1, 'round-close': 20,
+                              'terminal': 1, 'live': 0}[boundary]
     summary = result['summary']
-    assert {k: summary[k] for k in ('totalMs', 'llmMs', 'toolMs', 'approvalWaitMs', 'unattributedMs')} == {
+    assert {k: summary[k] for k in ('totalMs', 'llmMs', 'toolMs', 'approvalWaitMs',
+                                    'orchestrationMs', 'unattributedMs')} == {
         'totalMs': 30, 'llmMs': expected_llm, 'toolMs': 1,
-        'approvalWaitMs': end - 3, 'unattributedMs': 30 - expected_llm - 1 - (end - 3)}
+        'approvalWaitMs': end - 3, 'orchestrationMs': expected_orchestration,
+        'unattributedMs': 30 - expected_llm - 1 - (end - 3) - expected_orchestration}
     assert summary['waitMs'] == summary['compactionMs'] == 0
 
 

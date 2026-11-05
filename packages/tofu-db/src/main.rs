@@ -44,7 +44,7 @@ use zeroize::Zeroize;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn usage() -> ! {
-    eprintln!("usage: tofu-db <init|inspect> --data-dir <persistent-path>\n       tofu-db serve --data-dir <existing-authority> --owner-id <positive-id> [--tenant-id <positive-id>] [--search-projection-dir <persistent-path>] [--durability strict|normal] [--wal-flush-interval-ms <1..1000>] [--backup-dir <persistent-path>] [--fastpath-dir <existing-local-base>] [--fastpath-sync-interval-ms <1000..3600000>]\n       tofu-db fastpath-export --data-dir <durable-seed> --backup-dir <NEW-authority-target>\n       tofu-db <certify-filesystem|{FILESYSTEM_CERTIFICATION_MATRIX_COMMAND}> --data-dir <persistent-empty-path>\n       tofu-db certify-resource-gate --data-dir <persistent-empty-path>\n       tofu-db collect-garbage --data-dir <existing-authority> [--execute [--max-rounds <1..{MAX_AUTHORITY_GC_SESSION_CALLS}>] [--budget-ms <1..{MAX_AUTHORITY_GC_OPERATOR_MILLISECONDS}>]]\n       tofu-db sql --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> < query.sql\n       tofu-db backfill-activity-index --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..256>] --execute\n       tofu-db backfill-integration-checkout-claims --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..128>] --execute\n       tofu-db migration-session --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> --execute\n       tofu-db backup --data-dir <source> --backup-dir <persistent-path>\n       tofu-db verify --data-dir <existing-authority>\n       tofu-db salvage --data-dir <existing-authority> --backup-dir <persistent-empty-target>\n       tofu-db restore --backup-dir <source> --data-dir <restore-target>\n       tofu-db certify-release --manifest <SHA256SUMS> --signature <SHA256SUMS.sig> --binary <packaged-tofu-db> [--pubkey <public-key.json>]\n       tofu-db certify-release-keygen --key-out <secret-key.json> --pubkey-out <public-key.json>");
+    eprintln!("usage: tofu-db <init|inspect> --data-dir <persistent-path>\n       tofu-db serve --data-dir <existing-authority> --owner-id <positive-id> [--tenant-id <positive-id>] [--search-projection-dir <persistent-path>] [--durability strict|normal] [--wal-flush-interval-ms <1..1000>] [--backup-dir <persistent-path>] [--fastpath-dir <existing-local-base> [--fastpath-admission required|auto]] [--fastpath-sync-interval-ms <1000..3600000>]\n       tofu-db fastpath-export --data-dir <durable-seed> --backup-dir <NEW-authority-target>\n       tofu-db <certify-filesystem|{FILESYSTEM_CERTIFICATION_MATRIX_COMMAND}> --data-dir <persistent-empty-path>\n       tofu-db certify-resource-gate --data-dir <persistent-empty-path>\n       tofu-db collect-garbage --data-dir <existing-authority> [--execute [--max-rounds <1..{MAX_AUTHORITY_GC_SESSION_CALLS}>] [--budget-ms <1..{MAX_AUTHORITY_GC_OPERATOR_MILLISECONDS}>]]\n       tofu-db sql --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> < query.sql\n       tofu-db backfill-activity-index --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..256>] --execute\n       tofu-db backfill-integration-checkout-claims --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> [--maximum-rows <1..128>] --execute\n       tofu-db migration-session --data-dir <existing-authority> --tenant-id <positive-id> --owner-id <positive-id> --execute\n       tofu-db backup --data-dir <source> --backup-dir <persistent-path>\n       tofu-db verify --data-dir <existing-authority>\n       tofu-db salvage --data-dir <existing-authority> --backup-dir <persistent-empty-target>\n       tofu-db restore --backup-dir <source> --data-dir <restore-target>\n       tofu-db certify-release --manifest <SHA256SUMS> --signature <SHA256SUMS.sig> --binary <packaged-tofu-db> [--pubkey <public-key.json>]\n       tofu-db certify-release-keygen --key-out <secret-key.json> --pubkey-out <public-key.json>");
     std::process::exit(2)
 }
 
@@ -70,6 +70,7 @@ struct Arguments {
     wal_flush_interval_ms: Option<u64>,
     fastpath_dir: Option<PathBuf>,
     fastpath_interval_ms: Option<u64>,
+    fastpath_admission: Option<tofu_db::fastpath::FastpathAdmission>,
 }
 
 fn arguments() -> Arguments {
@@ -95,6 +96,7 @@ fn arguments() -> Arguments {
     let mut wal_flush_interval_ms = None;
     let mut fastpath_dir = None;
     let mut fastpath_interval_ms = None;
+    let mut fastpath_admission = None;
     macro_rules! path_flag {
         ($slot:ident) => {
             if $slot.is_none() {
@@ -111,6 +113,13 @@ fn arguments() -> Arguments {
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--fastpath-dir" => { path_flag!(fastpath_dir); }
+            "--fastpath-admission" if fastpath_admission.is_none() => {
+                fastpath_admission = Some(match args.next().unwrap_or_else(|| usage()).as_str() {
+                    "required" => tofu_db::fastpath::FastpathAdmission::Required,
+                    "auto" => tofu_db::fastpath::FastpathAdmission::Auto,
+                    _ => usage(),
+                });
+            }
             "--fastpath-sync-interval-ms" if fastpath_interval_ms.is_none() => {
                 let value: u64 = args.next().unwrap_or_else(|| usage()).parse().unwrap_or_else(|_| usage());
                 if !(tofu_db::fastpath::MIN_NATIVE_FASTPATH_SYNC_INTERVAL_MS..=tofu_db::fastpath::MAX_NATIVE_FASTPATH_SYNC_INTERVAL_MS).contains(&value) { usage(); }
@@ -233,7 +242,7 @@ fn arguments() -> Arguments {
         _ => data_dir.unwrap_or_else(|| usage()),
     };
     if command != "serve" && (fastpath_dir.is_some() || fastpath_interval_ms.is_some()) { usage(); }
-    if fastpath_interval_ms.is_some() && fastpath_dir.is_none() { usage(); }
+    if (fastpath_interval_ms.is_some() || fastpath_admission.is_some()) && fastpath_dir.is_none() { usage(); }
     match command.as_str() {
         "init"
         | "inspect"
@@ -381,6 +390,7 @@ fn arguments() -> Arguments {
         wal_flush_interval_ms,
         fastpath_dir,
         fastpath_interval_ms,
+        fastpath_admission,
     }
 }
 
@@ -514,13 +524,17 @@ fn run() -> io::Result<()> {
             {
                 usage();
             }
-            config = config.with_wal_durability(durability, flush_interval)?;
+            config = config
+                .with_wal_durability(durability, flush_interval)?
+                .with_explicit_wal_durability(arguments.durability.is_some());
             config = config.with_backup_dir(arguments.backup_dir.clone());
             if let Some(base) = arguments.fastpath_dir.as_ref() {
                 if arguments.durability.as_deref() == Some("normal") || arguments.wal_flush_interval_ms.is_some() {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, "native fastpath requires strict local durability"));
                 }
-                config = config.with_fastpath(base, arguments.fastpath_interval_ms)?;
+                config = config
+                    .with_fastpath(base, arguments.fastpath_interval_ms)?
+                    .with_fastpath_admission(arguments.fastpath_admission.unwrap_or_default());
             }
             if let Some(search_projection_dir) = arguments.search_projection_dir.as_ref() {
                 config = config.with_search_projection_dir(search_projection_dir)?;

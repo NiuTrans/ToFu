@@ -74,7 +74,7 @@ check(composerInput.value === 'belongs to B', 'late preprocessing modified B');
 """)
 
 
-def test_503_retry_preserves_command_identity_because_commit_is_uncertain():
+def test_503_is_retried_automatically_with_the_same_command_identity():
     _run_pipeline(r"""
 const commands = [];
 runtimeScope.ConversationTurnStore.submitConversation = async (conv, payload, config, extra) => {
@@ -84,8 +84,129 @@ runtimeScope.ConversationTurnStore.submitConversation = async (conv, payload, co
 };
 composerInput.value = 'retry this';
 await sendMessage();
+check(commands.length === 2 && commands[0] === commands[1], '503 retry minted a duplicate command');
+check(composerInput.value === '', 'accepted draft returned to the composer');
+check(!toastEntries.some(x => x[1] === 'error'), 'a transient 503 still asked for a manual retry');
+check(debugEntries.some(x => String(x[0]).startsWith('Send retry #1') && x[1] === 'warn'),
+  'automatic retry left no diagnostic trace');
+""")
+
+
+def test_transient_preparation_failure_retries_without_a_manual_resend():
+    _run_pipeline(r"""
+const signals = [];
+_buildConvSubmission = async (conv, workspace, options) => {
+  signals.push(options?.signal);
+  if (signals.length < 3) throw Object.assign(new Error('timeout'), {status: 0, code: 'timeout'});
+  return {config: {autoTranslate: false}, settings: {}};
+};
+const labels = [];
+_renderTranslatingBubble = (label) => labels.push(label);
+const submitted = [];
+runtimeScope.ConversationTurnStore.submitConversation = async (conv, payload) => {
+  submitted.push(payload.text);
+  return {submittedTurn: {turnId: 'ok'}};
+};
+composerInput.value = 'survive the stall';
 await sendMessage();
-check(commands.length === 2 && commands[0] === commands[1], '503 minted a duplicate command');
+check(signals.length === 3 && signals.every(signal => signal instanceof AbortSignal),
+  'config resolution attempts did not own a signal');
+check(new Set(signals).size === 3, 'resolution attempts shared one signal');
+check(submitted.length === 1 && submitted[0] === 'survive the stall', 'draft was not submitted exactly once');
+check(labels.includes('send.retrying'), 'automatic retry was invisible');
+check(composerInput.value === '', 'accepted draft returned to the composer');
+check(!toastEntries.some(x => x[1] === 'error'), 'transient preparation failure asked for a manual retry');
+""")
+
+
+def test_stop_during_automatic_retry_restores_the_draft_without_an_error():
+    _run_pipeline(r"""
+const collapsedRetry = retryTransientSendStartup;
+retryTransientSendStartup = (options) => collapsedRetry({ ...options, retryDelayMs: () => 60000 });
+let reportFailure;
+const failedOnce = new Promise(resolve => { reportFailure = resolve; });
+const signals = [];
+_buildConvSubmission = async (conv, workspace, options) => {
+  signals.push(options.signal);
+  reportFailure();
+  throw Object.assign(new Error('bad gateway'), {status: 502});
+};
+runtimeScope.ConversationTurnStore.submitConversation = async () => {
+  throw new Error('a stopped send reached the command write');
+};
+composerInput.value = 'stop me';
+const sending = sendMessage();
+await failedOnce;
+await new Promise(resolve => setTimeout(resolve, 0));
+const controller = composerConv._genStartCtrl;
+check(controller, 'a retrying send released its stop scope');
+composerConv._genStartStop = controller;
+composerConv._genStartCtrl = null;
+controller.abort();
+await sending;
+check(signals.length === 1, 'a stopped send kept retrying');
+check(composerInput.value === 'stop me', 'stopped send lost its draft');
+check(abortMarkers.includes(composerConv.id), 'stop did not reach the server abort marker');
+check(!toastEntries.some(x => x[1] === 'error'), 'user stop surfaced as an error');
+""")
+
+
+def test_definitive_rejection_is_not_retried():
+    _run_pipeline(r"""
+let attempts = 0;
+runtimeScope.ConversationTurnStore.submitConversation = async () => {
+  attempts += 1;
+  throw Object.assign(new Error('invalid request'), {status: 400});
+};
+composerInput.value = 'reject me';
+await sendMessage();
+check(attempts === 1, 'a definitive rejection was retried');
+check(composerInput.value === 'reject me', 'rejected draft was not restored');
+check(toastEntries.some(x => x[1] === 'error'), 'definitive rejection was silent');
+""")
+
+
+def test_document_settled_during_send_joins_attachments_and_failure_is_dropped():
+    _run_pipeline(r"""
+const uploading = { name: 'notes.txt', text: '', pages: 0, textLength: 0, method: 'parsing' };
+const failing = { name: 'broken.txt', text: '', pages: 0, textLength: 0, method: 'parsing' };
+pendingPdfTexts = [uploading, failing];
+let submitted;
+runtimeScope.ConversationTurnStore.submitConversation = async (conv, payload) => {
+  submitted = payload;
+  return {submittedTurn: {turnId: 'ok'}};
+};
+_waitForVlmParsing = async (draft) => {
+  check(draft.pdfTexts.length === 2, 'in-flight uploads were not part of the send wait');
+  Object.assign(uploading, { attachmentId: 'att-notes', kind: 'document', method: '.txt' });
+  failing.method = 'failed';
+};
+composerInput.value = 'read these';
+await sendMessage();
+check(submitted, 'send did not submit');
+check(submitted.attachments?.length === 1
+  && submitted.attachments[0].attachmentId === 'att-notes', 'settled upload missed the attachment lane');
+check(!submitted.pdfTexts, 'an uploaded or failed document reached the legacy text lane');
+check(toastEntries.some(x => x[0] === 'upload.documentSkipped'), 'failed upload was dropped silently');
+""")
+
+
+def test_send_waits_for_archive_mount_and_never_sends_it_as_a_document():
+    _run_pipeline(r"""
+const archive = { name: 'src.zip', text: '', pages: 0, textLength: 9, _archive: true, method: 'parsing' };
+pendingPdfTexts = [archive];
+const order = [];
+_waitForPendingArchives = async () => { order.push('archive'); archive.method = 'archive'; };
+let submitted;
+runtimeScope.ConversationTurnStore.submitConversation = async (conv, payload) => {
+  order.push('submit');
+  submitted = payload;
+  return {submittedTurn: {turnId: 'ok'}};
+};
+composerInput.value = 'unzip and summarize';
+await sendMessage();
+check(order.join() === 'archive,submit', 'turn was captured before the archive mounted: ' + order.join());
+check(!submitted.pdfTexts && !submitted.attachments, 'archive chip reached a document lane');
 """)
 
 

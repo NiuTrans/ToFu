@@ -18,19 +18,27 @@ pytestmark = pytest.mark.visual
 
 
 @pytest.fixture(scope="module")
-def bar_html():
-    sources = json.loads(subprocess.check_output([
-        "node", "-e", r"""
-const fs=require('fs'),ts=require('typescript'),result={};
-for(const name of ['disclosure','project-context','context-meter','turn-navigation'])result[name]=ts.transpileModule(
- fs.readFileSync('frontend/src/features/conversation-bar/'+name+'.ts','utf8'),
- {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
-process.stdout.write(JSON.stringify(result));
-"""], cwd=ROOT, text=True))
+def bar_html(tmp_path_factory):
+    # The production bundler resolves the owners' whole import graph (shared
+    # UI primitives, round-directory navigation) instead of a hand-kept list.
+    from tests._jsdom import require_node_modules
+    require_node_modules('vite')
+    owners = ROOT / 'frontend/src/features/conversation-bar'
+    entry = tmp_path_factory.mktemp('conversation-bar') / 'entry.ts'
+    entry.write_text(''.join(
+        f"export * as {alias} from {json.dumps((owners / name).as_posix())};\n"
+        for alias, name in (('projectContext', 'project-context.ts'),
+                            ('contextMeter', 'context-meter.ts'),
+                            ('turnNavigation', 'turn-navigation.ts'))), encoding='utf-8')
+    built = entry.with_name('bar.js')
+    subprocess.run(['node', str(ROOT / 'scripts/vite_test_bundle.mjs'), str(entry), '--bundle',
+                    '--format=iife', '--platform=browser', '--global-name=ConversationBar',
+                    f'--outfile={built}'], cwd=ROOT, check=True, capture_output=True,
+                   text=True, timeout=120)
     locales = {lang: json.loads((ROOT / f"frontend/src/i18n/locales/{lang}.json").read_text()) for lang in ("en", "zh")}
-    js = "const sources=" + json.dumps(sources) + ";const locales=" + json.dumps(locales) + ";" + r"""
-const modules={};function load(name){if(modules[name])return modules[name];const exports={};modules[name]=exports;
-new Function('require','exports',sources[name])(id=>load(id.replace('./','')),exports);return exports;}
+    js = built.read_text(encoding='utf-8') + ";const locales=" + json.dumps(locales) + ";" + r"""
+const modules={'project-context':ConversationBar.projectContext,'context-meter':ConversationBar.contextMeter,'turn-navigation':ConversationBar.turnNavigation};
+const load=name=>modules[name];
 window.lang='en';const t=(key,args={})=>(locales[lang][key]||key).replace(/\{(\w+)\}/g,(_,k)=>args[k]??'{'+k+'}');
 document.documentElement.dataset.theme='tofu';
 if(innerWidth<=800)document.querySelector('#sidebar').classList.add('collapsed');

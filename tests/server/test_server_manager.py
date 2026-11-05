@@ -20,6 +20,7 @@ import pytest
 
 import server_manager as sm
 from tofu_db._loopback import bind_ephemeral_loopback
+from tofu_dotenv import MAX_DOTENV_BYTES, load_dotenv_file
 
 
 pytestmark = pytest.mark.unit
@@ -175,8 +176,10 @@ def test_worker_budget_snapshot_exposes_only_scheduling_provenance(monkeypatch):
     payload = (
         b'TOFU_RESOURCE_BUDGET_POLICY_VERSION=old\0'
         b'TOFU_RESOURCE_BUDGET_AUTOMATIC_DEFAULTS=TOFU_AGENT_WORKERS,'
-        b'TOFU_PROCESS_RSS_RECYCLE_MB,SECRET\0'
+        b'TOFU_MAX_INFLIGHT_TASKS,SECRET\0'
         b'TOFU_AGENT_WORKERS=4\0'
+        b'TOFU_MAX_INFLIGHT_TASKS=6144\0'
+        # A pre-upgrade worker may still carry a retired RSS knob.
         b'TOFU_PROCESS_RSS_RECYCLE_MB=6144\0'
         b'LLM_API_KEY=must-not-leak\0'
     )
@@ -191,10 +194,10 @@ def test_worker_budget_snapshot_exposes_only_scheduling_provenance(monkeypatch):
     assert snapshot['policyVersion'] == 'old'
     assert snapshot['policyCurrent'] is False
     assert snapshot['automatic'] == [
-        'TOFU_AGENT_WORKERS', 'TOFU_PROCESS_RSS_RECYCLE_MB']
+        'TOFU_AGENT_WORKERS', 'TOFU_MAX_INFLIGHT_TASKS']
     assert snapshot['values'] == {
         'TOFU_AGENT_WORKERS': '4',
-        'TOFU_PROCESS_RSS_RECYCLE_MB': '6144',
+        'TOFU_MAX_INFLIGHT_TASKS': '6144',
     }
     assert 'SECRET' not in repr(snapshot)
     assert 'must-not-leak' not in repr(snapshot)
@@ -202,15 +205,22 @@ REAL_RUN_FRONTEND_PREFLIGHT = sm.run_frontend_preflight
 
 
 @pytest.fixture(autouse=True)
-def _scrub_ambient_server_env(monkeypatch):
+def _scrub_ambient_server_env(monkeypatch, tmp_path):
     """Tests launched from a tofu-spawned shell inherit the LIVE server's
     port and budget knobs (_TOFU_RUNTIME_PORT/PORT make the manager adopt
-    the live server's port and then correctly refuse to kill it;
-    TOFU_PROCESS_RSS_* leak into profile-budget assertions). Scrub them so
-    every test starts hermetic; tests re-set what they need."""
+    the live server's port and then correctly refuse to kill it; retired
+    TOFU_PROCESS_RSS_* knobs leak into serverEnv assertions). Scrub them so
+    every test starts hermetic; tests re-set what they need.
+
+    The manager resolves its storage authority from TOFU_DATA_DIR. The
+    conftest root is shared by every test in the pytest process, so a lease
+    another test held there made status()/start() report a foreign
+    'conflict'; each manager under test owns the project _project() creates."""
     for name in ('_TOFU_RUNTIME_PORT', 'PORT', 'TOFU_HEARTBEAT_DIR',
                  'TOFU_PROCESS_RSS_RECYCLE_MB', 'TOFU_PROCESS_RSS_RELIEF_MB'):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('TOFU_DATA_DIR', str(tmp_path / 'project'))
+    monkeypatch.setattr(sm, '_dotenv_warned_failures', {})
     monkeypatch.setattr(
         sm, 'run_frontend_preflight',
         lambda *_args, **_kwargs: (True, ''),
@@ -246,6 +256,13 @@ def _status(project: Path, *, running=False, pid=None):
         'projectMatches': True if running else None,
         'cmdline': 'python server.py' if running else None,
     }
+
+
+def test_manager_under_test_owns_its_storage_authority(tmp_path):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+
+    assert manager._storage_data_dir() == project / 'data'
 
 
 def test_monitor_failures_are_logged_with_bounded_repeat_checkpoints(
@@ -300,6 +317,7 @@ def test_manager_log_maintenance_failure_is_observable_but_nonfatal(
 
 def test_frontend_preflight_runs_project_command_with_bounded_contract(
         tmp_path, monkeypatch):
+    from serverctl_pkg import native_engine
     project = _project(tmp_path)
     (project / 'serverctl.py').write_text('# preflight command\n')
     observed = {}
@@ -307,9 +325,9 @@ def test_frontend_preflight_runs_project_command_with_bounded_contract(
     def fake_run(command, **kwargs):
         observed['command'] = command
         observed['kwargs'] = kwargs
-        return subprocess.CompletedProcess(command, 0)
+        return ''
 
-    monkeypatch.setattr(sm.subprocess, 'run', fake_run)
+    monkeypatch.setattr(native_engine, '_run', fake_run)
     environment = {'PATH': os.environ.get('PATH', '')}
 
     ok, error = REAL_RUN_FRONTEND_PREFLIGHT(
@@ -322,7 +340,7 @@ def test_frontend_preflight_runs_project_command_with_bounded_contract(
     assert observed['command'][-1] == 'automatic recovery'
     assert observed['kwargs']['timeout'] \
         == sm.DEFAULT_FRONTEND_PREFLIGHT_TIMEOUT
-    assert observed['kwargs']['env']['TOFU_PROJECT_PATH'] \
+    assert observed['kwargs']['environment']['TOFU_PROJECT_PATH'] \
         == str(project.resolve())
 
 
@@ -337,6 +355,7 @@ def test_restart_preparation_failure_keeps_live_worker(tmp_path, monkeypatch, ba
 
 
 def test_preflight_refreshes_managed_pin_in_child_and_manager(tmp_path, monkeypatch):
+    from serverctl_pkg import native_engine
     (tmp_path / 'serverctl.py').write_text('# isolated preflight\n')
     dotenv = tmp_path / '.env'
     dotenv.write_text('TOFUDB_EXPECTED_SHA256=old-managed-pin\n')
@@ -345,9 +364,9 @@ def test_preflight_refreshes_managed_pin_in_child_and_manager(tmp_path, monkeypa
 
     def prepare(*args, **kwargs):
         dotenv.write_text('TOFUDB_EXPECTED_SHA256=new-managed-pin\n')
-        return subprocess.CompletedProcess(args[0], 0)
+        return ''
 
-    monkeypatch.setattr(sm.subprocess, 'run', prepare)
+    monkeypatch.setattr(native_engine, '_run', prepare)
     assert REAL_RUN_FRONTEND_PREFLIGHT(str(tmp_path), sys.executable, environment, 'test') == (True, '')
     assert environment['TOFUDB_EXPECTED_SHA256'] == 'new-managed-pin'
     assert os.environ['TOFUDB_EXPECTED_SHA256'] == 'new-managed-pin'
@@ -355,11 +374,12 @@ def test_preflight_refreshes_managed_pin_in_child_and_manager(tmp_path, monkeypa
 
 @pytest.mark.parametrize('inherited', [None, 'explicit-pin'])
 def test_preflight_freezes_project_pin_without_overwriting_override(tmp_path, monkeypatch, inherited):
+    from serverctl_pkg import native_engine
     (tmp_path / 'serverctl.py').write_text('# isolated preflight\n')
     (tmp_path / '.env').write_text('TOFUDB_EXPECTED_SHA256=project-pin\nTOFUDB_BIN=/admitted/engine\n')
     monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
     environment = {} if inherited is None else {'TOFUDB_EXPECTED_SHA256': inherited}
-    monkeypatch.setattr(sm.subprocess, 'run', lambda command, **_: subprocess.CompletedProcess(command, 0))
+    monkeypatch.setattr(native_engine, '_run', lambda *a, **k: '')
     assert REAL_RUN_FRONTEND_PREFLIGHT(str(tmp_path), sys.executable, environment, 'test') == (True, '')
     assert environment['TOFUDB_EXPECTED_SHA256'] == (inherited or 'project-pin')
     assert environment['TOFUDB_BIN'] == '/admitted/engine'
@@ -400,6 +420,282 @@ def test_worker_spawn_refuses_failed_frontend_preflight_before_popen(
     assert 'authoring digest mismatch' in result['message']
     assert manager._state['observed'] == 'crashloop'
     assert manager._state['workerFailureCount'] == 0
+
+
+_STALE_CODEX_HOME = '/stale-supervisor-launch-shell/.codex-local'
+_FRESH_CODEX_HOME = '/current-project-dotenv/.codex'
+
+
+@pytest.mark.parametrize('entry', ['restart', 'automatic-recovery'])
+def test_worker_generation_takes_current_dotenv_over_stale_supervisor_env(
+        tmp_path, monkeypatch, entry):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setenv('CODEX_HOME', _STALE_CODEX_HOME)
+    (project / '.env').write_text(f'CODEX_HOME={_FRESH_CODEX_HOME}\n')
+    prepared = []
+
+    def preflight(_project, _python, environment, _operation):
+        prepared.append(dict(environment))
+        return False, 'stop before replacing the worker'
+
+    monkeypatch.setattr(sm, 'run_frontend_preflight', preflight)
+    monkeypatch.setattr(manager, 'stop', lambda **_: pytest.fail('worker must stay live'))
+    monkeypatch.setattr(
+        sm.subprocess, 'Popen', lambda *_args, **_kwargs: pytest.fail('no spawn'))
+
+    if entry == 'restart':
+        manager.restart(source='application-restart')
+    else:
+        manager._spawn(entry)
+
+    assert [environment['CODEX_HOME'] for environment in prepared] == [_FRESH_CODEX_HOME]
+    assert os.environ['CODEX_HOME'] == _STALE_CODEX_HOME
+
+
+def test_worker_environment_layers_dotenv_between_ambient_and_manager_values(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    for name in ('TOFU_AGENT_WORKERS', sm.RESOURCE_BUDGET_AUTOMATIC_ENV,
+                 sm.RESOURCE_BUDGET_POLICY_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('TOFU_AMBIENT_ONLY_SENTINEL', 'ambient')
+    monkeypatch.setenv('TOFU_MANAGED_BY', 'shell')
+    (project / '.env').write_text(
+        'PORT=16001\n'
+        'TOFU_MANAGED_BY=dotenv\n'
+        'TOFU_PROJECT_PATH=/another/project\n'
+        'TOFU_EXTERNAL_CONSOLE_LOG=/another/console.log\n'
+        'TOFU_AGENT_WORKERS=3\n')
+
+    environment = manager._worker_environment({}, 15123)
+
+    assert environment['TOFU_AMBIENT_ONLY_SENTINEL'] == 'ambient'
+    assert environment['PORT'] == '15123'
+    assert environment['TOFU_MANAGED_BY'] == 'supervisor'
+    assert environment['TOFU_SERVER_WORKER'] == '1'
+    assert environment['TOFU_PROJECT_PATH'] == manager.project
+    assert environment['TOFU_EXTERNAL_CONSOLE_LOG'] == str(manager.worker_log)
+    # Probed defaults fill only knobs that the current .env left empty.
+    assert environment['TOFU_AGENT_WORKERS'] == '3'
+    assert 'TOFU_AGENT_WORKERS' not in (
+        environment[sm.RESOURCE_BUDGET_AUTOMATIC_ENV].split(','))
+
+
+def test_validated_server_env_override_wins_over_project_dotenv(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setenv('TOFU_AGENT_QUEUE_CAPACITY', '2')
+    (project / '.env').write_text(
+        'TOFU_AGENT_QUEUE_CAPACITY=8\nTOFU_HTTP_WRITE_STALL_SECS=30\n')
+
+    _, forwarded, error = manager._validated_server_environment(
+        {'TOFU_AGENT_QUEUE_CAPACITY': '32'})
+    environment = manager._worker_environment(forwarded, 15123)
+
+    assert error == ''
+    assert environment['TOFU_AGENT_QUEUE_CAPACITY'] == '32'
+    assert environment['TOFU_HTTP_WRITE_STALL_SECS'] == '30'
+
+
+def test_deleted_dotenv_key_falls_back_to_ambient_until_explicitly_emptied(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(sm, 'install_process_resource_defaults', lambda _env: {})
+    monkeypatch.setenv('CODEX_HOME', _STALE_CODEX_HOME)
+    dotenv = project / '.env'
+    observed = []
+    for declared in (f'CODEX_HOME={_FRESH_CODEX_HOME}\n', '', 'CODEX_HOME=\n'):
+        dotenv.write_text(declared)
+        observed.append(manager._worker_environment({}, 15123)['CODEX_HOME'])
+
+    assert observed == [_FRESH_CODEX_HOME, _STALE_CODEX_HOME, '']
+
+
+_INTERPRETER_BOOTSTRAP_DOTENV = {
+    'PYTHONPATH': '/dotenv/site',
+    'PYTHONHOME': '/dotenv/home',
+    'PYTHONSTARTUP': '/dotenv/startup.py',
+    'LD_PRELOAD': '/dotenv/preload.so',
+    'LD_LIBRARY_PATH': '/dotenv/lib',
+    'DYLD_LIBRARY_PATH': '/dotenv/dyld',
+    'DYLD_INSERT_LIBRARIES': '/dotenv/insert.dylib',
+}
+
+
+def test_interpreter_bootstrap_dotenv_keys_stay_post_start_only(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setattr(sm, 'install_process_resource_defaults', lambda _env: {})
+    monkeypatch.setenv('CODEX_HOME', _STALE_CODEX_HOME)
+    inherited = {'LD_LIBRARY_PATH': '/ambient/lib',
+                 'DYLD_LIBRARY_PATH': '/ambient/dyld'}
+    for name in _INTERPRETER_BOOTSTRAP_DOTENV:
+        if name in inherited:
+            monkeypatch.setenv(name, inherited[name])
+        else:
+            monkeypatch.delenv(name, raising=False)
+    (project / '.env').write_text(
+        f'CODEX_HOME={_FRESH_CODEX_HOME}\n' + ''.join(
+            f'{name}={value}\n'
+            for name, value in _INTERPRETER_BOOTSTRAP_DOTENV.items()))
+
+    environment = manager._worker_environment({}, 15123)
+
+    assert environment['CODEX_HOME'] == _FRESH_CODEX_HOME
+    assert {name: environment.get(name) for name in _INTERPRETER_BOOTSTRAP_DOTENV} == {
+        name: inherited.get(name) for name in _INTERPRETER_BOOTSTRAP_DOTENV}
+    # The worker's boot loader still fills the names its exec environment
+    # lacks, after the interpreter and loader have started.
+    load_dotenv_file(project / '.env', environment)
+    assert {name: environment[name] for name in _INTERPRETER_BOOTSTRAP_DOTENV} == {
+        **_INTERPRETER_BOOTSTRAP_DOTENV, **inherited}
+
+
+_UNUSABLE_DOTENV_DAMAGE = ('directory', 'oversized', 'not-utf8')
+
+
+def _write_unusable_dotenv(dotenv: Path, damage: str, declared: str) -> None:
+    if damage == 'directory':
+        dotenv.mkdir()
+    elif damage == 'oversized':
+        dotenv.write_text(declared + '#' * MAX_DOTENV_BYTES)
+    else:
+        dotenv.write_bytes(declared.encode() + b'\xff\n')
+
+
+@pytest.mark.parametrize('damage', _UNUSABLE_DOTENV_DAMAGE)
+def test_unusable_project_dotenv_keeps_ambient_worker_environment(
+        tmp_path, monkeypatch, caplog, damage):
+    project = _project(tmp_path)
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setenv('CODEX_HOME', _STALE_CODEX_HOME)
+    # Only the composition is under test; the resource probe may drift.
+    monkeypatch.setattr(sm, 'install_process_resource_defaults', lambda _env: {})
+    server_env = {'TOFU_AGENT_QUEUE_CAPACITY': '8'}
+    without_dotenv = manager._worker_environment(server_env, 15123)
+    declared = f'CODEX_HOME={_FRESH_CODEX_HOME}\nTOFU_DOTENV_ONLY_SENTINEL=1\n'
+    _write_unusable_dotenv(project / '.env', damage, declared)
+
+    with caplog.at_level(logging.WARNING, logger='server_manager'):
+        environment = manager._worker_environment(server_env, 15123)
+
+    assert environment == without_dotenv
+    assert environment['CODEX_HOME'] == _STALE_CODEX_HOME
+    warnings = [record.getMessage() for record in caplog.records
+                if record.name == 'server_manager'
+                and record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert 'inherited Supervisor values remain in effect' in warnings[0]
+
+
+@pytest.mark.parametrize('damage', _UNUSABLE_DOTENV_DAMAGE)
+def test_unusable_project_dotenv_keeps_manager_construction_alive(
+        tmp_path, caplog, damage):
+    project = _project(tmp_path)
+    _write_unusable_dotenv(
+        project / '.env', damage, 'PORT=16001\nTOFU_AGENT_QUEUE_CAPACITY=8\n')
+
+    with caplog.at_level(logging.WARNING, logger='server_manager'):
+        manager = sm.LifecycleManager(str(project))
+
+    assert manager._project_env == {}
+    assert sm.project_server_env(str(project)) == {}
+    assert manager.port == sm.DEFAULT_SERVER_PORT
+    assert 'inherited Supervisor values remain in effect' in caplog.text
+
+
+def _unreadable_dotenv_warnings(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records
+            if record.name == 'server_manager'
+            and record.levelno == logging.WARNING
+            and 'project .env not applied' in record.getMessage()]
+
+
+def test_unreadable_project_dotenv_warns_once_per_distinct_failure(
+        tmp_path, monkeypatch, caplog):
+    project = _project(tmp_path)
+    monkeypatch.setattr(sm, 'install_process_resource_defaults', lambda _env: {})
+    dotenv = project / '.env'
+    dotenv.write_bytes(b'PORT=16001\n\xff\n')
+
+    with caplog.at_level(logging.WARNING, logger='server_manager'):
+        manager = sm.LifecycleManager(str(project))
+        for _ in range(3):
+            manager._worker_environment({}, 15123)
+            sm.project_server_env(str(project))
+        assert len(_unreadable_dotenv_warnings(caplog)) == 1
+        dotenv.write_text('PORT=16001\n' + '#' * MAX_DOTENV_BYTES)
+        manager._worker_environment({}, 15123)
+        manager._worker_environment({}, 15123)
+        assert len(_unreadable_dotenv_warnings(caplog)) == 2
+        # A recovery ends the episode: the same failure later is news again.
+        dotenv.write_text('PORT=16001\n')
+        assert sm.project_server_env(str(project)) == {'PORT': '16001'}
+        dotenv.write_bytes(b'PORT=16001\n\xff\n')
+        manager._worker_environment({}, 15123)
+        manager._worker_environment({}, 15123)
+
+    warnings = _unreadable_dotenv_warnings(caplog)
+    assert len(warnings) == 3
+    assert ['valid UTF-8' in warnings[0], 'byte limit' in warnings[1],
+            'valid UTF-8' in warnings[2]] == [True, True, True]
+
+
+def test_unreadable_dotenv_warning_memory_is_bounded(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(sm, '_DOTENV_WARNING_MEMORY', 2)
+    projects = []
+    for index in range(3):
+        project = tmp_path / f'project-{index}'
+        project.mkdir()
+        (project / '.env').write_bytes(b'\xff\n')
+        projects.append(str(project))
+
+    with caplog.at_level(logging.WARNING, logger='server_manager'):
+        for project in projects:
+            sm.project_server_env(project)
+        sm.project_server_env(projects[2])
+        # The oldest remembered failure was evicted, so it warns again.
+        sm.project_server_env(projects[0])
+
+    warnings = _unreadable_dotenv_warnings(caplog)
+    assert len(warnings) == 4
+    assert projects[0] in warnings[-1]
+    assert len(sm._dotenv_warned_failures) == 2
+
+
+def test_non_utf8_project_dotenv_keeps_restart_preparation_on_inherited_values(
+        tmp_path, monkeypatch):
+    from serverctl_pkg import native_engine
+    project = _project(tmp_path)
+    (project / 'serverctl.py').write_text('# isolated preflight\n')
+    manager = sm.LifecycleManager(str(project))
+    monkeypatch.setenv('CODEX_HOME', _STALE_CODEX_HOME)
+    monkeypatch.delenv('TOFUDB_BIN', raising=False)
+    _write_unusable_dotenv(
+        project / '.env', 'not-utf8',
+        f'CODEX_HOME={_FRESH_CODEX_HOME}\nTOFUDB_BIN=/dotenv/engine\n')
+    prepared = []
+
+    def prepare(command, **kwargs):
+        prepared.append(dict(kwargs['environment']))
+        return ''
+
+    # The real preflight also re-reads the .env around the child to refresh
+    # managed engine pins; both reads must take the same fallback.
+    monkeypatch.setattr(sm, 'run_frontend_preflight', REAL_RUN_FRONTEND_PREFLIGHT)
+    monkeypatch.setattr(native_engine, '_run', prepare)
+    monkeypatch.setattr(
+        manager, 'stop', lambda **_: {'ok': False, 'message': 'stop refused by test'})
+
+    assert manager.restart(source='application-restart') == {
+        'ok': False, 'message': 'stop refused by test'}
+    assert [environment['CODEX_HOME'] for environment in prepared] == [
+        _STALE_CODEX_HOME]
+    assert 'TOFUDB_BIN' not in prepared[0]
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX flock contract')
@@ -542,14 +838,12 @@ def test_terminate_logs_graceful_stop_elapsed(tmp_path, monkeypatch, caplog):
 
 
 def test_frontend_preflight_logs_stage_elapsed(tmp_path, monkeypatch, caplog):
+    from serverctl_pkg import native_engine
     project = _project(tmp_path)
     (project / 'serverctl.py').write_text('# stub\n', encoding='utf-8')
 
-    class _Completed:
-        returncode = 0
-
     monkeypatch.setattr(
-        sm.subprocess, 'run', lambda *a, **k: _Completed())
+        native_engine, '_run', lambda *a, **k: '')
     with caplog.at_level(logging.INFO, logger='server_manager'):
         ready, error = REAL_RUN_FRONTEND_PREFLIGHT(
             str(project), sys.executable, {}, 'manager test')
@@ -794,6 +1088,7 @@ def test_restart_waits_for_just_stopped_sidecar_lease(
     assert len(sleeps) == 2
     prepared = starts[0].pop('_prepared_environment')
     assert prepared['TOFU_PROJECT_PATH'] == str(project)
+    assert starts[0].pop('_prepared_storage_plan') is None
     assert starts == [{
         'server_args': [],
         'server_env': {},
@@ -1017,66 +1312,46 @@ def test_cgroup_oom_counter_reader_supports_events_file(tmp_path, monkeypatch):
     assert sm.cgroup_oom_kill_count() == 3
 
 
-def test_worker_rss_recycle_limit_adapts_to_cgroup(tmp_path, monkeypatch):
-    memory_max = tmp_path / 'memory.max'
-    memory_max.write_text(str(1024 * 1024 * 1024))
-    monkeypatch.setattr(sm, 'CGROUP_MEMORY_LIMIT_PATHS', (str(memory_max),))
-
-    assert sm.worker_rss_recycle_limit_bytes() == int(
-        1024 * 1024 * 1024 * sm.DEFAULT_WORKER_RSS_CGROUP_FRACTION)
-    assert sm.worker_rss_recycle_limit_bytes('256') == 256 * sm.MIB
-    assert sm.worker_rss_recycle_limit_bytes('0') == 0
-
-
-def test_worker_rss_recycle_limit_uses_deployment_profile_without_cgroup(
-        monkeypatch):
-    monkeypatch.setattr(sm, 'cgroup_memory_limit_bytes', lambda: None)
-    monkeypatch.setattr(
-        sm, 'deployment_resource_default',
-        lambda _name, environment: (
-            8192 if environment.get('TOFU_DEPLOYMENT_MODE') == 'distributed'
-            else 3072))
-    assert sm.worker_rss_recycle_limit_bytes(
-        environment={}) == 3072 * sm.MIB
-    assert sm.worker_rss_recycle_limit_bytes(
-        environment={'TOFU_DEPLOYMENT_MODE': 'distributed'},
-    ) == 8192 * sm.MIB
-
-
-def test_manager_recycles_owned_worker_above_rss_ceiling(tmp_path, monkeypatch):
+def test_reconcile_never_recycles_a_healthy_worker_whose_rss_reads_enormous(
+        tmp_path, monkeypatch):
     project = _project(tmp_path)
-    alive = {'value': True}
+    # Retired RSS ceilings left in an old project environment have no effect.
+    (project / '.env').write_text(
+        'TOFU_PROCESS_RSS_RECYCLE_MB=1\nTOFU_PROCESS_RSS_RELIEF_MB=1\n')
+    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '1')
+    real_path_type = type(sm.Path())
 
-    def status(_project_path):
-        return _status(project, running=alive['value'],
-                       pid=4321 if alive['value'] else None)
+    class _EnormousResidentSet(real_path_type):
+        def read_text(self, *args, **kwargs):
+            if self.name == 'statm' and str(self).startswith('/proc/'):
+                return f'{1 << 50} {1 << 50} 0 0 0 0 0\n'
+            return super().read_text(*args, **kwargs)
 
-    monkeypatch.setattr(sm, 'read_lock_status', status)
-    monkeypatch.setattr(sm, 'listener_pids',
-                        lambda _port: [4321] if alive['value'] else [])
-    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: alive['value'])
-    monkeypatch.setattr(sm, 'proc_rss_bytes', lambda _pid: 101 * sm.MIB)
+    monkeypatch.setattr(sm, 'Path', _EnormousResidentSet)
+    monkeypatch.setattr(
+        sm, 'read_lock_status', lambda _p: _status(project, running=True, pid=4321))
+    monkeypatch.setattr(sm, 'listener_pids', lambda _port: [4321])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: True)
     monkeypatch.setattr(sm, 'cgroup_oom_kill_count', lambda: 7)
     manager = sm.LifecycleManager(str(project))
-    manager.worker_rss_recycle_bytes = 100 * sm.MIB
-    manager._state['lastCgroupOomKillCount'] = 7
-    terminated = []
+    monkeypatch.setattr(manager, '_http_probe', lambda _pid: {
+        'health': True, 'liveness': True, 'ready': True, 'scheme': 'http'})
+    monkeypatch.setattr(manager, '_terminate', lambda *_a, **_k: pytest.fail(
+        'memory must never terminate a healthy worker'))
+    monkeypatch.setattr(manager, '_spawn', lambda *_a, **_k: pytest.fail(
+        'memory must never replace a healthy worker'))
 
-    def terminate(worker_status, **_kwargs):
-        terminated.append(worker_status['pid'])
-        alive['value'] = False
-        return True, False, 'stopped cleanly'
+    for _ in range(3):
+        manager.reconcile()
 
-    monkeypatch.setattr(manager, '_terminate', terminate)
-    manager.reconcile()
-
-    assert terminated == [4321]
-    assert manager._state['lastExitCause'] == 'manager_rss_recycle'
-    assert manager._state['lastMemoryRecycleRssBytes'] == 101 * sm.MIB
-    assert manager._state['workerRssBytes'] == 101 * sm.MIB
-    assert manager._state['restartCount'] == 1
-    assert manager._state['failureHistory']
-    assert 'graceful SIGTERM' in manager._state['lastFailureReason']
+    assert manager._state['observed'] == 'running'
+    assert manager._state['worker']['pid'] == 4321
+    assert manager._state['failureHistory'] == []
+    assert manager._state['workerFailureCount'] == 0
+    assert manager._state['restartCount'] == 0
+    assert manager._state['lastExitCause'] == ''
+    status = manager.status()
+    assert not [key for key in status if 'Rss' in key or 'MemoryRecycle' in key]
 
 
 def test_adopts_existing_worker_without_restart(tmp_path, monkeypatch):
@@ -1920,28 +2195,16 @@ def test_project_env_controls_default_managed_port(tmp_path, monkeypatch):
     }
 
 
-def test_project_env_deployment_profile_reaches_manager_memory_budget(
-        tmp_path, monkeypatch):
+def test_retired_resource_profile_is_not_forwarded_to_the_worker(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    (project / '.env').write_text('TOFU_DEPLOYMENT_MODE=distributed\n')
+    (project / '.env').write_text(
+        'TOFU_RESOURCE_PROFILE=throughput\nTOFU_DEPLOYMENT_MODE=distributed\n')
     monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
     monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
-    monkeypatch.setattr(sm, 'cgroup_memory_limit_bytes', lambda: None)
-
     manager = sm.LifecycleManager(str(project))
-
+    assert 'TOFU_RESOURCE_PROFILE' not in sm.SERVER_ENV_KEYS
+    assert 'TOFU_RESOURCE_PROFILE' not in manager._state['serverEnv']
     assert manager._state['serverEnv']['TOFU_DEPLOYMENT_MODE'] == 'distributed'
-    assert manager.worker_rss_recycle_bytes == 8192 * sm.MIB
-
-
-def test_project_throughput_profile_reaches_manager_before_worker_launch(tmp_path, monkeypatch):
-    project = _project(tmp_path)
-    (project / '.env').write_text('TOFU_RESOURCE_PROFILE=throughput\n')
-    monkeypatch.setattr(sm, 'read_lock_status', lambda _p: _status(project))
-    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
-    monkeypatch.setattr(sm, 'cgroup_memory_limit_bytes', lambda: None)
-    manager = sm.LifecycleManager(str(project))
-    assert manager._state['serverEnv']['TOFU_RESOURCE_PROFILE'] == 'throughput'
 
 
 def test_spawn_translates_project_allocator_override_after_env_merge(
@@ -1974,9 +2237,6 @@ def test_spawn_translates_project_allocator_override_after_env_merge(
 
 _WORKER = r'''import fcntl, json, os, signal, socket, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-resident_blob = bytearray(int(os.environ.get('WORKER_ALLOC_MB', '0')) * 1024 * 1024)
-for resident_offset in range(0, len(resident_blob), 4096):
-    resident_blob[resident_offset] = 1
 data = os.path.join(os.getcwd(), 'data')
 os.makedirs(data, exist_ok=True)
 lock_path = os.path.join(data, '.server.lock')
@@ -2190,20 +2450,22 @@ def test_real_unintended_clean_signal_recovers_with_failure_budget(
 
 
 @pytest.mark.serial
-def test_real_worker_over_rss_ceiling_is_gracefully_recycled(
-        tmp_path, monkeypatch):
-    """The stdlib manager must stop a real bloated worker before kernel OOM."""
+@pytest.mark.skipif(not Path('/proc/self/stat').exists(), reason='Linux exit evidence')
+@pytest.mark.parametrize('retirement', ['sigkill', 'stop'])
+def test_real_worker_exit_status_survives_the_managers_own_subprocesses(
+        tmp_path, monkeypatch, caplog, retirement):
+    """Reconcile runs ``ss`` (and preflights spawn children); none may reap
+    the worker before its exit status is recorded."""
+    caplog.set_level(logging.INFO, logger='server_manager')
     port = _free_port()
     project = _project(tmp_path, _WORKER)
     monkeypatch.setenv('PORT', str(port))
-    monkeypatch.setenv('WORKER_ALLOC_MB', '48')
-    monkeypatch.setenv('TOFU_PROCESS_RSS_RECYCLE_MB', '32')
     monkeypatch.setenv('TOFU_HEARTBEAT_DIR', str(tmp_path / 'heartbeat'))
     manager = sm.LifecycleManager(str(project), sys.executable,
                                   monitor_interval=0.2)
-    worker_pid = None
+    pid = None
     try:
-        assert manager.start(source='rss-integration')['ok'] is True
+        assert manager.start(source='exit-evidence')['ok'] is True
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             current = manager.status(probe_health=True)
@@ -2211,16 +2473,29 @@ def test_real_worker_over_rss_ceiling_is_gracefully_recycled(
                 break
             time.sleep(0.1)
         assert current.get('health') is True
-        worker_pid = int(current['pid'])
-        assert sm.proc_rss_bytes(worker_pid) > manager.worker_rss_recycle_bytes
+        pid = int(current['pid'])
 
-        manager.reconcile()
+        if retirement == 'stop':
+            assert manager.stop(source='exit-evidence')['ok'] is True
+            expected = {'pid': pid, 'exitCode': 0, 'signal': None}
+        else:
+            os.kill(pid, signal.SIGKILL)
+            deadline = time.monotonic() + 20.0
+            while (manager.status()['workerFailureCount'] == 0
+                   and time.monotonic() < deadline):
+                manager.reconcile()
+                time.sleep(0.05)
+            assert manager.status()['lastExitCause'] == 'fatal_signal'
+            expected = {'pid': pid, 'exitCode': None,
+                        'signal': int(signal.SIGKILL), 'signalName': 'SIGKILL'}
 
-        assert not sm.pid_is_alive(worker_pid)
-        assert manager._state['lastExitCause'] == 'manager_rss_recycle'
-        assert manager._state['restartCount'] == 1
-        assert manager.status()['recentFailureCount'] == 1
-        assert 'graceful SIGTERM' in manager._state['lastFailureReason']
+        evidence = manager.status()['lastWorkerProcessExit']
+        assert {key: evidence.get(key) for key in expected} == expected
+        assert json.loads(manager.state_path.read_text())[
+            'lastWorkerProcessExit'] == evidence
+        assert 'worker process exit observation' in caplog.text
+        # Recorded, then reaped: no zombie outlives the retired generation.
+        assert not Path(f'/proc/{pid}').exists()
     finally:
         status = sm.read_lock_status(str(project))
         if status.get('running'):
@@ -2229,6 +2504,148 @@ def test_real_worker_over_rss_ceiling_is_gracefully_recycled(
             except OSError:
                 pass
         manager.close()
+
+
+def _shared_checkout_state(project, clock, *, worker, desired='running',
+                           pending_recovery=''):
+    state_path = project / 'data' / 'server-manager-state.json'
+    state_path.write_text(json.dumps({
+        'version': sm.STATE_VERSION,
+        'desired': desired,
+        'observed': 'running',
+        'worker': worker,
+        'pendingRecoverySource': pending_recovery,
+        'consecutiveFailures': 0,
+        'workerFailureCount': 0,
+        'updatedAt': clock[0],
+    }))
+    return state_path
+
+
+# Beyond any Linux pid_max, so the peer host never sees this PID alive.
+_PEER_INVISIBLE_PID = 4_194_305
+
+
+def test_manager_never_judges_or_replaces_a_worker_recorded_on_another_host(
+        tmp_path, monkeypatch):
+    """Two hosts share one checkout. A peer Supervisor that cannot see the
+    owner host's worker PID must not read that absence as an exit, start a
+    second worker, or write the shared state the owner host reloads."""
+    clock = [10_000.0]
+    monkeypatch.setattr(sm, '_now', lambda: clock[0])
+    monkeypatch.setattr(sm, '_hostname', lambda: 'peer-host')
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    project = _project(tmp_path)
+    (project / 'data' / '.server.lock').write_text(
+        f'{_PEER_INVISIBLE_PID}@owner-host\n')
+    state_path = _shared_checkout_state(project, clock, worker={
+        'pid': _PEER_INVISIBLE_PID, 'host': 'owner-host',
+        'processStartTime': 41500777, 'processCwd': str(project.resolve()),
+        'spawnedAt': clock[0] - 3600.0,
+    })
+    persisted = state_path.read_bytes()
+    manager = sm.LifecycleManager(str(project))
+    spawned = []
+    monkeypatch.setattr(
+        manager, '_spawn',
+        lambda source, **_kwargs: spawned.append(source) or {'ok': True})
+
+    for _ in range(4):
+        manager.reconcile()
+        clock[0] += 61.0
+    status = manager.status()
+
+    assert spawned == []
+    assert status['workerFailureCount'] == 0
+    assert status['recentFailureCount'] == 0
+    assert status['observed'] == 'conflict'
+    assert 'owner-host' in status['lastError']
+    assert status['worker']['pid'] == _PEER_INVISIBLE_PID
+
+    # Ownership loss on the peer retires through stop(); a persisted
+    # desired=stopped would stop the owner host's worker at its next reload.
+    stopped = manager.stop(source='supervisor-ownership-lost')
+    assert stopped['ok'] is False
+    assert 'owner-host' in stopped['message']
+    assert manager.status()['desired'] == 'running'
+    assert state_path.read_bytes() == persisted
+
+    # Moving the service (or recovering a host recreated under a new name)
+    # stays an explicit operator start.
+    assert manager.start(source='serverctl')['ok'] is True
+    assert spawned == ['serverctl']
+
+
+@pytest.mark.parametrize('pending_recovery', ['', 'manager-restart'])
+def test_foreign_instance_lock_blocks_automatic_spawn(
+        tmp_path, monkeypatch, pending_recovery):
+    clock = [10_000.0]
+    monkeypatch.setattr(sm, '_now', lambda: clock[0])
+    monkeypatch.setattr(sm, '_hostname', lambda: 'peer-host')
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    project = _project(tmp_path)
+    (project / 'data' / '.server.lock').write_text(
+        f'{_PEER_INVISIBLE_PID}@owner-host\n')
+    _shared_checkout_state(
+        project, clock, worker={}, pending_recovery=pending_recovery)
+    manager = sm.LifecycleManager(str(project))
+    spawned = []
+    monkeypatch.setattr(
+        manager, '_spawn',
+        lambda source, **_kwargs: spawned.append(source) or {'ok': True})
+
+    for _ in range(4):
+        manager.reconcile()
+        clock[0] += 61.0
+    status = manager.status()
+
+    assert spawned == []
+    assert status['workerFailureCount'] == 0
+    assert status['observed'] == 'conflict'
+    assert 'owner-host' in status['lastError']
+
+
+@pytest.mark.skipif(not Path('/proc/self/stat').exists(), reason='Linux /proc identity')
+def test_live_generation_without_the_instance_lock_is_never_replaced(
+        tmp_path, monkeypatch):
+    """A worker that is still alive past boot grace is not an exit: counting
+    it as failed would start a second generation beside it."""
+    clock = [10_000.0]
+    monkeypatch.setattr(sm, '_now', lambda: clock[0])
+    monkeypatch.setattr(sm, 'listener_pids', lambda _p: [])
+    monkeypatch.setattr(sm, 'port_accepts', lambda *_a, **_k: False)
+    project = _project(tmp_path, 'import time\ntime.sleep(120)\n')
+    worker = subprocess.Popen([sys.executable, 'server.py'], cwd=project)
+    try:
+        manager = sm.LifecycleManager(str(project))
+        manager._state['desired'] = 'running'
+        manager._state['worker'] = {
+            'pid': worker.pid, 'host': sm._hostname(),
+            'processStartTime': sm.proc_start_ticks(worker.pid),
+            'processCwd': str(project.resolve()),
+            'spawnedAt': clock[0] - sm.DEFAULT_BOOT_GRACE - 60.0,
+        }
+        spawned = []
+        monkeypatch.setattr(
+            manager, '_spawn',
+            lambda source, **_kwargs: spawned.append(source) or {'ok': True})
+
+        for _ in range(4):
+            manager.reconcile()
+            clock[0] += 61.0
+        status = manager.status()
+
+        assert spawned == []
+        assert status['workerFailureCount'] == 0
+        assert status['worker']['pid'] == worker.pid
+        assert status['observed'] == 'degraded'
+        assert 'instance lock' in status['lastError']
+        assert worker.poll() is None
+    finally:
+        worker.kill()
+        worker.wait(timeout=5)
 
 
 @pytest.mark.serial
@@ -2267,6 +2684,11 @@ def test_serverctl_process_roundtrip(tmp_path, entry):
     )
     env = {
         **os.environ,
+        # The copied CLI imports lib from PYTHONPATH. Without it an editable
+        # install resolves lib to whichever checkout the venv was built from,
+        # so a worktree run would validate another tree's frontend graph.
+        'PYTHONPATH': os.pathsep.join(
+            filter(None, (str(root), os.environ.get('PYTHONPATH', '')))),
         'TOFU_SUPERVISOR_PORT': str(manager_port),
         'TOFU_SUPERVISOR_HOST': '127.0.0.1',
         'TOFU_SUPERVISOR_PYTHON': sys.executable,
@@ -2275,6 +2697,8 @@ def test_serverctl_process_roundtrip(tmp_path, entry):
         # Either way the detached watchdog has a per-test ownership boundary.
         'TOFU_SUPERVISOR_OWNER_PID': str(owner_lease.pid),
         'TOFU_PROJECT_PATH': str(project),
+        # A per-test storage authority outside the project, which is renamed below.
+        'TOFU_DATA_DIR': str(tmp_path / 'cli-storage'),
         'PORT': str(worker_port),
         'TOFU_HEARTBEAT_DIR': str(tmp_path / 'heartbeat'),
         # This subprocess test has no TTY. Production non-interactive stops

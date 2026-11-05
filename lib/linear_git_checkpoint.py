@@ -40,6 +40,7 @@ from lib.git_checkpoint_policy import (
     semantic_gate_paths,
     GatePolicyError, git_policy_environment, select_gate_commands,
     require_unchanged_gates,
+    PublicationRefError, retire_unrelated_publication_refs, unrelated_publication_refs,
 )
 from lib.git_runtime import git_executable
 from lib.log import get_logger
@@ -69,18 +70,22 @@ def _git(
     check: bool = False,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    from lib.project_mod.git_inspection_execution import (
+        GitInspectionPreparationError, prepare_git_index_read)
     merged_env = git_policy_environment()
     if env:
         merged_env.update(env)
     try:
-        process = subprocess.run(
-            [git_executable(), '-c', 'core.fsmonitor=false', *args],
-            cwd=str(cwd), env=merged_env, text=True,
-            input=input_text,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
+        executable = git_executable()
+        with prepare_git_index_read(executable, args, str(cwd), environment=merged_env) as (arguments, environment):
+            process = subprocess.run(
+                [executable, '-c', 'core.fsmonitor=false', *arguments],
+                cwd=str(cwd), env=environment, text=True,
+                input=input_text,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=timeout, check=False,
+            )
+    except (OSError, subprocess.TimeoutExpired, GitInspectionPreparationError) as error:
         raise LinearCheckpointError(
             f'git {args[0] if args else "command"} failed: {error}') from error
     if check and process.returncode != 0:
@@ -207,8 +212,6 @@ def resolve_publication_mode(project_path: str | Path) -> dict[str, Any]:
                 or fields[2] != 'commit'):
             raise LinearCheckpointError('Cannot resolve publication mode: incomplete publication refs')
         refs[fields[0]] = fields[1]
-    if 'refs/tofu/candidate' in refs:
-        return decision(True, False, 'Integration candidate exists; linear checkpoint does not own publication')
 
     branch = probe(root, ['symbolic-ref', '-q', 'HEAD'], missing=True)
     if branch.returncode == 1:
@@ -221,19 +224,37 @@ def resolve_publication_mode(project_path: str | Path) -> dict[str, Any]:
     head_sha = head.stdout.strip()
     if not re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', head_sha):
         raise LinearCheckpointError('Cannot resolve publication mode: incomplete HEAD revision')
+    try:
+        unrelated = unrelated_publication_refs(
+            lambda args, input_text=None: _git(root, args), head_sha)
+    except PublicationRefError as error:
+        raise LinearCheckpointError(f'Cannot resolve publication mode: {error}') from error
+    for name in unrelated:
+        refs.pop(name, None)
+    retiring = ('Publication refs from an unrelated history will be retired; '
+                if unrelated else '')
+    if 'refs/tofu/candidate' in refs:
+        return decision(True, False, 'Integration candidate exists; linear checkpoint does not own publication')
     marker, stable = refs.get(CHECKPOINT_BASELINE_REF), refs.get(STABLE_REF)
     if stable and not marker:
         return decision(True, False, 'Existing stable history has no linear baseline ownership')
     if marker and not stable:
         return decision(True, False, 'Linear baseline exists but stable ref is missing')
     if stable and stable != head_sha:
-        return decision(True, False, 'Stable and HEAD differ; linear publication requires reconciliation')
+        # Ordinary commits and landed merges move HEAD past stable; the next
+        # gate verifies the whole stable-to-checkpoint delta. Only a stable
+        # outside HEAD's history (a reset or a branch switch) needs reconciling.
+        behind = probe(root, ['merge-base', '--is-ancestor', stable, head_sha], missing=True)
+        if behind.returncode == 1:
+            return decision(True, False, 'Stable is outside HEAD history; linear publication requires reconciliation')
     if marker:
         ancestor = probe(root, ['merge-base', '--is-ancestor', marker, head_sha], missing=True)
         if ancestor.returncode == 1:
             return decision(True, False, 'HEAD is outside the linear baseline history')
-        return decision(True, True, 'Linear baseline owns stable at HEAD')
-    return decision(True, True, 'Unowned refs permit initial linear baseline activation')
+        position = ('at HEAD' if stable == head_sha
+                    else 'behind HEAD; the next gate verifies the whole delta')
+        return decision(True, True, retiring + f'Linear baseline owns stable {position}')
+    return decision(True, True, retiring + 'Unowned refs permit initial linear baseline activation')
 
 
 def _configured_gate_command(root: Path) -> str:
@@ -276,14 +297,40 @@ def preferred_export_ref(project_path: str | Path) -> str:
         # Merely turning on the repository setting must not make an older
         # isolated-mode stable ref replace today's export.  The first task-end
         # checkpoint establishes the explicit trusted linear baseline.
-        if not _revision(root, CHECKPOINT_BASELINE_REF):
+        baseline = _revision(root, CHECKPOINT_BASELINE_REF)
+        if not baseline:
             return 'HEAD'
-        if not _revision(root, STABLE_REF):
+        stable = _revision(root, STABLE_REF)
+        if not stable:
             raise LinearCheckpointError(
                 'Linear checkpoint baseline exists but refs/tofu/stable is '
                 'missing; refusing to export unverified HEAD')
+        # A rewritten history strands baseline and stable outside HEAD's
+        # lineage. Promotion only fast-forwards, so that stable can never move
+        # again and exporting it would ship one frozen tree forever while every
+        # newer capability silently disappears (2026-10: 0.17.0 exported from
+        # a 0.18.3 checkout). Such a baseline no longer owns publication.
+        if not _is_ancestor(root, baseline, 'HEAD'):
+            logger.warning(
+                '[LinearCheckpoint] baseline %s is outside HEAD history; '
+                'exporting HEAD instead of orphaned stable %s',
+                baseline[:12], stable[:12])
+            return 'HEAD'
+        if not _is_ancestor(root, stable, 'HEAD'):
+            raise LinearCheckpointError(
+                'refs/tofu/stable is not in the history of HEAD; reconcile it '
+                'or set TOFU_EXPORT_SOURCE_REF explicitly')
         return STABLE_REF
     return 'HEAD'
+
+
+def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    process = _git(root, ['merge-base', '--is-ancestor', ancestor, descendant])
+    if process.returncode not in (0, 1):
+        raise LinearCheckpointError(
+            'Cannot compare export refs: '
+            + (process.stderr or process.stdout).strip()[:300])
+    return process.returncode == 0
 
 
 def _checkpoint_identity(user_id: int, task_id: str) -> tuple[int, str]:
@@ -416,7 +463,21 @@ def _working_tree_status(root: Path) -> list[str]:
 
 
 def _ensure_checkpoint_baseline(root: Path, head_sha: str) -> str:
-    """CAS-activate only unowned refs; never adopt another controller's history."""
+    """CAS-activate only unowned refs; never adopt another controller's history.
+
+    Publication refs from an unrelated (rewritten) history are archived first:
+    they cannot own this history, and left in place they refused every
+    checkpoint after the rewrite. An owned stable may trail HEAD (ordinary
+    commits, landed merges): verification covers the whole stable-to-checkpoint
+    delta and publication moves branch and stable together. Only a stable
+    outside HEAD's history fails closed.
+    """
+    retired = retire_unrelated_publication_refs(
+        lambda args, input_text=None: _git(root, args, input_text=input_text), head_sha)
+    if retired:
+        logger.warning(
+            '[LinearCheckpoint] retired publication refs from an unrelated history root=%s: %s',
+            root, ', '.join(f'{name} -> {archive}' for name, archive in retired.items()))
     marker = _revision(root, CHECKPOINT_BASELINE_REF)
     stable = _revision(root, STABLE_REF)
     if _revision(root, 'refs/tofu/candidate'):
@@ -426,8 +487,10 @@ def _ensure_checkpoint_baseline(root: Path, head_sha: str) -> str:
     if marker:
         if not stable:
             raise LinearCheckpointError('Checkpoint stable ref is missing; explicit recovery is required')
-        if stable != head_sha:
-            raise LinearCheckpointError('HEAD and owned stable diverged; explicit reconciliation is required')
+        if stable != head_sha and _git(
+                root, ['merge-base', '--is-ancestor', stable, head_sha]).returncode:
+            raise LinearCheckpointError(
+                'Owned stable is outside HEAD history; explicit reconciliation is required')
         if _git(root, ['merge-base', '--is-ancestor', marker, head_sha]).returncode:
             raise LinearCheckpointError('HEAD is outside the checkpoint baseline history')
         return stable
@@ -777,6 +840,23 @@ def _publish_verified_refs(
             + (process.stderr or process.stdout).strip()[:600])
 
 
+def _carry_captured_tree_over_head(
+    root: Path, base_sha: str, current_head: str, tree_sha: str,
+) -> str:
+    """Replay the workspace delta onto an unrelated landed HEAD privately."""
+    if not _is_ancestor(root, base_sha, current_head):
+        raise LinearCheckpointError(
+            'HEAD was rewritten during capture; workspace left untouched')
+    from lib.integration_control import _task_delta_tree
+
+    merged, detail = _task_delta_tree(
+        root, base_sha, current_head, tree_sha, 'linear-checkpoint')
+    if not merged:
+        raise LinearCheckpointError(
+            'Workspace changes conflict with a concurrent HEAD commit: ' + detail)
+    return merged
+
+
 def _capture_repository(task: dict[str, Any], user_id: int,
                         root: Path) -> dict[str, Any]:
     """Capture while holding the same lease as tools, before the Git lock."""
@@ -807,88 +887,94 @@ def _capture_repository_leased(task: dict[str, Any], user_id: int,
         }
 
     try:
-        for attempt in range(1, 4):
-            branch_process = _git(root, ['symbolic-ref', '-q', 'HEAD'])
-            branch_ref = branch_process.stdout.strip()
-            if (branch_process.returncode != 0
-                    or not branch_ref.startswith('refs/heads/')):
-                raise LinearCheckpointError(
-                    f'{root}: detached or unborn HEAD cannot receive an '
-                    'automatic workspace checkpoint')
-            base_sha = _revision(root, 'HEAD')
-            if not base_sha:
-                raise LinearCheckpointError(
-                    f'{root}: HEAD does not resolve to a commit')
-            stable_sha = _ensure_checkpoint_baseline(root, base_sha)
+        branch_process = _git(root, ['symbolic-ref', '-q', 'HEAD'])
+        branch_ref = branch_process.stdout.strip()
+        if (branch_process.returncode != 0
+                or not branch_ref.startswith('refs/heads/')):
+            raise LinearCheckpointError(
+                f'{root}: detached or unborn HEAD cannot receive an '
+                'automatic workspace checkpoint')
+        base_sha = _revision(root, 'HEAD')
+        if not base_sha:
+            raise LinearCheckpointError(
+                f'{root}: HEAD does not resolve to a commit')
+        stable_sha = _ensure_checkpoint_baseline(root, base_sha)
 
-            index_path = ''
-            try:
-                index_path, tree_sha, index_env = _stage_working_tree(
-                    root, base_sha)
-                capture_consistent = _worktree_matches_index(root, index_env)
-                base_tree = _git(root, [
-                    'rev-parse', f'{base_sha}^{{tree}}',
-                ], check=True).stdout.strip()
-                if tree_sha == base_tree:
-                    return {
-                        'projectRoot': str(root), 'status': 'no_changes',
-                        'baseSha': base_sha, 'checkpointSha': base_sha,
-                        'stableSha': stable_sha, 'stableUpdated': False,
-                        'verification': (
-                            'not_needed' if capture_consistent
-                            else 'workspace_changed'),
-                        'verificationDetail': (
-                            '' if capture_consistent else
-                            'Workspace changed while the no-op snapshot was '
-                            'being observed; later bytes remain uncommitted.'),
-                    }
-
-                if (_revision(root, 'HEAD') != base_sha
-                        or _git(root, ['symbolic-ref', '-q', 'HEAD']).stdout.strip() != branch_ref):
-                    raise LinearCheckpointError('HEAD changed during capture; workspace left untouched')
-
-                changed_paths = _changed_paths(root, base_sha, tree_sha)
-                forbidden = forbidden_checkpoint_paths(changed_paths)
-                if forbidden:
-                    raise LinearCheckpointError(
-                        'Checkpoint contains forbidden runtime/dependency '
-                        'paths; bytes were left untouched: '
-                        + ', '.join(forbidden))
-
-                final_sha = _commit_tree(
-                    root, tree_sha, base_sha, task=task,
-                    verification='pending_settlement_gate')
-                checkpoint_ref = (
-                    f'{CHECKPOINT_REF_ROOT}/u{user_id}/'
-                    f'{_safe_task_ref_component(task_id)}')
-                ref_update = _git(root, [
-                    'update-ref', '-m', 'tofu: task-end workspace checkpoint',
-                    checkpoint_ref, final_sha,
-                ])
-                if ref_update.returncode != 0:
-                    logger.warning(
-                        '[LinearCheckpoint] checkpoint evidence ref failed '
-                        'task=%s root=%s: %s', task_id[:12], root,
-                        (ref_update.stderr or ref_update.stdout).strip()[:600])
-                    checkpoint_ref = ''
-
+        index_path = ''
+        try:
+            index_path, tree_sha, index_env = _stage_working_tree(
+                root, base_sha)
+            capture_consistent = _worktree_matches_index(root, index_env)
+            base_tree = _git(root, [
+                'rev-parse', f'{base_sha}^{{tree}}',
+            ], check=True).stdout.strip()
+            if tree_sha == base_tree:
                 return {
-                    'projectRoot': str(root), 'status': 'committed',
-                    'userId': user_id,
-                    'baseSha': base_sha, 'checkpointSha': final_sha,
-                    'branchRef': branch_ref,
-                    'checkpointRef': checkpoint_ref,
-                    'changedPaths': changed_paths[:128],
+                    'projectRoot': str(root), 'status': 'no_changes',
+                    'baseSha': base_sha, 'checkpointSha': base_sha,
                     'stableSha': stable_sha, 'stableUpdated': False,
-                    'verification': 'pending', 'verificationDetail': '',
-                    'captureConsistent': capture_consistent,
-                    'indexSynchronized': False,
+                    'verification': (
+                        'not_needed' if capture_consistent
+                        else 'workspace_changed'),
+                    'verificationDetail': (
+                        '' if capture_consistent else
+                        'Workspace changed while the no-op snapshot was '
+                        'being observed; later bytes remain uncommitted.'),
                 }
-            finally:
-                if index_path:
-                    with contextlib.suppress(OSError):
-                        os.unlink(index_path)
-        raise LinearCheckpointError('Checkpoint retry limit was exhausted')
+
+            if _git(root, ['symbolic-ref', '-q', 'HEAD']).stdout.strip() != branch_ref:
+                raise LinearCheckpointError(
+                    'Branch changed during capture; workspace left untouched')
+            changed_paths = _changed_paths(root, base_sha, tree_sha)
+            current_head = _revision(root, 'HEAD')
+            if current_head != base_sha:
+                tree_sha = _carry_captured_tree_over_head(
+                    root, base_sha, current_head, tree_sha)
+                capture_consistent = _workspace_matches_snapshot(
+                    root, tree_sha)
+                base_sha = current_head
+                stable_sha = _ensure_checkpoint_baseline(root, base_sha)
+
+            forbidden = forbidden_checkpoint_paths(changed_paths)
+            if forbidden:
+                raise LinearCheckpointError(
+                    'Checkpoint contains forbidden runtime/dependency '
+                    'paths; bytes were left untouched: '
+                    + ', '.join(forbidden))
+
+            final_sha = _commit_tree(
+                root, tree_sha, base_sha, task=task,
+                verification='pending_settlement_gate')
+            checkpoint_ref = (
+                f'{CHECKPOINT_REF_ROOT}/u{user_id}/'
+                f'{_safe_task_ref_component(task_id)}')
+            ref_update = _git(root, [
+                'update-ref', '-m', 'tofu: task-end workspace checkpoint',
+                checkpoint_ref, final_sha,
+            ])
+            if ref_update.returncode != 0:
+                logger.warning(
+                    '[LinearCheckpoint] checkpoint evidence ref failed '
+                    'task=%s root=%s: %s', task_id[:12], root,
+                    (ref_update.stderr or ref_update.stdout).strip()[:600])
+                checkpoint_ref = ''
+
+            return {
+                'projectRoot': str(root), 'status': 'committed',
+                'userId': user_id,
+                'baseSha': base_sha, 'checkpointSha': final_sha,
+                'branchRef': branch_ref,
+                'checkpointRef': checkpoint_ref,
+                'changedPaths': changed_paths[:128],
+                'stableSha': stable_sha, 'stableUpdated': False,
+                'verification': 'pending', 'verificationDetail': '',
+                'captureConsistent': capture_consistent,
+                'indexSynchronized': False,
+            }
+        finally:
+            if index_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(index_path)
     finally:
         _release_checkpoint_lock(handle)
 
@@ -981,17 +1067,30 @@ def _prepared_index_publication(root, base_sha, target_sha):
                 raise LinearCheckpointError('Cannot establish real index preimage; publication refused')
             flags = _git(root, ['ls-files', '-v'], check=True).stdout.splitlines()
             ordinary_index = all(line.startswith('H ') for line in flags)
-            synchronized = staged.returncode == 0 and index_path.is_file() and ordinary_index
+            synchronized = index_path.is_file() and ordinary_index
             if synchronized:
                 fd, temporary = tempfile.mkstemp(prefix='tofu-linear-index-')
                 os.close(fd)
-                os.unlink(temporary)
-                _git(root, ['read-tree', target_sha],
-                     env={'GIT_INDEX_FILE': temporary}, check=True)
-                with open(temporary, 'rb') as prepared:
-                    shutil.copyfileobj(prepared, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
+                with index_path.open('rb') as source, open(temporary, 'wb') as prepared:
+                    shutil.copyfileobj(source, prepared)
+                if staged.returncode != 0:
+                    # A concurrent commit leaves an ordinary index against
+                    # its parent. Compare trees privately while index.lock is
+                    # held; staged content differences still refuse sync.
+                    index_tree = _git(root, ['write-tree'], env={
+                        'GIT_INDEX_FILE': temporary,
+                    }, check=True).stdout.strip()
+                    base_tree = _git(root, [
+                        'rev-parse', f'{base_sha}^{{tree}}',
+                    ], check=True).stdout.strip()
+                    synchronized = index_tree == base_tree
+                if synchronized:
+                    _git(root, ['read-tree', target_sha],
+                         env={'GIT_INDEX_FILE': temporary}, check=True)
+                    with open(temporary, 'rb') as prepared:
+                        shutil.copyfileobj(prepared, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
         yield synchronized
         if synchronized and _revision(root, 'HEAD') == target_sha:
             os.replace(lock_path, index_path)

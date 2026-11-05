@@ -171,9 +171,14 @@ final class WebViewStore: NSObject, ObservableObject {
     private var progressObservation: NSKeyValueObservation?
     private var parkedTls: (URLAuthenticationChallenge, (URLSession.AuthChallengeDisposition, URLCredential?) -> Void)?
     private var reauthTask: Task<Void, Never>?
+    private var completionTask: Task<Void, Never>?
+    private var browserProfile: Profile
+    private var passwordResumeAttempted = false
+    private var disposed = false
 
     init(profile: Profile, session: SessionManager, onBack: @escaping () -> Void) {
         self.profile = profile
+        self.browserProfile = profile
         self.session = session
         self.onBack = onBack
         super.init()
@@ -239,6 +244,19 @@ final class WebViewStore: NSObject, ObservableObject {
             return
         }
         webView.load(URLRequest(url: url))
+    }
+
+    func dispose() {
+        disposed = true
+        reauthTask?.cancel(); completionTask?.cancel()
+        reauthTask = nil; completionTask = nil
+        if let (_, handler) = parkedTls { handler(.cancelAuthenticationChallenge) }
+        parkedTls = nil
+        progressObservation?.invalidate(); progressObservation = nil
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil; webView?.uiDelegate = nil
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tofuNative")
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "tofuDiag")
     }
 
     // MARK: - Chrome actions
@@ -313,11 +331,12 @@ final class WebViewStore: NSObject, ObservableObject {
                 let result = await self.session.login(self.profile)
                 guard !Task.isCancelled else { return }
                 switch result {
-                case .success, .needsInteractiveSso:
-                    // success: fresh cookie is in the jar — reload picks it up.
-                    // needsInteractiveSso: the gate turned SSO on; reload lets
-                    // the page run that flow (never intercepted).
+                case .success:
                     self.reauth.settle(succeeded: true)
+                    self.webView?.reload()
+                case .needsInteractiveSso:
+                    self.browserProfile = InteractiveSso.profileForWebView(self.profile, result: result)
+                    self.reauth.handoffToBrowser()
                     self.webView?.reload()
                 default:
                     self.reauth.settle(succeeded: false)
@@ -354,7 +373,7 @@ extension WebViewStore: WKNavigationDelegate {
             url: url.absoluteString,
             isMainFrame: navigationAction.targetFrame?.isMainFrame ?? false,
             hasGesture: navigationAction.navigationType == .linkActivated,
-            ownHost: ServerUrl.parse(profile.baseUrl)?.host
+            ownURL: profile.baseUrl
         )
         switch verdict {
         case .allow:
@@ -376,7 +395,8 @@ extension WebViewStore: WKNavigationDelegate {
         // The edge session can die UNDER the page: a bare main-frame 401 is
         // the third re-auth trigger (latched — fires once).
         if let http = navigationResponse.response as? HTTPURLResponse,
-           navigationResponse.isForMainFrame, http.statusCode == 401 {
+           navigationResponse.isForMainFrame, http.statusCode == 401,
+           TrustedWebBridge.allowsURL(http.url, serverURL: profile.baseUrl, isMainFrame: true) {
             reauth.trigger()
         }
         decisionHandler(.allow)
@@ -385,11 +405,21 @@ extension WebViewStore: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         firstLoadDone = true
         loadError = nil
-        // Interactive-SSO stamping: the browser engine set the cookie, so the
-        // profile's cookieHost can only be learned by observing the finished
-        // page (see SessionManager.noteInteractiveSignIn).
-        if let finished = webView.url?.absoluteString {
-            Task { await session.noteInteractiveSignIn(profile, finishedUrl: finished) }
+        guard !disposed, browserProfile.authType == .interactiveSso,
+              let finished = webView.url?.absoluteString else { return }
+        completionTask?.cancel()
+        completionTask = Task { [weak self] in
+            guard let self else { return }
+            // Resume at most once for this browser session; the stored row
+            // decides whether a password policy still exists.
+            if !self.passwordResumeAttempted,
+               let server = ServerUrl.parse(self.profile.baseUrl), server.isLoginURL(finished) {
+                self.passwordResumeAttempted = true
+                let result = await self.session.resumePasswordSignIn(self.profile, finishedUrl: finished)
+                guard !Task.isCancelled, !self.disposed else { return }
+                if case .success? = result { self.loadBaseUrl(into: webView); return }
+            }
+            _ = await self.session.noteInteractiveSignIn(self.browserProfile, finishedUrl: finished)
         }
     }
 
@@ -438,7 +468,9 @@ extension WebViewStore: WKUIDelegate {
         type: WKMediaCaptureType,
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
-        decisionHandler(.grant)
+        let trusted = TrustedWebBridge.allows(serverURL: profile.baseUrl, scheme: origin.protocol,
+            host: origin.host, port: origin.port, isMainFrame: frame.isMainFrame)
+        decisionHandler(trusted ? .grant : .prompt)
     }
 }
 
@@ -450,6 +482,9 @@ extension WebViewStore: WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        let origin = message.frameInfo.securityOrigin
+        guard !disposed, TrustedWebBridge.allows(serverURL: profile.baseUrl, scheme: origin.protocol,
+            host: origin.host, port: origin.port, isMainFrame: message.frameInfo.isMainFrame) else { return }
         switch message.name {
         case "tofuNative":
             // The page saw the outer gateway's bare 401 on its API transport.
@@ -483,6 +518,10 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 
 private struct WebViewRepresentable: UIViewRepresentable {
     let store: WebViewStore
+
+    func makeCoordinator() -> WebViewStore { store }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: WebViewStore) { coordinator.dispose() }
 
     func makeUIView(context: Context) -> WKWebView {
         store.makeWebView()

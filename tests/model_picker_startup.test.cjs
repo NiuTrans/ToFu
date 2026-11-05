@@ -26,6 +26,7 @@ function setup() {
     loadRouting: () => { const next = deferred(); routing.push(next); return next.promise; },
     applyConfig: value => applied.push(['config', value]),
     applyRouting: value => applied.push(['routing', value]),
+    routingRevision: value => value?.revision,
     showFailure: error => failures.push(error),
     onBootReady: callback => { onBootReady = callback; return () => { disposed++; }; },
     isActive: () => active,
@@ -42,6 +43,191 @@ function setup() {
     isDisposed: () => disposed === 2 };
 }
 const bootError = { status: 503, code: 'server_booting' };
+
+test('settled config coordination releases the response payload while the picker remains alive', () => {
+  const compiled = ts.transpileModule(
+    fs.readFileSync('frontend/src/features/model-catalog/model-picker-startup.ts', 'utf8'),
+    {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}},
+  ).outputText;
+  const script = `
+    const moduleUnderTest = {exports: {}};
+    new Function('module', 'exports', ${JSON.stringify(compiled)})(moduleUnderTest, moduleUnderTest.exports);
+    (async () => {
+      let payload = {bytes: new Uint8Array(1024 * 1024)};
+      const reference = new WeakRef(payload), calls = [0, 0, 0, 0];
+      const owner = moduleUnderTest.exports.createModelPickerStartup({
+        loadConfig: async () => {calls[0]++; return payload;},
+        loadRouting: async () => {calls[1]++; return {};},
+        applyConfig: value => {if (value.bytes.length === 1024 * 1024) calls[2]++;},
+        applyRouting: () => {calls[3]++;},
+        showFailure: error => {throw error;}, onBootReady: () => () => {},
+      });
+      await owner.load();
+      payload = null;
+      let older = {bytes: new Uint8Array(1024 * 1024)};
+      let queued = {bytes: new Uint8Array(1024 * 1024)};
+      const olderRef = new WeakRef(older), queuedRef = new WeakRef(queued);
+      const waitingOwner = moduleUnderTest.exports.createModelPickerStartup({
+        loadConfig: () => {throw Error('unsolicited config read');},
+        loadRouting: () => {throw Error('unsolicited catalog read');},
+        applyConfig: () => {}, applyRouting: () => {throw Error('policy is not ready');},
+        showFailure: error => {throw error;}, onBootReady: () => () => {},
+      });
+      waitingOwner.adoptRouting(older);
+      waitingOwner.adoptRouting(queued);
+      older = queued = null;
+      for (let turn = 0; turn < 4; turn++) {
+        await new Promise(resolve => setImmediate(resolve));
+        global.gc();
+      }
+      const olderQueuedRetained = olderRef.deref() !== undefined;
+      const latestQueuedRetained = queuedRef.deref() !== undefined;
+      waitingOwner.destroy();
+      for (let turn = 0; turn < 4; turn++) {
+        await new Promise(resolve => setImmediate(resolve));
+        global.gc();
+      }
+      console.log(JSON.stringify({calls, retained: reference.deref() !== undefined,
+        olderQueuedRetained, latestQueuedRetained,
+        disposedQueuedRetained: queuedRef.deref() !== undefined,
+        postDisposeAccepted: waitingOwner.adoptRouting({})}));
+      owner.destroy();
+    })().catch(error => {console.error(error); process.exitCode = 1;});
+  `;
+  const result = require('node:child_process').execFileSync(process.execPath,
+    ['--expose-gc', '-e', script], {encoding: 'utf8', timeout: 20_000});
+  assert.deepEqual(JSON.parse(result.trim()), {calls: [1, 1, 1, 1], retained: false,
+    olderQueuedRetained: false, latestQueuedRetained: true,
+    disposedQueuedRetained: false, postDisposeAccepted: false});
+});
+
+test('committed routing uses existing config without reads and cannot regress its revision', async () => {
+  const s = setup();
+  const configured = s.picker.refreshConfig();
+  s.config[0].resolve('initial policy');
+  await configured;
+  s.applied.length = 0;
+  const committed = { revision: 4, controls: ['low', 'ultra'] };
+  assert.equal(s.picker.adoptRouting(committed), true);
+  assert.equal(s.picker.adoptRouting({ revision: 3 }), false);
+  assert.deepEqual(s.applied, [['routing', committed]]);
+  const refreshed = { revision: 4, availability: 'no_route' };
+  assert.equal(s.picker.adoptRouting(refreshed), true);
+  assert.equal(s.applied.at(-1)[1], refreshed);
+  assert.equal(s.config.length, 1);
+  assert.equal(s.routing.length, 0);
+  s.picker.destroy();
+  s.picker.destroy();
+  assert.equal(s.isDisposed(), true);
+  assert.equal(s.picker.adoptRouting({ revision: 5 }), false);
+  assert.equal(s.applied.length, 2);
+});
+
+for (const outcome of ['success', 'failure']) {
+  test(`committed routing supersedes a pending catalog ${outcome} but keeps config policy`, async () => {
+    const s = setup();
+    const loading = s.picker.load();
+    const committed = { revision: 4 };
+    s.picker.adoptRouting(committed);
+    assert.deepEqual(s.applied, [], 'initial config policy must precede committed presentation');
+    s.config[0].resolve('policy');
+    if (outcome === 'success') s.routing[0].resolve({ revision: 1 });
+    else s.routing[0].reject({ status: 503 });
+    await loading;
+    assert.deepEqual(s.applied, [['config', 'policy'], ['routing', committed]]);
+    assert.deepEqual(s.failures, []);
+    assert.equal(s.timers.size, 0);
+    assert.equal(s.routing.length, 1);
+    s.picker.destroy();
+  });
+}
+
+test('adopting committed routing cannot hide a current config authorization failure', async () => {
+  const s = setup();
+  const loading = s.picker.load();
+  s.picker.adoptRouting({ revision: 4 });
+  const denied = { status: 403 };
+  s.config[0].reject(denied);
+  s.routing[0].resolve({ revision: 1 });
+  await loading;
+  assert.deepEqual(s.failures, [denied]);
+  assert.deepEqual(s.applied, [], 'an unauthorized initial policy cannot expose queued catalog state');
+  assert.equal(s.timers.size, 0);
+  s.picker.destroy();
+});
+
+test('pre-startup publications wait for policy without reading and disposal drops them', async () => {
+  const s = setup();
+  s.picker.adoptRouting({ revision: 1 });
+  s.picker.adoptRouting({ revision: 2 });
+  assert.deepEqual(s.applied, []);
+  assert.equal(s.config.length + s.routing.length, 0);
+  s.picker.destroy();
+  await s.picker.refreshConfig();
+  assert.deepEqual(s.applied, []);
+  assert.equal(s.config.length + s.routing.length, 0);
+});
+
+for (const outcome of ['success', 'failure']) {
+  test(`new config refresh supersedes older startup config ${outcome}`, async () => {
+    const s = setup();
+    const loading = s.picker.load();
+    const refreshing = s.picker.refreshConfig();
+    await Promise.resolve();
+    s.config[1].resolve('new policy');
+    await refreshing;
+    if (outcome === 'success') s.config[0].resolve('old policy');
+    else s.config[0].reject({ status: 503 });
+    s.routing[0].resolve({ revision: 1 });
+    await loading;
+    assert.deepEqual(s.applied, [['config', 'new policy'], ['routing', { revision: 1 }]]);
+    assert.deepEqual(s.failures, []);
+    assert.equal(s.timers.size, 0);
+    s.picker.destroy();
+  });
+}
+
+test('superseded config-refresh failure cannot start another full catalog read', async () => {
+  const s = setup();
+  const first = s.picker.refreshConfig();
+  await Promise.resolve();
+  const second = s.picker.refreshConfig();
+  await Promise.resolve();
+  s.config[1].resolve('current');
+  await second;
+  const aborted = { code: 'aborted' };
+  s.config[0].reject(aborted);
+  await assert.rejects(first, error => error === aborted);
+  assert.equal(s.routing.length, 0);
+  assert.equal(s.config.length, 2);
+  assert.deepEqual(s.applied, [['config', 'current']]);
+  s.picker.destroy();
+});
+
+test('startup joins the latest pending config before applying its catalog', async () => {
+  const s = setup();
+  const loading = s.picker.load();
+  const refreshing = s.picker.refreshConfig();
+  s.config[0].resolve('old policy');
+  s.routing[0].resolve({ revision: 2 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(s.applied, []);
+  s.config[1].resolve('current policy');
+  await Promise.all([loading, refreshing]);
+  assert.deepEqual(s.applied, [['config', 'current policy'], ['routing', { revision: 2 }]]);
+  s.picker.destroy();
+});
+
+test('a pre-commit read may still carry a provably newer server revision', async () => {
+  const s = setup();
+  const loading = s.picker.load();
+  s.picker.adoptRouting({ revision: 4 });
+  s.config[0].resolve('policy');
+  s.routing[0].resolve({ revision: 5 });
+  await loading;
+  assert.deepEqual(s.applied.at(-1), ['routing', { revision: 5 }]);
+  s.picker.destroy();
+});
 
 test('parallel reads, one in-flight pair, and config policy applied before routing', async () => {
   const s = setup();

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import requests as _requests_mod
 
 from tofu_search.config import get_config
+from tofu_search.fetch.http_response import read_response_body
 from tofu_search.fetch.request_budget import (
     RequestBudgetExceeded,
     request_budget,
@@ -81,7 +82,9 @@ def do_request(url, timeout, verify=True, legacy_ssl=False, deadline_ts=None):
     Args:
         deadline_ts: Optional absolute ``time.time()`` deadline. Retries,
             socket-phase timeouts and body checks share the lesser of this
-            deadline and ``timeout*3``; no later attempt starts after expiry.
+            deadline, ``timeout*3`` and an enclosing page allowance. Convert
+            this external epoch input once; all later checks use elapsed time.
+            No later attempt starts after expiry.
             An already-running socket read is still cooperative, not hard-cancelled.
     """
     seconds = timeout * 3
@@ -89,12 +92,12 @@ def do_request(url, timeout, verify=True, legacy_ssl=False, deadline_ts=None):
         seconds = min(seconds, deadline_ts - time.time())
     try:
         with request_budget(seconds):
-            return _perform_request(url, timeout, verify, legacy_ssl, deadline_ts)
+            return _perform_request(url, timeout, verify, legacy_ssl)
     except RequestBudgetExceeded as error:
         raise _requests_mod.exceptions.Timeout(str(error)) from None
 
 
-def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
+def _perform_request(url, timeout, verify, legacy_ssl):
     """Existing response/proxy owner, inside the caller's request budget."""
     cfg = get_config()
     if legacy_ssl and _HAS_LEGACY_SSL:
@@ -129,7 +132,7 @@ def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
             kw['proxies'] = proxies_kwarg
         return sess.get(url, **kw)
 
-    t0 = time.time()
+    t0 = time.monotonic()
     resp = None
     winning_proxies = None
     last_conn_exc = None
@@ -149,82 +152,24 @@ def _perform_request(url, timeout, verify, legacy_ssl, deadline_ts):
         break
     if resp is None:
         raise last_conn_exc
-    conn_ms = int((time.time() - t0) * 1000)
-    if not resp.ok:
-        status = resp.status_code
-        retry_after = resp.headers.get('Retry-After')
-        resp.close()
-        logger.debug('[Fetch] resp %d in %dms — %s', status, conn_ms, domain)
-        raise HttpError(status, url, retry_after=retry_after)
-    ct = resp.headers.get('Content-Type', '').lower()
-    cl = int(resp.headers.get('Content-Length', 0) or 0)
-    if cl > cfg.fetch_max_bytes:
-        resp.close()
-        raise HttpError(413, url)   # treat as "too large"
-    total_deadline = timeout * 3
-    _body_stop = t0 + total_deadline
-    if deadline_ts is not None:
-        _body_stop = min(_body_stop, deadline_ts)
-    chunks, dl = [], 0
-    oversized = False
-    timed_out = False
+    retried_decoding = False
     try:
-        for chunk in resp.iter_content(65536):
-            chunks.append(chunk); dl += len(chunk)
-            if dl > cfg.fetch_max_bytes:
-                oversized = True
-                break
-            if time.time() > _body_stop:
-                logger.warning('Download exceeded wall time (%.0fs budget) — %s',
-                               _body_stop - t0, url[:80])
-                timed_out = True
-                break
-    except _requests_mod.exceptions.ContentDecodingError as e:
-        resp.close()
+        raw = read_response_body(resp, url, max_bytes=cfg.fetch_max_bytes, http_error=HttpError)
+    except _requests_mod.exceptions.ContentDecodingError as error:
         logger.warning('ContentDecodingError during download, retrying without br — %s: %s',
-                       domain, e)
-        resp2 = _open(winning_proxies,
-                      extra_headers={'Accept-Encoding': 'gzip, deflate'})
-        if not resp2.ok:
-            status = resp2.status_code
-            retry_after = resp2.headers.get('Retry-After')
-            resp2.close()
-            raise HttpError(status, url, retry_after=retry_after) from e
-        chunks, dl = [], 0
+                       domain, error)
+        resp = _open(winning_proxies, extra_headers={'Accept-Encoding': 'gzip, deflate'})
         try:
-            for chunk in resp2.iter_content(65536):
-                chunks.append(chunk); dl += len(chunk)
-                if dl > cfg.fetch_max_bytes:
-                    oversized = True
-                    break
-                if time.time() > _body_stop:
-                    timed_out = True
-                    break
-        finally:
-            resp2.close()
-        elapsed_ms = int((time.time() - t0) * 1000)
-        logger.debug('[Fetch] resp 200 %sB in %dms (no-br retry) ct=%s — %s',
-                     f'{dl:,}', elapsed_ms, ct[:40], domain)
-        if oversized:
-            raise HttpError(413, url) from e
-        if timed_out:
-            raise _requests_mod.exceptions.Timeout('Download exceeded body deadline') from e
-        return resp2, b''.join(chunks)
-    except Exception:
-        # Any other error mid-stream (pool closed, socket reset, etc.):
-        # always close to release the decompressor before GC can crash.
-        resp.close()
-        raise
-    resp.close()
-    if timed_out:
-        raise _requests_mod.exceptions.Timeout('Download exceeded body deadline')
-    if oversized:
-        logger.warning('Response body too large (%sB, limit %sB) — %s',
-                       f'{dl:,}', f'{cfg.fetch_max_bytes:,}', url[:80])
-        raise HttpError(413, url)
-    elapsed_ms = int((time.time() - t0) * 1000)
-    logger.debug('[Fetch] resp 200 %sB in %dms  ct=%s — %s', f'{dl:,}', elapsed_ms, ct[:40], domain)
-    return resp, b''.join(chunks)
+            raw = read_response_body(resp, url, max_bytes=cfg.fetch_max_bytes, http_error=HttpError)
+        except (HttpError, _requests_mod.exceptions.Timeout) as retry_error:
+            raise retry_error from error
+        retried_decoding = True
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    ct = resp.headers.get('Content-Type', '').lower()
+    logger.debug('[Fetch] resp 200 %sB in %dms%s ct=%s — %s',
+                 f'{len(raw):,}', elapsed_ms, ' (no-br retry)' if retried_decoding else '',
+                 ct[:40], domain)
+    return resp, raw
 
 
 def try_authenticated_fetch(url, source, max_chars, timeout):

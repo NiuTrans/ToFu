@@ -13,11 +13,13 @@ def test_fold_survives_stale_inline_rail_width(page):
         "typeof window.TofuModules?.resolveAction('renderTurnCtxNote') === 'function'",
         timeout=20000)
     assert page.evaluate(_PLANT) == 'ok'
-    page.set_viewport_size({'width': 1100, 'height': 900})
+    # The Inspector takes at most half the window (docs/RENDER_CONTRACT.md,
+    # "Inspector and composer reading"), so the widest sidebar makes the pane narrow.
+    page.set_viewport_size({'width': 1280, 'height': 900})
     page.evaluate("async () => window.TofuModules.invokeFeature('toggleDebug', [], () => {})")
     page.evaluate("() => { const s = document.querySelector('.sidebar');"
-                  " s.classList.remove('has-rail','rail-collapsed');"
-                  " s.classList.add('collapsed'); }")
+                  " s.classList.remove('collapsed','rail-collapsed');"
+                  " s.classList.add('has-rail'); }")
     page.wait_for_function(
         "() => { const w = document.querySelector('.chat-container')"
         ".getBoundingClientRect().width; return w >= 205 && w <= 245; }",

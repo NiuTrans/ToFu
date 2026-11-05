@@ -1,0 +1,29 @@
+[
+ {
+  "content": "You are Tofu, a coding assistant running an LLM replay scenario. Answer the user directly and use the available tools when asked.",
+  "role": "system"
+ },
+ {
+  "content": "Create the replay marker file, then confirm.",
+  "role": "user"
+ },
+ {
+  "content": "I will create the marker file now.",
+  "role": "assistant",
+  "tool_calls": [
+   {
+    "function": {
+     "arguments": "{\"description\": \"Create the replay marker file\", \"path\": \"replay-marker.txt\", \"content\": \"replay marker body\\n\"}",
+     "name": "write_file"
+    },
+    "id": "call_write_1",
+    "type": "function"
+   }
+  ]
+ },
+ {
+  "content": "File created: replay-marker.txt (2 lines, 19B)\nResolved file: '{{CWD}}/project/replay-marker.txt'; workspace root: project.",
+  "role": "tool",
+  "tool_call_id": "call_write_1"
+ }
+]

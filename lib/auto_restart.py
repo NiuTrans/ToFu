@@ -9,7 +9,7 @@ precondition bundle:
 
   * env-gated: ``TOFU_AUTO_RESTART=1`` — default OFF, a self-driving
     restart is a deliberate deployment choice;
-  * git checkout only (``lib.self_update._git._is_git_repo``);
+  * git checkout only (``lib.self_update._git.git_available``);
   * HEAD sha differs from the boot-time baseline — any commit that lands
     while the server runs (ours or a sibling's);
   * shutdown not already requested;
@@ -107,7 +107,7 @@ def poll_once(state: dict, *, shutdown_requested=None, is_repo=None,
     if state.get('restarting'):
         return 'restarting'
     if is_repo is None:
-        from lib.self_update._git import _is_git_repo as is_repo
+        from lib.self_update._git import git_available as is_repo
     if head_sha is None:
         from lib.self_update._git import _head_sha as head_sha
     if running_tasks is None:
@@ -116,8 +116,8 @@ def poll_once(state: dict, *, shutdown_requested=None, is_repo=None,
             return list_running_tasks()
     if do_restart is None:
         def do_restart(reason):
-            from routes.api_v1.update import _perform_server_reexec
-            return _perform_server_reexec(reason)
+            from lib.server.server_reexec import perform_server_reexec
+            return perform_server_reexec(reason)
     try:
         if not is_repo():
             return 'no-repo'

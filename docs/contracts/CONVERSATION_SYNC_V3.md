@@ -49,8 +49,19 @@ and `fileChanges.truncated` expose omitted rows and survive settlement/resume.
 Durable journal and device snapshots remain intact. `undoAvailable: false`
 disables the local undo control for external or incomplete file sets; the
 command boundary independently refuses them before any projection or file
-mutation. Verify with receipt, round-derivation, file-command, resume and
-conversation-surface tests, plus the remote paper browser journey.
+mutation. A turn undo settles `undone` only when every selected journal record
+was restored. A refused record, or no recorded change left to undo, returns the
+block to `applied` with the reason as its `error`: redo rewrites the turn's
+files unconditionally, so it must never be offered over a newer edit that made
+undo refuse. Only the file-history engine's typed refusals answer 400. An
+engine fault (file history unavailable, an unreadable journal, a failed
+restore) also returns the block to its source state, but answers a logged,
+redacted 500 (`FileHistoryFault`); its recorded `error` names files and
+exception types, never raw exception text
+([refusals and faults](../PROJECT_FILE_UNDO.md#refusals-and-faults)).
+Verify with receipt, round-derivation, file-command, file-change fault
+boundary, resume and conversation-surface tests, plus the remote paper browser
+journey.
 
 ## Goal phase execution
 
@@ -123,6 +134,17 @@ validation violations or storage retry fields. Declaration follows the matched
 blueprint, never a URL-prefix exemption, and changes no auth/owner checks.
 The generated image/event/history/command URLs migrate together.
 
+Command failures map once, in `_command_response`: `LifecycleConflict` is 409
+with `latestTurn`, `LifecycleNotFound` is 404, `BadRequest` is 400 with its
+message and `field`, `StorageError` keeps the storage taxonomy, and
+`AttemptStartFailure` is its persisted 500 envelope. A `ContractViolation`
+raised while executing is durable-data drift: the typed 500 the reads use,
+because request bodies are schema-checked before the command runs. Any other
+exception, including a builtin `ValueError`/`TypeError`, is a logged,
+redacted 500 ([API contract §2.3](API_CONTRACT.md#23-status-code-mapping)).
+Read routes decode their query into `BadRequest` before calling the service, so
+a service fault can never answer as a malformed request.
+
 ## Snapshot live-phase parity
 
 Both SQL and native TofuDB snapshots implement the existing `activeAttemptPhase`
@@ -144,6 +166,37 @@ resurrects stale phases. Specs: native `snapshot_phase_tests.rs` and
 `test_snapshot_restores_only_current_committed_bounded_attempt_phase`.
 
 ## One authority
+
+### State delivery and diagnostic evidence
+
+Problem: multi-megabyte `messages_snapshot` diagnostic bodies shared the ordered
+conversation SSE pipe with progress and terminal patches. A slow forwarded
+connection could repeatedly time out before one complete diagnostic frame arrived.
+Decision: the generated browser requests `diagnosticPayload=none`; the service
+omits only the optional `AttemptEvent.payload.event` body from its read view.
+Cursor, sequence, patch, phase, interactions and settlement remain identical.
+Durable task/attempt evidence stays complete; the demand-loaded Request Inspector
+uses its existing owner-checked wire/detail reads and refresh lifecycle. Default
+and explicit `full` streams retain diagnostic delivery for other consumers.
+Alternatives rejected: deleting durable evidence loses inspection; extending
+timeouts leaves status behind the same body; changing live projection fields
+without their revision breaks positional replay. No backend switch, polling
+lane, task limit or tuning setting is introduced.
+
+The stream confirms a quiet subscription with an immediate heartbeat. Later
+heartbeat deadlines advance only after a delivered frame; redundant broker wake
+hints cannot postpone them. Browser wake/invalidation uses the existing full
+`reconnectGraceMs`, measured from that source's opening or latest valid frame,
+including when browser suspension delays timers. The previous source's timestamp
+cannot prematurely retire its replacement. Only `live` confirms a running
+sidebar label; connecting, recovering, idle and missing health display neutral
+“Syncing status” until canonical replay establishes current state. Unknown
+transport health neither completes nor cancels a task.
+
+Verify `test_conversation_sync_diagnostic_payload.py`,
+`test_conversation_stream_heartbeat.py`, `conversation-sync.test.ts`, and
+`conversation-activity.test.ts`, alongside Inspector wire/detail and stream
+ownership tests.
 
 ```text
 generated command DTO
@@ -203,6 +256,7 @@ Client DOM measurements and shell receipt caching: [rendering performance](../TU
 | Atomic durable operations | `lib/storage_authority_sql/operations_pkg/_turns.py` (facade over `_turns_{core,read,write,lifecycle,events,branch}.py`) |
 | Post-commit wake | `lib/conversation_sync/broker.py` |
 | Browser cursor/SSE/recovery | `frontend/src/core/conversation-sync.ts` |
+| Browser page-wide stream transport | `frontend/src/core/conversation-event-multiplexer.ts` |
 | Browser authenticated owner lifecycle | `frontend/src/core/current-user.ts` |
 | Browser push-frame ownership policy | `frontend/src/core/frame-identity.ts` |
 | Browser turn state | `frontend/src/conversation/domain/turn-store.ts` |
@@ -213,10 +267,11 @@ Client DOM measurements and shell receipt caching: [rendering performance](../TU
 | Operation | Endpoint |
 |---|---|
 | Snapshot/reset image | `GET /api/v4/conversations/{conversationId}/sync` |
-| Older lane page at an exact replay head | `GET /api/v4/conversations/{conversationId}/turns/history` |
+| Older lane page at a replay head not older than the caller's | `GET /api/v4/conversations/{conversationId}/turns/history` |
 | Complete Turn for explicit projection editing | `GET /api/v4/conversations/{conversationId}/turns/{turnId}` |
 | Exact lazy historical tool output | `GET /api/v4/conversations/{conversationId}/turns/{turnId}/tool-results/{roundIndex}` |
 | Ordered replay SSE | `GET /api/v4/conversations/{conversationId}/events` |
+| Several conversations' ordered replay on one SSE response (browser) | `GET /api/v4/conversation-events` |
 | Create input/output pair and attempt | `POST /api/v4/conversations/{conversationId}/turns` |
 | Projection CAS update | `PATCH /api/v4/conversations/{conversationId}/turns/{turnId}` |
 | Execute an exact proposed plan | `POST /api/v4/conversations/{conversationId}/turns/{turnId}/plan/execute` |
@@ -227,6 +282,9 @@ Client DOM measurements and shell receipt caching: [rendering performance](../TU
 
 Every operation receives authenticated `user_id` explicitly. No v2
 conversation route or attempt-scoped conversation EventSource exists.
+Turn and lane deletes are idempotent per delete intent: repeating the same
+turn set (in any order) or the same lane returns the recorded response; a
+different request naming an absent turn or lane answers `404`.
 `regenerate`, `continue`, `checkpoint_resume`, and `answer_guidance` supersede
 the whole later lane tail, including branch lanes rooted there, in the same
 transaction. Resume keeps the target checkpoint; regenerate starts over.
@@ -238,15 +296,48 @@ never on click, and an older response cannot resurrect it.
 
 ### Unconfirmed-usage forward recovery
 
-**Problem:** a closed unknown-usage execution had no nontechnical recovery path.
-A nontechnical reader has no way to choose a token/tool/time budget, and
-`continue`/`checkpoint_resume`/`answer_guidance` are refused for this failure
-because they restore the settled `usageComplete=false`. Offering those resumes
-handed the user a guaranteed dead end: one click, the same error again.
-**Decision:** settlement offers only `regenerate` for
-`execution_token_usage_unknown` (`lib/turn_lifecycle._settlement`), so no
-continuation control advertises work the fence will refuse. The supported
-continuation is this recovery command, and it is one explicit gesture: the
+**Problem:** one missing provider receipt used to close a human's conversation
+for good. A resumed turn restores `usageComplete=false`, and a finite-budget
+account refused its next model request with `execution_token_usage_unknown`;
+`continue`/`checkpoint_resume`/`answer_guidance` therefore died on their first
+call. The only offered control was `regenerate`, which throws away the saved
+progress the reader actually wanted to keep.
+**Decision:** the conversation continues; the *receipt* is what stays
+incomplete. Every turn the conversation command dispatches — ordinary chat,
+Goal Mode and Flow, including their continuations, recoveries and resumes —
+carries `_unknownUsagePolicy: 'continue'` (`lib/conversation_sync.command_service`),
+and `ExecutionBudget` reads it: unconfirmed consumption keeps its paid lower
+bound, stays `usage_complete: false` in every receipt and allowance snapshot,
+and no longer blocks `reserve_model`, dispatch validation or tool admission.
+Flow roles and swarm workers attach to that same account
+(`inherit_execution_budget`) and therefore share its policy. An explicit finite
+cap still stops spend, because token/tool/deadline accounting is unchanged —
+this only stops treating an *unknown* number as an *exhausted one*. Accounts
+opened outside a conversation turn (Evolution stages) keep the account default
+`'fence'`.
+**Owner decision 2026-11-02: Goal Mode is not a separate spending regime.**
+Goal Mode and Flow turns used to keep `'fence'` as "unattended paid runs". A
+long Goal run that failed for an unrelated reason then could not be continued:
+its resume died on the first model call with `execution_token_usage_unknown`,
+settlement hid every resume, and the only in-place control left was
+`regenerate`, which discards the saved progress. They now share chat's policy:
+they run the same invocation loop for the same owner, who can stop them at any
+time and whose explicit finite limits still bind. Rejected: keeping the fence for
+unattended turns (the dead end above, for exactly the longest runs); removing
+the fence from `ExecutionBudget` altogether (it would also change Evolution
+accounts, which settle through their own run records rather than a conversation
+resume — a separate decision).
+Settlement therefore advertises the ordinary resumes for an incomplete turn,
+including one whose conversation account recorded
+`execution_token_usage_unknown` (`source: execution-budget`): that refusal
+cannot recur. `lib/turn_lifecycle._settlement` hides them only for producers
+that refuse independently of the policy — the native model account
+(`source: native`) and delegated swarm recovery (`source: swarm-recovery`) —
+where a resume would die on its first call again. `UsageRecoveryBudget` and this
+forward-recovery command remain as the *deliberate* path: a bounded, freshly
+authorized execution rather than a continuation of the old one. Its card renders
+only when the settlement offers no ordinary `continue`/`checkpoint_resume`, so
+a resumable turn shows one way to continue. It is one explicit gesture: the
 single visible action ("Continue generating" / “继续生成”) performs the
 read-only check and then submits the exact budget the server proposed. The
 reader never enters, computes or interprets a limit; the numbers stay in a
@@ -258,7 +349,11 @@ unmetered spend cannot be authorized silently.
 saved configuration and tool receipts without a model call or write. Supported
 uncertain file publications use their existing domain inspector;
 unknown/background/delegated effects without complete proof refuse. This check
-cannot reconstruct missing provider usage. `POST` requires `confirmed: true`,
+cannot reconstruct missing provider usage. The proposed budget is finite and
+sized from the saved request: the preview rebuilds the ordinary model messages
+locally (no provider call, no budget spend) and rejects a source cap smaller than
+that input plus an output reserve as `budget_insufficient` instead of proposing
+a limit the first request would already exceed. `POST` requires `confirmed: true`,
 the exact preview budget and source projection revision. It creates an ordinary
 human/assistant pair with finite token/tool/time limits and a `usageRecovery`
 confirmation receipt. Source revision, idle lane, lane tail and pending-human
@@ -266,12 +361,20 @@ fences commit in the existing `turn.create_pair` transaction on both stores.
 The old Turn/Attempt and unknown accounting are unchanged. Only user-facing
 preferences cross into the new config, including write-approval/readonly
 restrictions and the selected browser device; old checkpoint, wallet, Goal and
-Flow authority does not. Command identity owns lost-ACK retries, never another
+Flow authority does not. The continuation prompt restates the saved original
+objective as task text (never as Goal/Flow authority), and the new execution
+drops only provider-issued Responses reasoning/compaction ciphertext, which a
+fresh dispatch cannot replay; saved tool calls, results and readable output
+stay in the message projection. Command identity owns lost-ACK retries, never another
 execution authorization. The browser aborts disposed checks, fences late
 replies, refreshes the existing snapshot owner after acceptance, and discards
 the consumed authorization on a definitive refusal so the next click re-reads
-the source. A permanent block (`not_applicable`, `operation_unconfirmed`) hides
-the action instead of repeating it.
+the source. A permanent block (`not_applicable`, `operation_unconfirmed`,
+`budget_insufficient`) hides the action instead of repeating it. Settlement rows
+carry an explicit `usageRecovery` capability when the turn is an assistant
+failure or interruption with `usageComplete === false`; a restart-interrupted
+turn without a terminal error envelope still renders one recovery row rather
+than inventing an error, and historical retry/compaction rows never receive it.
 **Alternatives rejected:** resuming the unknown checkpoint bypasses its financial
 fence; ordinary createTurn lacks source-revision/confirmation policy; a second
 recovery queue or ledger duplicates existing ownership. Specs:
@@ -323,7 +426,17 @@ applies that input update and creates the new attempt in the same transaction.
 **Edit + resend** uses this same atomic command rather than PATCHing the input
 first. Consequently an accepted regeneration shows and executes with the
 updated workspace, while untouched earlier Turns continue to report the
-context they actually used. Resume operations (`continue`,
+context they actually used. An input the server creates without a browser
+(proactive and background-command wakes, peer messages, Feishu exchanges,
+plan execution) receives a `contextSnapshot` derived from the accepted task
+config when its pair is created (`create_turn_pair`): model, the
+config-guaranteed tool chips and explicit workspace roots, never the
+conversation's private managed root. Agent-authored inputs (Coordinator
+workers and continuations, Goal and Swarm continuations) open rounds with the
+same snapshot and rendering as human input; their actor, initiator and
+authorization are unchanged. A supplied snapshot always wins. Older inputs
+without a recorded snapshot stay as they are: no historical context is
+guessed. Resume operations (`continue`,
 `checkpoint_resume`, `answer_guidance`) may send a `contextSnapshot`-only
 `inputUpdate` so the submitted Turn's info rail records the live model/tools
 at resume without rewriting submitted content. Whenever `inputUpdate` is
@@ -393,6 +506,13 @@ A pending background completion does not block immediate user insertion: a
 completion's durable queue row and inbox twin pending. The API boundary is
 covered by `test_conversation_command_inject_mode.py`.
 
+A steer carries text only, so a message's `replyQuotes` travel inside it: each
+quote becomes a Markdown block quote before the content, in both the delivered
+inbox value and the committed injection preview (a queued Turn keeps
+`replyQuotes` on its projection instead). A quoted answer to a question the
+model asked therefore reaches a live turn with its question. Covered by
+`test_conversation_steer_reply_quotes.py`.
+
 When hydrating a lane-busy conflict fails with a storage error, preserve the
 typed storage failure and its retry contract at the HTTP boundary (temporary
 capacity failures return 503). A successfully read but absent live Turn uses
@@ -416,7 +536,9 @@ Completion publication retries transient storage errors at most three times
 with a frozen payload and owner/conversation/command-derived queue identity.
 A lost ACK replays the same durable receipt. Retry sleeps total at most two
 seconds, without another worker or retry queue. Explicit command queries expose
-`delivery_status`: pending, queued, failed, or not_applicable. Before the first
+`delivery_status`: pending, queued, failed, not_applicable, or undeliverable
+(owner conversation confirmed absent and no longer creatable; settled once,
+never retried — see [Storage operations](../STORAGE_OPERATIONS.md)). Before the first
 durable commit, process failure can lose the result; exhausted steer-handoff
 publication is logged, not restart-recoverable. Deferred acknowledgement requires
 positive verified provider completion, never an error-dictionary return.
@@ -504,8 +626,10 @@ bound; a live browser sample still received 32,437,621 decoded JSON bytes with
 refs/lazy enabled. Decision: the browser supplies additive `windowLimit` and
 `windowBytes` selectors. The retained host probes the actual chat pane; the pure
 policy requests `ceil(height / 160) * 2 + 4` Turns (8..96) and a soft projection
-budget scaled from 1 MiB at 960×800 (256 KiB..16 MiB). Older-history demand uses
-the same byte budget with its existing count and exact replay-head fence.
+budget scaled from 1 MiB at 960×800 (256 KiB..16 MiB). Older-history demand starts
+from the same byte budget with its existing count and exact replay-head fence; a
+continuous page chained from a page that bytes cut short grows it (see Older
+history below).
 Missing/invalid viewport dimensions use 960×800. No prefetch pool, worker,
 resident snapshot cache or durable-state truncation is introduced.
 
@@ -542,20 +666,139 @@ Older history uses the generated `turnPage` operation. The caller supplies its
 currently applied `syncSeq`, lane, exclusive `beforeOrdinal`, and a page limit
 of at most 256. Storage checks owner and replay head in the same read
 transaction, reads `LIMIT + 1` oldest-first, and returns only current attempts
-for those Turns. A stale head returns 409 and never publishes a page. In the
-browser, identical requests share one flight, a different overlapping request
-is rejected instead of queued, and identity/reference/sequence validation plus
-the non-authoritative Store merge happen in one synchronous coordinator turn.
-An SSE or reset that advances local sequence before publication rejects the old
-page. A 409 (`history_page_stale`) is a routine race on a live lane: a write
-committed after the applied head, including while a paused stream delivers no
-frames. The coordinator repairs the head from one authoritative snapshot and
-replays the same cursor, up to three attempts, instead of surfacing a failure
-whose retry would re-send the same superseded `syncSeq`. Any other status is
-published unchanged. The Surface's 80-Turn DOM window prefetches a 64-Turn page only after its
-local prefix is exhausted, anchors on stable `turnId`, and reveals 20 newly
-prepended Turns without replacing the render path; the remaining 44 serve the
-next local window moves without another API round trip.
+for those Turns; a storage read at any other head returns stale and no page.
+The application service repeats a stale read at the newer head storage
+reported, at most four reads (the head check precedes every Turn read), so the
+response's `syncSeq` names the head the page is exact for, never one older
+than the caller's. Only a head behind the caller, or one that keeps moving
+through those reads, returns 409 (`history_page_stale`, carrying
+`currentSyncSeq`). In the browser, identical requests share one flight, a
+different overlapping request is rejected instead of queued, and
+identity/reference/sequence validation plus the non-authoritative Store merge
+happen in one synchronous coordinator turn. The continuous window and detached
+jump hydration hold one flight slot each, so a round jump never fails against
+the Surface's own history read.
+
+Problem: a streaming reply commits an attempt event every few hundred
+milliseconds and the browser's replayed head trails the server by the stream
+latency. Under an exact-head fence nearly every history read lost that race:
+the 409 reported a head that had moved again by the time the browser caught up
+and re-read, and a continuous page that arrived after any further streamed
+event was discarded. Scrolling up on a live conversation showed "loading
+earlier messages" through eight catch-ups and two full snapshot replacements
+(megabytes each on long conversations), then failed. Decision: answer at the
+newest head not older than the reader's, as rank reads do, and publish in the
+browser at a head the replica has replayed. A page read ahead of the replica
+waits (bounded, 2 s) until the live stream applies exactly its head; a page the
+replica already reached publishes unless a Turn change or snapshot
+(`roundRevision`) was applied after its read began. Streamed attempt events
+patch only the live Turn, never older Turns or lane membership, so both modes
+share this fence; a continuous page additionally advances the lane's history
+cursor and conversation revision, which therefore never run ahead of deltas
+still in flight. A detached page adds its missing Turns and attempts but never
+overwrites present ones, moves `conversationRevision` or advances a cursor. A
+409 head the live stream can deliver is awaited and read again, up to eight
+times; only a head the stream cannot deliver (paused, wedged, a 409 without a
+head, or a page head not applied within the wait) is repaired from one
+authoritative snapshot, at most twice; a wedged stream with no frames is
+exactly the case that otherwise never self-heals. Alternatives rejected:
+retrying in the browser at its own head (every attempt loses the race by a
+round trip plus stream latency); publishing a page read ahead of the replayed
+stream immediately (a continuous page's revision would reject the Turn deltas
+still in flight and force a snapshot); always repairing (each snapshot
+re-reads every loaded history page); unbounded retry (a broken projection never
+converges). Any other status is published unchanged.
+
+**History read-ahead and chained page budgets.** Problem: the Surface asked for
+an older page only once the reader was within 1.5 viewports of the mounted top,
+and every page used the viewport byte budget (about 1-1.7 MiB). An agent Turn
+carries 0.7-2.2 MiB of process evidence yet renders folded, a few hundred pixels
+tall, so every page held exactly one Turn; the small input Turn even travelled
+alone because the older reply did not fit beside it. A brisk reader therefore
+reached the loaded top before most 0.15-1.3 s round trips completed. Separately,
+the Surface retired a flight when its request promise settled, one frame before
+the Store render that carries the page: the idle boundary painted over the old
+window first (a 34 px jump at the top) and a reader frame queued in between
+requested the page just read again. On a synthetic 28-Turn agent history read
+upward at 2400 px/s with the measured production latency profile
+(`tests/visual/test_visual_history_paging_latency.py`), the reader waited 3.3-3.4 s
+of 7.8-7.9 s at the loaded top across 27 one-Turn requests and saw 13 jumps.
+Small-Turn chats were unaffected only because the former rule (fetch once at most
+20 loaded Turns remain unmounted) happened to leave about 13 viewports above the
+reader. Decision: on reader demand toward earlier content, the Surface requests
+the next continuous page while less than twelve viewports of loaded content
+remain above the reader (mounted Turns measured, loaded but unmounted Turns
+counted at their mean mounted height), which covers a p99 page (2.5 s) at a brisk
+2400 px/s; a failed page retries only on a renewed gesture within the residency
+prefetch distance. A settled flight holds its lane until the render whose
+advanced cursor retires it in the same anchored commit that mounts the page; a
+page no render consumes retires on the following frame. The coordinator doubles the byte budget
+of a continuous page whose `beforeOrdinal` is the previous published page's
+`nextBeforeOrdinal` when that page was cut short by bytes (fewer Turns than its
+count while more remain), up to four viewport budgets and the 16 MiB ceiling; a
+count-bound page, a detached jump and any unchained read use the viewport budget.
+The same journey then takes 6 requests of 6 Turns and waits 0.7 s of 5.0 s (the
+slow-start pages), with no jumps; with a slower service (400 ms + 300 ms/MiB) the
+wait falls from 11.8 s of 16.6 s to 3.2 s of 7.5 s. A 240-Turn chat keeps its 4
+count-bound 64-Turn pages, starts each read with about 12 viewports loaded above
+the reader and never waits. Larger pages make the single longest wait longer
+(0.4 s instead of 0.3 s) while total waiting drops fivefold. Alternatives
+rejected: one larger fixed history budget (a slower first page while the reader already waits at the
+top, and oversized pages for every conversation); parallel page reads (the next
+cursor exists only after the previous page, and overlapping continuous reads are
+refused); chaining pages without reader demand (pages a whole history unasked);
+a larger Turn count (count-bound chat pages never made the reader wait). The
+Surface's 80-Turn DOM window still anchors on stable `turnId` and reveals newly
+prepended Turns without replacing the render path; loaded Turns beyond the window
+serve later local window moves without another API round trip.
+
+**Recovery keeps loaded history.** Problem: every recovery snapshot
+(`sync.reset_required`, a sequence or projection gap, a closed EventSource, a
+`conversation.activity` refresh, a TurnStore resync) is a byte-budgeted tail
+window, and while a long Turn streams it often admits only that Turn. The
+browser applied it as a full replacement, so every older Turn the reader had
+loaded was unmounted until the Surface paged it in again: the whole transcript
+flashed away and back mid-run. Decision: an `authoritativeFull` snapshot with a
+`turnWindow` that `hasMore` is authoritative from the window's oldest ordinal
+up. Loaded Turns of that lane below it stay in the Store as the same objects,
+and `historyByLane.retainedFromOrdinal` marks them unverified. After the
+snapshot cursor is committed and the stream reopened, the runtime re-reads that
+range through the continuous frontier (`turnPage` at the lane's
+`nextBeforeOrdinal` with the Surface's page size, so a reader-driven read joins
+the same flight). A continuous frontier page lists every lane Turn in
+`[its oldest ordinal, beforeOrdinal)` (everything below `beforeOrdinal` when
+`hasMore` is false) at its fenced head, so it removes the retained Turns it
+omits in that range; this is the only deletion a history page performs.
+Detached and off-frontier pages stay additive, and a snapshot without a tail
+window still replaces every Turn. Alternatives rejected: reading the older
+pages before applying the snapshot (pages are fenced to a replayed head that
+exists only after the snapshot is applied and the stream reopened); retaining
+without re-reading (a compaction or another device's deletion made while the
+stream was down would stay visible); widening the recovery window server-side
+(changes both snapshot owners and still cannot cover a range larger than the
+byte budget); holding the old DOM in the Surface (the display would disagree
+with the Store). Specifications: `frontend/src/core/turn-state.test.ts`,
+`frontend/src/core/turn-runtime-history-recovery.test.ts` and
+`tests/visual/test_visual_recovery_keeps_history.py`.
+
+**A retained range converges.** Problem: the re-read ran once, right after
+the snapshot, and returned unless a stream was open at that instant; a failed
+re-read was dropped. A hydrate of an inactive settled conversation applies its
+snapshot without a stream, and such a conversation pauses its stream the moment
+its last Turn settles, so enrichment committed after settlement (incremental
+translation stamps and the terminal translation land seconds later) never
+reached a retained Turn larger than the tail window: it kept its
+pre-translation revision, showing only the stray live previews the push
+socket had happened to deliver, until reload. Decision: the coordinator reports every stream it opens
+(`onStreamOpened`), and the runtime arms the same single-pass re-read then as
+well as after the snapshot, while the range stays unverified. Opens are already
+rare and backed off, so a failing read retries at that pace; no timer, retry
+count or threshold is added. Alternatives rejected: retrying on every frame (a
+request storm while a running Turn streams), keeping inactive streams open
+after settlement (an arbitrary grace window that still misses later
+enrichment), and dropping retained Turns (the flashing transcript above).
+Specifications: the `retained Turns of a conversation the reader left` cases
+in `frontend/src/core/turn-runtime-history-recovery.test.ts`.
 
 In the reference representation, on terminal
 Turns, a uniquely matched settled `tool_use` segment keeps its ordering identity
@@ -576,6 +819,57 @@ objects before publishing the snapshot to TurnStore; an invalid reference is a
 protocol error, never an empty tool card. The reference view is request-local
 and does not mutate the shared authoritative snapshot or create another stored
 format.
+
+**Completed browser view diet.** Problem: one long completed agent Turn sent
+the browser about 2 MiB per snapshot or history page, most of it never
+rendered: thinking signatures twice (each `thinking` segment's `signature` and
+the round's `thinkingSignature`, 793 KiB of 2,064 KiB in a 2026-10-28 live
+sample), task-trace spans and status history, and the cost popover's
+unrendered admission/recache detail. Signatures are incompressible, so Brotli
+kept 577 KiB on the wire. Decision: the completed-Turn `refs` view also omits
+both signature fields (with the provider replay bodies above), keeps only the
+`writeBreakdown` allocation terms (`write`, `prevOutput`, `toolResults`,
+`contextWrite`, `recacheBody`, `envelope`, `readDrop`, `capped`) and the
+`promptAdmission` totals (`action`, `totalTokens`, `messageTokens`,
+`toolSchemaTokens`, `targetTokens`) the lazily built cost popover reads (the
+recache cause duplicated `cacheBreak`), and reduces `timingTrace` to the
+settled clock the finish footer reads (`version`, `taskId`, `running`, `tEnd`,
+`clockSource`, `coverage`, `totalMs`). The span list survives whole only when
+it contains a compaction span, whose duration a compaction activity row
+displays; it is never filtered, so a positional patch fails and resynchronizes
+rather than addressing a shifted index. The Request Inspector trace reads its
+own task-trace endpoint. Model requests read signatures from storage, never a
+browser projection. A whole-projection edit is the one path that writes a
+browser copy back: `update_turn` restores every omitted value from the
+CAS-fenced stored revision (`projection_with_restored_browser_evidence`), but
+only where the client left it absent or equal to the browser view; replay
+evidence also requires the signed thinking to be unchanged. The same repair
+closes the pre-existing loss of provider replay, apiRound diagnostics and
+budgeted swarm timelines on edits. Pending/running/resumable/failed Turns and
+the SSE stream are unchanged: live projections and replay patches remain the
+exact committed revision, which positional patches require. The browser's
+thinking view model no longer carries `signature`, so a live-settled Turn and
+its later slim snapshot present identical reasoning blocks; a tool card still
+repaints once if a recovery snapshot replaces a live-settled round, as it
+already did for provider replay bodies, and browser source never names these
+server-only fields (`test_browser_does_not_consume_server_only_snapshot_evidence_fields`). Alternatives rejected: stripping signatures
+from SSE frames would make live patch bases diverge from the committed
+document; an on-demand fetch for the cost popover or trace would change
+retained runtime sections for data that already has a slim closed-world
+projection. Measurements (2026-10-28, two live completed Turns replayed
+offline through the real service with an injected repository): a one-Turn
+tail snapshot fell from 2,119,724 to 966,808 bytes (54.4%) and from 577,549
+to 176,531 Brotli bytes; a one-Turn history page holding a 13-agent settled
+swarm fell from 1,465,044 to 665,975 bytes (54.5%) and from 349,742 to
+139,484 Brotli bytes, including the settled swarm budget and string exit-code
+laziness below. With the specialized validation predicates, thread CPU of
+the service read fell from 11.3 to 8.6 ms and 9.0 to 6.6 ms; adding orjson
+encoding and the live Brotli quality, per-request server CPU fell from 23.1
+to 19.6 ms and 18.4 to 15.0 ms. Smaller bodies under 1 MiB move from Brotli
+quality 2 to 4, which keeps compression CPU nearly flat (11.1 to 10.6 ms)
+while wire bytes fall 69%. Specs: `test_completed_browser_view_omits_replay_signatures_and_unrendered_detail`,
+`test_client_edit_of_browser_view_restores_omitted_server_evidence`, and the
+HTTP round trip `test_refs_view_edit_round_trip_keeps_server_only_evidence`.
 
 For terminal Turns, `snapshotProjectionRefs` removes exact stable-segment
 duplicates with a global 4,096-reference ceiling. `projection.content` must be
@@ -598,11 +892,14 @@ total. Turns settled before the fold have no `cost`; the client-side cost
 cache fills them, and that fill rides presentation state into the footer's
 re-render compare so the late-landing value is not diffed away.
 
-That same browser view content-addresses repeated terminal-Turn `toolContent` and
-`results` values whose canonical JSON is at least 1 KiB. Full SHA-256 keys
-address at most 256 shared documents and 4,096 references in one response;
-unique, conflicting, over-budget, active-Turn, or unserializable values remain
-inline. The generated schema accepts only the two declared reference fields,
+That same browser view content-addresses repeated `toolContent` and `results`
+values, including pending/running Turns, whose canonical JSON is at least 1 KiB.
+Full SHA-256 keys address at most 256 shared documents and 4,096 references in
+one response; unique, conflicting, over-budget, or unserializable values remain
+inline. Equal canonical documents have equal encoded lengths, so only documents
+whose length repeats are hashed (the first of each length waits request-local
+for a second); on the same sampled live Turns this cut the interning pass from
+0.28-0.39 ms to 0.09-0.20 ms with identical output. The generated schema accepts only the two declared reference fields,
 full digest keys, and the bounded dictionary. Before any state publication,
 the browser restores the exact shared values into shallow-copied rounds,
 resolves segment references against those rounds, and discards the dictionary.
@@ -610,7 +907,18 @@ Missing documents, inline/reference conflicts, malformed keys, or a non-array
 `results` value are protocol errors. Thus the wire and parse work shrink while
 durable storage, the independent-client `full` response, TurnStore shape, and
 replay events remain unchanged; no response cache or cross-request lifetime is
-introduced.
+introduced. Active interning is lossless wire compression, not deferred detail:
+restoration completes before replay and a later patch copy-on-writes shared
+arrays, preserving both sibling Turns and old immutable reader state. Active
+segment normalization, private-field omission and lazy output remain disabled.
+
+**Problem:** active tool evidence can repeat large text and structured results
+across rounds while terminal-only interning leaves those snapshots oversized.
+**Decision:** extend only the existing request-local shared-document view; restore
+exact fields before ingestion. **Alternatives rejected:** truncation loses evidence;
+active lazy fetching leaves incomplete positional patch bases; a completed-response
+cache weakens freshness. Specs: snapshot singleflight/document-reference tests
+cover pending/running exact restoration and subsequent append/text replay.
 
 Frozen pre-attachment Turns may still contain the same historical image twice:
 one `base64` field and one data-URL `preview`. For a completed Turn with a unique
@@ -695,7 +1003,9 @@ execution: exact error/rejection/abort receipts remain replayable. A malformed
 resume anchor is a typed protocol error and cannot partially mutate the Turn.
 
 When that boundary rewinds a non-empty terminal `content`/`thinking` tail
-(seamless provider prefill is impossible for it), the discarded text moves
+(no provider continues an unfinished reply from a prefill; see
+[rewind and resend](TURN_SETTLEMENT.md#interruption-recovery-rewind-and-resend)),
+the discarded text moves
 into `TurnProjection.rolledBack` — one entry per rewound attempt, bounded to
 the last four, oldest first — instead of vanishing from the render. The lane
 is display-only history: it is never replayed onto the model wire and never
@@ -718,7 +1028,9 @@ ordered projection, while a missing or stale stream reopens from its durable
 cursor. Browser visibility, online, push-reconnect, periodic reconciliation,
 and live-attempt wake probes use the same warm-store path; only a cold store
 has no cursor and needs an initial snapshot. Only a typed reset condition
-crosses the authoritative snapshot boundary.
+crosses the authoritative snapshot boundary, including the server's
+`replay_exceeds_window` verdict for a missed suffix that outgrew the snapshot
+window (see [Catch-up budget](#catch-up-budget)).
 
 The retained sidebar-selection bridge follows the same boundary. Reopening a
 warm conversation calls `wakeConversation` and resumes from the in-memory
@@ -733,6 +1045,17 @@ an opportunity envelope, not a steady-state savings claim; the executable
 browser harness proves that each warm selection now performs zero hydrations
 and one cursor wake while a cold selection still performs exactly one
 hydration and zero wakes.
+
+The shell's `_serverTurnCount` is the main-lane total that the TurnRuntime
+shell reconciler projects from the snapshot window (`totalTurns`), the same
+quantity as the catalog row's `msgCount`; hydration never replaces it with the
+number of loaded Turns. Recording the tail-window size made the next catalog
+merge (another conversation changing, tab return, reconnect) see a changed
+body for every visited conversation larger than its window, re-arm
+`_turnSnapshotRequired` and download the whole window again on the next click.
+A newer catalog revision still requires one snapshot. Specs:
+`tests/conversation_sync/test_catalog_hydrated_window_count.py` and the warm
+revisit budget in `tests/visual/test_visual_conversation_switch_paint.py`.
 
 Server snapshot arrivals with the same explicit owner, conversation, and Turn
 window also share one Sidecar read and stable-segment projection inside an 8 ms
@@ -751,7 +1074,20 @@ wrapper and rebuilds from a fresh authority read.
 
 Each caller still receives its own HTTP response and top-level envelope so the
 request-time `pushWithheld` hint cannot leak between callers; shared nested
-authority/reference values are read-only during JSON serialization. Only Turns
+authority/reference values are read-only during JSON serialization. Raw connection
+health updates remain timestamped diagnostics. The typed runtime updates the
+conversation shell before visual notification, suppressing only consecutive
+healthy `live` callbacks with unchanged transport/reason. Initial/ownerless,
+trouble and recovery observations still reach the notice owner; no new timer
+is introduced. Aggregate degraded count is maintained incrementally and notifies
+only count transitions; publication identity prevents stale callback evidence
+when nested clear/set returns to the same count. Required projection ingestion,
+cursor acknowledgements and actual DOM perception receipts are unchanged.
+**Problem:** per-frame healthy evidence triggered redundant sidebar/Surface work.
+**Decision:** separate raw evidence from unchanged healthy visual demand.
+**Alternative rejected:** suppressing all equal health states breaks the existing
+trouble-notice debounce. Specs: `turn-runtime-health.test.ts`,
+`connection-health.test.ts` and the native EventSource recovery browser suite. Only Turns
 whose terminal tool segments are safely referenceable receive shallow copied
 turn/projection/segment containers; large sibling round values remain shared.
 An unshared request therefore never recursively copies a conversation-sized
@@ -766,7 +1102,19 @@ array as before; malformed input is never accepted on a cheaper partial check.
 Python and the generated browser both use JSON value equality for `const` and
 `enum`, so booleans never coerce to numeric `0`/`1` across the protocol.
 The compiler retains only the generated schema and predicates, never request or
-conversation values.
+conversation values. Each predicate is specialized when compiled: undeclared
+length/size/range bounds cost nothing per value, exact `dict`/`int`/`float`
+values take a direct type test (bool, subclasses and other Mappings keep the
+general path), required keys are one dict-keys subset test, and each
+`additionalProperties` mode has its own member loop. Problem: on a live 2 MiB
+completed Turn, validating the shared snapshot authority was half of the
+offline service read (5.5 of 11.3 ms), mostly ABC and per-call bound checks.
+The same authority now validates in 3.3 ms; the synthetic benchmark below
+moves from 1.33 to 0.64 ms. Skipping or sampling validation was rejected: the
+authority stays fully validated at the contract boundary.
+`test_specialized_predicates_match_diagnostics_on_mutated_wire_fixtures`
+mutates sampled nodes of both committed wire fixtures and requires the
+diagnostic verdict.
 
 
 **Problem:** tool-heavy snapshots repeat exactly-one branch checks for every
@@ -785,15 +1133,31 @@ code on synthetic data only. Its component timings exclude production storage,
 HTTP scheduling and durability and are not production latency certification.
 After generated-schema validation, the snapshot HTTP adapter uses compact
 `orjson` bytes rather than Quart's stdlib encoder. Unsupported values fail
-soft to the existing `jsonify` provider. Dynamic responses are still
-compressed off the serving loop by the profile-aware HTTP compression policy
+soft to the existing `jsonify` provider. Snapshot response construction and each
+demanded SSE frame run on the existing demand executor. The stream awaits one
+frame before advancing, retaining ordering/backpressure without a replay queue.
+Cancellation joins that exact encoder before releasing snapshot admission or
+subscription ownership; simultaneous failure/cancellation retain both causes.
+Supersession withdraws publication permission after page reads and each joined
+encoder, and before starting another frame; an old generation neither emits
+late bytes nor encodes the remainder of its page.
+SSE uses compact UTF-8 `orjson` with the previous stdlib behavior for unsupported
+or non-finite values; transport optimization never silently changes evidence.
+**Problem:** large response/frame encoding occupies the serving loop.
+**Decision:** move finite encoding to its existing worker boundary, with joined
+cancellation. **Alternatives rejected:** eager frame pre-encoding retains replay
+backlogs; abandoning a cancelled encoder releases borrowed DTOs too early;
+increasing poll frequency creates more work. Specs: `test_conversation_sync_encoding.py`
+and stream ownership/setup tests. Synthetic encoder microbenchmarks exclude
+storage/proxy/browser time and do not certify production RTT improvement.
+Dynamic responses are still compressed off the serving loop by the profile-aware HTTP compression policy
 owned in [`modules/infra_runtime.md`](../modules/infra_runtime.md); they do not
 enter its static-artifact cache, so no conversation response is retained after
 delivery.
 
 ### Lazy historical read-tool output
 
-**Problem:** a short conversation can contain hundreds of read-tool results; Turn-count windows alone leave multi-megabyte output on the initial decode path. **Decision:** the generated snapshot and history clients opt into `toolPayload=lazy` together with `segmentPayload=refs`. Completed `read_files`, `grep_search`, `find_files`, `list_dir`, `get_conversation`, `repo_map`, `read_tool_artifact` and `search_tool_artifact` rounds whose exact string `toolContent` exceeds 4,096 characters publish `_snapshotToolResult`. The reference carries owner scope, conversation/Turn/call identity, original round index, exact projection revision, character count and at most 240 UTF-16 units of preview. Unique call identity and referenceable segment mirrors are required. Missing inline output is explicitly deferred, never an empty result. Results metadata, tool arguments, status and execution provenance remain. Proven-success `run_command`/`code_exec` rounds additionally defer structured `results[].output`: every result must have an integer zero `exitCode`, with no timeout, interruption, rejection, error, background or not-run evidence. Ambiguous/legacy-only and unsuccessful commands stay inline. Command references carry `fields: [toolContent, results]`, and the revision-fenced detail restores the exact original result array to a display clone only. One native keyboard- accessible disclosure is retained after hydration; initial exit status and command metadata never depend on expansion. This avoids duplicate structured stdout while preserving all command failure evidence. Swarm lifecycle payloads and diagnostics remain inline because text-only restoration cannot replace their identity/recovery consumers.
+**Problem:** a short conversation can contain hundreds of read-tool results; Turn-count windows alone leave multi-megabyte output on the initial decode path. **Decision:** the generated snapshot and history clients opt into `toolPayload=lazy` together with `segmentPayload=refs`. Completed `read_files`, `search_files` (and its retired name `grep_search`), `find_files`, `list_dir`, `get_conversation`, `repo_map`, `read_tool_artifact` and `search_tool_artifact` rounds whose exact string `toolContent` exceeds 4,096 characters publish `_snapshotToolResult`. The reference carries owner scope, conversation/Turn/call identity, original round index, exact projection revision, character count and at most 240 UTF-16 units of preview. Unique call identity and referenceable segment mirrors are required. Missing inline output is explicitly deferred, never an empty result. Results metadata, tool arguments, status and execution provenance remain. Proven-success `run_command`/`code_exec` rounds additionally defer structured `results[].output`: every result must have a zero `exitCode` (integer `0` or the producers' canonical string `"0"`), with no timeout, interruption, rejection, error, background or not-run evidence. Ambiguous/legacy-only and unsuccessful commands stay inline. The producers (`run_command`, `code_exec`) stamp `exitCode` as the exact decimal parsed from the executor's end-anchored marker, so the canonical string `"0"` is the same proof as integer `0`; every other string (`"1"`, `"timeout"`, `"not-run"`, `"background"`, `"?"`, padded or other spellings) stays inline. Problem: the integer-only rule never matched a production command (0 of 68 sampled `run_command` rounds deferred, 365 KiB inline in one Turn). Alternative rejected: changing producers to integers would rewrite stored evidence and every exit-badge consumer. Command references carry `fields: [toolContent, results]`, and the revision-fenced detail restores the exact original result array to a display clone only. One native keyboard- accessible disclosure is retained after hydration; initial exit status and command metadata never depend on expansion. This avoids duplicate structured stdout while preserving all command failure evidence. Swarm lifecycle payloads and diagnostics remain inline because text-only restoration cannot replace their identity/recovery consumers.
 
 The exact command-restoration fixture measures 44,615 → 1,020 UTF-8 JSON bytes
 (97.7% smaller); this is a synthetic transport measurement, not a live latency
@@ -907,6 +1271,27 @@ Full projections are allowed in snapshots and bounded new-turn events. A
 multi-turn graph rewrite such as compaction emits a small
 `conversation.activity` event with `requiresSnapshot` and re-anchors once.
 
+**Problem:** `activityTimeline.entries` and `timingTrace.statusHistory` keep
+their newest 128 rows. Once full, every new row shifted each retained index, so
+the index-aligned list diff rewrote every field of every row: a sampled live
+Turn carried up to 1,813 operations (124 KB) in one patch, durably and on every
+stream. **Decision:** the Python and native producers remove an evicted head
+and append the new rows when that re-sends fewer items than index alignment.
+Append-only and in-place list updates keep their existing patches, and the
+operation vocabulary is unchanged. Reconstructing all 1,509 revisions of a
+real 1,510-change Turn (the old diff reproduced every stored patch exactly)
+reduced patch bytes from 7.92 MB to 3.03 MB (−61.8%) and its largest patch
+from 1,431 to 47 operations. The evicted run starts at the first divergence,
+not only at the head: the activity window retains errors and compaction
+receipts, so once one of them is the oldest row every eviction lands behind it.
+Head-only detection re-sent every later row there: one eviction in a full
+128-row tool window cost 763 operations (60,399 B) instead of 3 (552 B), which
+the run now restores; the scan stays linear. **Rejected:** a separate
+ring-buffer operation would change every consumer; general minimal edit
+scripts cost quadratic producer time on the hot path. Specs:
+`tests/turn_lifecycle/test_turn_projection_patch_windows.py` and the native
+`turn_projection_patch` tests.
+
 The two replay surfaces do not imply two durable AttemptEvent bodies. New
 `attempt.event` change rows retain only the private attempt sequence reference;
 the Sidecar reconstructs the exact public ConversationChange with one fenced
@@ -942,6 +1327,22 @@ those facts. A settled `context_compaction` row is the explicit exception: it
 is the projection of a durable archive receipt, not a progress beat, and exposes bounded
 before/after token and message accounting without embedding archived
 transcript content.
+
+**Problem:** the full window reclaimed the oldest info status/model row first,
+and a settled `context_compaction` receipt is exactly that shape, so a long
+tool loop erased the only transcript marker of an archived context while
+keeping display-filtered tool rows (a sampled three-hour Turn folded 541 rows,
+kept 96 hidden tool rows and dropped its single receipt). **Decision:** a full
+window evicts the oldest row of the lowest rank in
+`lib/turn_activity_timeline.py::_eviction_rank`: routine info status/model
+beats, then the other display-filtered info rows, then rendered warnings, then
+errors and failed/switched outcomes, and compaction receipts (with the
+`compacting` beat they replace) last. The row/byte bounds and `droppedCount`
+accounting are unchanged. **Rejected:** a separate receipt list outside the
+window adds a second sidecar and fold path for one row kind; exempting receipts
+from the byte budget makes the bound depend on the compaction count. Specs:
+the rank, byte-budget and long tool-loop cases in
+`tests/turn_lifecycle/test_turn_activity_timeline.py`.
 
 The per-generation-attempt timing document is the separate user-perceived
 latency authority; `projection.timingTrace` is its terminal mirror on the
@@ -1016,18 +1417,99 @@ mismatches and server restart require `sync.reset_required` and a snapshot.
 **Problem:** a failed reset snapshot could reopen at a newer cursor while
 retaining stale state indefinitely. **Decision:** the coordinator retains a
 snapshot-required barrier until required projection ingestion succeeds; reset
-hints never acknowledge cursors. Hydrate, resume, wake and timed retry share
-one snapshot flight. Failures back off; pause/suspension retain the barrier
+hints never acknowledge cursors. A required TurnRuntime ingest rejects a full
+snapshot older than an already accepted command revision before changing settings
+or metadata. Delta acknowledgement covers rows, tombstones and patches; a reducer
+rejection is not successful ingestion. A heartbeat proves liveness only at the
+last applied cursor and server boot identity: mismatch keeps the projection
+barrier and repairs through the same snapshot owner, never advances past missing
+changes. Socket open and health notifications do not fabricate a valid-frame
+timestamp. Hydrate, resume, wake and timed retry share one snapshot flight. Failures back off; pause/suspension retain the barrier
 without background retries. History/rank reads require an accepted snapshot.
 **Rejected:** direct SSE reopening skips state; per-page retries split authority.
 Read cancellation, observer isolation, watchdog and resource regression rules
 live in [Defensive patterns](../DEFENSIVE_PATTERNS.md#conversation-sync-ownership).
 
-Generated EventSource URLs carry page-scoped `streamClientId` and monotonic
+### Catch-up budget
+
+**Problem:** a browser returning after a long absence reopened its retained
+cursor and replayed every intermediate change, so it re-rendered thousands of
+superseded tool rounds before reaching the current state. On a live
+single-Turn agent conversation with 13,148 changes (a server build that still
+sent diagnostic bodies), one browser snapshot was 3.21 MB in 0.40 s, while the
+last 500 changes were 115.5 MB in 5.4 s and the last 2,000 were 429.3 MB in
+24.4 s on loopback, before any proxy or browser work. A 1,510-change Turn
+replayed 60.5 MB against a 0.65 MB snapshot.
+
+**Decision:** the generated EventSource declares its snapshot `windowBytes`.
+Changes committed before a connection's first page read are held until they
+reach that read's head. If their encoded frames exceed the window first, the
+stream sends `sync.reset_required` with reason `replay_exceeds_window` and the
+coordinator re-anchors with one snapshot of the same window; otherwise the held
+frames stream unchanged. A reconnect therefore transfers at most one window of
+replay or one snapshot, and changes committed after the first read always
+stream. The budget is the existing viewport window, not a new threshold.
+`cursorSource=snapshot` exempts only the first connection after a snapshot:
+its suffix is that snapshot's own round trip, which another snapshot would
+merely restart, so the reset cannot loop. Native reconnects carry
+`Last-Event-ID` and are budgeted; heartbeats carry their cursor as the event
+id so an idle stream's reconnect does too. Clients that omit `windowBytes`
+keep unbounded replay.
+
+**Rejected:** a change-count or age cutoff is a tuning knob; snapshotting
+every reconnect re-downloads the window on each transient proxy reconnect;
+compacted replay would add a second Turn-state representation; a client-side
+cutoff cannot see the server head and pays the backlog before deciding. Specs:
+`tests/conversation/test_conversation_sync_catch_up.py` and the catch-up
+budget cases in `frontend/src/core/conversation-sync.test.ts`.
+
+Stream requests carry page-scoped `streamClientId` and monotonic
 `streamGeneration`. Equal-generation native reconnects and newer explicit
 recoveries supersede the same client's older subscription synchronously,
 waking its wait and releasing its exact token. Older generations get HTTP 204
-to stop native retry. Legacy clients remain readable without replacement rights.
+to stop native retry (`stream.closed` with status 204 on a multiplexed
+response). Legacy clients remain readable without replacement rights.
+
+### One page stream
+
+**Problem:** an HTTP/1.x browser allows six connections per origin, and an
+EventSource holds one for its whole life. With one stream per live
+conversation (the active one plus each with a pending or running Turn), the
+sixth left no connection for snapshot, history or command requests, so opening
+a conversation queued its snapshot behind idle streams. The negotiated HTTP
+version is outside the app: the same origin is reached over HTTP/2 through one
+ingress and HTTP/1.1 through another, and the server itself speaks HTTP/1.1.
+
+**Decision:** the browser carries every live conversation on one
+`GET /api/v4/conversation-events` response, owned per page by
+`conversation-event-multiplexer.ts`. `streams` is URL-encoded JSON; the server
+also accepts it encoded once more, as a VS Code forwarded port delivers it
+([query re-encoding](../PROXY_RUNTIME.md#query-re-encoding)). Each coordinator receives a source with
+EventSource semantics and keeps its own cursor, catch-up budget, silence
+deadline and recovery. Each listed stream has exactly the semantics of its own
+`/events` connection; only framing differs: `data` is the stream's index in
+`streams`, a line feed, then the event document, and `id` stays that stream's
+cursor. A stream that cannot open, is superseded or fails sends
+`stream.closed` with the status its own connection would have answered; it
+alone ends and its source reports CLOSED, so the recovery barrier above
+applies. A membership change replaces the response once per microtask; each
+stream resumes after its newest received id and repeats `cursorSource=snapshot`
+only while it has received nothing, as a native reconnect without
+`Last-Event-ID` would. Each response takes the next page-wide generation, so it
+supersedes its predecessor's subscriptions and a late older request is refused
+as stale. A dropped response is replaced from those cursors with the shared
+reconnect backoff, never the native retry, which would replay from the
+bootstrap URL; a refused response (HTTP error status) ends every stream as its
+own refusal would. Without members there is no response, timer or listener.
+
+**Alternatives considered:** TLS on the app server for HTTP/2 cannot help
+behind a proxy that forwards to its plain-HTTP port; a per-origin connection
+budget makes the seventh conversation wait; a WebSocket adds a second transport
+and lifecycle; a POST-created stream session adds server-side session state
+that this request-scoped response avoids. The bound is the request line, about
+150 URL-encoded bytes per stream: dozens of live conversations fit common
+8 KB proxy limits. Specs: `tests/conversation/test_conversation_sync_multiplex.py`
+and `frontend/src/core/conversation-event-multiplexer.test.ts`.
 
 Conversation SSE has no per-principal count quota or shared capacity lease; new conversations
 cannot evict other subscriptions. Exact-client generation replacement owns
@@ -1038,8 +1520,8 @@ transfers release to the generator finalizer and that deadline.
 
 **Problem:** applying the headless model-stream cap to these observers stranded
 accepted tasks behind old startup labels once 24 subscriptions were open.
-**Decision:** the existing broker alone owns conversation observation; the
-headless generation-stream budget remains independent. A native EventSource
+**Decision:** the existing broker alone owns conversation observation; no
+stream-count budget applies to any SSE consumer. A native EventSource
 that reports CLOSED (including HTTP 204) retires immediately and sets the
 existing snapshot-required barrier. The shared retry timer repairs authority
 before reopening, and wake/resume hints cannot bypass its backoff. Only a valid
@@ -1183,6 +1665,35 @@ Executable contracts live primarily in `tests/conversation/test_conversation_syn
 `tests/turn_lifecycle/test_turn_command.py`, and
 `tests/storage/test_storage_authority_sql_contract.py`.
 
+## Conversation settings vocabulary
+
+**Problem:** settings crossed the browser boundary through five hand-copied key
+lists (browser snapshot builder, server resolver, retained adopter, catalog
+projection, metadata cache), and they drifted both ways. The per-conversation
+write-approval choice (`autoApply`) was persisted but never adopted, so a reload
+painted Auto and the next settings write silently replaced Manual; catalog rows
+cleared `paperDocument` because the adopter treated a partial projection as
+complete; the cache dropped `modelRef`, `preferredProviderId`, `imageGenEnabled`
+and `autoApply`; the catalog shipped keys no server writes (`lastMsg*`,
+`activeTaskId`). **Decision:** `contracts/conversation_settings_v1.json`
+declares every public key once: its author (composer, composer-derived,
+resolver-derived, server, legacy), whether the browser adopts and caches it,
+whether the catalog carries it, and which modules write server-authored keys.
+`CATALOG_SETTING_KEYS` and the browser cache key set derive from it.
+`_applySettingsToConv(conv, settings, projection)` lets only `full` snapshot
+settings clear `clearWhenAbsent` keys; `partial` catalog rows and command
+echoes never clear state they do not carry. Private keys remain owned by
+`settings_policy.py` and may not enter the contract. **Rejected:** a generated
+TypeScript type alone cannot check the retained JavaScript adopter or the
+Python resolver; deriving the vocabulary from the resolver would hide
+server-authored keys; keeping dead keys for compatibility keeps shipping state
+that no producer maintains. Specs:
+`tests/conversation/test_conversation_settings_contract.py` (resolver
+vocabulary, catalog derivation, declared writers, private keys) and
+`frontend/src/conversation/application/conversation-settings-contract.test.ts`
+(snapshot keys, adopter reads, cache keys, reload round trip, partial/full
+clearing).
+
 ## Catalog deletion evidence
 
 Sidebar reconciliation evicts an absent persisted shell only when the current response supplies a nonnegative safe-integer total equal to its valid, unique row count. A missing or malformed total, duplicate/invalid row, or partial page cannot prove deletion; an earlier response’s total is never reused for this decision. Local drafts remain. Confirmed deletion disposes the Turn runtime and cached metadata, then selects a remaining conversation or opens a fresh chat. `tests/conversation_sync/test_sync_digest_ghost_eviction.py` exercises the shipped catalog/invalidation adapters; `tests/conversation/test_conversation_catalog_load_runtime.py` checks response-local completeness evidence.
@@ -1269,8 +1780,27 @@ carries `ownerId`, `conversationId`, `laneId`, `syncSeq`, exact `totalRounds`,
 zero-based `offset`, and up to 100 compact entries (`turnId`, `ordinal`, `actor`,
 1-based `roundNumber`). `anchorTurnId` optionally resolves the preceding/current
 input rank for viewport selection. `nextOffset` pages the directory; rank N is
-read with `offset=N-1&limit=1`. Stale heads return `stale: true` and no entries;
-their zero total is not authoritative and must never be displayed as a count.
+read with `offset=N-1&limit=1`. `syncSeq` names the reader's applied head; the
+response's `syncSeq` names the head its ranks are exact for, never an older
+one. The storage operation itself answers only at the exact head; the
+application service repeats a stale read at the newer head storage reported,
+at most four reads. Only a head behind the reader, or one that keeps moving
+through those reads, returns `stale: true` and no entries; that zero total is
+not authoritative and must never be displayed as a count.
+
+Problem: every streamed attempt event advances the sync head while input ranks
+stay unchanged, and the browser's replayed head trails the server by at least
+the stream latency. An exact-head fence therefore failed most rank reads during
+a streaming reply, and the jump panel showed "history failed" after a click or
+two. Decision: answer at the newest head not older than the reader's. The
+browser keeps such a page unless a Turn change or snapshot was applied to its
+replica during the read; a Turn change the page already includes reaches the
+replica through the ordered stream and re-reads the view through its key. A
+replacement snapshot in flight is awaited instead of failing the read.
+Alternatives rejected: retrying in the browser at its own head (every attempt
+loses the same race by a round trip plus stream latency); a per-lane rank
+revision in storage (a schema change on both authorities for a read that is
+already exact at any head it names).
 
 Inputs are exactly `human`, `critic`, and `virtual_user` in lane ordinal order.
 Assistant-only messages, arbitrary assistant/input ratios, and ordinal gaps do
@@ -1287,17 +1817,27 @@ the envelope is therefore part of the schema authority, not a transport detail
 the client may ignore.
 
 The browser directory is instance/owner/lane scoped and read against the one
-coordinator's committed head. Snapshot resets, input upserts, and deletions
-invalidate rank selection; pure projection patches do not change actor ranks.
-Rank targets are revalidated under the current head before jumping. A streaming
+coordinator's committed head. Its key (`roundRevision`) changes with snapshot
+resets and every applied Turn change: upserts, deletions, projection patches
+(which may delete Turns) and attempt events that announce related Turns.
+Streamed attempt progress, which patches only the live Turn, does not change
+it. Rank targets are revalidated under the current head before jumping. A streaming
 attempt advances that head on every committed turn, which is why a directory
 view keeps its last good page and refreshes the shown window in place instead of
 discarding the projection: only a conversation switch drops it. One read is in
 flight per view and a newer request replaces the queued one. A page fenced by a
 head that moved under it is re-read against the head observed now, bounded,
-because a racing head converges while a broken projection does not. Bodies use
-the same coordinator/TurnStore path, with at most two detached pages (eight
-nearby Turns plus a one-Turn fallback). Detached ingestion never advances the
+because a racing head converges while a broken projection does not.
+
+A jump is never dropped silently. Background reads (scroll anchoring, key
+refreshes) hold the view's slot without disabling the jump controls; a jump
+requested meanwhile waits for that slot, the latest request winning. If the key
+changes while a jump resolves or hydrates, the jump re-resolves its round under
+the new ranks (bounded) and then lands; only a conversation switch abandons
+it. A failed jump stays reported until the reader acts again, so the refresh a
+key change starts cannot erase it. Bodies use the same coordinator/TurnStore
+path: one detached page holding the target and the seven Turns after it, plus a
+one-Turn fallback when a byte budget drops the target. Detached ingestion never advances the
 continuous tail history cursor, and never counts historical hydration as a new
 Turn. Only a page whose `beforeOrdinal` equals the continuous frontier may
 advance that frontier, so a loaded island cannot skip unseen history.

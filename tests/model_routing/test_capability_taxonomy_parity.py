@@ -42,6 +42,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -62,8 +63,7 @@ _MODEL_CAPABILITY_OWNER = (
 def _frontend_contract() -> dict[str, object]:
     """Exercise the public typed controller through the production bundler."""
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not available for typed-owner evaluation')
+    require_node_modules('vite')
     bundle = native_module_path(
         '.native/model-capability-taxonomy.js', _MODEL_CAPABILITY_OWNER)
     script = r'''
@@ -100,6 +100,7 @@ process.stdout.write(JSON.stringify({
   defaults: {
     transcription: standard.isChatModel({capabilities: ['transcription']}),
     tts: standard.isChatModel({capabilities: ['tts']}),
+    reranking: standard.isChatModel({capabilities: ['reranking']}),
     audioChat: standard.isChatModel({capabilities: ['text', 'audio_chat']}),
     empty: standard.isChatModel({capabilities: []}),
     missing: standard.isChatModel({}),
@@ -158,6 +159,7 @@ def test_frontend_controller_classifies_and_applies_valid_server_taxonomy():
     assert contract['defaults'] == {
         'transcription': False,
         'tts': False,
+        'reranking': False,
         'audioChat': True,
         'empty': True,
         'missing': True,
@@ -262,10 +264,23 @@ def test_is_chat_model_hides_asr_and_keeps_omni_chat():
     assert is_chat_model(['text', 'vision', 'audio_chat']) is True
     assert is_chat_model(['image_gen']) is False
     assert is_chat_model(['embedding']) is False
+    assert is_chat_model(['reranking']) is False
+    assert is_chat_model(['reranking', 'cheap']) is False
     assert is_chat_model(['text']) is True
     assert is_chat_model(['text', 'thinking', 'cheap']) is True
     assert is_chat_model([]) is True
     assert is_chat_model(None) is True
+
+
+def test_reranking_capability_payload_declares_its_own_endpoint():
+    from lib.model_info.capability_taxonomy import taxonomy_payload
+
+    payload = taxonomy_payload()
+    assert 'reranking' in payload['known_capabilities']
+    assert payload['capability_semantics']['reranking'] == {
+        'role': 'non-chat', 'endpoint': 'rerank',
+        'in_chat_picker': False, 'is_dispatch_chat': False,
+    }
 
 
 # ── Invariant 6: NEUTER ══════════════════════════════════════════════════

@@ -89,6 +89,7 @@ def chat_human_response():
 
     from lib.tasks_pkg.human_guidance import resolve_human_guidance
 
+    from lib.error_envelope import BadRequest
     from lib.storage import StorageError
     from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
     from routes.conversation_turn_errors import lifecycle_conflict_response, storage_failure_response
@@ -104,8 +105,8 @@ def chat_human_response():
         return lifecycle_conflict_response(exc)
     except StorageError as exc:
         return storage_failure_response(exc, operation='human_guidance.answer')
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
     except Exception as e:
         logger.error('[HumanGuidance] Exception resolving %s: %s',
                      guidance_id, e, exc_info=True)

@@ -26,6 +26,7 @@ from quart import Blueprint, request
 from lib.api_response import (
     api_bad_request, api_conflict, api_forbidden, api_not_found, api_ok, api_payload_too_large,
 )
+from lib.error_envelope import BadRequest
 from lib.artifacts import (
     ArtifactNotFoundError, delete_artifact, get_artifact_meta,
     list_artifacts, list_pinned_or_recent, list_versions, public_meta,
@@ -87,8 +88,8 @@ async def update_artifact_review_v1(artifact_id):
         return api_conflict(str(exc))
     except PermissionError as exc:
         return api_forbidden(str(exc))
-    except ValueError as exc:
-        return api_bad_request(str(exc))
+    except BadRequest as exc:
+        return api_bad_request(str(exc), **({'field': exc.field} if exc.field else {}))
 
 
 def _strip_meta(meta: dict) -> dict:

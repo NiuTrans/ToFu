@@ -30,7 +30,8 @@ Source builds require Rust 1.88 or newer and Cargo; wheel consumers require only
 platform tag and `py3-none` ABI tag; a build is not automatically manylinux
 certified. The package resolves independently of the shared uv workspace.
 Tofu automatically prefers this package for repository ranking when installed.
-Missing or invalid artifacts retain the canonical NetworkX path. There is no
+Missing or invalid artifacts select the application's dependency-free Python
+kernel, which follows the same canonical semantics. There is no
 runtime compiler, download, storage authority or model-visible backend option.
 Container builds install the wheel into API, Worker and Headless environments;
 Rust stays in the build stage. The module command certifies a digest-verified

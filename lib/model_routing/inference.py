@@ -20,14 +20,58 @@ def _validator():
     return Draft202012Validator({'$ref': '#/$defs/inferenceProfile', '$defs': EXTERNAL_DEFS})
 
 
+# Structural identities of profiles jsonschema already accepted. A routing
+# aggregate repeats a few dozen distinct profiles across hundreds of rows and
+# is re-normalized several times per request; the schema walk dominated that.
+# Only the pure schema verdict is reused: every call still runs the finite and
+# bound checks below and returns a detached copy. Reconstructible and bounded.
+_SCHEMA_VALID_PROFILES: set = set()
+_SCHEMA_VALID_PROFILES_MAX = 512
+
+
+def _plain_json_identity(value):
+    """Hashable identity of an exact builtin JSON tree, or None if not memoizable.
+
+    Exact types only: jsonschema distinguishes look-alikes (a tuple is not an
+    array, a bool is not an integer), so anything else is validated in full.
+    """
+    kind = type(value)
+    if kind is dict:
+        items = []
+        for key, child in value.items():
+            child_identity = _plain_json_identity(child)
+            if type(key) is not str or child_identity is None:
+                return None
+            items.append((key, child_identity))
+        items.sort(key=lambda item: item[0])
+        return 'object', tuple(items)
+    if kind is list:
+        children = []
+        for child in value:
+            child_identity = _plain_json_identity(child)
+            if child_identity is None:
+                return None
+            children.append(child_identity)
+        return 'array', tuple(children)
+    if value is None or kind in (str, int, float, bool):
+        return kind.__name__, value
+    return None
+
+
 def validate_inference_profile(value, *, field='inference_profile') -> dict:
     """Validate without coercion, then detach; reject inconsistent numeric bounds."""
     from .domain import ModelRoutingError
-    error = next(_validator().iter_errors(value), None)
-    if error is not None:
-        # jsonschema's message includes invalid values. A profile is inspectable
-        # routing metadata, never a channel for reflecting secrets or payloads.
-        raise ModelRoutingError(f'{field}: invalid inference profile', field=field)
+    identity = _plain_json_identity(value)
+    if identity is None or identity not in _SCHEMA_VALID_PROFILES:
+        error = next(_validator().iter_errors(value), None)
+        if error is not None:
+            # jsonschema's message includes invalid values. A profile is inspectable
+            # routing metadata, never a channel for reflecting secrets or payloads.
+            raise ModelRoutingError(f'{field}: invalid inference profile', field=field)
+        if identity is not None:
+            if len(_SCHEMA_VALID_PROFILES) >= _SCHEMA_VALID_PROFILES_MAX:
+                _SCHEMA_VALID_PROFILES.clear()
+            _SCHEMA_VALID_PROFILES.add(identity)
     def check_finite(node):
         if isinstance(node, float) and not math.isfinite(node):
             raise ModelRoutingError(f'{field} numbers must be finite', field=field)
@@ -136,6 +180,10 @@ def resolve_inference_profile(*, model=None, offering=None, connection=None, dep
                             and previous.get('disabled_effort') not in value['supported_efforts']):
                         previous['can_disable'] = False
                 previous.update(value)
+            elif section == 'features' and isinstance(value, Mapping):
+                # Per-feature evidence: a face declaring one gateway binding
+                # must not erase what the model or offering declared.
+                result.setdefault('features', {}).update(value)
             else:
                 result[section] = value
     reasoning = result.get('reasoning', {})

@@ -14,7 +14,8 @@ export const richChartText = (key: string, _fallback: string) => t(key as PlainK
  * available beside the projection, including invalid/unsupported/truncated data.
  * Chart schemas cap series and points; never execute supplied markup or code.
  */
-export function evidenceCharts(doc: Document, source: string): HTMLElement | null {
+/** `note` keeps the acceptance disclaimer for pages that show no verdict beside the charts. */
+export function evidenceCharts(doc: Document, source: string, options: {note: boolean} = {note: true}): HTMLElement | null {
   if (source.length > 200_000) return null;
   const host=doc.createElement('section');host.className='evo-evidence-charts';
   const responses=source.includes('tofu-ui') ? splitRichMarkdown(source).flatMap(part=>part.kind==='rich' ? [parseRichResponse(part.source)] : []) : [projectRichToolResult([source])];
@@ -30,6 +31,6 @@ export function evidenceCharts(doc: Document, source: string): HTMLElement | nul
     host.append(figure);count+=blocks.length;if(count>=8)break;
   }
   if(!count)return null;
-  const note=doc.createElement('p');note.className='evo-chart-note';note.textContent=chartCopy('resultChartsNote');host.prepend(note);
+  if(options.note){const note=doc.createElement('p');note.className='evo-chart-note';note.textContent=chartCopy('resultChartsNote');host.prepend(note);}
   return host;
 }

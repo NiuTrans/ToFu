@@ -6,6 +6,10 @@
 attempts, queues and presentation overlays, and memoizes eligible settled Turns.
 Its type re-exports preserve existing callers; projection modules import types
 directly from `types.ts` and never re-enter the facade.
+The composition shares its existing lane/Turn-location maps as optional read-only
+navigation data. Ordered child-lane IDs follow Turn/descriptor chronology;
+eligible local deltas reuse them, while structural changes rebuild them. No
+consumer owns a second graph index; cyclic graphs retain explicit placeholders.
 
 | Module | Responsibility |
 |---|---|

@@ -84,7 +84,11 @@ def test_real_attempt_acceptance_overwrites_spoofed_source_and_fences_intervenin
     assert restart_source_attempt(row, user_id=11)['attemptId'] == original
     def accept(command):
         current = get_turn(conv, turn_id, user_id=11)
-        return create_attempt(conv, turn_id, command_id=command, operation='continue',
+        # The first offered resume, as batch resume picks it: a prose tail
+        # resumes through its checkpoint, a reasoning-only tail continues.
+        operation = current['settlement']['resumeOptions'][0]['operation']
+        assert operation in ('continue', 'checkpoint_resume')
+        return create_attempt(conv, turn_id, command_id=command, operation=operation,
             expected_projection_revision=current['projectionRevision'], user_id=11,
             config={'_resumeSource': {'attemptId': 'spoofed', 'cause': 'server_restart'}})
     resumed = accept('first-continue-' + conv)
@@ -95,7 +99,8 @@ def test_real_attempt_acceptance_overwrites_spoofed_source_and_fences_intervenin
         'attemptId': original, 'taskId': 'original-task', 'status': 'interrupted', 'cause': 'server_restart'}
     assert get_turn(conv, turn_id, user_id=11)['settlement'] == {}
     task = {'id': 'resume-task', 'convId': conv, '_userId': 11,
-            'config': {'_turnId': turn_id, '_attemptId': resume_id, '_turnOperation': 'continue'}}
+            'config': {'_turnId': turn_id, '_attemptId': resume_id,
+                       '_turnOperation': resumed['attempt']['operation']}}
     assert continue_recovery_allowed(row, task, user_id=11)
     task['id'] = 'wrong-task'
     assert not continue_recovery_allowed(row, task, user_id=11)
@@ -105,7 +110,8 @@ def test_real_attempt_acceptance_overwrites_spoofed_source_and_fences_intervenin
     second_id = second['attempt']['attemptId']
     _bound(second_id, 'second-task')
     task.update(id='second-task')
-    task['config']['_attemptId'] = second_id
+    task['config'].update(_attemptId=second_id,
+                          _turnOperation=second['attempt']['operation'])
     assert get_attempt(second_id, user_id=11, include_execution_config=True)['config']['_resumeSource'] == {
         'attemptId': resume_id, 'taskId': 'resume-task', 'status': 'interrupted', 'cause': 'user_abort'}
     assert not continue_recovery_allowed(row, task, user_id=11)

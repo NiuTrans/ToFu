@@ -62,6 +62,7 @@ from lib.project_recent_contract import (
     RECENT_PROJECT_PATH_MAX_CHARS,
     RECENT_PROJECT_TOUCH_BATCH_LIMIT,
 )
+from lib.error_envelope import BadRequest
 from lib.human_gate_contract import MAX_HUMAN_GATE_REQUEST_ID_LENGTH
 from lib.request_parser import optional_bool, optional_str, parse_body
 
@@ -90,9 +91,10 @@ def _project_set_recent_paths(data: dict, paths: list) -> list[str]:
         not isinstance(candidates, list)
         or len(candidates) > RECENT_PROJECT_TOUCH_BATCH_LIMIT
     ):
-        raise ValueError(
+        raise BadRequest(
             f"recentPaths must contain at most "
-            f"{RECENT_PROJECT_TOUCH_BATCH_LIMIT} paths"
+            f"{RECENT_PROJECT_TOUCH_BATCH_LIMIT} paths",
+            field="recentPaths",
         )
     canonical: list[str] = []
     for candidate in candidates:
@@ -102,7 +104,8 @@ def _project_set_recent_paths(data: dict, paths: list) -> list[str]:
             or len(candidate) > RECENT_PROJECT_PATH_MAX_CHARS
             or candidate not in paths
         ):
-            raise ValueError("recentPaths must be a bounded subset of paths")
+            raise BadRequest("recentPaths must be a bounded subset of paths",
+                             field="recentPaths")
         path = os.path.abspath(os.path.expanduser(candidate))
         if path not in canonical:
             canonical.append(path)
@@ -153,12 +156,12 @@ def project_set():
     path = data.get("path", "").strip()
     if not path:
         return api_bad_request("No path provided", field="path")
-    try:
-        from lib.project_mod import set_project
+    from lib.project_mod import set_project
 
+    try:
         return api_ok({**set_project(path)})
-    except Exception as e:
-        logger.error("[Project.v1] set failed for path %s: %s", path, e, exc_info=True)
+    except BadRequest as e:
+        logger.warning("[Project.v1] set rejected for path %s: %s", path, e)
         return api_bad_request(e)
 
 
@@ -177,20 +180,24 @@ def project_set():
 def project_paths():
     data = parse_body(exact=("paths", "readOnlyPaths", "recentPaths"))
     paths = data.get("paths", [])
-    if not paths or not isinstance(paths, list):
+    if (not paths or not isinstance(paths, list)
+            or not all(isinstance(path, str) for path in paths)):
         return api_error(
             'Provide a "paths" array with at least one directory', status=400
         )
     readonly = data.get("readOnlyPaths") or []
     if not isinstance(readonly, list):
         readonly = []
+    if any(path and not isinstance(path, str) for path in readonly):
+        return api_bad_request("readOnlyPaths must contain only paths",
+                               field="readOnlyPaths")
     try:
         recent_paths = _project_set_recent_paths(data, paths)
-    except ValueError as exc:
+    except BadRequest as exc:
         return api_bad_request(str(exc), field="recentPaths")
-    try:
-        from lib.project_mod import save_recent_projects, set_project_paths
+    from lib.project_mod import save_recent_projects, set_project_paths
 
+    try:
         result = set_project_paths(paths, readonly_paths=readonly)
         if recent_paths:
             try:
@@ -207,8 +214,8 @@ def project_paths():
                     exc,
                 )
         return api_ok({**result})
-    except Exception as e:
-        logger.error("[Project.v1] paths failed for %s: %s", paths, e, exc_info=True)
+    except BadRequest as e:
+        logger.warning("[Project.v1] paths rejected for %s: %s", paths, e)
         return api_bad_request(e)
 
 
@@ -310,7 +317,7 @@ def project_browse():
     data = parse_body(strict=True, exact=tuple(browse_request_schema()["properties"]))
     try:
         path, show_hidden = normalize_browse_request(data)
-    except ValueError as error:
+    except BadRequest as error:
         return api_bad_request(str(error))
     from lib.project_mod import browse_directory
 

@@ -143,7 +143,7 @@ def test_amalgam_reuse_is_per_block_granular():
     def blocks(skills):
         return [
             _block('skills_index', skills, authority='workflow'),
-            _block('parallel_execution', 'PAR', authority='workflow'),
+            _block('programmatic_execution', 'PAR', authority='workflow'),
         ]
     messages = [{'role': 'user', 'content': 'request'}]
     render_context(messages, blocks('V1'), ComposeRequest(model='m'))
@@ -628,13 +628,38 @@ def test_environment_is_a_tail_block_and_static_survives_project_path_change():
     assert disabled['environment'].suppressed_reason == 'disabled'
 
 
-def test_all_runtime_provider_blocks_use_tail_user_placement(monkeypatch):
-    """Runtime context never rewrites the system message or history head.
+def test_anonymous_compositions_never_share_a_transition_baseline():
+    """A composition with neither a task id nor a conversation (debug wire
+    snapshots, throwaway tasks) has no previous turn: it must not report a
+    path change learned from an unrelated anonymous composition, and must
+    not seed a baseline the next one would diff against."""
 
-    Only the registry-declared system blocks (platform_static always,
-    ui_nav_directory on browser-frontend turns) may occupy the dedicated
-    system prefix; everything else stays a tail user carrier. A non-browser
-    task fails closed to no directory.
+    providers._reset_tail_transitions_for_tests()
+
+    def _blocks(path):
+        task = {'config': {}}
+        blocks = {
+            block.id: block
+            for block in providers.collect_context_blocks(
+                [{'role': 'user', 'content': 'request'}],
+                ComposeRequest(project_path=path, project_enabled=bool(path),
+                               model='m', task=task),
+            )
+        }
+        return blocks, task
+
+    for path in ('/tmp/anon-alpha', '/tmp/anon-beta', ''):
+        blocks, task = _blocks(path)
+        assert '_projectPathChange' not in task, path
+        assert not any(block_id.startswith('project_path_change_')
+                       for block_id in blocks), path
+
+
+def test_runtime_provider_blocks_keep_evidence_in_tail_user_placement(monkeypatch):
+    """Only registered policy/guidance blocks occupy the system prefix.
+
+    A non-browser task fails closed to no navigation directory; ordinary
+    runtime evidence and ambient context remain tail user carriers.
     """
     monkeypatch.setattr(providers, '_project_rules', lambda _request: 'rules')
     monkeypatch.setattr(providers, '_profile_block', lambda _request: 'prefs')
@@ -658,8 +683,45 @@ def test_all_runtime_provider_blocks_use_tail_user_placement(monkeypatch):
     assert ui_nav.suppressed_reason == 'non_browser_surface'
     content_blocks = [b for b in blocks
                       if b.content and b.id not in
-                      {'platform_static', 'ui_nav_directory'}]
+                      {'platform_static', 'ui_nav_directory',
+                       'parallel_execution', 'delegate_mode'}]
     assert {b.placement for b in content_blocks} == {'tail'}
+
+
+def test_orchestration_contracts_use_system_and_migrate_legacy_tail():
+    legacy = []
+    render_context(legacy, [context_block('parallel_execution', 'PARALLEL')],
+                   ComposeRequest(model='m'))
+    legacy[0]['role'] = 'user'
+    messages = [legacy[0], {'role': 'user', 'content': 'request'}]
+
+    result = render_context(
+        messages, [context_block('parallel_execution', 'PARALLEL')],
+        ComposeRequest(model='m'))
+    assert messages[0]['role'] == 'system'
+    assert 'PARALLEL' in _texts(messages[0])
+    assert messages[1] == {'role': 'user', 'content': 'request'}
+    assert result.manifest[0]['placement'] == 'system'
+    assert result.manifest[0]['carrier'] == 'system_context'
+
+    render_context(messages, [
+        context_block('parallel_execution', '',
+                      reason='superseded_by_delegate_mode'),
+        context_block('delegate_mode', 'DELEGATE'),
+    ], ComposeRequest(model='m'))
+    assert 'PARALLEL' not in ''.join(_texts(m) for m in messages)
+    assert messages[0]['role'] == 'system'
+    assert 'DELEGATE' in _texts(messages[0])
+    assert messages[1] == {'role': 'user', 'content': 'request'}
+
+    render_context(messages, [
+        context_block('parallel_execution', 'PARALLEL'),
+        context_block('delegate_mode', '', reason='delegate_mode_off'),
+    ], ComposeRequest(model='m'))
+    assert 'DELEGATE' not in ''.join(_texts(m) for m in messages)
+    assert messages[0]['role'] == 'system'
+    assert 'PARALLEL' in _texts(messages[0])
+    assert messages[1] == {'role': 'user', 'content': 'request'}
 
 
 def test_ui_nav_directory_injects_on_browser_conversation_attempt(

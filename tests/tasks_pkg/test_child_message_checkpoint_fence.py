@@ -35,7 +35,7 @@ def run_context(monkeypatch):
               'config': {'projectPath': '/project', 'memoryEnabled': False}}
     spec = SimpleNamespace(id='worker', retained_agent_id='', retained_run_id='',
                            retained_scope='')
-    binding = binding_for(parent, spec, 'checkpoint-conv')
+    binding = binding_for(parent, spec, 'checkpoint-conv', run_id='checkpoint-parent')
     return SimpleNamespace(parent=parent, binding=binding,
                            repo=RunMessageRepository(binding))
 
@@ -210,7 +210,7 @@ def test_subagent_recovery_passes_binding_before_checkpoint_projection(run_conte
     confirm_input(prior, round_num=0)
     worker = SubAgent(SubTaskSpec(id='worker', role='general', objective='Recover'),
                       parent_task=ctx.parent, all_tools=[], model='fixture-model')
-    worker.swarm_key = 'checkpoint-conv'
+    worker.swarm_key, worker.swarm_run_id = 'checkpoint-conv', ctx.parent['id']
     worker.restore_checkpoint(checkpoint, 1)
     assert any(item['id'] in message.get('_swarmMessageIds', []) for message in worker.messages)
     observed = []

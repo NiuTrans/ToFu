@@ -13,7 +13,9 @@ Channel notes (all URLs measured reachable 2026-08-06 from this host):
 
   * ``@fontpkg/*`` and ``@fontsource/*`` via cdn.jsdelivr.net/npm — single
     woff2/otf files, ideal for scene-local ``@font-face``.
-  * ``cdn.jsdelivr.net/fontsource/fonts/...`` for the Noto CJK subsets.
+  * ``cdn.jsdelivr.net/fontsource/fonts/...`` for the Noto CJK subsets and
+    selected Latin faces; exact releases re-audited 2026-10-27. Never use
+    floating release tags beside immutable byte pins.
   * ZCOOL WenYiTi has no npm package; the wordshub/free-font raw file is the
     pinned source.
 
@@ -121,10 +123,10 @@ FONT_REGISTRY: tuple = (
         scenarios=('management-report', 'academic-research',
                    'education-training'),
         sources=(
-            FontSource(400, f'{_FSO}/noto-sans-sc@latest/chinese-simplified-400-normal.woff2',
+            FontSource(400, f'{_FSO}/noto-sans-sc@5.3.1/chinese-simplified-400-normal.woff2',
                        '95e3633b6a98f764ba3adfb54504a0cd4799328c009adf9081d6c1850f9c4c78',
                        1142552, 'woff2'),
-            FontSource(700, f'{_FSO}/noto-sans-sc@latest/chinese-simplified-700-normal.woff2',
+            FontSource(700, f'{_FSO}/noto-sans-sc@5.3.1/chinese-simplified-700-normal.woff2',
                        'e1df51edc00bce27b58044e829fb8ec6accc8a5daece475413de90d52818845c',
                        1172244, 'woff2'),
         ),
@@ -135,12 +137,12 @@ FONT_REGISTRY: tuple = (
         roles=('display', 'body'),
         scenarios=('academic-research', 'brand-creative'),
         sources=(
-            FontSource(400, f'{_FSO}/noto-serif-sc@latest/chinese-simplified-400-normal.woff2',
-                       '7dd5aea2df4644e916c2eb558bc8ed6ad6d8925c2c8e251fe68f7206da211696',
-                       1507260, 'woff2'),
-            FontSource(700, f'{_FSO}/noto-serif-sc@latest/chinese-simplified-700-normal.woff2',
-                       '7535a804cc83aa0e8f40fdb1170556ad54ea3260e087a368f3ad6ab4bc86ca4f',
-                       1557548, 'woff2'),
+            FontSource(400, f'{_FSO}/noto-serif-sc@5.3.1/chinese-simplified-400-normal.woff2',
+                       '0d5a3fd4981d7cc03ad357775de336b27d41394158d52c7bdda1ab2c68fa1845',
+                       1509736, 'woff2'),
+            FontSource(700, f'{_FSO}/noto-serif-sc@5.3.1/chinese-simplified-700-normal.woff2',
+                       '6fee904c45179102c1176bab222caeea1b5618c8aa2701644d0aacd34ccab533',
+                       1558272, 'woff2'),
         ),
         license_id='ofl-1.1',
         note='宋体衬线,文化/学术/正式场合的正文与标题。'),
@@ -210,7 +212,7 @@ FONT_REGISTRY: tuple = (
         roles=('latin',),
         scenarios=('tech-engineering', 'analysis-decision'),
         sources=(
-            FontSource(400, f'{_FSO}/liter@latest/latin-400-normal.woff2',
+            FontSource(400, f'{_FSO}/liter@5.3.0/latin-400-normal.woff2',
                        'fe2a35c3a43761865e0f5d72f44aa40c73de569c0d1990649060a59839d39677',
                        17688, 'woff2'),
         ),
@@ -221,7 +223,7 @@ FONT_REGISTRY: tuple = (
         roles=('latin',),
         scenarios=('brand-creative',),
         sources=(
-            FontSource(400, f'{_FSO}/oranienbaum@latest/latin-400-normal.woff2',
+            FontSource(400, f'{_FSO}/oranienbaum@5.3.0/latin-400-normal.woff2',
                        '8ab24c8b63edb5f7307d7eb83a0613bbfcec267700d781324d4462ce4ea897f6',
                        20504, 'woff2'),
         ),
@@ -254,6 +256,7 @@ _PAIRINGS = {
     'business-plan':     ('alimama-shuheiti', 'misans', 'liter'),
     'management-report': ('alimama-shuheiti', 'noto-sans-sc', 'liter'),
     'academic-research': ('noto-serif-sc', 'noto-serif-sc', 'oranienbaum'),
+    'career-interview': ('misans', 'noto-sans-sc', 'liter'),
     'education-training': ('lxgw-wenkai', 'lxgw-wenkai', 'liter'),
     'brand-creative':    ('smiley-sans', 'zcool-wenyiti', 'oranienbaum'),
 }

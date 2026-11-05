@@ -3,9 +3,14 @@
 Entry: available_kernel, score_with_kernel. One process-lifetime immutable C ABI
 binding; each graph/buffer is call-local. No storage, cache, pool or subprocess.
 Dependency: standalone tofu_repo_kernel when installed, canonical path penalty.
+score_with_kernel also drives the dependency-free `_python_rank` kernel; a
+kernel computation failure degrades to reference counts with one warning per
+process, and any other exception propagates.
 """
 from functools import lru_cache
 from .outline import _is_test_path
+
+_reference_count_fallback_logged = False
 
 
 @lru_cache(maxsize=1)
@@ -32,6 +37,9 @@ def score_with_kernel(repo, chat_rel_paths, kernel):
         referencers = repo.references.get(ident, set()) - definers
         if not definers or not referencers:
             continue
+        # Each referencer->identifier edge occurs once per definer and each
+        # identifier->definer edge once per referencer; weights carry those
+        # multiplicities instead of materializing the Cartesian product.
         for path in referencers:
             source, target = node('file:' + path), node('ident:' + ident)
             adjacency[source].append((target, len(definers)))
@@ -50,9 +58,25 @@ def score_with_kernel(repo, chat_rel_paths, kernel):
     vector = [personal.get(i, 0.0) for i in range(len(indices))] if personal else [1.0] * len(indices)
     try:
         values = kernel.solve(offsets, targets, weights, vector)
-    except Exception as exc:
-        from .rank import logger, _fallback_scores
-        logger.debug('[repo_map] native pagerank failed, using fallback scores: %s', exc)
-        return _fallback_scores(repo, set(repo.definitions), repo.references, repo.definitions)
+    except (RuntimeError, ValueError) as exc:
+        # The kernel contract's failures: RuntimeError for non-convergence or a
+        # contained native panic, ValueError for refused input.
+        return _reference_count_fallback(repo, exc)
+    # Tests reference all of production; unpenalized they win every ranking
+    # while telling a model almost nothing about the design.
     return {name[5:]: values[index] * (.2 if _is_test_path(name[5:]) else 1.)
             for name, index in indices.items() if name.startswith('file:')}
+
+
+def _reference_count_fallback(repo, exc):
+    global _reference_count_fallback_logged
+    from .rank import logger, _fallback_scores
+    if _reference_count_fallback_logged:
+        logger.debug('[repo_map] PageRank failed again (%s: %s); using reference counts',
+                     type(exc).__name__, exc)
+    else:
+        _reference_count_fallback_logged = True
+        logger.warning('[repo_map] PageRank failed (%s: %s); repository ranking degrades '
+                       'to reference counts. Later failures in this process log at debug.',
+                       type(exc).__name__, exc)
+    return _fallback_scores(repo, set(repo.definitions), repo.references, repo.definitions)

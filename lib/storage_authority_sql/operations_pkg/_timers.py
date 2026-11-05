@@ -225,15 +225,17 @@ def _timer_update(session: Session, payload: Mapping[str, Any]) -> Any:
     return {"changed": bool(changed)}
 
 
-def _timer_poll_append(session: Session, payload: Mapping[str, Any]) -> Any:
+def _timer_poll_append(session: Session, payload: Mapping[str, Any], *,
+                       require_active: bool = False) -> Any:
     timer_id = _timer_id(payload)
     user_id = _timer_owner(payload)
     poll_id = str(payload.get("poll_id") or "")[:80]
     session.lock_key("timer", timer_id)
-    if session.fetch_one(
-        "SELECT 1 AS present FROM storage_timers WHERE id=? AND user_id=?",
+    timer = session.fetch_one(
+        "SELECT status FROM storage_timers WHERE id=? AND user_id=?",
         (timer_id, user_id),
-    ) is None:
+    )
+    if timer is None:
         raise StorageError("database_not_found", "Timer not found")
     session.lock_key("timer_poll_log", "global")
     if poll_id:
@@ -243,6 +245,10 @@ def _timer_poll_append(session: Session, payload: Mapping[str, Any]) -> Any:
         )
         if existing is not None:
             return {"inserted": False, "id": int(existing["id"])}
+    if require_active and timer["status"] != "active":
+        # A poll that finishes after the watcher settled (triggered, cancelled,
+        # retired) must not overwrite its receipt or spend its budget.
+        return {"inserted": False, "id": None, "status": str(timer["status"])}
     row = session.fetch_one(
         "SELECT COALESCE(MAX(id), 0) AS max_id FROM storage_timer_poll_log"
     )
@@ -271,8 +277,12 @@ def _timer_poll_append(session: Session, payload: Mapping[str, Any]) -> Any:
 
 
 def _timer_poll_commit(session: Session, payload: Mapping[str, Any]) -> Any:
-    """Atomically append one poll ledger row and advance watcher progress."""
-    result = _timer_poll_append(session, payload)
+    """Atomically append one poll ledger row and advance an active watcher.
+
+    A settled watcher returns a not-advanced receipt naming its status, with
+    no ledger row, poll-ID claim or progress change.
+    """
+    result = _timer_poll_append(session, payload, require_active=True)
     if not result["inserted"]:
         return {**result, "advanced": False}
     timer_id = _timer_id(payload)

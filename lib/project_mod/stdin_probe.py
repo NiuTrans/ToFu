@@ -1,10 +1,12 @@
 """Optional procfs stdin sensing, isolated from command execution control.
 
-One lazy sensor per command, bounded process-wide by the cached agent-worker
-envelope. Sensors hold immutable process/pipe ids and private observation state,
-never task objects, callbacks, model authority, or command file descriptors.
-Closing delivery fences late samples; a blocked sensor retains its physical
-pool slot until it returns. This is not a command owner or a kill mechanism.
+One lazy sensor per command, never refused by count. Sensors hold immutable
+process/pipe ids and private observation state, never task objects, callbacks,
+model authority, or command file descriptors. Closing delivery fences late
+samples; a blocked sensor stays tracked until it returns. This is not a command
+owner or a kill mechanism. A sensor reads only its own command's subtree, so one
+shared pass would save no work yet let a blocked procfs read delay every
+command ("Command stdin sensor discovery" in docs/RESOURCE_CONTROL.md).
 """
 from __future__ import annotations
 
@@ -16,9 +18,8 @@ logger = get_logger(__name__)
 
 
 class ProbePool:
-    """No queue or eager workers; physically unfinished sensors retain slots."""
-    def __init__(self, capacity):
-        self.capacity = max(1, int(capacity))
+    """No queue or eager workers; tracks physically unfinished sensors."""
+    def __init__(self):
         self._lock = threading.Lock()
         self._threads = set()
 
@@ -33,8 +34,6 @@ class ProbePool:
                     self._threads.discard(threading.current_thread())
         worker = threading.Thread(target=run, name='tofu-stdin-probe', daemon=True)
         with self._lock:
-            if len(self._threads) >= self.capacity:
-                return False
             self._threads.add(worker)
         try:
             worker.start()
@@ -42,7 +41,6 @@ class ProbePool:
             with self._lock:
                 self._threads.discard(worker)
             raise
-        return True
 
     @property
     def active(self):
@@ -58,11 +56,7 @@ def _default_pool():
     global _pool
     with _pool_lock:
         if _pool is None:
-            from runtime_guards import MAX_TASK_CONCURRENCY, resolve_resource_budget
-            # Uses the existing cached launch observation and explicit override;
-            # each optional sensor is lighter than an admitted agent worker.
-            _pool = ProbePool(resolve_resource_budget(
-                'TOFU_AGENT_WORKERS', minimum=1, maximum=MAX_TASK_CONCURRENCY))
+            _pool = ProbePool()
         return _pool
 
 
@@ -95,7 +89,8 @@ class StdinProbe:
             if self._closed:
                 return None
             if not self._started:
-                self._started = self._pool.launch(self._observe)
+                self._pool.launch(self._observe)
+                self._started = True
             reader, self._reader = self._reader, None
             return reader
 

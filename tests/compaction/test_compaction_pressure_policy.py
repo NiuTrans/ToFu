@@ -56,7 +56,8 @@ def test_required_l1_resolves_pressure_preserving_newest_batch_and_reasoning(har
 def test_rejected_cache_negative_candidate_emits_nothing(harness, monkeypatch):
     task, events, notices = harness
     monkeypatch.setattr('lib.tasks_pkg.compaction._cache_economics._proactive_cache_economics',
-                        lambda *a, **k: {'cache_read_tokens': 50_000, 'payback_rounds': 1000})
+                        lambda *a, **k: {'cache_read_tokens': 50_000, 'warm_prefix_tokens': 50_000,
+                                         'payback_rounds': 1000})
     messages = history()
     original = deepcopy(messages)
     assert not try_pressure_l1(messages, task, target_tokens=30_000,

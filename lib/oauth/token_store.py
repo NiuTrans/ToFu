@@ -1,12 +1,18 @@
 """lib/oauth/token_store.py — Persistent token storage for OAuth credentials.
 
-Tokens are stored in data/config/oauth/<provider>.json.
+Tokens are stored in data/config/oauth/<provider>.json. ``token_snapshot``
+scopes one projection pass (e.g. one status response) to a single resolution
+per provider.
 """
 
+import contextlib
+import contextvars
+import copy
 import hashlib
 import math
 import os
 import re
+import stat
 import threading
 import time
 
@@ -18,7 +24,18 @@ from lib.weak_lock_pool import WeakLockPool
 logger = get_logger(__name__)
 
 __all__ = ['load_token', 'save_token', 'delete_token', 'token_path',
-           'OAuthExchangeError', 'refresh_singleflight']
+           'OAuthExchangeError', 'refresh_singleflight', 'token_snapshot',
+           'forget_token_snapshot']
+
+# One status response reads the same credential for several projections
+# (catalog account fingerprint, provider card, reset offer, reconciliation).
+# Resolving a shared Codex login revalidates native launcher metadata with
+# dozens of filesystem probes, and every probe releases the GIL: on a loaded
+# server each read cost seconds. Inside ``token_snapshot`` each provider is
+# resolved at most once; writes in the same context drop that provider's
+# snapshot, and nothing outlives the block.
+_token_snapshots: contextvars.ContextVar = contextvars.ContextVar(
+    'oauth_token_snapshots', default=None)
 
 
 # ══════════════════════════════════════════════════════════
@@ -132,6 +149,31 @@ def token_path(provider: str) -> str:
     return _config_path(os.path.join('oauth', f'{provider}.json'))
 
 
+@contextlib.contextmanager
+def token_snapshot():
+    """Resolve each provider's credential at most once inside this block.
+
+    Nested blocks share the outermost snapshot. ``save_token``,
+    ``delete_token`` and ``forget_token_snapshot`` invalidate one provider so
+    a pass that changes or refreshes a credential re-reads it.
+    """
+    if _token_snapshots.get() is not None:
+        yield
+        return
+    scope = _token_snapshots.set({})
+    try:
+        yield
+    finally:
+        _token_snapshots.reset(scope)
+
+
+def forget_token_snapshot(provider: str) -> None:
+    """Drop one provider from the active snapshot after its source changed."""
+    snapshots = _token_snapshots.get()
+    if snapshots is not None:
+        snapshots.pop(provider, None)
+
+
 def _harden_token_permissions(path: str) -> None:
     """Best-effort migration of legacy token stores to private modes."""
     parent = os.path.dirname(path)
@@ -149,8 +191,21 @@ def _harden_token_permissions(path: str) -> None:
                            path, e)
 
 
+def _tighten_mode(path: str, current_mode: int, private_mode: int) -> None:
+    if stat.S_IMODE(current_mode) == private_mode:
+        return
+    try:
+        os.chmod(path, private_mode)
+    except OSError as e:
+        logger.warning('[TokenStore] Could not restrict %s: %s', path, e)
+
+
 def load_stored_token(provider: str) -> dict | None:
     """Load stored OAuth token for a provider.
+
+    Legacy stores are tightened to private modes on read, exactly as
+    ``_harden_token_permissions`` would, but an already private store costs
+    two stats instead of a mkdir and two chmods on every read.
 
     Returns:
         Token dict or None if not found / invalid.
@@ -158,9 +213,19 @@ def load_stored_token(provider: str) -> dict | None:
     path = token_path(provider)
     try:
         with _store_lock(provider):
-            if not os.path.isfile(path):
+            try:
+                info = os.stat(path)
+            except OSError:
                 return None
-            _harden_token_permissions(path)
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            parent = os.path.dirname(path)
+            try:
+                _tighten_mode(parent, os.stat(parent).st_mode, 0o700)
+            except OSError as e:
+                logger.warning('[TokenStore] Could not inspect token directory %s: %s',
+                               parent, e)
+            _tighten_mode(path, info.st_mode, 0o600)
             data = read_json(path, default=None)
         if not isinstance(data, dict):
             logger.warning('[TokenStore] Invalid token file for %s (not a dict)', provider)
@@ -175,6 +240,15 @@ def load_stored_token(provider: str) -> dict | None:
 
 def load_token(provider: str) -> dict | None:
     """Resolve a reference without persisting borrowed bearer credentials."""
+    snapshots = _token_snapshots.get()
+    if snapshots is None:
+        return _resolve_token(provider)
+    if provider not in snapshots:
+        snapshots[provider] = _resolve_token(provider)
+    return copy.deepcopy(snapshots[provider])
+
+
+def _resolve_token(provider: str) -> dict | None:
     stored = load_stored_token(provider)
     reference = (stored or {}).get('codex_shared_reference')
     if provider != 'codex' or not isinstance(reference, dict):
@@ -217,6 +291,8 @@ def save_token(provider: str, token_data: dict) -> bool:
     except Exception as e:
         logger.error('[TokenStore] Failed to save token for %s: %s', provider, e, exc_info=True)
         return False
+    finally:
+        forget_token_snapshot(provider)
 
 
 def delete_token(provider: str) -> bool:
@@ -240,3 +316,5 @@ def delete_token(provider: str) -> bool:
     except Exception as e:
         logger.warning('[TokenStore] Failed to delete token for %s: %s', provider, e)
         return False
+    finally:
+        forget_token_snapshot(provider)

@@ -27,11 +27,13 @@ When restricted, absolute / ``~`` paths are allowed ONLY if they resolve
 workspace root. Project dispatch binds the trusted conversation/task registry
 for the duration of the call; a missing scoped registry denies rather than
 borrowing another task's global roots. Unscoped callers retain the legacy
-global registry. Anything else is refused with a clear error. This is
-enforced at the lowest choke points — :func:`enforce_abs_read` (called
-from ``_read_absolute_file``) and the absolute branch of
-``_resolve_write_path`` — so every code path that reaches the filesystem
-is covered, regardless of which tool was used.
+global registry. Anything else is refused with a clear error. There is no
+lower filesystem choke point: each tool that accepts an absolute path calls
+the guard where it resolves one — :func:`enforce_abs_read` from
+``_read_absolute_file`` and the batch path of ``read_files``,
+``tool_inspect_image`` and ``tool_inspect_video``; :func:`enforce_abs_write`
+from the absolute branch of ``_resolve_write_path``. A new tool that accepts
+absolute paths must call the guard itself.
 """
 
 from __future__ import annotations

@@ -30,6 +30,7 @@ if _ROOT not in sys.path:
 from lib.llm.llm_errors import (  # noqa: E402
     BadRequestError,
     PermissionError_,
+    ModelRefusalError,
     PromptTooLongError,
     RateLimitError,
     _ERR_BODY_LIMIT,
@@ -131,7 +132,7 @@ class TestSummarizeErrorBody:
             'API HTTP 502: <html>Bad Gateway</html>'
 
     def test_non_envelope_json_passthrough(self):
-        # The sankuai 500-wrap shape carries signal in other fields — keep raw.
+        # The example-corp 500-wrap shape carries signal in other fields — keep raw.
         raw = '{"status":500,"data":"No matching constant for [529]"}'
         assert summarize_error_body(raw) == raw
 
@@ -393,6 +394,27 @@ class TestUpstreamTransientClassification:
         raw = 'API HTTP 400: {"error":{"message":"prompt is too long: 500k tokens"}}'
         with pytest.raises(PromptTooLongError):
             _classify_http_error(400, raw, 'm', '[t]')
+
+    @pytest.mark.parametrize('raw', [
+        'API HTTP 500: user sensitive words detected: example_flag (request id: test)',
+        'API HTTP 500: {"error":{"message":"user sensitive words detected: example_flag"}}',
+    ])
+    def test_sensitive_input_rejection_is_model_refusal_not_retryable_500(self, raw):
+        with pytest.raises(ModelRefusalError) as raised:
+            _classify_http_error(500, raw, 'primary-model', '[t]')
+
+        error = raised.value
+        assert error.model == 'primary-model'
+        assert error.category == 'user_sensitive_words'
+        assert error.explanation == 'user sensitive words detected: example_flag'
+        assert not isinstance(error, RateLimitError)
+
+    def test_unrelated_500_keeps_retryable_classification(self):
+        from lib.llm.llm_errors import RetryableAPIError
+
+        with pytest.raises(RetryableAPIError):
+            _classify_http_error(
+                500, 'API HTTP 500: upstream request failed', 'primary-model', '[t]')
 
     def test_status_code_carried_on_429_and_throttle(self):
         with pytest.raises(RateLimitError) as e429:

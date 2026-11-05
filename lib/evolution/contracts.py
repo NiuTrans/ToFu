@@ -95,6 +95,45 @@ def validate_program(payload: dict, definition: str | None = None) -> dict:
     return payload
 
 
+def inline_program_definition(definition: str) -> dict:
+    """Compile the shared finite programme schema for provider tool discovery."""
+    from copy import deepcopy
+    program = load_schema(PROGRAM_SCHEMA)
+    catalogs = {'urn:tofu:evolution-run:v1': load_schema('evolution_run_v1.schema.json'),
+                'https://tofu.local/contracts/research_program_v1.schema.json': load_schema('research_program_v1.schema.json')}
+    def expand(value, document):
+        if isinstance(value, list):
+            return [expand(item, document) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if '$ref' in value:
+            name, pointer = value['$ref'].split('#', 1)
+            target = catalogs[name] if name else document
+            selected = target
+            for key in pointer.strip('/').split('/'):
+                selected = selected[key]
+            return expand(selected, target)
+        # Repeated step/protocol references contain long author documentation.
+        # Keep every validation constraint; searchable tools need a complete
+        # callable schema that fits the common discovery response envelope.
+        result = {}
+        for key, item in value.items():
+            if key in ('description', 'title', '$comment', 'examples', 'default'):
+                continue
+            if key in ('properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'):
+                # Property names such as "title" are data, not annotations.
+                result[key] = {name: expand(schema, document) for name, schema in item.items()}
+            elif key in ('const', 'enum', 'dependentRequired'):
+                result[key] = deepcopy(item)
+            else:
+                result[key] = expand(item, document)
+        return result
+    result = expand(deepcopy(program['$defs'][definition]), program)
+    # Runtime admission validates conditional branches; provider root stays an object.
+    result.pop('allOf', None)
+    return result
+
+
 def _validate(payload: dict, schema_name: str, kind: str) -> dict:
     if not isinstance(payload, dict):
         raise EvolutionContractError(f'{kind} must be an object')

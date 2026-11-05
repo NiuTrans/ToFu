@@ -11,7 +11,7 @@
 #
 # The store zip uses docs/chrome-web-store/manifest.store.json, which drops the
 # permissions the code cannot justify (see PERMISSIONS_JUSTIFICATION.md). The
-# actual code files (background.js, popup.*, icons) are copied unchanged.
+# actual code files (background.js, worker/*.js, popup.*, icons) are copied unchanged.
 #
 set -euo pipefail
 
@@ -59,6 +59,8 @@ cp "$SRC_DIR/popup.js"      "$STAGE/"
 cp "$SRC_DIR/icon16.png"    "$STAGE/"
 cp "$SRC_DIR/icon48.png"    "$STAGE/"
 cp "$SRC_DIR/icon128.png"   "$STAGE/"
+mkdir -p "$STAGE/worker"
+cp "$SRC_DIR"/worker/*.js "$STAGE/worker/"
 
 if [[ "$STORE_BUILD" == "1" ]]; then
   cp "$STORE_MANIFEST" "$STAGE/manifest.json"
@@ -94,10 +96,12 @@ try:
         if archive.testzip() is not None:
             raise RuntimeError('Extension archive checksum verification failed')
     os.replace(temporary, output)
+    print('[package] contents:')
+    with zipfile.ZipFile(output) as archive:
+        for name in archive.namelist():
+            print('  ' + name)
 finally:
     Path(temporary).unlink(missing_ok=True)
 PYZIP
 
 echo "[package] wrote $OUT_ZIP"
-echo "[package] contents:"
-( cd "$STAGE" && find . -type f | sed 's|^\./|  |' | sort )

@@ -2,9 +2,12 @@
 """Context-window completion clamp.
 
 Cohesive group:
-  - _clamp_completion_to_context_window(..., precomputed_input_tokens=None)
+  - _clamp_completion_to_context_window(..., precomputed_input_tokens=None,
+    text_count_memo=None)
   - _COMPLETION_INPUT_MARGIN / _COMPLETION_MIN_FLOOR (module constants)
 """
+
+from functools import partial
 
 from lib.log import get_logger
 from lib.token_counter.evidence import validated_admitted_input_tokens
@@ -30,6 +33,7 @@ def _clamp_completion_to_context_window(
     *,
     precomputed_input_tokens=None,
     context_window=0,
+    text_count_memo=None,
 ):
     """Trim ``max_tokens`` so estimated input + completion fits the window.
 
@@ -41,7 +45,9 @@ def _clamp_completion_to_context_window(
     reactive-compaction path rather than silently truncating here.
 
     Never raises: on any failure it returns ``max_tokens`` unchanged so a
-    clamp helper can never block a request.
+    clamp helper can never block a request. ``text_count_memo`` (an owner
+    memo or view) lets the fallback estimate reuse that owner's per-text
+    estimates; the estimate is unchanged.
     """
     admitted_input_tokens = validated_admitted_input_tokens(
         precomputed_input_tokens)
@@ -59,9 +65,19 @@ def _clamp_completion_to_context_window(
         if admitted_input_tokens is not None:
             input_tokens = admitted_input_tokens
         else:
+            from contextlib import nullcontext
+
+            from lib.token_counter import (
+                cached_cheap_estimate_text, request_text_count_view)
             from lib.token_counter.heuristic import cheap_estimate
 
-            input_tokens = cheap_estimate(messages)
+            # History recurs across rounds and slot retries; the digest cache
+            # returns exactly cheap_estimate_text, so the decision is unchanged.
+            view = request_text_count_view(text_count_memo)
+            with view.estimating() if view is not None else nullcontext():
+                input_tokens = cheap_estimate(
+                    messages, estimate_text=partial(
+                        cached_cheap_estimate_text, reusable=True))
         # The fallback estimate can under-count non-CJK text, while the final
         # admission count can still contain bounded tokenizer/cache drift. Keep
         # the established margin for either source before reserving completion.

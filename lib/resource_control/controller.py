@@ -193,14 +193,13 @@ class ResourceController:
         release = port.acquire(owner, **kwargs)
         return ResourceLease(resource_id, owner, release)
 
-    def tick(self, *, memory_pressure: bool = False,
-             headroom_bytes: int | None = None, allow_growth: bool = True) -> dict:
+    def tick(self) -> dict:
+        """Grow automatic owners on sustained demand; memory is never an input."""
         with self._apply_lock:
             samples = self.sample()
             now = self._clock()
             changes = {}
             reasons = []
-            available = headroom_bytes
             for key, sample in samples.items():
                 state = self._states[key]
                 previous = state.previous_sample
@@ -219,9 +218,8 @@ class ResourceController:
                     continue
                 if state.status in {'failed', 'blocked'}:
                     ceiling = min(state.port.maximum, sample.ceiling or state.port.maximum)
-                    if (now >= state.backoff_until and
-                            (state.desired <= sample.capacity or (not memory_pressure and allow_growth)) and
-                            state.port.minimum <= state.desired <= ceiling):
+                    if (now >= state.backoff_until
+                            and state.port.minimum <= state.desired <= ceiling):
                         changes[key] = state.desired
                         reasons.append('resize_retry')
                     continue
@@ -232,26 +230,7 @@ class ResourceController:
                     {'failed', 'blocked', 'unavailable'} or
                     (dep in samples and (samples[dep].pressure or samples[dep].waiting)))
                     for dep in self._specs[key]['dependencies'])
-                pressured = memory_pressure
                 demand = sample.waiting > 0 or blocked > 0
-                if pressured:
-                    state.trial = None
-                    state.healthy_samples = 0
-                    # Buffers containing completed responses retain their
-                    # drain capacity; only execution admission is reduced.
-                    if self._specs[key]['kind'] == 'execution':
-                        target = max(state.port.minimum, int(min(sample.capacity, sample.used)
-                                                             * self._policy['pressure_fraction']))
-                        if target < sample.capacity and now - state.last_change >= self._policy['cooldown_seconds']:
-                            # A temporary squeeze is not a new throughput
-                            # baseline. Keep the last healthy envelope across
-                            # repeated shrink steps so recovery does not take
-                            # dozens of slow growth trials on a large host.
-                            state.pressure_capacity = max(
-                                state.pressure_capacity or 0, sample.capacity)
-                            changes[key] = target
-                            reasons.append('memory_pressure')
-                    continue
                 if state.trial and now - state.trial[3] >= self._policy['evaluation_seconds']:
                     before, baseline_rate, start_completed, started = state.trial
                     trial_completed = successful - start_completed
@@ -264,7 +243,7 @@ class ResourceController:
                         reasons.append('no_completion_gain')
                         continue
                 if (state.trial or now < state.backoff_until
-                        or not allow_growth or errors_increased or sample.pressure or downstream_busy or not demand
+                        or errors_increased or sample.pressure or downstream_busy or not demand
                         or now - state.last_change < self._policy['cooldown_seconds']):
                     state.healthy_samples = 0
                     continue
@@ -272,29 +251,12 @@ class ResourceController:
                 if state.healthy_samples < self._policy['healthy_samples_before_growth']:
                     continue
                 ceiling = min(state.port.maximum, sample.ceiling or state.port.maximum)
-                recovery = (self._policy['restore_capacity_after_pressure']
-                            and state.pressure_capacity is not None)
-                recovery_ceiling = min(ceiling, state.pressure_capacity or ceiling)
-                if recovery and sample.capacity >= recovery_ceiling:
-                    state.pressure_capacity = None
-                    recovery = False
-                increment = (recovery_ceiling - sample.capacity if recovery
-                             else max(1, math.ceil(sample.capacity * self._policy['growth_fraction'])))
-                if state.port.growth_cost_bytes:
-                    if available is None:
-                        continue
-                    increment = min(increment, available // state.port.growth_cost_bytes)
+                increment = max(1, math.ceil(sample.capacity * self._policy['growth_fraction']))
                 target = min(ceiling, sample.capacity + increment)
                 if target > sample.capacity:
-                    if available is not None:
-                        available -= (target - sample.capacity) * state.port.growth_cost_bytes
-                    # Restored capacity pays the same memory/dependency cost,
-                    # without a new speculative throughput trial. Retire its
-                    # saved ceiling only after the next native owner sample.
-                    if not recovery:
-                        state.trial = (sample.capacity, state.completion_rate, successful, now)
+                    state.trial = (sample.capacity, state.completion_rate, successful, now)
                     changes[key] = target
-                    reasons.append('pressure_recovered' if recovery else 'queued_work')
+                    reasons.append('queued_work')
             if changes:
                 return self.apply(self.plan(changes, reason=','.join(sorted(set(reasons)))))
             return self.snapshot()

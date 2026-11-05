@@ -304,8 +304,8 @@ def adapter_account_delete_route():
             agent_id, name, auth_index=body.get('auth_index'),
             agent_name=agent.get('name', ''), user_id=uid)
         return api_ok(out)
-    except ValueError as e:
-        return api_bad_request(str(e))
+    except BadRequest as e:
+        return api_bad_request(str(e), field='name')
     except RuntimeError as e:
         logger.warning('[Adapter.v1] account delete failed: %s', e)
         return api_error(str(e), status=502)

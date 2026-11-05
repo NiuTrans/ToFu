@@ -19,21 +19,15 @@ Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/frontend/test_fron
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -87,8 +81,7 @@ process.exit(out.some(l => l.startsWith('FAIL')) ? 1 : 0);
 
 @pytest.mark.unit
 def test_rescue_verdict_dedup():
-    if not _node_deps_available():
-        pytest.skip('node/jsdom not installed')
+    require_node_modules('jsdom')
     probe = os.path.join(ROOT, 'node_modules', '.tmp_rescue_tail_harness.js')
     with open(probe, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)

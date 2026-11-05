@@ -30,29 +30,20 @@ from pathlib import Path
 import pytest
 
 from tests._paper_vite import compiled_typescript
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 MODULE_TS = ROOT / "frontend" / "src" / "features" / "settings" / "section-requires.ts"
 PANEL = ROOT / "static" / "settings_panels" / "general.html"
-STYLES = ROOT / "frontend/src/styles/application/10-project-progress-modals.css"
+STYLES = ROOT / "frontend/src/styles/application/10-theme-pickers.css"
 
 
 def _node() -> str:
     exe = shutil.which("node")
-    if not exe:
-        pytest.skip("node not available")
+    require_node_modules('jsdom', 'vite')
     return exe
-
-
-def _has_jsdom() -> bool:
-    try:
-        subprocess.run([_node(), "-e", "require('jsdom')"],
-                       cwd=ROOT, capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
 
 
 def _section_html(requires: str = "paintSomeTab", control_id: str = "someTabPicker") -> str:
@@ -111,7 +102,6 @@ def module_source() -> str:
         yield Path(built).read_text(encoding="utf-8")
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_missing_module_degrades_the_section(module_source):
     """The exact live failure: the painting module is absent → the block must
     NOT sit there as an empty box; it must be marked degraded so CSS hides the
@@ -126,7 +116,6 @@ def test_missing_module_degrades_the_section(module_source):
     assert out["noticeText"], "a human-readable notice must be present to show"
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_present_module_leaves_the_section_fully_usable(module_source):
     out = _run(
         _section_html(),
@@ -139,7 +128,6 @@ def test_present_module_leaves_the_section_fully_usable(module_source):
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_contract_is_generic_not_a_logo_special_case(module_source):
     """Any block can declare a dependency — adding a JS-gated section is one
     attribute, not new code. Also covers the multi-symbol form."""
@@ -163,7 +151,6 @@ def test_contract_is_generic_not_a_logo_special_case(module_source):
     assert all_present["hasDegradedClass"] is False
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_vite_section_requirements_match_declared_contract(module_source):
     missing = _run(_section_html(), module_source)
     present = _run(
@@ -228,7 +215,6 @@ def test_a_shipped_block_that_declares_the_contract_is_wired():
     )
 
 
-@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NC_requirement_check_removed_leaves_the_dead_control():
     """Neuter: make the check always pass → the live defect returns (a block
     whose module is missing still presents itself as usable)."""

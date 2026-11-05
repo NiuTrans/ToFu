@@ -9,8 +9,7 @@ from lib.research.request_context import PART_NAMESPACE,RequestContexts
 from lib.research.model_accounting import ModelCalls
 from lib.storage.errors import StorageError
 from tests.research.test_research_process_recovery import VersionedRecords,setup
-from tests.research.test_research_request_context import defined_material
-from tests.research.test_research_model_accounting import snapshot
+from tests.research.test_research_request_context import defined_material,snapshot
 from tests.research.test_research_workspace_evidence_guard import storage as storage
 
 pytestmark=pytest.mark.unit

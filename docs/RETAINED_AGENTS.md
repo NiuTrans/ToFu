@@ -12,7 +12,11 @@ Archive recovery with explicit current authority retains all witnesses for norma
 validation; foreign/malformed ones still fail closed. Same-run child checkpoints
 retain and revalidate both confirmed and pending carriers before dispatch.
 Canonical and physical validation share request-scoped, nonretryable
-`MessageInputScopeError` (the existing request-rejected envelope); cancellation keeps
+`MessageInputScopeError`; its envelope identifies a local context-admission
+failure (`internal`, nonretryable, `providerReached=false`) without claiming an
+upstream HTTP status or blaming a model. The shared evidence type lives in
+`agent_core.context_errors`; request-scoped dispatch still forbids route retry,
+fallback and provider-health penalties. Cancellation keeps
 its type and no provider fallback can repair missing/revoked/foreign authority.
 **Rejected alternatives:** metadata-derived bindings forge authority; ignoring
 unbound live carriers hides pending delivery; deleting text loses context;
@@ -63,11 +67,38 @@ parent supplies teammate handles in assignments or follow-up messages.
 
 Problem: the leaf-worker denylist prevented collaboration as well as control.
 Decision: admit context exchange through the existing message service while
-retaining the ban on spawning, stable activation, human questions and cancellation.
+retaining the ban on spawning, stable activation, human questions and cancelling
+other work (a leaf worker's `kill` reaches only the `bg_*` commands it started).
 Alternative rejected: removing the whole denylist would grant worker control;
 a separate peer bus would duplicate durable receipts and input admission.
 
 ## Run-level message recovery
+
+**Problem:** generic message failures prescribed receipt readback for definite
+rejection and suggested stable new-turn activation to exact-run workers.
+**Decision:** the tool integration projects recovery from `submission_state`
+first, then the caller role and requested exact/stable target. A rejected send
+created no new submission receipt: correct arguments within authority, or stop
+optional reporting and carry the finding in ordinary final delivery. An inactive
+original root/assignment cannot be bypassed with a new target or key. A rejected
+read does not undo an earlier submission. Worker guidance explicitly names only
+the original running root and supplied teammates; stable reads/activation remain
+root-only, including when recovering an uncertain response.
+
+Saved or unknown postcommit evidence takes precedence over a later Stop, scope,
+lookup or projection error code. Reconcile the original exact run/recipient and
+receipt (bounded history if no message ID returned), or the original stable
+identity/scope/idempotency key and its pinned assignment; retain authored input.
+Unresolved stable-read outcomes use the same typed recovery while preserving
+assignment/content evidence. Storage retryability is not send replay authority;
+no adapter automatically retries a send, starts work, redirects history or makes
+unknown evidence a rejection. Unavailable reads leave uncertainty unresolved;
+Stop still fences new work. A saved success remains the original receipt, not a
+recovery error. **Alternatives rejected:** universal readback loops have no
+receipt for precommit rejection; code-only recovery downgrades durable evidence;
+new retained turns or worker-only fallbacks expand authority and risk duplicate
+execution. Guards: `test_message_recovery_guidance.py` and neighboring commit,
+target and team-message suites. Storage/CAS and execution authorities are unchanged.
 
 **Lazy inboxes:** mailbox absence previously masqueraded as run absence. Reads now prove the original owned recipient via live session or durable specs, revalidate scope, and return `messages=[]` (or `message_not_found` for a specified absent ID). Missing run/recipient authority remains `message_run_not_found`; storage failures never mean empty success. Eager writes, universal empty success and latest-run redirects are rejected. Guard: `test_empty_message_inbox.py`.
 
@@ -83,6 +114,53 @@ stale/failed reads preserve previously committed evidence but incomplete reads
 set availability false. No mailbox read failure claims an empty successful run.
 
 Reads reuse `RunMessageRepository` binding equality and `validate_target` scope validation. The parent is not a synthetic child row; child settlement never turns parent `submitted` into `unconfirmed`.
+
+**Run identity after restart Continue:** Problem: Continue rebuilds a session
+with the launch `task_id` (the persisted run, its mailboxes and every published
+`swarm_run_id`) while the accepted Continue task is the live execution parent
+(budget root, native parent, child `_parentTaskId`). `binding_for` derived the
+run from that parent, so every snapshot read, child acquisition, root send,
+terminal close and worker send named a mailbox no run owned: receipts became
+unavailable and each activity poll logged one opaque warning per recipient.
+Decision: `binding_for(..., run_id=...)` takes the durable run explicitly and
+the execution parent stays the Continue task. A worker proves its team as a
+launch child (`_parentTaskId == swarmRunId`), as a child of the live session
+whose `task_id` is its run and whose parent proxy is its `_parentTaskId`, or as
+that session's exact live invocation (below); sends still require the exact
+live child. Snapshot read failures log one bounded
+signature (exception class, typed code, raising site; never exception text) per
+run per 300 s with the suppressed repeat count, plus at most one recovery line
+per interval; at most 256 runs are tracked. Alternatives rejected: re-identifying
+the proxy as the launch task breaks budget/native-parent identity; moving the
+run to the Continue task orphans submitted messages and published handles;
+relying only on the global duplicate coalescer still counts every occurrence as
+an incident and the opaque line never named the cause. Guard:
+`tests/swarm/test_continue_run_mailbox.py`.
+
+**Later-wave and restored worker identity:** Problem: a follow-up wave spawned
+by a later turn binds its assignment to that caller
+(`retained_execution_context.parent_task_id`), so the worker's `_parentTaskId`
+is neither the launch run nor the session's parent proxy while its mailbox
+names the launch run. Startup recovery restores that parent under a session
+whose proxy is the launch task, as it does for a Continue-rebound assignment
+after a later restart. Every send and read by such a worker failed
+`message_forbidden` before any target check, so it could neither warn a
+teammate nor read its own inbox, and run snapshots could not attribute its
+sent messages. Decision: the worker also proves its team when the live session
+registered at its `swarmKey`, whose `task_id` is its run, currently holds this
+exact invocation as the bound assignment's child; snapshot participant joins
+accept that same live invocation whatever its execution parent. Copies,
+descendants, superseded invocations, other runs and workers without a live
+session stay refused. The coordinator target is unchanged: the launch root
+while it runs. A later wave whose launch turn has ended receives
+`message_target_not_active` and reports through its final result.
+Alternatives rejected: accepting the recorded assignment parent ID admits any
+other child of that caller carrying a copied binding; re-parenting assignments
+to the session root removes the caller's budget and cancellation authority;
+routing coordinator messages to the latest root crosses the root replacement
+fence of same-run team communication. Guard:
+`tests/swarm/test_resumed_worker_team_identity.py`.
+
 Child `senderTaskId` is the random invocation task ID created by the shared child
 factory, not the assignment ID. Join only through an exact owned
 `master._agents[assignmentId]._child` binding or a mailbox `inputTaskId` witness.
@@ -101,7 +179,8 @@ a separate history store duplicates mailbox authority. Specs:
 The SA dock mounts `conversation/ui/swarm-messages.ts` per exact run above agent activity.
 `swarm-messages-projection.ts` derives snapshots/live overlays; parent receipts need no child row.
 Identity updates in place with sender/recipient, filters, full plain text and timestamp/ID evidence.
-History expands from three rows by twenty, retaining focused/open rows; missing history differs from verified empty, and task completion is not input confirmation.
+History expands from three rows by twenty, retaining focused/open rows; task completion is not input confirmation.
+A view appears only once it holds a message. The snapshot's `messageReceiptsAvailable` keeps missing history distinct from verified empty, but the dock narrates neither (2026-11-02 owner decision: such notices explained evidence instead of showing it).
 Tool records remain execution evidence. Guards: `tests/visual/test_visual_agent_sidebar_dock.py` and receipt/projection/component tests.
 
 ## Decision
@@ -202,6 +281,47 @@ terminal child checkpoints are also validated before dispatch and sending;
 a late sender rechecks after CAS, while duplicate completion retries the
 terminal mailbox fence. Storage unavailability cannot become execution proof.
 
+**Per-round target validation problem/decision.** A child round validated its
+mailbox target three to four times (injection, provider-send entry, each
+prepared physical attempt, input ACK), and every validation paged all agent
+checkpoints of the session: 6,291 `swarm.agents.page` calls at 1.34 s mean
+(8,431 s) in 15 hours. `validate_round_target` now evaluates the durable child
+outcome, which closes an ended run's mailbox, once per root-loop round and
+exact binding. Later checks of that round skip only that evaluation and still
+revalidate conversation scope, run identity, session status, coordinator
+liveness and retained assignment, so Stop, cancel and supersede are fenced
+before every provider send and ACK. The memo is keyed by the exact round
+number and binding; failed checks and unknown, boolean or negative rounds
+record nothing. Injection resets it and the root dispatch drops it on exit, so
+the next round and post-loop model calls start complete. A child outcome that
+ends mid-round is observed by the next complete check. Alternatives rejected:
+a cross-round or time-based cache would let input be consumed after the child
+outcome ended. Guard: `tests/swarm/test_round_target_validation.py`.
+
+**Compact target read problem/decision.** Even once per round, the complete
+check paged every agent's full checkpoint (`messages`/`result`) and each check
+decoded the session's specs and config, so a child's `inputs.swarm_messages`
+round-prep step grew with the whole team's retained history: p50 491 ms, p99
+1.48 s over 766 swarm rounds (2026-10-27 `RoundPrepTiming`), and 93% of
+read-only py-spy samples under injection were in `load_session`. Every check
+is now one `swarm.agent.state.get` query (`load_session(agent_id=...)`): the
+session header without specs/config plus the bound agent's compact state,
+read in one transaction from both authorities without touching an agent core.
+The outcome rule, the mailbox close and the per-round memo are unchanged.
+`benchmarks/round_prep_inputs.py` measures injection at p50 31.2 ms before and
+0.31 ms after (8 agents x 512 KiB checkpoints, local native authority) and at
+p50 192.8 ms before and 0.35 ms after with the authority on the DolphinFS
+volume (9 agents x 2 MiB); admitted checks drop from 0.5 ms to 0.17 ms. Alternatives rejected: an optional
+`agent_id` field on `swarm.session.get` (an engine that ignores it would
+silently return a row without the agent); caching the paged row by session
+`updated_at` (agent checkpoints rewrite it every round and a millisecond clock
+is no revision); answering from the in-process master (not the durable
+authority after restart or across processes). The operation needs an engine
+built from the same source; application restart already prepares that engine.
+Guards: `swarm::tests::agent_state_get_reads_no_checkpoint_body`, the swarm
+cases of `tests/storage/test_storage_authority_sql_contract.py` and
+`tests/tofudb/test_tofudb_differential.py`.
+
 Restored checkpoint witnesses are captured before optional acquisition, so its
 failure cannot silently bypass matched-carrier authority checks. Child bootstrap
 removes stale/cross-assignment mailbox carriers from the copied checkpoint;
@@ -286,6 +406,7 @@ A repeated objective is a fresh retained turn, not ordinary one-off objective de
 **Problem:** copying the entire live config during workspace snapshotting can fail on process-private MCP search mappings or locks before a spawn receipt; plain exception strings hide retry/submission state and generic ValueError catches mislabel other startup failures as dependency cycles.
 **Decision:** all waves scope metadata to their selected catalog and reuse `inherit_child_config` before copying workspace authority. Preparation/cycle failures return typed `rejected` results before submission, preserving existing work. Only `AgentDependencyCycleError` denotes a cycle; later start failures return `swarm_launch_unknown`, original lookup handles and `requested_agent_ids`, never a fabricated launch roster. Generic tool failures also use the shared typed error boundary. Unconfirmed work must be inspected before another spawn.
 **Alternative rejected:** serializing arbitrary runtime objects would retain state outside declared child policy.
+The broad handler that catches an unconfirmed start logs it once at ERROR with the traceback and then returns `swarm_launch_unknown`. The result builder never logs. Problem: the code-quality guard reads only a handler's own body, so a handler whose log lived inside the result builder read as a silent return. Decision: the log sits in each handler. Alternative rejected: adding the builder to the guard's recognised log-or-handle names would exempt any future handler that calls it, whether or not that handler logs.
 Guards: `test_launch_preparation.py`, `test_spawn_tool_authority.py` and `test_retained_assignment_authority.py` cover launch receipts, detached workspace grants and the real child model/tool loop. `test_assignment_context_capacity.py` adds large ordinary/retained grants, first/follow-up launch receipts, complete recovery and denied corruption; allocation/encoding measurements live in [RESOURCE_CONTROL.md](RESOURCE_CONTROL.md#assignment-authority-size).
 
 For retained Browser agents, the child supplies its stable identity as a
@@ -387,8 +508,8 @@ result status to success; unknown checkpoint states do not restart workers.
 Unreadable or unauthorized evidence is not disclosed as a successful result.
 
 Model-facing lifecycle advice uses `poll` with explicit returned agent handles
-and `wait_s` bounded to 60 seconds. No-ID `poll()` is a snapshot, not a wait for
-all agents. Legacy `await_agents` dispatch and the internal orchestrator method
+and `wait_s` bounded by `POLL_WAIT_CAP_S` (1500 s; the wait returns as soon as
+an agent finishes). No-ID `poll()` is a snapshot, not a wait for all agents. Legacy `await_agents` dispatch and the internal orchestrator method
 remain compatibility implementations, not instructions for new calls.
 
 **Alternatives considered.** Treating any transcript as a final answer invents

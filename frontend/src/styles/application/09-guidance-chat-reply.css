@@ -1,0 +1,41 @@
+/* ═══════════════════════════════════════════
+   ★ Human Guidance — non-blocking chat reply
+   The agent keeps working while this question is open and an ordinary chat
+   message answers it, so the card reads as a calm invitation: a neutral,
+   still badge instead of the waiting-reply alert. Its settled rows sit
+   beside the skipped/submitted rows.
+   ═══════════════════════════════════════════ */
+.hg-card[data-hg-reply="chat"] .hg-badge {
+  color: var(--chip-neutral-color);
+  background: var(--chip-neutral-bg);
+  border-color: var(--chip-neutral-border);
+  animation: none;
+}
+.hg-reply-hint {
+  padding: 0 var(--space-3) var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+/* Answered here through the chat composer: settled like a submitted answer. */
+.hg-replied-line {
+  background: var(--success-bg);
+}
+/* A blocking question the user bypassed by chatting: muted like a skip. */
+.hg-superseded-line .ptool-text {
+  color: var(--text-secondary);
+}
+
+@media (max-width: 480px) {
+  .hg-card[data-hg-reply="chat"] .hg-header,
+  .hg-replied-line,
+  .hg-superseded-line {
+    flex-wrap: wrap;
+  }
+  .hg-replied-line .ptool-badge,
+  .hg-superseded-line .ptool-badge {
+    white-space: normal;
+  }
+}

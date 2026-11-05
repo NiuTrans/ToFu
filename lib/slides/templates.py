@@ -23,6 +23,7 @@ import os
 import re
 import time
 
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -75,8 +76,8 @@ def import_template(pptx_path: str, *, title: str = '',
                     owner_user_id: int) -> dict:
     """Import one uploaded PPTX as a reusable visual template.
 
-    Raises ValueError with a user-meaningful message on contract
-    violations (size, unreadable pptx); infra errors propagate. Returns
+    Raises BadRequest with a user-meaningful message on contract
+    violations (size); infra errors propagate. Returns
     ``{'template_id', 'title', 'theme', 'size', 'source_pages',
     'font_substitutions'}``.
     """
@@ -84,9 +85,9 @@ def import_template(pptx_path: str, *, title: str = '',
         raise ValueError('template import requires an explicit owner user_id')
     size_bytes = os.path.getsize(pptx_path)
     if not 0 < size_bytes <= MAX_TEMPLATE_BYTES:
-        raise ValueError(
+        raise BadRequest(
             f'template file is {size_bytes} bytes; limit is '
-            f'{MAX_TEMPLATE_BYTES}')
+            f'{MAX_TEMPLATE_BYTES}', field='file')
 
     import hashlib
     digest = hashlib.sha256(

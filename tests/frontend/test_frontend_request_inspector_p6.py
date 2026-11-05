@@ -45,7 +45,6 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -61,12 +60,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(HERE))
 
 TOOL_OWNER = native_module_path('.native/tool-inspector.js', Path(PROJECT_ROOT) / 'frontend/src/conversation/ui/tool-groups/inspector.ts')
 _TOOL_OWNER_LITERAL = json.dumps(TOOL_OWNER)
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -263,7 +256,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       .indexOf("openToolDebugPanel('task-old',1") !== -1);
 
   console.log(out.join('\n'));
-})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });
+})().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); })
+  .finally(() => { closeRequestInspector(); dom.window.close(); });
 """.replace("__TOOL_OWNER__", _TOOL_OWNER_LITERAL)
 
 
@@ -293,14 +287,10 @@ def _run(tool_src_path=None, expect_fail=None):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
 def test_p6_tool_row_anchor():
     _run()
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
 def test_neuter_wrong_round_mapping_flips_red():
     """NC: drop the `llmRound + 1` mapping inside inspectorReference → the
     mapping probe MUST fail. This is the off-by-one that would send the user
@@ -342,8 +332,6 @@ def test_neuter_wrong_round_mapping_flips_red():
             'shipped request_inspector.js must be byte-identical')
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed')
 def test_neuter_vu_role_guard_flips_red():
     """Removing the typed actor guard exposes a virtual-user task anchor."""
     # The task-identity resolver is boot-critical row authority and now rides

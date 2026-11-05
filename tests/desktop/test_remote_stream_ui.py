@@ -291,24 +291,45 @@ def test_streams_endpoint_unknown_404(flask_client):
 
 
 @pytest.mark.unit
-def test_remote_bridge_failure_joins_its_progress_observer(monkeypatch):
+@pytest.mark.parametrize('cleanup_failure', [False, True])
+def test_remote_bridge_failure_joins_its_progress_observer(monkeypatch, cleanup_failure):
     from types import SimpleNamespace
     import lib.desktop
     import lib.tasks_pkg.handlers.project as hp
+    from lib.tasks_pkg.handlers import code_exec
     observers = []
+    progress_flushed = []
+    chunks = []
+    stream = {}
     real_thread = threading.Thread
+
+    class Progress:
+        def __call__(self, name, text):
+            chunks.append((name, text))
+
+        def flush(self):
+            progress_flushed.append(True)
+            if cleanup_failure:
+                raise OSError('synthetic progress flush failure')
+
     def thread(*args, **kwargs):
         result = real_thread(*args, **kwargs)
         observers.append(result)
         return result
     monkeypatch.setattr(hp, 'threading', SimpleNamespace(Thread=thread, Event=threading.Event))
-    monkeypatch.setattr(hp, '_make_run_command_progress_cb', lambda *args:
-        SimpleNamespace(flush=lambda: None))
+    monkeypatch.setattr(code_exec, '_make_run_command_progress_cb', lambda *args, **kwargs: Progress())
+    monkeypatch.setattr(lib.desktop, 'get_command_stream', lambda _command_id: dict(stream))
+    failure = RuntimeError('injected bridge failure')
+
     def fail(*args, **kwargs):
         assert kwargs['timeout'] is None
-        raise RuntimeError('injected bridge failure')
+        stream.update(stdout='last remote bytes', stderr='failure detail')
+        raise failure
     monkeypatch.setattr(lib.desktop, 'send_desktop_command', fail)
-    with pytest.raises(RuntimeError, match='injected bridge failure'):
+    with pytest.raises(RuntimeError) as caught:
         hp._execute_remote_run_command({'id': 'owner'}, 'tool', {'command': 'echo ready'},
             1, {}, {'agent_id': 'device', 'root': 'project'})
+    assert caught.value is failure
     assert len(observers) == 1 and not observers[0].is_alive()
+    assert chunks == [('stdout', 'last remote bytes'), ('stderr', 'failure detail')]
+    assert progress_flushed == [True]

@@ -14,6 +14,7 @@ Public exceptions
 - :class:`PromptTooLongError` — HTTP 400/413 indicating context overflow
 - :class:`ContextCompactionError` — local automatic compaction failure
 - :class:`InvalidImageError` — HTTP 400 from image content rejection
+- :class:`InvalidEncryptedContentError` — rejected Responses state; never replay
 - :class:`StreamOnlyError` — HTTP 400 from non-streaming on stream-only models
 
 Public classifier
@@ -126,7 +127,7 @@ class RateLimitError(Exception):
             is_credential_delivery_anomaly)
         # True when the body names a PROJECT/APP-level model limit shared with
         # OTHER tenants or keys of the gateway account (Moonshot project TPM,
-        # or the sankuai gateway's app/model RPM envelope). This is EXTERNAL
+        # or the example-corp gateway's app/model RPM envelope). This is EXTERNAL
         # contention, not key health: it must not feed the model success-rate
         # column nor the consecutive-429 auto-exhaust streak (see
         # Slot.record_error is_shared_contention branch).
@@ -172,11 +173,55 @@ class ContentFilterError(Exception):
     pass
 
 
+class ModelRefusalError(ContentFilterError):
+    """The model itself declined: an HTTP 200 stream finished ``content_filter``.
+
+    Anthropic's ``stop_reason: "refusal"`` is projected to that finish reason,
+    with ``stop_details`` in ``refusal``. Unlike the HTTP 450 gateway block,
+    another model may answer the same request, so the task layer retries it
+    once on the configured fallback model. ``refusal`` keeps only the bounded
+    ``category``/``explanation`` display fields.
+    """
+
+    def __init__(self, model: str, refusal: dict | None = None):
+        self.model = str(model or '')
+        details = refusal if isinstance(refusal, dict) else {}
+        self.category = details.get('category') or None
+        self.explanation = details.get('explanation') or None
+        reason = (f'category: {self.category}' if self.category
+                  else 'no category reported')
+        message = f'{self.model or "The model"} declined the request ({reason})'
+        if self.explanation:
+            message = f'{message}: {self.explanation}'
+        super().__init__(message)
+
+
 class AbortedError(Exception):
     """User requested abort — stop all retries immediately."""
     def __init__(self, message, url=''):
         super().__init__(message)
         self.url = str(url or '')
+
+
+class AdmissionRefused(AbortedError):
+    """An authority check refused an effect before it ran.
+
+    It halts the turn exactly like AbortedError, so every abort fence still
+    stops model and tool effects and no retry, credential rotation or model
+    fallback is attempted, but the turn failed for the stated reason; it is
+    never a user Stop. Settlement classifiers test this base type.
+    """
+
+
+class ToolAdmissionRefused(AdmissionRefused):
+    """An authority check refused a tool call before it ran."""
+    def __init__(self, message, *, tool_name=''):
+        super().__init__(message)
+        self.tool_name = str(tool_name or '')
+
+
+class ModelAdmissionRefused(AdmissionRefused):
+    """An authority check refused a model request before any provider saw it."""
 
 
 class SubscriptionLoginRequiredError(RuntimeError):
@@ -200,7 +245,13 @@ class LocalRequestPreparationError(Exception):
     Dispatch must release the reserved slot neutrally and surface this error
     unchanged. Rotating credentials or models cannot repair a deterministic
     bug in local body construction, and doing so would incorrectly charge
-    fallback budgets and poison provider health.
+    fallback budgets and poison provider health. One typed exception: a
+    ``SubscriptionCredentialUnavailableError`` cause proves only that one
+    credential source issued no bearer, so dispatch excludes the slots sharing
+    it and keeps picking under unchanged constraints, re-raising this same
+    error when nothing else qualifies. ``stage='thread_start'`` means the host
+    refused a transport thread before sending: rotation cannot fix it either,
+    but it is transient, so its envelope is retryable.
     """
 
     def __init__(self, message: str, *, stage: str = 'request_prepare'):
@@ -303,6 +354,37 @@ class RequestScopedError(Exception):
         self.status_code = int(status_code or 0)
 
 
+class InvalidEncryptedContentError(RequestScopedError):
+    """Exact Responses state rejection, not provider/key availability.
+
+    Stop without replay, model fallback or history repair. Provider messages
+    and params can echo ciphertext, so retain only the fixed code and a bounded
+    structural input label; never attach arbitrary provider-controlled text.
+    """
+
+    code = 'invalid_encrypted_content'
+    retryable = False
+    failure_stage = 'provider_response'
+    _input_param = re.compile(
+        r'input(?:(?:\[([0-9]{1,10})\]|\.([0-9]{1,10})))?(\.encrypted_content)?')
+
+    def __init__(self, *, param=None):
+        # Reject rather than truncate: a clipped value is neither a proven
+        # path nor safe diagnostic text. Accept only the known input carrier
+        # and ciphertext-field vocabulary; normalize dot-index spelling.
+        match = self._input_param.fullmatch(param) if isinstance(param, str) else None
+        self.param = None
+        if match:
+            index = match[1] or match[2]
+            self.param = 'input' + (f'[{int(index)}]' if index is not None else '')
+            self.param += match[3] or ''
+        super().__init__(
+            'Responses encrypted state rejected (invalid_encrypted_content); '
+            'stopped without replay or changes to conversation history.',
+            status_code=400,
+        )
+
+
 class ProviderToolCallFloodError(RequestScopedError):
     """Runaway repeated provider output; no retry, fallback or health penalty."""
 
@@ -320,8 +402,10 @@ class ProviderToolCallFloodError(RequestScopedError):
 class RequestTransportError(RequestScopedError):
     """A transport failure with no evidence of credential/model failure.
 
-    Dispatch releases its reservation and surfaces this request unchanged.
-    Diagnostics carry only phase, reason, byte count and timeout budget.
+    Dispatch releases its reservation and surfaces this request unchanged unless
+    streaming response-read failure supplies pair-level retry evidence. That
+    decision belongs to the shared dispatch failure policy. Diagnostics carry
+    only phase, reason, byte count and timeout budget.
     """
 
     def __init__(self, *, failure_stage, reason, base_url='',
@@ -394,28 +478,94 @@ class BadRequestError(Exception):
     key, so this says something about the PAYLOAD, not slot health: the
     dispatch layer releases the slot (no consecutive_errors → no 300s
     lockout, no key_stats feed — the ContentFilterError/InvalidImageError
-    precedent) and pair-excludes so the remaining keys each get one try
-    (a 400 CAN be key-specific — observed: an aliyun quota body that only
-    one key rejects). Not raised for 401/403 (those have their own
+    precedent) and durably excludes the rejecting provider endpoint + wire
+    model for that dispatch, so the unchanged request is not replayed against
+    another credential on the same route. A credential-scoped billing body is
+    classified as RateLimitError(is_quota=True) before this branch even when
+    its status is 400. Not raised for 401/403 (those have their own
     auth-vs-transient discrimination) or 5xx (retryable).
     """
     pass
 
 
 class ModelRouteMissingError(BadRequestError):
-    """HTTP 400 whose body says the gateway has NO route for the model.
+    """The gateway's own verdict that it has NO route for the model.
+
+    Raised for an HTTP 400 whose body carries a ``ROUTE_MISSING_MARKERS``
+    phrase, and for an HTTP 404 whose body carries the gateway's explicit
+    protocol-unsupported phrase (``GATEWAY_PROTOCOL_UNSUPPORTED_MARKERS``);
+    every other 404 stays a ``RequestScopedError``. ``status_code`` is 404
+    for that 404 verdict and 0 for the 400 verdict, so an escaped 404 still
+    renders as ``not_found`` while the 400 envelope keeps carrying no status.
 
     A ``BadRequestError`` subclass so the payload-rejection bookkeeping
     (first-400-wins, turn-level fallback, any ``except BadRequestError``)
     still applies, but the dispatch layer catches it FIRST and excludes the
     whole MODEL for the rest of the dispatch: every remaining key would
     reject identically, so pair-exclusion would just burn attempts and let
-    this 400 mask the actionable one. Not slot health — the catalog sync
+    this verdict mask the actionable one. Not slot health — the catalog sync
     owns the durable removal of unserved models.
     """
-    def __init__(self, message, model=''):
+    def __init__(self, message, model='', *, status_code=0):
         super().__init__(message)
         self.model = model
+        self.status_code = int(status_code or 0)
+
+
+class ModelRouteUnavailableError(RateLimitError):
+    """Gateway 5xx proving that no enabled channel serves one wire model.
+
+    New-API's distributor answers HTTP 503 ``code: model_not_found`` ("分组 X
+    下模型 Y 无可用渠道（distributor）") when no enabled channel serves the model
+    in the key's group: the model is unprovisioned or every channel is
+    disabled, and auto-disable can make that transient. This is availability
+    evidence for one provider/wire model, distinct from a whole-gateway outage
+    and from per-key contention, and never key health. Dispatch excludes the
+    route while another eligible route can serve and otherwise re-probes it
+    on a fixed backoff (``lib/llm_dispatch/_route_unavailable.py``).
+    ``is_gateway`` stays True so every escape path keeps the waitable,
+    no-model-switch 5xx policy. ``gateway_message`` is the bounded upstream
+    message for retry notices.
+    """
+
+    def __init__(self, message, *, model='', status_code=503, error_code='',
+                 gateway_message=''):
+        super().__init__(message, is_gateway=True, status_code=status_code,
+                         reason=f'HTTP {status_code}: {str(message)[:180]}')
+        self.model = str(model or '')
+        self.error_code = str(error_code or '')
+        self.gateway_message = str(gateway_message or message or '')[:160]
+
+
+class UnsupportedRequestParameterError(BadRequestError):
+    """HTTP 400 naming one optional request parameter the route rejects.
+
+    ``param`` is the canonical (OpenAI-shape) name from the closed
+    ``REPAIRABLE_PARAMETER_WIRE_NAMES`` vocabulary. The stream/chat loops
+    retry the same request once without it and learn a route-scoped
+    omission (``lib/llm/request_repair.py``). When the error escapes it keeps
+    ordinary ``BadRequestError`` dispatch bookkeeping.
+    """
+
+    def __init__(self, message, *, param, error_code=''):
+        super().__init__(message)
+        self.param = param
+        self.error_code = error_code
+
+
+class ThinkingBlockBindingError(BadRequestError):
+    """Anthropic rejected a replayed thinking block bound to another prefix.
+
+    Preserved-thinking models bind each signed block to the request prefix
+    that produced it. The documented portable fallback withdraws every
+    replayed thinking/redacted_thinking block once and never re-adds them;
+    ``lib/llm/request_repair.py`` owns that repair and its memory. A merely
+    invalid signature (no binding sentence) is not this error.
+    """
+
+
+REQUEST_REPAIR_ERRORS = (UnsupportedRequestParameterError,
+                         ThinkingBlockBindingError)
 
 
 class EndpointUnreachableError(Exception):
@@ -444,7 +594,7 @@ class EndpointUnreachableError(Exception):
 # ══════════════════════════════════════════════════════════
 
 # Body markers that mean "this gateway has NO route for the model" — as
-# opposed to "route exists but the payload was rejected". The Meituan AIGC
+# opposed to "route exists but the payload was rejected". The YourProvider AIGC
 # gateway answers a missing route with HTTP 400 stage=validation and a
 # CHINESE message ("不支持的模型类型(model=…)"); reading it as a generic
 # deterministic 400 burns every remaining key of the dead model and lets
@@ -456,6 +606,17 @@ ROUTE_MISSING_MARKERS = (
     'unsupported model', 'unsupported_model', 'model not supported',
     'invalid model name',
     '不支持的模型类型',
+)
+
+# The same gateway answers a model it no longer serves over the request's wire
+# protocol with HTTP 404 not_found_error "模型 [M] 不支持协议 ANTHROPIC_MESSAGES"
+# (2026-10-31: deepseek-v4.1-flash-m17 dropped from Anthropic Messages, and
+# every cheap translation that picked it ended instead of failing over). Only
+# this explicit phrase, or its English form, types a 404 as route-missing;
+# every other 404 stays request-scoped.
+GATEWAY_PROTOCOL_UNSUPPORTED_MARKERS = (
+    '不支持协议',
+    'does not support protocol',
 )
 
 # Patterns in HTTP 400 that indicate an image content error (not retryable)
@@ -507,7 +668,7 @@ _QUOTA_EXHAUSTED_PATTERNS = [
 
 # Phrases in a 4xx body that mean the failure is an UPSTREAM-VENDOR TRANSIENT,
 # not a client/auth error — the gateway itself is telling us to retry later.
-# Observed on the toio/sankuai gateway (2026-07-26): the claude-opus-5 vendor
+# Observed on the toio/example-corp gateway (2026-07-26): the claude-opus-5 vendor
 # outage surfaced as HTTP 400 AND 403 with message
 # "请求失败,请稍后(再)尝试" + ext.error.source=UPSTREAM_VENDOR, and our
 # classifier treated the 403 as an auth failure (pair exclusion) and the 400
@@ -525,7 +686,7 @@ _UPSTREAM_TRANSIENT_PATTERNS = [
 
 # Phrases in a 4xx body emitted by the gateway's own ROUTING layer when it
 # fails to resolve a vendor group — a 503 wearing a 4xx costume, NOT an auth
-# rejection. Observed on the toio/sankuai gateway (2026-07-26, 19:15–19:54):
+# rejection. Observed on the toio/example-corp gateway (2026-07-26, 19:15–19:54):
 # 22 hits of ``resolve groups failed: model unsupported by selected groups:
 # claude-opus-5`` (HTTP 403) inside one 40-minute vendor-storm window, 10 of
 # them misclassified PermissionError_ → task deaths / kimi fallbacks wearing
@@ -554,6 +715,21 @@ _GATEWAY_ROUTING_TRANSIENT_PATTERNS = [
 # after bounded gateway-class rotation instead of fail-fast.
 _WRAPPED_UPSTREAM_STATUS_PATTERNS = [
     'bad response status code',
+]
+
+# Phrase reporting a fault INSIDE the gateway process, not a verdict on the
+# request. Observed on the AIGC gateway 2026-10-31 21:37/21:40 (task d9a651dc,
+# round 28): HTTP 400 ``Handler dispatch failed; nested exception is
+# java.lang.OutOfMemoryError: Java heap space`` with ext.error.stage=validation,
+# while the same body passed that stage and streamed (to an upstream 429) on
+# the surrounding attempts of the same round. As a deterministic payload
+# rejection it excluded two healthy Kunlun pairs and pushed the request onto a
+# Deployment that could not decrypt its replayed reasoning. Heap exhaustion is
+# the server's memory state, so it rotates like any gateway fault. Matched with
+# the servlet wrapper's own phrasing so an echoed user stack trace in a
+# genuine payload rejection stays deterministic.
+_GATEWAY_INTERNAL_FAULT_PATTERNS = [
+    'nested exception is java.lang.outofmemoryerror',
 ]
 
 
@@ -603,6 +779,8 @@ def _is_upstream_vendor_transient(err_msg: str) -> bool:
         return True
     if any(p in lower for p in _GATEWAY_ROUTING_TRANSIENT_PATTERNS):
         return True
+    if any(p in lower for p in _GATEWAY_INTERNAL_FAULT_PATTERNS):
+        return True
     if any(p in lower for p in _WRAPPED_UPSTREAM_STATUS_PATTERNS):
         return True
     repaired = repair_mojibake(err_msg)
@@ -646,8 +824,9 @@ _PERMISSION_STATUS_CODES = {401, 403}
 # Request-scoped 4xx (CLIProxyAPI ``isRequestScopedResultError``): a
 # deterministic rejection of THIS request's semantics — not slot/model
 # health. Raised as RequestScopedError so the dispatch layer surfaces it
-# without cooldowns, key_stats, or fallback consumption. 400 is absent on
-# purpose: it has its own typed taxonomy (BadRequestError & friends).
+# without cooldowns, key_stats, or fallback consumption (except the gateway's
+# protocol-unsupported 404, GATEWAY_PROTOCOL_UNSUPPORTED_MARKERS). 400 is
+# absent on purpose: it has its own typed taxonomy (BadRequestError & friends).
 _REQUEST_SCOPED_STATUS_CODES = {404, 422}
 
 # Application errors may arrive inside HTTP 200 SSE/WS envelopes. Normalize
@@ -662,6 +841,7 @@ _PROVIDER_ERROR_STATUS = {
     'permission_error': 403, 'permission_denied': 403,
     'not_found_error': 404,
     'invalid_request_error': 400, 'context_length_exceeded': 400,
+    'invalid_encrypted_content': 400,
     'content_filter': 450, 'content_policy_violation': 450,
     'request_too_large': 413,
 }
@@ -789,7 +969,7 @@ def decode_error_body(resp) -> str:
 
     ``requests`` falls back to ISO-8859-1 for ``text/*`` responses without an
     explicit charset (the RFC 2616 default), which garbles UTF-8 CJK payloads
-    from gateways that omit the charset header — observed on the sankuai toio
+    from gateways that omit the charset header — observed on the example-corp toio
     gateway (2026-07-25): its Chinese 400 body surfaced as ``è¯·æ±...``
     mojibake in both logs and the frontend retry HUD. API error bodies are
     JSON per OpenAI/Anthropic convention and thus virtually always UTF-8, so
@@ -803,22 +983,165 @@ def decode_error_body(resp) -> str:
     encoding = (getattr(resp, 'encoding', None) or '').lower().replace('_', '-')
     if encoding and encoding not in ('iso-8859-1', 'latin-1', 'latin1', 'ascii', 'utf-8'):
         try:
-            return repair_mojibake(content.decode(encoding))
+            return _project_error_body(repair_mojibake(content.decode(encoding)))
         except (LookupError, UnicodeDecodeError) as _e:
             logger.debug('decode error body: lookup failed/undecodable (%s)', _e)
             pass  # declared charset unusable — fall through to UTF-8
     try:
-        return repair_mojibake(content.decode('utf-8'))
+        return _project_error_body(repair_mojibake(content.decode('utf-8')))
     except UnicodeDecodeError:
         apparent = getattr(resp, 'apparent_encoding', None) or 'utf-8'
         try:
-            return repair_mojibake(content.decode(apparent, errors='replace'))
+            return _project_error_body(repair_mojibake(content.decode(apparent, errors='replace')))
         except (LookupError, UnicodeDecodeError) as _e:
             logger.debug('decode error body: lookup failed/undecodable (%s)', _e)
-            return repair_mojibake(content.decode('utf-8', errors='replace'))
+            return _project_error_body(repair_mojibake(content.decode('utf-8', errors='replace')))
 
 
 _API_HTTP_PREFIX_RE = re.compile(r'^(API HTTP \d+:\s*)')
+
+
+def _invalid_encrypted_content_error(text):
+    """Recognize a structured exact code, never a message/type substring."""
+    if not isinstance(text, str):
+        return None
+    prefix = _API_HTTP_PREFIX_RE.match(text)
+    payload = text[prefix.end():].strip() if prefix else text.strip()
+    if not payload.startswith('{'):
+        return None
+    try:
+        data = json.loads(payload)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    error = data.get('error', data)
+    if (not isinstance(error, dict)
+            or error.get('code') != InvalidEncryptedContentError.code):
+        return None
+    return InvalidEncryptedContentError(param=error.get('param'))
+
+
+def _project_error_body(text):
+    """Keep exact invalid-state code/param before callers clip HTTP text.
+
+    In particular, a long ciphertext echo must not hide the code or trick
+    chat's earlier token-limit retry matcher. Ordinary error bodies retain
+    their existing diagnostics and classification.
+    """
+    error = _invalid_encrypted_content_error(text)
+    if error is None:
+        return text
+    fields = {'code': error.code}
+    if error.param is not None:
+        fields['param'] = error.param
+    return json.dumps({'error': fields}, ensure_ascii=False)
+
+
+# Closed vocabulary of optional sampling/presentation controls that may be
+# omitted after a provider names one as unsupported. Wire spellings map to the
+# canonical (OpenAI-shape) parameter they derive from. Required fields (model,
+# messages, input, tools, max_tokens) are deliberately absent: removing them
+# changes what is asked, not how it is shaped.
+REPAIRABLE_PARAMETER_WIRE_NAMES = {
+    'temperature': 'temperature',
+    'top_p': 'top_p',
+    'top_k': 'top_k',
+    'presence_penalty': 'presence_penalty',
+    'frequency_penalty': 'frequency_penalty',
+    'stop': 'stop',
+    'stop_sequences': 'stop',
+    'seed': 'seed',
+    'parallel_tool_calls': 'parallel_tool_calls',
+    'logprobs': 'logprobs',
+    'reasoning_effort': 'reasoning_effort',
+    'thinking.display': 'thinking.display',
+    # Anthropic reports tagged-union fields with the variant in the path.
+    'thinking.enabled.display': 'thinking.display',
+    'thinking.adaptive.display': 'thinking.display',
+}
+
+_PARAMETER_PATH = r'[A-Za-z_][A-Za-z0-9_.\[\]]*'
+# Each phrase captures the COMPLETE parameter path it names. The lookbehind
+# keeps a nested path such as ``messages.0.content.0.temperature`` from being
+# read as the top-level ``temperature``.
+_UNSUPPORTED_PARAMETER_PHRASES = (
+    re.compile(r'Unsupported parameter:\s*[\'"`]?(?P<name>' + _PARAMETER_PATH + r')'),
+    re.compile(r'Unknown parameter:\s*[\'"`]?(?P<name>' + _PARAMETER_PATH + r')'),
+    re.compile(r'(?<![A-Za-z0-9_.\[\]])(?P<name>' + _PARAMETER_PATH
+               + r'):\s*Extra inputs are not permitted'),
+    re.compile(r'[\'"`](?P<name>' + _PARAMETER_PATH
+               + r')[\'"`]\s+is not supported with this model'),
+)
+_UNSUPPORTED_PARAMETER_CODES = frozenset({
+    'unsupported_parameter', 'unknown_parameter'})
+_ERROR_CODE_RE = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
+
+_THINKING_BINDING_MISMATCH_RE = re.compile(
+    r'messages\.\d+\.content\.\d+:\s*Invalid `signature` in `thinking` block\.'
+    r'\s*The block is bound to a different conversation')
+
+
+def _provider_error_projection(text):
+    """Return ``(error_object_or_None, searchable_message)`` for one body."""
+    prefix = _API_HTTP_PREFIX_RE.match(text)
+    payload = text[prefix.end():].strip() if prefix else text.strip()
+    if not payload.startswith('{'):
+        return None, text
+    try:
+        data = json.loads(payload)
+    except (ValueError, RecursionError):
+        return None, text
+    if not isinstance(data, dict):
+        return None, text
+    error = data.get('error', data)
+    if not isinstance(error, dict):
+        return None, text
+    message = error.get('message')
+    return error, message if isinstance(message, str) and message else text
+
+
+def _unsupported_request_parameter(text):
+    """Return ``(canonical_param, error_code)`` for one named optional field.
+
+    Exactly one parameter path may be named across the recognized phrasings
+    and the structured ``param`` of an unsupported/unknown-parameter code; it
+    must be in ``REPAIRABLE_PARAMETER_WIRE_NAMES``. Anything else (a required
+    field, a nested path, several fields, value-range errors) is ``None``.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+    error, message = _provider_error_projection(text)
+    names = {match.group('name')
+             for phrase in _UNSUPPORTED_PARAMETER_PHRASES
+             for match in phrase.finditer(message)}
+    code = ''
+    if error is not None:
+        raw_code = error.get('code')
+        raw_param = error.get('param')
+        if (raw_code in _UNSUPPORTED_PARAMETER_CODES
+                and isinstance(raw_param, str) and raw_param):
+            names.add(raw_param)
+        for candidate in (raw_code, error.get('type')):
+            if isinstance(candidate, str) and _ERROR_CODE_RE.fullmatch(candidate):
+                code = candidate
+                break
+    if len(names) != 1:
+        return None
+    param = REPAIRABLE_PARAMETER_WIRE_NAMES.get(next(iter(names)))
+    if param is None:
+        return None
+    return param, code
+
+
+def _is_thinking_binding_mismatch(text):
+    """True only for the documented preserved-thinking binding rejection.
+
+    The sentence contains no JSON-escaped characters, so the raw body is
+    searched directly; a bare invalid signature never matches.
+    """
+    return (isinstance(text, str)
+            and _THINKING_BINDING_MISMATCH_RE.search(text) is not None)
 
 
 def summarize_error_body(text: str) -> str:
@@ -938,7 +1261,7 @@ def parse_subscription_retry_after(err_msg: str, *, now: float = None):
 # tenants or keys of the gateway account. Every phrase in ONE group must
 # appear (narrow on purpose): a per-key/per-account throttle must NEVER match,
 # or a genuinely sick key would be laundered into "external contention" and
-# stop feeding the dead-key safety nets. Observed canonical bodies (sankuai):
+# stop feeding the dead-key safety nets. Observed canonical bodies (example-corp):
 #   Moonshot: "request reached project (kimi-k3) TPM rate limit"
 #   Gateway:  "App:**62518在模型:kimi-k3每分钟请求次数超过限制"
 _SHARED_PROJECT_LIMIT_PATTERN_GROUPS = (
@@ -1024,6 +1347,38 @@ def _is_route_missing_error(err_msg: str) -> bool:
     return any(marker in lower for marker in ROUTE_MISSING_MARKERS)
 
 
+# 5xx route-unavailability evidence is deliberately narrower than the HTTP 400
+# ROUTE_MISSING_MARKERS: only the structured code, or New-API's exact
+# distributor no-channel phrase for gateways that omit it.
+_ROUTE_UNAVAILABLE_ERROR_CODES = frozenset({'model_not_found'})
+_DISTRIBUTOR_NO_CHANNEL_RE = re.compile(
+    r'无可用渠道\s*[（(]\s*distributor\s*[）)]', re.IGNORECASE)
+_REQUEST_ID_SUFFIX_RE = re.compile(
+    r'\s*[（(]\s*request id\s*[:：][^)）]*[)）]\s*$', re.IGNORECASE)
+
+
+def _route_unavailable_evidence(err_msg):
+    """Return ``(error_code, gateway_message)`` for a no-channel 5xx body.
+
+    The message drops the per-request id so retry notices stay stable.
+    """
+    if not isinstance(err_msg, str) or not err_msg:
+        return None
+    error, message = _provider_error_projection(err_msg)
+    code = error.get('code') if error is not None else None
+    if isinstance(code, str) and code in _ROUTE_UNAVAILABLE_ERROR_CODES:
+        evidence = code
+    elif (_DISTRIBUTOR_NO_CHANNEL_RE.search(message)
+          or _DISTRIBUTOR_NO_CHANNEL_RE.search(err_msg)):
+        evidence = 'distributor_no_channel'
+    else:
+        return None
+    prefix = _API_HTTP_PREFIX_RE.match(message)
+    if prefix:
+        message = message[prefix.end():]
+    return evidence, _REQUEST_ID_SUFFIX_RE.sub('', message.strip())[:160]
+
+
 def _has_outbound_credential(headers) -> bool:
     """Return whether the final wire headers contain a non-empty credential.
 
@@ -1096,9 +1451,10 @@ def mark_provider_refusal(error):
         return error
     try:
         setattr(error, _PROVIDER_REFUSAL_ATTR, True)
-    except Exception:
+    except Exception as exc:
         # Settlement evidence is diagnostic state, never a failure cause.
-        pass
+        logger.debug('provider refusal marker not attached to %s: %s',
+                     type(error).__name__, exc)
     return error
 
 
@@ -1121,8 +1477,18 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         RateLimitError, ContentFilterError, PermissionError_,
         PromptTooLongError, ModelLimitError, InvalidImageError,
         StreamOnlyError, ModelRouteMissingError, BadRequestError,
-        RetryableAPIError, or generic Exception.
+        ModelRouteUnavailableError,
+        UnsupportedRequestParameterError, ThinkingBlockBindingError,
+        InvalidEncryptedContentError, RetryableAPIError, or generic Exception.
     """
+    # Exact structured state rejection outranks HTTP status and heuristic
+    # text matchers. Never log/retain a message that may contain ciphertext.
+    invalid_state = _invalid_encrypted_content_error(err_msg)
+    if invalid_state is not None:
+        logger.warning('%s Responses encrypted state rejected — stopping '
+                       'without replay (code=%s)', log_prefix, invalid_state.code)
+        raise invalid_state
+
     # Lazy import to avoid a top-level cycle: lib.model_info is its own
     # module but lives in the same import graph and importing it here
     # keeps lib.llm.llm_errors usable from anywhere without dragging in the
@@ -1230,6 +1596,14 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                        'treating as prompt-too-long: %s', log_prefix, err_msg[:_ERR_BODY_LIMIT])
         raise PromptTooLongError(display_msg)
     if status_code == 400:
+        if _is_quota_exhausted(err_msg):
+            # A dead balance is credential-scoped, not a request-shape
+            # rejection, regardless of the gateway's status code. Keep the
+            # 429/402 quota channel so dispatch rotates credentials.
+            logger.warning('%s Quota exhausted (HTTP 400): %s',
+                           log_prefix, err_msg[:_ERR_BODY_LIMIT])
+            raise RateLimitError(display_msg, is_quota=True,
+                                 reason=display_msg[:200], status_code=400)
         if _is_route_missing_error(err_msg):
             # The gateway's own words: no route for this model at all — the
             #   most authoritative claim in any 400 body, checked first.
@@ -1242,6 +1616,19 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             _learn_model_limit(
                 model, _detected_limit, route_key=route_limit_key)
             raise ModelLimitError(display_msg, model, _detected_limit, max_tokens)
+        if _is_thinking_binding_mismatch(err_msg):
+            logger.warning('%s Replayed thinking block bound to a different '
+                           'conversation (HTTP 400) — withdrawing thinking '
+                           'history: %s', log_prefix, display_msg[:_ERR_BODY_LIMIT])
+            raise ThinkingBlockBindingError(display_msg)
+        _unsupported = _unsupported_request_parameter(err_msg)
+        if _unsupported is not None:
+            _param, _code = _unsupported
+            logger.warning('%s Route rejected optional parameter %s (HTTP 400, '
+                           'code=%s): %s', log_prefix, _param, _code or '-',
+                           display_msg[:_ERR_BODY_LIMIT])
+            raise UnsupportedRequestParameterError(
+                display_msg, param=_param, error_code=_code)
         if _is_image_error(err_msg):
             logger.warning('%s Image content error (HTTP 400): %s',
                            log_prefix, err_msg[:_ERR_BODY_LIMIT])
@@ -1289,6 +1676,27 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         logger.error('%s Non-retryable API error (HTTP 400, deterministic): %s',
                      log_prefix, err_msg[:_ERR_BODY_LIMIT])
         raise BadRequestError(display_msg)
+    if 500 <= status_code <= 599:
+        normalized_message = _API_HTTP_PREFIX_RE.sub('', display_msg, count=1).strip()
+        sensitive_input_prefix = 'user sensitive words detected:'
+        if normalized_message.lower().startswith(sensitive_input_prefix):
+            explanation = re.split(
+                r'\s+\(request id:', normalized_message, maxsplit=1,
+                flags=re.IGNORECASE)[0]
+            raise ModelRefusalError(model, {
+                'category': 'user_sensitive_words',
+                'explanation': explanation,
+            })
+        route_unavailable = _route_unavailable_evidence(err_msg)
+        if route_unavailable is not None:
+            error_code, gateway_message = route_unavailable
+            # Dispatch owns the bounded per-route record of this verdict.
+            logger.debug('%s Model route unavailable (HTTP %d, %s) for %s: %s',
+                         log_prefix, status_code, error_code, model,
+                         err_msg[:_ERR_BODY_LIMIT])
+            raise ModelRouteUnavailableError(
+                display_msg, model=model, status_code=status_code,
+                error_code=error_code, gateway_message=gateway_message)
     if status_code in _GATEWAY_THROTTLE_STATUS:
         # 502/503/504 from the gateway = upstream overload or transient
         #   backend failure. Treat identically to 429: bubble to dispatch
@@ -1303,6 +1711,16 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
                              reason=f'HTTP {status_code}: {display_msg[:180]}',
                              status_code=status_code)
     if status_code in _REQUEST_SCOPED_STATUS_CODES:
+        if status_code == 404 and any(
+                marker in str(err_msg).lower()
+                for marker in GATEWAY_PROTOCOL_UNSUPPORTED_MARKERS):
+            # The gateway's own words: it no longer serves this model over
+            #   the request's wire protocol — the same model-level verdict as
+            #   the HTTP 400 route-missing markers, so dispatch fails over.
+            logger.warning('%s Model %s has no route for this wire protocol '
+                           'on this gateway (HTTP 404): %s',
+                           log_prefix, model, err_msg[:_ERR_BODY_LIMIT])
+            raise ModelRouteMissingError(display_msg, model, status_code=404)
         # 404/422 — request-scoped semantic rejection. Must NOT enter
         #   slot/model cooldown (a 404 "model not found" on one wire says
         #   nothing about the key's health, and a 422 says the payload is

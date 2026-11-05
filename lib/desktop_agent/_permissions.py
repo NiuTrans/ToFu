@@ -5,9 +5,10 @@ Computer-control is powerful: with everything on, the local bridge can run
 arbitrary shell commands, move the mouse and delete files on the user's own
 machine with no per-action confirmation. The safety posture is therefore
 **deny by default** — enabling computer control grants only READ-ONLY tools
-(list/read files, screenshot-less system overview); the write / exec / GUI
-tiers must each be turned on EXPLICITLY (via the tray toggles or the CLI
---allow-* flags).
+(list/read files inside the declared shared folders, screenshot-less system
+overview); the write / exec / GUI (screen, input and clipboard) tiers must
+each be turned on EXPLICITLY (via the tray toggles or the CLI --allow-* flags).
+File listing and reading stay inside the shared folders on every tier.
 
 This module is pure data + a builder so the policy can be unit-tested without
 starting the agent:

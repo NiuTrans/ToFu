@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,44 @@ _RETIRED_ORCHESTRATION_API_NAMES = (
     'api/orchestration-endpoints.js',
     'api/orchestrations.js',
 )
+
+
+_RELATIVE_SPECIFIER = re.compile(
+    r"""(\bfrom\s+|\bimport\s+|\bimport\s*\(\s*)(['"])(\.{1,2}/[^'"]+)\2""")
+
+
+def _resolve_frontend_module(origin_dir: Path, specifier: str) -> Path:
+    base = Path(os.path.normpath(origin_dir / specifier))
+    for candidate in (base, base.with_name(base.name + '.ts'),
+                      base.with_name(base.name + '.js'), base / 'index.ts'):
+        if candidate.is_file():
+            return candidate
+    raise AssertionError(
+        f'relative import {specifier!r} from {origin_dir} does not resolve')
+
+
+def anchor_relative_imports(
+        source: str, origin_dir: str | Path, *,
+        relocated_dir: str | Path | None = None) -> str:
+    """Rewrite a relocated module's relative imports to absolute source paths.
+
+    Harnesses that copy or pipe a shipped module into a temporary directory
+    break every relative specifier. Each one is resolved against the module's
+    real ``origin_dir`` and replaced by its absolute path, failing loudly when
+    a target does not exist. Targets inside ``relocated_dir`` (a source
+    subtree copied alongside the module, e.g. to inject a fault) stay
+    relative so the private copy, not the shipped owner, is bundled.
+    """
+    origin = Path(origin_dir)
+    kept = Path(relocated_dir).resolve() if relocated_dir is not None else None
+
+    def anchor(match: re.Match[str]) -> str:
+        target = _resolve_frontend_module(origin, match.group(3))
+        if kept is not None and kept in target.resolve().parents:
+            return match.group(0)
+        return match.group(1) + json.dumps(target.as_posix())
+
+    return _RELATIVE_SPECIFIER.sub(anchor, source)
 
 
 def shipped_source_text(rel_path: str) -> str:
@@ -66,6 +105,134 @@ def _section_source(name: str) -> str:
             raise AssertionError(f'unsafe migrated runtime section path: {name}')
         return path.read_text(encoding='utf-8')
     raise AssertionError(f'migrated runtime section not found: {name}')
+
+
+# Modules whose bindings are ambient ports every raw-section harness already
+# supplies (or stubs on purpose); composing the real owner would mask them.
+_HARNESS_SUPPLIED_MODULES = frozenset(
+    (ROOT / 'frontend' / 'src' / rel).resolve() for rel in (
+        'i18n/index.ts', 'icons.ts', 'html-safety.ts', 'feature-registry.ts',
+        'vendor-runtime.ts',
+    ))
+_IMPORT_STATEMENT = re.compile(
+    r"""^import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]""", re.M)
+_PRELUDE_SERVICE = re.compile(r'^const\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\(\);$', re.M)
+
+
+@lru_cache(maxsize=None)
+def _section_import_ports(name: str) -> tuple[
+        tuple[tuple[tuple[str, str], ...], Path] | tuple[str, str], ...]:
+    """Typed bindings the composed runtime supplies to one retained section.
+
+    Production hands each section the named imports of its ESM header (the
+    prelude, plus ``moduleImports`` for a lazy bundle) and the prelude's
+    zero-argument service constants. Returns ``((local, exported)
+    pairs, module)`` rows and ``(service, factory)`` rows.
+    """
+    payload = json.loads(MANIFEST.read_text(encoding='utf-8'))
+    bundle = next((b for b in payload['lazyBundles']
+                   if any(r.get('source') == name for r in b['sections'])), None)
+    rows: list = []
+    if bundle is not None:
+        for item in bundle.get('moduleImports') or []:
+            module = (ROOT / item['source']).resolve()
+            rows.append((tuple((b, b) for b in item['bindings']), module))
+    # Raw fixtures also compose eager sections into lazy ones (debug_state
+    # into debug_panel), so the eager prelude's bindings always apply.
+    prelude = (SECTIONS / payload['prelude']).read_text(encoding='utf-8')
+    for match in _IMPORT_STATEMENT.finditer(prelude):
+        if not match.group(2).startswith('.'):
+            continue
+        pairs = []
+        for part in match.group(1).split(','):
+            words = part.split()
+            if not words or words[0] == 'type':
+                continue
+            exported, local = words[0], words[-1]
+            pairs.append((local, exported))
+        module = _resolve_frontend_module(RUNTIME.parent, match.group(2)).resolve()
+        rows.append((tuple(pairs), module))
+    rows.extend(_PRELUDE_SERVICE.findall(prelude))
+    return tuple(rows)
+
+
+_DECLARED_REFERENCE = re.compile(r'(?:function\*?|class|const|let|var)\s+([\w$]+)')
+_FREE_REFERENCE = re.compile(r'(?<![\w$.])([\w$]+)(?![\w$])(?!\s*:(?!:))')
+
+
+def _free_reference_names(body: str) -> set[str]:
+    """Index the existing lexical admission rule once per section body.
+
+    Import ports share this index; scanning the full body separately for every
+    possible prelude binding made collection proportional to both source size
+    and the prelude catalogue. Property names, object keys and declarations
+    retain the same exclusion rules.
+    """
+    return set(_FREE_REFERENCE.findall(body)) - set(_DECLARED_REFERENCE.findall(body))
+
+
+def _import_port_path(module: Path) -> str:
+    """Bundle one owner whose exports fill only globals a harness left unset."""
+    key = f'import-port:{module}'
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return str(cached)
+    _require_frontend_bundler()
+    global_name = 'TofuImportPort_' + hashlib.sha256(key.encode()).hexdigest()[:12]
+    path = _DIRECTORY / '.import-ports' / f'{global_name}.js'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    footer = (f'for(const[k,v]of Object.entries({global_name}))'
+              'if(!(k in globalThis))globalThis[k]=v;')
+    _run_test_bundler(
+        [str(module), '--bundle', '--format=iife', '--platform=browser',
+         f'--global-name={global_name}', f'--footer:js={footer}',
+         f'--outfile={path}'],
+        [path], timeout=60,
+        failure=f'failed to compile section import port {module}',
+    )
+    _CACHE[key] = path
+    return str(path)
+
+
+def _compose_import_ports(name: str, body: str) -> str:
+    """Prepend the real owners of every header binding a raw section uses.
+
+    Raw fixtures load no ESM header, so a binding production imports for the
+    section is otherwise an undefined global. Owners only fill globals the
+    harness has not installed, keeping deliberate stubs authoritative.
+    """
+    prefix: list[str] = []
+    ports = _section_import_ports(name)
+    imports = [row for row in ports if isinstance(row[1], Path)]
+    services = [row for row in ports if isinstance(row[1], str)]
+    references = _free_reference_names(body)
+    needed_services = [(s, f) for s, f in services if s in references]
+    factories = {f for _, f in needed_services}
+    for pairs, module in imports:
+        if module in _HARNESS_SUPPLIED_MODULES:
+            continue
+        # Type-only bindings never exist in the browser. The ESM bundle
+        # exports runtime owners on one namespace; retain all of them so
+        # a raw classic section can use the same graph as production.
+        pairs = tuple((local, exported) for local, exported in pairs
+                      if not local.startswith('type '))
+        used = [(local, exported) for local, exported in pairs
+                if local in factories or local in references]
+        if not used:
+            continue
+        prefix.append(Path(_import_port_path(module)).read_text(encoding='utf-8'))
+        for local, exported in used:
+            if local != exported:
+                prefix.append(
+                    f'if (!({local!r} in globalThis)) '
+                    f'globalThis[{local!r}] = globalThis[{exported!r}];\n')
+    for service, factory in needed_services:
+        prefix.append(
+            f'if (!({service!r} in globalThis)) '
+            f'globalThis[{service!r}] = {factory}();\n')
+    return ''.join(prefix) + body
+
+
 _DIRECTORY = Path(tempfile.mkdtemp(prefix='tofu-runtime-sections-'))
 _LEGACY_ROOT = Path(tempfile.mkdtemp(prefix='tofu-frontend-test-root-'))
 _CACHE: dict[str, Path] = {}
@@ -77,10 +244,290 @@ def _cleanup() -> None:
     shutil.rmtree(_LEGACY_ROOT, ignore_errors=True)
 
 
+# Cross-process test-bundle cache.
+#
+# Problem: legacy jsdom modules materialize ~90 native owners at IMPORT time,
+# one Node+Vite process each (~0.6 s idle, several seconds on a loaded host).
+# Every xdist worker collects the whole suite, so every worker of every
+# session repeated the same compiles before running a single test.
+# Decision: cache complete bundler outputs, validated by content. The bundler
+# reports every file Rollup read (--inputs-manifest); a hit requires each
+# recorded input to hash identically, every directory holding an input to
+# list identically (a new or renamed file can change module resolution without
+# touching a recorded input), plus an unchanged bundler script, dependency
+# lockfile, TypeScript configs and frontend/src file list. Output that names
+# this session's view directory is never stored, and inputs modified near or
+# after the build started are never recorded.
+# Alternatives rejected: hashing the whole frontend tree invalidates every
+# bundle on any edit and still misses inputs outside it (tests/fixtures,
+# contracts); mtime-only validation is unsafe on whole-second FUSE mtimes.
+# TOFU_TEST_BUNDLE_CACHE=off disables it; a path value relocates it.
+_BUNDLE_CACHE_VERSION = 2
+_BUNDLE_CACHE_MAX_AGE_SECONDS = 7 * 24 * 3600
+_BUNDLE_CACHE_PRUNE_SCAN_LIMIT = 4096
+_DIRECTORY_TOKEN = '{TEST_VIEW_DIR}'
+_bundle_cache_pruned = False
+# Racy-git rule for whole-second FUSE mtimes: a digest is memoized by stat
+# signature, and a build's inputs are recorded, only when the path's mtime and
+# ctime are both older than this window, so a same-second, same-size rewrite
+# can never hide behind an unchanged signature.
+_BUNDLE_CACHE_RACY_WINDOW_NS = 2_000_000_000
+_input_digest_memo: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+_bundle_clock_ns = time.time_ns
+
+
+def _bundle_cache_root() -> Path | None:
+    override = os.environ.get('TOFU_TEST_BUNDLE_CACHE', '').strip()
+    if override.lower() in ('0', 'off', 'false', 'no'):
+        return None
+    uid = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
+    root = Path(override) if override else (
+        Path(tempfile.gettempdir()) / f'tofu-test-bundle-cache-{uid}')
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        st = root.lstat()
+    except OSError:
+        return None
+    if (root.is_symlink() or not root.is_dir()
+            or (hasattr(os, 'getuid') and st.st_uid != os.getuid())):
+        return None
+    return root
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _directory_digest(path: Path) -> str | None:
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return None
+    return hashlib.sha256('\0'.join(names).encode()).hexdigest()
+
+
+def _stat_signature(st: os.stat_result) -> tuple[int, int, int, int]:
+    return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _is_settled(signature: tuple[int, int, int, int], now_ns: int) -> bool:
+    return now_ns - max(signature[2], signature[3]) > _BUNDLE_CACHE_RACY_WINDOW_NS
+
+
+def _memoized_digest(path: str, *, directory: bool = False) -> str | None:
+    try:
+        signature = _stat_signature(os.stat(path))
+    except OSError:
+        return None
+    memo_key = f'{"d" if directory else "f"}\0{path}'
+    hit = _input_digest_memo.get(memo_key)
+    if hit is not None and hit[0] == signature:
+        return hit[1]
+    hashed_at_ns = _bundle_clock_ns()
+    value = (_directory_digest if directory else _file_digest)(Path(path))
+    if value is not None and _is_settled(signature, hashed_at_ns):
+        _input_digest_memo[memo_key] = (signature, value)
+    return value
+
+
+@lru_cache(maxsize=1)
+def _frontend_source_listing() -> bytes | None:
+    # Per-process belt; per-build directory digests catch mid-session adds.
+    try:
+        listing = subprocess.run(
+            ['git', 'ls-files', '-co', '--exclude-standard', '-z',
+             'frontend/src'],
+            cwd=ROOT, capture_output=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return listing.stdout if listing.returncode == 0 else None
+
+
+def _bundle_environment_digest() -> str | None:
+    listing = _frontend_source_listing()
+    if listing is None:
+        return None
+    digest = hashlib.sha256(f'v{_BUNDLE_CACHE_VERSION}\0{ROOT}\0'.encode())
+    digest.update(listing)
+    nested_tsconfigs = [
+        ROOT / name for name in listing.decode(errors='replace').split('\0')
+        if name.rsplit('/', 1)[-1].startswith('tsconfig')]
+    for path in (
+            ROOT / 'scripts' / 'vite_test_bundle.mjs',
+            ROOT / 'node_modules' / '.package-lock.json',
+            ROOT / 'package-lock.json',
+            *sorted(ROOT.glob('tsconfig*.json')),
+            *sorted(ROOT.glob('frontend/tsconfig*.json')),
+            *nested_tsconfigs):
+        digest.update(f'{path}\0{_memoized_digest(str(path))}\0'.encode())
+    return digest.hexdigest()
+
+
+def _to_token(value: str) -> str:
+    return value.replace(str(_DIRECTORY), _DIRECTORY_TOKEN)
+
+
+def _from_token(value: str) -> str:
+    return value.replace(_DIRECTORY_TOKEN, str(_DIRECTORY))
+
+
+def _record_is_valid(record: dict) -> bool:
+    if not record['inputs']:
+        return False
+    for token_path, expected in record['inputs'].items():
+        if _memoized_digest(_from_token(token_path)) != expected:
+            return False
+    for token_path, expected in record['directories'].items():
+        if _memoized_digest(_from_token(token_path), directory=True) != expected:
+            return False
+    return True
+
+
+def _settled_digest(path: str, started_ns: int, *, directory: bool) -> str | None:
+    """Digest ``path`` for a new record, or None when it changed near or after
+    the build started (the build may have read other bytes). Files in this
+    process's own view directory are written before the build and exempt."""
+    if not path.startswith(str(_DIRECTORY) + os.sep):
+        try:
+            signature = _stat_signature(os.stat(path))
+        except OSError:
+            return None
+        if not _is_settled(signature, started_ns):
+            return None
+    return (_directory_digest if directory else _file_digest)(Path(path))
+
+
+def _prune_bundle_cache(root: Path) -> None:
+    global _bundle_cache_pruned
+    if _bundle_cache_pruned:
+        return
+    _bundle_cache_pruned = True
+    import time
+    cutoff = time.time() - _BUNDLE_CACHE_MAX_AGE_SECONDS
+    try:
+        with os.scandir(root) as entries:
+            for index, entry in enumerate(entries):
+                if index >= _BUNDLE_CACHE_PRUNE_SCAN_LIMIT:
+                    break
+                try:
+                    if (entry.is_dir(follow_symlinks=False)
+                            and entry.stat(follow_symlinks=False).st_mtime
+                            < cutoff):
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                except OSError:
+                    continue
+    except OSError:
+        return
+
+
+def _run_test_bundler(
+        args: list[str], outputs: list[Path], *, timeout: int,
+        failure: str) -> None:
+    """Run ``scripts/vite_test_bundle.mjs`` with ``args`` producing
+    ``outputs``, reusing a content-validated cached result when available."""
+    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
+    root = _bundle_cache_root()
+    environment = _bundle_environment_digest() if root is not None else None
+    record_dir = None
+    if root is not None and environment is not None:
+        key = hashlib.sha256(json.dumps(
+            [environment, str(_DIRECTORY.parent),
+             [_to_token(arg) for arg in args],
+             [_to_token(str(path)) for path in outputs]]).encode()).hexdigest()
+        record_dir = root / key
+        try:
+            record = json.loads(
+                (record_dir / 'record.json').read_text(encoding='utf-8'))
+            if (record.get('outputs') == len(outputs)
+                    and _record_is_valid(record)):
+                for index, output in enumerate(outputs):
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(record_dir / f'output-{index}', output)
+                os.utime(record_dir)
+                return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+    manifest = _DIRECTORY / '.inputs' / (
+        hashlib.sha256(repr(args).encode()).hexdigest()[:16] + '.json')
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    started_ns = _bundle_clock_ns()
+    result = subprocess.run(
+        [str(test_bundler), *args, f'--inputs-manifest={manifest}'],
+        cwd=ROOT, capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f'{failure}:\n{result.stderr}')
+    if record_dir is None:
+        return
+    try:
+        inputs = {}
+        directories = {}
+        for path in json.loads(manifest.read_text(encoding='utf-8')):
+            if '/node_modules/' in path:
+                continue
+            digest = _settled_digest(path, started_ns, directory=False)
+            if digest is None:
+                return
+            inputs[_to_token(path)] = digest
+            parent = os.path.dirname(path)
+            if _to_token(parent) not in directories:
+                listing = _settled_digest(parent, started_ns, directory=True)
+                if listing is None:
+                    return
+                directories[_to_token(parent)] = listing
+        if not inputs:
+            return
+        blobs = [output.read_bytes() for output in outputs]
+        session_markers = (str(_DIRECTORY).encode(), _DIRECTORY.name.encode())
+        if any(marker in blob for blob in blobs for marker in session_markers):
+            return
+        _prune_bundle_cache(root)
+        staging = Path(tempfile.mkdtemp(prefix='.staging-', dir=root))
+        try:
+            for index, blob in enumerate(blobs):
+                (staging / f'output-{index}').write_bytes(blob)
+            (staging / 'record.json').write_text(json.dumps(
+                {'outputs': len(outputs), 'inputs': inputs,
+                 'directories': directories}), encoding='utf-8')
+            shutil.rmtree(record_dir, ignore_errors=True)
+            os.replace(staging, record_dir)
+        except OSError:
+            shutil.rmtree(staging, ignore_errors=True)
+    except (OSError, ValueError):
+        return
+
+
 @lru_cache(maxsize=None)
 def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
     body = _section_source(name)
 
+    if name in ('settings/oauth.js', 'settings/mcp.js'):
+        presenter = 'oauth' if name == 'settings/oauth.js' else 'mcp'
+        opening = 'openOAuthFixture' if presenter == 'oauth' else 'openMcpFixture'
+        owner = Path(native_module_path(
+            f'.native/settings-{presenter}-presenter.js',
+            ROOT / f'tests/support/settings-{presenter}-presenter.ts',
+        ))
+        body = owner.read_text(encoding='utf-8') + f'\n{opening}();\n' + body
+
+    if name in ('settings/provider_render.js', 'settings/access_matrix.js'):
+        # Raw fixtures compose the same read owner as settings-presenters.
+        body = Path(native_module_path(
+            '.native/provider-settings-projection.js',
+            ROOT / 'frontend/src/features/settings/provider-settings-projection.ts',
+        )).read_text(encoding='utf-8') + '\n' + body
+    if name == 'settings/provider_render.js':
+        for owner in ('provider-connection-staging', 'provider-model-staging', 'provider-model-picker',
+                      'provider-key-reveal', 'provider-key-stats', 'provider-key-editor',
+                      'model-routing-authority', 'provider-mutations'):
+            body = Path(native_module_path(
+                f'.native/{owner}.js',
+                ROOT / f'frontend/src/features/settings/{owner}.ts',
+            )).read_text(encoding='utf-8') + '\n' + body
 
     if name in ('main/main_send_pipeline.js', 'ui/send_button.js'):
         body = Path(native_module_path(
@@ -95,6 +542,13 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
         body = Path(native_module_path(
             '.native/folder-presets.js',
             ROOT / 'frontend/src/conversation/application/folder-presets.ts',
+        )).read_text(encoding='utf-8') + body
+    if name == 'core/conv_apply_settings.js':
+        # Production imports the hydration guard through the retained ESM
+        # prelude; raw-section fixtures compose that same typed owner.
+        body = Path(native_module_path(
+            '.native/conversation-project.js',
+            ROOT / 'frontend/src/conversation/application/conversation-project.ts',
         )).read_text(encoding='utf-8') + body
     if name == 'main/main_folders_mobile.js':
         body = Path(native_module_path(
@@ -128,11 +582,29 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
             ROOT / 'frontend/src/attachment-preview-lifecycle.ts',
         )).read_text(encoding='utf-8')
         body = owner + body
+    if name == 'paper/report.js':
+        # Match the lazy presenter's manifest import, retaining one projection
+        # owner in raw-section fixtures as well as the production graph.
+        for logical, source in (
+            ('paper-report-events', 'report-events.ts'),
+            ('paper-report-article', 'report-article/index.ts'),
+        ):
+            body = Path(native_module_path(
+                f'.native/{logical}.js',
+                ROOT / 'frontend/src/features/paper' / source,
+            )).read_text(encoding='utf-8') + body
     if name == 'core/markdown.js':
         owner = Path(native_module_path(
             '.native/markdown-renderer.js', ROOT / 'frontend/src/markdown/index.ts',
         )).read_text(encoding='utf-8')
-        body = owner + body
+        # Production imports `_i18nLang` and `t` from ../i18n through the ESM
+        # prelude; raw fixtures load no prelude, so supply the same two ports
+        # while keeping any values a harness already installed as globals.
+        i18n_ports = (
+            "var _i18nLang = typeof _i18nLang === 'string' ? _i18nLang : 'en';\n"
+            "var t = typeof t === 'function' ? t : (key) => key;\n"
+        )
+        body = i18n_ports + owner + body
     if name == 'background-activity.js':
 
         for owner in ('agent-sidebar-dock', 'agent-sidebar-dock-projection'):
@@ -148,18 +620,18 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
             '.native/token-usage.js', ROOT / 'frontend/src/token-usage.ts',
         )).read_text(encoding='utf-8')
         body = token_owner + body
-    if name in ('core/request_inspector.js', 'ui/tool_rounds.js'):
+    if name == 'ui/tool_rounds.js':
         evidence_owner = Path(native_module_path(
             '.native/inspector-evidence.js',
             ROOT / 'frontend/src/features/inspector-evidence.ts',
         )).read_text(encoding='utf-8')
         body = evidence_owner + body
     if name == 'core/request_inspector.js':
-        wire_owner = Path(native_module_path(
-            '.native/diagnostics-wire-controller.js',
-            ROOT / 'frontend/src/features/diagnostics-wire-controller.ts',
+        inspector_owner = Path(native_module_path(
+            '.native/inspector-presenter.js',
+            ROOT / 'tests/support/inspector-presenter.ts',
         )).read_text(encoding='utf-8')
-        body = wire_owner + body
+        body = inspector_owner + body
     if name == 'ui/conversation_list.js':
 
         body = Path(native_module_path(
@@ -187,11 +659,29 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
             '.native/background-command-completion.js',
             ROOT / 'frontend/src/conversation/presentation/background-command-completion.ts',
         )).read_text(encoding='utf-8') + body
+        # Production imports these owners through the ESM prelude and the
+        # store wires them at module scope; raw fixtures compose the same ones.
+        for logical, owner_source in (
+            ('turn-command', 'frontend/src/core/turn-command.ts'),
+            ('turn-review-presentation',
+             'frontend/src/features/turn-review/presentation.ts'),
+            ('animation-frame-scheduler',
+             'frontend/src/conversation/ui/animation-frame-scheduler.ts'),
+        ):
+            body = Path(native_module_path(
+                f'.native/{logical}.js', ROOT / owner_source,
+            )).read_text(encoding='utf-8') + body
         body = mount_tracker + body
+    if name == 'main/main_conv_lifecycle.js':
+        body = Path(native_module_path(
+            '.native/project-conversation-navigation.js',
+            ROOT / 'frontend/src/features/project-conversation-navigation.ts',
+        )).read_text(encoding='utf-8') + body
     if name == 'main/main_toolbar_ui.js':
         body = Path(native_module_graph([
             ('.native/model-picker.js', ROOT / 'frontend/src/application-shell/model-picker/index.ts'),
             ('.native/model-picker-startup.js', ROOT / 'frontend/src/features/model-catalog/model-picker-startup.ts'),
+            ('.native/audio-capabilities.js', ROOT / 'frontend/src/features/voice/audio-capabilities.ts'),
         ])).read_text(encoding='utf-8') + body
     if name == 'main.js':
         body = Path(native_module_path(
@@ -199,18 +689,23 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
             ROOT / 'frontend/src/application-shell/interactions/index.ts',
         )).read_text(encoding='utf-8') + body
     if name == 'core/debug_panel.js':
+        reconciliation_owner = Path(native_module_path(
+            '.native/diagnostics-message-reconciliation.js',
+            ROOT / 'frontend/src/features/diagnostics-message-reconciliation.ts',
+        )).read_text(encoding='utf-8')
         disclosure_owner = Path(native_module_path(
             '.native/diagnostics-message-disclosure.js',
             ROOT / 'frontend/src/features/diagnostics-message-disclosure.ts',
         )).read_text(encoding='utf-8')
-        body = disclosure_owner + body
+        body = reconciliation_owner + disclosure_owner + body
         # Production imports the bounded typed collection owner, then the thin
         # retained shell port, before loading Debug/Request Inspector. Raw
         # fixtures compose that same owner graph rather than cloning policy.
-        state_owner = Path(native_module_path(
-            '.native/debug-runtime-owner.js',
-            ROOT / 'frontend/src/core/debug-runtime-owner.ts',
-        )).read_text(encoding='utf-8')
+        state_owner = Path(native_module_graph([
+            (f'.native/{owner}.js', ROOT / f'frontend/src/core/{owner}.ts')
+            for owner in ('debug-runtime-owner', 'browser-interaction-context',
+                          'browser-responsiveness-monitor')
+        ])).read_text(encoding='utf-8')
         # Production supplies the retained lifecycle registry from the ESM
         # prelude; raw fixtures load no prelude, so stub the same seam.
         lifecycle_stub = (
@@ -234,10 +729,6 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
         retained_badge = _section_source('local-control-state.js')
         state_port = r'''
 var LocalControlShellState = Object.freeze({
-  get browserEnabled() {
-    return typeof browserEnabled !== 'undefined'
-      ? Boolean(browserEnabled) : Boolean(globalThis.browserEnabled);
-  },
   get desktopEnabled() {
     return typeof desktopEnabled !== 'undefined'
       ? Boolean(desktopEnabled) : Boolean(globalThis.desktopEnabled);
@@ -301,6 +792,13 @@ var LocalControlShellState = Object.freeze({
             'swarm-failure-presentation.ts',
         )).read_text(encoding='utf-8')
         body = failure_owner + body
+        # Agent timeline rows draw the parent tool panel's glyphs through the
+        # same prelude-imported icon owner production uses.
+        icon_owner = Path(native_module_path(
+            '.native/tool-round-icons.js',
+            ROOT / 'frontend/src/conversation/presentation/tool-round-icons.ts',
+        )).read_text(encoding='utf-8')
+        body = icon_owner + body
         # Production injects the DOM-free demand scheduler through the ESM
         # prelude. Raw-section fixtures compose that exact typed owner before
         # the retained Swarm projection adapter.
@@ -340,11 +838,12 @@ var LocalControlShellState = Object.freeze({
         )).read_text(encoding='utf-8')
         body = revision_gate + body
     if name == 'project.js':
-        # Production imports the browse coordinator in the generated lazy
-        # runtime header and injects live retained state through one frozen
-        # service object. Raw-section jsdom fixtures need those same two ports
-        # ahead of the authored section; a snapshot of projectState would hide
-        # the conversation-switch class this boundary is meant to protect.
+        # Production imports the browse coordinator and shared folder browser in
+        # the generated lazy runtime header and injects live retained state
+        # through one frozen service object. Raw-section jsdom fixtures need
+        # those same ports ahead of the authored section; a snapshot of
+        # projectState would hide the conversation-switch class this boundary
+        # is meant to protect.
         coordinator = Path(native_module_path(
             '.native/project-browse-coordinator.js',
             ROOT / 'frontend/src/core/project-browse-coordinator.ts',
@@ -352,6 +851,10 @@ var LocalControlShellState = Object.freeze({
         assets = Path(native_module_path(
             '.native/project-presentation-assets.js',
             ROOT / 'frontend/src/features/project/presentation-assets.ts',
+        ))
+        folder_browser = Path(native_module_path(
+            '.native/project-folder-browser.js',
+            ROOT / 'frontend/src/features/project/folder-browser.ts',
         ))
         state_port = r'''
 var ProjectPresentationShellState = Object.freeze({
@@ -390,6 +893,7 @@ var ProjectPresentationShellState = Object.freeze({
         body = (
             coordinator.read_text(encoding='utf-8')
             + assets.read_text(encoding='utf-8')
+            + folder_browser.read_text(encoding='utf-8')
             + state_port
             + body
         )
@@ -422,6 +926,10 @@ var ProjectPresentationShellState = Object.freeze({
             Path(native_module_path(
                 '.native/context-note-grouping.js',
                 ROOT / 'frontend/src/conversation/presentation/context-note-grouping.ts',
+            )),
+            Path(native_module_path(
+                '.native/context-note-presentation.js',
+                ROOT / 'frontend/src/conversation/presentation/context-note-presentation.ts',
             )),
             Path(native_module_path(
                 '.native/tool-round-presentation.js',
@@ -609,6 +1117,7 @@ def runtime_section_path(name: str, *, scope_prelude: bool = True) -> str:
             + '\nvar requiredApiTransport = globalThis.apiTransport;\n'
             + body
         )
+    body = _compose_import_ports(name, body)
     if scope_prelude:
         path = _DIRECTORY / name
     else:
@@ -719,16 +1228,14 @@ def native_module_path(name: str, source: str | Path) -> str:
             f'Object.assign(globalThis,{global_name}.owner,'
             f'{global_name}.featureRegistry);'
             f'globalThis.featureRegistry={global_name}.featureRegistry;')
-    result = subprocess.run(
-        [str(test_bundler), str(compile_source), '--bundle', '--format=iife',
+    _run_test_bundler(
+        [str(compile_source), '--bundle', '--format=iife',
          '--platform=browser', f'--global-name={global_name}',
          f'--footer:js={footer}',
          f'--outfile={path}'],
-        cwd=ROOT, capture_output=True, text=True, timeout=60,
+        [path], timeout=60,
+        failure=f'failed to compile native test module {source_path}',
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            f'failed to compile native test module {source_path}:\n{result.stderr}')
     _CACHE[key] = path
     return str(path)
 
@@ -746,7 +1253,6 @@ def _materialize_orchestration_api_legacy_graph() -> None:
     if _CACHE.get(key) is not None:
         return
     _require_frontend_bundler()
-    test_bundler = ROOT / 'scripts' / 'vite_test_bundle.mjs'
     source = ROOT / 'frontend/src/features/orchestration/api-client.ts'
     contracts = (
         ROOT / 'frontend/src/features/orchestration/'
@@ -809,17 +1315,14 @@ def _materialize_orchestration_api_legacy_graph() -> None:
     first = _DIRECTORY / _RETIRED_ORCHESTRATION_API_NAMES[0]
     first.parent.mkdir(parents=True, exist_ok=True)
     global_name = 'TofuNativeOrchestrationApi'
-    result = subprocess.run(
-        [str(test_bundler), str(entry), '--bundle', '--format=iife',
+    _run_test_bundler(
+        [str(entry), '--bundle', '--format=iife',
          '--platform=browser', f'--global-name={global_name}',
          f'--footer:js=Object.assign(globalThis,{global_name});',
          f'--outfile={first}'],
-        cwd=ROOT, capture_output=True, text=True, timeout=60,
+        [first], timeout=60,
+        failure='failed to compile typed orchestration API test view',
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            f'failed to compile typed orchestration API test view:\n'
-            f'{result.stderr}')
     for name in _RETIRED_ORCHESTRATION_API_NAMES[1:-1]:
         path = _DIRECTORY / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -901,15 +1404,13 @@ def native_module_graph(
         'Object.defineProperties(globalThis,Object.getOwnPropertyDescriptors('
         f'{global_name}.orchestrationRegistry));'
         f'globalThis.orchestrationRegistry={global_name}.orchestrationRegistry;')
-    result = subprocess.run(
-        [str(test_bundler), str(entry), '--bundle', '--format=iife',
+    _run_test_bundler(
+        [str(entry), '--bundle', '--format=iife',
          '--platform=browser', f'--global-name={global_name}',
          f'--footer:js={footer}', f'--outfile={first}'],
-        cwd=ROOT, capture_output=True, text=True, timeout=60,
+        [first], timeout=60,
+        failure='failed to compile native test graph',
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            f'failed to compile native test graph:\n{result.stderr}')
     for name, _ in resolved[1:]:
         placeholder = target_root / name
         placeholder.parent.mkdir(parents=True, exist_ok=True)
@@ -959,16 +1460,14 @@ def orchestration_legacy_test_root() -> str:
         )
         entries.append(entry)
     if entries:
-        result = subprocess.run(
-            [str(test_bundler), *map(str, entries), '--bundle', '--format=iife',
+        _run_test_bundler(
+            [*map(str, entries), '--bundle', '--format=iife',
              '--platform=browser', f'--outdir={_DIRECTORY}',
              '--log-level=warning'],
-            cwd=ROOT, capture_output=True, text=True, timeout=120,
+            [_DIRECTORY / f'{entry.stem}.js' for entry in entries],
+            timeout=120,
+            failure='failed to compile native orchestration test view',
         )
-        if result.returncode != 0:
-            raise AssertionError(
-                f'failed to compile native orchestration test view:\n'
-                f'{result.stderr}')
     static_dir = _LEGACY_ROOT / 'static'
     static_dir.mkdir(parents=True, exist_ok=True)
     js_link = static_dir / 'js'

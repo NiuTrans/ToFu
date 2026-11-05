@@ -1,3 +1,6 @@
+/* Delivery uses WOFF2. The original TTF sources remain beside their compressed
+   assets; reproduce with fontTools.ttLib.woff2.compress(source, destination).
+   Compression preserves glyph coverage, advances, and vertical metrics. */
 /* Newsreader — self-hosted editorial serif (latin subset, variable font:
    weight 200–800 + optical-size 6–72). Heading hero for the 'tofu' theme's
    Warm Reading Room language. Two files (roman + italic) cover every weight.
@@ -22,7 +25,7 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url(fonts/PressStart2P-Regular.ttf) format('truetype');
+  src: url(fonts/PressStart2P-Regular.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Pixelify Sans';
@@ -36,21 +39,21 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf) format('truetype');
+  src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.woff2) format('woff2');
 }
 @font-face {
   font-family: 'JetBrains Mono';
   font-style: normal;
   font-weight: 500;
   font-display: swap;
-  src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.ttf) format('truetype');
+  src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8-qxjPQ.woff2) format('woff2');
 }
 @font-face {
   font-family: 'JetBrains Mono';
   font-style: normal;
   font-weight: 600;
   font-display: swap;
-  src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FqtjPQ.ttf) format('truetype');
+  src: url(fonts/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8FqtjPQ.woff2) format('woff2');
 }
 /* Inter — self-hosted neutral reading sans (variable font, weight 100–900).
    The 'tofu' theme's Latin BODY face (pairs with the Newsreader serif
@@ -120,35 +123,35 @@
   font-style: normal;
   font-weight: 300;
   font-display: swap;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_907NSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_907NSg.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Plus Jakarta Sans';
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_qU7NSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_qU7NSg.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Plus Jakarta Sans';
   font-style: normal;
   font-weight: 500;
   font-display: swap;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_m07NSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_m07NSg.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Plus Jakarta Sans';
   font-style: normal;
   font-weight: 600;
   font-display: swap;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_d0nNSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_d0nNSg.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Plus Jakarta Sans';
   font-style: normal;
   font-weight: 700;
   font-display: swap;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_TknNSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_TknNSg.woff2) format('woff2');
 }
 
 /* 'Jakarta Toolbar' — WIDTH-SENSITIVE toolbar/control alias of Plus Jakarta
@@ -165,19 +168,19 @@
   font-style: normal;
   font-weight: 400;
   font-display: optional;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_qU7NSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_qU7NSg.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Jakarta Toolbar';
   font-style: normal;
   font-weight: 600;
   font-display: optional;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_d0nNSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_d0nNSg.woff2) format('woff2');
 }
 @font-face {
   font-family: 'Jakarta Toolbar';
   font-style: normal;
   font-weight: 700;
   font-display: optional;
-  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_TknNSg.ttf) format('truetype');
+  src: url(fonts/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_TknNSg.woff2) format('woff2');
 }

@@ -5,10 +5,23 @@ exercised via monkeypatching, and the pure helpers (dedup, rerank, vertical
 intent detection, URL guards) run directly.
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 
-import tofu_search.config as _config
-import tofu_search.providers as _providers
+# These tests certify this checkout's package source, never an editable
+# install that points at another checkout.
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PACKAGE_ROOT))
+
+import tofu_search  # noqa: E402
+import tofu_search.config as _config  # noqa: E402
+import tofu_search.providers as _providers  # noqa: E402
+
+if not Path(tofu_search.__file__).resolve().is_relative_to(_PACKAGE_ROOT):
+    raise pytest.UsageError(
+        f'tofu_search was imported from {tofu_search.__file__}, not {_PACKAGE_ROOT}')
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +36,20 @@ def _reject_unmocked_httpx_network(monkeypatch):
     monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', reject)
     yield
     assert not attempts, 'Offline test reached the real HTTPX network transport'
+
+
+@pytest.fixture(autouse=True)
+def _reset_engine_breakers():
+    """Breaker outcomes are process-global and shared by every engine module.
+
+    A failure leaked from an earlier test would make that engine an un-awaited
+    probe in a later search.
+    """
+    from tofu_search.search import _common
+
+    _common.engine_circuit._state.clear()
+    yield
+    _common.engine_circuit._state.clear()
 
 
 @pytest.fixture(autouse=True)

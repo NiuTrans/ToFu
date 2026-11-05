@@ -1,4 +1,10 @@
-"""Owner-scoped, restart-safe bounded swarm continuation execution specs."""
+"""Owner-scoped, restart-safe, structurally bounded swarm continuation specs.
+
+The unattended loop has no count ceiling and is result-driven like the project
+Coordinator: each settled delivery frontier wakes at most once (durable
+receipts), failure recovery runs once per human chain, and only the settling
+run's stamped results authorize a wake (docs/AGENT_LIFECYCLE.md).
+"""
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -10,6 +16,7 @@ from lib.swarm import integration
 from lib.swarm.integration._autocontinue import (
     _durable_chain_allows, _start_autocontinue_turn,
 )
+from lib.swarm.types import SubTaskSpec
 
 pytestmark = pytest.mark.unit
 
@@ -23,6 +30,9 @@ def harness():
                   status='completed', projection={})]
     calls = []
     disposition = ['started']
+    # The settling session: work launched by the human chain.
+    session = SimpleNamespace(user_id=17, task_id='run-1',
+                              specs=[SubTaskSpec(id='needed')])
 
     def dispatch(conv, projection, config, **kwargs):
         assert conv == key
@@ -50,20 +60,21 @@ def harness():
         for index, status in enumerate(statuses):
             agent_inbox.enqueue(key, 'evidence', priority='later',
                                 mode='swarm-update', agent_id=str(index),
-                                extra={'status': status})
+                                extra={'status': status,
+                                       'swarm_run_id': session.task_id})
 
     with patch('lib.swarm.restart_recovery.read_continuation_turns', side_effect=listing), \
          patch('lib.scheduler.conversation_dispatch.dispatch_scheduled_turn', side_effect=dispatch), \
          patch('lib.agent_core.push.push_event'), \
          patch.object(integration, '_key_is_live', return_value=False), \
          patch.object(integration, 'SWARM_AUTOCONTINUE_ENABLED', True), \
-         patch.object(integration, 'SWARM_AUTOCONTINUE_MAX_CHAIN', 3):
-        yield SimpleNamespace(key=key, turns=turns, calls=calls,
+         patch.object(integration, 'get_active_session',
+                      side_effect=lambda candidate: session if candidate == key else None):
+        yield SimpleNamespace(key=key, turns=turns, calls=calls, session=session,
                               disposition=disposition, enqueue=enqueue,
                               run=lambda source='wave-1': integration._maybe_autocontinue(
                                   key, 17, source_id=source))
     agent_inbox.reset_for_test(key)
-    integration.reset_autocontinue_chain(key)
 
 
 @pytest.mark.parametrize('statuses', [('failed',), ('failed', 'completed', 'cancelled')])
@@ -77,8 +88,7 @@ def test_failure_bearing_turn_is_factual_once_and_restart_safe(harness, statuses
     assert f'{statuses.count("completed")} completed' in content
     assert h.calls[0][0]['_swarmFailureRecovery'] is True
     h.run()  # duplicate settlement
-    integration.reset_autocontinue_chain(h.key)  # process registry lost on restart
-    h.run('wave-2')
+    h.run('wave-2')  # the durable receipt, not process memory, spends recovery
     assert len(h.calls) == 1
     # A genuinely new human authorization, not an automatic turn, resets it.
     h.turns.append(dict(turnId='new-human', actor='human', status='completed', projection={}))
@@ -115,7 +125,6 @@ def test_failed_dispatch_does_not_consume_allowance(harness, outcome):
     harness.enqueue('failed')
     harness.disposition[0] = outcome
     harness.run()
-    assert integration._autocontinue_chain.get(harness.key, 0) == 0
     harness.disposition[0] = 'started'
     harness.run()
     assert len(harness.calls) == 2
@@ -125,20 +134,56 @@ def test_dispatch_exception_does_not_consume_or_leave_latch(harness):
     harness.enqueue('failed')
     with patch.object(integration, '_start_autocontinue_turn', side_effect=RuntimeError):
         harness.run()
-    assert integration._autocontinue_chain.get(harness.key, 0) == 0
     assert harness.key not in integration._autocontinue_inflight
     harness.run()
     assert len(harness.calls) == 1
 
 
-def test_total_ceiling_survives_restart_and_failure_is_not_extra_credit(harness):
+def test_each_new_frontier_wakes_once_without_a_count_ceiling(harness):
     harness.enqueue('completed')
-    for index in range(3):
+    for index in range(5):
         harness.run(str(index))
-    integration.reset_autocontinue_chain(harness.key)
+    assert len(harness.calls) == 5  # result-driven, not counted
+    harness.run('4')
+    assert len(harness.calls) == 5  # a frontier never wakes twice
     harness.enqueue('failed')
-    harness.run('failure')
-    assert len(harness.calls) == 3
+    harness.run('failure-1')
+    harness.run('failure-2')
+    assert len(harness.calls) == 6  # one failure-bearing recovery per human chain
+
+
+def test_a_continuation_wave_with_new_results_wakes_the_next_continuation(harness):
+    harness.enqueue('completed')
+    harness.run('human-wave')
+    # The continuation launched a follow-up wave, run-2, which settles later.
+    harness.session.task_id = 'run-2'
+    harness.session.specs = [SubTaskSpec(id='follow-up')]
+    harness.enqueue('completed')
+    harness.run('continuation-wave')
+    assert len(harness.calls) == 2  # an autonomous chain never stalls on its own work
+    harness.run('continuation-wave')
+    assert len(harness.calls) == 2  # but the same delivery never wakes twice
+
+
+def test_a_nonhuman_input_never_resets_the_failure_recovery_allowance(harness):
+    harness.enqueue('failed')
+    harness.run()
+    assert len(harness.calls) == 1
+    # Timer and channel inputs are stored as actor=human with a nonhuman
+    # origin.initiator; they are not a new human authorization.
+    harness.turns.append(dict(turnId='channel-input', actor='human', status='completed',
+                              projection={'origin': {'blockId': 'origin',
+                                                     'initiator': 'channel'}}))
+    harness.run('wave-2')
+    assert len(harness.calls) == 1
+
+
+def test_only_the_settling_runs_results_authorize_a_wake(harness):
+    agent_inbox.enqueue(harness.key, 'stale', priority='later', mode='swarm-update',
+                        agent_id='old', extra={'status': 'completed',
+                                               'swarm_run_id': 'earlier-run'})
+    harness.run()
+    assert not harness.calls
 
 
 def test_success_duplicates_do_not_charge_budget(harness):
@@ -146,7 +191,6 @@ def test_success_duplicates_do_not_charge_budget(harness):
     harness.run()
     harness.run()
     assert len(harness.calls) == 1
-    assert integration._autocontinue_chain[harness.key] == 1
 
 
 def test_owner_query_failure_stands_down(harness):
@@ -170,7 +214,6 @@ def test_typed_durable_admission_failure_does_not_spend_recovery(harness):
     harness.run()
     harness.turns[-1]['projection']['error'] = {'code': 'task_start_failed'}
     harness.turns[-1]['status'] = 'failed'
-    integration.reset_autocontinue_chain(harness.key)
     harness.run('another-source')
     assert len(harness.calls) == 2
 
@@ -195,7 +238,6 @@ def test_main_failure_blocks_wake_and_retains_child_results(
     harness.enqueue(child_status)
     harness.run()
     # Repeated notification and process restart do not clear durable evidence.
-    integration.reset_autocontinue_chain(harness.key)
     harness.run('later-wave')
     assert harness.calls == []
     assert agent_inbox.peek(harness.key) == 1
@@ -211,15 +253,15 @@ def test_legacy_git_guard_projection_blocks_but_later_recovery_supersedes_it():
             'rejection': {'kind': 'git_guard', 'retryable': True},
         }]},
     }
-    assert not _durable_chain_allows([human, blocked], 'wake', failure=False, ceiling=8)
+    assert not _durable_chain_allows([human, blocked], 'wake', failure=False)
     not_executed = {
         'turnId': 'admission-failure', 'actor': 'assistant', 'status': 'failed',
         'projection': {'error': {'code': 'task_start_failed', 'retryable': False}},
     }
     assert not _durable_chain_allows(
-        [human, blocked, not_executed], 'wake', failure=False, ceiling=8)
+        [human, blocked, not_executed], 'wake', failure=False)
     recovered = {'turnId': 'recovered', 'actor': 'assistant', 'status': 'completed'}
-    assert _durable_chain_allows([human, blocked, recovered], 'wake', failure=False, ceiling=8)
+    assert _durable_chain_allows([human, blocked, recovered], 'wake', failure=False)
 
 
 def test_retryable_main_failure_keeps_existing_single_recovery_opportunity():
@@ -228,50 +270,43 @@ def test_retryable_main_failure_keeps_existing_single_recovery_opportunity():
         {'turnId': 'm', 'actor': 'assistant', 'status': 'failed',
          'settlement': {'error': {'kind': 'overloaded', 'retryable': True}}},
     ]
-    assert _durable_chain_allows(turns, 'wake', failure=True, ceiling=8)
+    assert _durable_chain_allows(turns, 'wake', failure=True)
 
 
-
-def test_optional_delivery_frontier_deduplicates_across_restart_and_admits_new_required_work(harness, monkeypatch):
-    from lib.swarm.types import SubTaskSpec
+def test_optional_delivery_frontier_deduplicates_across_restart_and_admits_new_required_work(harness):
     h = harness
-    session = SimpleNamespace(user_id=17, specs=[
-        SubTaskSpec(id='needed'), SubTaskSpec(id='extra', required_for_completion=False)])
-    monkeypatch.setattr(integration, 'get_active_session', lambda key: session if key == h.key else None)
+    h.session.specs = [SubTaskSpec(id='needed'),
+                       SubTaskSpec(id='extra', required_for_completion=False)]
     h.enqueue('completed')
     h.run()
     first = h.calls[0][1]['command_id']
-    integration.reset_autocontinue_chain(h.key)
     h.enqueue('completed')
     h.run()
     assert len(h.calls) == 1  # same persisted required frontier after restart
-    session.specs.append(SubTaskSpec(id='new-needed'))
+    h.session.specs.append(SubTaskSpec(id='new-needed'))
     h.enqueue('completed')
     h.run()
-    assert len(h.calls) == 2
+    assert len(h.calls) == 2  # new required work opens a new frontier
     assert h.calls[1][1]['command_id'] != first
 
 
 @pytest.mark.parametrize('internal', [True, False])
 def test_guard_terminal_classification_preserves_bounded_wake_gate(harness, internal):
     from threading import Event
-    from lib.tasks_pkg.invocation import invocation_abort_requested
-    from lib.swarm.liveness import ProgressBeacon
+    from lib.tasks_pkg.invocation import invocation_abort_requested, stop_stalled_invocation
     from lib.turn_verdict import derive_task_verdict
     task = {'id': 'child-guard', 'abort_event': Event(), 'config': {},
             '_invocationAbortCheck': lambda: not internal}
-    beacon = ProgressBeacon(stall_timeout=0)
-    beacon.touch(task['id'])
-    task['_invocationProgressBeacon'] = beacon
+    # The liveness judge's verdict loses to an owner Stop observed first.
+    assert stop_stalled_invocation(task, silent_seconds=2000, stall_timeout=1800) is internal
     assert invocation_abort_requested(task)
     verdict = derive_task_verdict(task)
     status = 'failed' if verdict.status.value == 'failed' else 'cancelled'
     agent_inbox.enqueue(harness.key, str(task.get('error') or 'User stopped agent'),
         priority='later', mode='swarm-update', agent_id=task['id'],
-        extra={'status': status})
+        extra={'status': status, 'swarm_run_id': harness.session.task_id})
     harness.run()
     harness.run()  # duplicate notification
-    integration.reset_autocontinue_chain(harness.key)
     harness.run('cold-notification')
     assert len(harness.calls) == (1 if internal else 0)
     if internal:

@@ -318,6 +318,29 @@ def test_dispatch_forwards_its_final_admission_count_to_body_prep(monkeypatch):
             'reusable_text_token_counts_by_identity'] == {123: 456}
 
 
+def test_deferred_catalog_does_not_consume_small_window_admission(monkeypatch):
+    from lib.tasks_pkg.compaction import _prompt_admission as admission
+
+    task = {'aborted': False, 'error': None,
+            '_toolSearchMode': 'local'}
+    state = _state()
+    events = []
+    _install_common(monkeypatch, events)
+    seen = []
+    projected = [{'type': 'function', 'function': {'name': 'search_tools'}}]
+    task['_tool_schema'] = projected
+
+    def admit(messages, tools, _task, **kwargs):
+        seen.append(tools)
+        return {'totalTokens': 100, 'toolSchemaTokens': 40}
+
+    monkeypatch.setattr(admission, 'enforce_dispatch_prompt_limit', admit)
+    monkeypatch.setattr(root_loop, 'run_llm_call_with_fallback', lambda *args, **kwargs: 'break')
+    deferred = [{'type': 'function', 'function': {'name': f'deferred_{i}'}} for i in range(40)]
+    root_loop._RootLoopHooks(_request(task, state)).dispatch(0, deferred)
+    assert seen == [projected]
+
+
 def test_provider_exception_closes_stream_prefetch_and_preserves_error(
     monkeypatch,
 ):
@@ -550,7 +573,7 @@ def test_resumed_root_emits_one_continuous_logical_round_stream(monkeypatch):
 
 
 def test_resume_retains_paid_accounting_when_next_provider_dispatch_raises(monkeypatch):
-    from lib.tasks_pkg.orchestrator import _finalize
+    from lib.tasks_pkg import round_costs
     task = {'id': 'resume-task', 'aborted': False, 'error': None,
             '_checkpointUsage': {'prompt_tokens': 10, 'completion_tokens': 2},
             '_checkpointApiRounds': [{'round': 1, 'usage': {'prompt_tokens': 10}}]}
@@ -558,8 +581,8 @@ def test_resume_retains_paid_accounting_when_next_provider_dispatch_raises(monke
     state.model_round_start = 1
     events = []
     _install_common(monkeypatch, events)
-    monkeypatch.setattr(_finalize, '_stamp_child_round_costs', lambda *a, **k: None)
-    monkeypatch.setattr(_finalize, '_child_cost_usage', lambda usage, rounds: usage)
+    monkeypatch.setattr(round_costs, 'stamp_round_costs', lambda *a, **k: None)
+    monkeypatch.setattr(round_costs, 'usage_with_round_costs', lambda usage, rounds: usage)
     def fail(task, state, *args, **kwargs):
         state.accumulated_usage = {'prompt_tokens': 4}
         state.api_rounds.append({'round': 2, 'usage': {'prompt_tokens': 4}})

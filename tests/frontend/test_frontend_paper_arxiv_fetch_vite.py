@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -99,11 +98,6 @@ function done(tag) {
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/esbuild dev dependencies required',
-)
 def test_compiled_arxiv_fetch_owner_is_latest_wins_and_destroyable(tmp_path):
     built = tmp_path / 'arxiv-fetch.js'
     compiled = compile_feature_owner(ESBUILD, SOURCE, built, tmp_path)

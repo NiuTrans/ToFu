@@ -3,7 +3,7 @@
 
 WHY
 ---
-Gateway endpoints (Meituan et al.) expose dozens of near-identical rows:
+Gateway endpoints (YourProvider et al.) expose dozens of near-identical rows:
 cloud mirrors of one deployment, and long version series of one line. The
 picker folds them — display-only — using the metadata this module emits. A
 wrong fold here silently hides a model the user configured, so both the

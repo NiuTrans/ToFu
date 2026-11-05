@@ -3,8 +3,9 @@
 Every anchor the Markdown renderer emits without an explicit `target` is
 rewritten to `target="_blank" rel="noopener noreferrer"` so navigation never
 replaces the single-page app. In-page `#anchor` links keep same-tab scrolling
-and `mailto:` keeps its default handler; anchors that already declare a
-target (raw-HTML passthrough) are left alone. The rewrite is part of the
+and `mailto:` keeps its default handler; a target declared in raw model HTML
+is removed by the sanitizer, so those anchors get the same safe pair. The
+rewrite is part of the
 cached render output, so repeat renders of the same text agree.
 
 Runs the REAL renderMarkdown() from the retained markdown section (Node +
@@ -15,11 +16,11 @@ tests/frontend/test_frontend_markdown_backtick_code.py.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
+from tests._jsdom import require_node_modules
 from tests._runtime_sections import native_module_path, runtime_sections_dir
 
 pytestmark = pytest.mark.unit
@@ -37,6 +38,11 @@ const fs = require('fs');
 function load(p){ return fs.readFileSync(p,'utf8'); }
 
 global.marked = require(process.argv[4]);
+// The renderer fails closed to escaped source without a DOM document and a
+// sanitizer; production always has both, so supply real ones from jsdom.
+const __dom = new (require('jsdom').JSDOM)('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
+global.document = __dom.window.document;
+global.DOMPurify = require('dompurify')(__dom.window);
 var BASE_PATH = '';
 var _ensureKatex = function(){};
 
@@ -63,10 +69,11 @@ h = renderMarkdown('[mail](mailto:a@b.c)');
 check('mailto_untouched',
       /<a href="mailto:a@b\.c">/.test(h) && !/target=/.test(h));
 
-// 4. Raw-HTML anchors declaring their own target keep it (passthrough).
+// 4. A raw-HTML anchor's model-declared target is not trusted: the production
+//    sanitizer drops it, so the anchor still gets the safe new-tab pair.
 h = renderMarkdown('<a href="https://example.com" target="_self">x</a>');
-check('explicit_target_kept',
-      /target="_self"/.test(h) && !/target="_blank"/.test(h));
+check('raw_html_target_not_trusted',
+      !/target="_self"/.test(h) && /target="_blank" rel="noopener noreferrer"/.test(h));
 
 // 5. The rewrite is part of the cached output: a second render of the same
 //    text returns the identical string (cache identity, not re-processing).
@@ -78,11 +85,9 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_markdown_link_target_contract():
     marked_cjs = os.path.join(ROOT, 'node_modules', 'marked', 'lib', 'marked.cjs')
-    if not os.path.isfile(marked_cjs):
-        pytest.skip('marked dev-dep not installed (run `npm install`)')
+    require_node_modules('marked')
     harness = os.path.join(HERE, '_md_link_target_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)

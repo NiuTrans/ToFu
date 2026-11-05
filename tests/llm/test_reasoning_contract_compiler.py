@@ -65,6 +65,32 @@ def test_sampling_restored_and_source_unmodified():
     assert extra['chat_template_kwargs'] == {'unrelated': 7}
 
 
+def test_baidu_deployment_requires_enabled_thinking_for_translation():
+    from lib.llm.cache import add_cache_breakpoints
+    from lib.llm.openai_outbound import openai_body_to_chat
+    from lib.model_routing.inference import resolve_inference_profile
+    deployment = {'inference_profile': {'reasoning': {
+        'can_disable': False, 'supported_efforts': ['low', 'high', 'max']},
+        'features': {'chat_cache_breakpoints': 'unsupported'},
+        'source': 'provider_observed'}}
+    creator = {'inference_profile': {'reasoning': {
+        'support': 'supported', 'wire_format': 'thinking_type',
+        'can_disable': True, 'supported_efforts': ['low', 'high', 'max'],
+        'default_effort': 'high'}}}
+    resolved = resolve_inference_profile(model=creator,
+                                         deployment=deployment)
+    body = build_body('deepseek-v4-pro-baidu', [
+        {'role': 'system', 'content': 'Translate faithfully.'},
+        {'role': 'user', 'content': 'Hello from Tofu.'}],
+        thinking_enabled=False, stream=False, inference_profile=resolved)
+    assert body['thinking'] == {'type': 'enabled'}
+    add_cache_breakpoints(body, api_protocol='openai')
+    wire = openai_body_to_chat(body)
+    assert [message['content'] for message in wire['messages']] == [
+        'Translate faithfully.', 'Hello from Tofu.']
+    assert 'cache_control' not in str(wire['messages'])
+
+
 def test_off_degrades_to_enabled_when_cannot_disable_kimi_code():
     # A thinking_type model with can_disable False and no effort ladder cannot
     # honor Off; it must degrade to an enabled control rather than 500 the turn.

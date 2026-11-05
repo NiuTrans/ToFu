@@ -72,20 +72,21 @@ if (typeof window !== 'undefined') runtimeScope.onProjectCleared = onProjectClea
 
 
 // ══════════════════════════════════════════════════════
-// Agent interaction mode — Standard / Plan / Autopilot
+// Agent interaction mode — Standard / Delegate / Plan / Autopilot
 //
-// One radio surface projects the established planMode / autopilotEnabled
+// One radio surface projects the planMode / autopilotEnabled / delegateMode
 // wire flags. Optional project attachment is a separate workspace action.
 // ══════════════════════════════════════════════════════
 
 const _AGENT_MODE_LABEL_KEYS = Object.freeze({
   standard: 'toolbar.standardMode',
+  delegate: 'toolbar.delegateMode',
   plan: 'toolbar.planMode',
   autopilot: 'toolbar.autopilot',
 });
 
 function _paintAgentModeUI() {
-  const mode = resolveAgentMode(planMode, autopilotEnabled);
+  const mode = resolveAgentMode(planMode, autopilotEnabled, delegateMode);
   const workflowSelected = !!activeFlow;
   const trigger = document.getElementById('agentModeToggle');
   if (trigger) {
@@ -117,6 +118,7 @@ function _applyAgentModeUI(mode) {
   const flags = agentModeFlags(mode);
   planMode = flags.planMode;
   autopilotEnabled = flags.autopilotEnabled;
+  delegateMode = flags.delegateMode;
   const autopilotBadge = document.getElementById('autopilotBadge');
   if (autopilotBadge) autopilotBadge.style.display = autopilotEnabled ? '' : 'none';
   _paintAgentModeUI();
@@ -127,7 +129,7 @@ if (typeof window !== 'undefined') runtimeScope._applyAgentModeUI = _applyAgentM
  * setAgentMode(), which also owns persistence and Autopilot disarm. */
 function _applyPlanModeUI(on) {
   _applyAgentModeUI(on ? 'plan'
-    : resolveAgentMode(false, autopilotEnabled));
+    : resolveAgentMode(false, autopilotEnabled, delegateMode));
 }
 if (typeof window !== 'undefined') runtimeScope._applyPlanModeUI = _applyPlanModeUI;
 
@@ -150,10 +152,15 @@ if (typeof window !== 'undefined') {
 function _setAgentModeLocked(on) {
   const locked = !!on;
   const trigger = document.getElementById('agentModeToggle');
+  /* Every projected Turn change re-applies the lock, several times a second
+   * while a reply streams; an unchanged state never rewrites an attribute. */
+  const ariaDisabled = locked ? 'true' : 'false';
   [trigger, document.getElementById('flowToggle')].forEach((control) => {
     if (!control) return;
-    control.disabled = locked;
-    control.setAttribute('aria-disabled', locked ? 'true' : 'false');
+    if (control.disabled !== locked) control.disabled = locked;
+    if (control.getAttribute('aria-disabled') !== ariaDisabled) {
+      control.setAttribute('aria-disabled', ariaDisabled);
+    }
   });
   /* A disabled trigger swallows the click outright — swap the tooltip so the
    * locked state explains itself instead of reading as a dead button. Ride
@@ -162,19 +169,25 @@ function _setAgentModeLocked(on) {
   if (trigger) {
     const titleKey = locked
       ? 'toolbar.agentModeLockedTooltip' : 'toolbar.agentModeTooltip';
-    trigger.setAttribute('data-i18n-title', titleKey);
-    if (typeof t === 'function') trigger.title = t(titleKey);
+    if (trigger.getAttribute('data-i18n-title') !== titleKey) {
+      trigger.setAttribute('data-i18n-title', titleKey);
+    }
+    const title = typeof t === 'function' ? t(titleKey) : trigger.title;
+    if (trigger.title !== title) trigger.title = title;
   }
   document.querySelectorAll(
     '#agentModeMenu button, .mobile-agent-mode-item, #mobileFlow, '
       + '#flowMenuList button',
   )
-    .forEach((item) => { item.disabled = locked; });
+    .forEach((item) => { if (item.disabled !== locked) item.disabled = locked; });
   if (locked) {
     const submenu = document.getElementById('submenuAgentMode');
-    submenu?.classList.remove('open');
-    submenu?.querySelector('.submenu-trigger')?.classList.remove('open');
-    trigger?.setAttribute('aria-expanded', 'false');
+    const submenuTrigger = submenu?.querySelector('.submenu-trigger');
+    if (submenu?.classList.contains('open')) submenu.classList.remove('open');
+    if (submenuTrigger?.classList.contains('open')) submenuTrigger.classList.remove('open');
+    if (trigger && trigger.getAttribute('aria-expanded') !== 'false') {
+      trigger.setAttribute('aria-expanded', 'false');
+    }
     _flowMenuRenderGeneration++;
   }
 }
@@ -283,10 +296,16 @@ function _loadServerConfigAndPopulate() {
 function _refreshServerConfigAfterSave() {
   return _modelPickerStartup.refreshConfig();
 }
+/* Temporary bridge while Settings and composer still share the retained
+ * shell. Remove with that shell; projection/lifecycle stay in the typed owner. */
+function _adoptModelRoutingResponse(response) {
+  return _modelPickerStartup.adoptRouting(response);
+}
 let _modelPickerLastRouting = null;
 const _modelPickerStartup = createModelPickerStartup({
   loadConfig: signal => Api.serverConfig.get({ signal, timeout: 15000 }),
   loadRouting: signal => Api.modelRouting.get({ signal, timeout: 15000 }),
+  routingRevision: response => response?.revision ?? response?.model_routing?.revision,
   onBootReady: callback => {
     window.addEventListener('tofu:boot-ready', callback);
     return () => window.removeEventListener('tofu:boot-ready', callback);
@@ -386,6 +405,8 @@ const _modelPickerStartup = createModelPickerStartup({
 
         if (!routingDocument) throw new Error('Model routing unavailable');
         _modelPickerLastRouting = routingDocument;
+        // Accepted routing is a wake hint; the audio API owns callability.
+        void audioCapabilities.routingAccepted(routingResponse.revision ?? routingDocument.revision);
         _reasoningControls = Array.isArray(routingResponse?.reasoning_controls)
           ? routingResponse.reasoning_controls : undefined;
         const v2Models = _modelRoutingDropdownModels(
@@ -651,17 +672,18 @@ function updateSubmenuCounts() {
   _applyImageGenAvailability();
 
   // Extras drawer count = every orthogonal capability the user turned on.
-  // (Scheduler + Swarm are default tools — no toggles — so they don't count.)
+  // (Scheduler, Swarm and Browser are default tools — no toggles — so they
+  // don't count.)
   const extrasCount = (autoTranslate ? 1 : 0) + (humanGuidanceEnabled ? 1 : 0)
-    + (browserEnabled ? 1 : 0) + (desktopEnabled ? 1 : 0)
-    + (imageGenEnabled ? 1 : 0);
+    + (desktopEnabled ? 1 : 0) + (imageGenEnabled ? 1 : 0);
   _setCount(document.getElementById("submenuExtrasCount"), extrasCount);
   const extrasTrigger = document.querySelector("#submenuExtras .submenu-trigger");
   if (extrasTrigger) extrasTrigger.classList.toggle("has-active", extrasCount > 0);
 
   /* Browser + desktop share ONE merged row (#localControlToggle); its summary
-   * badge counts both. Repaint here so the row reflects state restored from a
-   * conversation, not just state changed through the modal's switches. */
+   * badge counts the desktop switch (the browser has none). Repaint here so
+   * the row reflects state restored from a conversation, not just state
+   * changed through the modal's switch. */
   if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
 
   /* A pill appeared/disappeared → toolbar's intrinsic width shifted by the

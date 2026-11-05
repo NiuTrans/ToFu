@@ -6,35 +6,34 @@ import pytest
 from tests.project_mod.test_project_dispatch_repository import context
 from tests.project_mod.test_coordinator_workers import runtime as runtime, base_runtime
 from tests.project_mod import test_coordinator_request_budget as contracts
-from lib.storage.service import get_storage_client
 
 pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = [pytest.mark.api, pytest.mark.parametrize('semantic_authority', ['sqlite'], indirect=True)]
 
 
 @pytest.fixture
-def segmented_runtime(semantic_authority, runtime):
+def segmented_runtime(detached_semantic_authority, runtime):
+    factory, _, _ = detached_semantic_authority
     r = runtime
     # Preserve the existing contract's frozen human/Turn/task evidence. Only
-    # its in-memory persistence double is replaced by the selected authority.
+    # its in-memory persistence double is replaced by the selected authority;
+    # conversation creation stays on the composed fixture's double.
     for (namespace, key), row in r.c.client.rows.items():
-        get_storage_client(write=True).command('record.put', {'namespace': namespace,
+        factory(write=True).command('record.put', {'namespace': namespace,
             'key': key, 'expected_version': 0, 'value': row['value']}, uuid.uuid4().hex)
-    r.c.repo.client = get_storage_client
+    r.c.repo.client = factory
     r.c.repo.storage_version = 2
     return r
 
 
 SCENARIOS = [
-    contracts.test_initial_coordinator_and_worker_share_model_and_tool_allowance,
-    contracts.test_coordinator_can_plan_from_the_same_passive_usage_projection_as_human,
-    contracts.test_explicit_execution_ceiling_is_shared_only_after_source_registration,
-    contracts.test_grant_cas_fences_race_after_root_output_reservation,
-    contracts.test_model_request_reservations_are_shared_even_with_tokens_remaining,
-    contracts.test_overshoot_is_charged_and_blocks_other_accounts,
-    contracts.test_same_human_input_new_attempt_keeps_spend_and_first_settings,
+    contracts.test_request_account_has_no_policy_and_coordinator_plus_workers_are_summed,
+    contracts.test_spend_far_beyond_the_old_ceiling_is_never_refused,
+    contracts.test_worker_missing_usage_receipt_never_blocks_its_next_call,
+    contracts.test_coordinator_missing_usage_receipt_never_blocks_its_next_call,
+    contracts.test_same_human_input_new_attempt_keeps_one_account,
     contracts.test_plan_counts_own_usage_but_never_delegates,
-    contracts.test_user_selected_allowance_can_scale_above_old_internal_default_ceiling,
+    contracts.test_long_running_records_stay_bounded_and_replays_are_not_double_counted,
 ]
 
 
@@ -43,8 +42,16 @@ def test_existing_conservation_contract_on_segmented_storage(segmented_runtime, 
     scenario(segmented_runtime)
 
 
+@pytest.mark.parametrize('scenario', [
+    contracts.test_request_account_records_workers_without_limiting_concurrency,
+    contracts.test_legacy_issued_worker_policy_does_not_limit_active_workers,
+], ids=lambda scenario: scenario.__name__)
+def test_unlimited_concurrency_on_segmented_storage(segmented_runtime, monkeypatch, scenario):
+    scenario(segmented_runtime, monkeypatch)
+
+
 def test_unknown_ack_remains_charged(segmented_runtime, monkeypatch):
-    contracts.test_unknown_source_write_ack_never_refunds_or_rebinds(segmented_runtime, monkeypatch)
+    contracts.test_unknown_source_write_ack_never_rebinds(segmented_runtime, monkeypatch)
 
 
 def test_live_original_and_worker_accounts_survive_cutover(segmented_runtime):
@@ -52,7 +59,6 @@ def test_live_original_and_worker_accounts_survive_cutover(segmented_runtime):
     r.c.repo.storage_version = 1
     source = contracts.bind(r)
     contracts.spend(r.task, 100)
-    r.args.update(max_tokens=700, max_model_requests=4, max_tool_calls=5)
     worker, assignment = contracts._worker_task(r)
     before = contracts.usage(r, source)
     r.c.repo.storage_version = 2
@@ -60,16 +66,15 @@ def test_live_original_and_worker_accounts_survive_cutover(segmented_runtime):
     contracts.spend(worker, 50)  # This existing physical account triggers cutover.
     r.attempts[assignment['execution']['attemptId']]['status'] = 'completed'
     after = contracts.usage(r, source)
-    assert after['observedTokens'] == after['heldTokens'] == 150
-    assert after['modelRequests'] == after['heldModelRequests'] == 2
+    assert after['tokens'] == 150 and after['usageComplete']
+    assert after['modelRequests'] == 2 and after['activeWorkers'] == 0
     contracts.spend(r.task, 20)
-    assert contracts.usage(r, source)['observedTokens'] == 170
+    assert contracts.usage(r, source)['tokens'] == 170
 
 
 def test_one_request_can_delegate_beyond_the_old_project_lifetime_ceiling(segmented_runtime):
     r = segmented_runtime
-    source = contracts.bind(r, maxTokens=10000, maxModelRequests=1000, maxToolCalls=1000)
-    r.args.update(max_tokens=10, max_model_requests=1, max_tool_calls=1)
+    source = contracts.bind(r)
     conversations = []
     for number in range(132):
         r.args['idempotency_key'] = f'part-{number}'
@@ -80,7 +85,7 @@ def test_one_request_can_delegate_beyond_the_old_project_lifetime_ceiling(segmen
         r.attempts[assignment['execution']['attemptId']]['status'] = 'completed'
     assert len(set(conversations)) == len(r.created) == 132
     assert contracts.usage(r, source)['activeWorkers'] == 0
-    assert contracts.usage(r, source)['heldTokens'] == 0
+    assert contracts.usage(r, source)['tokens'] == 0
 
 
 @pytest.mark.parametrize('group', ['source', 'budget'])

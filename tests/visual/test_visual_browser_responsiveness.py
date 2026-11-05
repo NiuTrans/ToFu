@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Thread
 from urllib.parse import urlparse
 from scripts.frontend_bundle_canary import _api_body, _entry_file, _shell
+from tests._jsdom import require_shipped_graph
 
 pytestmark = [pytest.mark.visual, pytest.mark.auth_mode('open')]
 
@@ -13,6 +14,7 @@ pytestmark = [pytest.mark.visual, pytest.mark.auth_mode('open')]
 def test_recovered_stall_reaches_client_log_relay(browser):
     # Serve the production bundle on loopback with the same in-memory API
     # contract as the publication canary; storage is outside this browser test.
+    require_shipped_graph()
     root = Path(__file__).resolve().parents[2]
     artifact_dir = root / 'static/vite'
     shell = _shell(_entry_file(artifact_dir, artifact_dir / 'manifest.json'))

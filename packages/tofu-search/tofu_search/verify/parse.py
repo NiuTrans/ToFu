@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from importlib import import_module
 
 from tofu_search.log import get_logger
-from tofu_search.search.vertical import arxiv as _arxiv_v
-from tofu_search.search.vertical import doi as _doi_v
 
+# Leaf imports, not via the package: see search/vertical/base.py.
+_arxiv_v = import_module('tofu_search.search.vertical.arxiv')
+_doi_v = import_module('tofu_search.search.vertical.doi')
 logger = get_logger(__name__)
 
 __all__ = ['Citation', 'parse_bibtex', 'parse_references', 'extract_identifiers',

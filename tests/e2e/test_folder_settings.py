@@ -83,7 +83,7 @@ def test_folder_defaults_first_send_readonly_and_existing_chat_isolation(page, m
     field = dialog.locator('.folder-settings-path-field input')
     field.fill(str(root)); field.press('Enter')
     field.fill(str(reference)); field.press('Enter')
-    dialog.locator('.folder-settings-root').nth(1).locator('input[type=checkbox]').check()
+    dialog.locator('.folder-settings-root').nth(1).locator('[data-action="readonly"]').click()
     _save(dialog).click()
     page.wait_for_function("!document.querySelector('dialog:modal')")
     folder = next(row for row in _list(page) if row['name'] == 'Workspace inheritance')
@@ -102,7 +102,7 @@ def test_folder_defaults_first_send_readonly_and_existing_chat_isolation(page, m
     assert captured['readOnlyPaths'] == [str(reference)]
     page.locator(f'.folder-tab[data-folder-id="{folder["id"]}"]').dblclick()
     dialog = _dialog(page)
-    for _ in range(2): dialog.locator('.folder-settings-root').first.locator('button').last.click()
+    for _ in range(2): dialog.locator('.folder-settings-root').first.locator('[data-action="remove"]').click()
     _save(dialog).click(); page.wait_for_function("!document.querySelector('dialog:modal')")
     after = page.evaluate("() => { const c = window.conversations.find(c => c.id === window.activeConvId); return {projectPaths:c.projectPaths,readOnlyPaths:c.readOnlyPaths}; }")
     assert after['projectPaths'] == captured['projectPaths'] and after['readOnlyPaths'] == captured['readOnlyPaths']
@@ -113,7 +113,7 @@ def test_folder_settings_theme_focus_and_narrow_layout(page, theme, width, asser
 
     recent_paths = ['/mnt/workspace/' + ('long-parent/' * 8) + name for name in ('tofu', 'llm-mcp', 'lumix', 'autoharness')]
     page.route('**/api/v4/project/recent', lambda route: route.fulfill(
-        json={'data': {'projects': [{'path': path} for path in recent_paths]}}))
+        json={'data': {'projects': [{'path': path} for path in recent_paths]}, 'meta': {}}))
     page.evaluate('(theme) => { localStorage.setItem("claude_ui_theme", theme); localStorage.setItem("tofu_ui_lang", "en"); }', theme)
     page.reload(); _wait_app_ready(page)
     page.wait_for_function('(theme) => document.documentElement.dataset.theme === theme', arg=theme)
@@ -126,19 +126,18 @@ def test_folder_settings_theme_focus_and_narrow_layout(page, theme, width, asser
     path = dialog.locator('.folder-settings-path-field input')
     path.fill('/workspace/primary/shared'); path.press('Enter')
     path.fill('/workspace/reference/shared'); path.press('Enter')
-    dialog.locator('.folder-settings-root').nth(1).locator('input[type=checkbox]').check()
-    dialog.locator('.folder-settings-recents summary').click()
-    cards = dialog.locator('.folder-settings-recent-list button')
+    dialog.locator('.folder-settings-root').nth(1).locator('[data-action="readonly"]').click()
+    cards = dialog.locator('.folder-settings-recent-list button[data-path]')
     cards.first.wait_for(state='visible')
     assert cards.count() == 4
     assert cards.first.get_attribute('aria-label') == recent_paths[0]
     assert cards.first.locator('.folder-settings-recent-name').inner_text() == 'tofu'
     assert cards.first.locator('.folder-settings-recent-path').evaluate('(el) => getComputedStyle(el).whiteSpace') == 'nowrap'
     layout = dialog.evaluate('''(d) => {
-      const workspace = d.querySelector('.folder-settings-workspace').getBoundingClientRect();
-      const recents = d.querySelector('.folder-settings-recents').getBoundingClientRect();
+      const browser = d.querySelector('.folder-browser').getBoundingClientRect();
+      const rail = d.querySelector('.folder-settings-rail').getBoundingClientRect();
       const save = d.querySelector('button[type=submit]').getBoundingClientRect();
-      return { sideBySide: recents.left >= workspace.right, saveTop: save.top, saveBottom: save.bottom,
+      return { sideBySide: rail.left >= browser.right, saveTop: save.top, saveBottom: save.bottom,
         border: parseFloat(getComputedStyle(d).borderTopWidth), background: getComputedStyle(d).backgroundColor };
     }''')
     assert layout['sideBySide'] == (width > 700)
@@ -165,17 +164,18 @@ def test_directory_browser_selects_acknowledged_directory_without_binding_active
     dialog = _open_create(page); _name(dialog).fill('Browse directory journey')
     directory = tmp_path / 'selectable'; directory.mkdir()
     (directory / 'child').mkdir()
-    dialog.locator('.folder-settings-actions').first.locator('button').nth(1).click()
-    browser = dialog.locator('.folder-settings-browser')
-    location = browser.locator('input[type=text]'); location.fill(str(directory))
+    browser = dialog.locator('.folder-browser')
+    # The filter doubles as a path bar: Enter on a typed path opens it.
+    location = browser.locator('.folder-browser-filter'); location.fill(str(directory))
     location.press('Enter')
     try:
-        browser.get_by_role('button', name='child', exact=True).wait_for(state='visible')
+        browser.locator(f'.folder-browser-row[data-dir-path="{directory / "child"}"]').wait_for(state='visible')
     except Exception as error:
         raise AssertionError({'location': location.input_value(), 'browser': browser.inner_text()}) from error
-    use = browser.locator('.folder-settings-actions button').nth(3)
+    use = browser.locator('.folder-browser-footer button')
     assert use.is_enabled()
     use.click()
+    assert use.is_disabled()
     assert dialog.locator('.folder-settings-root').first.get_attribute('data-path') == str(directory)
     assert _list(page) == []  # selection is a local editor choice, not a write
     _save(dialog).click(); page.wait_for_function("!document.querySelector('dialog:modal')")

@@ -410,6 +410,7 @@ def test_session_start_detector_is_quiet_when_clean(monkeypatch):
 
     class _Clean:
         returncode = 0
+        stdout = conftest._ROOT_DIR + '\n'
     monkeypatch.setattr(conftest.__dict__['subprocess'] if 'subprocess'
                         in conftest.__dict__ else __import__('subprocess'),
                         'run', lambda *a, **k: _Clean(), raising=False)

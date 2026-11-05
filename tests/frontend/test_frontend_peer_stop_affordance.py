@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -39,12 +38,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = _legacy_test_root()
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _PEERS_SRC = os.path.join(JS_DIR, 'project-brain-peers.js')
-
-
-def _node_deps_available():
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 # The harness takes a THIRD argv: the confirm decision ('yes' | 'no').
@@ -135,8 +128,6 @@ def _run(src, confirm):
     raise AssertionError(f'no result line: {proc.stdout}\n{proc.stderr}')
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_stop_present_only_on_running_conv_peer_and_confirmed_abort():
     out = _run(_PEERS_SRC, 'yes')
     # Present only on a running conversation peer.
@@ -155,8 +146,6 @@ def test_stop_present_only_on_running_conv_peer_and_confirmed_abort():
     assert out['navTotal'] == 0, out
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_denied_confirm_does_not_abort():
     """The confirm GATE: a DENIED confirm must NOT call the abort API."""
     out = _run(_PEERS_SRC, 'no')
@@ -165,8 +154,6 @@ def test_denied_confirm_does_not_abort():
     assert out['navTotal'] == 0, out
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_confirm_gate_is_load_bearing(tmp_path):
     """NC: force the confirm to always-resolve-true in a COPY of the source
     (neuter the gate). Now even the 'no' decision runs the abort → proving the

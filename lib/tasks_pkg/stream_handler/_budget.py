@@ -3,8 +3,9 @@
 Groups the tunable knobs that govern abnormal-stream-termination retries:
 
   * ``_PREMATURE_RETRY_MAX_CLASSIC`` / ``_PREMATURE_RETRY_MAX_ZERO_BYTE`` /
-    ``_NO_ACTIONABLE_RETRY_MAX`` / ``_EMPTY_STOP_RETRY_MAX`` /
-    ``_PARTIAL_STREAM_RETRY_MAX`` — the per-signature retry caps.
+    ``_PREMATURE_RETRY_MAX_ZERO_BYTE_STALLED`` /
+    ``_NO_ACTIONABLE_RETRY_MAX`` / ``_EMPTY_STOP_RETRY_MAX`` — the
+    per-signature retry caps.
   * ``_ZERO_BYTE_BACKOFF_BASE_S`` / ``_ZERO_BYTE_BACKOFF_MAX_S`` +
     ``_zero_byte_backoff_seconds`` — the exponential-backoff schedule.
   * ``_interruptible_sleep`` — abort-aware backoff sleep.
@@ -29,7 +30,9 @@ logger = get_logger(__name__)
 #   backoff, same schedule as zero-byte) rather than failing the whole
 #   task on a single dropped connection. Each retry re-bills the prompt
 #   cache + re-generates thinking, so there's still a finite cap as a
-#   runaway guard, but it's generous.
+#   runaway guard, but it's generous. A cut after partial prose or inside
+#   tool arguments is the same failure and shares this budget: the attempt's
+#   output is discarded and the unchanged request is resent.
 #
 #   ── Zero-byte stream anomaly ─────────────────────────────────────
 #   Gateway/proxy opens the SSE connection, returns zero tokens, and
@@ -40,10 +43,24 @@ logger = get_logger(__name__)
 #   (see ``_zero_byte_backoff_seconds``) so we don't hammer a poisoned
 #   upstream pool that is overwhelmingly likely to zero-byte the next
 #   request milliseconds later.  Recurring trigger: ``aws.claude-opus-4.7``
-#   via sankuai gateway.  Retries go through append_event 'phase:retrying'
+#   via example-corp gateway.  Retries go through append_event 'phase:retrying'
 #   so the UI shows a spinner with attempt count.
+#
+#   ── Stalled zero-byte stream ─────────────────────────────────────
+#   The same zero-byte signature, but the attempt consumed at least 60s
+#   of the rolling transport-idle window (default 300s) instead of
+#   closing fast.  The model produced no output, yet every retry burns
+#   that whole window in wall-clock time plus prompt-cache traffic.  The
+#   2026-10-23 claude-opus-5.5/example-corp incident replayed 16 attempts
+#   whose client-observed elapsed time was already at the idle window,
+#   adding ~90 minutes before abnormal_stop.  A zero-byte close after
+#   that long is not the fast gateway close this budget was sized for,
+#   so it gets only the same small alternate-slot budget as the
+#   historical semantic-stall bucket.
+_ZERO_BYTE_STALL_THRESHOLD_MS = 60_000
 _PREMATURE_RETRY_MAX_CLASSIC = 16
 _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
+_PREMATURE_RETRY_MAX_ZERO_BYTE_STALLED = 2
 
 # Historical semantic-timeout records/plugins retain their former bounded
 # recovery budget. Live transports use rolling raw activity and therefore enter
@@ -59,12 +76,6 @@ _NO_ACTIONABLE_RETRY_STREAK_KEY = '_no_actionable_retry_streak'
 # moderately expensive (cache reads + new thinking), so the cap is low.
 _EMPTY_STOP_RETRY_MAX = 2
 
-# Content-bearing stream-cut continuation budget. Unlike an empty/classic
-# retry, this path preserves the already streamed prose and asks the model to
-# continue from that exact prefix. Each continuation is still a newly billed
-# request, so keep the cap deliberately small even though no user text is lost.
-_PARTIAL_STREAM_RETRY_MAX = 2
-
 # Canned-greeting retry budget (upstream returns a "successful" canned
 # greeting incongruent with the conversation tail — see _canned_greeting.py).
 # In the 2026-07-28 incident the failure was intermittent (~50% per round),
@@ -75,7 +86,7 @@ _CANNED_GREETING_RETRY_MAX = 2
 
 # Tool-calls-finish-without-payload retry budget (the gateway reports
 # finish_reason=tool_calls but the stream carried ZERO tool_call deltas —
-# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/sankuai
+# the model's tool calls were lost upstream; 2026-08-06 kimi-k3/example-corp
 # incident, conv msh3qeplzneph5 R3). Ending the turn there delivers a
 # preamble as if it were the conclusion. The poisoned round DID bill
 # prompt + completion tokens (unlike zero-byte), and the failure is

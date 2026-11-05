@@ -2,10 +2,17 @@
 
 Public surface:
   * ``run_compaction_pipeline``             — called from the orchestrator
-    before each LLM API call.
+    before each LLM API call. Its first call in a task, and the next call
+    after a schedule/cancel wake hint, applies an owner-scheduled working-view
+    compaction through the forced manual L2 path.
+  * ``applies_scheduled_compaction``        — whether a task may apply one.
+  * ``settle_scheduled_compaction``         — post-commit: retires that
+    request's durable marker once a stored checkpoint carries its handoff.
   * ``recompose_context_after_compaction`` — rebuilds managed tail context
     after L2 compaction changes the request-local working set.
 """
+
+from contextlib import nullcontext
 
 from lib.log import audit_log, get_logger
 
@@ -15,8 +22,10 @@ from lib.tasks_pkg.compaction._layer1 import micro_compact
 from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
 from lib.tasks_pkg.compaction._timing import compaction_stage_timing
 from lib.tasks_pkg.compaction._tokens import (
+    _TASK_TOOL_SCHEMA,
     _estimate_total_tokens,
     _get_context_limit,
+    _task_text_count_view,
     _usable_context,
 )
 
@@ -127,6 +136,101 @@ def _maybe_record_context_budget(
 #  context (project context, memory, swarm prompt) is re-injected to ensure
 #  the model doesn't lose critical instructions.
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def applies_scheduled_compaction(task: dict) -> bool:
+    """Only checkpoint-publishing root turns apply a scheduled compaction.
+
+    Pure task inspection (the task registry evaluates it under its lock).
+    """
+    if (not task.get('convId') or not task.get('_turnId')
+            or task.get('_transientRuntime')):
+        return False
+    from lib.tasks_pkg.invocation import is_child_invocation
+    from lib.tasks_pkg.model_replay import publishes_completed_checkpoint
+    config = task.get('config') or {}
+    compaction = config.get('compaction')
+    if isinstance(compaction, dict) and compaction.get('disableForceCompact'):
+        return False
+    return not is_child_invocation(task) and publishes_completed_checkpoint(config)
+
+
+def _read_scheduled_marker(task: dict):
+    """One owner-scoped read per task (and per wake hint)."""
+    if not applies_scheduled_compaction(task):
+        return None
+    try:
+        from lib.agent_core.store import get_conversation_store
+        from lib.tasks_pkg.compaction._context_lifecycle import (
+            scheduled_working_view_compaction,
+        )
+        from lib.tasks_pkg.manager import task_user_id
+        return scheduled_working_view_compaction(
+            task['convId'], store=get_conversation_store(), user_id=task_user_id(task))
+    except Exception as e:
+        # The durable marker survives; the next task reads it again.
+        logger.warning('[Pipeline] scheduled compaction marker unavailable: %s',
+                       type(e).__name__)
+        return None
+
+
+def pending_scheduled_compaction(task: dict | None, messages: list) -> str:
+    """Return the owner-scheduled request this working view still lacks, or ''.
+
+    Each request is attempted once per task: a failed or declined attempt
+    keeps the durable marker for the next task. A schedule or cancel made
+    while the task runs leaves a wake hint (``hint_scheduled_compaction``),
+    so the next model call re-reads the durable marker. A view that already
+    carries the request's handoff (restored after an interruption) is not
+    compacted again.
+    """
+    if not task:
+        return ''
+    if task.pop('_scheduledCompactionRefresh', False):
+        task.pop('_scheduledWorkingViewCompaction', None)
+    if '_scheduledWorkingViewCompaction' not in task:
+        task['_scheduledWorkingViewCompaction'] = _read_scheduled_marker(task) or None
+    marker = task['_scheduledWorkingViewCompaction']
+    if not marker or marker['requestId'] == task.get('_scheduledCompactionAttempted'):
+        return ''
+    from lib.tasks_pkg.compaction._handoff import handoff_scheduled_request_ids
+    if marker['requestId'] in handoff_scheduled_request_ids(messages):
+        return ''
+    return marker['requestId']
+
+
+def settle_scheduled_compaction(task: dict) -> bool:
+    """Retire the marker once ordinary publication stored a view carrying it.
+
+    Called after terminal persistence. Only a stored checkpoint whose messages
+    carry the request's handoff adopts it; every other outcome leaves the
+    marker for the next model call.
+    """
+    marker = task.get('_scheduledWorkingViewCompaction')
+    if not marker or task.get('_modelReplayPublishStatus') != 'stored':
+        return False
+    from lib.tasks_pkg.compaction._handoff import handoff_scheduled_request_ids
+    if marker['requestId'] not in handoff_scheduled_request_ids(task.get('messages') or []):
+        return False
+    try:
+        from lib.agent_core.store import get_conversation_store
+        from lib.tasks_pkg.compaction._context_lifecycle import (
+            clear_scheduled_working_view_compaction,
+        )
+        from lib.tasks_pkg.manager import task_user_id
+        cleared = clear_scheduled_working_view_compaction(
+            task['convId'], store=get_conversation_store(),
+            user_id=task_user_id(task), request_id=marker['requestId'])
+    except Exception as e:
+        # Retained marker: the next task sees the handoff and only retries the clear.
+        logger.warning('[Pipeline] scheduled compaction marker clear failed: %s',
+                       type(e).__name__)
+        return False
+    if cleared:
+        task['_scheduledWorkingViewCompaction'] = None
+        logger.info('[Pipeline] conv=%s scheduled compaction %s adopted',
+                    str(task.get('convId') or '')[:8], marker['requestId'][:8])
+    return cleared
+
 
 def recompose_context_after_compaction(messages: list, task: dict | None = None):
     """Recompose all managed context after compaction.
@@ -271,7 +375,10 @@ def run_compaction_pipeline(
     if _disable_l1 and 'steps' not in _l1_kwargs:
         saved = 0
     else:
-        with compaction_stage_timing('l1', task, current_round):
+        # L1's hot-tail and telemetry estimates read the task's memo too.
+        _l1_view = _task_text_count_view(task, _TASK_TOOL_SCHEMA)
+        with compaction_stage_timing('l1', task, current_round), (
+                _l1_view.estimating() if _l1_view is not None else nullcontext()):
             saved = micro_compact(messages, conv_id=conv_id, task=task, **_l1_kwargs)
 
     if task and task.get('aborted'):
@@ -295,7 +402,27 @@ def run_compaction_pipeline(
     # double-truncate, so it does not set the flag.
     _l2_measurement: dict = {}
     compacted = False
-    if not _disable_force:
+    # An owner-scheduled working-view compaction (protected conversations,
+    # whose canonical Turns are never rewritten) runs the forced manual L2
+    # path at the first model call; ordinary publication then adopts it.
+    scheduled_request = '' if _disable_force else pending_scheduled_compaction(task, messages)
+    if scheduled_request:
+        # The claim is atomic with cancel/schedule hints: a request withdrawn
+        # before this point is re-read (and dropped) instead of applied.
+        from lib.tasks_pkg.manager import claim_scheduled_compaction
+        while scheduled_request and not claim_scheduled_compaction(task, scheduled_request):
+            scheduled_request = pending_scheduled_compaction(task, messages)
+    if scheduled_request:
+        with compaction_stage_timing('l2', task, current_round):
+            compacted = force_compact_if_needed(
+                messages, task=task, force=True,
+                _compaction_trigger='manual',
+                _compaction_reason='owner-scheduled working-view compaction',
+                _scheduled_request_id=scheduled_request,
+                _compaction_round=current_round,
+                _compaction_remaining_api_rounds=remaining_api_rounds,
+                _measurement_out=_l2_measurement)
+    elif not _disable_force:
         with compaction_stage_timing('l2', task, current_round):
             compacted = force_compact_if_needed(
                 messages, task=task, _allow_head_truncate_fallback=True,
@@ -320,7 +447,7 @@ def run_compaction_pipeline(
                     task, current_round,
                     int(_l2_measurement.get('message_tokens') or 0),
                     int(_l2_measurement.get('message_count') or 0),
-                    messages, trigger='auto')
+                    messages, trigger='manual' if scheduled_request else 'auto')
 
     if task and task.get('aborted'):
         return
@@ -366,15 +493,14 @@ def run_compaction_pipeline(
     # Notify cache tracker ONLY for mutations that actually touch the cached
     # PREFIX, so the expected cache_read drop isn't flagged as a break.
     #
-    # Default L1 (micro_compact, saved>0) is cache-SAFE by construction:
-    #   every built-in step gates on ``ctx.is_in_cache_prefix(idx)`` and skips
-    #   messages[0:get_cache_prefix_count]. It edits only COLD results that
-    #   have NOT yet been cached (or, idempotently, ones already byte-identical
-    #   in the prefix). So it does NOT cause a drop and must NOT raise
-    #   compaction_pending — doing so blanket-suppresses detect_cache_break on
-    #   exactly the transient rounds (cold start, post-eviction, big fan-out)
-    #   where a REAL break is most likely, masking it. (See memory
-    #   l1-compaction-notify-masks-detection.)
+    # Default L1 (micro_compact, saved>0) never edits the previous request's
+    #   bytes (messages[0:get_cache_prefix_count]) except one admitted edit of
+    #   that request's last tool step, which micro_compact prices and then
+    #   advertises itself as a BOUNDED rewrite (intended_rewrite_index). So it
+    #   must NOT raise compaction_pending here — a whole-prefix notice
+    #   blanket-suppresses detect_cache_break on exactly the transient rounds
+    #   (cold start, post-eviction, big fan-out) where a REAL break is most
+    #   likely, masking it. (See memory l1-compaction-notify-masks-detection.)
     #
     #   We DO notify for:
     #     * L2 force-compact (``compacted``) — rebuilds/drops prefix messages.

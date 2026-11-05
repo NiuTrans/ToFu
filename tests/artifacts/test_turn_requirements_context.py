@@ -1,7 +1,12 @@
 """Current owner requirements survive common admission and wire construction."""
+
+import lib.llm as _fallback_llm
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
 import copy
 import json
-from concurrent.futures import Future
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -179,44 +184,160 @@ def test_current_generation_reaches_real_http_requests_through_native_context_po
         assert not thread.is_alive()
 
 
-def test_timeout_abort_and_read_failure_cannot_fall_back_to_old_requirements(subject, quiet_notes, monkeypatch):
+def hold_requirement_reads(monkeypatch):
+    """Requirement reads park in their worker until released, then read real storage."""
+    real = turns.read_execution_requirements
+    gate = SimpleNamespace(release=threading.Event(), started=[], finished=threading.Event())
+    def held(*args, **kwargs):
+        gate.started.append(args)
+        try:
+            gate.release.wait(30)
+            return real(*args, **kwargs)
+        finally:
+            gate.finished.set()
+    monkeypatch.setattr(turns, 'read_execution_requirements', held)
+    monkeypatch.setattr(context, '_CONTEXT_PROVIDER_DEADLINE_SECONDS', .05)
+    return gate
+
+
+def in_thread(call):
+    outcome = {}
+    def run():
+        try:
+            outcome['value'] = call()
+        except BaseException as error:  # the spec inspects the exact refusal
+            outcome['error'] = error
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, outcome
+
+
+def eventually(predicate, timeout=10.0):
+    stop = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < stop, 'condition not reached'
+        time.sleep(.01)
+
+
+def test_slow_requirement_read_waits_as_storage_then_admits_its_fresh_result(subject, quiet_notes, monkeypatch):
+    from lib.tasks_pkg.explained_wait import explained_wait
+    configure(subject)
+    _measure_chars(monkeypatch, ceiling=100_000)
+    gate = hold_requirement_reads(monkeypatch)
+    messages = [{'role': 'user', 'content': 'Continue'}]
+    thread, outcome = in_thread(lambda: admission.enforce_dispatch_prompt_limit(
+        messages, [], subject.task, round_num=4, model='test-model'))
+    eventually(lambda: (subject.task.get('phase') or {}).get('attempt', 0) >= 3)
+    # Several context deadlines elapsed: the task is still running, explains
+    # its silence as storage, and retained its one in-flight read.
+    assert thread.is_alive() and not outcome
+    assert explained_wait(subject.task) == 'storage'
+    waiting = subject.task['phase']
+    assert waiting['phase'] == 'retrying' and waiting['detail'] == 'Waiting for storage'
+    assert waiting['storageOperation'] == 'turn requirements read'
+    assert len(gate.started) == 1
+    assert not subject.task.get('aborted') and not subject.task.get('error')
+    configure(subject, objective='Changed while storage was slow')
+    gate.release.set()
+    thread.join(10)
+    assert not thread.is_alive() and 'error' not in outcome
+    assert outcome['value']['totalTokens'] > 0
+    assert 'Changed while storage was slow' in encoded(messages)
+    assert not subject.task['_storageWaits'] and subject.task.get('phase') is None
+    assert explained_wait(subject.task) == ''
+
+
+@pytest.mark.parametrize('cause', ['user_stop', 'server_shutdown', 'owner_stop'])
+def test_stop_during_requirement_wait_cancels_promptly_without_stale_or_late_requirements(
+        subject, quiet_notes, monkeypatch, cause):
     configure(subject)
     messages = [{'role': 'user', 'content': 'Continue'}]; refresh(subject, messages)
     original = copy.deepcopy(messages)
-    future = Future(); future.set_running_or_notify_cancel()
-    monkeypatch.setattr(context.context_provider_executor, 'submit', lambda *a, **kw: future)
-    monkeypatch.setattr(context, '_CONTEXT_PROVIDER_DEADLINE_SECONDS', .01)
-    with pytest.raises(TimeoutError): refresh(subject, messages)
-    future.set_result({'late': True})
+    subject.task['abort_event'] = threading.Event()
+    owner_stopped = threading.Event()
+    # A delegated agent observes its owner's Stop only through this probe.
+    subject.task['_invocationAbortCheck'] = owner_stopped.is_set
+    gate = hold_requirement_reads(monkeypatch)
+    configure(subject, objective='Never admitted after Stop')
+    thread, outcome = in_thread(lambda: refresh(subject, messages))
+    eventually(lambda: subject.task.get('_storageWaits'))
+    stopped = time.monotonic()
+    if cause == 'owner_stop':
+        owner_stopped.set()
+    else:
+        if cause == 'server_shutdown':
+            # The same fields quiesce_running_tasks publishes at shutdown.
+            subject.task.update(aborted=True, _abort_reason='server_shutdown')
+        subject.task['abort_event'].set()
+    thread.join(5)
+    assert not thread.is_alive() and time.monotonic() - stopped < 2
+    # Shutdown interrupts an effect-free read; it is not a requirement failure.
+    assert isinstance(outcome.get('error'), AbortedError)
+    assert not subject.task['_storageWaits']
+    gate.release.set()
+    assert gate.finished.wait(10)
+    assert messages == original and 'Never admitted after Stop' not in encoded(messages)
+
+
+def test_transient_storage_failure_retries_with_a_fresh_requirement_read(subject, quiet_notes, monkeypatch):
+    configure(subject)
+    real = turns.read_execution_requirements
+    calls = []
+    def unavailable_once(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise StorageError('database_unavailable', 'storage.v2 authority is unavailable')
+        return real(*args, **kwargs)
+    monkeypatch.setattr(turns, 'read_execution_requirements', unavailable_once)
+    messages = [{'role': 'user', 'content': 'Continue'}]
+    assert refresh(subject, messages) is not None
+    assert len(calls) == 2 and 'Deliver a checked report' in encoded(messages)
+    assert not subject.task['_storageWaits'] and not subject.task.get('error')
+
+
+@pytest.mark.parametrize('failure', [
+    LifecycleNotFound('Turn execution was superseded'),
+    PermissionError('Turn requirements owner mismatch'),
+    ValueError('Malformed requirement record'),
+    StorageError('database_forbidden', 'authority scope mismatch'),
+    RuntimeError('storage unavailable'),
+], ids=['missing-turn', 'permission', 'malformed', 'storage-refusal', 'unclassified'])
+def test_permanent_requirement_failure_still_refuses_with_its_typed_error(
+        subject, quiet_notes, monkeypatch, failure):
+    configure(subject)
+    messages = [{'role': 'user', 'content': 'Continue'}]; refresh(subject, messages)
+    original = copy.deepcopy(messages)
+    calls = []
+    def refused(*args, **kwargs):
+        calls.append(args)
+        raise failure
+    monkeypatch.setattr(turns, 'read_execution_requirements', refused)
+    with pytest.raises(type(failure)) as caught:
+        refresh(subject, messages)
+    assert caught.value is failure and len(calls) == 1
     assert messages == original
-    subject.task['aborted'] = True
-    with pytest.raises(AbortedError): refresh(subject, messages)
-    subject.task['aborted'] = False
-    failed = Future(); failed.set_exception(RuntimeError('storage unavailable'))
-    monkeypatch.setattr(context.context_provider_executor, 'submit', lambda *a, **kw: failed)
-    with pytest.raises(RuntimeError, match='storage unavailable'): refresh(subject, messages)
-    assert messages == original
+    assert not subject.task.get('_storageWaits') and subject.task.get('phase') is None
 
 
 def test_reactive_retry_restores_requirements_and_refuses_unavailable_snapshot(subject, quiet_notes, monkeypatch):
     from lib.tasks_pkg.compaction import api as compaction
     from lib.tasks_pkg.llm_fallback import _call as fallback
-    from lib.cgroup_guard import MemoryPressureError
+    from lib.llm.llm_errors import PromptTooLongError
     configure(subject)
     def compact(messages, **kwargs):
-        messages[:] = [{'role': 'user', 'content': 'Shortened after memory pressure'}]
+        messages[:] = [{'role': 'user', 'content': 'Shortened after provider overflow'}]
         return True
     monkeypatch.setattr(compaction, 'reactive_compact', compact)
     messages = [{'role': 'user', 'content': 'Continue'}]
-    body = fallback._prepare_reactive_retry_body(subject.task, {}, 'test-model', messages, [],
-        'medium', False, MemoryPressureError('memory'), 'test')
+    body = _fallback_recovery._prepare_reactive_retry_body(subject.task, {}, 'test-model', messages, [],
+        'medium', False, PromptTooLongError('too long'), 'test')
     assert body is not None and 'Deliver a checked report' in encoded(body)
     def unavailable(*a, **kw): raise TimeoutError('requirements unavailable')
     monkeypatch.setattr(context, 'refresh_turn_requirements', unavailable)
-    monkeypatch.setattr(fallback, 'build_body', lambda *a, **kw: pytest.fail('No incomplete request'))
+    monkeypatch.setattr(_fallback_llm, 'build_body', lambda *a, **kw: pytest.fail('No incomplete request'))
     with pytest.raises(TimeoutError, match='requirements unavailable'):
-        fallback._prepare_reactive_retry_body(subject.task, {}, 'test-model', messages, [],
-            'medium', False, MemoryPressureError('memory'), 'test')
+        _fallback_recovery._prepare_reactive_retry_body(subject.task, {}, 'test-model', messages, [],
+            'medium', False, PromptTooLongError('too long'), 'test')
 
 
 @pytest.mark.parametrize('unavailable', [False, True])

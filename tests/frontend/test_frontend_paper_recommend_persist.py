@@ -24,12 +24,12 @@ Skips cleanly when node/jsdom dev-deps are absent.
 from contextlib import ExitStack
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 
 import pytest
 from tests._paper_vite import compiled_typescript
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -39,19 +39,11 @@ LIBRARY_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'library.ts')
 RECOMMEND_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'recommend.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
-
-
-def _node_deps_available():
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 @pytest.fixture(scope='module')
 def native_owners():
-    if not _node_deps_available() or not os.path.isfile(ESBUILD):
-        pytest.skip('node + jsdom + vite test bundler dev dependencies required')
+    require_node_modules('jsdom', 'vite')
     with ExitStack() as stack:
         built = tuple(
             stack.enter_context(compiled_typescript(
@@ -220,8 +212,6 @@ def _run(recommend_js: str, library_js: str):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_grounded_card_auto_saves(native_owners):
     out = _run(*native_owners)
     assert out['after_first_count'] == 1, 'grounded card should create exactly one bookshelf row'
@@ -230,15 +220,11 @@ def test_grounded_card_auto_saves(native_owners):
     assert out['active_not_stolen'], 'a background save must not steal the active-paper pointer'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_null_arxiv_card_is_skipped(native_owners):
     out = _run(*native_owners)
     assert out['null_skipped'], 'a card with null arxiv_id must NOT be persisted'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_dedup_whole_library(native_owners):
     out = _run(*native_owners)
     assert out['dedup_no_new_row'], 'a versioned dup of an existing id must not create a second row'
@@ -246,8 +232,6 @@ def test_dedup_whole_library(native_owners):
     assert out['read_not_downgraded'], 'a read paper must never be downgraded to recommended'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_lazy_ingest_in_place_no_duplicate(native_owners):
     out = _run(*native_owners)
     assert out['lit_row_id'], 'expected a lightweight Paper A row to click'
@@ -260,15 +244,11 @@ def test_lazy_ingest_in_place_no_duplicate(native_owners):
         'the upgraded row must flip from recommended to a normal paper'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_native_reuse_contract_is_explicit(native_owners):
     out = _run(*native_owners)
     assert out['upgrade_no_new_row'] and out['upgrade_same_row_id']
 
 
-@pytest.mark.skipif(not _node_deps_available() or not os.path.isfile(ESBUILD),
-                    reason='node + jsdom + vite test bundler dev-deps not installed')
 def test_vite_library_preserves_recommend_persistence_contract(native_owners):
     out = _run(*native_owners)
     assert out['after_first_count'] == 1

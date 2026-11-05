@@ -424,6 +424,11 @@ def sweep_conversation_translations(
                     continue
                 if row.get("status") in {"pending", "running", "waiting_for_user"}:
                     continue
+                if row.get("actor") == "human":
+                    # The human authored it, and a Coordinator request pins
+                    # its exact projection revision as authority: a display
+                    # translation must never rewrite an input Turn.
+                    continue
                 projection = row.get("projection") or {}
                 content = str(projection.get("content") or "").strip()
                 if not content:

@@ -166,6 +166,116 @@ class TestSystemStructure(unittest.TestCase):
             '<system-reminder>', out['messages'][-1]['content'][0]['text'])
 
 
+def _wire_markers(body):
+    """``(segment, ttl)`` per cache_control marker, in Anthropic's prefix
+    order tools → system → messages (a bare marker is the 5m default)."""
+    found = []
+
+    def _take(segment, block):
+        cc = block.get('cache_control') if isinstance(block, dict) else None
+        if cc:
+            found.append((segment, cc.get('ttl', '5m')))
+
+    for tool in body.get('tools') or []:
+        _take('tools', tool)
+    system = body.get('system')
+    for block in system if isinstance(system, list) else []:
+        _take('system', block)
+    for message in body.get('messages') or []:
+        content = message.get('content')
+        for block in content if isinstance(content, list) else []:
+            _take('messages', block)
+    return found
+
+
+class TestSystemCacheMarker(unittest.TestCase):
+    """add_cache_breakpoints marks the system prefix BEFORE the cloak rebuilds
+    system[]. The rebuilt prefix is byte-stable, so the marker must move onto
+    its LAST block instead of vanishing with the replaced blocks — otherwise
+    the stable tools+system prefix never gets its own (1h) cache entry."""
+
+    _MARKER = {'type': 'ephemeral', 'ttl': '1h'}
+
+    def _marked_body(self):
+        body = _anthropic_body()
+        body['system'][-1]['cache_control'] = dict(self._MARKER)
+        return body
+
+    def test_marker_reapplied_to_last_rebuilt_system_block(self):
+        body, _ = apply_claude_cloak(self._marked_body())
+        self.assertEqual(body['system'][-1].get('cache_control'), self._MARKER)
+        self.assertEqual(_wire_markers(body), [('system', '1h')])
+
+    def test_unmarked_system_gains_no_marker(self):
+        for system in (_anthropic_body()['system'], 'Plain string system prompt.'):
+            body = _anthropic_body()
+            body['system'] = system
+            out, _ = apply_claude_cloak(body)
+            self.assertEqual(_wire_markers(out), [])
+
+    def test_marked_prefix_is_byte_stable_across_rounds(self):
+        """The billing header depends only on the FIRST system text (no nonce,
+        clock or randomness), so a later round with revised operator rules and
+        more history rebuilds byte-identical system[] — the marker anchors an
+        entry later rounds can read back."""
+        first, _ = apply_claude_cloak(self._marked_body())
+        later_body = self._marked_body()
+        later_body['system'][-1]['text'] = 'Operator rules, revised this round.'
+        later_body['messages'].append(
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'next'}]})
+        later, _ = apply_claude_cloak(later_body)
+        self.assertEqual(json.dumps(first['system'], sort_keys=True),
+                         json.dumps(later['system'], sort_keys=True))
+
+    def test_pipeline_keeps_one_system_marker_within_budget_and_ttl_order(self):
+        """add_cache_breakpoints → openai_body_to_anthropic → cloak: the tools
+        and conversation markers are untouched, the system marker(s) collapse
+        onto ONE rebuilt block, the total stays <= Anthropic's 4-marker
+        ceiling, and no 1h marker follows a 5m one."""
+        import lib as _lib
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        from lib.llm.cache import add_cache_breakpoints
+
+        first_text = 'You are Tofu, a self-hosted AI assistant.'
+        for system_content in (
+                first_text,
+                [{'type': 'text', 'text': first_text},
+                 {'type': 'text', 'text': 'Memory block.'},
+                 {'type': 'text', 'text': 'Swarm block.'}]):
+            with self.subTest(system=type(system_content).__name__):
+                openai_body = {
+                    'model': 'claude-opus-4-5-20251101',
+                    'messages': [
+                        {'role': 'system', 'content': system_content},
+                        {'role': 'user', 'content': 'hi'},
+                        {'role': 'assistant', 'content': '', 'tool_calls': [
+                            {'id': 'tu1', 'type': 'function', 'function': {
+                                'name': 'bash', 'arguments': '{"command": "ls"}'}}]},
+                        {'role': 'tool', 'tool_call_id': 'tu1', 'content': 'ok'},
+                    ],
+                    'tools': [{'type': 'function', 'function': {
+                        'name': 'bash', 'description': 'run',
+                        'parameters': {'type': 'object', 'properties': {}}}}],
+                }
+                with mock.patch.object(_lib, 'CACHE_EXTENDED_TTL', True,
+                                       create=True):
+                    add_cache_breakpoints(openai_body, api_protocol='anthropic')
+                anthropic_body = openai_body_to_anthropic(openai_body)
+                before = _wire_markers(anthropic_body)
+                self.assertIn(('system', '1h'), before)
+
+                cloaked, _ = apply_claude_cloak(anthropic_body)
+                after = _wire_markers(cloaked)
+
+                self.assertEqual(after, (
+                    [m for m in before if m[0] == 'tools']
+                    + [('system', '1h')]
+                    + [m for m in before if m[0] == 'messages']))
+                self.assertLessEqual(len(after), 4)
+                ttls = [ttl for _segment, ttl in after]
+                self.assertEqual(ttls, sorted(ttls, key=lambda t: t != '1h'))
+
+
 class TestToolRename(unittest.TestCase):
 
     def test_request_side_rename_and_reverse_map(self):

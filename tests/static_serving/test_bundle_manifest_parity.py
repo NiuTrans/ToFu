@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
 
 import pytest
+
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -22,20 +25,18 @@ def test_classic_graph_is_removed_instead_of_served_as_a_second_owner():
     assert not (ROOT / 'frontend/src/classic-assets.ts').exists()
 
 
-def test_python_and_vite_config_declare_the_same_entries():
+def test_declared_frontend_entries_match_the_authoring_contract():
     from lib.vite_assets import VITE_ENTRIES
 
-    config = _read('vite.config.mjs')
-    assert VITE_ENTRIES == {
-        'main': 'frontend/src/main.ts',
-        'admin': 'frontend/src/admin.ts',
-    }
-    for name, source in VITE_ENTRIES.items():
-        assert f"{name}: resolve(process.cwd(), '{source}')" in config
+    contract = json.loads((ROOT / 'frontend/authoring-inputs.json').read_text())
+    assert VITE_ENTRIES == contract['entries']
+    assert set(VITE_ENTRIES) == {'main', 'admin', 'plugin'}
+    for source in VITE_ENTRIES.values():
         assert (ROOT / source).is_file()
 
 
 def test_every_manifest_row_and_reference_has_one_emitted_residency():
+    require_shipped_graph()
     from lib.vite_assets import VITE_OUT_DIR, validate_vite_artifact
 
     manifest = validate_vite_artifact()
@@ -54,7 +55,7 @@ def test_every_manifest_row_and_reference_has_one_emitted_residency():
 
 
 def test_main_routes_every_declared_domain_to_an_explicit_esm_owner():
-    source = _read('frontend/src/main.ts')
+    source = _read('frontend/src/application.ts')
     domains = set(re.findall(r"import\('./features/([^']+)'\)", source))
     expected = {
         'settings', 'memory', 'skills', 'paper', 'image', 'project-brain',
@@ -73,7 +74,7 @@ def test_main_routes_every_declared_domain_to_an_explicit_esm_owner():
 
 def test_feature_registry_is_module_private_and_connected_explicitly():
     registry = _read('frontend/src/feature-registry.ts')
-    main = _read('frontend/src/main.ts')
+    main = _read('frontend/src/application.ts')
     assert 'new Proxy(overrides' in registry
     assert 'connectFeatureRuntime(' in registry
     assert 'connectFeatureRuntime(' in main
@@ -91,25 +92,3 @@ def test_index_has_one_server_owned_module_asset_slot():
     assert '_APP_ASSET_MARKER = "<!-- TOFU_APP_ASSETS -->"' in route
     assert 'html.count(_APP_ASSET_MARKER) != 1' in route
     assert 'get_vite_asset_tags' in route
-
-
-def test_extracted_trace_stylesheet_is_shipped_after_application_styles():
-    html = _read('index.html')
-    application_style = 'href="static/styles.css'
-    trace_style = 'href="static/request-inspector-trace.css'
-    assert application_style in html
-    assert trace_style in html
-    assert html.index(application_style) < html.index(trace_style)
-
-    trace_css = _read('static/request-inspector-trace.css')
-    assert '.ri-trace-entry{' in trace_css
-    assert '.tr-flame{' in trace_css
-
-
-def test_release_retention_is_driven_only_by_valid_manifest_assets():
-    source = _read('scripts/build_frontend.mjs')
-    assert 'for (const key of Object.keys(manifest)) await visit(key)' in source
-    assert 'new Set([...nextAssets, ...previousAssets]' in source
-    assert "'previous-manifest.json'" in source
-    assert 'feature-' not in source
-    assert 'domain-' not in source

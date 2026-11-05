@@ -3,7 +3,9 @@
 ``tools.nativeExposure=routed`` is the shipped default; ``full`` bypasses
 this module.  The routed arm selects tool families from the latest user
 request and explicit feature toggles.  Safety-critical/custom and
-progressive MCP surfaces are never hidden by the router.
+progressive MCP surfaces are never hidden by the router.  The registry
+applies the selection to eager families only: searchable families stay
+candidates for provider/local deferral (``assemble_tool_list``).
 """
 
 from __future__ import annotations
@@ -23,9 +25,15 @@ from lib.tools.discovery_vocabulary import route_capability_aliases
 # while a V2 result may name those functions on any source-tool round.
 # Background lifecycle control must outlive launch intent; its builder still
 # enforces runtime feature gates, and dispatch enforces task authority.
-_ALWAYS = frozenset({'read_files', 'inspect_image', 'knowledge', 'skills',
+# Interrupted-publication recovery is named by the failed write's result, so
+# inspect_tool_effect rides _ALWAYS for the same reason as artifact reads.
+# read_files' video/audio refusal, fetch_url's staged video/audio note and the
+# page-media inventory name inspect_video, so it rides _ALWAYS beside inspect_image.
+_ALWAYS = frozenset({'read_files', 'inspect_image', 'inspect_video',
+                     'knowledge', 'skills',
                      'todo', 'mcp', 'custom', 'swarm', 'background',
-                     'tool_result_artifacts', 'timer_watcher'})
+                     'tool_result_artifacts', 'timer_watcher',
+                     'tool_effect_inspection'})
 
 _KEYWORDS: dict[str, tuple[str, ...]] = {
     'search': ('search', 'research', 'browse', 'online', 'latest', 'news',
@@ -123,7 +131,7 @@ def routed_native_spec_keys(ctx: Any, *, specs: Any = ()) -> set[str]:
         # so native/full exposure paths can defer it provider-side instead of
         # dropping it. create_project is no longer a model-facing tool at all
         # (the absolute-path-write auto-register covers the useful case).
-        selected.update({'conv_ref', 'project_brain', 'project_brain_write'})
+        selected.update({'conv_ref', 'project_integration'})
     if _matches(text, 'search'):
         selected.update({'search', 'fetch', 'search_settings'})
     if _matches(text, 'browser'):
@@ -136,14 +144,11 @@ def routed_native_spec_keys(ctx: Any, *, specs: Any = ()) -> set[str]:
         selected.update({'motion_video', 'produce', 'page_preview'})
     if _matches(text, 'page_preview'):
         selected.add('page_preview')
-    if _matches(text, 'conversation') or any(
-            isinstance(message, dict)
-            and (message.get('convRefs') or message.get('convRefTexts'))
-            for message in (getattr(ctx, 'messages', None) or [])):
+    if _matches(text, 'conversation') or getattr(ctx, 'has_conv_ref', False):
         # A conversation/coordination mention wants the whole family visible:
         # open-a-sibling (conv_ref) AND the brain write surface (claim an
         # epic, message a peer) — the read half already rides project mode.
-        selected.update({'conv_ref', 'project_brain', 'project_brain_write'})
+        selected.update({'conv_ref', 'project_integration'})
     if _matches(text, 'memory'):
         selected.add('memory')
     if _matches(text, 'scheduler'):

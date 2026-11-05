@@ -2,7 +2,7 @@
 """Outbound Anthropic Messages API adapter.
 
 The rest of Tofu speaks OpenAI Chat Completions internally. Some gateways
-(e.g. the sankuai AIGC gateway's Claude Code app) only accept the
+(e.g. the example-corp AIGC gateway's Claude Code app) only accept the
 **Anthropic Messages API** (``POST /v1/messages``) for certain models.
 This module translates a fully-built OpenAI request body into an Anthropic
 request, and translates the Anthropic response / SSE stream back into the

@@ -34,6 +34,9 @@ DB, cleaned up after):
  11. Route registration pins /api/v1/tasks/<id>/trace on the v1 blueprint.
  12. User-visible phase history and browser paint/transport receipts remain
      idempotent, bounded, content-free, and byte-capped.
+ 13. A failed event read is never an empty log: the reader raises, live
+     folds cannot report "expired", and settlement freezes an explicit
+     ``event-read-failed`` partial marker instead of a zero-round fold.
 
 NEUTER: make ``_disjoint_summary`` attribute every segment to 'llmMs' →
 the sum-to-total assertion flips red (proving the partition is
@@ -96,12 +99,19 @@ def _assert_strict_accounting(doc):
     gaps + covered = the whole turn interval."""
     s = doc['summary']
     parts = [s['llmMs'], s['toolMs'], s['waitMs'], s['compactionMs'],
-             s['approvalWaitMs'], s.get('flowStepMs', 0), s['unattributedMs']]
+             s['approvalWaitMs'], s.get('flowStepMs', 0),
+             s.get('orchestrationMs', 0), s['unattributedMs']]
     assert sum(parts) == s['totalMs'] == doc['totalMs'], (
         f'buckets {parts} must sum to totalMs {doc["totalMs"]}')
     gap_ms = sum(g['tEnd'] - g['tStart'] for g in doc['gaps'])
     assert gap_ms == s['unattributedMs'], (
         f'gaps {gap_ms} must equal unattributedMs {s["unattributedMs"]}')
+    # Each split is the exact sum of its bucket (never a second account).
+    assert (s.get('admissionWaitMs', 0) + s.get('retryWaitMs', 0)
+            + s.get('spawnWaitMs', 0)) == s['waitMs']
+    assert (s.get('startupMs', 0) + s.get('roundPrepMs', 0)
+            + s.get('roundSettleMs', 0) + s.get('finalizeMs', 0)) \
+        == s.get('orchestrationMs', 0)
 
 
 # ── 1/2/3. The canonical two-round task: tree, strict accounting, TTFT ──
@@ -686,10 +696,10 @@ def test_phase_rule_table_covers_the_chat_registry():
     assert not missing, (
         f'registered chat phases with NO trace rule: {sorted(missing)} — '
         'add a rule to _PHASE_TRACE_RULE in lib/tasks_pkg/turn_trace.py '
-        '(ttft | retry_wait | compaction | covered | ignore)')
+        '(ttft | retry_wait | compaction | covered | ignore | startup)')
     dead = rules - phase_values()
     assert not dead, f'trace rules for unregistered phases: {sorted(dead)}'
-    legal = {'ttft', 'retry_wait', 'compaction', 'covered', 'ignore'}
+    legal = {'ttft', 'retry_wait', 'compaction', 'covered', 'ignore', 'startup'}
     assert set(_PHASE_TRACE_RULE.values()) <= legal
 
 
@@ -939,6 +949,47 @@ def test_persisted_trace_has_a_hard_byte_budget():
     decode('TurnTimingTrace', compacted)
 
 
+def test_trace_within_budget_is_measured_once_and_keeps_compaction_markers(monkeypatch):
+    """A live trace below the cap is encoded once, not once per byte guard."""
+    import json
+
+    import lib.turn_trace_contract as contract
+
+    calls = []
+    real_dumps = json.dumps
+
+    def counting_dumps(*args, **kwargs):
+        calls.append(1)
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(contract.json, 'dumps', counting_dumps)
+    small = {
+        'version': 1, 'taskId': 'task-small', 'running': True, 'status': 'running',
+        'statusHistory': [{'id': f'status-{index}', 'phase': 'working', 'tStart': index}
+                          for index in range(TRACE_STATUS_ROWS)],
+        'statusDroppedCount': 3,
+    }
+    compacted = contract.compact_trace_document(small, source='live-projection')
+    assert len(calls) == 1
+    assert compacted['statusDroppedCount'] == 3
+    assert compacted['compacted'] is True
+    assert compacted['statusHistory'] == small['statusHistory']
+
+    calls.clear()
+    plain = contract.compact_trace_document({'version': 1, 'taskId': 'task-plain'})
+    assert len(calls) == 1
+    assert 'compacted' not in plain
+
+    # Only the final marker pass derives ``compacted`` from ``detailCompacted``.
+    detail_only = contract.compact_trace_document(
+        {'version': 1, 'taskId': 'task-detail', 'detailCompacted': True})
+    assert detail_only['detailCompacted'] is True
+    assert detail_only['compacted'] is True
+
+
+TRACE_STATUS_ROWS = 12
+
+
 def test_projection_normalizer_retains_timing_trace():
     from lib.turn_projection_patch import normalize_projection_document
 
@@ -959,6 +1010,478 @@ def test_perception_storage_lane_avoids_receipt_and_sync_write_amplification():
     assert operation.kind == 'command'
     assert operation.receipt_required is False
     assert operation.after is None
+
+
+# ── 12b. Workspace admission waits (lease-owner evidence) ──
+
+def _admission(offset_start, offset_end, **fields):
+    payload = {'waitStartedAtMs': _T0 + offset_start, 'waitEndedAtMs': _T0 + offset_end,
+               'waitedMs': offset_end - offset_start, 'mode': 'write',
+               'lockDomain': 'workspace', 'lockRoot': 'repo', 'outcome': 'admitted',
+               'holderTool': 'run_command', 'holderConversation': 'conv-holder',
+               'holderHeldMs': 61_000}
+    payload.update(fields)
+    return payload
+
+
+def test_admission_wait_is_a_tool_child_that_ends_at_admission():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('tool_start', 2000, {'roundNum': 1, 'toolName': 'write_file',
+                              'toolCallId': 'c1', 'tStart': _T0 + 2000}),
+        # Evidence is appended when the wait ENDS (admission at 62s).
+        ('workspace_admission_wait', 62_010, _admission(
+            2_100, 62_000, roundNum=1, toolCallId='c1', toolName='write_file')),
+        ('tool_result', 63_000, {'roundNum': 1, 'toolCallId': 'c1',
+                                 'status': 'done', 'tEnd': _T0 + 63_000}),
+        ('round_start', 64_000, {'roundNum': 2}),
+        ('round_end', 65_000, {'roundNum': 2, 'reason': 'final'}),
+        ('done', 65_000, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        tool = _spans(doc, 'tool')[0]
+        (admission,) = _spans(doc, 'admission_wait')
+        assert admission['parent'] == tool['spanId']
+        assert admission['depth'] == tool['depth'] + 1
+        assert (admission['tStart'], admission['tEnd']) == (_T0 + 2_100, _T0 + 62_000)
+        assert admission['tEnd'] < tool['tEnd']  # admission, not tool completion
+        assert admission['status'] == 'done'
+        # The waiter occurrence and the holder/lock facts identify the wait.
+        assert admission['attrs'] == {
+            'waiterTool': 'write_file', 'holderTool': 'run_command',
+            'holderConversation': 'conv-holder', 'heldMs': 61_000, 'mode': 'write',
+            'lock': 'workspace:repo',
+            'waiterCallId': 'c1', 'waiterRoundKey': '1', 'waiterQuery': ''}
+        assert 'budgetMs' not in admission  # declared unbounded
+        s = doc['summary']
+        assert s['waitMs'] == 59_900
+        assert (s['admissionWaitMs'], s['retryWaitMs'], s['spawnWaitMs']) == (59_900, 0, 0)
+        assert s['toolMs'] == 100 + 1000  # announce sliver + post-admission run
+        assert set(s) == {'totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
+                          'approvalWaitMs', 'flowStepMs', 'orchestrationMs',
+                          'unattributedMs', 'ttftMs', 'overBudget',
+                          'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs',
+                          'startupMs', 'roundPrepMs', 'roundSettleMs', 'finalizeMs'}
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_admission_wait_span_names_both_requests():
+    """One span diagnoses a stall: the waiter's claims and the holder's request."""
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('tool_start', 2000, {'roundNum': 1, 'toolName': 'run_command',
+                              'toolCallId': 'c1', 'tStart': _T0 + 2000}),
+        ('workspace_admission_wait', 9_010, _admission(
+            2_100, 9_000, roundNum=1, toolCallId='c1', toolName='run_command',
+            lockDomain='tree', lockRoot='tofu', holderTask='task-holder',
+            waiterClaims='tree:tofu[git-uncatalogued],metadata:tofu[git-uncatalogued]',
+            holderMode='file-write', holderClaims='tree:bughunt[unattributed-effect]',
+            holderCommand='cd bughunt && pytest -n 6')),
+        ('tool_result', 10_000, {'roundNum': 1, 'toolCallId': 'c1',
+                                 'status': 'done', 'tEnd': _T0 + 10_000}),
+        ('done', 10_000, {'finishReason': 'stop'}),
+    ])
+    try:
+        (admission,) = _spans(_fold(tid), 'admission_wait')
+        assert admission['attrs'] == {
+            'waiterTool': 'run_command', 'holderTool': 'run_command',
+            'holderConversation': 'conv-holder', 'heldMs': 61_000, 'mode': 'write',
+            'lock': 'tree:tofu',
+            'waiterClaims': 'tree:tofu[git-uncatalogued],metadata:tofu[git-uncatalogued]',
+            'holderTask': 'task-holder', 'holderMode': 'file-write',
+            'holderClaims': 'tree:bughunt[unattributed-effect]',
+            'holderCommand': 'cd bughunt && pytest -n 6',
+            'waiterCallId': 'c1', 'waiterRoundKey': '1', 'waiterQuery': ''}
+    finally:
+        _cleanup(tid)
+
+
+def test_admission_wait_outranks_spawn_and_approval_spans_that_enclose_it():
+    from lib.tasks_pkg import turn_trace
+
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        # c1: approved at ~3s, then queued 10s for the lease, then spawned.
+        ('tool_start', 2000, {'roundNum': 1, 'toolName': 'run_command',
+                              'toolCallId': 'c1', 'tStart': _T0 + 2000}),
+        ('write_approval_request', 2500, {'roundNum': 1, 'toolCallId': 'c1'}),
+        ('workspace_admission_wait', 13_000, _admission(
+            3_000, 13_000, roundNum=1, toolCallId='c1')),
+        ('tool_progress', 13_100, {'roundNum': 1, 'toolCallId': 'c1',
+                                   'execStartTs': _T0 + 13_100}),
+        ('tool_result', 14_000, {'roundNum': 1, 'toolCallId': 'c1',
+                                 'status': 'done', 'tEnd': _T0 + 14_000}),
+        # c2: no approval; its whole announce->spawn delay was a lease wait.
+        ('tool_start', 20_000, {'roundNum': 1, 'toolName': 'run_command',
+                                'toolCallId': 'c2', 'tStart': _T0 + 20_000}),
+        ('workspace_admission_wait', 30_000, _admission(
+            20_050, 30_000, roundNum=1, toolCallId='c2')),
+        ('tool_progress', 30_200, {'roundNum': 1, 'toolCallId': 'c2',
+                                   'execStartTs': _T0 + 30_200}),
+        ('tool_result', 31_000, {'roundNum': 1, 'toolCallId': 'c2',
+                                 'status': 'done', 'tEnd': _T0 + 31_000}),
+        ('done', 31_000, {'finishReason': 'stop'}),
+    ])
+    original = turn_trace._read_trace_rows
+    turn_trace._read_trace_rows = lambda selected: list(_SEEDED_ROWS.get(selected, ()))
+    try:
+        ledger = {}
+        doc = turn_trace.fold_task_trace(tid, ledger_out=ledger)
+        assert len(_spans(doc, 'spawn_wait')) == 1  # c2's announce->spawn delay
+        assert len(_spans(doc, 'approval_wait')) == 1
+        kinds = ledger['kindMs']
+        assert kinds['admission_wait'] == 10_000 + 9_950
+        assert kinds['approval_wait'] == (3_000 - 2_500) + (13_100 - 13_000)
+        assert kinds['spawn_wait'] == 50 + 200  # only the unexplained remainder
+        s = doc['summary']
+        assert s['approvalWaitMs'] == kinds['approval_wait']
+        assert s['waitMs'] == kinds['admission_wait'] + kinds['spawn_wait'] + kinds['retry_wait']
+        assert ledger['rounds'] == 1
+        # Readers of the bounded document re-derive the same split.
+        assert turn_trace.trace_kind_attribution(doc) == kinds
+        _assert_strict_accounting(doc)
+    finally:
+        turn_trace._read_trace_rows = original
+        _cleanup(tid)
+
+
+def test_admission_wait_without_tool_is_turn_level_and_backgrounded_wait_is_clipped():
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('workspace_admission_wait', 1500, _admission(1_100, 1_400, outcome='refused')),
+        ('tool_start', 2000, {'roundNum': 1, 'toolName': 'run_command',
+                              'toolCallId': 'bg', 'tStart': _T0 + 2000}),
+        # Handed off to the background at 5s while still queued for the lease.
+        ('tool_result', 5000, {'roundNum': 1, 'toolCallId': 'bg',
+                               'status': 'done', 'tEnd': _T0 + 5000}),
+        ('round_start', 6000, {'roundNum': 2}),
+        ('workspace_admission_wait', 9000, _admission(
+            2_500, 9_000, roundNum=1, toolCallId='bg', outcome='cancelled')),
+        ('round_end', 10_000, {'roundNum': 2, 'reason': 'final'}),
+        ('done', 10_000, {'finishReason': 'stop'}),
+    ])
+    try:
+        doc = _fold(tid)
+        flat, child = sorted(_spans(doc, 'admission_wait'), key=lambda s: s['depth'])
+        assert (flat['parent'], flat['depth'], flat['status']) == ('turn', 1, 'error')
+        assert (flat['tStart'], flat['tEnd']) == (_T0 + 1_100, _T0 + 1_400)
+        tool = _spans(doc, 'tool')[0]
+        assert child['parent'] == tool['spanId'] and child['status'] == 'aborted'
+        # The model round that ran after the handoff stays model time.
+        assert (child['tStart'], child['tEnd']) == (_T0 + 2_500, _T0 + 5_000)
+        assert doc['summary']['waitMs'] == 300 + 2_500
+        _assert_strict_accounting(doc)
+    finally:
+        _cleanup(tid)
+
+
+def test_admission_wait_is_a_declared_trace_payload_and_bucket():
+    from lib.agent_core.events import EventType, event_types
+    from lib.tasks_pkg import turn_trace
+
+    assert EventType.WORKSPACE_ADMISSION_WAIT in event_types()
+    assert EventType.WORKSPACE_ADMISSION_WAIT in turn_trace._TRACE_PAYLOAD_TYPES
+    assert dict(turn_trace._BUCKET_PRIORITY)['admission_wait'] == 'waitMs'
+    kinds = [kind for kind, _ in turn_trace._BUCKET_PRIORITY]
+    assert kinds.index('admission_wait') < kinds.index('tool')
+    assert kinds.index('admission_wait') < kinds.index('spawn_wait')
+
+
+def test_terminal_settlement_logs_one_summary_line_from_the_frozen_fold(caplog):
+    import logging
+    from lib.tasks_pkg import turn_trace
+
+    tid = _tid()
+    _seed(tid, [
+        ('round_start', 0, {'roundNum': 1}),
+        ('phase', 100, {'phase': 'retrying', 'attempt': 1}),
+        ('delta', 400, {}),  # first output ends the backoff
+        ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'}),
+        ('tool_start', 2000, {'roundNum': 1, 'toolName': 'run_command',
+                              'toolCallId': 'c1', 'tStart': _T0 + 2000}),
+        ('workspace_admission_wait', 7_000, _admission(
+            2_000, 7_000, roundNum=1, toolCallId='c1')),
+        ('tool_result', 8_000, {'roundNum': 1, 'toolCallId': 'c1',
+                                'status': 'done', 'tEnd': _T0 + 8_000}),
+        ('round_start', 9_000, {'roundNum': 2}),
+        ('round_end', 10_000, {'roundNum': 2, 'reason': 'final'}),
+    ])
+    task = {'id': tid, 'convId': 'conv-summary'}
+    original = turn_trace._read_trace_rows
+    turn_trace._read_trace_rows = lambda selected: list(_SEEDED_ROWS.get(selected, ()))
+    try:
+        with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.turn_trace'):
+            for _ in range(2):  # CAS rebase / retained-receipt retry rebuild
+                projection = turn_trace.finalize_trace_projection(
+                    {}, task, {'type': 'done', 'finishReason': 'stop',
+                               'executionAtMs': _T0 + 10_000},
+                    now_ms=_T0 + 10_000, pending_sequence=10)
+        lines = [r.getMessage() for r in caplog.records
+                 if r.getMessage().startswith('[TurnTraceSummary]')]
+        assert len(lines) == 1, lines
+        fields = dict(part.split('=', 1) for part in lines[0].split()[1:])
+        summary = projection['timingTrace']['summary']
+        assert fields['task'] == tid and fields['conv'] == 'conv-summary'
+        assert fields['status'] == 'done' and fields['rounds'] == '2'
+        for key in ('totalMs', 'llmMs', 'toolMs', 'waitMs', 'compactionMs',
+                    'approvalWaitMs', 'unattributedMs', 'ttftMs', 'flowStepMs',
+                    'admissionWaitMs', 'retryWaitMs', 'spawnWaitMs'):
+            assert int(fields[key]) == summary[key], key
+        assert int(fields['admissionWaitMs']) == 5_000
+        assert int(fields['retryWaitMs']) == 300
+        assert int(fields['admissionWaitMs']) + int(fields['retryWaitMs']) \
+            + int(fields['spawnWaitMs']) == summary['waitMs']
+        assert list(fields)[:16] == [
+            'task', 'conv', 'status', 'totalMs', 'llmMs', 'toolMs', 'waitMs',
+            'admissionWaitMs', 'retryWaitMs', 'compactionMs', 'approvalWaitMs',
+            'unattributedMs', 'ttftMs', 'rounds', 'spawnWaitMs', 'flowStepMs']
+    finally:
+        turn_trace._read_trace_rows = original
+        _cleanup(tid)
+
+
+def test_wait_split_stays_exact_when_the_bounded_document_drops_spans():
+    """Long tasks exceed the span bound; only the persisted split stays exact."""
+    from lib.tasks_pkg import turn_trace
+
+    tid = _tid()
+    events = [('round_start', 0, {'roundNum': 1}),
+              ('round_end', 1000, {'roundNum': 1, 'reason': 'tools'})]
+    calls = 200
+    for index in range(calls):
+        base = 2_000 + index * 1_000
+        events += [
+            ('tool_start', base, {'roundNum': 1, 'toolName': 'run_command',
+                                  'toolCallId': f'c{index}', 'tStart': _T0 + base}),
+            ('workspace_admission_wait', base + 600, _admission(
+                base + 100, base + 600, roundNum=1, toolCallId=f'c{index}')),
+            ('tool_result', base + 900, {'roundNum': 1, 'toolCallId': f'c{index}',
+                                         'status': 'done', 'tEnd': _T0 + base + 900}),
+        ]
+    end = 2_000 + calls * 1_000
+    events += [('round_start', end, {'roundNum': 2}),
+               ('round_end', end + 1_000, {'roundNum': 2, 'reason': 'final'}),
+               ('done', end + 1_000, {'finishReason': 'stop'})]
+    _seed(tid, events)
+    try:
+        doc = _fold(tid)
+        s = doc['summary']
+        assert doc['droppedSpans'] > 0
+        assert s['admissionWaitMs'] == calls * 500
+        assert s['admissionWaitMs'] + s['retryWaitMs'] + s['spawnWaitMs'] == s['waitMs']
+        # The stored spans no longer carry every wait: recomputing from them
+        # is only a lower bound, which is why the split is persisted.
+        assert turn_trace.trace_kind_attribution(doc)['admission_wait'] < s['admissionWaitMs']
+        # Gaps are bounded too, so only the bucket partition stays exact here.
+        assert sum(s[key] for key in (
+            'llmMs', 'toolMs', 'waitMs', 'compactionMs', 'approvalWaitMs',
+            'flowStepMs', 'orchestrationMs', 'unattributedMs')) == s['totalMs'] == doc['totalMs']
+    finally:
+        _cleanup(tid)
+
+
+def test_absolute_byte_fail_safe_keeps_every_aggregate_summary_field(monkeypatch):
+    import lib.turn_trace_contract as contract
+
+    summary = {'totalMs': 13, 'llmMs': 1, 'toolMs': 1, 'waitMs': 3, 'compactionMs': 1,
+               'approvalWaitMs': 1, 'flowStepMs': 1, 'orchestrationMs': 4,
+               'unattributedMs': 1, 'ttftMs': 1,
+               'admissionWaitMs': 1, 'retryWaitMs': 1, 'spawnWaitMs': 1,
+               'startupMs': 1, 'roundPrepMs': 1, 'roundSettleMs': 1, 'finalizeMs': 1,
+               'overBudget': [{'spanId': 's', 'kind': 'tool', 'name': 'n',
+                               'elapsedMs': 2, 'budgetMs': 1}]}
+    monkeypatch.setattr(contract, 'TRACE_MAX_PERSISTED_BYTES', 1)
+    compacted = contract.compact_trace_document(
+        {'version': 1, 'taskId': 'task-fail-safe', 'summary': dict(summary)})
+    assert compacted['detailCompacted'] is True
+    assert compacted['summary'] == {**summary, 'overBudget': []}
+
+
+def test_summary_lines_of_distinct_tasks_are_never_coalesced():
+    import logging
+    from lib.logging_pkg.log_rate_limit import DuplicateCoalescingFilter
+
+    coalescer = DuplicateCoalescingFilter()
+    records = [
+        logging.LogRecord('lib.tasks_pkg.turn_trace', logging.INFO, __file__, 1,
+                          '[TurnTraceSummary] task=%s conv=c status=done totalMs=%d',
+                          (f'task-{index}', 1000), None)
+        for index in range(64)]
+    assert all(coalescer.filter(record) for record in records)
+    assert {record.tofu_occurrence_delta for record in records} == {1}
+
+
+# ── 13. Event read failure is not an empty log ──
+
+def test_event_read_failure_raises_with_full_task_id_and_bounded_detail(
+        monkeypatch, caplog):
+    import logging
+    import lib.storage
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg import turn_trace
+
+    tid = _tid() + '-' + uuid.uuid4().hex
+    message = 'storage.v2 codec failure: ' + 'x' * 5_000
+
+    class Client:
+        def query(self, operation, payload):
+            raise StorageError('database_protocol_error', message)
+
+    class Recovered:
+        def query(self, operation, payload):
+            if operation != 'event.list' or payload['after_sequence'] >= 0:
+                return []
+            return [{'sequence': 0, 'created_at_ms': _T0,
+                     'event': {'type': 'round_start', 'roundNum': 1}}]
+
+    monkeypatch.setattr(lib.storage, 'get_storage_client', lambda: Client())
+    with caplog.at_level(logging.WARNING, logger='lib.tasks_pkg.turn_trace'):
+        with pytest.raises(turn_trace.TurnTraceEventReadError):
+            turn_trace._read_trace_rows(tid)
+        # A live fold must not present the failure as an unknown/expired task.
+        with pytest.raises(turn_trace.TurnTraceEventReadError):
+            turn_trace.fold_task_trace(tid, now_ms=_T0)
+    # The failure was not cached as an empty log: the next read sees the rows.
+    monkeypatch.setattr(lib.storage, 'get_storage_client', lambda: Recovered())
+    assert [row['type'] for row in turn_trace._read_trace_rows(tid)] == ['round_start']
+    lines = [r.getMessage() for r in caplog.records
+             if 'event read failed' in r.getMessage()]
+    assert lines, caplog.records
+    assert f'task={tid} ' in lines[0]
+    assert 'code=database_protocol_error' in lines[0]
+    assert "message='storage.v2 codec failure: xxx" in lines[0]
+    assert len(lines[0]) < 1_000
+
+
+
+@pytest.mark.parametrize('code', [
+    'storage_payload_too_large',
+    # Engines built before the stream point-read bound was classified report
+    # it as a protocol refusal whose sanitized message is only its code.
+    'database_protocol_error',
+])
+def test_event_page_size_refusal_halves_the_page_at_the_same_cursor(monkeypatch, code):
+    import lib.storage
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg import turn_trace
+
+    events = [{'sequence': sequence, 'created_at_ms': _T0 + sequence,
+               'event': {'type': 'round_start', 'roundNum': sequence + 1}}
+              for sequence in range(3)]
+    calls = []
+
+    class Client:
+        def query(self, operation, payload):
+            assert operation == 'event.list'
+            calls.append((payload['after_sequence'], payload['limit']))
+            if payload['limit'] > 1:
+                raise StorageError(code, code)
+            return [row for row in events
+                    if row['sequence'] > payload['after_sequence']][:payload['limit']]
+
+    monkeypatch.setattr(lib.storage, 'get_storage_client', lambda: Client())
+    rows = turn_trace._read_trace_rows(_tid())
+    assert [(row['event_id'], row['payload']['roundNum']) for row in rows] == [
+        (0, 1), (1, 2), (2, 3)]
+    assert calls[:10] == [(-1, limit) for limit in [
+        1000, 500, 250, 125, 62, 31, 15, 7, 3, 1]]
+
+def test_settlement_read_failure_freezes_marked_partial_trace_not_zero_round_fold(
+        monkeypatch, caplog):
+    """2026-10-27: a failed read at settlement froze a 10,586 s, 217-round run
+    as one unattributed gap with zero rounds, and the API served it forever."""
+    import logging
+    from debug.turn_trace_audit import parse_summary_line
+    from lib.conversation_sync.validation import decode
+    from lib.tasks_pkg import turn_trace
+
+    tid = _tid()
+    end = _T0 + 10_586_000
+    clock = {'executionClockId': 'clock-a', 'executionOriginAtMs': _T0}
+    terminal = {'type': 'done', 'finishReason': 'stop',
+                'executionAtMs': end, **clock}
+    task = {'id': tid, 'convId': 'conv-read-failure'}
+    turn_trace.observe_task_trace_event(
+        task, {'type': 'phase', 'phase': 'waiting_model'},
+        observed_at_ms=_T0 + 5_000)
+    previous = {'timingTrace': {'version': 1, 'taskId': tid, 'clientObservations': [{
+        'observationId': 'paint:1', 'kind': 'phase_painted', 'taskId': tid,
+        'attemptId': 'attempt-1', 'clientId': 'page-a', 'recordedAt': _T0 + 6_000}]}}
+
+    def failed_read(selected):
+        raise turn_trace.TurnTraceEventReadError(f'read failed task={selected}')
+
+    def summary_lines():
+        return [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith('[TurnTraceSummary]')]
+
+    monkeypatch.setattr(turn_trace, '_read_trace_rows', failed_read)
+    with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.turn_trace'):
+        projection = turn_trace.finalize_trace_projection(
+            previous, task, terminal, now_ms=end, pending_sequence=500)
+        # A CAS-rebase rebuild whose read still fails neither changes the
+        # document nor repeats the summary line.
+        rebuilt = turn_trace.finalize_trace_projection(
+            previous, task, terminal, now_ms=end, pending_sequence=500)
+    trace = projection['timingTrace']
+    assert rebuilt['timingTrace'] == trace
+    assert (trace['coverage'], trace['coverageReason']) == ('partial', 'event-read-failed')
+    assert (trace['status'], trace['running'], trace['source']) == (
+        'done', False, 'turn-snapshot')
+    assert trace['eventsAvailable'] is True and trace['eventLogAvailable'] is False
+    # Nothing the failed read would have had to prove is fabricated ...
+    assert not {'summary', 'spans', 'gaps'} & set(trace)
+    # ... while evidence that never came from the event log survives.
+    assert (trace['tStart'], trace['tEnd'], trace['totalMs']) == (_T0, end, 10_586_000)
+    assert trace['clockSource'] == 'server-monotonic'
+    assert trace['statusHistory'][0]['phase'] == 'waiting_model'
+    assert trace['statusHistory'][-1]['tEnd'] == end
+    assert [o['observationId'] for o in trace['clientObservations']] == ['paint:1']
+    decode('TurnProjection', projection)
+    lines = summary_lines()
+    assert len(lines) == 1, lines
+    fields = dict(part.split('=', 1) for part in lines[0].split()[1:])
+    assert fields == {'task': tid, 'conv': 'conv-read-failure', 'status': 'done',
+                      'coverage': 'partial', 'coverageReason': 'event-read-failed'}
+    assert parse_summary_line(lines[0]) is None  # no bucket an aggregator could sum
+
+    # A successful read (e.g. the next rebuild) is the unchanged full fold and
+    # still logs its one real summary line.
+    _seed(tid, [
+        ('round_start', 1_000, {'roundNum': 1, **clock}),
+        ('round_end', 9_000, {'roundNum': 1, 'reason': 'final', **clock}),
+    ])
+    monkeypatch.setattr(turn_trace, '_read_trace_rows',
+                        lambda selected: list(_SEEDED_ROWS.get(selected, ())))
+    caplog.clear()
+    try:
+        with caplog.at_level(logging.INFO, logger='lib.tasks_pkg.turn_trace'):
+            for _ in range(2):
+                healed = turn_trace.finalize_trace_projection(
+                    previous, task, terminal, now_ms=end, pending_sequence=2)
+    finally:
+        _cleanup(tid)
+    healed_trace = healed['timingTrace']
+    assert healed_trace['coverage'] == 'full' and 'coverageReason' not in healed_trace
+    assert healed_trace['eventLogAvailable'] is True
+    assert len([s for s in healed_trace['spans'] if s['kind'] == 'round']) == 1
+    _assert_strict_accounting(healed_trace)
+    lines = summary_lines()
+    assert len(lines) == 1, lines
+    record = parse_summary_line(lines[0])
+    assert record['rounds'] == 1 and record['coverage'] == 'full'
+    assert record['totalMs'] == healed_trace['summary']['totalMs'] == 10_586_000
 
 
 # ── 12. Route registration ──

@@ -12,10 +12,11 @@ heal the empty-output cases, but four gaps were measured:
       anomaly dumps died inside tool args.
   G2  a cut WITH partial content was soft-landed as a completed turn even
       though the gateway ended in the middle of an SSE JSON frame. Now the
-      visible prefix is preserved, ``phase:retrying`` tells the user what
-      happened, and a bounded continuation resumes from that exact prefix.
-      Exhaustion is an honest error and never triggers a destructive
-      whole-turn replay.
+      cut attempt's prose is discarded, ``phase:retrying`` tells the user
+      what happened, and the round resends the unchanged request (no
+      provider continues a bare trailing assistant message, and a
+      continuation prompt would persist in context). Exhaustion is an
+      honest error.
   G3  ``record_truncation`` cooled a slot only on 3 CONSECUTIVE truncations,
       but interleaved successes kept zeroing the streak — intermittent rot
       never cooled. Now a rolling 10-minute window also feeds the gate.
@@ -50,7 +51,6 @@ from lib.tasks_pkg.stream_handler.api import (  # noqa: E402
     analyse_stream_result,
 )
 from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402
-    _PARTIAL_STREAM_RETRY_MAX,
     _PREMATURE_RETRY_MAX_CLASSIC,
 )
 from tests._registered_chat_task import registered_chat_task  # noqa: E402
@@ -477,10 +477,10 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────
-#  G2 — content-bearing stream anomaly: preserve + continue, never fake success
+#  G2 — content-bearing stream anomaly: rewind + resend, never fake success
 # ─────────────────────────────────────────────────────────────────────
 
-class TestPartialContentLosslessRetry(unittest.TestCase):
+class TestPartialContentRewindRetry(unittest.TestCase):
 
     @staticmethod
     def _usage():
@@ -488,236 +488,100 @@ class TestPartialContentLosslessRetry(unittest.TestCase):
                 '_chunks_received': 900, 'stream_elapsed_ms': 176000,
                 'trace_id': 'M-PARTIAL'}
 
-    def test_partial_content_emits_phase_and_continues_from_exact_prefix(self):
-        """The already rendered bytes survive and become assistant prefill;
-        the retry is visible in the ordinary stream status-text channel."""
-        prefix = 'an almost-complete answer body'
-        task = _fresh_task(content=prefix)
-        msg = {'role': 'assistant',
-               'content': prefix,
-               'reasoning_content': ''}
+    def _cut(self, task, messages, *, model='kimi-k3', content='partial',
+             retry_count=0, round_num=2):
+        return analyse_stream_result(
+            assistant_msg={'role': 'assistant', 'content': content,
+                           'reasoning_content': 'cut reasoning'},
+            last_finish_reason='stop', task=task, tid='partial', model=model,
+            round_num=round_num, _premature_retry_count=retry_count,
+            messages=messages, usage=self._usage())
+
+    def test_partial_cut_rewinds_round_and_resends_unchanged_request(self):
+        """The retry request is the interrupted one, byte for byte: nothing is
+        appended to model context, the attempt's prose is discarded with an
+        explicit epoch reset, and the retry is visible as a phase status."""
+        from lib.agent_core.events import EventType
+        task = _fresh_task(content='PRIOR partial answer body',
+                           thinking='PRIOR-T cut reasoning',
+                           round_base_content='PRIOR',
+                           round_base_thinking='PRIOR-T')
         messages = [{'role': 'user', 'content': 'finish the diagnosis'}]
+        sent = [dict(message) for message in messages]
         with registered_chat_task(task), _no_sleep():
-            d = analyse_stream_result(
-                assistant_msg=msg, last_finish_reason='stop', task=task,
-                tid='partial', model='kimi-k3', round_num=2,
-                _premature_retry_count=0, messages=messages,
-                usage=self._usage())
+            d = self._cut(task, messages, content=' partial answer body')
 
         self.assertEqual(d['action'], 'continue')
         self.assertEqual(d['premature_retry_count'], 1)
-        self.assertEqual(task['content'], prefix)
+        self.assertEqual(messages, sent)
+        self.assertEqual(task['content'], 'PRIOR')
+        self.assertEqual(task['thinking'], 'PRIOR-T')
+        self.assertEqual(task['_floor_retry_residue'][-1]['content'],
+                         'PRIOR partial answer body')
         self.assertIsNone(task['error'])
-        self.assertTrue(
-            task.get('_suppress_whole_turn_retry_to_preserve_partial'))
-        self.assertEqual(messages[-1]['role'], 'assistant')
-        self.assertEqual(messages[-1]['content'], prefix)
-        self.assertTrue(messages[-1].get('_partialStreamPrefill'))
-        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
-        wire = apply_wire_sanitize(messages)
-        self.assertEqual(wire[-1], {'role': 'assistant', 'content': prefix})
-        self.assertNotIn('delta_reset', [e.get('type') for e in task['events']])
-        phases = [e for e in task['events'] if e.get('type') == 'phase']
-        self.assertTrue(phases, task['events'])
-        phase = phases[-1]
+        self.assertNotIn('_suppress_whole_turn_retry_to_preserve_partial', task)
+        self.assertFalse(task.get('_injected_notes'))
+        resets = [e for e in task['events']
+                  if e.get('type') == EventType.DELTA_RESET]
+        self.assertTrue(resets and resets[-1].get('discard'), task['events'])
+        phase = [e for e in task['events'] if e.get('type') == 'phase'][-1]
         self.assertEqual(phase.get('phase'), 'retrying')
         self.assertEqual(phase.get('bucket'), 'partial_stream')
         self.assertEqual(phase.get('errorKind'), 'premature_close')
-        self.assertEqual(phase.get('continuationMode'), 'assistant_prefill')
+        self.assertNotIn('continuationMode', phase)
         self.assertEqual(phase.get('detailKey'),
                          'stream.phase.partialStreamRetry')
-        self.assertEqual(phase.get('detailArgs', {}).get('chars'), len(prefix))
+        self.assertEqual(phase.get('detailArgs'), {
+            'chars': len(' partial answer body'), 'attempt': 1,
+            'max': _PREMATURE_RETRY_MAX_CLASSIC})
 
-    def test_repeated_cuts_extend_one_prefill_without_separator(self):
-        """Each fresh continuation is concatenated byte-for-byte; generic
-        same-role history merging must not inject a ``\\n\\n`` seam."""
-        task = _fresh_task(content='prefix')
+    def test_rewind_does_not_depend_on_the_provider(self):
+        """No provider continues a bare trailing assistant message, so every
+        model family gets the same protocol-valid resend."""
+        for model in ('claude-opus-5.5', 'gpt-6.1-sol', 'gemini-3.6-flash',
+                      'kimi-k3', 'deepseek-v4-pro', 'glm-5.3'):
+            with self.subTest(model=model):
+                task = _fresh_task(content='cut tail', round_base_content='',
+                                   round_base_thinking='')
+                messages = [{'role': 'user', 'content': 'go'}]
+                with registered_chat_task(task), _no_sleep():
+                    d = self._cut(task, messages, model=model,
+                                  content='cut tail')
+                self.assertEqual(d['action'], 'continue')
+                self.assertEqual(messages, [{'role': 'user', 'content': 'go'}])
+                self.assertEqual(task['content'], '')
+
+    def test_repeated_cuts_keep_resending_the_same_request(self):
+        task = _fresh_task(content='first cut', round_base_content='',
+                           round_base_thinking='')
         messages = [{'role': 'user', 'content': 'go'}]
         with registered_chat_task(task), _no_sleep():
-            first = analyse_stream_result(
-                assistant_msg={'role': 'assistant', 'content': 'prefix'},
-                last_finish_reason='stop', task=task, tid='partial',
-                model='kimi-k3', round_num=0, _premature_retry_count=0,
-                messages=messages, usage=self._usage())
-            task['content'] += '-middle'
-            second = analyse_stream_result(
-                assistant_msg={'role': 'assistant', 'content': '-middle'},
-                last_finish_reason='stop', task=task, tid='partial',
-                model='kimi-k3', round_num=1,
-                _premature_retry_count=first['premature_retry_count'],
-                messages=messages, usage=self._usage())
+            first = self._cut(task, messages, content='first cut')
+            task['content'] = 'second, longer cut'
+            second = self._cut(
+                task, messages, content='second, longer cut',
+                retry_count=first['premature_retry_count'])
 
         self.assertEqual(second['action'], 'continue')
         self.assertEqual(second['premature_retry_count'], 2)
-        prefill_rows = [m for m in messages
-                        if m.get('_partialStreamPrefill')]
-        self.assertEqual(len(prefill_rows), 1)
-        self.assertEqual(prefill_rows[0]['content'], 'prefix-middle')
-        self.assertEqual(task['content'], 'prefix-middle')
-        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
-        self.assertEqual(apply_wire_sanitize(messages)[-1], {
-            'role': 'assistant', 'content': 'prefix-middle'})
+        self.assertEqual(messages, [{'role': 'user', 'content': 'go'}])
+        self.assertEqual(task['content'], '')
 
-    def test_successful_prose_consumes_prefill_without_separator(self):
-        from lib.tasks_pkg.assistant_messages import (
-            PARTIAL_STREAM_PREFILL_MARKER,
-            append_assistant_prose_message,
-        )
-        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
-
-        messages = [
-            {'role': 'user', 'content': 'go'},
-            {'role': 'assistant', 'content': 'exact prefix',
-             PARTIAL_STREAM_PREFILL_MARKER: True},
-        ]
-        adopted = append_assistant_prose_message(
-            messages,
-            {'role': 'assistant', 'content': ' continuation'},
-        )
-
-        self.assertEqual(len(messages), 2)
-        self.assertIs(adopted, messages[-1])
-        self.assertEqual(messages[-1], {
-            'role': 'assistant',
-            'content': 'exact prefix continuation',
-        })
-        self.assertEqual(apply_wire_sanitize(messages)[-1]['content'],
-                         'exact prefix continuation')
-
-    def test_successful_tool_call_consumes_prefill_as_one_assistant_row(self):
-        from lib.tasks_pkg.assistant_messages import (
-            PARTIAL_STREAM_PREFILL_MARKER,
-            append_assistant_message_with_partial_prefill,
-        )
-
-        messages = [
-            {'role': 'user', 'content': 'go'},
-            {'role': 'assistant', 'content': 'exact prefix',
-             PARTIAL_STREAM_PREFILL_MARKER: True},
-        ]
-        tool_message = {
-            'role': 'assistant',
-            'tool_calls': [_tc('read_files', '{"path":"safe.py"}')],
-        }
-        adopted = append_assistant_message_with_partial_prefill(
-            messages,
-            tool_message,
-            continuation_content=' then inspect ',
-        )
-
-        self.assertEqual(len(messages), 2)
-        self.assertIs(adopted, messages[-1])
-        self.assertEqual(messages[-1]['content'],
-                         'exact prefix then inspect ')
-        self.assertEqual(messages[-1]['tool_calls'], tool_message['tool_calls'])
-        self.assertNotIn(PARTIAL_STREAM_PREFILL_MARKER, messages[-1])
-
-    def test_existing_continue_prefill_is_extended_without_separator(self):
-        """A stream cut during an already-resumed task must extend the manual
-        Continue prefill instead of creating two same-role wire messages."""
-        task = _fresh_task(content='full prior answerfresh fragment')
-        messages = [
-            {'role': 'user', 'content': 'go'},
-            {'role': 'assistant', 'content': 'prior answer tail'},
-        ]
-        with registered_chat_task(task), _no_sleep():
-            d = analyse_stream_result(
-                assistant_msg={'role': 'assistant',
-                               'content': 'fresh fragment'},
-                last_finish_reason='stop', task=task, tid='partial',
-                model='kimi-k3', round_num=0, _premature_retry_count=0,
-                messages=messages, usage=self._usage())
-
-        self.assertEqual(d['action'], 'continue')
-        self.assertEqual(len(messages), 2)
-        self.assertEqual(messages[-1]['content'],
-                         'prior answer tailfresh fragment')
-        self.assertTrue(messages[-1].get('_partialStreamPrefill'))
-        from lib.tasks_pkg.wire_messages import apply_wire_sanitize
-        self.assertEqual(apply_wire_sanitize(messages)[-1], {
-            'role': 'assistant',
-            'content': 'prior answer tailfresh fragment',
-        })
-
-    def test_provider_without_prefill_uses_ordered_continuation_nudge(self):
-        """Claude rejects a trailing assistant prefill, so keep the prefix as
-        assistant history and terminate the request with a user nudge."""
-        prefix = 'partial claude answer'
-        task = _fresh_task(content=prefix)
-        messages = [{'role': 'user', 'content': 'go'}]
-        with registered_chat_task(task), _no_sleep():
-            d = analyse_stream_result(
-                assistant_msg={'role': 'assistant', 'content': prefix},
-                last_finish_reason='stop', task=task, tid='partial',
-                model='claude-sonnet-4-5', round_num=0,
-                _premature_retry_count=0, messages=messages,
-                usage=self._usage())
-
-        self.assertEqual(d['action'], 'continue')
-        self.assertEqual(messages[-2],
-                         {'role': 'assistant', 'content': prefix})
-        self.assertEqual(messages[-1]['role'], 'user')
-        self.assertIn('LOSSLESS STREAM CONTINUATION', messages[-1]['content'])
-        self.assertTrue(messages[-1].get('_isMeta'))
-        phase = [e for e in task['events'] if e.get('type') == 'phase'][-1]
-        self.assertEqual(phase.get('continuationMode'), 'continuation_nudge')
-        note = task['_injected_notes'][-1]
-        self.assertEqual(note['text'], messages[-1]['content'])
-        self.assertEqual(note['action'], 'continue')
-        self.assertEqual(note['reason'], 'partial_stream_retry')
-        self.assertEqual(note['llmRound'], 0)
-        self.assertEqual(task['content'], prefix)
-
-    def test_exhausted_budget_is_failed_but_keeps_partial(self):
+    def test_exhausted_budget_is_failed_but_keeps_last_partial_visible(self):
         prefix = 'still-visible partial answer'
-        task = _fresh_task(
-            phase_counter=_PARTIAL_STREAM_RETRY_MAX, content=prefix)
-        d = analyse_stream_result(
-            assistant_msg={'role': 'assistant', 'content': prefix},
-            last_finish_reason='stop', task=task, tid='partial',
-            model='kimi-k3', round_num=3,
-            _premature_retry_count=_PARTIAL_STREAM_RETRY_MAX,
-            messages=[{'role': 'user', 'content': 'go'}],
-            usage=self._usage())
+        task = _fresh_task(phase_counter=_PREMATURE_RETRY_MAX_CLASSIC,
+                           content=prefix, round_base_content='',
+                           round_base_thinking='')
+        messages = [{'role': 'user', 'content': 'go'}]
+        d = self._cut(task, messages, content=prefix,
+                      retry_count=_PREMATURE_RETRY_MAX_CLASSIC, round_num=3)
 
         self.assertEqual(d['action'], 'break')
         self.assertEqual(d['last_finish_reason'], 'premature_close')
         self.assertIn('retries_exhausted', d['loop_exit_reason'])
         self.assertEqual(task['error'].get('kind'), 'premature_close')
-        self.assertTrue(
-            task.get('_suppress_whole_turn_retry_to_preserve_partial'))
         self.assertEqual(task['content'], prefix)
-
-    def test_later_empty_retry_failure_keeps_earlier_partial_protected(self):
-        """Once any prose was preserved, a later empty continuation must not
-        fall back into the destructive whole-turn retry seam."""
-        prefix = 'already visible prefix'
-        task = _fresh_task(content=prefix)
-        messages = [{'role': 'user', 'content': 'go'}]
-        with registered_chat_task(task), _no_sleep():
-            first = analyse_stream_result(
-                assistant_msg={'role': 'assistant', 'content': prefix},
-                last_finish_reason='stop', task=task, tid='partial',
-                model='kimi-k3', round_num=0, _premature_retry_count=0,
-                messages=messages, usage=self._usage())
-            self.assertEqual(first['action'], 'continue')
-            task['_premature_retry_count_phase'] = \
-                _PREMATURE_RETRY_MAX_CLASSIC
-            terminal = analyse_stream_result(
-                assistant_msg={'role': 'assistant', 'content': '',
-                               'reasoning_content': 'incomplete reasoning'},
-                last_finish_reason='stop', task=task, tid='partial',
-                model='kimi-k3', round_num=2,
-                _premature_retry_count=_PREMATURE_RETRY_MAX_CLASSIC,
-                messages=messages,
-                usage=self._usage() | {'_chunks_received': 10})
-
-        self.assertEqual(terminal['action'], 'break')
-        self.assertEqual(terminal['last_finish_reason'], 'abnormal_stop')
-        self.assertEqual(task['error'].get('kind'), 'abnormal_stop')
-        self.assertEqual(task['content'], prefix)
-        self.assertTrue(
-            task.get('_suppress_whole_turn_retry_to_preserve_partial'))
+        self.assertEqual(messages, [{'role': 'user', 'content': 'go'}])
 
     def test_no_content_anomaly_keeps_honest_error_after_retry_exhaustion(self):
         """An empty first-round cut retries, then keeps an honest error at cap."""

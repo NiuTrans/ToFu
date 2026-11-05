@@ -117,6 +117,92 @@ def test_root_turn_durable_spawn_carries_message_id(monkeypatch):
     assert spawned['message_id'] == 'msg-abc'
 
 
+def test_final_reply_costs_exactly_one_provider_call(monkeypatch):
+    """Completion submits nothing; the durable whole-turn job is the reply's
+    only translation.
+
+    Completion used to submit the reply a second time as an incremental
+    preview keyed ``text:<attempt>:llm-N``. The reply's projection segment is
+    ``text:terminal``, so that paid preview was never shown or stamped.
+    """
+    import types
+
+    import lib.translate.commit as commit
+    import lib.translate.execution as execution
+    import lib.translate.incremental as incremental
+    import lib.translate.terminal as terminal
+    import lib.tasks_pkg.orchestrator._post_loop as post_loop
+    from lib.translate.runtime import _worker
+    from lib.translate.runtime._state import _translate_runtime
+
+    reply = 'The parser fix is merged and the regression test passes. ' * 6
+    task = _task(id='task-final-once', convId='conv-final-once',
+                 _turnId='turn-final-once', _attemptId='final-attempt')
+    provider_calls, committed, runtime_tasks = [], [], []
+
+    def provider(text, *_args, **_kwargs):
+        provider_calls.append(text)
+        return f'译:{text}', {'_dispatch': {'model': 'translator'}}
+
+    monkeypatch.setattr('lib.translate.engine._translate_freetext', provider)
+    monkeypatch.setattr(_worker, '_translate_freetext', provider)
+    monkeypatch.setattr(incremental, '_accumulators', {})
+    monkeypatch.setattr('lib.agent_core.push.push_event', lambda *a, **k: None)
+    monkeypatch.setattr(
+        'lib.text_lang.detect_language',
+        lambda text, force_fasttext=False: types.SimpleNamespace(code='en'))
+
+    # The root loop's success tail for a prose-only final round.
+    monkeypatch.setattr(post_loop, 'append_event', lambda *a, **k: None)
+    monkeypatch.setattr(post_loop, '_finalize_and_emit_done',
+                        lambda *a, **k: None)
+    monkeypatch.setattr(
+        'lib.tasks_pkg.orchestrator._completion_projection.'
+        'publish_final_messages_snapshot', lambda *a, **k: None)
+    post_loop.finalize_after_loop(
+        task, cfg=task['config'], tid='final', model='m', preset='',
+        thinking_depth=None, thinking_enabled=False, temperature=None,
+        max_tokens=None, messages=[{'role': 'user', 'content': 'status?'}],
+        original_messages=[], tool_list=None,
+        assistant_msg={'role': 'assistant', 'content': reply}, round_num=2,
+        accumulated_usage={}, api_rounds=[], last_finish_reason='stop',
+        last_usage=None, tool_call_happened=True, all_search_results_text=[],
+        project_path='', project_enabled=False,
+        loop_exit_reason='no_tool_calls_round_2', abort_detected_phase=None)
+    assert incremental._TASK_PREVIEW_STATE not in task
+    assert incremental._accumulators == {}
+
+    # Settlement: the terminal coordinator runs the durable whole-turn job.
+    turn = {'status': 'completed', 'projection': {'content': reply}}
+    monkeypatch.setattr('lib.turn_lifecycle.get_turn', lambda *a, **k: turn)
+    monkeypatch.setattr(commit, 'get_turn', lambda *a, **k: turn)
+    monkeypatch.setattr(
+        _worker, 'commit_translation_to_turn',
+        lambda conv, turn_id, field, text, **_kw: committed.append(
+            (turn_id, field, text)))
+    monkeypatch.setattr(_worker, '_schedule_segment_enrichment',
+                        lambda *a, **k: None)
+
+    def run_now(runtime, task_id, function, *args, running_fields=None,
+                prioritize=False, **kwargs):
+        runtime_tasks.append(task_id)
+        assert runtime.mark_running(task_id, fields=running_fields)
+        function(*args, **kwargs)
+        return True
+
+    monkeypatch.setattr(execution, 'submit_translation_task', run_now)
+    try:
+        terminal._translate_settled_turns(task)
+    finally:
+        for task_id in runtime_tasks:
+            _translate_runtime.discard(task_id)
+
+    assert len(runtime_tasks) == 1
+    assert provider_calls == [reply.strip()]
+    assert committed == [('turn-final-once', 'translatedContent',
+                          f'译:{reply.strip()}')]
+
+
 # ── 2. Failure verdict on the projection (durable recovery lever) ────────
 
 def test_commit_merge_clears_failure_verdict_on_success():
@@ -236,6 +322,9 @@ def test_sweep_respawns_only_untranslated_settled_turns(monkeypatch):
                 # empty content -> skip
                 {'turnId': 't6', 'status': 'completed',
                  'projection': {'content': '  '}},
+                # a human input (a request's authorization source) -> skip
+                {'turnId': 't8', 'actor': 'human', 'status': 'completed',
+                 'projection': {'content': 'hello world'}},
             ]
         },
     )

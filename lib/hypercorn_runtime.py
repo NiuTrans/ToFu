@@ -187,6 +187,9 @@ class _OwnedTCPServer(TCPServer):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        from lib.http_transport.websocket_fairness import with_websocket_fairness
+
+        self.app = with_websocket_fairness(self.app)
         self._protocol_closed = False
         self._read_task: asyncio.Task | None = None
 
@@ -290,9 +293,11 @@ class _OwnedTCPServer(TCPServer):
     async def _close(self) -> None:
         async def flush_and_close() -> None:
             try:
+                half_closed = False
                 if _pending_tcp_bytes(self.writer) is not None:
                     try:
                         self.writer.write_eof()
+                        half_closed = True
                     except (NotImplementedError, OSError, RuntimeError):
                         # Upstream also tolerates unsupported/already-closed EOF.
                         pass
@@ -305,6 +310,19 @@ class _OwnedTCPServer(TCPServer):
                     if pending == 0 and not buffered:
                         break
                     await asyncio.sleep(0.01)
+                if half_closed:
+                    # ACKs prove delivery to the peer kernel, not consumption
+                    # by its application. A paused proxy may acknowledge the
+                    # entire body/FIN yet retain CLOSE_WAIT and unread bytes.
+                    # Keep reset authority until its receive owner closes too;
+                    # the same progress deadline reclaims abandoned peers.
+                    # Protocol admission already ended and its reader joined.
+                    try:
+                        while await self.reader.read(MAX_RECV):
+                            pass
+                    except ConnectionError:
+                        # A peer reset is already a completed socket teardown.
+                        pass
             except asyncio.CancelledError:
                 # Expiry/shutdown cannot enter upstream's flush with an
                 # abandoned kernel queue and no remaining cancellation timer.

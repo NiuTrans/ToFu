@@ -89,10 +89,7 @@ function refreshSystemPromptSummary(): void {
     const lbl = translate('settings.systemPromptBlocksOff', 'blocks off');
     parts.push(disabled.length + ' ' + lbl);
   }
-  if (val) {
-    const charsLbl = translate('settings.systemPromptSet', 'custom prompt set');
-    parts.push(charsLbl + ' · ' + val.length + ' chars');
-  }
+  if (val) parts.push(translate('settings.systemPromptSet', 'custom prompt set'));
   if (!parts.length) {
     summary.textContent = translate('settings.systemPromptEmpty', '(using all built-in blocks)');
     summary.classList.remove('has-value');

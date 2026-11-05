@@ -60,6 +60,7 @@ from .oauth import api_v1_oauth_bp
 from .adapter import api_v1_adapter_bp
 from .project import api_v1_project_bp
 from .project_brain import api_v1_project_brain_bp
+from .router import api_v1_router_bp
 
 from . import project_dispatch_batches  # noqa: F401 — registers on the coordination blueprint
 from .integration import api_v1_integration_bp
@@ -76,6 +77,7 @@ from .slides import api_v1_slides_bp
 from .uploads import api_v1_uploads_bp
 from .videos import api_v1_videos_bp
 from .audio import api_v1_audio_bp
+from .channels import api_v1_channels_bp
 from .common import api_v1_common_bp
 from .config import api_v1_config_bp
 from .providers import api_v1_providers_bp
@@ -130,6 +132,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_adapter_bp,
     api_v1_project_bp,
     api_v1_project_brain_bp,
+    api_v1_router_bp,
     api_v1_integration_bp,
     api_v1_translate_bp,
     api_v1_artifacts_bp,
@@ -143,6 +146,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_uploads_bp,
     api_v1_videos_bp,
     api_v1_audio_bp,
+    api_v1_channels_bp,
     api_v1_common_bp,
     api_v1_config_bp,
     api_v1_providers_bp,

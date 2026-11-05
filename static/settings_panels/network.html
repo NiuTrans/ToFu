@@ -1,6 +1,6 @@
         <div class="settings-tab-panel" id="settingsTab_network">
           <div class="settings-section-title" data-i18n="settings.proxyPoolTitle">代理池</div>
-          <p class="settings-desc" data-i18n-html="settings.proxyPoolBody">粘贴完整代理链接。系统按顺序连接，失败自动切换；不添加则使用系统代理。</p>
+          <p class="settings-desc" data-i18n-html="settings.proxyPoolBody">粘贴完整代理链接，按顺序尝试，失败自动切换。</p>
           <div id="proxyEnvBanner" class="settings-hint-banner" style="display:none;margin-top:0;margin-bottom:12px">
             ℹ️ <span id="proxyEnvBannerText"></span>
           </div>
@@ -8,8 +8,6 @@
             <div class="proxy-pool-toolbar">
               <span class="proxy-pool-meta">
                 <span id="proxyPoolCount" class="proxy-pool-count">0 个代理</span>
-                <span class="proxy-pool-meta-sep" aria-hidden="true">·</span>
-                <span class="proxy-pool-order-hint" data-i18n="settings.proxyPoolOrderHint">从上到下按顺序尝试</span>
               </span>
               <button type="button" id="proxyPoolAddBtn" class="auth-src-btn sm"></button>
             </div>

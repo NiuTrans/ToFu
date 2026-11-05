@@ -35,6 +35,24 @@ points cannot replace them or spoof that provenance. Allow-list membership is
 availability, not a request to pin every schema. Full and routed exposure both
 retain enabled plugins; provider/local Tool Search can defer their functions.
 
+**Discovery of a dormant bundled capability (2026-11-02).** Problem: the
+allow-list removed a bundled tool from the executable catalog silently, so a
+deployment without `production` returned zero Tool Search hits for
+`produce_slides` / PPT and the model could not tell a hallucinated name from a
+disabled capability (nor which gate to enable). Decision:
+`bundled_plugin_search_availability` in `lib/tools/optional_plugins.py` projects
+the same `resolve_enabled_plugins` decision into the existing read-only
+`capability_availability` evidence, aggregated once per plugin, when the
+namespace equals the plugin or the query contains a distinctive tool/product
+alias, and the request does not already expose it. It reports
+`bundled_plugin_not_enabled` plus the plugin's declared `gate`, names how to
+enable it, and clears `missing_name` only for a name it actually matched.
+Alternatives rejected: enabling bundled plugins by default (contradicts the
+fail-closed isolation this contract exists for), disclosing dormant schemas
+(would misrepresent authority), and keyword/BM25 matching (fires on generic
+capability words; only declared aliases count). Evidence never enables a plugin
+or starts a bridge. Verify with `tests/tools/test_bundled_plugin_discovery.py`.
+
 ## 1. The problem
 
 A third-party package contributes native tools by declaring a `tofu.tools`

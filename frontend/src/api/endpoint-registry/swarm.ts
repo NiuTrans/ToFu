@@ -8,6 +8,8 @@ export function createSwarmEndpoints(ports: EndpointPorts) {
           Object.assign({ onError: 'null' }, opts || {})),
     abort:  (taskId: string) =>
       post(`/api/v4/swarm/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null' }),
+    stopAgent: (swarmId: string, agentId: string) =>
+      post(`/api/v4/swarm/runs/${encodeURIComponent(swarmId)}/agents/${encodeURIComponent(agentId)}/stop`, {}),
   };
   return swarm;
 }

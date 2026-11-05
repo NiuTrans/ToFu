@@ -29,7 +29,6 @@ harness reports the hang. Shipped source left byte-identical.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -41,10 +40,6 @@ pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'frontend/src/core/conversation-metadata-cache.ts'
-
-
-def _node_available() -> bool:
-    return bool(shutil.which('node'))
 
 
 # A minimal fake IndexedDB with a working transaction event model. The store's
@@ -246,7 +241,6 @@ def _neuter_put_onabort(src: str) -> str:
     )
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_metadata_put_resolves_on_quota_abort():
     bundle = native_module_path('conversation-metadata-cache.js', SOURCE)
     proc = _run_harness(bundle)
@@ -257,7 +251,6 @@ def test_metadata_put_resolves_on_quota_abort():
     assert output.count('PASS') >= 4, f'expected >=4 PASS lines, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_put_onabort_double_neuter(tmp_path):
     """DOUBLE-NEUTER: strip the putMetadata `transaction.onabort` handler on a
     COPY of the compiled owner → the aborted put's promise never resolves →

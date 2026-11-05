@@ -130,7 +130,9 @@ def _check_frontend_artifact():
 
 def _validate_imports():
     """Validate critical imports at startup."""
-    # tofu_search.fetch/search are deliberately ABSENT: tofu-search is an
+    # tofu_search and its host search_bridge are deliberately ABSENT: the
+    # bridge imports the package facade too, so validating it is equally eager.
+    # tofu-search is an
     # optional, heavyweight capability (pymupdf/onnxruntime native chain,
     # ~2s of the boot phase on a network mount) and ``lib.search.search_runtime``
     # already installs its seams at the first real search/fetch call. An
@@ -140,7 +142,6 @@ def _validate_imports():
     _CRITICAL_IMPORTS = [
         'lib.tasks_pkg.orchestrator',
         'lib.tasks_pkg.executor',
-        'lib.search.search_bridge',
         'lib.llm',
     ]
     _boot('Validating critical imports…')
@@ -151,7 +152,7 @@ def _validate_imports():
             __import__(mod_name)
         except ImportError as ie:
             failures.append((mod_name, ie))
-            _server_log.error('Critical import failed: %s — %s', mod_name, ie)
+            _server_log.exception('Critical import failed: %s — %s', mod_name, ie)
     if failures:
         msgs = [f'  {m}: {e}' for m, e in failures]
         raise ImportError('Missing dependencies:\n' + '\n'.join(msgs))
@@ -243,13 +244,15 @@ def _start_storage_authority_sql():
     """Start and verify the required storage authority."""
     from lib.storage import start_storage, storage_status
 
-    # Direct/container starts and a re-exec from an older updater must also
-    # prepare the current engine. Keep this in the visible boot phase, never
-    # on an ordinary query's storage acquisition path.
-    from serverctl import prepare_native_engine_artifact
-    preparation_error = prepare_native_engine_artifact('storage startup', project=_PROJECT_ROOT)
-    if preparation_error:
-        raise RuntimeError(preparation_error)
+    # A managed external authority has already admitted its engine. Its
+    # attaching client still verifies source, binary pin, scope and handshake;
+    # it must not compile or replace that service's executable during boot.
+    # Direct launches retain preparation before their own authority starts.
+    if not os.environ.get('TOFU_STORAGE_CONNECTION_FILE'):
+        from serverctl import prepare_native_engine_artifact
+        preparation_error = prepare_native_engine_artifact('storage startup', project=_PROJECT_ROOT)
+        if preparation_error:
+            raise RuntimeError(preparation_error)
     _boot('Starting storage sidecar…')
     # The runtime start performs the authoritative ready handshake and
     # raises on a failed one; a third explicit probe here was a redundant
@@ -366,6 +369,16 @@ def _init_database():
     except Exception as exc:
         _server_log.warning('Shutdown-marker classification failed: %s', exc)
 
+    # A dead server's in-flight foreground commands can neither deliver output
+    # nor release inherited workspace leases. Retire them before tasks and
+    # swarms resume, so resumed agents never race their own orphans.
+    from lib.project_mod.foreground_command_records import (
+        retire_orphaned_foreground_commands,
+    )
+    _run_boot_recovery_step(
+        'orphaned command retirement', retire_orphaned_foreground_commands,
+        attempts=1)
+
     from lib.tasks_pkg.manager import (
         record_boot_interrupted_conversations,
         recover_stale_tasks_on_startup,
@@ -436,7 +449,8 @@ def _run_post_ready_deferred():
     """Best-effort recovery that must not hold the readiness gate.
 
     These steps are idempotent and reconstructible: cache warm-up,
-    superseded-attempt cleanup, swarm rehydration and output housekeeping.
+    superseded-attempt cleanup, MCP declaration slot compaction, swarm
+    rehydration and output housekeeping.
     Required task/turn and work-item settlement stays in _init_database.
     Wired as ``ProductionStartupSteps.post_ready`` by the composition root.
     """
@@ -450,11 +464,31 @@ def _run_post_ready_deferred():
     from lib.turn_lifecycle import cleanup_superseded_attempts
     _run_boot_recovery_step(
         'superseded-attempt cleanup', cleanup_superseded_attempts)
-    try:
-        from lib.swarm.integration import rehydrate_swarms_on_startup
-        rehydrate_swarms_on_startup()
-    except Exception as exc:
-        _server_log.warning('Swarm rehydration failed: %s', exc)
+    from lib.process_roles import CAPABILITY_TASK_RECOVERY, process_role_has
+    if (not _DEPLOYMENT_CONFIGURATION.distributed_preview_read_only
+            and process_role_has(_DEPLOYMENT_CONFIGURATION.process_role,
+                                 CAPABILITY_TASK_RECOVERY)):
+        # Receipts that finished while the server was down get their one
+        # collective wake here. It starts a model turn, so it waits for
+        # readiness; the record scan that gates wakes already ran in
+        # _init_database. Idempotent (queue-id keyed), and the maintenance
+        # tick retries it.
+        from lib.message_queue import drain_idle_background_batches
+        _run_boot_recovery_step(
+            'background batch wake', drain_idle_background_batches, attempts=2)
+        try:
+            from lib.identity import PERSONAL_USER_ID
+            from lib.storage.mcp_declarations import start_legacy_slot_compaction
+            # Lossless legacy-slot re-encoding keeps conversation headers
+            # inline for catalog reads; idempotent, fail-soft, off-request.
+            # TODO(enterprise): one pass per served owner, not only the
+            # process-bound storage owner.
+            start_legacy_slot_compaction(user_id=int(
+                os.environ.get('TOFUDB_OWNER_ID', str(PERSONAL_USER_ID))))
+        except Exception as exc:
+            _server_log.warning('[Server] MCP declaration compaction failed to start: %s', exc)
+    from lib.swarm.integration import rehydrate_swarms_on_startup
+    _run_boot_recovery_step('swarm rehydration', rehydrate_swarms_on_startup)
     try:
         from lib.swarm.integration import start_swarm_output_cleanup
         start_swarm_output_cleanup()

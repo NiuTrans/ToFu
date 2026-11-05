@@ -13,6 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from . import admission
+from .repository import PublicationResultChanged
 
 from lib.log import get_logger
 
@@ -26,7 +27,7 @@ def workspace_origin(task) -> dict:
 
 
 def _same_project(left, right) -> bool:
-    return bool(left and right) and Path(left).resolve() == Path(right).resolve()
+    return bool(left and right) and Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
 
 
 def _path_allowed(path: str, scopes, root: Path) -> bool:
@@ -65,6 +66,10 @@ def publication_reason(row: Mapping, receipt: Mapping) -> str:
                 or assignment['grant']['revision'] != binding.get('revision')
                 or assignment['grant']['revoked']):
             return 'project_publication_identity_changed'
+    except PublicationResultChanged:
+        # Actionable: the source Coordinator re-reviews the current result
+        # revision for the same checkpoint; the receiver retries each tick.
+        return 'project_publication_result_changed'
     except Exception as diagnostic_error:
         logger.debug('publication_reason failure handled: %s', type(diagnostic_error).__name__)
         return 'project_publication_authority_missing'
@@ -116,7 +121,8 @@ def delivery_view(assignment: Mapping, attempt: Mapping | None, workspace_get) -
         return None
     task_id = attempt['taskId']
     try:
-        row = workspace_get(request['projectPath'], task_id, user_id=grant['owner'])
+        project_root = str(Path(request['projectPath']).expanduser().resolve())
+        row = workspace_get(project_root, task_id, user_id=grant['owner'])
         if (not isinstance(row, Mapping) or row.get('task_id') != task_id
                 or type(row.get('user_id')) is not int or row['user_id'] < 1
                 or row['user_id'] != grant['owner']

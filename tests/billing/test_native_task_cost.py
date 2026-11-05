@@ -3,7 +3,7 @@ import copy
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
-from lib.billing.cost import native_task_cost
+from lib.billing.native_cost import native_task_cost
 from tests.tasks_pkg.test_native_cost_projection import evidence
 pytestmark=pytest.mark.unit
 

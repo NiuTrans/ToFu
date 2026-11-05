@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from lib.log import get_logger
 
@@ -80,20 +82,58 @@ def _mark_dispatch_failed(timer: dict[str, Any], reason: str) -> None:
 #  Continuation execution — inject user message + start agentic task
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _execute_continuation(timer: dict[str, Any]) -> str | None:
-    """Inject user message and start agentic task in the target conversation.
+_CONTINUATION_COMMAND_PREFIX = 'timer:'
+
+
+def continuation_command_id(timer_id: str) -> str:
+    """The conversation command identity of a timer's single continuation."""
+    return f'{_CONTINUATION_COMMAND_PREFIX}{timer_id}'
+
+
+@dataclass(frozen=True, slots=True)
+class TimerContinuationOutcome:
+    """Where one timer continuation ended up.
+
+    ``started`` — its own turn began and ``task_id`` is that executor.
+    ``steered`` — committed into the attempt that was ALREADY running.
+    ``queued`` — durable behind the running turn; the queue drain starts it.
+    ``retry``  — nothing was accepted; the watcher must stay active.
+    ``closed`` — the timer is settled (cancelled, already triggered, or
+                 retired by a terminal dispatch failure).
+
+    A single-shot watcher owns one obligation, so every accepted delivery
+    retires it. Only ``retry`` leaves it watching.
+    """
+
+    kind: Literal["started", "steered", "queued", "retry", "closed"]
+    task_id: str = ""
+    queue_id: str = ""
+
+    @property
+    def accepted(self) -> bool:
+        return self.kind in ("started", "steered", "queued")
+
+
+def _execute_continuation(timer: dict[str, Any]) -> TimerContinuationOutcome:
+    """Deliver the timer's continuation into its target conversation.
+
+    A watcher never owns the target lane, so a busy conversation must not
+    consume its one-shot obligation: the continuation is steered into the
+    live attempt (committed as a durable injection block the model sees on
+    its next round) with the durable queue as fallback.
 
     Args:
         timer: The timer record dict.
 
     Returns:
-        The agentic task_id, or None on failure.
+        A :class:`TimerContinuationOutcome` describing the delivery.
     """
+    from lib.scheduler._shared import continuation_policy
     from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn
 
     current = _get_timer_row(str(timer['id']), user_id=int(timer['user_id']))
     if not current or current.get('status') != 'active':
-        return None
+        return TimerContinuationOutcome('closed')
     timer = current
 
     timer_id = timer['id']
@@ -115,23 +155,31 @@ def _execute_continuation(timer: dict[str, Any]) -> str | None:
         '_timerId': timer_id,
     }
 
+    tools_config = timer.get('tools_config') or {}
     try:
         dispatch = dispatch_scheduled_turn(
             conversation_id=conv_id,
             user_message=user_message,
-            tools_config=timer.get('tools_config', '{}'),
+            tools_config=tools_config,
             user_id=int(timer['user_id']),
-            command_id=f'timer:{timer_id}',
+            command_id=continuation_command_id(timer_id),
             log_prefix=log_prefix,
+            config_overrides=(continuation_policy(tools_config)
+                              if isinstance(tools_config, Mapping) else None),
+            # A busy lane is the normal case for a watcher: the conversation
+            # is very often still working when the condition is met. Steer
+            # commits the continuation into that live attempt and falls back
+            # to the durable queue on its own.
+            inject_mode='steer',
         )
     except Exception as exc:
         logger.error('%s Continuation dispatch unavailable: %s', log_prefix,
                      exc, exc_info=True)
-        return None
+        return TimerContinuationOutcome('retry')
 
     if dispatch.disposition == 'busy':
-        return None
-    if dispatch.disposition != 'started':
+        return TimerContinuationOutcome('retry')
+    if dispatch.disposition not in ('started', 'steered', 'queued'):
         reason = (
             'target conversation no longer exists'
             if dispatch.disposition == 'target_missing'
@@ -139,42 +187,170 @@ def _execute_continuation(timer: dict[str, Any]) -> str | None:
         )
         logger.error('%s Terminal continuation failure: %s', log_prefix, reason)
         _mark_dispatch_failed(timer, reason)
-        return None
+        return TimerContinuationOutcome('closed')
 
+    delivery = dispatch.disposition
     agentic_task_id = dispatch.task_id
 
-    if agentic_task_id:
-        # Mark timer as triggered in DB
-        try:
-            now_iso = datetime.now().isoformat()
-            receipt = _timer_client(write=True).command(
-                'timer.update', {'timer_id': timer_id,
-                                 'user_id': int(timer['user_id']),
-                                 'status': 'triggered',
-                                 'triggered_at': now_iso,
-                                 'execution_task_id': agentic_task_id,
-                                 'updated_at': now_iso,
-                                 'expected_status': 'active'},
-                f'timer.triggered:{timer_id}:{agentic_task_id}')
-            if not receipt.get('changed'):
-                # Cancellation/another owner won the status predicate. Never
-                # advertise a transition the storage authority did not accept.
-                return None
-            from ._notify import notify_timer_changed
-            notify_timer_changed('triggered', user_id=int(timer['user_id']))
-        except Exception as e:
-            logger.error('%s Failed to mark timer as triggered: %s',
-                         log_prefix, e, exc_info=True)
-            # Keep the committed ready obligation live. The next pass replays
-            # timer:<id> through the Turn command owner, which returns the same
-            # attempt without launching another executor. If the write committed
-            # but its ACK was lost, the next row read observes terminal status.
+    # Mark the obligation settled only after the delivery is durable. The
+    # recorded decision IS the delivery receipt, so the timer panel and the
+    # API can say whether the continuation joined the running turn, waits in
+    # the queue, or started a turn of its own.
+    try:
+        now_iso = datetime.now().isoformat()
+        update: dict[str, Any] = {
+            'timer_id': timer_id,
+            'user_id': int(timer['user_id']),
+            'status': 'triggered',
+            'triggered_at': now_iso,
+            'last_poll_decision': delivery,
+            'updated_at': now_iso,
+            'expected_status': 'active',
+        }
+        if agentic_task_id:
+            update['execution_task_id'] = agentic_task_id
+        receipt = _timer_client(write=True).command(
+            'timer.update', update,
+            f'timer.triggered:{timer_id}:{delivery}')
+        if not receipt.get('changed'):
+            # Cancellation/another owner won the status predicate. Never
+            # advertise a transition the storage authority did not accept.
+            return TimerContinuationOutcome('closed')
+        from ._notify import notify_timer_changed
+        notify_timer_changed('triggered', user_id=int(timer['user_id']))
+    except Exception as e:
+        logger.error('%s Failed to mark timer as triggered: %s',
+                     log_prefix, e, exc_info=True)
+        # Keep the committed ready obligation live. The next pass replays
+        # timer:<id> through the Turn command owner, which returns the same
+        # attempt without launching another executor. If the write committed
+        # but its ACK was lost, the next row read observes terminal status.
+        return TimerContinuationOutcome('retry')
+
+    remove_live_watcher(timer_id)
+    logger.info('%s Continuation delivered (%s)', log_prefix, delivery)
+    return TimerContinuationOutcome(
+        delivery,
+        task_id=agentic_task_id,
+        queue_id=dispatch.queue_id,
+    )
+
+
+def record_requeued_continuation(command_id: str, *, user_id: int) -> bool:
+    """Correct a steered continuation's receipt after it fell back to the queue.
+
+    A steer is accepted into the running attempt but reaches the model only at
+    that attempt's next round boundary. When the attempt ends first, the task
+    finalizer re-queues the undelivered steer as the conversation's next turn,
+    and the watcher's ``steered`` receipt would claim an injection that never
+    happened. Commands of other producers are ignored. Best-effort: the queued
+    turn, not this receipt, is the delivery authority.
+    """
+    if not command_id.startswith(_CONTINUATION_COMMAND_PREFIX):
+        return False
+    timer_id = command_id[len(_CONTINUATION_COMMAND_PREFIX):]
+    try:
+        changed = bool(_timer_client(write=True).command(
+            'timer.update', {
+                'timer_id': timer_id,
+                'user_id': int(user_id),
+                'last_poll_decision': 'queued',
+                'updated_at': datetime.now().isoformat(),
+                'expected_status': 'triggered',
+            }, f'timer.requeued:{timer_id}').get('changed'))
+    except Exception as exc:
+        logger.warning('[Timer:%s] Re-queued continuation receipt not recorded: %s',
+                       timer_id, exc, exc_info=True)
+        return False
+    if changed:
+        from ._notify import notify_timer_changed
+        notify_timer_changed('progress', user_id=int(user_id))
+        logger.info('[Timer:%s] Steered continuation re-queued as the next turn',
+                    timer_id)
+    return changed
+
+
+def _poll_decision(ready: bool, parse_error: bool, poll_model: str) -> str:
+    """Ledger decision for one completed poll."""
+    if ready:
+        return 'ready'
+    if not parse_error:
+        return 'wait'
+    return 'error' if poll_model == 'predicate' else 'parse_error'
+
+
+@dataclass(frozen=True, slots=True)
+class TimerCheckOutcome:
+    """Verdict of one operator-requested readiness check.
+
+    ``decision``/``reason`` are what the check left on the durable row
+    (``wait``, ``error``, ``parse_error`` or ``ready``). ``delivery`` is set
+    only for ``ready``: the continuation was dispatched exactly as a
+    background poll would have dispatched it.
+    """
+
+    decision: str
+    reason: str = ''
+    delivery: TimerContinuationOutcome | None = None
+
+
+def check_timer_now(timer_id: str, *, user_id: int) -> TimerCheckOutcome | None:
+    """Run one readiness check now; deliver the continuation only when ready.
+
+    The operator's counterpart of one background poll: it spends one poll of
+    the declared budget, records its verdict in the same ledger, and a ready
+    verdict becomes the same durable dispatch obligation. A row whose ready
+    verdict is already committed is delivered without a new check, which
+    could only lose a transient condition. Returns ``None`` when the timer is
+    gone or settled, or when its poll budget is spent (it is then retired as
+    exhausted, as the background loop would).
+    """
+    from lib.storage import StorageError
+
+    timer = _get_timer_row(timer_id, user_id=user_id)
+    if not timer or timer.get('status') != 'active':
+        return None
+    if timer.get('last_poll_decision') != 'ready':
+        poll_count = int(timer.get('poll_count') or 0)
+        max_polls = int(timer.get('max_polls') or 0)
+        if max_polls > 0 and poll_count >= max_polls:
+            _mark_exhausted(timer_id, user_id=user_id)
             return None
-
-    if agentic_task_id:
-        remove_live_watcher(timer_id)
-
-    return agentic_task_id
+        poll_id = f'{timer_id}.p{poll_count + 1}'
+        try:
+            (ready, reason, tokens_used, _skipped, parse_error, cmd_output,
+             poll_model, _tool_trace, raw_content) = poll_timer(
+                timer_id, user_id=user_id)
+            decision = _poll_decision(ready, parse_error, poll_model)
+            raw_output = raw_content if parse_error else ''
+        except Exception as exc:
+            logger.error('[Timer:%s] Manual check %s error: %s',
+                         timer_id, poll_id, exc, exc_info=True)
+            decision, reason, tokens_used = 'error', str(exc)[:200], 0
+            cmd_output, poll_model, raw_output = '', '', str(exc)[:2000]
+        try:
+            _record_poll(timer_id, decision, reason, tokens_used, cmd_output,
+                         poll_model, poll_id=poll_id, raw_output=raw_output,
+                         user_id=user_id)
+        except StorageError as exc:
+            # The poll number is one command identity. A background poll that
+            # recorded it first owns that number, so the committed row below
+            # decides instead of this call's verdict.
+            if exc.code != 'database_conflict':
+                raise
+            logger.info('[Timer:%s] Manual check %s lost the poll number to '
+                        'a concurrent poll', timer_id, poll_id)
+        logger.info('[Timer:%s] Manual check %s: %s — %s',
+                    timer_id, poll_id, decision, reason[:80])
+        timer = _get_timer_row(timer_id, user_id=user_id)
+        if not timer or timer.get('status') != 'active':
+            return None
+        if timer.get('last_poll_decision') != 'ready':
+            return TimerCheckOutcome(
+                str(timer.get('last_poll_decision') or decision),
+                str(timer.get('last_poll_reason') or ''))
+    return TimerCheckOutcome('ready', str(timer.get('last_poll_reason') or ''),
+                             _execute_continuation(timer))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -264,8 +440,8 @@ def start_timer_loop(timer_id: str, *, user_id: int) -> bool:
             # Lane contention must not consume another poll, repeat a model
             # call, lose a transient condition, or exhaust the watcher.
             if current.get('last_poll_decision') == 'ready':
-                exec_id = await run_blocking(_execute_continuation, current)
-                if exec_id:
+                outcome = await run_blocking(_execute_continuation, current)
+                if outcome.kind != 'retry':
                     break
                 continue
 
@@ -318,9 +494,7 @@ def start_timer_loop(timer_id: str, *, user_id: int) -> bool:
                         'retrying: %s', tid, persist_error)
                 continue
 
-            decision = ('ready' if ready else (
-                ('error' if poll_model == 'predicate' else 'parse_error')
-                if parse_error else 'wait'))
+            decision = _poll_decision(ready, parse_error, poll_model)
             # Persist the raw LLM output only when it carries diagnostic value
             # (a malformed decision) — a clean wait/ready needs no raw dump.
             _raw_to_store = raw_content if parse_error else ''
@@ -340,17 +514,18 @@ def start_timer_loop(timer_id: str, *, user_id: int) -> bool:
                         poll_model or '?')
 
             if ready:
-                logger.info('[Timer:%s] ✅ Conditions met — executing continuation', tid)
-                exec_id = await run_blocking(_execute_continuation, current)
-                if exec_id:
-                    logger.info('[Timer:%s] 🚀 Continuation started: task=%s', tid, exec_id[:8])
+                logger.info('[Timer:%s] ✅ Conditions met — delivering continuation', tid)
+                outcome = await run_blocking(_execute_continuation, current)
+                if outcome.kind != 'retry':
+                    logger.info('[Timer:%s] Continuation settled: %s %s', tid,
+                                outcome.kind, (outcome.task_id or outcome.queue_id)[:8])
                     break
                 latest = await run_blocking(_get_timer_row, tid, user_id=user_id)
                 if not latest or latest.get('status') != 'active':
                     logger.info('[Timer:%s] Continuation retired with status=%s',
                                 tid, (latest or {}).get('status', 'deleted'))
                     break
-                logger.info('[Timer:%s] Conversation lane or dispatcher unavailable; '
+                logger.info('[Timer:%s] Delivery lane unavailable; '
                             'watcher remains active and will retry', tid)
                 continue
 

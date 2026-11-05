@@ -11,7 +11,7 @@ export function mountExecutionEnvironment(host: HTMLElement, ports: {
   const projectField = createField({label: ports.copy('projectDirectory'), inputType: 'text', controlId: 'evo-project-path'});
   const project = projectField.control as HTMLInputElement;project.name = 'project_path';
   const environmentField = createField({label: ports.copy('executionEnvironment'),
-    choices: [{label: ports.copy('environmentInherit'), value: ''}], controlId: 'evo-execution-environment', hint: ports.copy('environmentHint')});
+    choices: [{label: ports.copy('environmentInherit'), value: ''}], controlId: 'evo-execution-environment'});
   const select = environmentField.control as HTMLSelectElement;select.name = 'executor_plugins';
   const status = document.createElement('p');status.setAttribute('role', 'status');
   let busy = false, loading = false;
@@ -32,7 +32,7 @@ export function mountExecutionEnvironment(host: HTMLElement, ports: {
       if (saved && !Array.from(select.options).some(option => option.value === saved)) {
         const missing = new Option(ports.copy('environmentUnavailable'), saved);missing.disabled = true;select.append(missing);
       }
-      select.value = saved;status.textContent = ports.copy(names.length ? 'environmentReady' : 'environmentEmpty');
+      select.value = saved;status.textContent = names.length ? '' : ports.copy('environmentEmpty');
     } catch {
       if (!ports.signal.aborted) {status.textContent = ports.copy('environmentUnavailable');retry.hidden = false;}
     } finally {loading = false;disabled();}

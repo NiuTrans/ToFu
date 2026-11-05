@@ -1,7 +1,6 @@
-"""Real-browser QA for the standalone local-knowledge workbench."""
+"""Real-browser QA for the local-knowledge workbench in Settings."""
 
 from pathlib import Path
-import re
 
 import pytest
 
@@ -32,18 +31,22 @@ def _surface_fit(page):
 def _knowledge_harness():
     root = Path(__file__).resolve().parents[2]
     index = (root / 'index.html').read_text(encoding='utf-8')
-    modal = re.search(
-        r'<!-- Local Knowledge.*?(<div class="modal-overlay kb-overlay".*?</div>)\s*'
-        r'<!-- Preview Modal -->', index, re.S)
-    assert modal, 'could not extract #knowledgeModal from index.html'
-    launcher = '''<div class="topbar"><div class="topbar-tools">
-      <button class="topbar-tool-btn" id="knowledgeTopbarBtn"
-        onclick="openKnowledgeBase()"><span>知识库</span></button>
-    </div></div>'''
+    panel = (root / 'frontend/src/settings-panels/knowledge.html').read_text(
+        encoding='utf-8')
+    assert 'id="knowledgeModal"' in panel
+    assert 'id="knowledgeTopbarBtn"' not in index
+    assert 'id="mobileKnowledge"' not in index
+    launcher = '''<div class="modal-overlay open" id="settingsModal">
+      <div class="modal settings-panel">
+        <nav class="settings-tabs"><button class="settings-tab active"
+          data-tab="knowledge">知识库</button></nav>
+        <div class="settings-content"><!-- WORKBENCH --></div>
+      </div>
+    </div>'''
     html = f'''<!doctype html><html data-theme="tofu"><head>
       <meta charset="utf-8"><meta name="viewport" content="width=device-width">
       <link rel="stylesheet" href="/styles.css">
-      </head><body>{launcher}{modal.group(1)}
+      </head><body>{launcher.replace('<!-- WORKBENCH -->', panel)}
       <script src="/i18n.js"></script>
       <script src="/escape.js"></script>
       <script src="/dialog.js"></script>
@@ -182,6 +185,33 @@ def _knowledge_harness():
       };
     '''
     return root, html, mock
+
+
+def test_settings_knowledge_tab_opens_and_cleans_up(page, tmp_path):
+    _, _, mock = _knowledge_harness()
+    page.wait_for_function("window.TofuModules?.version === 3 && window.Api?.knowledge")
+    page.evaluate(mock)
+    assert page.locator('#knowledgeTopbarBtn').count() == 0
+    assert page.locator('#mobileKnowledge').count() == 0
+
+    page.locator('[data-tofu-action="openSettings()"]').first.click()
+    page.locator('#settingsModal.open').wait_for(state='visible')
+    page.locator('.settings-tab[data-tab="knowledge"]').click()
+    page.locator('#settingsTab_knowledge.active #knowledgeModal.open').wait_for(
+        state='visible')
+    page.locator('.kb-empty-state').wait_for(state='visible')
+    page.screenshot(path=str(tmp_path / 'knowledge-settings-tab.png'))
+
+    page.locator('.settings-tab[data-tab="general"]').click()
+    assert not page.locator('#knowledgeModal').evaluate(
+        'node => node.classList.contains("open")')
+    page.locator('.settings-tab[data-tab="knowledge"]').click()
+    page.locator('#knowledgeModal.open').wait_for(state='visible')
+    page.locator('#settingsModal .settings-header .settings-close-btn').click()
+    page.locator('#settingsModal').wait_for(state='hidden')
+    assert not page.locator('#knowledgeModal').evaluate(
+        'node => node.classList.contains("open")')
+    assert not getattr(page, '_tofu_js_errors', [])
 
 
 def test_knowledge_upload_preview_toggle_and_responsive_fit(page, tmp_path):
@@ -343,11 +373,11 @@ def test_knowledge_upload_preview_toggle_and_responsive_fit(page, tmp_path):
     assert not desktop_fit['documentScrollX']
     for region in desktop_fit['regions']:
         assert region['left'] >= -1 and region['right'] <= 1441, region
-        assert region['top'] >= -1 and region['bottom'] <= 901, region
+        assert region['top'] >= -1, region
     desktop_shot = Path(tmp_path) / 'knowledge-desktop.png'
     page.screenshot(path=str(desktop_shot), full_page=False)
 
-    # Small realistic viewport: fixed shell stays fitted; its body owns scroll.
+    # Narrow panes keep the workbench width bounded; Settings owns scrolling.
     page.set_viewport_size({'width': 390, 'height': 844})
     page.wait_for_timeout(250)
     mobile_fit = _surface_fit(page)
@@ -356,7 +386,10 @@ def test_knowledge_upload_preview_toggle_and_responsive_fit(page, tmp_path):
         region for region in mobile_fit['regions']
         if region['key'] == 'kb-workbench')
     assert workbench['width'] <= 391
-    assert workbench['height'] <= 845
+    assert page.evaluate('''() => {
+      const content = document.querySelector('.settings-content');
+      return content.scrollHeight > content.clientHeight;
+    }'''), 'the embedded workbench must scroll through Settings'
     mobile_shot = Path(tmp_path) / 'knowledge-mobile.png'
     page.screenshot(path=str(mobile_shot), full_page=False)
     page.locator('#knowledgeVisualEnrichment').scroll_into_view_if_needed()
@@ -454,15 +487,18 @@ def test_knowledge_long_results_never_overlap_the_panel_footer(page, tmp_path):
       const results = document.querySelector('.kb-search-results')
         .getBoundingClientRect();
       return {
-        panelScrollable: panel.scrollHeight > panel.clientHeight + 1,
+        settingsScrollable: (() => {
+          const content = document.querySelector('.settings-content');
+          return content.scrollHeight > content.clientHeight + 1;
+        })(),
         lastCardBottom: cards[cards.length - 1].bottom,
         resultsBottom: results.bottom,
         footTop: foot.top,
         overlap: cards[cards.length - 1].bottom - foot.top,
       };
     }''')
-    assert geometry['panelScrollable'], (
-        'the staged results must genuinely overflow the panel, otherwise the '
+    assert geometry['settingsScrollable'], (
+        'the embedded results must scroll through Settings, otherwise the '
         f"overlap assertions below prove nothing: {geometry}")
     assert geometry['resultsBottom'] >= geometry['lastCardBottom'] - 1, (
         'the results box must CONTAIN its cards — a box that stops short is '

@@ -28,6 +28,13 @@ If ``stat()`` itself hangs (mount already stale), the daemon detects this
 via a watchdog sub-thread and logs a warning — it can't fix a stale mount,
 but at least makes the condition visible in ``logs/error.log``.
 
+The same observation is liveness evidence (``filesystem_unresponsive`` /
+``filesystem_resumed_at``): every agent's worktree, log and storage I/O shares
+this mount, so while a stat stays unanswered an agent's silence belongs to the
+filesystem. ``lib.tasks_pkg.liveness`` reads it so a freeze is never judged a
+wedged agent (2026-11-02: a 27-minute freeze killed five healthy Swarm workers
+the moment their blocked I/O returned).
+
 Usage
 -----
 Called from ``server.py`` at startup::
@@ -104,6 +111,7 @@ class _ProbeRuntime:
         self._paths: tuple[str, ...] = ()
         self._results: list[tuple[str, bool, float]] = []
         self._active_path = ''
+        self._active_since: float | None = None
 
     def start(self) -> None:
         with self._condition:
@@ -155,6 +163,12 @@ class _ProbeRuntime:
                 return list(self._results), ''
             return None, self._active_path
 
+    def unanswered_seconds(self) -> float:
+        """How long the in-flight stat has gone unanswered; 0.0 when none is."""
+        with self._condition:
+            since = self._active_since
+        return 0.0 if since is None else max(0.0, time.monotonic() - since)
+
     def request_stop(self) -> None:
         with self._condition:
             self._stop_requested = True
@@ -189,8 +203,9 @@ class _ProbeRuntime:
                         if self._stop_requested:
                             return
                         self._active_path = path
+                        started_at = time.monotonic()
+                        self._active_since = started_at
                         self._condition.notify_all()
-                    started_at = time.monotonic()
                     ok = True
                     try:
                         _probe_path(path)
@@ -204,7 +219,12 @@ class _ProbeRuntime:
                         logger.warning(
                             '[FS-Keepalive] unexpected stat(%s) failure: %s',
                             path, exc, exc_info=True)
-                    results.append((path, ok, time.monotonic() - started_at))
+                    elapsed = time.monotonic() - started_at
+                    with self._condition:
+                        self._active_since = None
+                    if elapsed >= STAT_TIMEOUT_S:
+                        _record_filesystem_resumed()
+                    results.append((path, ok, elapsed))
 
                 with self._condition:
                     self._results = results
@@ -215,12 +235,40 @@ class _ProbeRuntime:
         finally:
             with self._condition:
                 self._active_path = ''
+                self._active_since = None
                 if self._thread is current_thread:
                     self._thread = None
                 self._condition.notify_all()
 
 
 _probe_runtime: _ProbeRuntime | None = None
+
+# (monotonic, wall) instant a stat unanswered for STAT_TIMEOUT_S last returned:
+# the moment I/O blocked by a stale mount could proceed again.
+_resumed_lock = threading.Lock()
+_resumed_at: tuple[float, float] = (0.0, 0.0)
+
+
+def _record_filesystem_resumed() -> None:
+    global _resumed_at
+    with _resumed_lock:
+        _resumed_at = (time.monotonic(), time.time())
+
+
+def filesystem_unresponsive() -> bool:
+    """True while a keepalive stat has been unanswered for ``STAT_TIMEOUT_S``.
+
+    That is this module's definition of a stale mount. False when no probe
+    runs (local disk, non-Linux, keepalive stopped).
+    """
+    runtime = _probe_runtime
+    return runtime is not None and runtime.unanswered_seconds() >= STAT_TIMEOUT_S
+
+
+def filesystem_resumed_at() -> tuple[float, float]:
+    """``(monotonic, wall)`` when a stale-mount stat last returned; zeros if never."""
+    with _resumed_lock:
+        return _resumed_at
 
 
 # ═══════════════════════════════════════════════════════════════════════

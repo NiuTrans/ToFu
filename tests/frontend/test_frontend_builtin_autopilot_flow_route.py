@@ -34,20 +34,24 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 sys.path.insert(0, os.path.dirname(HERE))
-from _runtime_sections import runtime_section_path  # noqa: E402
+from _runtime_sections import native_module_path, runtime_section_path  # noqa: E402
 
 SRC = runtime_section_path('main/main_toolbar_ui.js')
+FLOW_PICKER_BUNDLE = native_module_path(
+    'flow-picker-display.js',
+    os.path.join(ROOT, 'frontend', 'src', 'features', 'orchestration', 'flow-picker.ts'),
+)
 
 # The marker at the top of the shipped setActiveFlow — it must go STRAIGHT into
 # the normal flow path (no builtin:autopilot alias branch). The NC re-inserts a
@@ -67,17 +71,12 @@ _NC_ALIAS_BRANCH = (
 )
 
 
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
-
-
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
 const TOOLBAR_SRC = process.argv[3];   // path to the main_toolbar_ui.js variant
+const FLOW_PICKER_BUNDLE = process.argv[4];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body>'
@@ -97,6 +96,7 @@ global.console = console;
 //    toolbar source in this scope, so plain `var` here is visible to it. ──
 var autopilotEnabled = false, planMode = false, activeFlow = '';
 var imageGenMode = false;
+var _registeredModelsLoaded = false;
 var swarmEnabled = false, codeExecEnabled = false, memoryEnabled = false, autoTranslate = false;
 var searchMode = 'off', fetchEnabled = true, browserEnabled = false, desktopEnabled = false;
 var schedulerEnabled = false, imageGenEnabled = false, humanGuidanceEnabled = false;
@@ -124,7 +124,9 @@ win.getActiveConv = global.getActiveConv = () => null;
 win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 win.updateSubmenuCounts = global.updateSubmenuCounts = () => {};
 win._applyImageGenUI = global._applyImageGenUI = (value) => { imageGenMode = !!value; };
-win._flowDisplayName = global._flowDisplayName = (v) => v || 'none';
+// Use the real shared display-name owner, not a second localized-flow catalog.
+(0, eval)(fs.readFileSync(FLOW_PICKER_BUNDLE, 'utf8'));
+win._flowDisplayName = global._flowDisplayName = (v) => orchestrationFlowPickerDisplayName(v, [], (key) => key);
 win._scheduleReflow = global._scheduleReflow = () => {};
 win.Api = global.Api = { chat: {} };
 
@@ -185,7 +187,7 @@ const B = _snapshot();
 check('dropdown_selects_flow', B.activeFlow === 'builtin:autopilot');
 check('dropdown_autopilot_off', B.autopilotEnabled === false);
 check('dropdown_projects_workflow_mode', B.triggerMode === 'workflow');
-check('dropdown_projects_workflow_label', B.modeLabel === 'builtin:autopilot');
+check('dropdown_projects_workflow_label', B.modeLabel === 'toolbar.autopilot');
 check('dropdown_ap_badge_hidden', B.apBadge === 'none');
 check('dropdown_ov_activeflow_flow', B.ovActiveFlow === 'builtin:autopilot');
 check('dropdown_ov_autopilot_false', B.ovAutopilot === false);
@@ -199,12 +201,13 @@ console.log(out.join('\n'));
 
 
 def _run(toolbar_src: str) -> str:
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_builtin_autopilot_flow_route_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, ROOT, toolbar_src],
+            ['node', harness, ROOT, toolbar_src, FLOW_PICKER_BUNDLE],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -241,8 +244,6 @@ def _build_reverted_copy() -> str:
     return dst
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_builtin_autopilot_is_a_real_engine_flow():
     """Selecting 目标模式 from the 编排流程 dropdown yields a real flow selection
     (activeFlow='builtin:autopilot', autopilot OFF), distinct from the
@@ -253,8 +254,6 @@ def test_builtin_autopilot_is_a_real_engine_flow():
     assert output.count('PASS') >= 14, f'expected >=14 PASS, got:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nc_alias_revert_breaks_flow_route():
     """Byte-revert NC: re-inserting the legacy alias branch makes the dropdown
     set autopilotEnabled + clear activeFlow again — the "real flow" assertions

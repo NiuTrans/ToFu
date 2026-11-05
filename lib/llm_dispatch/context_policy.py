@@ -31,12 +31,10 @@ def pinned_context_profile(model, *, provider_id='', owner_user_id=None, pin='')
     candidates = []
     output_caps = []
     exact = True
-    for slot in list(get_dispatcher().slots):
-        if pin and slot.provider_id != pin:
-            continue
+    # The pin's own group, or configured slots only when unpinned; never a
+    # scan of every live slot (each running task owns one route group).
+    for slot in list(get_dispatcher().slots.scope(pin)):
         if owner_user_id and getattr(slot, 'routing_owner_user_id', 0) != owner_user_id:
-            continue
-        if not pin and getattr(slot, 'request_scoped', False):
             continue
         if provider_id and not pin and provider_id not in (
                 slot.provider_id, getattr(slot, 'routing_provider_id', '')):
@@ -47,7 +45,8 @@ def pinned_context_profile(model, *, provider_id='', owner_user_id=None, pin='')
         if not window:
             from lib.model_info import resolved_context_profile
             fallback = resolved_context_profile(
-                slot.model, getattr(slot, 'routing_provider_id', '') or slot.provider_id)
+                slot.logical_model or slot.model,
+                getattr(slot, 'routing_provider_id', '') or slot.provider_id)
             window = fallback.get('window')
             exact = exact and bool(fallback.get('exact'))
         if not window:
@@ -61,8 +60,9 @@ def pinned_context_profile(model, *, provider_id='', owner_user_id=None, pin='')
             deployment_id=str(getattr(slot, 'route_deployment_id', '') or ''),
             protocol=str(slot.protocol or 'openai'), model=str(slot.model or ''))
         output_caps.append(_clamp_route_max_tokens(
-            slot.model, int(window), route_key=route_key,
-            declared_limit=int(getattr(slot, 'max_output_tokens', 0) or 0)))
+            slot.logical_model or slot.model, int(window), route_key=route_key,
+            declared_limit=int(getattr(slot, 'max_output_tokens', 0) or 0),
+            wire_model=slot.model))
     if not candidates:
         return None
     return {'window': min(candidates), 'source': 'model_routing_v2', 'exact': exact,

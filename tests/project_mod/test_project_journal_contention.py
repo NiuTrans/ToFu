@@ -182,6 +182,63 @@ def test_busy_is_typed_retryable_and_never_mutates(project, monkeypatch, action)
     assert not list(Path(project).glob('.tofu_atomic_*'))
 
 
+def edit(base, name, anchor='old', content='new'):
+    return _ops.tool_edit_file(base, [{'path': name, 'operation': 'replace',
+                                      'anchor': anchor, 'content': content}],
+                               conv_id='conv', task_id=name)
+
+
+@pytest.mark.parametrize('stage', ['matching', 'syntax-check'])
+def test_independent_edit_does_not_wait_for_another_edits_unjournaled_work(
+        project, monkeypatch, stage):
+    """Two edit_file calls on different files of one project, issued together.
+
+    Matching and the report-only syntax check of one call need no journal
+    admission, so the other call commits while they run instead of spending
+    its admission budget and reporting journal-busy.
+    """
+    entered, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(locks, '_wait_seconds', lambda: 0.5)
+    name = '_compute_diff' if stage == 'matching' else '_post_edit_guard'
+    original = getattr(_ops, name)
+
+    def slow(*args, **kwargs):
+        if 'first.txt' in args:
+            entered.set()
+            assert release.wait(10)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(_ops, name, slow)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(edit, project, 'first.txt')
+        try:
+            assert entered.wait(10)
+            second = pool.submit(edit, project, 'second.txt').result(timeout=10)
+        finally:
+            release.set()
+        first = first.result(timeout=10)
+    assert second.startswith('Applied 1/1 edits'), second
+    assert first.startswith('Applied 1/1 edits'), first
+    assert Path(project, 'first.txt').read_bytes() == Path(project, 'second.txt').read_bytes() == b'new\r\n'
+    assert {row['path'] for row in mods.get_modifications(project)} == {'first.txt', 'second.txt'}
+
+
+def test_rejected_atomic_batch_reports_without_waiting_for_the_journal(project, monkeypatch):
+    """A batch that will write nothing never queues behind the project journal."""
+    session = mods._get_session_dir(project)
+    monkeypatch.setattr(locks, '_wait_seconds', lambda: 30)
+    batch = [{'path': 'first.txt', 'operation': 'replace', 'anchor': 'old', 'content': 'new'},
+             {'path': 'second.txt', 'operation': 'replace', 'anchor': 'absent', 'content': 'x'}]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with locks.locked_session(session):
+            result = pool.submit(_ops.tool_edit_file, project, batch).result(timeout=5)
+    assert 'atomic preflight failed; no files written' in result, result
+    assert '[1] SKIP' in result and '[2] FAIL second.txt [replace] [match-not-found]' in result
+    assert '[journal-busy]' not in result
+    assert Path(project, 'first.txt').read_bytes() == b'old\r\n'
+    assert mods.get_modifications(project) == []
+
+
 def test_cross_project_disk_write_does_not_hold_global_cache_lock(project, tmp_path, monkeypatch):
     other = tmp_path / 'other'
     other.mkdir()

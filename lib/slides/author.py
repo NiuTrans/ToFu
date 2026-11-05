@@ -14,6 +14,7 @@ as designer-quality output while fallback pages remain.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -40,7 +41,9 @@ _INTERNAL_COPY_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_MARKER_RE = re.compile(r'\[S\d{1,3}\]', re.IGNORECASE)
-_NUMBER_RE = re.compile(r'(?<![A-Za-z0-9_])\d+(?:\.\d+)?')
+_NUMBER_RE = re.compile(
+    r'(?<![A-Za-z0-9_.,])[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)'
+    r'(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_]|\.\d)')
 
 #: Theme textStyles every page may reference ($title/$body/$caption/$bignum).
 PAGE_STYLES_DOC = """\
@@ -172,12 +175,10 @@ def _brief_fidelity_findings(brief: dict, text: str, *, page_index: int,
         if isinstance(source, dict):
             evidence_parts.extend((str(source.get('title') or ''),
                                    str(source.get('point') or '')))
-    allowed = {float(token) for token in _NUMBER_RE.findall(
+    allowed = {Decimal(token.replace(',', '')) for token in _NUMBER_RE.findall(
         '\n'.join(evidence_parts))}
-    # Small integers are structural labels (page numbers, steps, ranks), not
-    # quantitative claims. Larger chart values need exact page evidence.
-    allowed.update(float(value) for value in range(0, max(20, total) + 1))
-    allowed.update((float(page_index + 1), float(total)))
+    # Series values are measurements, including 0, 1 and values coinciding
+    # with a page count. Structural labels live outside the series values.
 
     unsupported: list[str] = []
     for element in data.get('elements') or []:
@@ -190,7 +191,7 @@ def _brief_fidelity_findings(brief: dict, text: str, *, page_index: int,
             for value in series.get('values') or []:
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     continue
-                if float(value) not in allowed:
+                if Decimal(str(value)) not in allowed:
                     unsupported.append(str(value))
     if not unsupported:
         return []
@@ -253,16 +254,23 @@ def _shared_author_prompt_prefix(deck, total: int, theme_block: str,
         f'Page geometry {deck.width}×{deck.height} px.')
 
 
+def _without_source_markers(value) -> str:
+    return _SOURCE_MARKER_RE.sub('', str(value or ''))
+
+
 def _build_prompt(deck, brief: dict, page_index: int, total: int,
                   theme_block: str, bible_excerpt: str, cheatsheet: str,
                   image_urls: list, lang: str) -> str:
-    purpose = brief.get('purpose') or ''
-    key = brief.get('key_message') or ''
-    layout = brief.get('layout_hint') or ''
-    notes = brief.get('content_notes') or ''
+    # Briefs cite research cards as [S#] for evidence lineage; the page
+    # validator rejects any visible marker, so the author never sees them.
+    purpose = _without_source_markers(brief.get('purpose'))
+    key = _without_source_markers(brief.get('key_message'))
+    layout = _without_source_markers(brief.get('layout_hint'))
+    notes = _without_source_markers(brief.get('content_notes'))
     ptype = brief.get('pageType') or 'content'
     from lib.slides._creative_plan import page_packet
-    packet = page_packet(brief, page_index, total, deck_title=deck.title)
+    packet = _without_source_markers(
+        page_packet(brief, page_index, total, deck_title=deck.title))
     images_block = ''
     if image_urls:
         images_block = (
@@ -278,7 +286,6 @@ def _build_prompt(deck, brief: dict, page_index: int, total: int,
               '做成构图主体,不要缩成卡片角落的装饰。\n')
     source_cards = [s for s in (brief.get('sources') or [])
                     if isinstance(s, dict) and s.get('url')]
-    sources_block = ''
     if source_cards:
         heading = (
             '\n## 本页事实来源(必须保持事实与数字一致,并用 $caption '
@@ -286,8 +293,18 @@ def _build_prompt(deck, brief: dict, page_index: int, total: int,
             '\n## Sources for this page (keep facts/numbers exact and cite '
             'the source domains in a $caption footer)\n')
         sources_block = heading + '\n'.join(
-            f'- [{s.get("id")}] {s.get("point")} — {s.get("url")}'
+            f'- {_without_source_markers(s.get("point"))} — {s.get("url")}'
             for s in source_cards) + '\n'
+    elif lang == 'zh':
+        sources_block = (
+            '\n## 本页事实来源\n本页没有带 URL 的来源卡：事实来自用户提供的'
+            '素材（即上方内容素材），不要添加来源页脚，也不要写“来源：待补充”'
+            '“TBD”等占位文字。\n')
+    else:
+        sources_block = (
+            '\n## Sources for this page\nNo URL-bearing source cards: the '
+            "facts come from the user's supplied material above. Do not add "
+            'a source footer or any placeholder such as "Source: TBD".\n')
     stable_prefix = _shared_author_prompt_prefix(
         deck, total, theme_block, bible_excerpt, cheatsheet, lang)
     if lang == 'zh':
@@ -300,8 +317,9 @@ def _build_prompt(deck, brief: dict, page_index: int, total: int,
             f'{images_block}\n'
             f'{sources_block}'
             '读者任务、版式提示、内容素材是内部输入，禁止把“章节引导页”'
-            '“引出下一页”“过渡页”等策划语原样放进页面。禁止编造来源中'
-            '不存在的数字或评测分数；没有精确数据时使用定性对比或流程图。\n'
+            '“引出下一页”“过渡页”等策划语原样放进页面。研究阶段的内部来源'
+            '编号（形如 [S#]）只供内部核对，禁止出现在页面任何文字中。禁止编造'
+            '来源中不存在的数字或评测分数；没有精确数据时使用定性对比或流程图。\n'
             '只输出本页的 YAML '
             f'(pageType/background/elements/components),不要代码围栏外的任何解释。')
     return (
@@ -314,7 +332,9 @@ def _build_prompt(deck, brief: dict, page_index: int, total: int,
         f'{sources_block}'
         'Reader task, layout hint, and material are internal inputs; never '
         'render phrases such as "section divider", "transition page", or '
-        '"introduce the next page". Never invent benchmark numbers; use a '
+        '"introduce the next page". Research-stage internal source ids such '
+        'as [S#] are bookkeeping only; never show them in any page text. '
+        'Never invent benchmark numbers; use a '
         'qualitative comparison or diagram when exact sourced data is absent.\n'
         'Output ONLY this '
         f'page\'s YAML (pageType/background/elements/components), no commentary.')

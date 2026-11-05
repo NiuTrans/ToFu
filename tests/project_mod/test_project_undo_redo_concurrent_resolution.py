@@ -180,9 +180,40 @@ def test_stale_reverse_patch_fails_without_rewriting_the_file():
         assert failed == [{
             'path': 'document.txt',
             'reason': 'Reverse patch target no longer matches',
+            'refused': True,
         }]
         with open(path, encoding='utf-8') as handle:
             assert handle.read() == 'newer external edit\n'
+
+
+def test_failed_undo_write_is_a_fault_row_without_its_raw_error(monkeypatch):
+    from lib.project_mod import undo_filesystem
+
+    withheld = '/srv/private/project/document.txt'
+
+    def deny(*_args, **_kwargs):
+        raise PermissionError(13, 'Permission denied', withheld)
+
+    monkeypatch.setattr(undo_filesystem, 'write_file', deny)
+    with tempfile.TemporaryDirectory() as project:
+        path = os.path.join(project, 'document.txt')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('tool replacement\n')
+        undone, failed = pm_modifications._undo_modifications_list(project, [{
+            'type': 'apply_diff',
+            'path': 'document.txt',
+            'reversePatch': {'search': 'tool replacement',
+                             'replace': 'original text'},
+        }])
+
+        assert undone == []
+        assert failed == [{
+            'path': 'document.txt',
+            'reason': 'internal error (PermissionError)',
+            'refused': False,
+        }]
+        with open(path, encoding='utf-8') as handle:
+            assert handle.read() == 'tool replacement\n'
 
 
 # ── undo-all with a pinned project only touches THAT project ──

@@ -600,10 +600,15 @@ def _settle_error(
     target: str = "",
 ) -> None:
     from lib.error_envelope import from_exception
-    from lib.translate.errors import TranslationNoAdmissibleProvider
+    from lib.translate.errors import (
+        TranslationDeadlineExhausted,
+        TranslationNoAdmissibleProvider,
+    )
 
     if isinstance(exc, TranslationNoAdmissibleProvider):
         kind = 'no_slot'
+    elif isinstance(exc, TranslationDeadlineExhausted):
+        kind = 'timeout'
     else:
         kind = None
 

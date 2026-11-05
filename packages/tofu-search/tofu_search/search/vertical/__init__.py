@@ -18,7 +18,8 @@ one that cannot answer.
 This package was split out of a single 1000+ line module: one submodule per
 vertical (``cve``, ``arxiv``, …), each exposing ``TYPE``, ``DOMAIN``,
 ``detect(query)`` and ``search(identifier, params)``; :mod:`registry` wires
-them into the ordered detection chain + dispatch.
+them into the ordered detection chain + dispatch. Submodules never import a
+sibling through this package (see :mod:`base`).
 """
 
 from tofu_search.search.vertical.registry import (
@@ -32,8 +33,8 @@ from tofu_search.search.vertical.registry import (
 )
 
 # NOTE: the shared HTTP seam (``base.http_get`` / ``base._fetch_json`` /
-# ``base._post_json``) is deliberately NOT re-exported here. Handlers import
-# ``base`` directly so tests patch exactly one module, and a leading underscore
+# ``base._post_json``) is deliberately NOT re-exported here. Handlers bind the
+# ``base`` module directly so tests patch exactly one module, and a leading underscore
 # in a package ``__all__`` would advertise private names as public API.
 __all__ = [
     'detect_vertical_intent',

@@ -7,11 +7,14 @@ single pre-authentication hook used for an atomic v4 cutover.
 
 from __future__ import annotations
 
+# pyright: strict
+
+import hashlib
 import json
 import os
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from quart import Blueprint, Response, current_app, has_request_context, request
 
@@ -23,6 +26,7 @@ from lib.generated_api_v4_constants import (
     UPGRADE_URL,
 )
 from lib.log import req_id
+from lib.http_transport.json_response import take_json_representation
 
 
 ACTIVE_API_MAJOR_CONFIG = 'ACTIVE_API_MAJOR'
@@ -43,7 +47,7 @@ class NativeContractBlueprint(Blueprint):
     """
 
     def __init__(self, name: str, import_name: str, *, contract_id: str):
-        if not isinstance(contract_id, str) or not 1 <= len(contract_id) <= 128:
+        if not 1 <= len(contract_id) <= 128:
             raise ValueError('A native blueprint requires its canonical contract ID')
         super().__init__(name, import_name)
         self.native_contract_id = contract_id
@@ -51,7 +55,9 @@ class NativeContractBlueprint(Blueprint):
 
 def request_uses_native_response_contract() -> bool:
     """Use matched route ownership, never a path-prefix exemption."""
-    blueprint = current_app.blueprints.get(request.blueprint or '')
+    app = cast(Any, current_app)._get_current_object()
+    blueprints = cast(dict[str, Any], app.blueprints)
+    blueprint = blueprints.get(request.blueprint or '')
     return isinstance(blueprint, NativeContractBlueprint)
 
 
@@ -243,6 +249,22 @@ def _is_route_lambda(func: Any) -> bool:
     )
 
 
+_RegistrationValue = TypeVar('_RegistrationValue')
+
+
+def _copy_registration_containers(
+    registrations: dict[str, _RegistrationValue],
+) -> dict[str, _RegistrationValue]:
+    """Separate registration maps/lists without cloning callback owners."""
+    copied = cast(dict[str, Any], dict(registrations))
+    for key, value in registrations.items():
+        if isinstance(value, dict):
+            copied[key] = _copy_registration_containers(value)
+        elif isinstance(value, list):
+            copied[key] = list(value)
+    return cast(dict[str, _RegistrationValue], copied)
+
+
 def copy_blueprint_to_v4(source: Any, *, name: str) -> Any:
     """Project a v1 blueprint onto ``/api/v4`` with rewritten rule paths.
 
@@ -255,21 +277,42 @@ def copy_blueprint_to_v4(source: Any, *, name: str) -> Any:
     is preserved verbatim, so v1 and v4 execute identical domain logic and only
     the wire path/envelope differ.
 
-    Non-route deferred registrations (error handlers, nested blueprints, app
-    hooks) are NOT projected; they are copied only when they are blueprint-
-    scoped hooks expressed as ordinary ``record`` callbacks. The v4 envelope is
-    then attached by :func:`attach_v4_envelope`.
+    Blueprint-local guards, errors, response hooks and teardown keep their
+    callback identities in independent registration containers. Non-route
+    deferred callbacks replay unchanged; nested blueprints are not projected.
+    The v4 envelope is attached by :func:`attach_v4_envelope`.
     """
     from quart import Blueprint
 
-    target = Blueprint(name, source.import_name)
+    target = Blueprint(
+        name, source.import_name,
+        static_folder=source.static_folder,
+        static_url_path=source.static_url_path,
+        template_folder=source.template_folder,
+        root_path=source.root_path,
+        url_prefix=_rewrite_path(source.url_prefix) if source.url_prefix else None,
+        subdomain=source.subdomain,
+        url_defaults=dict(source.url_values_defaults),
+    )
+    # Scaffold decorators store blueprint-local policy directly, not in
+    # deferred_functions. Copy the containers so projection retains guards,
+    # errors and teardown without sharing mutable registration lists.
+    for attribute in (
+        'view_functions', 'before_request_funcs', 'after_request_funcs',
+        'teardown_request_funcs', 'error_handler_spec',
+        'url_value_preprocessors', 'url_default_functions',
+        'template_context_processors', 'before_websocket_funcs',
+        'after_websocket_funcs', 'teardown_websocket_funcs',
+    ):
+        if hasattr(source, attribute):
+            setattr(target, attribute, _copy_registration_containers(getattr(source, attribute)))
     for index, deferred in enumerate(source.deferred_functions):
         if not _is_route_lambda(deferred):
             # Non-route deferred setup: replay verbatim onto the copy so
             # blueprint-scoped hooks (before/after, error handlers) survive.
             target.record(deferred)
             continue
-        cells = [c.cell_contents for c in deferred.__closure__]
+        cells = [c.cell_contents for c in cast(tuple[Any, ...], deferred.__closure__)]
         provide_automatic_options, options, endpoint, rule, view_func = cells
         new_rule = _rewrite_path(rule)
         # Endpoint must be unique per rule: several rules may share one view
@@ -287,11 +330,37 @@ def copy_blueprint_to_v4(source: Any, *, name: str) -> Any:
     return target
 
 
-def success_envelope(data: Any, *, request_id: str, server_time_ms: int) -> dict:
+def product_blueprints_for_policy(
+    source: Any, *, legacy_enabled: bool, v4_enabled: bool,
+) -> tuple[Any, ...]:
+    """Project discovered legacy product routes through the common boundary.
+
+    Raw pages and native contracts keep their owner. URL prefixes/rules, not
+    plugin names or import paths, declare participation in the retired API.
+    """
+    paths = [source.url_prefix or '']
+    paths.extend(
+        callback.__closure__[3].cell_contents
+        for callback in source.deferred_functions if _is_route_lambda(callback)
+    )
+    if not any(_rewrite_path(path) != path for path in paths):
+        return (source,)
+    projections = [source] if legacy_enabled else []
+    if v4_enabled:
+        projections.append(attach_v4_envelope(
+            copy_blueprint_to_v4(source, name=f'{source.name}_v4')))
+    return tuple(projections)
+
+
+def success_envelope(
+    data: Any, *, request_id: str, server_time_ms: int,
+) -> dict[str, Any]:
     """Project one domain JSON value without inventing a domain wrapper."""
-    body = dict(data) if isinstance(data, dict) else data
-    if isinstance(body, dict) and body.get('ok') is True:
-        body.pop('ok')
+    body: Any = dict(cast(Mapping[str, Any], data)) if isinstance(data, dict) else data
+    if isinstance(body, dict):
+        envelope_body = cast(dict[str, Any], body)
+        if envelope_body.get('ok') is True:
+            envelope_body.pop('ok')
     return {
         'data': body,
         'meta': {'requestId': request_id, 'serverTimeMs': server_time_ms},
@@ -320,26 +389,71 @@ def raw_success_response(handler: Any) -> Any:
     return handler
 
 
+def _conditional_read(response: Any) -> bool:
+    """Whether this success may carry the generic representation validator.
+
+    Handlers that already chose a validator, a cache policy or a cookie own
+    their caching semantics; writes and non-200 successes never revalidate.
+    """
+    return (has_request_context()
+            and request.method in ('GET', 'HEAD')
+            and response.status_code == 200
+            and 'ETag' not in response.headers
+            and 'Cache-Control' not in response.headers
+            and 'Set-Cookie' not in response.headers)
+
+
 async def translate_v4_envelope(response: Any) -> Any:
     """after_request: convert a v1 payload into the v4 ``{data, meta}`` shape.
 
     Errors are left alone — the framework error boundary already renders
     RFC 7807 for v4 paths via ``_v4_problem``. Streaming/SSE and non-JSON
     bodies pass through unmodified.
+
+    ``meta`` differs on every response, so a read's validator is derived from
+    the handler's own representation: an unchanged read answers a matching
+    If-None-Match with an empty 304 and the browser cache supplies the body.
     """
     import time as _time
 
     if has_request_context():
-        handler = current_app.view_functions.get(request.endpoint)
+        app = cast(Any, current_app)._get_current_object()
+        handler = app.view_functions.get(request.endpoint or '')
         if getattr(handler, 'tofu_raw_success_response', False):
             return response
     if not _is_product_json_success(response):
         return response
-    try:
-        payload = json.loads(await response.get_data())
-    except (ValueError, TypeError):
-        return response
-    enveloped = success_envelope(
+    representation = await response.get_data()
+    owned = take_json_representation(response, representation)
+    payload = None
+    if owned is None:
+        # Raw/third-party bodies must validate before hashing or cache headers,
+        # including producers whose get_data result is not a byte sequence.
+        try:
+            payload = json.loads(representation)
+        except (ValueError, TypeError):
+            return response
+    tag = (hashlib.sha256(representation).hexdigest()[:32]
+           if _conditional_read(response) else None)
+    not_modified = tag is not None and request.if_none_match.contains_weak(tag)
+    # A matching validator needs no semantic value for certified JSON.
+    if owned is not None and not not_modified:
+        payload = owned.payload_in_wire_order()
+        if payload is None:
+            try:
+                payload = json.loads(representation)
+            except (ValueError, TypeError):
+                return response
+    if tag is not None:
+        response.set_etag(tag, weak=True)
+        response.headers['Cache-Control'] = 'private, no-cache'
+        if not_modified:
+            response.status_code = 304
+            response.set_data(b'')
+            for header in ('Content-Type', 'Content-Length'):
+                response.headers.pop(header, None)
+            return response
+    enveloped: dict[str, Any] = success_envelope(
         payload,
         request_id=req_id() or 'unassigned',
         server_time_ms=int(_time.time() * 1000),
@@ -375,6 +489,7 @@ __all__ = [
     'legacy_api_upgrade_before_request',
     'legacy_upgrade_response',
     'problem_response',
+    'product_blueprints_for_policy',
     'raw_success_response',
     'success_envelope',
     'translate_v4_envelope',

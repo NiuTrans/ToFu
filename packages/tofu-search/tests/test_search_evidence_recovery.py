@@ -149,16 +149,20 @@ def test_generic_acronym_does_not_suppress_evidence_recovery():
     assert wrong['relevance'] == 'weak_match'
 
 
-@pytest.mark.parametrize('body', [
-    '模型参数：上下文长度一百万。' * 10,
-    'quasar 模型参数：上下文长度一百万。' * 10,
-])
-def test_multilingual_partial_overlap_never_penalizes_recall(monkeypatch, body):
+@pytest.mark.parametrize('query, body', [
+    ('quasar context length', '模型参数：上下文长度一百万。' * 10),
+    ('quasar context length', 'quasar 模型参数：上下文长度一百万。' * 10),
+    ('quasar 的上下文长度是多少', 'Quasar has a one million token context window. ' * 10),
+    ('quasar длина контекста', 'Quasar has a one million token context window. ' * 10),
+    ('quasar طول السياق', 'Quasar has a one million token context window. ' * 10),
+], ids=['latin-to-cjk', 'latin-to-mixed-cjk', 'mixed-cjk-to-latin',
+        'mixed-cyrillic-to-latin', 'mixed-arabic-to-latin'])
+def test_multilingual_partial_overlap_never_penalizes_recall(monkeypatch, query, body):
     engines_off(monkeypatch)
     monkeypatch.setattr(orchestrator, 'search_bing',
         lambda *a: [row('https://vendor.test/zh', '模型参数')])
     monkeypatch.setattr(orchestrator, 'fetch_page_content', lambda *a, **kw: body)
-    result = orchestrator.perform_web_search('quasar context length',
+    result = orchestrator.perform_web_search(query,
         engines=['Bing'], filter_pages=False, deepen=False,
         config=get_config().copy(search_deadline_secs=5))
     assert len(result) == 1

@@ -70,7 +70,7 @@ def test_policy_model_content_and_owner_evidence(monkeypatch):
     build()
     with patch.object(Image, 'open', wraps=Image.open) as opened:
         build('claude-sonnet-4-6')
-        monkeypatch.setattr(_images, '_CLAUDE_IMAGE_MAX_PX', 1500)
+        monkeypatch.setattr(_images, '_CLAUDE_HIGH_RES_IMAGE_MAX_PX', 1500)
         build()
         build(original=source(size=(101, 80)))
         assert opened.call_count == 3

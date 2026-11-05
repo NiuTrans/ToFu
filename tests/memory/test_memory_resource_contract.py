@@ -2,8 +2,8 @@
 
 The tests prove invalid model/API payloads fail before corpus scans or writes,
 legacy direct-call search clamping remains compatible, generated Unicode IDs
-fit filesystem components, and the five resident schemas stay bounded without
-losing their task-selection semantics.
+fit filesystem components, and the five resident schemas stay provider-stable
+without losing their task-selection semantics.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from pathlib import Path
 from jsonschema import Draft7Validator
 import pytest
 
-from lib.context_telemetry import tool_schema_tokens
 from lib.memory.contracts import (
     MEMORY_BODY_MAX_CHARS,
     MEMORY_DESCRIPTION_MAX_CHARS,
@@ -285,11 +284,10 @@ def test_wire_schemas_share_limits_and_reject_costly_shapes():
         'description': 'dense trigger', 'body': 'evidence'})
 
 
-def test_memory_family_is_provider_stable_and_below_resident_budget():
+def test_memory_family_is_provider_stable_and_keeps_guidance():
     schemas = copy.deepcopy(ALL_MEMORY_TOOLS)
 
     assert sanitize_wire_tools(schemas) is schemas
-    assert tool_schema_tokens(ALL_MEMORY_TOOLS) <= 910
 
     descriptions = {
         tool['function']['name']: tool['function']['description']

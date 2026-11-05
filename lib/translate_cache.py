@@ -21,6 +21,7 @@ by ``ALWAYS_EXCLUDE_DIRS`` in ``export.py`` (``data/`` is excluded), so
 exported copies start with an empty cache.
 """
 
+import functools
 import hashlib
 import json
 import os
@@ -198,22 +199,19 @@ def get(text: str, source: str, target: str):
 
 
 def put(text: str, source: str, target: str, translated: str, model: str = ''):
-    """Store ``translated`` under the key for ``(text, source, target)``.
+    """Schedule storing ``translated`` under the key for ``(text, source, target)``.
 
-    Atomic: uses the repository's unique-temp + fsync + replace primitive.
-    Failures are logged at debug level — caching is best-effort.
+    Returns without waiting for the write. The entry is reconstructible, while
+    its shard lock, fsync and budget scan run on the shared data filesystem,
+    where they stalled translation callers (including the attended send path)
+    for 1-30s under load. Until the write lands, a lookup is a cache miss.
+    The destination path is resolved now so a later ``_CACHE_DIR`` change
+    cannot redirect the write. Failures are logged at debug level.
     """
     if not _ENABLED or not text or not translated:
         return
-    _ensure_dir()
     key = _key(text, source, target)
     path = _path_for(key)
-    shard = os.path.dirname(path)
-    try:
-        os.makedirs(shard, exist_ok=True)
-    except OSError as e:
-        logger.debug('[TranslateCache] mkdir %s failed: %s', shard, e)
-        return
 
     payload = {
         'translated': translated,
@@ -231,17 +229,32 @@ def put(text: str, source: str, target: str, translated: str, model: str = ''):
             shard_budget,
         )
         return
-    budget_lock_path = os.path.join(shard, '.translate-cache-budget')
-    # ``locked_path`` is already both thread- and process-safe and is keyed by
-    # this shard. Independent shards therefore remain concurrent instead of
-    # queueing every cache write behind one process-wide mutex.
-    with locked_path(budget_lock_path):
-        try:
-            write_json_atomic(path, payload, indent=None)
-        except (OSError, TypeError, ValueError) as e:
-            logger.debug('[TranslateCache] write failed for %s: %s', path, e)
-            return
-        _enforce_shard_budget(shard, keep_path=path)
+    _start_background_store(functools.partial(_store_entry, path, payload))
+
+
+def _start_background_store(store) -> None:
+    threading.Thread(target=store, name='translate-cache-store',
+                     daemon=True).start()
+
+
+def _store_entry(path: str, payload: dict) -> None:
+    """Atomically write one entry (unique temp + fsync + replace) in budget."""
+    shard = os.path.dirname(path)
+    try:
+        os.makedirs(shard, exist_ok=True)
+        budget_lock_path = os.path.join(shard, '.translate-cache-budget')
+        # ``locked_path`` is already both thread- and process-safe and is
+        # keyed by this shard. Independent shards therefore remain concurrent
+        # instead of queueing every cache write behind one process-wide mutex.
+        with locked_path(budget_lock_path):
+            try:
+                write_json_atomic(path, payload, indent=None)
+            except (OSError, TypeError, ValueError) as e:
+                logger.debug('[TranslateCache] write failed for %s: %s', path, e)
+                return
+            _enforce_shard_budget(shard, keep_path=path)
+    except Exception as e:
+        logger.debug('[TranslateCache] store failed for %s: %s', path, e)
 
 
 def remove(text: str, source: str, target: str) -> bool:

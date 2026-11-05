@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextlib import ExitStack
+from dataclasses import replace
 
-from tofu_search.config import configure
+from tofu_search.config import bind_call_config, configure, get_config
 from tofu_search.log import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +55,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument('--workers', type=int, default=1,
                         help=argparse.SUPPRESS)
+    parser.add_argument('--local-reranker-model-dir',
+                        help='Enable optional offline CPU reranking with an already downloaded, '
+                             'admitted Qwen3-Reranker-0.6B snapshot. No automatic download.')
+    parser.add_argument('--local-reranker-python',
+                        help='Python interpreter with the local-rerank extra installed '
+                             '(defaults to this interpreter; requires --local-reranker-model-dir).')
     return parser
 
 
@@ -111,7 +119,10 @@ def _reject_multiprocess(workers: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.local_reranker_python and not args.local_reranker_model_dir:
+        parser.error('--local-reranker-python requires --local-reranker-model-dir')
 
     _reject_multiprocess(args.workers)
 
@@ -130,10 +141,18 @@ def main(argv: list[str] | None = None) -> int:
             'Install them with:  pip install "tofu-search[mcp]"'
         ) from e
 
-    server = build_server()
-
     from tofu_search.mcp_server._bridge import shutdown_bridge
-    try:
+    with ExitStack() as owners:
+        # LIFO: stop/join model calls first, then join bridge carriers even if
+        # model cleanup raises. Call contexts borrow this explicit owner.
+        owners.callback(shutdown_bridge)
+        if args.local_reranker_model_dir:
+            from tofu_search.local_rerank import LocalReranker
+            ranker = LocalReranker(args.local_reranker_model_dir,
+                                   python_executable=args.local_reranker_python)
+            owners.callback(ranker.close)
+            owners.enter_context(bind_call_config(replace(get_config(), local_reranker=ranker)))
+        server = build_server()
         if args.transport == 'http':
             logger.info('[MCP] serving Streamable HTTP on %s:%d', args.host, args.port)
             # MCP SDK v2 owns transport configuration at run time.  The same
@@ -148,9 +167,6 @@ def main(argv: list[str] | None = None) -> int:
             # go to stderr (tofu_search.log never writes to stdout).
             logger.info('[MCP] serving over stdio')
             server.run(transport='stdio')
-    finally:
-        shutdown_bridge()
-
     return 0
 
 

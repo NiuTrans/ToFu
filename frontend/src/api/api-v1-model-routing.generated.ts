@@ -208,6 +208,7 @@ export type ModelRoutingMigrationMetadata = {
   "source": string;
   "migrated_at": number;
   "receipt_id": ModelRoutingIdentifier;
+  "context_repair_receipt_id"?: ModelRoutingIdentifier;
 };
 
 export type ModelRoutingDocument = {
@@ -394,7 +395,15 @@ export type ProviderProbeResponse = {
   "provider_bundle"?: CompiledProviderBundle;
   "credential_id"?: string;
   "model_count"?: number;
+  "listed_model_count"?: number;
   [key: string]: unknown;
+};
+
+export type ListedModelsImportResponse = {
+  "provider_id": string;
+  "listed_model_count": number;
+  "added_model_count": number;
+  "revision": Revision;
 };
 
 export type ProbeCellsStartRequest = {

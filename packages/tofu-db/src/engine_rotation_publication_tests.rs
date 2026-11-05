@@ -107,7 +107,8 @@
         };
         let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
         let gate = Arc::new(GenerationIoGate { entered: entered_sender,
-            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new() });
+            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new(),
+            maximum_pause: Some(std::time::Duration::from_secs(10)) });
         let vfs = Arc::new(GenerationPausedVfs(Arc::clone(&gate), true));
         let engine = Arc::new(Mutex::new(Engine::initialize_with_vfs(directory.path(), vfs.clone()).unwrap()));
         let snapshot = {
@@ -164,7 +165,8 @@
         let directory = tempfile::tempdir().unwrap();
         let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
         let gate = Arc::new(GenerationIoGate { entered: entered_sender,
-            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new() });
+            armed: std::sync::atomic::AtomicBool::new(false), released: Mutex::new(false), wake: std::sync::Condvar::new(),
+            maximum_pause: Some(std::time::Duration::from_secs(10)) });
         let vfs = Arc::new(GenerationPausedVfs(Arc::clone(&gate), true));
         let mut engine = Engine::initialize_with_vfs(directory.path(), vfs).unwrap();
         let root = engine.write_block(b"authority root").unwrap();
@@ -198,6 +200,9 @@
         let (seed, mut engine) = initialized_simulated_engine();
         let root = engine.write_block(b"authority root").unwrap();
         engine.commit_references_with_authority_state(b"old", &[], Some(root)).unwrap();
+        // Retirement must rewrite a mixed routing page, not merely publish an
+        // unchanged index after retiring a source with no carried payloads.
+        engine.commit_transaction(b"retiring", &[b"retired history payload"]).unwrap();
         indexed_rotate(&mut engine);
         engine.commit_transaction(b"new", &[b"promoted history bytes"]).unwrap();
         indexed_rotate(&mut engine);
@@ -236,7 +241,8 @@
                 std::mem::forget(engine); vfs.crash().unwrap(); vfs.arm_fault(None).unwrap();
                 let recovered = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap_or_else(|error|
                     panic!("history fault {index} {operation:?}: {error}"));
-                assert_eq!(recovered.state.durable_sequence, 3);
+                assert_eq!(recovered.state.durable_sequence, 4);
+                assert_eq!(recovered.read_block(BlockId::for_payload(b"retired history payload")).unwrap(), b"retired history payload");
                 assert_eq!(recovered.read_block(BlockId::for_payload(b"promoted history bytes")).unwrap(), b"promoted history bytes");
                 assert_eq!(recovered.read_block(BlockId::for_payload(b"concurrent history payload")).unwrap(), b"concurrent history payload");
                 cases += 1;

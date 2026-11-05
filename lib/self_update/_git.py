@@ -1,7 +1,8 @@
 """lib/self_update/_git.py — git executable resolution and raw runners.
 
 ``_git_exe`` (cached PATH/Windows probe), ``_run_git`` (subprocess in the
-project root), ``git_available`` (is this a checkout?) and ``_head_sha``.
+project root), ``git_available`` (is this a checkout?), ``_head_sha`` and
+``observe_repository`` (both answers from one git process).
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from dataclasses import dataclass
 from typing import Optional
 
 from lib.self_update._config import _ROOT
@@ -168,10 +170,48 @@ def _run_git_streaming(args: list[str], timeout: int = 30,
         stderr='\n'.join(stderr_lines))
 
 
-def git_available() -> bool:
-    """True if this is a git checkout and git is on PATH."""
+@dataclass(frozen=True)
+class RepositoryObservation:
+    """``git rev-parse --git-dir`` and ``git rev-parse HEAD`` in one process.
+
+    ``discovered`` is what ``rev-parse --git-dir`` reports (repository
+    discovery succeeded); ``head`` is what ``_head_sha`` reports (the full
+    HEAD commit, None when unborn or unresolvable).
+    """
+
+    discovered: bool
+    head: Optional[str]
+
+
+def observe_repository() -> RepositoryObservation:
+    """Observe the project checkout and its HEAD with a single git process.
+
+    ``rev-parse`` sets up the repository before parsing arguments, so it
+    prints the git directory whenever discovery succeeds and exits 128 with
+    no output when it fails. ``HEAD`` is then resolved exactly as
+    ``git rev-parse HEAD`` would (exit 0 prints the commit; an unborn or
+    ambiguous HEAD exits non-zero after the git directory line).
+    """
+    try:
+        cp = _run_git(['rev-parse', '--git-dir', 'HEAD'])
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.warning('[Update] git not available: %s', e)
+        return RepositoryObservation(discovered=False, head=None)
+    lines = cp.stdout.splitlines()
+    head = lines[1].strip() if cp.returncode == 0 and len(lines) > 1 else None
+    return RepositoryObservation(discovered=bool(lines), head=head or None)
+
+
+def git_available(observation: Optional[RepositoryObservation] = None) -> bool:
+    """True if this is a git checkout and git is on PATH.
+
+    A caller that already holds this request's ``observe_repository`` result
+    passes it instead of spawning another ``rev-parse``.
+    """
     if not os.path.isdir(os.path.join(_ROOT, '.git')):
         return False
+    if observation is not None:
+        return observation.discovered
     try:
         cp = _run_git(['rev-parse', '--git-dir'])
         return cp.returncode == 0

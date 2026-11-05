@@ -151,6 +151,14 @@ def normalise_deck_plan(outline: dict) -> dict:
         modality = str(page.get('visual_modality') or '').strip().lower()
         if modality not in VISUAL_MODALITIES:
             modality = _LAYOUT_MODALITY[layout]
+        # Research/work artifacts must come from supplied evidence. Illustration
+        # remains available for framing pages, never as a synthetic result.
+        if (outline.get('scenario') in ('academic-research', 'career-interview')
+                and index not in (0, total - 1)
+                and page.get('pageType') not in ('cover', 'chapter', 'final')
+                and modality in ('hero-image', 'annotated-evidence')
+                and page.get('asset_mode') != 'provided'):
+            modality = 'native-diagram'
         page['visual_modality'] = modality
         anchor = re.sub(r'\s+', ' ', str(page.get('visual_anchor') or '')).strip()
         page['visual_anchor'] = (anchor or message or title)[:280]

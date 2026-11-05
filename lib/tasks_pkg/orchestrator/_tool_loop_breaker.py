@@ -114,8 +114,8 @@ _GIT_OBSERVATION_SUBCOMMANDS = frozenset({
     'rev-parse', 'rev-list', 'describe', 'shortlog', 'cat-file', 'name-rev',
 })
 _DEFAULT_READONLY_TOOLS = frozenset({
-    _READ_TOOL, 'grep_search', 'find_files', 'fetch_url', 'web_search',
-    'get_conversation', 'list_dir', 'read_tool_artifact',
+    _READ_TOOL, 'search_files', 'grep_search', 'find_files', 'fetch_url',
+    'web_search', 'get_conversation', 'list_dir', 'read_tool_artifact',
     'search_tool_artifact', 'list_conversations', 'search_memories',
 })
 _EXIT_CODE_RE = re.compile(r'\[exit code: (-?\d+)\]\s*$')
@@ -1229,7 +1229,7 @@ def _force_clean_finish(
 def finish_after_background_task_acceptance(
     task: dict[str, Any], rs: Any, *, round_num: int, tid: str,
 ) -> bool:
-    """End root chat after a long-running producer accepted its task.
+    """Suspend an explicit dependency wait, preserving ordinary Chat work.
 
     The accepted worker is now the sole progress authority. The model must not
     create an expensive polling loop or claim completion from intermediate
@@ -1238,6 +1238,8 @@ def finish_after_background_task_acceptance(
     """
     accepted = task.get('_backgroundTaskAccepted')
     if not isinstance(accepted, dict) or not accepted.get('taskId'):
+        return False
+    if accepted.get('continueConversation') is True:
         return False
     if task.get('_backgroundTaskAcceptanceConsumed'):
         return False

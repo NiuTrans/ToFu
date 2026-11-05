@@ -60,9 +60,11 @@ export interface AaBlock {
   source?: string;
   source_url?: string;
   fetched_at?: number | null;
+  /** AA Intelligence Index version (major.minor, e.g. ``5``) of every score. */
+  index_version?: number | null;
   key_source?: 'settings' | 'legacy_config' | 'env' | null;
   key_hint?: string;
-  /** Scores are keyed by ``creator_id::model_id``. */
+  /** Published scores only, keyed by ``creator_id::model_id``. */
   scores?: Record<string, AaScore>;
 }
 

@@ -79,11 +79,12 @@ role-scoped schema allow-list).
 
 ## 4. The dedup / write-partition fix at dispatch time
 
-`tool_dispatch.py` partitions tools into **write** (run serially for
-filesystem-race safety) and **idempotent** (dedup-cached). Those sets were
-frozen **once at import** by `_registry_tool_flags()`, so custom tools were
-invisible to them — a custom *write* tool would wrongly run in the parallel
-pool, and a custom read tool would never dedup.
+`tool_dispatch` partitions tools into **write** (approval-eligible effects:
+Manual-mode approval, project-cache invalidation, no pool ceiling, own receipt
+after Stop) and **idempotent** (dedup-cached). Those sets were frozen **once
+at import** by `_registry_tool_flags()`, so custom tools were invisible to
+them — a custom *write* tool would wrongly skip approval as a bounded read, and
+a custom read tool would never dedup.
 
 Fix: compute the partition **per task** at the top of `execute_tool_pipeline`,
 unioning the import-time base with the env's declared flags:
@@ -97,10 +98,11 @@ def _task_partitions(task):
             _IDEMPOTENT_TOOLS | env.idempotent_names)
 ```
 
-A custom tool declaring `"write": true` therefore runs in the serial write
-phase; one declaring `"idempotent": true` is dedup-cached in the existing
-per-task `_tool_result_cache`. The safe default (neither) → runs in parallel,
-no caching.
+A custom tool declaring `"write": true` is therefore an approval-eligible
+effect; one declaring `"idempotent": true` is dedup-cached in the existing
+per-task `_tool_result_cache`. The safe default (neither) → a bounded read, no
+caching. Every call of a round starts concurrently either way
+([concurrent tool rounds](contracts/TOOL_EXECUTION_POLICY.md#concurrent-tool-rounds-owner-decision-2026-10-28)).
 
 ---
 
@@ -122,9 +124,13 @@ existing per-task `assemble_tool_list`.
 
 ### 6.1 `client` (default — zero-trust)
 The server takes **schemas only**. When the model calls a `client` tool, the
-handler registers its owned waiter, then emits a `custom_tool_call` SSE event
-`{callId, toolName, arguments}` and **blocks** (`request_client_tool_result`,
-abort-aware, monotonic deadline). The request owner may declare a finite
+handler registers its owned waiter, then emits the registered
+`custom_tool_call` interaction event `{roundNum, toolCallId, callId, toolName,
+arguments}` and **blocks** (`request_client_tool_result`, abort-aware,
+monotonic deadline). Like every response-requiring event, publication is a
+delivery barrier: it returns once the request and every frame accepted before
+it are committed and visible, so the handler's wait starts with the request
+already readable by the client. The request owner may declare a finite
 `execution.timeout_s` from 1 to 3600 seconds; omission uses
 `limits.per_call_timeout_s` (120 seconds by default, hard ceiling 3600).
 Model arguments cannot change this handoff budget. The waiter is present even

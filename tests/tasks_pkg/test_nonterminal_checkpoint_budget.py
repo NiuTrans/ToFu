@@ -6,10 +6,19 @@ import time
 import pytest
 
 from lib.storage import StorageError
+from lib.storage.deadline_policy import reset_storage_service_observations
 from lib.task_replay.task_result_checkpoint_contract import TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
 from lib.tasks_pkg.manager._persist import _upsert_task_row
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _cold_service_observations():
+    """Budgets start at their floors: read 0.25 s, write 1.0 s (1.25 s in total)."""
+    reset_storage_service_observations()
+    yield
+    reset_storage_service_observations()
 
 
 def write(task, status):
@@ -45,7 +54,9 @@ def test_parent_witness_and_write_share_one_budget(monkeypatch, status):
 
     monkeypatch.setattr('lib.storage.get_storage_client', lambda **_: Client())
     assert write({'id': 'task', 'convId': 'conversation', '_userId': 7}, status)
-    assert [budget for _, budget in calls] == pytest.approx([.5, .3, .1])
+    # Each read is capped by the read budget; the write gets what the two
+    # 0.2 s reads left of the shared 1.25 s, below its own 1.0 s budget.
+    assert [budget for _, budget in calls] == pytest.approx([.25, .25, .85])
 
 
 @pytest.mark.parametrize('status', ['pending', 'running'])
@@ -56,7 +67,7 @@ def test_exhausted_preflight_does_not_begin_a_write(monkeypatch, status):
     class Client:
         def query(self, operation, payload, *, deadline):
             assert operation == 'conversation.get'
-            clock[0] += .6
+            clock[0] += 1.3
             return {'id': payload['conv_id']}
 
         def command(self, *args, **kwargs):
@@ -95,4 +106,4 @@ def test_only_terminal_write_retries_transient_pressure(monkeypatch, status, att
     if status == 'done':
         assert all('deadline' not in options for options in calls)
     else:
-        assert 0 < calls[0]['deadline'] <= .5
+        assert calls[0]['deadline'] == pytest.approx(1.0)

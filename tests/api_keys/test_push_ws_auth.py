@@ -67,6 +67,39 @@ def test_private_mode_rejects_a_bad_socket_token(monkeypatch):
     assert ctx is None and reason == 'invalid_token'
 
 
+@pytest.mark.parametrize('headers', [
+    {'Host': '127.0.0.1:15000', 'Origin': 'https://evil.example',
+     'Sec-Fetch-Site': 'cross-site'},
+    {'Host': 'localhost:15000', 'Origin': 'http://localhost:3000',
+     'Sec-Fetch-Site': 'same-site'},
+    # Browsers always send Origin on a socket handshake; CORS never applies.
+    {'Host': '127.0.0.1:15000', 'Origin': 'https://evil.example'},
+    {'Host': '127.0.0.1:15000', 'Origin': 'null'},
+])
+def test_open_mode_refuses_cross_site_browser_socket(monkeypatch, headers):
+    """Another site's page cannot read the owner's push stream or call RPCs."""
+    ctx, reason = _resolve(monkeypatch, headers=headers)
+    assert ctx is None and reason == 'cross_site'
+    ctx, reason = _resolve(
+        monkeypatch, ctx=None,
+        headers={**headers, 'Authorization': 'Bearer tofu_live_stale'})
+    assert ctx is None
+
+
+@pytest.mark.parametrize('headers', [
+    {'Host': '127.0.0.1:15000', 'Origin': 'http://127.0.0.1:15000',
+     'Sec-Fetch-Site': 'same-origin'},
+    {'Host': '127.0.0.1:15000', 'Origin': 'https://ide.example',
+     'Sec-Fetch-Site': 'same-origin'},
+    {'Host': 'localhost:15000', 'Origin': 'http://localhost:15000'},
+    {'Host': '127.0.0.1:15000'},
+])
+def test_open_mode_keeps_same_origin_and_non_browser_sockets(monkeypatch, headers):
+    ctx, reason = _resolve(monkeypatch, headers=headers)
+    assert ctx is not None and ctx.via_open_mode is True
+    assert reason == 'open_local'
+
+
 def test_http_and_ws_share_loopback_address_parser():
     from routes.api_v1.auth import address_is_loopback
     assert address_is_loopback(('127.0.0.1', 5000))

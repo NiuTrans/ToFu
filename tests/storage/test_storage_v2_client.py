@@ -14,6 +14,10 @@ from typing import Any
 import pytest
 
 from lib.storage import v2_client as v2_module
+from lib.storage.deadline_policy import (
+    reset_storage_service_observations,
+    storage_service_estimate,
+)
 from lib.storage.errors import StorageError
 from lib.storage.v2_client import StorageV2Client
 from lib.storage import commit_events as commit_events_module
@@ -491,6 +495,40 @@ def test_resource_exhausted_backs_off_from_first_retry(monkeypatch) -> None:
         'conversation.count', {}, deadline=30.0) == {'ok': True}
     # First retry already at the availability base, not the 50 ms blip hint.
     assert sleeps == [v2_module._AVAILABILITY_BACKOFF_BASE_S]
+
+
+@pytest.mark.parametrize('kind', ['query', 'command'])
+def test_deterministic_resource_bound_is_never_retried(monkeypatch, kind):
+    """A per-request bound (domain_resource_bound, e.g. a transcript above
+    the response byte budget) arrives non-retryable: replaying the same
+    request re-reads ~64 MiB to be refused again. It keeps its own
+    non-transient code, distinct from load shedding."""
+    from lib.storage.errors import (
+        http_status_for_storage_error, is_transient_storage_error)
+
+    sleeps = []
+    monkeypatch.setattr(v2_module.time, 'sleep', sleeps.append)
+    _FakeSession.responses = [
+        _FakeResponse(429, b'', 'database_resource_exhausted',
+                      'database_resource_exhausted', False),
+        _FakeResponse(0, b'{"ok": true}'),
+    ]
+    client = _client()
+
+    with pytest.raises(StorageError) as caught:
+        if kind == 'query':
+            client.query('conversation.list', {}, deadline=30.0)
+        else:
+            client.command('conversation.clone', {}, 'clone-1', deadline=30.0)
+
+    error = caught.value
+    assert (error.code, error.message, error.retryable, error.retry_after_ms) == (
+        'database_resource_exhausted', 'database_resource_exhausted', False,
+        None)
+    assert not is_transient_storage_error(error)
+    assert http_status_for_storage_error(error) == 500
+    assert _FakeSession.calls == 1
+    assert sleeps == []
 
 
 # ── Persistent session pool ──────────────────────────────────────────────
@@ -1012,3 +1050,63 @@ def test_health_invalid_response_retires_lane_before_next_probe(monkeypatch, fai
         assert len(sessions) == 2
     finally:
         client.close()
+
+
+def test_a_completed_call_records_the_observed_service_time() -> None:
+    # The authority's measured service time is the input of the writer
+    # deadline policy: a writer budgets for the authority it actually has.
+    reset_storage_service_observations()
+    try:
+        for _ in range(8):
+            _FakeSession.responses = [
+                _FakeResponse(0, json.dumps({'count': 4}).encode())]
+            _client().query('conversation.count', {}, deadline=5.0)
+        estimate = storage_service_estimate('query', 'conversation.count')
+        assert estimate is not None and estimate > 0
+    finally:
+        reset_storage_service_observations()
+
+
+def test_slow_successful_rpc_warns_once_per_operation_with_ambient_task(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+    import time
+
+    from lib.log import bind_log_context
+    from lib.storage.retry_log import RetryLogThrottle
+
+    monkeypatch.setattr(v2_module, 'SLOW_RPC_WARN_SECONDS', 0.05)
+    monkeypatch.setattr(v2_module, '_slow_rpc_log_throttle', RetryLogThrottle())
+    answer = _FakeSession.request
+
+    def slow_request(self, *args, **kwargs):
+        time.sleep(0.06)
+        return answer(self, *args, **kwargs)
+
+    monkeypatch.setattr(_FakeSession, 'request', slow_request)
+    caplog.set_level(logging.WARNING, logger=v2_module.logger.name)
+    _FakeSession.responses = [_FakeResponse(0, b'{}') for _ in range(3)]
+    client = _client()
+    with bind_log_context(task_id='task-slow-0123456789abcdef', conversation_id='conv-9'):
+        client.query('conversation.count', {}, deadline=5.0)
+        client.query('conversation.count', {}, deadline=5.0)
+        client.query('conversation.get', {}, deadline=5.0)
+
+    slow = [record for record in caplog.records
+            if getattr(record, 'tofu_event_name', '') == 'storage_rpc_slow']
+    assert [record.tofu_event_fields['operation'] for record in slow] == [
+        'conversation.count', 'conversation.get']
+    message = slow[0].getMessage()
+    assert message.startswith('storage.v2 slow query conversation.count succeeded elapsedMs=')
+    assert int(message.split('elapsedMs=')[1].split()[0]) >= 50
+    assert message.endswith(' attempts=1 task=task-slow-0123456789abcdef conv=conv-9')
+
+
+def test_fast_successful_rpc_logs_no_slow_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger=v2_module.logger.name)
+    _FakeSession.responses = [_FakeResponse(0, b'{}')]
+    _client().query('conversation.count', {}, deadline=5.0)
+    assert not [record for record in caplog.records
+                if getattr(record, 'tofu_event_name', '') == 'storage_rpc_slow']

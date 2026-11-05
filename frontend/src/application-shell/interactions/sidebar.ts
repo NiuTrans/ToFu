@@ -1,9 +1,13 @@
 /** Conversation-row activation and action delegation. Mouse press survives rerenders; clipboard feedback is one fenced transient control. */
 import type { LifecycleScope } from '../../lifecycle';
+/** A search body hit's matching live Turn, rendered on its row by the sidebar search. */
+export interface SidebarMatchTurn { turnId: string; ordinal: number }
 export interface SidebarInteractionPorts {
-  activate(id: string): void;
+  /** `turn` is present for a search body hit: open the conversation at that Turn. */
+  activate(id: string, turn?: SidebarMatchTurn): void;
   copy(id: string): Promise<unknown>;
   duplicate(id: string, event: MouseEvent): void;
+  exportTranscript(id: string, event: MouseEvent): void;
   delete(id: string, event: MouseEvent): void;
   rename(id: string): void;
   reference(id: string, title: string): void;
@@ -24,6 +28,10 @@ export function installSidebarInteractions(scope: LifecycleScope, ownerWindow: W
     const element = event.target as Element | null;
     return element?.nodeType === 1 ? element : null;
   }
+  function matchTurn(item: HTMLElement | null | undefined): SidebarMatchTurn | undefined {
+    const turnId = item?.dataset.matchTurnId, ordinal = Number(item?.dataset.matchTurnOrdinal);
+    return turnId && Number.isSafeInteger(ordinal) && ordinal >= 0 ? { turnId, ordinal } : undefined;
+  }
   scope.listen(host, 'pointerdown', event => {
     const e = event as PointerEvent, el = target(e);
     if (e.pointerType !== 'mouse' || e.button !== 0 || !el || el.closest('.conv-actions, .conv-action-btn, button, a')) {
@@ -31,7 +39,7 @@ export function installSidebarInteractions(scope: LifecycleScope, ownerWindow: W
     }
     const item = el.closest<HTMLElement>('.conv-item'), id = item?.dataset.convId;
     if (!id) return;
-    pointer = { id, time: ownerWindow.performance.now() }; ports.activate(id);
+    pointer = { id, time: ownerWindow.performance.now() }; ports.activate(id, matchTurn(item));
   });
   scope.listen(host, 'click', event => {
     const e = event as MouseEvent, el = target(e);
@@ -53,6 +61,7 @@ export function installSidebarInteractions(scope: LifecycleScope, ownerWindow: W
     }
     const actions: readonly [string, (id: string, button: HTMLElement) => void][] = [
       ['.conv-dup', id => ports.duplicate(id, e)], ['.conv-delete', id => ports.delete(id, e)],
+      ['.conv-export', id => ports.exportTranscript(id, e)],
       ['.conv-rename', ports.rename], ['.conv-ref', (id, b) => ports.reference(id, b.dataset.convTitle || 'Untitled')],
       ['.conv-folder-assign', ports.assignFolder],
     ];
@@ -61,9 +70,9 @@ export function installSidebarInteractions(scope: LifecycleScope, ownerWindow: W
       if (!button) continue;
       e.stopPropagation(); if (button.dataset.convId) action(button.dataset.convId, button); return;
     }
-    const id = el.closest<HTMLElement>('.conv-item')?.dataset.convId;
+    const item = el.closest<HTMLElement>('.conv-item'), id = item?.dataset.convId;
     if (!id) return;
     if (pointer.id === id && ownerWindow.performance.now() - pointer.time < 1000) { pointer = { id: null, time: 0 }; return; }
-    ports.activate(id);
+    ports.activate(id, matchTurn(item));
   });
 }

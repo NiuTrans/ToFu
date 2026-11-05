@@ -5,6 +5,14 @@ This guide owns autonomous and collaboration-mode policy referenced by the
 
 ## Autonomous drivers
 
+Ordinary Chat can call fixed agent-based production tools directly. An accepted
+`produce_*` job leaves the root free to complete the rest of the human request;
+it is not a root completion verdict. Production owns durable progress and
+artifact quality after the reply. The `continueConversation` handoff policy
+does not apply to explicit dependency suspension such as `compute_wait`.
+Long-horizon research remains available through the existing owner-authorized
+Chat exploration adapter. See [agent-based tools](modules/production.md#agent-based-tools).
+
 Flow-backed chat stores visible role messages as explicit related turns. An
 accepted Goal turn starts one durable GoalRun; its worker ⇄ virtual-user Flow
 owns all iterations and persists terminal meaning before chat completion.
@@ -109,18 +117,61 @@ Ownership, scoped tools, inherited cancellation and attempt/CAS fences remain.
 A classified busy/unavailable/timeout response retains the exact receipt and
 payload (or an idempotent checkpoint) and waits with capped backoff. Individual
 RPCs still have deadlines; the agent has no transient-storage attempt ceiling.
-Registration must ACK before dispatch; model/tool intent and completed-round
-checkpoints drain accepted event evidence before the next paid/external effect.
+Registration and the domain checkpoint sink must ACK before dispatch. Tool intent
+and completed-round checkpoints drain accepted event evidence before the next
+external effect or paid request; model intent leaves request diagnostics in the
+ordered FIFO ([pre-request checkpoint](TASK_EVENT_DELIVERY.md#pre-request-checkpoint-never-awaits-diagnostics)).
+A child's FIFO holds only its Request Inspector snapshots, so its completed-round
+checkpoint leaves them queued too; tool intent and the child's terminal settle
+drain them ([child evidence lane](TASK_EVENT_DELIVERY.md#a-childs-inspector-evidence-never-blocks-its-paid-call)).
 Stop and explicit execution deadlines interrupt effect admission. Accepted
 Inspector/event/terminal evidence still persists after Stop. Shutdown returns
 unacknowledged debt to existing recovery owners; permanent errors and authority
 revocation fail closed. No backend switch or replay of unknown effects is allowed.
+A required read that admission cannot proceed without (`effect_free=True`) owes
+no debt: Stop and shutdown both cancel it with `AbortedError`. Its caller may add
+its own typed local deadline to the `transient` classifier while one in-flight
+read is retained, so a slow read waits visibly instead of failing the task
+([turn requirements](contracts/ARTIFACT_REVIEW.md)); permanent errors still
+raise unchanged. The wait log names the cause and the eventual success.
+
+**Problem:** rebuilding a child's Inspector delta after an ambiguous append
+changed its payload under the same event key. A previously committed write then
+refused the retry as a conflict, turning storage latency into a failed child.
+**Decision:** the shared child invocation freezes the storage projection once
+before entering persistence wait, matching the root delivery lane. Retries use
+that exact task/sequence/payload; resetting the codec only affects later events.
+Live sinks still receive the original full frame, once, after acknowledgement.
+Permanent delivery failures retain the typed storage cause and operation ID in
+their technical detail; diagnostic formatting cannot replace the original cause.
+**Alternatives rejected:** increasing retries cannot repair a changed payload;
+overwriting conflicts loses immutable evidence; restarting the child repeats
+paid requests and potentially completed tools. Only the current pending delta
+is retained; this adds no queue, journal, worker or durable growth allowance.
+Specs: `tests/tasks_pkg/test_child_evidence_recovery.py` and
+`tests/storage/test_child_evidence_recovery.py` cover ambiguous commits, Stop,
+exact replay and full Swarm model/tool counts across the selected authorities.
 
 Known storage waiting uses the existing `retrying` phase and a task-local witness.
-The shared liveness beacon recognizes that witness without claiming model/tool
-progress; ACK retires it. Root reaping and session TTL cannot cancel a proven
-persistence wait. Waiting creates no extra pool, worker, journal or transcript
+The shared liveness judge recognizes that witness without claiming model/tool
+progress; ACK retires it. Root and child reaping and session TTL cannot cancel a
+proven persistence wait. Waiting creates no extra pool, worker, journal or transcript
 copy. Witness count follows concurrent writers and is independent of retry count.
+
+Session TTL teardown never holds the swarm session registry lock.
+**Problem:** the sweep cleared an expired session's inbox, deleted its durable
+rows and aborted it while holding the process-wide registry lock, so one slow
+storage call stalled Stop, `await_agents`, poll/kill, status routes and spawns
+of every swarm. **Decision:** the sweep detaches expired sessions in memory
+under the lock and hands their teardown to one retirement worker per sweep.
+Only a registration or recovery reservation of the same key waits for that
+key's teardown, because the spawn persists the new session right after
+registering and a later delete would remove it. Shutdown joins in-flight
+teardown within its deadline. **Alternatives rejected:** running the I/O after
+releasing the lock still delays whichever caller (often Stop) triggered the
+throttled sweep; refusing a same-key registration during teardown turns an
+ordering wait into a retryable spawn failure. Spec:
+`tests/swarm/test_swarm_ttl_teardown_off_registry_lock.py`.
 
 Selected-route provider retries have no delegated-only 429 ceiling. An omitted
 `max_retries` inherits the common `autoTurnRetryMax`; explicit values retain their
@@ -169,7 +220,13 @@ optional deadlines reach blocked tools through the same child control port.
 
 Problem: detached Swarm parent proxies lost native execution and fee ownership. Decision: `tasks_pkg/native_parent.py` carries a typed, process-local reference to the exact issued parent separately from frozen config/tool grants. Scope and shared account must still match; model selection and child binding validate the canonical live task. The session ID remains the coordinator identity, while a continued child belongs to its current executor. Root usage counts its own requests; `apiRounds` and cost include descendant fees. Alternatives rejected: copying lifecycle fields grants unrelated authority; task-ID lookup weakens exact-instance admission; switching to Python loses native accounting. Session metadata persists only requirement identity and a native-required flag. Unfinished native actors, including parent-stop resumption, require acknowledged actor checkpoints and whole-tree handoff; transcript checkpoints cannot authorize takeover. Cold start retains evidence and Continue refuses before workers or model I/O. The existing usage-unknown error and completeness fields preserve known fees, prevent new admission even without a token cap, and avoid presenting missing actor accounting as a model transport failure. Terminal evidence remains readable without execution. Specs: `tests/tasks_pkg/test_native_parent.py`, `tests/swarm/test_native_delegation_recovery.py`, `tests/tasks_pkg/test_native_production_delegation.py`. Dynamic native-root recovery remains unqualified; shared-root quiescence is unchanged.
 
-Internal guards stamp `_invocationStopReason` and an existing error envelope before signaling: `stalled` / `deadline` settle failed (`invocation_stalled` / `invocation_deadline`), not cancelled, on normal and exception exits. Explicit Stop is checked first. Physical `client_aborted`, partial output, paid usage and tool receipts stay truthful. Stall diagnostics include only numeric silence and threshold, not beacon notes or provider payloads. Live/cold projections use the existing failed/error rendering. Failure delivery can earn the existing single bounded recovery wake; cancellation cannot. Never blindly replay partial calls. Three consecutive batches containing only the same operation's typed, non-retryable failures stop the common loop with a failed outcome; productive calls remain available without a private round ceiling.
+Problem: the Swarm session re-root (`lib/swarm/AGENTS.md`) moved a native spawning task's account slot to its proxy. Wave preparation also resolved model overrides through a plain copy that held the issued port. As a result, native selection refused every worker model override as not live, and priced binding refused every worker's fee receiver. Decision: a natively executed spawning task stays the account root, and preparation copies borrow it through `share_native_parent`. Its issued port retires at terminal persist, so no native child is issued after that task settles and re-rooting gains no admission time. Alternatives rejected: accepting the bound proxy as the live actor widens native admission and still leaves fee receivers and transfer refusing. Registering the task as the proxy's descendant is impossible because both share one task ID. Specs in `tests/tasks_pkg/test_native_parent.py`: `test_frozen_policy_and_native_model_override_use_different_owned_carriers`, `test_native_swarm_session_keeps_the_live_parent_as_priced_fee_receiver` and `test_chat_spawn_with_worker_model_override_borrows_the_live_native_parent` (ordinary and Delegate Mode spawns).
+
+Problem: a delegated worker that starts after its native spawning turn settled (a dependency-blocked worker, or a later wave waiting on running work) cannot borrow that turn. It failed with the opaque `Detached native parent binding changed`. Between the terminal stamp and port release it instead allocated a child carrier and resolved route credentials before the shared account refused it, and a later-wave worker whose caller port had been released fell back to the Python child path and the global route repository. Decision: native delegation authority is turn-scoped. The issuer's route, fee receiver and shared account end at its terminal stamp, so `native_parent.py` admits a child only while the exact issuer is pending/running. Otherwise it raises the typed `NativeParentSettled` (`native_parent_settled`, a `NativeConfigurationError`) after the exact principal/account/task checks and before any carrier, account slot, route, credential or model/tool work. Sharing binds identity only, so status and snapshot projections of unstarted workers still work. Wave preparation captures the current caller's binding while it is live (runtime-only `SubTaskSpec.retained_assignment_native`, cleared at settlement). Terminal release keeps a retired port as `None`, which still identifies a native parent. The worker settles `failed` with `recovery_reason='native_parent_settled'`; its swarm-update and panel error say that no work ran and that a live turn must delegate again and wait for delegated workers before ending. Owner Stop keeps precedence: scheduler admission checks Stop first, and a refusal observed under Stop settles `cancelled`. This covers child entry only; an already entered worker keeps its own issued port, and the issuer's quiescent-tree invoice requirement is unchanged. Alternatives rejected: leasing the parent's port and account past its terminal, because the root invoice freezes there and requires a quiescent tree (`native wallet cost has unknown financial usage`), so late fees would be unbillable unless the parent Turn stayed open, which changes fire-and-forget delegation and the turn-handoff contract. Issuing late workers their own binding from the frozen principal, because each would become a priced durable root with its own wallet hold, terminal and recovery (the pending priced/durable child migration) and would split the shared tree budget. Re-rooting onto the session proxy remains rejected because fee receivers must be the exact issued task. Specs in `tests/tasks_pkg/test_native_parent.py`: `test_worker_unblocked_after_native_parent_settles_is_refused_before_allocation` (initial and later waves, before and after port release), `test_settled_issuer_keeps_identity_for_projection_but_refuses_child_entry` and `test_late_worker_refusal_is_typed_unless_owner_stop_settled_the_issuer`.
+
+Internal guards stamp `_invocationStopReason` and an existing error envelope before signaling: `stalled` / `deadline` settle failed (`invocation_stalled` / `invocation_deadline`), not cancelled, on normal and exception exits. Explicit Stop is checked first: `stop_stalled_invocation` delivers a stall only after `invocation_abort_requested` has observed no owner Stop or deadline.
+
+Problem: a child agent was judged by a private rule. Its cancellation monitor stopped the whole worker after 900 s of beacon silence, with no dispatch-heartbeat exemption, while tool-heartbeat self-ticks kept a hung worker alive; the root rule waited 1800 s, interrupted a silent command instead of the agent, and graded those ticks as no evidence. Neither knew the host filesystem: on 2026-11-02 a 27-minute FUSE freeze silenced every agent, the child monitor's verdict could only act when the blocked I/O returned, and it destroyed five healthy workers (72–123 rounds each) at exactly the moment they could continue. Decision: `lib/tasks_pkg/liveness.py` is the one silence judge for every agent. Children are registry tasks, so the stuck-task reaper applies the root's dual clocks, explained waits, per-command interrupt ladder and threshold to them; the per-invocation monitor no longer judges silence. Only delivery follows the settlement owner: a wedged root is finalized from outside, a wedged child receives the typed stall through its own invocation owner and reports to its parent. A keepalive `stat` unanswered past the stale-mount bound is an explained wait for everyone (`explained_wait`), and silence never counts before the last filesystem recovery or the end of the task's last explained wait (`silence_origin`). The Swarm beacon judges each bound agent with the same verdict and window, so its driver backstop and TTL sweep cannot disagree with the reaper; the backstop delivers the same stamp so stalled children settle inside the shutdown wait. Alternatives rejected: subtracting frozen intervals from silence (needs a freeze history and still counts silence that a freeze caused before detection); keeping the child monitor but feeding it the root clocks (two actors racing one verdict, and children would still lack the command ladder); auto-resuming a stalled child from its checkpoint (a genuine wedge would loop, and the root has no such resume either). Specs: section (vii) of `tests/tasks_pkg/test_stuck_task_reaper.py`, `tests/swarm/test_swarm_liveness.py` (bound agents, filesystem), `test_silent_provider_internal_stall_fails_and_keeps_receipts` and `test_master_driver_stall_cannot_impersonate_owner_stop` in `tests/swarm/test_swarm_invocation.py`, and `tests/fs_keepalive/`. Physical `client_aborted`, partial output, paid usage and tool receipts stay truthful. Stall diagnostics include only numeric silence and threshold, not beacon notes or provider payloads. Live/cold projections use the existing failed/error rendering. Failure delivery can earn the existing single bounded recovery wake; cancellation cannot. Never blindly replay partial calls. Three consecutive batches containing only the same operation's typed, non-retryable failures stop the common loop with a failed outcome; productive calls remain available without a private round ceiling.
 
 `test_swarm_invocation.py` replaces tests of the retired private Swarm methods
 with real request/tool execution, cancellation, resume, artifact, terminal and
@@ -195,9 +252,8 @@ tests cover concurrent workers, blocked observers, cancellation and log growth.
 and runtime normalization enable `ask_human` automatically and disable
 autopilot, direct image generation, and selected orchestration flows. This
 allows multiple clarification exchanges inside the same turn without asking
-the user to discover a second toggle. The canonical schema stays within 325
-tokens, bounds question/option payloads, and requires 1–16 options for choice
-mode.
+the user to discover a second toggle. The canonical schema bounds
+question/option payloads and requires 1–16 options for choice mode.
 
 The model proposes rather than executes. Only the successful Plan-task terminal
 boundary may mint a complete tagged plan into the typed turn sidecar owned by
@@ -205,6 +261,60 @@ boundary may mint a complete tagged plan into the typed turn sidecar owned by
 execution authority. Leaving Plan mode manually does not synthesize an
 execution prompt. Execution starts only through the v3 exact-plan command in
 [`CONVERSATION_SYNC_V3.md`](contracts/CONVERSATION_SYNC_V3.md).
+
+## Delegate Mode
+
+`delegateMode: true` is the second choice of the Standard / Delegate / Plan /
+Goal radio. The root agent owns the logic flow — decompose, delegate, verify,
+answer — while `spawn_agents` workers perform every read, search, command, web
+lookup and edit. `lib/tasks_pkg/delegate_mode.py` owns the policy.
+
+- **Root surface.** Assembly builds the ordinary tool policy, captures it as
+  the task's delegation view (`_delegationToolPolicy`), then re-applies the
+  same assembly policy to `DELEGATE_ROOT_TOOLS`: Swarm orchestration,
+  artifacts, skills, memories, tool-result recovery, `ask_human`,
+  `todo_write` and gateway transport. The root never runs programs (program
+  action, PTC lane and its guidance are withdrawn) and always uses the local
+  Swarm lane, because provider-native subagents would inherit the narrowed
+  root surface.
+- **Authority.** Pipeline, executor, streaming prefetch and the approval API
+  reject every other call — including each member of an `execute_tools`
+  batch — as `delegate_orchestration_only`, before approval or effects.
+- **Workers.** Spawn, retained-agent and restart paths derive worker policy
+  from `delegation_policy_view(task)`; outside the mode that is the task
+  itself, so workers receive exactly what an ordinary root would delegate.
+  `delegateMode` is not inherited. Credential names and MCP hints follow the
+  delegable catalog, so the root can still name worker capabilities.
+- **Context.** `<delegate_mode>` replaces `<parallel_execution>`
+  (`superseded_by_delegate_mode`) and asks for templated, schema-bound
+  delegation (see [Structured and templated delegation](modules/task_engine.md#structured-and-templated-delegation)).
+- **Precedence.** Plan, an explicit Flow and Goal each clear the mode. The
+  project Coordinator and dispatch workers keep their own role surface; a
+  catalog without `spawn_agents` keeps the ordinary surface and receives no
+  contract. Every assembly recomputes the view; terminal release drops it.
+
+**Problem.** Many tasks share one procedure and differ only in details, yet
+the root transcript was dominated by raw tool output (657K–994K-token working
+sets before compaction), so the same logic ran on a different, ever-growing
+context each time.
+
+**Decision.** A per-conversation mode in the existing interaction radio,
+enforced at assembly and every dispatch entry, with worker authority preserved
+through an explicit pre-narrowing view.
+
+**Alternatives considered.**
+- *Stronger delegation guidance only.* Rejected: models given identical
+  guidance differed four-fold in spawn rate; advice the root may ignore does
+  not keep its context clean.
+- *Narrow the executable catalog like the Coordinator.* Rejected: Swarm
+  delegates the task's executable catalog, so workers would lose the authority
+  their objectives need.
+- *An independent toggle.* Rejected: Delegate is exclusive with Plan
+  (read-only, no spawning), Goal and Flow (other loop owners); a second switch
+  reintroduces the conflicting-state combinations the radio removed.
+- *A saved Workflow graph per repeated task.* Not the default path: Workflow
+  authoring has no product editor yet, while a skill carrying spawn templates
+  fixes the procedure as reviewable text on the same chat loop.
 
 
 ## Execution unification decisions
@@ -225,7 +335,7 @@ policy and domain state where semantics differ:
 | Mode normalization and multiple representations | Keep normalization at untrusted admission and inherited-config boundaries. Settings are preferences, attempt config is a frozen execution input, Turn kind/actor is provenance; none replaces the other. Plan permission and Goal continuation are independent axes, with current product exclusivity retained. |
 | Node model/tool policy | `model_override` selects a route explicitly; selected-model Goal runs reject a conflicting override. Node `tools` only intersects inherited/role authority. Omission inherits; explicit `[]` grants no tools and survives save/reload. |
 | Invocation-tree budgets | One live account covers Flow and Swarm descendants of a bounded parent. Atomic tool admission, per-call reported usage, model-round admission and inherited deadline prevent budget multiplication. Malformed supplied limits fail closed. |
-| Liveness / presence | Child execution uses the existing cancellation monitor and `ProgressBeacon`, including tool output progress. The ordinary startup/teardown path remains the presence owner; no graph-only heartbeat thread or second presence registry. |
+| Liveness / presence | Child execution is judged by the root's liveness rule (`lib/tasks_pkg/liveness.py`, applied by the stuck-task reaper); the cancellation monitor carries owner Stop and deadlines, and `ProgressBeacon` reports the same verdict per bound agent, including tool output progress. The ordinary startup/teardown path remains the presence owner; no graph-only heartbeat thread or second presence registry. |
 | Dynamic scheduling | Flow `fanout` joins a validated runtime DAG on `StreamingScheduler`. Existing async spawn/await/get/auto-continue remain available with their existing lifetimes. |
 | Identity / child durability | Retain invocation identity and the existing owner-scoped child/Inspector archive. Definition node, dynamic expansion, invocation attempt and visible Turn are distinct identities. Dynamic execution IDs scope each expansion; forced nested chat Turns are not the storage model. |
 | Result messages | Shared provider-consumption boundary acknowledges staged Swarm inbox and tool-return results. Domain payloads retain their provenance and authority. A received worker result or VU review is never a real-user authorization. |
@@ -261,6 +371,27 @@ by a prior session's staged result. Direct synchronous master consumers retain
 explicit immediate-delivery semantics. Delivery after an uncertain ACK is at
 least once, not exactly once. Per-session result persistence remains the outbox;
 no new storage backend or process-global message authority is added.
+
+Problem: a process-local session check raced durable session replacement, and
+partial inbox restoration removed receipts before their delivery succeeded.
+Decision: `swarm.agents.acknowledge_results` atomically checks required
+`swarm_key`, `task_id`, and `agent_ids` against the current durable session.
+It returns `{acknowledged: false, changed: 0}` on absent/replaced identity and
+`{acknowledged: true, changed: N}` on a matching session; repeated IDs are
+deduplicated. SQL shares the session replacement lock; native storage uses its
+existing owner-scoped transaction. A missing ACK field or unsupported operation
+retains pending consumption. Restoration removes each hint only after its
+inbox operation returns, retaining the rest on failure. Presented but unconsumed
+receipts remain parent delivery dependencies, while explicit Stop tombstones
+still prevent automatic wakeup. Alternatives: adding an optional field to the
+old operation lets old binaries silently ignore the fence; clearing all hints
+up front loses partial-failure evidence. This uses the existing delivered flag
+and operation receipts, with no additional durable ledger or result-body copy.
+For one changed agent, the compact JSON result grows from 13 to 33 UTF-8 bytes
+(20 additional receipt payload bytes); it creates no new domain rows and keeps
+the existing command-receipt retention contract in `tofudb_ir_v1.json`.
+Verify `test_swarm_delivery_fence`, the native Swarm reopen test, and the SQL/native
+Swarm differential script alongside the provider-consumption and handoff tests.
 
 Verification owners: `test_terminal_delivery`, `test_execution_tree_budget`,
 `test_goal_invocation_integration`, `test_child_invocation`,
@@ -354,7 +485,7 @@ asynchronous Swarm retains its domain recovery contract. Pre-journal historical 
 
 **Pending input inspection.** `recovery_frontier.inspect_pending_inputs` runs that same interpreter with a read-only journal policy. Completed receipts rebuild control/dataflow and working context; each unfinished agent must match its exact framed key and node/context digest before its branch transfers control. Parallel and dynamic fanout owners drain every sibling before returning suspension; no placeholder result advances downstream dependencies. Missing/unreachable actors, unused receipts, changed inputs, new effects, cancellation or an exceeded caller byte allowance refuse the entire inspection. The returned node/context/iteration and worker-context snapshots grant no child, wallet or replay authority. `GoalRecoverySeed.inspect_pending_inputs` applies the archived Goal launch policy. Alternatives rejected: a second graph walker, UI preview reconstruction, or synthetic success results to traverse past unfinished work. Tests cover parallel/nested graphs, isolated subflows, fanout dependencies, later loop iterations and actual Goal-writer SIGKILL before native claim. Ordinary automatic pending execution remains fenced until the complete native recipient set is prepared and consumed. Local five-sample inspection of one completed receipt plus 1/8/32 pending parallel workers took median 0.42/3.76/11.84 ms, with peak traced allocations 32/152/447 KB and zero graph workers after return. The interpreter uses its existing demand executor with idle hint 1; this excludes native I/O, recipient and model execution.
 
-**Whole-set checkpoint readiness.** Problem: each recipient's checkpoint factory needs its genuine `RootLoopRequest`, but waiting for other recipients inside that factory can occupy every callback worker. Decision: optional `NativePreparedInvocation.checkpoint_preparation` enters a caller-owned async scope before the ordinary factory, then awaits readiness after the factory worker returns and its policy identity is checked. `NativeGoalHandoff.prepare_recipients` owns that scope for an exact task/source set. Its read-only budget admission uses the same complete-set preflight as the later transfer; it moves no counters. Only all pristine policies together invoke the existing `consume` transaction on the supplied executor. No native client, route or model/tool call begins first. Factory failure or Stop wakes siblings; cancelled handoff joins the issued write and capability adoption before ordinary policy close. Scope exit joins already entered invocations and disposes every abort subscription. The ordinary child owner still owns terminal rejection, execution and policy cleanup. After successful handoff, ordinary execution owns cancellation. Unknown ACKs remain fenced without retry. Alternatives rejected: a barrier in the callback executor, fabricated ROOT requests, a second checkpoint factory, or policy closure racing native adoption. Tests cover a single callback worker, factory/no-policy failures, parent/child Stop, interrupted teardown, cancelled committed/unknown writes and actual native whole handoff followed by original-fee/account load and the next ordinary journal write. Local five-sample readiness/factory/account/close composition at 1/8/32 recipients took median 3.15/17.81/131.65 ms, with peak traced allocations 49/316/1708 KB, one callback worker and none after close. Storage and provider are fixture ports; this includes existing whole-account cut copies and excludes native I/O. Production continues to borrow its launch-sized executor. Automatic pending Goal dispatch still requires explicit application composition with the original checkpoint.
+**Whole-set checkpoint readiness.** Problem: each recipient's checkpoint factory needs its genuine `RootLoopRequest`, but waiting for other recipients inside that factory can occupy every callback worker. Decision: optional `NativePreparedInvocation.checkpoint_preparation` enters a caller-owned async scope before the ordinary factory, then awaits readiness after the factory worker returns and its policy identity is checked. `NativeGoalHandoff.prepare_recipients` owns that scope for an exact task/source set. Its read-only budget admission uses the same complete-set preflight as the later transfer; it moves no counters. Only all pristine policies together invoke the existing `consume` transaction on the supplied executor. No native client, route or model/tool call begins first. Factory failure or Stop wakes siblings; cancelled handoff joins the issued write and capability adoption before ordinary policy close. Scope exit joins already entered invocations and disposes every abort subscription. The ordinary child owner still owns terminal rejection, execution and policy cleanup. After successful handoff, ordinary execution owns cancellation. Unknown ACKs remain fenced without retry. Alternatives rejected: a barrier in the callback executor, fabricated ROOT requests, a second checkpoint factory, or policy closure racing native adoption. Tests cover a single callback worker, factory/no-policy failures, parent/child Stop, interrupted teardown, cancelled committed/unknown writes and actual native whole handoff followed by original-fee/account load and the next ordinary journal write. Local five-sample readiness/factory/account/close composition at 1/8/32 recipients took median 3.15/17.81/131.65 ms, with peak traced allocations 49/316/1708 KB, one callback worker and none after close. Storage and provider are fixture ports; this includes existing whole-account cut copies and excludes native I/O. Production continues to borrow its demand-driven executor. Automatic pending Goal dispatch still requires explicit application composition with the original checkpoint.
 
 **Prepared Flow recipients.** Problem: preparing native takeover targets ahead of execution must preserve the actual branch's context, event and cancellation owner. Decision: `prepared_recipients.prepare_flow_recipients` scopes ordinary registered children for the exact inspected input set. The journal passes its existing occurrence key, digest and awaited admission through `AgentExecutionAdmission`; one explicit root dispatch policy matches that occurrence to its prepared child. The actual runner must have the same parent object, launch configuration and original worker context before adopting execution. Its ordinary completion owner updates conversation state and journals the full result; child registration, completion CAS and lost-ACK reconciliation are unchanged. Subsequent leaves use ordinary invocation after the complete prepared set has entered. Native readiness still gates provider/tool work independently. Source binding checks the complete unique source inventory; it grants no checkpoint rights. Unused entries reject, entered children cancel/join on close, and scoped maps/context copies are cleared. No additional worker pool or persistent store is introduced. Alternatives rejected: a replacement graph walker, manually constructing child completion, or updating the preparer's stale context instead of the actual nested branch. Tests cover linear/parallel/isolated/nested/fanout traversal with both cursors, event/Stop ownership, mismatch refusal, registered completion and lost acknowledgement. The application fixture also exercises actual native file rounds with fresh prepared children; it is not evidence of interrupted-checkpoint recovery. Local five-sample preparation at 1/8/32 children took median 1.66/10.74/41.82 ms, with peak traced allocations 72/180/546 KB. Complete dispatch/close took 6.95/32.99/117.91 ms and left no graph workers or active child accounts. These storage-free fixture measurements exclude input inspection, native I/O and model latency; retained copies scale with the inspected frontier and end with its scope.
 

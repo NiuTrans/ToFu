@@ -3,6 +3,11 @@
 The clean committed profile may not contain these shared-runtime owners yet.
 The actual shared-tree integration must execute, not skip, this specification.
 """
+
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.llm_fallback._usage as _fallback_usage
+import lib.tasks_pkg.manager._events as _fallback_events
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -10,11 +15,11 @@ pytestmark = pytest.mark.unit
 
 def call_round(monkeypatch, stream, body, *, append_event=None):
     from lib.tasks_pkg.llm_fallback import _call as calls
-    monkeypatch.setattr(calls, 'stream_llm_response', stream)
-    monkeypatch.setattr(calls, '_get_fallback_model', lambda task: '')
-    monkeypatch.setattr(calls, '_flag_empty_stop_for_retry', lambda *a: False)
-    monkeypatch.setattr(calls, '_emit_round_usage', lambda *a, **k: None)
-    monkeypatch.setattr(calls, 'append_event', append_event or (lambda *a: None))
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: '')
+    monkeypatch.setattr(_fallback_retry, '_flag_empty_stop_for_retry', lambda *a: False)
+    monkeypatch.setattr(_fallback_usage, '_emit_round_usage', lambda *a, **k: None)
+    monkeypatch.setattr(_fallback_events, 'append_event', append_event or (lambda *a: None))
     task = {'id': 'composition-test', 'convId': 'composition', 'config': {}}
     from lib.tasks_pkg.message_input_receipts import remember
     remember(task, [{'content': 'bounded original', '_projectMessageIds': ['msg']}])

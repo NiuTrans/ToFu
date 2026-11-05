@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import lib.llm as _fallback_llm
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
+
 import copy
 import json
 
@@ -367,7 +370,7 @@ def test_continue_resume_and_final_body_receive_current_snapshot(monkeypatch):
             'content_lock': threading.Lock(), 'config': {'model': 'test-model'}}
     messages = [{'role': 'user', 'content': 'Continue from summary without tool calls.'}]
     apply_resume_state(task=task, cfg={'checkpointTodoState': checkpoint},
-                       messages=messages, model='test-model', tid='resume')
+                       messages=messages, tid='resume')
     _measure_chars(monkeypatch)
     measurement = _admit(messages, task, round_num=0)
     body = build_body('test-model', messages, max_tokens=2048,
@@ -377,10 +380,8 @@ def test_continue_resume_and_final_body_receive_current_snapshot(monkeypatch):
     assert all('_contextComposer' not in row for row in body['messages'])
 
 
-@pytest.mark.parametrize('memory_pressure', [False, True])
 @pytest.mark.parametrize('compacted', [False, True])
-def test_reactive_retry_restores_state_before_building_the_same_model_body(monkeypatch, memory_pressure, compacted):
-    from lib.cgroup_guard import MemoryPressureError
+def test_reactive_retry_restores_state_before_building_the_same_model_body(monkeypatch, compacted):
     from lib.tasks_pkg.compaction import api as compaction
     from lib.tasks_pkg.llm_fallback import _call as fallback
 
@@ -391,13 +392,13 @@ def test_reactive_retry_restores_state_before_building_the_same_model_body(monke
     observed = []
 
     def recover(working, **kwargs):
-        observed.append(kwargs.get('byte_target'))
+        observed.append(kwargs.get('error_text'))
         working[:] = [{'role': 'user', 'content': 'Compacted without checklist.'}]
         return compacted
 
     monkeypatch.setattr(compaction, 'reactive_compact', recover)
-    cause = MemoryPressureError('memory headroom') if memory_pressure else PromptTooLongError('too long')
-    body = fallback._prepare_reactive_retry_body(
+    cause = PromptTooLongError('too long')
+    body = _fallback_recovery._prepare_reactive_retry_body(
         task, {'temperature': 0.3}, 'test-model', messages, [], 'medium', False,
         cause, 'test')
     assert body is not None
@@ -405,7 +406,7 @@ def test_reactive_retry_restores_state_before_building_the_same_model_body(monke
     assert body['model'] == 'test-model'
     assert body['_task_id'] == task['id']
     assert task['_todoState'] == state
-    assert bool(observed[0]) is memory_pressure
+    assert observed == ['too long']
 
 
 def test_reactive_restoration_failure_never_builds_an_incomplete_body(monkeypatch):
@@ -419,9 +420,9 @@ def test_reactive_restoration_failure_never_builds_an_incomplete_body(monkeypatc
         raise ValueError('invalid state')
 
     monkeypatch.setattr(checklist, 'restore_checklist_context', broken)
-    monkeypatch.setattr(fallback, 'build_body', lambda *a, **k: pytest.fail('must not build without state'))
+    monkeypatch.setattr(_fallback_llm, 'build_body', lambda *a, **k: pytest.fail('must not build without state'))
     cause = PromptTooLongError('original provider limit')
-    assert fallback._prepare_reactive_retry_body(
+    assert _fallback_recovery._prepare_reactive_retry_body(
         _task(), {}, 'test-model', [], [], 'medium', False, cause, 'test') is None
 
 
@@ -465,7 +466,7 @@ def test_reactive_restored_checklist_is_counted_by_final_transport_limit(monkeyp
     task = _task()
     messages = [{'role': 'user', 'content': 'Continue.'}]
     monkeypatch.setattr(compaction, 'reactive_compact', lambda *a, **k: False)
-    body = fallback._prepare_reactive_retry_body(
+    body = _fallback_recovery._prepare_reactive_retry_body(
         task, {}, 'test-model', messages, [], 'medium', False,
         PromptTooLongError('too long'), 'test')
     expected = count_tokens(body['messages'], model='test-model',

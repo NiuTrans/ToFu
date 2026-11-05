@@ -61,6 +61,47 @@ def test_environment_scope_uses_common_dir_and_preserves_linked_app(roots, tmp_p
     assert policy.select_gate_commands(renamed).stable == ''
 
 
+def _runner(root):
+    def run(args, input_text=None):
+        return subprocess.run(['git', *args], cwd=root, env=policy.git_policy_environment(),
+                              text=True, input=input_text, capture_output=True, timeout=20)
+    return run
+
+
+def test_only_publication_refs_without_shared_history_are_retired(tmp_path):
+    root = repository(tmp_path / 'repo')
+    head, tree = git(root, 'rev-parse', 'HEAD'), git(root, 'rev-parse', 'HEAD^{tree}')
+    diverged = git(root, 'commit-tree', tree, '-p', head, '-m', 'diverged but related')
+    abandoned = git(root, 'commit-tree', tree, '-m', 'abandoned history')
+    git(root, 'update-ref', 'refs/tofu/candidate', abandoned)
+    git(root, 'update-ref', 'refs/tofu/stable', diverged)
+    run = _runner(root)
+
+    archived = policy.retire_unrelated_publication_refs(run, head)
+
+    assert list(archived) == ['refs/tofu/candidate']
+    assert archived['refs/tofu/candidate'].startswith('refs/tofu/retired/')
+    assert git(root, 'rev-parse', archived['refs/tofu/candidate']) == abandoned
+    assert git(root, 'rev-parse', 'refs/tofu/stable') == diverged
+    assert run(['rev-parse', '--verify', '--quiet', 'refs/tofu/candidate']).returncode == 1
+    assert policy.retire_unrelated_publication_refs(run, head) == {}
+
+
+def test_retirement_is_one_compare_and_swap_pinned_to_observed_head(tmp_path):
+    root = repository(tmp_path / 'repo')
+    head, tree = git(root, 'rev-parse', 'HEAD'), git(root, 'rev-parse', 'HEAD^{tree}')
+    other = git(root, 'commit-tree', tree, '-p', head, '-m', 'not the checked-out head')
+    abandoned = git(root, 'commit-tree', tree, '-m', 'abandoned history')
+    for ref in policy.PUBLICATION_REFS:
+        git(root, 'update-ref', ref, abandoned)
+    before = git(root, 'for-each-ref')
+
+    with pytest.raises(policy.PublicationRefError, match='Retiring'):
+        policy.retire_unrelated_publication_refs(_runner(root), other)
+
+    assert git(root, 'for-each-ref') == before
+
+
 def test_explicit_pin_and_local_overrides(roots, tmp_path, monkeypatch):
     app, foreign = roots
     monkeypatch.setenv('TOFU_INTEGRATION_TEST_ROOT', str(foreign))

@@ -8,7 +8,7 @@ Five tools get format-aware splitters that fan out into one file per
 result instead of one giant blob:
 
   * ``web_search``  → one file per search hit
-  * ``grep_search`` → one file per matched source file
+  * ``search_files`` → one file per matched source file
   * ``find_files``  → one file per batched search section
   * ``fetch_url``   → one file per URL
   * (default)       → single-file persistence
@@ -49,7 +49,7 @@ from lib.tasks_pkg.compaction._persist._splitters import (
     _generate_web_search_preview,
     _persist_fetch_url_split,
     _persist_find_files_split,
-    _persist_grep_search_split,
+    _persist_search_files_split,
     _persist_web_search_split,
 )
 
@@ -60,7 +60,7 @@ def _persist_to_disk(content: str, tool_name: str, tool_use_id: str = '',
                      conv_id: str = '') -> str:
     """Persist oversized tool result to disk and return a summary with file paths.
 
-    For tools with structured, multi-item results (web_search, grep_search),
+    For tools with structured, multi-item results (web_search, search_files),
     each item is saved to a **separate** file so the model can selectively
     read only the items it needs via read_files.
 
@@ -88,8 +88,8 @@ def _persist_to_disk(content: str, tool_name: str, tool_use_id: str = '',
         if result is not None:
             return result
 
-    if tool_name == 'grep_search':
-        result = _persist_grep_search_split(content, persist_dir, safe_id)
+    if tool_name in ('search_files', 'grep_search'):
+        result = _persist_search_files_split(content, persist_dir, safe_id)
         if result is not None:
             return result
 
@@ -144,7 +144,7 @@ __all__ = [
     '_persist_to_disk',
     # splitters + preview
     '_persist_web_search_split',
-    '_persist_grep_search_split',
+    '_persist_search_files_split',
     '_persist_find_files_split',
     '_persist_fetch_url_split',
     '_generate_web_search_preview',

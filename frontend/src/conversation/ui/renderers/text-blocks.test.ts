@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationTurnViewModel } from '../../presentation/conversation-view-model';
-import type { TextBlockViewModel } from '../../presentation/view-model/types';
+import type { TextBlockViewModel, ThinkingBlockViewModel } from '../../presentation/view-model/types';
 import type { ClassicConversationRendererPorts } from './ports';
-import { renderTextBlock } from './text-blocks';
+import { renderTextBlock, renderThinkingBlock } from './text-blocks';
 
 afterEach(() => document.body.replaceChildren());
 function fixture(overrides: Partial<TextBlockViewModel> = {}) {
@@ -106,4 +106,33 @@ it('retains focused evidence through answer replay and an appended paragraph', (
     renderTextBlock(node, { ...block, deliverable: false }, ports, turn);
     expect(node.querySelector('.conversation-answer-label')).toBeNull();
   } finally { node.remove(); }
+});
+
+it('folds merged reasoning after each round unless the reader opened it', () => {
+  const node = document.createElement('div');
+  document.body.appendChild(node);
+  const ports: ClassicConversationRendererPorts = { renderSafeMarkdownHtml: text => text };
+  const thinking = (markdown: string, terminal: boolean): ThinkingBlockViewModel => ({
+    kind: 'thinking', blockId: 'think-0', source: {}, identitySource: 'contract', memberBlockIds: ['think-0'],
+    markdown, displayMarkdown: markdown, displayMode: 'original', terminal,
+  });
+  renderThinkingBlock(node, thinking('Round one', false), ports);
+  const details = node.querySelector<HTMLDetailsElement>('details.thinking-block')!;
+  expect(details.open).toBe(true);
+  const glyph = details.querySelector<HTMLElement>('.thinking-icon')!;
+  expect(glyph.getAttribute('aria-hidden')).toBe('true');
+  expect(glyph.querySelector('svg')).not.toBeNull();
+  expect(details.querySelector('.thinking-state-dot')).toBeNull();
+  renderThinkingBlock(node, thinking('Round one', true), ports);
+  expect(details.querySelector('.thinking-icon')).toBe(glyph);
+  expect(details.open).toBe(false);
+
+  // The reader opens it; the next round streams into the same disclosure and
+  // settles without snapping it shut.
+  details.querySelector<HTMLElement>('summary')!.click();
+  expect(details.open).toBe(true);
+  renderThinkingBlock(node, thinking('Round one\n\nRound two', false), ports);
+  renderThinkingBlock(node, thinking('Round one\n\nRound two', true), ports);
+  expect(node.querySelector('details.thinking-block')).toBe(details);
+  expect(details.open).toBe(true);
 });

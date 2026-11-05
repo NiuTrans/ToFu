@@ -19,7 +19,8 @@ Environment-variable override: ``MEMORY_PREFETCH=0`` disables.
 
 No implementation lives in this file — it is a pure re-export facade. All
 code lives in the sub-modules (_config / _query / _shortlist / _inject /
-_run). ``lib/memory/__init__.py`` continues to re-export the public surface.
+_listing / _run). ``lib/memory/__init__.py`` continues to re-export the public
+surface.
 """
 from __future__ import annotations
 
@@ -51,6 +52,12 @@ from lib.memory.prefetch._shortlist import _bm25_top_n  # noqa: E402,F401
 from lib.memory.prefetch._inject import (  # noqa: E402,F401
     _RELEVANT_MEMORIES_TAG,
     _render_relevant_memories_block,
+)
+
+# ── Corpus listing, inline or started ahead (._listing) ──
+from lib.memory.prefetch._listing import (  # noqa: E402,F401
+    PrefetchCorpusListing,
+    list_prefetch_corpus,
 )
 
 # ── Orchestration entry point (._run) ──

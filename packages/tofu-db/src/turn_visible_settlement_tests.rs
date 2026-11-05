@@ -49,6 +49,33 @@ struct Flow {
 }
 
 #[test]
+fn visible_origin_never_launders_a_channel_message_into_human() {
+    // Mirrors lib/turn_initiation.py VALID_INITIATORS: an unknown initiator
+    // fell back to legacy flags and became human authority.
+    let message = json!({"role": "user", "content": "from a colleague", "_initiator": "channel"});
+    let origin = normalize_visible_origin(message.as_object().unwrap()).unwrap();
+    assert_eq!(origin["initiator"], "channel");
+}
+
+#[test]
+fn visible_origin_keeps_sanitized_channel_and_forwarded_provenance() {
+    let message = json!({"role": "user", "content": "x", "origin": {
+        "initiator": "channel",
+        "channel": {"channel": "dx", "thread": "dx:gid:5", "eventIds": ["dx:gid:5/1", 7],
+                    "title": "Team", "extra": 1},
+        "forwardedFrom": {"conversationId": "router", "turnId": "t1", "bogus": 2}}});
+    let origin = normalize_visible_origin(message.as_object().unwrap()).unwrap();
+    assert_eq!(origin["channel"], json!({"channel": "dx", "thread": "dx:gid:5",
+        "eventIds": ["dx:gid:5/1", "7"], "title": "Team"}));
+    assert_eq!(origin["forwardedFrom"], json!({"conversationId": "router", "turnId": "t1"}));
+    let incomplete = json!({"role": "user", "content": "x", "origin": {
+        "initiator": "human", "channel": {"channel": "dx"},
+        "forwardedFrom": {"conversationId": "router", "turnId": ""}}});
+    let origin = normalize_visible_origin(incomplete.as_object().unwrap()).unwrap();
+    assert!(origin.get("channel").is_none() && origin.get("forwardedFrom").is_none());
+}
+
+#[test]
 fn completion_only_tool_phase_preserves_context_notes_on_exact_replay() {
     let message = json!({"role":"assistant","content":"Done", "finishReason":"stop",
         "segments":[{"type":"system_note","blockId":"context:actor","text":"Accepted project rules",

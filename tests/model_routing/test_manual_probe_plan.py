@@ -47,6 +47,7 @@ def plan_work(bundle, **kwargs):
 
 def test_target_projection_is_exact_trimmed_and_deeply_read_only():
     document = manual_document()
+    document['offerings'][0]['enabled'] = True
     before_document = deepcopy(document)
     bundle = provider_bundle(document, 'provider-a')
     before_bundle = deepcopy(bundle)
@@ -61,7 +62,7 @@ def test_target_projection_is_exact_trimmed_and_deeply_read_only():
     assert [(row[2], row[3], row[5]) for row in work] == [
         ('alpha', 'unsaved/provider-name', 'https://disabled.example/v1')]
     assert work[0][7]['extra_headers'] == {'X-Transport': 'disabled'}
-    assert projected['offerings'][0]['enabled'] is False
+    assert projected['offerings'][0]['enabled'] is True
     assert projected['connections'][-1]['enabled'] is False
     assert projected['credentials'][0]['authorization']['models'] == []
     projected['credentials'][0]['authorization']['models'].append({'model_id': 'changed'})
@@ -72,7 +73,9 @@ def test_target_projection_is_exact_trimmed_and_deeply_read_only():
 
 
 def test_target_projection_keeps_multiple_unsaved_names_in_selection_order():
-    bundle = provider_bundle(manual_document(), 'provider-a')
+    document = manual_document()
+    document['offerings'][0]['enabled'] = True
+    bundle = provider_bundle(document, 'provider-a')
     projected = manual_probe_bundle(bundle, [target('new-b'), target('new-a')])
     assert [row[3] for row in plan_work(projected, manual=True)] == ['new-b', 'new-a']
     assert 'beta-wire-a' not in [row['wire_model_id'] for row in projected['deployments']]
@@ -89,7 +92,6 @@ def test_target_projection_keeps_multiple_unsaved_names_in_selection_order():
     [target('x\x00y')], [target('x\ny')], [target('x\ry')],
     [target('\twire')], [target('wire\n')], [target('x\x7fy')],
     [{**target(), 'base_url': 'https://untrusted.example/v1'}],
-    [target()] * 1025,
 ])
 def test_invalid_target_never_falls_back_to_saved_or_unselected_rows(targets):
     bundle = provider_bundle(manual_document(), 'provider-a')
@@ -100,6 +102,20 @@ def test_invalid_target_never_falls_back_to_saved_or_unselected_rows(targets):
     assert error.value.kind == 'provider_probe_invalid_target'
     assert bundle == before
     assert targets == before_targets
+
+
+def test_target_count_is_bounded_by_the_request_contract():
+    """The startProviderProbeCells contract owns the size bound and is
+    decoded before planning; repeated names collapse into one cell."""
+    from lib.generated_api_v1_model_routing import (
+        OPENAPI_SCHEMAS, ContractViolation, decode_request)
+
+    bound = OPENAPI_SCHEMAS['ProbeCellsStartRequest']['properties']['targets']['maxItems']
+    with pytest.raises(ContractViolation):
+        decode_request('startProviderProbeCells', {'targets': [target()] * (bound + 1)})
+    projected = manual_probe_bundle(
+        provider_bundle(manual_document(), 'provider-a'), [target()] * (bound + 1))
+    assert len(projected['deployments']) == 1
 
 
 def test_wire_length_limit_applies_after_trimming():
@@ -145,7 +161,9 @@ def test_duplicate_wire_cannot_select_conflicting_associations(conflicting):
 
 
 def test_duplicate_wire_with_same_association_is_one_cell():
-    bundle = provider_bundle(manual_document(), 'provider-a')
+    document = manual_document()
+    document['offerings'][0]['enabled'] = True
+    bundle = provider_bundle(document, 'provider-a')
     projected = manual_probe_bundle(bundle, [target('same'), target(' same ')])
     assert [row[3] for row in plan_work(projected, manual=True)] == ['same']
 
@@ -153,7 +171,7 @@ def test_duplicate_wire_with_same_association_is_one_cell():
 @pytest.mark.parametrize('offering_enabled,connection_enabled', [
     (False, True), (True, False), (False, False), (True, True),
 ])
-def test_manual_includes_disabled_while_default_automatic_scope_is_unchanged(
+def test_manual_skips_disabled_offerings_and_retains_disabled_connections(
         offering_enabled, connection_enabled):
     document = manual_document()
     document['offerings'][0]['enabled'] = offering_enabled
@@ -168,33 +186,21 @@ def test_manual_includes_disabled_while_default_automatic_scope_is_unchanged(
         expected.add('alpha-wire-a')
     assert {row[3] for row in automatic} == expected
     assert automatic == explicit_automatic
-    assert {row[3] for row in manual} == {'alpha-wire-a', 'beta-wire-a'}
-    assert next(row[5] for row in manual if row[3] == 'alpha-wire-a') == (
-        'https://disabled.example/v1')
+    expected_manual = {'beta-wire-a'}
+    if offering_enabled:
+        expected_manual.add('alpha-wire-a')
+    assert {row[3] for row in manual} == expected_manual
+    if offering_enabled:
+        assert next(row[5] for row in manual if row[3] == 'alpha-wire-a') == (
+            'https://disabled.example/v1')
     assert bundle == before
 
 
-def test_manual_all_off_is_probeable_without_enabling_access_or_grants():
-    document = manual_document()
-    for key in ('provider_accesses', 'offerings', 'connections', 'credentials'):
-        for row in document[key]:
-            row['enabled'] = False
-    bundle = provider_bundle(document, 'provider-a')
-    before = deepcopy(bundle)
-    assert {row[3] for row in plan_work(bundle, manual=True)} == {
-        'alpha-wire-a', 'beta-wire-a'}
-    with pytest.raises(ModelRoutingError) as error:
-        plan_work(bundle)
-    assert error.value.kind == 'provider_probe_no_connection'
-    assert bundle == before
-
-
-def test_automatic_all_offerings_off_still_has_no_enabled_scope():
+@pytest.mark.parametrize('manual', [False, True])
+def test_all_offerings_off_has_no_enabled_scope(manual):
     bundle = provider_bundle(manual_document(), 'provider-a')
     for row in bundle['offerings']:
         row['enabled'] = False
     with pytest.raises(ModelRoutingError) as error:
-        plan_work(bundle)
+        plan_work(bundle, manual=manual)
     assert error.value.kind == 'provider_probe_no_offerings'
-    assert {row[3] for row in plan_work(bundle, manual=True)} == {
-        'alpha-wire-a', 'beta-wire-a'}

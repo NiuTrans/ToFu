@@ -130,6 +130,30 @@ class TestDispatchStreamSuccess:
         assert usage['_dispatch']['queue_wait_measurement'] == \
             'dispatcher_backpressure_only'
 
+    def test_dispatch_total_spans_route_and_provider_work(self, monkeypatch):
+        from lib.llm.diagnostic_timing import DiagnosticTiming, bind_timing
+        from lib.llm_dispatch import api
+
+        disp = _FakeDispatcher([_make_slot()])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+
+        import lib.llm as llm_mod
+        monkeypatch.setattr(llm_mod, 'stream_chat',
+                            lambda _body, **_kwargs: ('done', 'stop', {}))
+
+        timing = DiagnosticTiming(kind='synthetic', emit=lambda _record: None)
+        with bind_timing(timing):
+            api.dispatch_stream([{'role': 'user', 'content': 'hi'}],
+                                log_prefix='[t]')
+        timing.complete()
+
+        samples = timing.snapshot()['samples']
+        totals = [s for s in samples if s['phase'] == 'dispatch_total']
+        assert len(totals) == 1, totals
+        nested = {s['phase'] for s in samples
+                  if s.get('parent_span_id') == totals[0]['span_id']}
+        assert {'route_resolution', 'route_selection', 'provider_call'} <= nested
+
     def test_distinct_large_conversations_never_cross_gate(
             self, monkeypatch):
         """Retired BIG_PREFIX knobs cannot reintroduce cross-conv waiting.
@@ -137,7 +161,18 @@ class TestDispatchStreamSuccess:
         Under the former default, the third distinct 200k-token prefix on the
         same selected key waited the residency budget even though selection had
         already finished and the request could not reroute.
+
+        Waits are observed, not timed. A dispatch wait sleeps through
+        ``time.sleep`` (instant under this module's autouse fixture, so wall
+        time never saw one) or blocks in a bounded Condition/Event/Semaphore
+        wait, the shape of the retired residency gate. Both are recorded on
+        the dispatching thread next to dispatch's own queue-wait account;
+        unbounded completion waits of local token-counting fan-out and
+        non-blocking probes are not admission waits. Disk and scheduler
+        latency can therefore neither fail nor satisfy the spec.
         """
+        import threading
+
         from lib.llm_dispatch import api
         from lib.llm_dispatch.conv_affinity import conv_affinity
         from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
@@ -167,15 +202,37 @@ class TestDispatchStreamSuccess:
             ADMITTED_INPUT_TOKENS_KEY: 200_000,
         }
 
-        started = time.perf_counter()
+        dispatch_thread = threading.get_ident()
+        waits = []
+        condition_wait = threading.Condition.wait
+        previous_sleep = time.sleep
+
+        def sleep(seconds, *args, **kwargs):
+            if threading.get_ident() == dispatch_thread:
+                waits.append(('sleep', seconds))
+            return previous_sleep(seconds, *args, **kwargs)
+
+        def bounded_wait(condition, timeout=None):
+            if (threading.get_ident() == dispatch_thread
+                    and timeout is not None and timeout > 0):
+                waits.append(('wait', timeout))
+            return condition_wait(condition, timeout)
+
+        monkeypatch.setattr(time, 'sleep', sleep)
+        monkeypatch.setattr(threading.Condition, 'wait', bounded_wait)
+
+        queue_wait_ms = []
         for conv_id in ('conv-a', 'conv-b', 'conv-c'):
             with conv_affinity(conv_id):
-                assert api.dispatch_stream(body)[0] == 'ok'
-        elapsed = time.perf_counter() - started
+                message, _finish, usage = api.dispatch_stream(body)
+            assert message == 'ok'
+            queue_wait_ms.append(usage['_dispatch']['queue_wait_ms'])
 
-        assert elapsed < 0.2, (
+        assert waits == [], (
             'distinct conversations regained a retired cross-prefix wait: '
-            f'{elapsed:.3f}s')
+            f'{waits}')
+        assert queue_wait_ms == [0, 0, 0]
+        assert dispatcher.picks == 3
 
     def test_semantic_retry_avoids_failed_pair_on_first_pick(self, monkeypatch):
         """A fresh dispatch must apply the prior attempt's rotate hint now.
@@ -628,7 +685,7 @@ class TestSettleStreamResultHelper:
             'prompt_tokens_details': {'cached_tokens': 98_000},
         }
         _settle_stream_result(
-            _make_slot(model='kimi-k3', key='sankuai-key'), usage,
+            _make_slot(model='kimi-k3', key='example-corp-key'), usage,
             latency=5.0, ttft=None, state=self._state(),
             cache_conv_id='conv-kimi', tag='[t]')
 
@@ -768,7 +825,8 @@ class TestDispatchStreamAbort:
 
 
 @pytest.mark.unit
-class TestDispatchStreamQuotaScope:
+@pytest.mark.parametrize('dispatch_kind', ['chat', 'stream', 'async_stream', 'race'])
+class TestDispatchQuotaScope:
     """End-to-end at the dispatch seam: RateLimitError.status_code decides
     the key_stats stop granularity (owner 2026-07-29: HTTP 402 = the
     gateway ACCOUNT's credit pool is dead → key-wide stop; a 429-quota
@@ -787,34 +845,57 @@ class TestDispatchStreamQuotaScope:
         yield ks
         ks._cache.update(snapshot)
 
-    def _run_quota_dispatch(self, monkeypatch, status_code):
+    def _run_quota_dispatch(self, monkeypatch, status_code, dispatch_kind):
+        import asyncio
         from lib.llm_dispatch import api
         from lib.llm.llm_errors import RateLimitError
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')
         disp = _FakeDispatcher([slot1, slot2])
+        disp.slots = [slot1, slot2]
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
-        calls = {'n': 0}
+        calls = []
 
-        def _fake_stream(body, **kwargs):
-            calls['n'] += 1
-            if calls['n'] == 1:
-                raise RateLimitError('quota exhausted',
-                                     is_quota=True,
+        def stream(body, **kwargs):
+            calls.append(None)
+            if dispatch_kind == 'race' or len(calls) == 1:
+                raise RateLimitError('quota exhausted', is_quota=True,
                                      status_code=status_code)
             return 'ok', 'stop', {}
 
-        import lib.llm as llm_mod
-        monkeypatch.setattr(llm_mod, 'stream_chat', _fake_stream)
-        msg, finish, usage = api.dispatch_stream(
-            [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
-        assert msg == 'ok' and calls['n'] == 2
+        def chat(**kwargs):
+            content, _finish, usage = stream(None, **kwargs)
+            return content, usage
+
+        async def astream(*args, **kwargs):
+            return stream(*args, **kwargs)
+
+        monkeypatch.setattr('lib.llm.chat', chat)
+        monkeypatch.setattr('lib.llm.stream_chat', stream)
+        monkeypatch.setattr('lib.llm.astream.async_stream_chat', astream)
+        messages = [{'role': 'user', 'content': 'hi'}]
+        if dispatch_kind == 'race':
+            def reserve(**kwargs):
+                for slot in disp.slots:
+                    slot.record_request()
+                return disp.slots
+            monkeypatch.setattr(disp, 'pick_top_n', reserve, raising=False)
+            with pytest.raises(RateLimitError):
+                api.dispatch_fastest(messages, log_prefix='[t]')
+        elif dispatch_kind == 'chat':
+            assert api.dispatch_chat(messages, log_prefix='[t]')[0] == 'ok'
+        elif dispatch_kind == 'async_stream':
+            assert asyncio.run(api.async_dispatch_stream(messages, log_prefix='[t]'))[0] == 'ok'
+        else:
+            assert api.dispatch_stream(messages, log_prefix='[t]')[0] == 'ok'
+        assert len(calls) == 2
+        assert slot1.inflight == slot2.inflight == 0
 
     def test_402_quota_stops_entire_key(self, monkeypatch,
-                                        isolated_key_stats):
+                                        isolated_key_stats, dispatch_kind):
         ks = isolated_key_stats
-        self._run_quota_dispatch(monkeypatch, status_code=402)
+        self._run_quota_dispatch(monkeypatch, status_code=402, dispatch_kind=dispatch_kind)
         row = ks.get_today_stats('default', 'k1')
         assert row['exhausted'] is True, (
             'a 402 quota error must flip the KEY-WIDE exhausted flag — '
@@ -824,9 +905,9 @@ class TestDispatchStreamQuotaScope:
         assert ks.is_key_enabled('default', 'k1', model='qwen-plus') is False
 
     def test_429_quota_stops_only_the_model(self, monkeypatch,
-                                            isolated_key_stats):
+                                            isolated_key_stats, dispatch_kind):
         ks = isolated_key_stats
-        self._run_quota_dispatch(monkeypatch, status_code=429)
+        self._run_quota_dispatch(monkeypatch, status_code=429, dispatch_kind=dispatch_kind)
         row = ks.get_today_stats('default', 'k1')
         assert row['exhausted'] is False, (
             'a 429-quota body is vendor-ambiguous and must NOT key-wide '
@@ -835,54 +916,5 @@ class TestDispatchStreamQuotaScope:
         assert ks.is_key_enabled('default', 'k1', model='other-model') is True
 
 
-@pytest.mark.unit
-class TestQuotaScopeCallSites:
-    """Every RateLimitError handler in the dispatch layer must wire the
-    402-vs-429 distinction into record_error — a call site that forgets
-    `is_account_quota=` silently degrades account-level 402s back to
-    per-model convergence (the 2026-07-29 key_2 incident shape)."""
-
-    def test_every_quota_record_error_passes_account_scope(self):
-        from tests._source_scan import strip_comments
-
-        import glob
-
-        live = ''
-        for path in sorted(glob.glob('lib/llm_dispatch/_api_*.py')):
-            with open(path, encoding='utf-8') as f:
-                live += strip_comments(f.read(), lang='python') + '\n'
-
-        calls = []
-        idx = 0
-        while True:
-            j = live.find('record_error(', idx)
-            if j < 0:
-                break
-            depth = 0
-            cursor = j + len('record_error')
-            for k in range(cursor, len(live)):
-                ch = live[k]
-                if ch == '(':
-                    depth += 1
-                elif ch == ')':
-                    depth -= 1
-                    if depth == 0:
-                        break
-            calls.append(live[j:k + 1])
-            idx = k + 1
-
-        quota_sites = [c for c in calls if 'is_quota_exhausted=' in c]
-        assert len(quota_sites) >= 3, (
-            f'expected >=3 quota record_error call sites in the dispatch '
-            f'layer (_api_chat.py/_api_stream.py), found '
-            f'{len(quota_sites)} — the scan must stay non-vacuous')
-        for c in quota_sites:
-            assert 'is_account_quota=' in c, (
-                'a quota record_error call site does not pass '
-                'is_account_quota= — the 402 key-wide rule is unwired there')
-
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

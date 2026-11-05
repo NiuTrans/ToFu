@@ -80,6 +80,11 @@ def test_adjacent_background_completions_share_one_queue_header(
     assert page.locator('.bgcmd-queue-header').count() == 1
     assert page.locator('.bgcmd-queue-label').inner_text() == locale['bgCommand.queuedMany'].replace('{count}', '2')
     assert page.locator('.bgcmd-details').count() == 2
+    assert page.locator('.bgcmd-summary > .bgcmd-chevron svg[fill="none"]').count() == 2
+    assert page.locator('.bgcmd-summary').first.evaluate(
+        "node => getComputedStyle(node).listStyleType") == 'none'
+    collapsed_transform = page.locator('.bgcmd-chevron').first.evaluate(
+        "node => getComputedStyle(node).transform")
     assert page.locator('#queue-fixture script, #queue-fixture img').count() == 0
     assert 'RAW_ENVELOPE' not in page.locator('#queue-fixture').inner_text()
     geometry = page.evaluate("""() => {
@@ -97,6 +102,15 @@ def test_adjacent_background_completions_share_one_queue_header(
     _assert_row_alignment(page, 'q-a')
     before_open = _assert_row_alignment(page, 'q-b')
     second = page.locator('[data-queue-id="q-b"]')
+    second.locator('.bgcmd-chevron').click()
+    assert second.locator('details').evaluate('(node)=>node.open')
+    page.wait_for_function("""() => getComputedStyle(document.querySelector(
+      '[data-queue-id="q-b"] .bgcmd-chevron')).transform === 'none'""")
+    second.locator('summary').focus()
+    page.keyboard.press('Space')
+    assert not second.locator('details').evaluate('(node)=>node.open')
+    page.wait_for_function("""expected => getComputedStyle(document.querySelector(
+      '[data-queue-id="q-b"] .bgcmd-chevron')).transform === expected""", arg=collapsed_transform)
     second.locator('summary').focus()
     page.keyboard.press('Enter')
     assert second.locator('details').evaluate('(node)=>node.open')

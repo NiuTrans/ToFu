@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from lib.error_envelope import BadRequest
+
 
 MEMORY_NAME_MAX_CHARS = 160
 MEMORY_DESCRIPTION_MAX_CHARS = 512
@@ -43,14 +45,14 @@ def _bounded_text(
     single_line: bool = False,
 ) -> str:
     if not isinstance(value, str):
-        raise ValueError(f'{field} must be a string')
+        raise BadRequest(f'{field} must be a string', field=field)
     if not allow_blank and not value.strip():
-        raise ValueError(f'{field} must not be empty')
+        raise BadRequest(f'{field} must not be empty', field=field)
     if len(value) > max_chars:
-        raise ValueError(
-            f'{field} exceeds the {max_chars:,}-character limit')
+        raise BadRequest(
+            f'{field} exceeds the {max_chars:,}-character limit', field=field)
     if single_line and ('\n' in value or '\r' in value):
-        raise ValueError(f'{field} must be a single line')
+        raise BadRequest(f'{field} must be a single line', field=field)
     return value
 
 
@@ -67,10 +69,10 @@ def normalize_memory_tags(
         return []
     if (not isinstance(tags, Sequence)
             or isinstance(tags, (str, bytes, bytearray))):
-        raise ValueError(f'{field} must be an array of strings')
+        raise BadRequest(f'{field} must be an array of strings', field=field)
     if len(tags) > MEMORY_TAG_MAX_ITEMS:
-        raise ValueError(
-            f'{field} exceeds the {MEMORY_TAG_MAX_ITEMS}-item limit')
+        raise BadRequest(
+            f'{field} exceeds the {MEMORY_TAG_MAX_ITEMS}-item limit', field=field)
 
     normalized: list[str] = []
     seen: set[str] = set()
@@ -86,9 +88,9 @@ def normalize_memory_tags(
         # bracket contents. A comma inside one tag would silently round-trip as
         # two tags, so reject the ambiguous value instead of corrupting it.
         if ',' in value:
-            raise ValueError(f'{field}[{index}] must not contain a comma')
+            raise BadRequest(f'{field}[{index}] must not contain a comma', field=field)
         if value in seen:
-            raise ValueError(f'{field} contains duplicate value {value!r}')
+            raise BadRequest(f'{field} contains duplicate value {value!r}', field=field)
         seen.add(value)
         normalized.append(value)
     return normalized
@@ -115,7 +117,7 @@ def normalize_memory_payload(
     normalized_tags = normalize_memory_tags(
         tags, allow_none=allow_tags_none)
     if scope not in ('global', 'project'):
-        raise ValueError("scope must be 'global' or 'project'")
+        raise BadRequest("scope must be 'global' or 'project'", field='scope')
     return (
         normalized_name,
         normalized_description,
@@ -128,7 +130,7 @@ def normalize_memory_payload(
 def normalize_memory_updates(updates: Any) -> dict[str, Any]:
     """Validate fields a caller explicitly replaces; ignore legacy extras."""
     if not isinstance(updates, Mapping):
-        raise ValueError('updates must be an object')
+        raise BadRequest('updates must be an object', field='updates')
     normalized = dict(updates)
     text_limits = {
         'name': (MEMORY_NAME_MAX_CHARS, False, True),
@@ -147,7 +149,7 @@ def normalize_memory_updates(updates: Any) -> dict[str, Any]:
             normalized[field] = normalize_memory_tags(
                 normalized[field], field=field)
     if 'enabled' in normalized and not isinstance(normalized['enabled'], bool):
-        raise ValueError('enabled must be a boolean')
+        raise BadRequest('enabled must be a boolean', field='enabled')
     return normalized
 
 
@@ -157,11 +159,11 @@ def validate_memory_id(memory_id: Any, *, field: str = 'memory_id') -> str:
         memory_id, field=field, max_chars=MEMORY_ID_MAX_CHARS,
         allow_blank=False)
     if len(value.encode('utf-8')) > MEMORY_ID_MAX_BYTES:
-        raise ValueError(
-            f'{field} exceeds the {MEMORY_ID_MAX_BYTES}-byte UTF-8 limit')
+        raise BadRequest(
+            f'{field} exceeds the {MEMORY_ID_MAX_BYTES}-byte UTF-8 limit', field=field)
     if ('\x00' in value or '/' in value or '\\' in value
             or value in ('.', '..')):
-        raise ValueError(f'{field} must be a filesystem basename')
+        raise BadRequest(f'{field} must be a filesystem basename', field=field)
     return value
 
 
@@ -169,19 +171,19 @@ def normalize_merge_memory_ids(memory_ids: Any) -> list[str]:
     """Validate a finite, unique merge set before reading the corpus."""
     if (not isinstance(memory_ids, Sequence)
             or isinstance(memory_ids, (str, bytes, bytearray))):
-        raise ValueError('memory_ids must be an array of memory IDs')
+        raise BadRequest('memory_ids must be an array of memory IDs', field='memory_ids')
     if len(memory_ids) < 2:
-        raise ValueError('merge_memories requires at least 2 memory IDs')
+        raise BadRequest('merge_memories requires at least 2 memory IDs', field='memory_ids')
     if len(memory_ids) > MEMORY_MERGE_MAX_ITEMS:
-        raise ValueError(
+        raise BadRequest(
             'merge_memories accepts at most '
-            f'{MEMORY_MERGE_MAX_ITEMS} memory IDs')
+            f'{MEMORY_MERGE_MAX_ITEMS} memory IDs', field='memory_ids')
     normalized = [
         validate_memory_id(memory_id, field=f'memory_ids[{index}]')
         for index, memory_id in enumerate(memory_ids)
     ]
     if len(set(normalized)) != len(normalized):
-        raise ValueError('memory_ids must be unique')
+        raise BadRequest('memory_ids must be unique', field='memory_ids')
     return normalized
 
 
@@ -190,7 +192,7 @@ def normalize_memory_search(query: Any, top_k: Any) -> tuple[str, int]:
     normalized_query = _bounded_text(
         query, field='query', max_chars=MEMORY_SEARCH_QUERY_MAX_CHARS)
     if isinstance(top_k, bool) or not isinstance(top_k, int):
-        raise ValueError('top_k must be an integer')
+        raise BadRequest('top_k must be an integer', field='top_k')
     normalized_top_k = max(
         MEMORY_SEARCH_TOP_K_MIN,
         min(top_k, MEMORY_SEARCH_TOP_K_MAX),

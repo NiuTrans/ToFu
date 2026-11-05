@@ -20,6 +20,7 @@ from quart import Blueprint
 from lib.api_v4 import raw_success_response
 from lib.openapi import media_responses, api_meta
 from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 
 from .auth import request_user_id, require_auth
@@ -127,18 +128,23 @@ def serve_page_html(task_id, n):
     workdir = _task_workdir(task_id, user_id=int(request_user_id()))
     if not workdir:
         return api_not_found('not_found')
-    from lib.slides.pptd import parse_deck
+    from lib.slides.pptd import PPTDError, parse_deck
     try:
         deck = parse_deck(os.path.join(workdir, 'deck', 'deck.pptd'))
-    except Exception as e:
+    except PPTDError as e:
         logger.debug('[Slides.v1] deck parse failed for %s: %s', task_id, e)
         return api_not_found('deck_not_ready')
     if n > len(deck.pages):
         return api_not_found('not_found')
     from lib.slides.render_html import render_page_html
+    # Rich text passes model-authored markup through, and the editor frame must
+    # stay same-origin to edit its DOM, so the document itself refuses scripts.
     return (render_page_html(deck, deck.pages[n - 1], page_index=n - 1),
             200, {'Content-Type': 'text/html; charset=utf-8',
-                  'Cache-Control': 'no-store'})
+                  'Cache-Control': 'no-store',
+                  'Content-Security-Policy': (
+                      "script-src 'none'; object-src 'none'; "
+                      "base-uri 'none'; form-action 'none'")})
 
 
 @api_v1_slides_bp.route('/api/v1/slides/<task_id>/pages/<int:n>/elements',
@@ -152,10 +158,10 @@ def list_page_elements(task_id, n):
     workdir = _task_workdir(task_id, user_id=int(request_user_id()))
     if not workdir:
         return api_not_found('not_found')
-    from lib.slides.pptd import parse_deck
+    from lib.slides.pptd import PPTDError, parse_deck
     try:
         deck = parse_deck(os.path.join(workdir, 'deck', 'deck.pptd'))
-    except Exception:
+    except PPTDError:
         return api_not_found('deck_not_ready')
     if n > len(deck.pages):
         return api_not_found('not_found')
@@ -256,7 +262,7 @@ def import_template_route():
                 os.unlink(tmp_path)
             except OSError:
                 pass
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e))
     logger.info('[Slides.v1] template %s imported by user %d',
                 result['template_id'], owner_user_id)

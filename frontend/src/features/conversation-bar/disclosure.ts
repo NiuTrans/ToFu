@@ -1,7 +1,7 @@
 /** Conversation-bar nonmodal disclosures. Owns viewport placement and temporary
  * listeners only; callers own content, commands and data. No timers or observers.
  */
-export function positionDisclosure(anchor: HTMLElement, panel: HTMLElement): void {
+export function positionDisclosure(anchor: HTMLElement, panel: HTMLElement, horizontalBoundary?: HTMLElement): void {
   const win = anchor.ownerDocument.defaultView;
   if (!win) return;
 
@@ -9,10 +9,15 @@ export function positionDisclosure(anchor: HTMLElement, panel: HTMLElement): voi
   // the app and invalidate the anchor rect as soon as it becomes fixed.
   panel.style.position = 'fixed';
   const viewport = win.visualViewport;
-  const left = viewport?.offsetLeft ?? 0;
+  let left = viewport?.offsetLeft ?? 0;
   const top = viewport?.offsetTop ?? 0;
-  const width = viewport?.width ?? win.innerWidth;
+  let width = viewport?.width ?? win.innerWidth;
   const height = viewport?.height ?? win.innerHeight;
+  const surface = horizontalBoundary?.getBoundingClientRect();
+  if (surface && surface.width > 0) {
+    const clippedLeft = Math.max(left, surface.left), clippedRight = Math.min(left + width, surface.right);
+    if (clippedRight > clippedLeft) { left = clippedLeft; width = clippedRight - clippedLeft; }
+  }
   const inset = 8;
   const rect = anchor.getBoundingClientRect();
   const above = rect.top - top - inset - 6;
@@ -30,6 +35,7 @@ const focusSelector = 'button:not(:disabled),a[href],input:not(:disabled),select
 export function createAnchoredDisclosure(ports: {
   anchor: HTMLElement;
   panel: HTMLElement;
+  horizontalBoundary?: HTMLElement;
   onClose?: () => void;
 }): { open(): void; close(restoreFocus?: boolean): void; destroy(): void; isOpen(): boolean } {
   const { anchor, panel } = ports;
@@ -45,6 +51,11 @@ export function createAnchoredDisclosure(ports: {
   function listen(target: EventTarget, type: string, fn: (event: Event) => void, capture = false): void {
     target.addEventListener(type, fn, capture);
     remove.push(() => target.removeEventListener(type, fn, capture));
+  }
+  // A control under a `hidden` attribute is not rendered and cannot take focus;
+  // conditional panel items (Current basis) stay mounted that way.
+  function controls(): HTMLElement[] {
+    return Array.from(panel.querySelectorAll<HTMLElement>(focusSelector)).filter(node => !node.closest('[hidden]'));
   }
   function focus(node: HTMLElement): void {
     node.focus({ preventScroll: true });
@@ -72,8 +83,11 @@ export function createAnchoredDisclosure(ports: {
     doc.body.append(panel);
     panel.scrollTop = 0;
     anchor.setAttribute('aria-expanded', 'true');
-    positionDisclosure(anchor, panel);
-    focus(panel.querySelector<HTMLElement>('[aria-current="true"]') ?? panel.querySelector<HTMLElement>(focusSelector) ?? panel);
+    positionDisclosure(anchor, panel, ports.horizontalBoundary);
+    // The current item can itself sit in a hidden subtree; focusing it would
+    // strand focus outside the panel.
+    const current = panel.querySelector<HTMLElement>('[aria-current="true"]');
+    focus((current && !current.closest('[hidden]') ? current : null) ?? controls()[0] ?? panel);
     listen(doc, 'click', event => {
       const target = event.target as Node | null;
       if (target && (panel.contains(target) || anchor.contains(target))) return;
@@ -90,10 +104,10 @@ export function createAnchoredDisclosure(ports: {
       const key = event as KeyboardEvent;
       if (key.key === 'Escape') { key.preventDefault(); close(true); return; }
       if (key.key !== 'Tab') return;
-      const controls = Array.from(panel.querySelectorAll<HTMLElement>(focusSelector));
-      if (key.shiftKey && (doc.activeElement === controls[0] || doc.activeElement === panel)) {
+      const rendered = controls();
+      if (key.shiftKey && (doc.activeElement === rendered[0] || doc.activeElement === panel)) {
         key.preventDefault(); close(true);
-      } else if (!key.shiftKey && (doc.activeElement === controls[controls.length - 1] || !controls.length)) {
+      } else if (!key.shiftKey && (doc.activeElement === rendered[rendered.length - 1] || !rendered.length)) {
         const pageControls = Array.from(doc.querySelectorAll<HTMLElement>(focusSelector)).filter(
           element => !panel.contains(element) && element.getClientRects().length > 0,
         );

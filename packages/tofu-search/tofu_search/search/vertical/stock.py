@@ -2,9 +2,11 @@
 
 import re
 from datetime import datetime, timezone
+from importlib import import_module
 
-from tofu_search.search.vertical import base
 from tofu_search.search.vertical.base import _HEADERS, _TIMEOUT, logger
+
+base = import_module('tofu_search.search.vertical.base')  # leaf, not via package: base.py
 
 TYPE = 'stock'
 DOMAIN = 'finance'

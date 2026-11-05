@@ -1,4 +1,5 @@
 """Native timeline value projection: occurrence identity, injection slots and bounded render work."""
+import json
 from pathlib import Path
 import subprocess
 
@@ -73,7 +74,7 @@ def test_stall_and_inbox_duplicates_terminal_answer_and_unmatched_tail(timeline_
 const segs=[{type:'system_note',noteKind:'intent-stall',text:'durable stall',llmRound:0},
  {type:'system_note',noteKind:'context-injection',reason:'inbox_delivery',text:'duplicate inbox',llmRound:0},
  {type:'tool_use',id:'one',llmRound:0},{type:'text',text:'DELIVERABLE',deliverable:true,terminal:true}];
-const rows=[tool(undefined,'stall chip',{_stallNudge:true,stallRound:1}),tool(undefined,'inbox',{_inboxInject:true,inboxRound:1}),
+const rows=[tool(undefined,'stall chip',{_stallNudge:true,stallRound:1}),tool(undefined,'inbox',{_inboxInject:true,inboxRound:1,inboxCount:1,inboxPreviews:[{text:'duplicate inbox'}]}),
  tool('one','real'),tool(undefined,'tail',{_peerInject:true,peerRound:99})];
 const html=render(segs,rows);assert.ok(html.includes('durable stall')&&!html.includes('stall chip'));
 assert.ok(!html.includes('duplicate inbox')&&!html.includes('DELIVERABLE'));assert.equal(slots,2);
@@ -115,4 +116,56 @@ for(let i=0;i<n;i++){rows.push(tool(String(i),'result '+i,{attemptId:'attempt-'+
  segments.push({type:'tool_use',id:String(i),attemptId:'attempt-'+i,llmRound:0});}
 const html=render(segments,rows);assert.equal(sessions,1);assert.equal(slots,1);assert.equal(lines,n);
 assert.equal(html.split('[INJECT:steer]').length-1,1);assert.ok(html.includes('[COUNT:2000]'));
+""")
+
+
+def test_inbox_note_dedup_requires_same_scope_round_and_full_preview_payload(timeline_bundle):
+    run_timeline(timeline_bundle, r"""
+const scope={attemptId:'attempt',taskId:'producer'};
+const note={type:'system_note',noteKind:'context-injection',reason:'inbox_delivery',
+ action:'prompt',text:'completion',llmRound:1,...scope};
+const receipt=tool(undefined,'dedicated completion',{_inboxInject:true,inboxRound:2,
+ inboxCount:1,inboxPreviews:[{text:'completion'}],...scope});
+const other={...note,text:'agent message'};
+const before=JSON.stringify([note,other,receipt]);
+const html=render([note,other],[receipt]);
+assert.ok(!html.includes('[PROSE:completion]')&&html.includes('[PROSE:agent message]'));
+assert.equal(before,JSON.stringify([note,other,receipt]));
+for(const change of [{inboxRound:3},{attemptId:'retry'},{taskId:'other-producer'},
+ {attemptId:undefined},{inboxPreviews:[]},{inboxCount:2},
+ {inboxPreviews:[{text:'completion',textTruncated:true}]},
+ {inboxPreviews:[{text:'completion '}]}, {inboxRound:undefined}]){
+ assert.ok(render([note],[{...receipt,...change}]).includes('[PROSE:completion]'),JSON.stringify(change));
+}
+assert.ok(render([{...note,reason:'future_inbox_reason'}],[receipt]).includes('[PROSE:completion]'));
+assert.ok(render([{...note,action:'stop'}],[receipt]).includes('[PROSE:completion]'));
+const peer=tool(undefined,'dedicated peer',{_peerInject:true,peerRound:2,peerCount:1,
+ peerPreviews:[{text:'peer update'}],...scope});
+assert.ok(!render([{...note,text:'completion\n\npeer update'},other],[receipt,peer]).includes('[PROSE:completion'));
+assert.ok(render([{...note,text:'completion\n\npeer update\n\nagent message'}],[receipt,peer]).includes('[PROSE:completion'));
+""")
+
+
+def test_retained_receipt_rehydration_preserves_dedup_scope(timeline_bundle):
+    from tests.tasks_pkg.test_inject_row_positioning import _extract_core_inject_fns
+
+    run_timeline(timeline_bundle,
+                 'const runtimeScope = {}; eval(' + json.dumps(_extract_core_inject_fns()) + ');\n' + r"""
+const note={type:'system_note',noteKind:'context-injection',reason:'inbox_delivery',
+ text:'same payload',llmRound:0};
+for(const field of ['_peerInjects','_inboxInjects']) {
+ for(const scope of [{taskId:'producer',attemptId:'attempt'},
+                    {_taskId:'producer',_attemptId:'attempt'}]) {
+  const msg={[field]:[{round:1,count:1,previews:[{text:'same payload'}],...scope}]};
+  const before=JSON.stringify(msg);
+  const rows=_rehydrateInjectRows(msg,[]);
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].taskId,'producer');
+  assert.equal(rows[0].attemptId,'attempt');
+  assert.ok(render([note],rows).includes('[PROSE:same payload]'), 'unknown scope cannot match explicit scope');
+  assert.ok(!render([{...note,taskId:'producer',attemptId:'attempt'}],rows).includes('[PROSE:same payload]'));
+  assert.ok(render([{...note,taskId:'other',attemptId:'attempt'}],rows).includes('[PROSE:same payload]'));
+  assert.equal(before,JSON.stringify(msg));
+ }
+}
 """)

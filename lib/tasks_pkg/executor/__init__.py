@@ -16,11 +16,14 @@ Implementations live in:
   * ``._content_ref`` — ``_resolve_content_ref``
   * ``._summary``     — ``_generate_tool_summary`` / ``_prefetch_user_urls``
   * ``._execute``     — ``_execute_tool_one`` (the single-tool dispatch entry)
+  * ``._admission_wait`` — workspace-lease admission-wait observer (task events)
 
 MODULE-LEVEL SIDE EFFECTS (preserved from the original, at the END of this
 file, AFTER all symbols are bound so handler registration can import them):
   1. ``import lib.tasks_pkg.handlers`` — triggers @tool_registry registration.
   2. ``sync_spec_handlers(tool_registry)`` — binds ToolSpec-attached handlers.
+  3. ``install_admission_wait_observer()`` — binds the workspace-lease wait
+     port to task events before any tool can execute.
 """
 
 from __future__ import annotations
@@ -28,10 +31,6 @@ from __future__ import annotations
 from lib.log import get_logger
 
 logger = get_logger(__name__)
-
-# NOTE: Do NOT re-export _lib.FETCH_* as module-level copies here.
-# Module-level copies become stale after reload_config() — always read
-# from _lib.<VAR> at call time to pick up hot-reloaded values.
 
 # ── Re-export for tool_dispatch / tool_display (kept as a facade symbol) ──
 from lib.swarm.tools import SWARM_TOOL_NAMES  # noqa: E402,F401
@@ -82,6 +81,14 @@ try:
 except Exception as _sync_err:
     logger.error('[Executor] ToolSpec handler sync failed: %s', _sync_err,
                  exc_info=True)
+
+# ── Workspace admission-wait evidence (._admission_wait) ───────────────
+# project_mod owns the wait but may not import this layer; it exposes an
+# explicit observer port that the task layer binds here, once per process.
+from lib.tasks_pkg.executor._admission_wait import (  # noqa: E402
+    install_admission_wait_observer as _install_admission_wait_observer,
+)
+_install_admission_wait_observer()
 
 # ── Single-tool dispatch entry (._execute) ────────────────────────────
 # Imported LAST so the handler registrations + spec-sync above are complete

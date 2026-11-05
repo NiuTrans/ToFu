@@ -1,11 +1,13 @@
 /** Skills panel state, rendering, commands, rollback, and lifecycle owner. */
+import type { SkillContext } from '../../api/endpoint-registry/skills';
+import { createButton, createField } from '../../ui';
+import { addSkillProject, chooseSkillDestination, skillProjects, type SkillProject } from './library';
 import { featureRegistry } from '../../feature-registry';
 import { escapeHtml as escape } from '../../html-safety';
 import type { I18nKey } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
 import {
   attachSkillsPackageDropZone,
-  promptInstallScope,
   showSkillsToast,
 } from './package-install-panel';
 
@@ -45,7 +47,9 @@ interface CatalogSkill {
   remote_rank?: number;
 }
 
-interface InstalledSkill {
+interface InstalledSkill extends SkillContext {
+  source_path?: string;
+  shadowed_by?: string;
   id: string;
   name: string;
   description?: string;
@@ -93,20 +97,21 @@ interface SkillsApi {
       verified_count?: number;
     };
   } | null>;
-  list(scope: string): Promise<{ skills?: InstalledSkill[] } | null>;
-  envStatus(id: string): Promise<{ env?: SkillEnvRow[] } | null>;
-  envSet(id: string, name: string, value: string): Promise<ResponseLike | null>;
-  envDelete(id: string, name: string): Promise<ResponseLike | null>;
-  setScope(id: string, scope: InstallScope): Promise<ResponseLike | null>;
+  list(scope: string, projectPath?: string): Promise<{ skills?: InstalledSkill[]; destinations?: { global?: string; project?: string } } | null>;
+  envStatus(id: string, context?: SkillContext): Promise<{ env?: SkillEnvRow[] } | null>;
+  envSet(id: string, name: string, value: string, context?: SkillContext): Promise<ResponseLike | null>;
+  envDelete(id: string, name: string, context?: SkillContext): Promise<ResponseLike | null>;
+  setScope(id: string, scope: InstallScope, context?: SkillContext, targetProjectPath?: string): Promise<ResponseLike | null>;
   catalogInstall(
     id: string,
     scope: InstallScope,
     sourceRevision?: string,
     overwrite?: boolean,
+    projectPath?: string,
   ): Promise<ResponseLike | null>;
-  uninstall(id: string): Promise<ResponseLike | null>;
-  toggle(id: string): Promise<ResponseLike | null>;
-  files(id: string): Promise<{
+  uninstall(id: string, context?: SkillContext): Promise<ResponseLike | null>;
+  toggle(id: string, context?: SkillContext): Promise<ResponseLike | null>;
+  files(id: string, context?: SkillContext): Promise<{
     count?: number;
     root?: string;
     files?: SkillFile[];
@@ -159,6 +164,22 @@ const CATEGORY_ORDER = [
 let catalog: CatalogSkill[] = [];
 let onlineCatalog: CatalogSkill[] = [];
 let installed: InstalledSkill[] = [];
+let projects: SkillProject[] = [];
+let projectFilter = 'all';
+let libraryWarning = '';
+let installDirectories = new Map<string, string>();
+
+function skillKey(item: InstalledSkill): string { return item.skill_ref || item.id; }
+function selectedSkill(key: string): InstalledSkill | undefined {
+  return installed.find((item) => skillKey(item) === key)
+    || installed.find((item) => item.id === key);
+}
+function skillContext(key: string): SkillContext | undefined {
+  const item = selectedSkill(key);
+  return item ? { project_path: item.project_path, skill_ref: item.skill_ref } : undefined;
+}
+function skillId(key: string): string { return selectedSkill(key)?.id || key; }
+
 let scope: SkillScope = 'catalog';
 let activeCategory = 'all';
 let searchQuery = '';
@@ -229,7 +250,15 @@ function ensureLifecycle(): LifecycleScope {
   const lifecycle = createLifecycleScope();
   viewScope = lifecycle;
   const panel = document.getElementById('settingsTab_skills');
-  if (panel) lifecycle.listen(panel, 'click', onPanelClick);
+  if (panel) {
+    lifecycle.listen(panel, 'click', onPanelClick);
+    lifecycle.listen(panel, 'change', (event) => {
+      const target = event.target;
+      if (target instanceof HTMLSelectElement && target.id === 'skillsProjectFilter') {
+        projectFilter = target.value; page = 1; renderInstalled();
+      }
+    });
+  }
   return lifecycle;
 }
 
@@ -255,28 +284,53 @@ export async function populateSkillsTab(): Promise<void> {
     grid.innerHTML = renderEmptyState('loading');
   }
   try {
-    const [catalogData, listData] = await Promise.all([
+    let nextProjects: SkillProject[] = [];
+    let warning = '';
+    try { nextProjects = await skillProjects(); }
+    catch (error) { warning = errorMessage(error); }
+    if (lifecycle.signal.aborted || generation !== populateGeneration) return;
+    const paths = ['', ...nextProjects.map((row) => row.path)];
+    const [catalogData, responses] = await Promise.all([
       api().catalog(),
-      api().list('all'),
+      Promise.allSettled(paths.map((path) => api().list('all', path))),
     ]);
     if (lifecycle.signal.aborted || generation !== populateGeneration) return;
-
     const nextCatalog = Array.isArray(catalogData?.catalog) ? catalogData.catalog : [];
-    const all = Array.isArray(listData?.skills) ? listData.skills : [];
-    const nextInstalled = all.filter((item) => item.is_package);
+    const bySource = new Map<string, InstalledSkill>();
+    const nextDirectories = new Map<string, string>();
+    responses.forEach((response, index) => {
+      if (response.status === 'rejected' || !Array.isArray(response.value?.skills)) {
+        warning += `${warning ? '\n' : ''}${paths[index] || translate('skills.scopeGlobal')}: ${translate('skills.sourceLoadFailed')}`;
+        return;
+      }
+      const data = response.value;
+      if (data.destinations?.global) nextDirectories.set('', data.destinations.global);
+      if (data.destinations?.project) nextDirectories.set(paths[index], data.destinations.project);
+      for (const item of data.skills || []) {
+        if (item.is_package && !bySource.has(skillKey(item))) bySource.set(skillKey(item), item);
+      }
+    });
+    const nextInstalled = [...bySource.values()];
     const nextEnv: Record<string, SkillEnvRow[]> = {};
     let envFailures = 0;
     await Promise.all(nextInstalled.map(async (item) => {
       if (!item.requires_env?.length) return;
       try {
-        const result = await api().envStatus(item.id);
-        if (Array.isArray(result?.env)) nextEnv[item.id] = result.env;
+        const result = await api().envStatus(item.id, { project_path: item.project_path, skill_ref: item.skill_ref });
+        if (Array.isArray(result?.env)) nextEnv[skillKey(item)] = result.env;
       } catch {
         envFailures += 1;
       }
     }));
     if (lifecycle.signal.aborted || generation !== populateGeneration) return;
 
+    projects = nextProjects;
+    libraryWarning = warning;
+    installDirectories = nextDirectories;
+    for (const entry of nextCatalog) {
+      const item = nextInstalled.find((row) => row.catalog_id === entry.id);
+      if (item) { entry.installed = true; entry.installed_memory_id = skillKey(item); }
+    }
     catalog = nextCatalog;
     installed = nextInstalled;
     refreshOnlineInstalledState();
@@ -331,7 +385,7 @@ function refreshOnlineInstalledState(): void {
   for (const entry of onlineCatalog) {
     const item = byCatalog.get(entry.catalog_id || entry.id);
     entry.installed = Boolean(item);
-    entry.installed_memory_id = item?.id || '';
+    entry.installed_memory_id = item ? skillKey(item) : '';
     entry.installed_source_revision = item?.source_revision || '';
     entry.update_available = Boolean(
       item?.source_revision
@@ -615,7 +669,7 @@ function envDomId(prefix: string, skillId: string, envName: string): string {
 }
 
 function envSection(item: InstalledSkill): string {
-  const rows = envStatus[item.id];
+  const rows = envStatus[skillKey(item)];
   if (!rows?.length) return '';
   return `<div class="skill-env-section">${rows.map((row) => {
     const state = row.configured
@@ -624,37 +678,38 @@ function envSection(item: InstalledSkill): string {
     return `<div class="skill-env-row">
         <code class="skill-env-name">${escape(row.name)}</code>${state}
         <button class="btn btn-secondary btn-xs" data-skills-action="env-edit"
-          data-skill-id="${escape(item.id)}" data-env-name="${escape(row.name)}">${escape(translate(row.configured ? 'skills.envUpdate' : 'skills.envSet'))}</button>
+          data-skill-id="${escape(skillKey(item))}" data-env-name="${escape(row.name)}">${escape(translate(row.configured ? 'skills.envUpdate' : 'skills.envSet'))}</button>
         ${row.configured ? `<button class="btn btn-secondary btn-xs" data-skills-action="env-delete"
-          data-skill-id="${escape(item.id)}" data-env-name="${escape(row.name)}">${escape(translate('skills.envDelete'))}</button>` : ''}
+          data-skill-id="${escape(skillKey(item))}" data-env-name="${escape(row.name)}">${escape(translate('skills.envDelete'))}</button>` : ''}
       </div>
-      <div class="skill-env-editor" id="${escape(envDomId('skillEnvEditor', item.id, row.name))}" style="display:none">
-        <input type="password" class="skill-env-input" id="${escape(envDomId('skillEnvInput', item.id, row.name))}"
+      <div class="skill-env-editor" id="${escape(envDomId('skillEnvEditor', skillKey(item), row.name))}" style="display:none">
+        <input type="password" class="skill-env-input" id="${escape(envDomId('skillEnvInput', skillKey(item), row.name))}"
           placeholder="${escape(translate('skills.envPlaceholder'))}" autocomplete="off">
         <button class="btn btn-primary btn-xs" data-skills-action="env-save"
-          data-skill-id="${escape(item.id)}" data-env-name="${escape(row.name)}">${escape(translate('skills.envSave'))}</button>
+          data-skill-id="${escape(skillKey(item))}" data-env-name="${escape(row.name)}">${escape(translate('skills.envSave'))}</button>
       </div>`;
   }).join('')}</div>`;
 }
 
 function installedCard(item: InstalledSkill): string {
-  const targetScope: InstallScope = item.scope === 'global' ? 'project' : 'global';
   return `<div class="mcp-app-card skill-card is-installed">
     <div class="mcp-app-icon">${icon('package', 26)}</div>
     <div class="mcp-app-name"><span class="mcp-app-name-text">${escape(item.name)}</span>
       <span class="mcp-app-status ${item.enabled ? 'on' : 'off'}"><span class="dot"></span>${escape(translate(item.enabled ? 'skills.statusOn' : 'skills.statusOff'))}</span>
     </div>
-    <div class="skill-author">${escape(translate('skills.scopeIdLine', { scope: item.scope, id: item.id }))}</div>
+    <div class="skill-author">${escape(translate('skills.scopeIdLine', { scope: item.project_path || translate('skills.scopeGlobal'), id: item.id }))}</div>
+    <div class="skill-source-path">${escape(item.source_path || '')}</div>
+    ${item.shadowed_by ? `<div class="skill-badge-warn">${escape(translate('skills.shadowedSource'))}</div>` : ''}
     <div class="mcp-app-desc">${escape(item.description || '')}</div>
     ${item.eligible === false && item.ineligible_reasons?.length
       ? `<div class="skill-badge-warn">⚠ ${escape(item.ineligible_reasons.join(' · '))}</div>` : ''}
     ${envSection(item)}
     <div class="skill-card-footer"><span></span><div class="skill-card-actions">
-      <button class="btn btn-secondary btn-xs" data-skills-action="files" data-skill-id="${escape(item.id)}">${escape(translate('skills.viewFiles'))}</button>
-      <button class="btn btn-secondary btn-xs" data-skills-action="move" data-skill-id="${escape(item.id)}"
-        data-target-scope="${targetScope}">${escape(translate(targetScope === 'project' ? 'skills.moveToProject' : 'skills.moveToGlobal'))}</button>
-      <button class="btn btn-secondary btn-xs" data-skills-action="toggle" data-skill-id="${escape(item.id)}">${escape(translate(item.enabled ? 'skills.disable' : 'skills.enable'))}</button>
-      <button class="btn btn-secondary btn-xs" data-skills-action="uninstall" data-skill-id="${escape(item.id)}">${escape(translate('skills.uninstallBtn'))}</button>
+      <button class="btn btn-secondary btn-xs" data-skills-action="files" data-skill-id="${escape(skillKey(item))}">${escape(translate('skills.viewFiles'))}</button>
+      ${item.scope === 'project' ? `<button class="btn btn-secondary btn-xs" data-skills-action="move" data-skill-id="${escape(skillKey(item))}"
+        >${escape(translate('skills.moveFiles'))}</button>` : ''}
+      <button class="btn btn-secondary btn-xs" data-skills-action="toggle" data-skill-id="${escape(skillKey(item))}">${escape(translate(item.enabled ? 'skills.disable' : 'skills.enable'))}</button>
+      <button class="btn btn-secondary btn-xs" data-skills-action="uninstall" data-skill-id="${escape(skillKey(item))}">${escape(translate('skills.uninstallBtn'))}</button>
     </div></div>
   </div>`;
 }
@@ -698,12 +753,49 @@ function renderCatalog(): void {
     + onlineStatus + renderPagination(items.length);
 }
 
+function renderLibraryControls(): void {
+  const grid = document.getElementById('skillsCatalogGrid');
+  if (!grid) return;
+  let container = document.getElementById('skillsLibraryControls');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'skillsLibraryControls';
+    container.className = 'skills-library-controls';
+    grid.before(container);
+  }
+  container.hidden = scope !== 'installed';
+  const choices = [
+    { value: 'all', label: translate('skills.allProjects') },
+    { value: 'global', label: translate('skills.scopeGlobal') },
+    ...projects.map((row) => ({ value: row.path, label: row.path })),
+  ];
+  const field = createField({
+    label: translate('skills.librarySource'), controlId: 'skillsProjectFilter',
+    choices, value: projectFilter, hint: translate('skills.libraryHint'),
+  });
+  field.el.classList.add('skills-library-filter');
+  const add = createButton({ label: translate('skills.addProject'), size: 'sm' });
+  add.dataset.skillsAction = 'add-project';
+  const refresh = createButton({ label: translate('skills.refreshLibrary'), size: 'sm' });
+  refresh.dataset.skillsAction = 'retry';
+  container.replaceChildren(field.el, add, refresh);
+  if (libraryWarning) {
+    const warning = document.createElement('p');
+    warning.className = 'skills-library-warning';
+    warning.setAttribute('role', 'alert');
+    warning.textContent = libraryWarning;
+    container.append(warning);
+  }
+}
+
 function renderInstalled(): void {
   const grid = document.getElementById('skillsCatalogGrid');
   if (!grid) return;
   let items = installed.filter((item) => {
+    if (projectFilter === 'global' && item.scope !== 'global') return false;
+    if (projectFilter !== 'all' && projectFilter !== 'global' && item.project_path !== projectFilter) return false;
     if (!searchQuery) return true;
-    return [item.name, item.description, ...(item.tags || [])]
+    return [item.name, item.description, item.project_path, item.source_path, ...(item.tags || [])]
       .filter(Boolean).join(' ').toLowerCase().includes(searchQuery);
   });
   if (!items.length) {
@@ -723,6 +815,7 @@ function renderInstalled(): void {
 export function render(): void {
   renderHeader();
   renderCategoryBar();
+  renderLibraryControls();
   if (scope === 'catalog') renderCatalog();
   else renderInstalled();
 }
@@ -744,7 +837,7 @@ export async function saveEnv(skillId: string, envName: string): Promise<void> {
     return;
   }
   try {
-    await requireOk(await api().envSet(skillId, envName, value));
+    await requireOk(await api().envSet(selectedSkill(skillId)?.id || skillId, envName, value, skillContext(skillId)));
     toast(translate('skills.envSaved', { name: envName }), 'success');
     await populateSkillsTab();
   } catch (error: unknown) {
@@ -758,7 +851,7 @@ export async function deleteEnv(skillId: string, envName: string): Promise<void>
   ) ?? Promise.resolve(true));
   if (!confirmed) return;
   try {
-    await requireOk(await api().envDelete(skillId, envName));
+    await requireOk(await api().envDelete(selectedSkill(skillId)?.id || skillId, envName, skillContext(skillId)));
     toast(translate('skills.envDeleted', { name: envName }), 'success');
     await populateSkillsTab();
   } catch (error: unknown) {
@@ -768,16 +861,31 @@ export async function deleteEnv(skillId: string, envName: string): Promise<void>
 
 export async function moveScope(
   skillId: string,
-  targetScope: InstallScope,
+  _targetScope: InstallScope,
   button?: HTMLButtonElement | null,
 ): Promise<void> {
+  const item = selectedSkill(skillId);
+  if (!item) return;
+  const generation = populateGeneration;
   if (button) button.disabled = true;
   try {
-    await requireOk(await api().setScope(skillId, targetScope));
-    toast(translate('skills.scopeMoved', { id: skillId }), 'success');
+    const destination = await chooseSkillDestination(item.name, 'skills.moveDestination');
+    if (!destination || generation !== populateGeneration || viewScope?.signal.aborted) return;
+    const root = installDirectories.get(destination.projectPath);
+    if (!root || !item.source_path) throw new Error(translate('skills.sourceLoadFailed'));
+    const target = `${root.replace(/[\\/]$/, '')}/${item.id}`;
+    if (target === item.source_path) return;
+    const confirmed = await globals().showConfirm?.(translate('skills.moveFilesConfirm', {
+      source: item.source_path, target,
+      visibility: destination.scope === 'global' ? translate('skills.scopeGlobalSub') : destination.projectPath,
+    }), { danger: true });
+    if (!confirmed || generation !== populateGeneration || viewScope?.signal.aborted) return;
+    await requireOk(await api().setScope(item.id, destination.scope, skillContext(skillId), destination.projectPath));
+    toast(translate('skills.scopeMoved', { id: item.id }), 'success');
     await populateSkillsTab();
   } catch (error: unknown) {
     toast(translate('skills.scopeMoveFailed', { err: errorMessage(error) }), 'error');
+  } finally {
     if (button?.isConnected) button.disabled = false;
   }
 }
@@ -791,8 +899,11 @@ export async function catalogInstall(
   const entry = [...catalog, ...onlineCatalog].find((candidate) => (
     (candidate.catalog_id || candidate.id) === skillId
   ));
-  const installScope = await promptInstallScope(entry?.name || skillId);
-  if (!installScope) return;
+  let destination;
+  try { destination = await chooseSkillDestination(entry?.name || skillId); }
+  catch (error) { toast(errorMessage(error), 'error'); return; }
+  if (!destination) return;
+  const installScope = destination.scope;
   if (entry?.source === 'clawhub') {
     const confirmed = await (globals().showConfirm?.(
       translate(overwrite ? 'skills.remoteUpdateConfirm' : 'skills.remoteInstallConfirm', {
@@ -813,6 +924,7 @@ export async function catalogInstall(
       installScope,
       sourceRevision || entry?.source_revision || '',
       overwrite,
+      destination.projectPath,
     );
     const body = await json(response);
     if (!response?.ok) {
@@ -849,7 +961,8 @@ export async function catalogInstall(
 }
 
 export async function uninstallSkill(memoryId: string): Promise<void> {
-  let confirmText = translate('skills.uninstallConfirm', { id: memoryId });
+  const sourceItem = selectedSkill(memoryId);
+  let confirmText = translate('skills.uninstallConfirm', { id: sourceItem?.source_path || skillId(memoryId) });
   if (envStatus[memoryId]?.some((row) => row.configured)) {
     confirmText += `\n${translate('skills.uninstallConfirmEnv')}`;
   }
@@ -858,11 +971,12 @@ export async function uninstallSkill(memoryId: string): Promise<void> {
   if (!confirmed) return;
 
   const epoch = dataEpoch;
-  const index = installed.findIndex((item) => item.id === memoryId);
+  const index = installed.findIndex((item) => item === sourceItem);
   const removed = index >= 0 ? installed[index] : null;
-  const catalogEntry = catalog.find((entry) => (
-    entry.installed_memory_id || entry.id
-  ) === memoryId) || null;
+  const catalogEntry = catalog.find((entry) => {
+    const selected = entry.installed_memory_id || entry.id;
+    return selected === memoryId || selected === sourceItem?.id;
+  }) || null;
   if (removed) installed = installed.filter((item) => item !== removed);
   if (catalogEntry) {
     catalogEntry.installed = false;
@@ -870,8 +984,8 @@ export async function uninstallSkill(memoryId: string): Promise<void> {
   }
   render();
   try {
-    await requireOk(await api().uninstall(memoryId));
-    toast(translate('skills.uninstalledToast', { id: memoryId }), 'success');
+    await requireOk(await api().uninstall(sourceItem?.id || memoryId, sourceItem ? { project_path: sourceItem.project_path, skill_ref: sourceItem.skill_ref } : undefined));
+    toast(translate('skills.uninstalledToast', { id: sourceItem?.id || memoryId }), 'success');
     await populateSkillsTab();
   } catch (error: unknown) {
     if (dataEpoch === epoch) {
@@ -893,14 +1007,14 @@ export async function toggleEnabled(
   memoryId: string,
   _button?: HTMLButtonElement | null,
 ): Promise<void> {
-  const item = installed.find((candidate) => candidate.id === memoryId);
+  const item = selectedSkill(memoryId);
   const previous = item?.enabled;
   if (item) {
     item.enabled = !item.enabled;
     render();
   }
   try {
-    await requireOk(await api().toggle(memoryId));
+    await requireOk(await api().toggle(skillId(memoryId), skillContext(memoryId)));
     await populateSkillsTab();
   } catch (error: unknown) {
     if (item && installed.includes(item)) {
@@ -938,12 +1052,12 @@ export async function viewFiles(memoryId: string): Promise<void> {
   const list = document.getElementById('skillsFilesList');
   if (!(overlay instanceof HTMLElement) || !title || !description || !list) return;
   const generation = ++filesGeneration;
-  title.textContent = memoryId;
+  title.textContent = selectedSkill(memoryId)?.name || skillId(memoryId);
   description.textContent = translate('skills.filesLoading');
   list.replaceChildren();
   overlay.style.display = 'flex';
   try {
-    const result = await api().files(memoryId);
+    const result = await api().files(skillId(memoryId), skillContext(memoryId));
     if (generation !== filesGeneration || overlay.style.display === 'none') return;
     if (!result) {
       description.textContent = translate('skills.filesLoadFailed');
@@ -984,6 +1098,9 @@ function onPanelClick(event: Event): void {
   const envName = target.dataset.envName || '';
   const button = target instanceof HTMLButtonElement ? target : null;
   if (action === 'retry') void populateSkillsTab();
+  else if (action === 'add-project') {
+    void addSkillProject().then(async (added) => { if (added) await populateSkillsTab(); }).catch((error: unknown) => toast(errorMessage(error), 'error'));
+  }
   else if (action === 'category') setCategory(target.dataset.category || 'all');
   else if (action === 'page') setPage(Number(target.dataset.page || 1));
   else if (action === 'install') {

@@ -100,7 +100,18 @@ def _settle_mcp_round_display(round_entry, meta, underlying, args,
         round_entry['status'] = 'error'
 
 
-def _run_progressive_mcp(fn_name, fn_args, *, task=None):
+def _tool_runtime(task, rn, tc_id, round_entry):
+    """The executor-registered context of this call occurrence, if any.
+
+    Local-path admission binds it so a workspace-lease wait is attributed to
+    the tool span (``toolCallId``) and ends when the call is cancelled.
+    """
+    from lib.tasks_pkg.tool_runtime import active_context_for_call
+    return active_context_for_call(
+        task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
+
+
+def _run_progressive_mcp(fn_name, fn_args, *, task=None, runtime_context=None):
     """Executor callable for the stable progressive MCP meta tools."""
     from lib.mcp import get_bridge
     from lib.mcp.progressive import (
@@ -123,7 +134,8 @@ def _run_progressive_mcp(fn_name, fn_args, *, task=None):
         return call_progressive_mcp(
             bridge, fn_name, fn_args.get('name', ''),
             fn_args.get('arguments', {}),
-            invoke=lambda name, arguments: call_with_file_receipts(bridge, name, arguments, task=task or {}),
+            invoke=lambda name, arguments: call_with_file_receipts(
+                bridge, name, arguments, task=task or {}, runtime_context=runtime_context),
         )
     except Exception as e:
         logger.error('[MCP:Progressive] %s failed: %s', fn_name, e,
@@ -167,7 +179,8 @@ def handle_progressive_mcp_tool(
     result = simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run_progressive_mcp,
-        executor_kwargs={'task': task},
+        executor_kwargs={'task': task,
+                         'runtime_context': _tool_runtime(task, rn, tc_id, round_entry)},
         source='MCP', module_tag='MCP:Progressive',
         extra={'mcpTool': underlying, 'progressive': True},
         post_build=_post_build,
@@ -189,14 +202,15 @@ def handle_progressive_mcp_tool(
     return result
 
 
-def _run_mcp(fn_name, fn_args, *, task=None):
+def _run_mcp(fn_name, fn_args, *, task=None, runtime_context=None):
     """Executor callable for simple_call — returns tool_content string."""
     from lib.mcp import get_bridge
     from lib.tasks_pkg.manager import task_user_id
     bridge = get_bridge(task_user_id(task))
     try:
         from ._mcp_files import call_with_file_receipts
-        return call_with_file_receipts(bridge, fn_name, fn_args, task=task or {})
+        return call_with_file_receipts(bridge, fn_name, fn_args, task=task or {},
+                                       runtime_context=runtime_context)
     except Exception as e:
         logger.error('[MCP] %s failed: %s', fn_name, e, exc_info=True)
         return _mcp_failure_content(e)
@@ -269,7 +283,8 @@ def handle_mcp_tool(
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run_mcp,
-        executor_kwargs={'task': task},
+        executor_kwargs={'task': task,
+                         'runtime_context': _tool_runtime(task, rn, tc_id, round_entry)},
         source=f'MCP:{server_name}', module_tag='MCP',
         extra={'mcpServer': server_name, 'mcpTool': tool_name},
         post_build=_post_build,

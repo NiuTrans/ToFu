@@ -127,8 +127,7 @@ def test_independent_accumulators_start_while_other_translations_are_blocked(mon
         accumulators.append(self)
         original_start(self)
     monkeypatch.setattr(incremental._Accumulator, 'start', capture_start)
-    monkeypatch.setattr(incremental, '_PREVIEW_MIN_NARRATION_CHARS', 1)
-    monkeypatch.setattr(incremental._Accumulator, '_push', lambda *args: None)
+    monkeypatch.setattr(incremental._Accumulator, '_push', lambda *args, **kwargs: None)
     def translate(self, original, **kwargs):
         if original == 'healthy':
             healthy.set()

@@ -47,6 +47,7 @@ def send_browser_command(
     *,
     client_id,
     owner_user_id,
+    cancel_event=None,
 ):
     """Send a command to a specific browser extension client and block until result.
 
@@ -56,9 +57,13 @@ def send_browser_command(
         timeout: Max seconds to wait for result.
         client_id: Target device ID.
         owner_user_id: Authenticated repository owner.
+        cancel_event: Optional task abort event. It ends the wait early and
+            withdraws the command exactly like a timeout.
     """
     client_id, owner_user_id = _normalize_route(
         client_id, owner_user_id)
+    if cancel_event is not None and cancel_event.is_set():
+        return None, 'Browser command cancelled before dispatch'
     logger.info('[Browser] Sending command %s (timeout=%ds, owner=%s, client=%s)',
                 cmd_type, timeout, owner_user_id, client_id[:12])
     if not is_extension_connected(
@@ -94,7 +99,7 @@ def send_browser_command(
     _notify.set()
     _wake_async_waiters(client_id, owner_user_id)
 
-    if not event.wait(timeout=timeout):
+    if not _wait_for_result(event, timeout, cancel_event):
         # Caller gave up: mark cancelled (so an in-flight get_pending_commands
         # that raced to pick it up won't hand it to the extension) and remove it.
         with _commands_lock:
@@ -107,6 +112,10 @@ def send_browser_command(
         if timed_out_cmd:
             p = timed_out_cmd.get('params') or {}
             url_hint = url_for_log(p.get('url', ''))
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info('[Browser] Command %s cancelled by its task (client=%s, picked_up=%s)',
+                        cmd_type, client_id[:12], picked)
+            return None, 'Browser command cancelled'
         with _commands_lock:
             pending_count = sum(1 for c in _commands.values() if not c.get('picked_up'))
             total_count = len(_commands)
@@ -130,6 +139,20 @@ def send_browser_command(
                        text_for_log(cmd['error'], max_chars=200))
         return None, cmd['error']
     return cmd['result'], None
+
+
+def _wait_for_result(event, timeout, cancel_event) -> bool:
+    """Wait for the command result; a set cancel event ends the wait early."""
+    if cancel_event is None:
+        return event.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while not cancel_event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if event.wait(timeout=min(0.25, remaining)):
+            return True
+    return event.is_set()
 
 
 def _deliverable_to(cmd, client_id, owner_user_id):

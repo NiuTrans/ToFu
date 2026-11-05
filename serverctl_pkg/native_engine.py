@@ -27,13 +27,19 @@ import tempfile
 import time
 import urllib.request
 
-PREPARE_TIMEOUT_SECONDS = 600
-LOCK_WAIT_TIMEOUT_SECONDS = 600
-PREPARATION_TOTAL_TIMEOUT_SECONDS = LOCK_WAIT_TIMEOUT_SECONDS + PREPARE_TIMEOUT_SECONDS
+from .restart_budget import (
+    NATIVE_LOCK_WAIT_SECONDS as LOCK_WAIT_TIMEOUT_SECONDS,
+    NATIVE_PREPARATION_SECONDS as PREPARATION_TOTAL_TIMEOUT_SECONDS,
+    NATIVE_MANIFEST_PARSE_SECONDS as MANIFEST_PARSE_TIMEOUT_SECONDS,
+)
 
 SOURCE_PREPARATION_MAX_ATTEMPTS = 3
 SOURCE_PREPARATION_SETTLE_SECONDS = 2.0
 BUILD_FINALIZATION_RESERVE_SECONDS = 30
+# A stable compiler profile is essential to dependency/incremental cache reuse.
+# Headroom and CPU availability are not build inputs. Cargo owns its jobserver;
+# explicit operator settings remain authoritative.
+RELEASE_CODEGEN_UNITS = 64
 MAX_LOG_BYTES = 8 * 1024 * 1024
 PROGRESS_INTERVAL_SECONDS = 5.0
 PROGRESS_PREFIX = "TOFU_ENGINE_PROGRESS "
@@ -109,9 +115,20 @@ def _read_manifest(manifest: Path) -> dict:
         # execute site hooks. Keep the existing bounded child and joined wait.
         return json.loads(subprocess.run(
             [sys.executable, '-I', '-S', '-c', _TOML_QUERY_PROGRAM, str(manifest)],
-            capture_output=True, check=True, text=True, timeout=10).stdout)
+            capture_output=True, check=True, text=True,
+            timeout=_remaining_preparation_seconds(MANIFEST_PARSE_TIMEOUT_SECONDS)).stdout)
+    except subprocess.TimeoutExpired as exc:
+        raise EnginePreparationError(
+            f'Cannot read the storage engine source manifest {manifest}: '
+            f'isolated parser timed out after {exc.timeout:g}s.') from exc
+    except subprocess.CalledProcessError as exc:
+        raise EnginePreparationError(
+            f'Cannot read the storage engine source manifest {manifest}: '
+            f'isolated parser exited with code {exc.returncode}.') from exc
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        raise EnginePreparationError(f'Cannot read the storage engine source manifest {manifest}.') from exc
+        raise EnginePreparationError(
+            f'Cannot read the storage engine source manifest {manifest} '
+            f'({type(exc).__name__}).') from exc
 
 
 def _manifest_reader() -> Callable[[Path], dict]:
@@ -401,7 +418,7 @@ def _run(command: list[str], *, cwd: Path, environment: dict, timeout: float,
     with tempfile.TemporaryDirectory(prefix='tofu-engine-command-') as temporary, \
             (Path(temporary) / 'output.log').open('wb') as log, \
             (Path(temporary) / 'output.log').open('rb') as reader:
-        child = subprocess.Popen(command, cwd=cwd, env=environment, stdout=log,
+        child = subprocess.Popen(command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL, stdout=log,
                                  stderr=subprocess.STDOUT, start_new_session=os.name != 'nt')
         next_progress = started + PROGRESS_INTERVAL_SECONDS
         decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
@@ -704,13 +721,16 @@ def _sync_build_snapshot(root: Path, crate: Path, snapshot: Path) -> None:
     if snapshot.is_symlink():
         raise EnginePreparationError('The storage build snapshot must not be a symlink.')
     snapshot.mkdir(parents=True, exist_ok=True)
-    layout = source_layout(root)
-    external = external_source_inputs(root)
+    read_manifest = _manifest_reader()
+    layout = _source_layout(root, read_manifest)
+    external = _external_source_inputs(root, read_manifest)
     copies: list[tuple[Path, Path]] = []
+    target_crates: list[Path] = []
     member_dirs: list[str] = []
     needs_workspace = False
     for location, relative, paths, inherits in layout:
         target_crate = snapshot if str(relative) == '.' else snapshot.parent / relative
+        target_crates.append(target_crate)
         if str(relative) != '.':
             member_dirs.append(relative.as_posix())
             needs_workspace = needs_workspace or inherits
@@ -766,8 +786,19 @@ def _sync_build_snapshot(root: Path, crate: Path, snapshot: Path) -> None:
         target.unlink(missing_ok=True)
     ledger.write_text(json.dumps([key for key, _ in external]))
     retained = {target for _, target in copies}
+    snapshot_parent = snapshot.parent.resolve()
+    # build.rs watches these roots to detect new/deleted inputs, even when
+    # they are empty. Missing watched paths make Cargo rerun the build script
+    # on EVERY invocation. Normalize only this owned snapshot, never sources;
+    # empty directories contribute no bytes to the compiled source identity.
+    watched_directories = {location / name for location in target_crates
+                           for name in ('src', '.cargo')}
+    for directory in watched_directories:
+        if not directory.resolve().is_relative_to(snapshot_parent) or directory.is_symlink():
+            raise EnginePreparationError('The storage build snapshot contains an unsafe path.')
+        directory.mkdir(parents=True, exist_ok=True)
     for path, target in copies:
-        if not target.resolve().is_relative_to(snapshot.parent.resolve()) or target.is_symlink():
+        if not target.resolve().is_relative_to(snapshot_parent) or target.is_symlink():
             raise EnginePreparationError('The storage build snapshot contains an unsafe path.')
         target.parent.mkdir(parents=True, exist_ok=True)
         if path.name == _SYNTHETIC_WORKSPACE_SENTINEL:
@@ -785,12 +816,13 @@ def _sync_build_snapshot(root: Path, crate: Path, snapshot: Path) -> None:
     # manifest), so build caches are never mistaken for stale sources.
     if needs_workspace:
         retained.add(snapshot.parent / 'Cargo.toml')
-    owned_roots = [snapshot]
+    owned_roots = list(target_crates)
     for entry in snapshot.parent.iterdir():
         if entry == snapshot or not entry.is_dir() or entry.is_symlink():
             continue
         if (entry / 'Cargo.toml').is_file():
-            owned_roots.append(entry)
+            if entry not in owned_roots:
+                owned_roots.append(entry)
     member_set = {str(member) for member in member_dirs}
     for owned in owned_roots:
         if not owned.is_dir():
@@ -804,7 +836,7 @@ def _sync_build_snapshot(root: Path, crate: Path, snapshot: Path) -> None:
                 folder = Path(directory) / name
                 if folder.is_symlink():
                     raise EnginePreparationError('The storage build snapshot contains an unsafe path.')
-                if not any(folder.iterdir()):
+                if folder not in watched_directories and not any(folder.iterdir()):
                     folder.rmdir()
         if owned != snapshot and owned.name not in member_set and not any(owned.iterdir()):
             owned.rmdir()
@@ -876,6 +908,43 @@ def _resolve_c_compiler(search_path: str, declared: str | None) -> str:
         'Install a compiler or provide a verified matching engine artifact.')
 
 
+def _build_cache_root(root: Path, environment: dict) -> Path:
+    """Place reconstructible compiler state through the common local policy.
+
+    The checkout preparation lock owns this per-project tree. It contains no
+    deployed engine or user database; a lost/unavailable cache only costs a
+    rebuild. Isolated certification supplies its own build_root instead.
+    """
+    from .local_placement import (
+        PURPOSE_NATIVE_BUILD, choose_local_root, ensure_private_directory,
+    )
+    root = root.resolve()
+    fallback = root / 'packages/tofu-db/target'
+    try:
+        placement = choose_local_root(root, PURPOSE_NATIVE_BUILD, environ=environment)
+        if placement.selected:
+            project_key = hashlib.sha256(os.fsencode(root)).hexdigest()
+            selected = Path(placement.root) / project_key
+            ensure_private_directory(selected)
+            return selected
+    except OSError as exc:
+        _report_progress(f'Local compiler cache unavailable: {exc}; using the checkout cache.')
+    return fallback
+
+
+def _cache_compiler_path(executable: str | None) -> str | None:
+    """Unify directory aliases without renaming argv[0]-selected proxies.
+
+    Rustup's cargo/rustc links must retain their names, and a distinct wrapper
+    remains a distinct build input. Only existing executable parent aliases
+    collapse; operator commands and unresolved paths keep their exact identity.
+    """
+    if not executable or not os.path.isabs(executable) or not os.path.isfile(executable):
+        return executable
+    path = Path(executable)
+    return str(path.parent.resolve() / path.name)
+
+
 def _build(root: Path, staging: Path, environment: dict, *, build_root: Path | None = None) -> Path:
     # A GUI/service launch need not inherit an interactive shell's PATH.
     # Resolve only from this deployment environment, including custom rustup
@@ -915,36 +984,47 @@ def _build(root: Path, staging: Path, environment: dict, *, build_root: Path | N
     # Mirror the repository layout entirely inside the owned build tree.
     # External root inputs resolve two levels above the crate; putting the
     # crate directly in target would spill those inputs into retained source.
-    target_root = build_root if build_root is not None else crate / 'target'
+    target_root = build_root if build_root is not None else _build_cache_root(root, environment)
     snapshot_root = target_root / 'update-source-root'
     if snapshot_root.is_symlink() or (snapshot_root / 'packages').is_symlink():
         raise EnginePreparationError('The storage build snapshot must not use a symlink.')
     snapshot = snapshot_root / 'packages/tofu-db'
     _sync_build_snapshot(root, crate, snapshot)
-    from runtime_guards import probe_system_resources
-    capacity = probe_system_resources(environment)
-    jobs = max(1, min(capacity.effective_cpu_count,
-                      (capacity.effective_memory_available_mb or 1024) // 1024))
-    build_environment.setdefault('CARGO_BUILD_JOBS', str(jobs))
-    # Release optimization stays at opt-level=3. Parallel LLVM code generation
-    # and Thin LTO avoid serial whole-crate optimization during a source restart.
+    # Release optimization stays at opt-level=3. Cargo's false keeps local Thin
+    # LTO across the fixed LLVM partitions without the cross-crate LTO pass.
+    # Packaged release profiles remain owned by the package/release pipeline.
     # Explicit operator profile overrides remain authoritative; Cargo tracks
     # these settings in the stable host cache's own fingerprints.
-    build_environment.setdefault('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', str(jobs))
-    build_environment.setdefault('CARGO_PROFILE_RELEASE_LTO', 'thin')
+    build_environment.setdefault('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', str(RELEASE_CODEGEN_UNITS))
+    build_environment.setdefault('CARGO_PROFILE_RELEASE_LTO', 'false')
     build_environment.setdefault('CARGO_PROFILE_RELEASE_INCREMENTAL', 'true')
     # Shared storage survives container replacement, compiled host programs do
     # not. Namespace Cargo cache by the current ABI and build environment.
     host_identity = json.dumps({
         'platform': platform.platform(), 'libc': platform.libc_ver(),
-        'cargo': cargo, 'compiler': build_environment.get('CC'),
+        'cargo': _cache_compiler_path(cargo),
+        'compiler': _cache_compiler_path(build_environment.get('CC')),
         'linker_environment': {key: build_environment.get(key, '') for key in
                                ('LD_LIBRARY_PATH', 'LIBRARY_PATH', 'RUSTFLAGS', 'CFLAGS', 'CXXFLAGS')},
     }, sort_keys=True).encode()
     host_key = hashlib.sha256(host_identity).hexdigest()[:16]
     target_dir = target_root / f'update-build-{host_key}'
     build_environment['CARGO_TARGET_DIR'] = str(target_dir)
-    _report_stage('compiling', f'Compiling matching storage engine (build workers: {build_environment["CARGO_BUILD_JOBS"]}); '
+    # Explicit Cargo diagnostics can include host observations. Ordinary
+    # restarts do not pay for a launch probe, especially on network volumes.
+    # Observations never select jobs, codegen units or cache identity.
+    if environment.get('CARGO_LOG') not in (None, '', 'off'):
+        from runtime_guards import probe_system_resources
+        try:
+            observed_resources = probe_system_resources(environment)
+            _report_progress(
+                f'Compiler host observation: {observed_resources.effective_cpu_count} CPUs, '
+                f'{observed_resources.effective_memory_available_mb} MiB available; '
+                'release profile is independent of host capacity.')
+        except (OSError, ValueError, RuntimeError) as exc:
+            _report_progress(f'Compiler host observation unavailable: {exc}; continuing the build.')
+    _report_stage('compiling', f'Compiling matching storage engine (build workers: {build_environment.get("CARGO_BUILD_JOBS", "Cargo default")}; '
+                     f'cache: {target_dir}); '
                      'this may take several minutes. The running service has not been stopped.')
     command = [cargo, 'build', '--release', '--locked']
     if sys.platform == 'linux':
@@ -1127,14 +1207,19 @@ def _prepare_generation(root: Path, environment: dict, project_environment: dict
         # A developer build or a timed-out publication may already have
         # produced the exact engine. Reuse it before any network/compiler
         # work, but retain source, semantic and deployment verification.
-        host_cached = sorted((root / 'packages/tofu-db/target').glob(f'update-build-*/release/{name}'))
+        cache_roots = dict.fromkeys((_build_cache_root(root, environment), root / 'packages/tofu-db/target'))
+        host_cached = [candidate for cache in cache_roots
+                       for candidate in sorted(cache.glob(f'update-build-*/release/{name}'))]
         for cached in (*host_cached,
                        root / f'packages/tofu-db/target/update-build/release/{name}',
                        root / f'packages/tofu-db/target/release/{name}'):
             if cached.resolve() == dest:
                 continue
             try:
-                _verify_generation(cached, root, expected)
+                # Obsolete cache entries are ordinary misses. Rehash the live
+                # tree once after selection, not once for every old host cache.
+                if build_identity(cached)['source_sha256'] != expected:
+                    continue
                 if requires_library and not _cached_library_matches_source(cached, expected):
                     continue
                 candidate = cached

@@ -36,7 +36,9 @@ therefore cannot select one another's candidate slots.
 
 This is deliberately a no-op when nothing is pinned (the default for the
 operator's own UI traffic), so the shared multi-key load balancer is
-completely unaffected.
+completely unaffected. An unpinned context selects only configured slots:
+request-scoped route groups are visible only under their own pin
+(``lib/llm_dispatch/slot_pool.py``).
 """
 
 from __future__ import annotations

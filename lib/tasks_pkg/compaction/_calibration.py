@@ -55,6 +55,16 @@ _TASK_KEY = '_tokenCalibration'
 _SAMPLE_KEY = '_gateCalibrationSample'
 _STREAM_KEY = '_lastStreamGroundTruth'
 
+# How long one provider measurement may bound the next prompt. A measurement is
+# a snapshot of a prompt that actually existed; the message list only grows
+# within a turn, but an idle conversation can have been rewritten by compaction
+# or lost its tool-schema identity. One hour matches the token counter's own
+# usage-cache TTL and comfortably spans one agent turn's rounds.
+_ANCHOR_MAX_AGE_SECONDS = 3600.0
+# Guard against an implausible message-count fact turning the suffix slice
+# itself into the expensive operation.
+_MAX_ANCHOR_MESSAGES = 200_000
+
 
 def _normalize_tier(method: str) -> str:
     """Map a gate method string to its estimator channel.
@@ -71,12 +81,19 @@ def _normalize_tier(method: str) -> str:
 
 def note_stream_ground_truth(
         task: dict[str, Any] | None, *,
-        model: str, prompt_tokens: int) -> None:
+        model: str, prompt_tokens: int,
+        message_count: int | None = None,
+        now: float | None = None) -> None:
     """Record one provider-measured input size on the task.
 
     Called once per successful stream settlement. Overwrites the previous
     record; the monotonic ``seq`` lets the gate detect a failed round in
     which no usage arrived (stale pairing is worse than no pairing).
+
+    ``message_count`` is the length of the request that produced this usage.
+    It positions the measurement inside a later message list so
+    :func:`provider_prompt_anchor` can bound appended growth; without it the
+    record still feeds ratio learning but cannot anchor a prompt.
     """
     if not isinstance(task, dict):
         return
@@ -86,12 +103,75 @@ def note_stream_ground_truth(
         return
     if tokens <= 0:
         return
-    task[_STREAM_KEY] = {
+    record = {
         'prompt_tokens': tokens,
         'model': str(model or ''),
         'seq': int(task.get('_streamGroundTruthSeq') or 0) + 1,
+        'measured_at': time.time() if now is None else float(now),
     }
-    task['_streamGroundTruthSeq'] = task[_STREAM_KEY]['seq']
+    if (type(message_count) is int and 0 < message_count <= _MAX_ANCHOR_MESSAGES):
+        record['message_count'] = message_count
+    task[_STREAM_KEY] = record
+    task['_streamGroundTruthSeq'] = record['seq']
+
+
+def provider_prompt_anchor(
+        task: dict[str, Any] | None, *,
+        model: str, messages: list | None,
+        now: float | None = None) -> int | None:
+    """Upper bound on the CURRENT prompt from the last provider measurement.
+
+    A provider's billed input is measured evidence; a local estimate is not.
+    The message list of one conversation only grows, so what the provider
+    actually received bounds the prompt it will receive next, plus the cost of
+    messages appended since. That makes this a snapshot bound
+    (``measured + estimate(appended suffix)``), not an unbounded historical
+    yardstick: it can never report a prompt smaller than one the provider
+    already accepted.
+
+    Returns ``None`` unless the bound is sound:
+
+    * a measurement exists for this exact model — another model's wire
+      encoding makes its size incomparable;
+    * the measurement recorded the request's message count, so the suffix
+      position is known;
+    * the current list still starts with at least that many messages — a
+      rewritten/shorter list is no longer described by the measurement;
+    * the measurement is recent (``_ANCHOR_MAX_AGE_SECONDS``).
+
+    The caller must treat the result as DOWN-ONLY: it may lower an
+    estimate-tier count, never raise one.
+    """
+    if not isinstance(task, dict) or not isinstance(messages, list) or not messages:
+        return None
+    truth = task.get(_STREAM_KEY)
+    if not isinstance(truth, dict) or truth.get('model') != str(model or ''):
+        return None
+    measured = truth.get('prompt_tokens')
+    count = truth.get('message_count')
+    if (type(measured) is not int or measured <= 0
+            or type(count) is not int or count <= 0 or count > len(messages)):
+        return None
+    measured_at = truth.get('measured_at')
+    if not isinstance(measured_at, (int, float)):
+        return None
+    age = (time.time() if now is None else float(now)) - float(measured_at)
+    if age < 0 or age > _ANCHOR_MAX_AGE_SECONDS:
+        return None
+    try:
+        from lib.token_counter.base import (
+            _IMAGE_TOKENS_DEFAULT, count_images, iter_message_texts,
+        )
+        from lib.token_counter.heuristic import cheap_estimate_text
+
+        suffix = messages[count:]
+        appended = sum(cheap_estimate_text(text)
+                       for text in iter_message_texts(suffix))
+        appended += count_images(suffix) * _IMAGE_TOKENS_DEFAULT
+        return int(measured) + int(appended)
+    except Exception as exc:  # advisory bound — never disturb the gate
+        logger.debug('[Compact] provider prompt anchor unavailable: %s', exc)
+        return None
 
 
 def calibration_ratio(
@@ -219,5 +299,6 @@ __all__ = [
     'consume_stream_sample',
     'discard_dispatch_sample',
     'note_stream_ground_truth',
+    'provider_prompt_anchor',
     'update_and_stash_sample',
 ]

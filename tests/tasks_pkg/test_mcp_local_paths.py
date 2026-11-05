@@ -181,26 +181,6 @@ def test_all_parameters_are_validated_before_output_directory_creation(workspace
     assert bridge.calls == []
 
 
-def test_symlink_change_while_waiting_for_lease_refuses_invocation(workspace, tmp_path, monkeypatch):
-    from contextlib import contextmanager
-    from lib.project_mod import workspace_lease
-    task, primary, *_ = workspace
-    outside = tmp_path / 'outside-race'
-    outside.mkdir()
-    bridge = Bridge()
-
-    @contextmanager
-    def switched(path, **kwargs):
-        (primary / 'new').symlink_to(outside, target_is_directory=True)
-        yield
-
-    monkeypatch.setattr(workspace_lease, 'workspace_write_lease', switched)
-    result = call(bridge, task, {'out_path': 'new/nested/doc.md'})
-    assert result.is_error
-    assert bridge.calls == []
-    assert not (outside / 'nested').exists()
-
-
 def test_success_receipt_retains_all_runtime_result_payloads(workspace):
     task, *_ = workspace
     bridge = Bridge()
@@ -250,3 +230,31 @@ def test_unknown_root_cannot_self_heal_from_directory_basename(workspace):
     with execution_root_scope(task['id'], task['_workspaceRootPolicy']):
         with pytest.raises(UnknownWorkspaceRootError):
             _resolve_base(str(primary / 'invented'), 'invented:doc.md', conv_id=task['id'])
+
+
+@pytest.mark.parametrize('handler_name, fn_name, fn_args', [
+    ('handle_mcp_tool', 'mcp__xuecheng__prepare_doc_edit', {'out_path': 'work/doc.md'}),
+    ('handle_progressive_mcp_tool', 'call_mcp_read_tool',
+     {'name': 'mcp__xuecheng__prepare_doc_edit', 'arguments': {'out_path': 'work/doc.md'}}),
+])
+def test_handlers_bind_the_registered_call_context(workspace, monkeypatch,
+                                                   handler_name, fn_name, fn_args):
+    """Both MCP entry points hand the executor's context for this occurrence on."""
+    import lib.mcp
+    from lib.tasks_pkg.handlers import mcp
+    from lib.tasks_pkg.tool_runtime import context_for_task, unregister_context
+    task, *_ = workspace
+    monkeypatch.setattr(lib.mcp, 'get_bridge', lambda owner: Bridge())
+    monkeypatch.setattr('lib.tasks_pkg.tool_display.compose_mcp_display',
+                        lambda *args, **kwargs: ('label', None))
+    captured = {}
+    monkeypatch.setattr(mcp, 'simple_call',
+                        lambda *args, **kwargs: captured.update(kwargs) or ('', '', False))
+    row = {'toolCallId': 'call-x'}
+    context = context_for_task(task, round_num=3, tool_call_id='call-x',
+                               tool_name=fn_name, round_entry=row)
+    try:
+        getattr(mcp, handler_name)(task, {}, fn_name, 'call-x', fn_args, 3, row, {}, None, False)
+    finally:
+        unregister_context(context)
+    assert captured['executor_kwargs']['runtime_context'] is context

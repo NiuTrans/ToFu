@@ -63,7 +63,8 @@ def test_ordinary_message_that_looks_like_abort_is_not_trigger():
 
 def test_diagnostics_do_not_copy_sensitive_command_arguments():
     command = ('TOKEN=private-secret git -c http.extraHeader="Authorization: private-secret" '
-               'stash push -m "private-secret"; git merge topic --future=private-secret')
+               'stash push -m "private-secret"; git merge topic --future=private-secret; '
+               'git apply --3way --exclude=private-secret --future=private-secret patch.diff')
     text = guard.format_refusal(command, [], 'private-secret', roots=['/repo'])
     evidence = json.dumps(guard.command_diagnostics(command))
     assert 'private-secret' not in text + evidence
@@ -97,11 +98,17 @@ def test_effect_annotation_does_not_downgrade_risk(command, reason, effects):
     ('git merge -m "--abort" topic --abort', ['--abort']),
     ('git merge --strategy=ours topic', ['--strategy']),
     ('git cherry-pick --mainline=1 --quit', ['--quit']),
+    ('git diff A B -- f > /tmp/fix.patch && git apply --index --3way /tmp/fix.patch'
+     ' && git commit -q --only -m "msg" -- f', ['--3way']),
+    ('git apply -3 --reject -3 patch.diff', ['-3', '--reject']),
+    ('git apply --exclude --3way --unsafe-paths -- --reject', ['--unsafe-paths']),
+    ('git apply --future-option --reject patch.diff', ['--reject']),
 ])
 def test_specific_risk_options_come_from_value_aware_parser(command, risky):
     evidence = guard.command_diagnostics(command)
     assert evidence['segments'][0]['riskyOptions'] == risky
-    assert risky[0] in guard.format_refusal(command, [], '', roots=['/repo'])
+    text = guard.format_refusal(command, [], '', roots=['/repo'])
+    assert 'Risk options: ' + ', '.join(risky) in text
 
 
 def test_staged_restore_has_index_effect_but_is_not_authorized():

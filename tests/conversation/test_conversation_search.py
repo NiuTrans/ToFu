@@ -556,12 +556,12 @@ class TestSearchEndpoint:
         assert response.status_code == 503
         assert response.headers['Retry-After'] == '1'
         body = response.get_json()
-        assert body['error']['kind'] == 'server_busy'
+        assert body['error']['kind'] == 'storage_unavailable'
         # The v4 wire is a strict RFC 7807 problem document (the generated
         # Problem DTO forbids extension members), so the storageCode /
         # operationId extras ride only on the v1 wire; here the typed
         # taxonomy survives as the problem code plus Retry-After.
-        assert body['problem']['code'] == 'server_busy'
+        assert body['problem']['code'] == 'storage_unavailable'
 
     def test_search_threads_request_owner_to_storage(
             self, flask_client, monkeypatch):

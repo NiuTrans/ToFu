@@ -16,7 +16,7 @@ import requests
 
 import lib as _lib
 from lib.llm.stream_result import ProviderStreamEvidence
-from lib.llm.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError, LocalRequestPreparationError
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -322,13 +322,36 @@ except (ValueError, TypeError) as e:
 
 
 # ── Rolling stream-activity idle timeout (seconds) ──
-# Match native Codex's stream contract: each received transport event renews a
-# 300-second idle window. SSE comments/keep-alives and WebSocket messages count
-# as activity even when they carry no reasoning, content, or tool delta. The
-# bound is not a total request deadline; an active stream may run indefinitely.
-# A genuinely silent stream is closed and enters the existing transport-
-# interruption diagnostics/retry path. The socket itself keeps read=None so
-# user Stop remains independently enforced by the abort poll.
+#
+# PERMANENTLY DISABLED BY DEFAULT (``0``). Do NOT re-enable a default here.
+# This is a deliberate seal, not a missing value — see the incident below and
+# docs/modules/llm_io.md ("Rolling stream-activity idle timeout") before
+# changing it.
+#
+# 2026-10-23 incident (kunlunbedrock.claude-opus-5.5-m17): first-token latency
+# grew past the old 300s default under adaptive-thinking load, and a transport
+# that buffered response headers longer than the window produced 80 zero-byte
+# PrematureStreamClose failures. The window had also been armed before the
+# POST, so it latched ``idle_timed_out`` during the header wait and the body
+# loop then discarded the first chunk of the healthy late answer. The arming
+# order is fixed (the window now arms at response headers via
+# ``StreamIdleWatchdog.arm_stream_idle``), but a default idle cutoff remains a
+# liability for slow/reasoning models and buffered gateways: it turns a slow
+# but healthy answer into a discarded one.
+#
+# A wedged request is already bounded without this window:
+#   * user Stop — the abort poll closes the read socket;
+#   * ``attempt_timeout`` — the caller's per-attempt wall deadline;
+#   * ``first_byte_timeout`` — the caller's response-header deadline;
+#   * the HTTP error-body read deadline in provider_error_body.
+#
+# When a caller does set a positive value, each received transport event renews
+# the window: SSE comments/keep-alives and WebSocket messages count as activity
+# even when they carry no reasoning, content, or tool delta. The bound is never
+# a total request deadline; an active stream may run indefinitely. A genuinely
+# silent stream is closed and enters the existing transport-interruption
+# diagnostics/retry path. The socket itself keeps read=None so user Stop
+# remains independently enforced by the abort poll.
 _STREAM_IDLE_TIMEOUT_ENV = 'TOFU_LLM_IDLE_STREAM_TIMEOUT_S'
 _DEPRECATED_STREAM_IDLE_TIMEOUT_ENVS = (
     'TOFU_LLM_SEMANTIC_IDLE_TIMEOUT_S',
@@ -352,21 +375,23 @@ def _stream_idle_timeout_from_environment() -> float:
                 )
                 break
     if configured is None:
-        configured = '300'
+        # Disabled unless a deployment opts in. Keep this '0' — see the seal
+        # note on the env var above.
+        configured = '0'
     try:
         value = float(configured)
     except (TypeError, ValueError, OverflowError) as error:
         logger.warning(
-            '[Transport] invalid %s=%r; using 300s: %s',
+            '[Transport] invalid %s=%r; stream idle timeout disabled: %s',
             configured_by, configured, error,
         )
-        return 300.0
+        return 0.0
     if not math.isfinite(value):
         logger.warning(
-            '[Transport] non-finite %s=%r; using 300s',
+            '[Transport] non-finite %s=%r; stream idle timeout disabled',
             configured_by, configured,
         )
-        return 300.0
+        return 0.0
     if value <= 0:
         return 0.0
     # Preserve the existing operator-safety floor: a typo must not turn into a
@@ -378,12 +403,39 @@ IDLE_STREAM_TIMEOUT_S = _stream_idle_timeout_from_environment()
 
 
 def stream_idle_timeout_seconds() -> float:
-    """Return the live transport-idle window (tests may retune the symbol)."""
+    """Return the live transport-idle window (tests may retune the symbol).
+
+    ``0`` (the default) means no rolling idle cutoff; a non-finite or
+    unparsable symbol falls back to disabled rather than to a hidden 300s.
+    """
     try:
         value = float(IDLE_STREAM_TIMEOUT_S)
     except (TypeError, ValueError, OverflowError):
-        return 300.0
-    return max(0.0, value) if math.isfinite(value) else 300.0
+        return 0.0
+    return max(0.0, value) if math.isfinite(value) else 0.0
+
+
+# ── Silent-stream deadline (seconds) ──
+#
+# The liveness contract is fixed in docs/modules/llm_io.md, not a tuning knob.
+# Any transport byte renews it; expiry raises a typed retryable read timeout.
+SILENT_STREAM_DEADLINE_SECONDS = 900.0
+SILENT_STREAM_DEADLINE_CAUSE = 'stream_silence'
+
+
+def silent_stream_deadline_seconds() -> float:
+    """Return the fixed transport-silence backstop for one attempt."""
+    return SILENT_STREAM_DEADLINE_SECONDS
+
+
+def silent_stream_timeout_error(*, base_url='', timeout_seconds=None):
+    from lib.llm.llm_errors import ResponseReadTimeoutError
+
+    return ResponseReadTimeoutError(
+        base_url=base_url,
+        timeout_seconds=(silent_stream_deadline_seconds()
+                         if timeout_seconds is None else timeout_seconds),
+        cause_type=SILENT_STREAM_DEADLINE_CAUSE)
 
 
 # Read compatibility for plugins and stored-attempt adapters. Production
@@ -775,6 +827,9 @@ class StreamIdleWatchdog:
         self._attempt_deadline = None
         self._on_attempt_deadline = None
         self._attempt_deadline_expired = False
+        self._silence_deadline = 0.0
+        self._on_silence_deadline = None
+        self._silence_deadline_expired = False
         self._aborted = False
         self._idle_timed_out = False
         self._actionable_timed_out = False
@@ -806,6 +861,30 @@ class StreamIdleWatchdog:
     @property
     def attempt_deadline_expired(self):
         return self._attempt_deadline_expired
+
+    @property
+    def silence_deadline_expired(self):
+        return self._silence_deadline_expired
+
+    def arm_silence_deadline(self, seconds, on_timeout):
+        """Arm the always-on transport-silence backstop at response headers.
+
+        Same rolling clock as the opt-in idle window (every transport byte
+        renews it), but it is never disabled and expiry latches a distinct
+        flag so the transport raises a typed read timeout instead of
+        finalizing a premature close. A tighter opt-in idle window still
+        fires first and keeps its premature-close semantics.
+        """
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(seconds) or seconds <= 0:
+            return
+        self._on_silence_deadline = on_timeout
+        self._silence_deadline = seconds
+        self._wake.set()
+        self.start()
 
     def arm_attempt_deadline(self, seconds, on_timeout):
         """Bound one PHYSICAL attempt independently of upstream traffic.
@@ -839,13 +918,38 @@ class StreamIdleWatchdog:
         self._wake.set()
         self.start()
 
+    def arm_stream_idle(self, timeout_s):
+        """Start the rolling transport-idle window at response headers.
+
+        The response-header wait has no body to renew the clock and no
+        response handle for an idle expiry to interrupt. Arming the window
+        there can only latch ``idle_timed_out``, which the body loop would
+        then apply to the first chunk of a healthy late answer. A caller that
+        still needs Stop/heartbeat polling during the header wait starts the
+        watcher with no idle timeout, then arms the window here.
+        """
+        try:
+            timeout = float(timeout_s or 0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(timeout) or timeout <= 0:
+            return
+        # Anchor first: the watcher thread may read ``_idle_timeout`` at any
+        # time, and publishing the new window before the fresh anchor would
+        # let it apply the whole header wait against the new bound.
+        self.progress.mark_transport_activity()
+        self._idle_timeout = timeout
+        self._wake.set()
+        self.start()
+
     def start(self):
         with self._start_lock:
             if self._thread is not None or self._done.is_set():
                 return
             if (not self._beats_on() and self._abort_check is None
                     and self._idle_timeout <= 0 and self._read_deadline is None
-                    and self._attempt_deadline is None):
+                    and self._attempt_deadline is None
+                    and self._silence_deadline <= 0):
                 return
             self._thread = threading.Thread(
                 target=self._run, name='stream-idle-watchdog', daemon=True)
@@ -923,6 +1027,16 @@ class StreamIdleWatchdog:
                     except Exception as e:
                         logger.debug('[Watchdog] on_idle_timeout raised: %s', e)
                 return
+            if self._silence_deadline > 0 and idle >= self._silence_deadline:
+                self._silence_deadline_expired = True
+                if self._on_silence_deadline is not None:
+                    try:
+                        self._on_silence_deadline()
+                    except Exception as error:
+                        logger.debug(
+                            '[Watchdog] silence-deadline interrupt failed: %s',
+                            type(error).__name__)
+                return
             # Status visibility follows semantic silence or incomplete tool
             # arguments independently of the socket-idle timeout.
             if (self._on_progress is not None and self._interval > 0
@@ -959,6 +1073,9 @@ class StreamIdleWatchdog:
                     wait = idle_remaining
                 else:
                     wait = min(wait, idle_remaining)
+            if self._silence_deadline > 0:
+                remaining = max(0.01, self._silence_deadline - idle)
+                wait = min(wait, remaining) if wait > 0 else remaining
             if self._read_deadline is not None:
                 remaining = max(.001, self._read_deadline - time.monotonic())
                 wait = min(wait, remaining) if wait > 0 else remaining
@@ -1006,7 +1123,8 @@ async def async_abortable_sleep(seconds: float, abort_check=None, interval: floa
 
 
 def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None,
-                           first_byte_deadline=None, timeout_seconds=None):
+                           first_byte_deadline=None, timeout_seconds=None,
+                           deadline_cause='response_headers'):
     """Run a blocking stream-open ``post_fn`` on a daemon thread while polling
     ``is_aborted``, so a Stop pressed during the response-header wait lands
     within one poll interval instead of whenever the upstream first speaks.
@@ -1051,7 +1169,13 @@ def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None,
 
     worker = threading.Thread(
         target=_run_post, name='llm-post-headers', daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except RuntimeError as error:
+        # ``post_fn`` runs only on the worker, so nothing was sent.
+        raise LocalRequestPreparationError(
+            f'llm-post-headers thread could not start: {error}',
+            stage='thread_start') from error
     while True:
         wait = poll_interval or ABORT_POLL_INTERVAL
         if first_byte_deadline is not None:
@@ -1062,7 +1186,7 @@ def post_headers_abortable(post_fn, *, is_aborted, poll_interval=None,
 
                 raise ResponseReadTimeoutError(
                     timeout_seconds=timeout_seconds,
-                    cause_type='response_headers')
+                    cause_type=deadline_cause)
             wait = min(wait, remaining)
         worker.join(wait)
         if not worker.is_alive():
@@ -1105,7 +1229,7 @@ def apply_model_limit_retry(body, err, log_prefix=''):
     }
 
 
-def prepare_retryable_wait(attempt, err, abort_check, log_prefix=''):
+def prepare_retryable_wait(attempt, err, abort_check, log_prefix='', *, max_retries=None):
     """Shared decision for a ``_RETRYABLE`` error in the stream retry loop.
 
     On a NON-final attempt: honor abort (raise ``AbortedError``), compute the
@@ -1122,7 +1246,8 @@ def prepare_retryable_wait(attempt, err, abort_check, log_prefix=''):
         AbortedError: abort was requested before the retry sleep.
         The original ``err``: no attempts remain.
     """
-    if attempt < MAX_STREAM_RETRIES:
+    retries = MAX_STREAM_RETRIES if max_retries is None else max_retries
+    if attempt < retries:
         if abort_check and abort_check():
             logger.debug('%s ✋ Abort detected before retry sleep, stopping.', log_prefix)
             raise AbortedError('User aborted before retry')
@@ -1138,7 +1263,7 @@ def prepare_retryable_wait(attempt, err, abort_check, log_prefix=''):
                        log_prefix, attempt + 1, type(err).__name__, err, wait)
         return wait
     logger.error('%s ✖ All %d attempts failed.', log_prefix,
-                 1 + MAX_STREAM_RETRIES, exc_info=True)
+                 1 + retries, exc_info=True)
     raise err
 
 

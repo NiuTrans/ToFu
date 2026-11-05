@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
 from pathlib import Path
+import shutil
+import sys
 import threading
 import time
 
@@ -11,6 +14,7 @@ import pytest
 
 from lib.llm.llm_errors import AbortedError
 from lib.pdf_parser.images import _render
+from lib.runtime import owned_helper_process
 
 pytestmark = pytest.mark.unit
 
@@ -60,7 +64,7 @@ def open(*, stream, filetype):
     monkeypatch.setenv('TOFU_TEST_SECRET', 'must-not-enter-child')
     processes, files = [], []
     lock = threading.Lock()
-    popen = _render.subprocess.Popen
+    popen = owned_helper_process.subprocess.Popen
     temporary = _render.tempfile.TemporaryFile
 
     def launch(*args, **kwargs):
@@ -75,7 +79,7 @@ def open(*, stream, filetype):
             files.append(file)
         return file
 
-    monkeypatch.setattr(_render.subprocess, 'Popen', launch)
+    monkeypatch.setattr(owned_helper_process.subprocess, 'Popen', launch)
     monkeypatch.setattr(_render.tempfile, 'TemporaryFile', create)
 
     def payload(index=0, **kwargs):
@@ -84,7 +88,7 @@ def open(*, stream, filetype):
     yield payload, processes, files, tmp_path
     # Never abandon a failed test's owned child or file.
     for process in processes:
-        _render._join_renderer(process)
+        owned_helper_process.join_owned_process(process)
     for file in files:
         file.close()
 
@@ -167,6 +171,31 @@ def test_incomplete_worker_output_is_an_error(renderer, monkeypatch):
     with pytest.raises(RuntimeError, match='incomplete page evidence'):
         _render.render_pdf_pages_isolated(payload(), spool=True)
     assert processes[0].poll() == 0 and all(file.closed for file in files)
+
+
+def test_loaded_parent_never_executes_a_worker_changed_on_disk(renderer, tmp_path, monkeypatch):
+    payload, processes, files, root = renderer
+    loaded = tmp_path / 'loaded'
+    loaded.mkdir()
+    for name in ('_render.py', '_render_worker.py'):
+        shutil.copyfile(Path(_render.__file__).with_name(name), loaded / name)
+    # A server imports the parent once, then the checkout changes beneath it.
+    module_name = 'lib.pdf_parser.images._render_loaded_before_checkout_update'
+    spec = importlib.util.spec_from_file_location(module_name, loaded / '_render.py')
+    parent = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, parent)
+    spec.loader.exec_module(parent)
+    executed = root / 'updated-worker-executed'
+    (loaded / '_render_worker.py').write_text(
+        f'import pathlib\npathlib.Path({str(executed)!r}).write_text("x")\n'
+        'raise SystemExit("unsupported frame protocol")\n')
+    pages = parent.render_pdf_pages_isolated(payload(), spool=True)
+    try:
+        assert list(pages) == [i.to_bytes(4, 'big') + b'x' * 4092 for i in range(8)]
+    finally:
+        pages.close()
+    assert not executed.exists()
+    assert all(process.poll() == 0 for process in processes)
 
 
 def test_native_pdf_render_round_trip_when_host_library_is_compatible():

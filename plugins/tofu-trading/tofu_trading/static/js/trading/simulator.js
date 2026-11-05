@@ -538,7 +538,7 @@
       if (resultsEl) resultsEl.innerHTML = '';
       return;
     }
-    window.Api.trading.raw('/sim/search?q=' + encodeURIComponent(keyword))
+    F.apiRaw('/sim/search?q=' + encodeURIComponent(keyword))
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var resultsEl = $('simSearchResults');
@@ -763,7 +763,7 @@
       symbol_names: _getSymbolNames(),
     });
 
-    window.Api.trading.raw('/sim/fetch-data', {
+    F.apiRaw('/sim/fetch-data', {
       method: 'POST',
       body: body,
     }).then(function (resp) { return resp.json(); })
@@ -802,7 +802,7 @@
     var _cursor = cursor;
 
     _activeFetchPoll = setInterval(function () {
-      window.Api.trading.raw(pollPath + '?cursor=' + _cursor)
+      F.apiRaw(pollPath + '?cursor=' + _cursor)
         .then(function (r) { return r.json(); })
         .then(function (resp) {
           if (resp.error === 'Task not found') {
@@ -1083,7 +1083,7 @@
       min_confidence: parseFloat(($('simMinConf') || {}).value || 50),
     });
 
-    window.Api.trading.raw('/sim/run', { method: 'POST', body: body })
+    F.apiRaw('/sim/run', { method: 'POST', body: body })
     .then(function (resp) { return resp.json(); })
     .then(function (data) {
       if (data.error) {
@@ -1118,7 +1118,7 @@
     var _cursor = cursor;
 
     _activeSimPoll = setInterval(function () {
-      window.Api.trading.raw(pollPath + '?cursor=' + _cursor)
+      F.apiRaw(pollPath + '?cursor=' + _cursor)
         .then(function (r) { return r.json(); })
         .then(function (resp) {
           if (resp.error === 'Task not found') {
@@ -1625,6 +1625,10 @@
     _saveState('results');
     _showPhase('results');
     _simResultData = data;
+    if (data.status && data.status !== 'completed') {
+      _showUnfinishedSession(data);
+      return;
+    }
     var metrics = data.metrics || {};
     var totalReturn = metrics.total_return_pct || 0;
     var maxDD = metrics.max_drawdown_pct || 0;
@@ -1715,6 +1719,28 @@
 
     _resetRunBtn();
     toast('✅ 模拟完成!', 'success');
+  }
+
+  function _showUnfinishedSession(data) {
+    var hero = $('simResHero');
+    if (hero) {
+      hero.textContent = '—';
+      hero.className = 'sim-res-hero-value';
+    }
+    var label = $('simResHeroLabel');
+    if (label) label.textContent = data.status === 'failed'
+      ? '模拟失败，以下为已保存的阶段记录'
+      : '模拟进行中，以下为已保存的阶段记录';
+    ['simResReturn', 'simResDrawdown', 'simResSharpe', 'simResWinRate', 'simResFees'].forEach(function (id) {
+      _setKPI(id, '—', '');
+    });
+    _setKPI('simResTrades', String(data.trade_count || 0), '');
+    ['simResSharpeHint', 'simResBenchmark', 'simResCTA'].forEach(function (id) {
+      var el = $(id);
+      if (el) el.textContent = '';
+    });
+    if (data.session_id) _loadResultJournal(data.session_id);
+    _resetRunBtn();
   }
 
   function _setKPI(id, value, cls) {
@@ -1818,18 +1844,21 @@
     el.innerHTML = _sessions.map(function (s) {
       var m = s.metrics || {};
       var ret = m.total_return_pct || 0;
+      var completed = s.status === 'completed';
+      var statusLabel = s.status === 'failed' ? '⚠️ 失败' : completed ? '✅ 已完成' : '⏳ 进行中';
       var stratId = s.strategy || s.risk_level || 'auto';
       var strat = _STRAT_NAMES[stratId] || _DEFAULT_STRAT;
       return '<div class="sim-session-card" onclick="TradingApp.viewSimSession(\'' + escHtml(s.session_id) + '\')">' +
         '<div class="sim-session-top">' +
           '<span class="sim-session-period">' + escHtml(s.start_date || '') + ' → ' + escHtml(s.end_date || '') + '</span>' +
-          '<span class="sim-session-ret ' + pnlClass(ret) + '">' + (ret >= 0 ? '+' : '') + fmtNum(ret, 2) + '%</span>' +
+          '<span class="sim-session-ret ' + (completed ? pnlClass(ret) : '') + '">' +
+            (completed ? (ret >= 0 ? '+' : '') + fmtNum(ret, 2) + '%' : '—') + '</span>' +
         '</div>' +
         '<div class="sim-session-kpis">' +
           '<span>' + strat.icon + ' ' + escHtml(strat.name) + '</span>' +
-          '<span>回撤 ' + fmtNum(m.max_drawdown_pct || 0, 1) + '%</span>' +
-          '<span>胜率 ' + fmtNum(m.win_rate || 0, 0) + '%</span>' +
-          '<span>' + (s.status === 'completed' ? '✅ 已完成' : '⏳ 进行中') + '</span>' +
+          '<span>回撤 ' + (completed ? fmtNum(m.max_drawdown_pct || 0, 1) + '%' : '—') + '</span>' +
+          '<span>胜率 ' + (completed ? fmtNum(m.win_rate || 0, 0) + '%' : '—') + '</span>' +
+          '<span>' + statusLabel + '</span>' +
         '</div>' +
       '</div>';
     }).join('');
@@ -1839,6 +1868,7 @@
     api('/sim/session/' + sessionId).then(function (data) {
       _showResults({
         session_id: sessionId,
+        status: (data.session || {}).status,
         metrics: data.metrics || {},
         benchmark: data.benchmark || {},
         trade_count: data.trade_count || data.total_trades || 0,

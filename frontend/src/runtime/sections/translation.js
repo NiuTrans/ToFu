@@ -305,14 +305,42 @@ async function _runTranslationPipeline(conv, turnId, options) {
   }
 }
 
-/* Page/tab activation only resumes tasks initiated in this browser lifetime.
- * Durable results converge independently through Conversation Sync v3. */
+/* Running-turn previews are pushed once per block and stay task-local until
+ * the Turn settles, so a reload, a reconnect or frames that arrived while the
+ * page showed something else would leave already translated blocks in the
+ * source language until the turn ends. Re-read the completed previews of
+ * running turns; later push frames keep extending the same index. */
+async function _rehydrateRunningTurnPreviews(convId) {
+  if (!runtimeScope.ConversationTurnRead?.activeAttemptIds?.(convId)?.length) return;
+  try {
+    const previews = await Api.translate.previews(convId);
+    for (const preview of Array.isArray(previews) ? previews : []) {
+      if (preview?.turnId) {
+        _setTranslationActivity(
+          convId, preview.turnId, _translationPendingActivity(preview),
+        );
+      }
+    }
+  } catch (error) {
+    console.debug(
+      '[Translate] preview rehydration failed:', error?.message || error,
+    );
+  }
+}
+
+/* Page/tab activation resumes tasks initiated in this browser lifetime and
+ * re-reads live previews of running turns. Durable results converge
+ * independently through Conversation Sync v3. */
 async function _resumePendingTranslations(convId) {
   const conv = conversations.find((item) => item?.id === convId);
   if (!conv) return;
+  const previews = _rehydrateRunningTurnPreviews(convId);
   const pending = [..._translationTasksByTurn.entries()]
     .filter(([key]) => key.startsWith(String(convId) + ':'));
-  if (!pending.length) return;
+  if (!pending.length) {
+    await previews;
+    return;
+  }
   const results = await _pollTranslateTaskBatch(
     pending.map(([, task]) => task.taskId),
   );
@@ -335,6 +363,7 @@ async function _resumePendingTranslations(convId) {
       );
     }
   }
+  await previews;
 }
 
 (function wireServerTranslationProjection() {
@@ -396,4 +425,12 @@ async function _resumePendingTranslations(convId) {
       );
     }
   });
+  if (typeof pushOnReconnect === 'function') {
+    // Frames published while the socket was down are not replayed.
+    pushOnReconnect(() => {
+      if (typeof activeConvId !== 'undefined' && activeConvId) {
+        void _rehydrateRunningTurnPreviews(activeConvId);
+      }
+    });
+  }
 })();

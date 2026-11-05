@@ -86,7 +86,15 @@
       "enhanceReportArticle",
       "buildReportTableOfContents",
       "mountReportArticle",
-      "releaseReportArticle"
+      "releaseReportArticle",
+      "syncReportFinishTag"
+     ]
+    },
+    {
+     "source": "frontend/src/features/paper/report-events.ts",
+     "bindings": [
+      "createReportEventProjection",
+      "reportSegmentsForRender"
      ]
     }
    ],
@@ -102,14 +110,6 @@
     },
     {
      "name": "debugLog",
-     "kind": "function"
-    },
-    {
-     "name": "pushSubscribe",
-     "kind": "function"
-    },
-    {
-     "name": "pushUnsubscribe",
      "kind": "function"
     },
     {
@@ -205,13 +205,13 @@
     {
      "source": "frontend/src/features/paper/podcast-runtime.ts",
      "bindings": [
-      "startPodcastTick"
+      "podcastTaskObserver"
      ]
     },
     {
      "source": "frontend/src/features/paper/video-runtime.ts",
      "bindings": [
-      "startVideoTick"
+      "videoTaskObserver"
      ]
     }
    ],
@@ -449,7 +449,10 @@
      "path": "knowledge.js"
     }
    ],
-   "runtimeExports": [],
+   "runtimeExports": [
+    "closeKnowledgeBase",
+    "openKnowledgeBase"
+   ],
    "runtimeBindings": []
   },
   {
@@ -475,9 +478,9 @@
      ]
     },
     {
-     "source": "frontend/src/features/project/directory-browser.ts",
+     "source": "frontend/src/features/project/folder-browser.ts",
      "bindings": [
-      "createProjectDirectoryBrowser"
+      "createFolderBrowser"
      ]
     },
     {
@@ -546,15 +549,7 @@
      "kind": "function"
     },
     {
-     "name": "showAlert",
-     "kind": "function"
-    },
-    {
      "name": "showConfirm",
-     "kind": "function"
-    },
-    {
-     "name": "showPrompt",
      "kind": "function"
     },
     {
@@ -569,9 +564,7 @@
     }
    ],
    "runtimeExports": [
-    "ProjectModalPresentation",
-    "mpAddBrowsedPath",
-    "mpDeleteFolder"
+    "ProjectModalPresentation"
    ],
    "runtimeBindings": []
   },
@@ -606,10 +599,6 @@
     {
      "name": "LocalControlShellState",
      "kind": "object"
-    },
-    {
-     "name": "_applyBrowserUI",
-     "kind": "function"
     },
     {
      "name": "_applyDesktopUI",
@@ -652,16 +641,42 @@
    "output": "frontend/src/runtime/diagnostics-presenters.generated.js",
    "moduleImports": [
     {
-     "source": "frontend/src/features/diagnostics-wire-controller.ts",
+     "source": "frontend/src/features/inspector-feed.ts",
+     "bindings": ["createInspectorFeed"]
+    },
+    {
+     "source": "frontend/src/features/inspector-pane-view.ts",
+     "bindings": ["renderInspectorLoading", "renderInspectorFailure", "renderInspectorBack"]
+    },
+    {
+     "source": "frontend/src/features/diagnostics-message-reconciliation.ts",
      "bindings": [
-      "createDiagnosticsWireController"
+      "createDiagnosticsMessageReconciler"
      ]
     },
     {
-     "source": "frontend/src/features/inspector-evidence.ts",
-     "bindings": [
-      "resolveInspectorView"
-     ]
+     "source": "frontend/src/features/inspector-session.ts",
+     "bindings": ["createInspectorSession"]
+    },
+    {
+     "source": "frontend/src/features/inspector-payloads.ts",
+     "bindings": ["createInspectorPayloads"]
+    },
+    {
+     "source": "frontend/src/features/inspector-inline.ts",
+     "bindings": ["createInspectorInline"]
+    },
+    {
+     "source": "frontend/src/features/inspector-navigation.ts",
+     "bindings": ["createInspectorNavigation"]
+    },
+    {
+     "source": "frontend/src/features/inspector-trace-view.ts",
+     "bindings": ["renderInspectorTrace"]
+    },
+    {
+     "source": "frontend/src/features/inspector-details.ts",
+     "bindings": ["createInspectorDetails"]
     },
     {
      "source": "frontend/src/i18n/index.ts",
@@ -679,9 +694,7 @@
      "source": "frontend/src/features/diagnostics-message-disclosure.ts",
      "bindings": [
       "createInspectorDisclosure",
-      "syncInspectorDisclosure",
-      "captureInspectorFocus",
-      "restoreInspectorFocus"
+      "syncInspectorDisclosure"
      ]
     }
    ],
@@ -908,7 +921,6 @@
      "source": "frontend/src/i18n/index.ts",
      "bindings": [
       "_i18nLang",
-      "_syncLangPicker",
       "t"
      ]
     },
@@ -921,9 +933,68 @@
      ]
     },
     {
+     "source": "frontend/src/features/settings/mcp-commands.ts",
+     "bindings": ["createMcpCommands"]
+    },
+    {
+     "source": "frontend/src/features/settings/mcp-tool-selection.ts",
+     "bindings": ["createMcpToolSelection"]
+    },
+    {
+     "source": "frontend/src/features/settings/mcp-settings-reads.ts",
+     "bindings": ["captureMcpSettingsReads", "refreshMcpSettingsAfterWrite"]
+    },
+    {
+     "source": "frontend/src/features/settings/oauth-panel-lifetime.ts",
+     "bindings": ["captureOAuthPanel"]
+    },
+    {
      "source": "frontend/src/features/settings/codex-shared-login.ts",
      "bindings": [
       "renderCodexSharedLogin"
+     ]
+    },
+    {
+     "source": "frontend/src/features/settings/catpaw-settings.ts",
+     "bindings": ["catpawSettings"]
+    },
+    {
+     "source": "frontend/src/features/settings/model-routing-authority.ts",
+     "bindings": ["runModelRoutingMutation"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-mutations.ts",
+     "bindings": ["createProviderMutations"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-key-editor.ts",
+     "bindings": ["createProviderKeyEditor"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-key-reveal.ts",
+     "bindings": ["createProviderKeyReveal", "maskProviderCredentialSecret"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-key-stats.ts",
+     "bindings": ["createProviderKeyStats"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-model-picker.ts",
+     "bindings": ["createProviderModelPicker"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-model-staging.ts",
+     "bindings": ["addProviderModels"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-connection-staging.ts",
+     "bindings": ["resolveProviderFaceConnection", "authorizeProviderConnection"]
+    },
+    {
+     "source": "frontend/src/features/settings/provider-settings-projection.ts",
+     "bindings": [
+      "createProviderSettingsProjection",
+      "providerSupplyRows"
      ]
     }
    ],
@@ -1229,6 +1300,8 @@
     "_populateSearchTab",
     "_renderMcpCatalog",
     "_renderProvidersTab",
+    "_destroyProviderCredentialViews",
+    "_adoptProviderCredentialDraft",
     "_stageModelRoutingProviderBundle"
    ],
    "runtimeBindings": [

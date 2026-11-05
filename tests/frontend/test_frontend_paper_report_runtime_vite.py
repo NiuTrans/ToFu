@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
 from tests._paper_vite import compiled_typescript
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -43,7 +43,7 @@ global._REPORT_POLL_MS = 999999;
 global._REPORT_POLL_BACKOFF_MS = 999999;
 global._REPORT_ABORT_GRACE_MS = 1;
 global.t = (key) => key;
-const calls = { paints:0, detach:0, saves:0, snapshots:0, aborts:[] };
+const calls = { paints:0, saves:0, snapshots:0, aborts:[] };
 const views = {
   report:{ kind:'report', stopBtnId:'reportStop', regenIntentKey:'regen-report',
     cache:'', meta:null, stream:null, langKey:()=> 'en' },
@@ -54,7 +54,6 @@ const views = {
 };
 global._reportView = (kind) => views[kind || 'report'];
 global._paintReportFromState = () => { calls.paints++; };
-global._detachReportPush = () => { calls.detach++; };
 global._rememberReportSnapshot = () => { calls.snapshots++; };
 global._persistGeneratedReviewVenue = () => {};
 global._saveActivePaperState = () => { calls.saves++; };
@@ -64,10 +63,6 @@ global._resetReportSnapshots = () => {};
 global._applyReportEventRaw = (state, event) => {
   if (event.type === 'delta') { state.fullText += event.delta; state.contentStarted = true; }
   return true;
-};
-global.taskReplayIngestPage = (state, page, apply, cursor) => {
-  for (const event of page.events || []) apply(state, event);
-  return { nextCursor:page.next_cursor ?? cursor };
 };
 let responseData = { ok:true, status:'running', events:[], next_cursor:0 };
 let deferredResolve = null;
@@ -177,7 +172,6 @@ global._reportView = (kind) => views[kind || 'report'];
 
 const calls = {
   starts:[], aborts:[], renders:[], saves:[], titles:[], toasts:[],
-  attaches:0, detaches:0,
 };
 global.Api = { paper:{
   reportStart:(body) => new Promise((resolve, reject) => {
@@ -188,10 +182,13 @@ global.Api = { paper:{
   reportPoll:() => new Promise(() => {}),
   reportAbort:async (taskId) => { calls.aborts.push(taskId); return { ok:true }; },
 }};
+const subscriptions = new Map();
+global.pushSubscribe = (channel, taskId, handler) => subscriptions.set(taskId, handler);
+global.pushUnsubscribe = (channel, taskId, handler) => {
+  if (subscriptions.get(taskId) === handler) subscriptions.delete(taskId);
+};
 global._renderReportSkeleton = (container) => { container.textContent = 'SKELETON'; };
 global._syncReportToolbar = () => {};
-global._attachReportPush = () => { calls.attaches++; };
-global._detachReportPush = () => { calls.detaches++; };
 global._paintReportFromState = () => {};
 global._populatePaperReportModelDropdown = () => {};
 global._getActivePaperEntry = () => ({ title:'Paper A.pdf' });
@@ -233,6 +230,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
     ok:true, cached:true, report:'STALE-CACHED', meta:{ model:'old' },
   });
   await staleCachedPromise;
+  const freshPushAttached = subscriptions.has('task-fresh');
   const staleCachedFenced = report.stream?.taskId === 'task-fresh'
     && report.cache !== 'STALE-CACHED'
     && document.getElementById('reportContent').textContent !== 'STALE-CACHED';
@@ -241,6 +239,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
   // new stream and repaints a terminal error over it.
   ReportRuntime.resetReportLocalState(report);
   report.cache = '';
+  const resetReleasesPush = subscriptions.size === 0;
   const staleErrorPromise = ReportRuntime.generatePaperReport(true, report);
   await Promise.resolve();
   const staleErrorCall = calls.starts.at(-1);
@@ -284,7 +283,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
     && report.stream?.stopRequested === true;
 
   // A cache hit from /start follows the same canonical apply path as reopen:
-  // no zombie provisional stream, and only lightweight metadata persistence.
+  // no zombie provisional stream or stale library metadata write-back.
   ReportRuntime.resetReportLocalState(report);
   report.cache = '';
   const cachedPromise = ReportRuntime.generatePaperReport(true, report);
@@ -300,7 +299,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
     && report.cache === 'CANONICAL-CACHE'
     && calls.renders.at(-1) === 'CANONICAL-CACHE'
     && calls.titles.at(-1) === 'Resolved Paper'
-    && calls.saves.slice(saveStart).join(',') === 'metadata';
+    && calls.saves.length === saveStart;
 
   // A hash-only source miss may retry exactly once with text because the
   // explicit 400 proves the server dispatched no paid task. Ambiguous errors
@@ -389,7 +388,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
     staleCachedFenced, staleErrorFenced, staleFallbackSuppressed, hashOnlyStart,
     hashOnlyWireBounded, provisionalStop, stopWasPending, pendingStopHonored, cachedApplied,
     sourceFallbackBounded, invalidHashUsesTextImmediately, draftsBounded, blankRebuttalGuarded,
-    missingReviewGuarded, rebuttalPayloadBounded,
+    missingReviewGuarded, rebuttalPayloadBounded, freshPushAttached, resetReleasesPush,
   }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
@@ -405,12 +404,8 @@ def _run_start_harness(runtime_contents: str | None = None) -> dict[str, bool]:
     return json.loads(process.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/esbuild dev dependencies required',
-)
 def test_compiled_report_runtime_owns_poll_stop_and_destroy(tmp_path):
+    require_node_modules('jsdom', 'vite')
     built = tmp_path / 'report-runtime.js'
     compiled = subprocess.run(
         [ESBUILD, SOURCE, '--bundle', '--format=iife', '--platform=browser',
@@ -432,21 +427,11 @@ def test_compiled_report_runtime_owns_poll_stop_and_destroy(tmp_path):
     assert result['destroyed'] and not result['leakedGlobal']
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/Vite dev dependencies required',
-)
 def test_generation_owner_fences_stale_starts_and_bounds_rebuttal_state():
     result = _run_start_harness()
     assert all(result.values()), result
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/Vite dev dependencies required',
-)
 def test_generation_fence_negative_control_exposes_same_paper_races():
     source = Path(SOURCE).read_text(encoding='utf-8')
     marker = """  return reportStartGenerations.get(reportStartKey(view)) === generation
@@ -473,7 +458,7 @@ def test_retained_report_file_contains_renderers_not_task_owner():
     assert 'function _generatePaperReport' not in renderer
     assert 'function _renderFinalReport' in renderer
     for required_port in (
-        '_attachReportPush', '_renderReportSkeleton', '_resolveReviewVenue',
+        '_renderReportSkeleton', '_resolveReviewVenue',
         '_syncReportToolbar',
     ):
         assert f'runtimeScope.{required_port} = {required_port};' in renderer
@@ -489,3 +474,181 @@ def test_rebuttal_textarea_matches_runtime_and_backend_limit():
     start = index.index('<textarea id="paperRebuttalInput"')
     opening_tag = index[start:index.index('>', start)]
     assert 'maxlength="40000"' in opening_tag
+
+
+_PUSH_OWNERSHIP_HARNESS = r"""
+const fs = require('fs');
+global.window = global;
+global.document = { addEventListener() {} };
+global.runtimeScope = global;
+global._activePaperId = 'different-paper';
+const subscriptions = new Set();
+global.pushSubscribe = (channel, taskId, handler) => subscriptions.add(handler);
+global.pushUnsubscribe = (channel, taskId, handler) => {
+  if (handler) subscriptions.delete(handler);
+  else subscriptions.clear();
+};
+const publish = (event) => [...subscriptions].forEach(handler => handler(event));
+let siblingFrames = 0, terminalFetches = 0;
+const sibling = () => siblingFrames++;
+const makeStream = () => ({ taskId:'shared-task', paperId:'paper-a',
+  kind:'report', status:'running', fullText:'', contentStarted:false,
+  segments:[], _segInferRound:0 });
+(0, eval)(fs.readFileSync(process.argv[1], 'utf8'));
+(0, eval)(fs.readFileSync(process.argv[2], 'utf8'));
+const ReportRuntime = global.TofuTestBundle;
+global.Api = { paper:{ reportPoll:() => {
+  terminalFetches++;
+  return new Promise(() => {});
+}}};
+const stream = makeStream(), view = { stream };
+pushSubscribe('paper', stream.taskId, sibling);
+ReportRuntime.attachReportPush(view, stream);
+ReportRuntime.attachReportPush(view, stream);
+const attachedOnce = subscriptions.size === 2;
+ReportRuntime.resetReportLocalState(view);
+view.stream = stream;
+publish({ type:'delta', seq:1, delta:'sibling-only' });
+const siblingSurvives = siblingFrames === 1 && stream.fullText === '';
+ReportRuntime.attachReportPush(view, stream);
+publish({ type:'delta', seq:2, delta:'live' });
+publish({ type:'delta', seq:2, delta:'live' });
+const deduplicated = stream.fullText === 'live';
+publish({ type:'aborted', seq:3, partial:'partial draft' });
+const terminalSettled = stream.status === 'aborted' &&
+  stream.fullText === 'partial draft' && terminalFetches === 1;
+const terminalPreservesSibling = subscriptions.size === 1 &&
+  subscriptions.has(sibling);
+const replacement = makeStream();
+view.stream = replacement;
+ReportRuntime.attachReportPush(view, replacement);
+view.stream = null;
+publish({ type:'delta', seq:4, delta:'stale' });
+const staleFenced = replacement.fullText === '';
+ReportRuntime.resetReportLocalState({ stream:replacement });
+console.log(JSON.stringify({ attachedOnce, siblingSurvives, deduplicated,
+  terminalSettled, terminalPreservesSibling, staleFenced }));
+"""
+
+
+def test_report_push_releases_only_its_own_subscription():
+    with compiled_typescript(SOURCE) as runtime_js:
+        result = subprocess.run(
+            ['node', '-e', _PUSH_OWNERSHIP_HARNESS,
+             str(RETAINED_RENDERER), runtime_js],
+            capture_output=True, text=True, timeout=60,
+        )
+    assert result.returncode == 0, result.stderr
+    outcomes = json.loads(result.stdout.strip().splitlines()[-1])
+    assert all(outcomes.values()), outcomes
+
+
+_POSTPASS_HARNESS = r"""
+const fs = require('fs'), assert = require('assert/strict');
+const { JSDOM } = require(process.argv[1] + '/node_modules/jsdom');
+const dom = new JSDOM('<!DOCTYPE html><body></body>', {url:'http://localhost/'});
+global.window = global;
+global.document = dom.window.document;
+global.localStorage = dom.window.localStorage;
+global.runtimeScope = global;
+global._activePaperId = 'paper-a';
+const timers = new Map();
+let nextTimer = 0;
+global.setTimeout = fn => { timers.set(++nextTimer, fn); return nextTimer; };
+global.clearTimeout = id => timers.delete(id);
+const handlers = new Set();
+global.pushSubscribe = (_channel, _id, fn) => handlers.add(fn);
+global.pushUnsubscribe = (_channel, _id, fn) => handlers.delete(fn);
+const push = event => [...handlers].forEach(fn => fn(event));
+global._paintReportFromState = () => {};
+global._rememberReportSnapshot = () => {};
+global._persistGeneratedReviewVenue = () => {};
+global._saveActivePaperState = () => {};
+(0, eval)(fs.readFileSync(process.argv[2], 'utf8'));
+const R = global.TofuTestBundle;
+const stream = R.makeReportStreamState('paper-a', 'en', 'task-a');
+const view = {stream, cache:'', meta:null, langKey:() => 'en'};
+global._reportView = () => view;
+global._applyReportEventRaw = R.createReportEventProjection({
+  isActivePaper:id => id === global._activePaperId, viewFor:() => view,
+  rememberSnapshot() {}, persistReviewVenue() {}, setPaperHash() {}, applyResolvedTitle() {},
+});
+let data = {ok:true, status:'done', workerActive:true, report:'body', next_cursor:1,
+  events:[{type:'done', seq:0, report:'body', workerActive:true}]};
+let fetch = async () => ({ok:true, json:async () => data});
+global.Api = {paper:{reportPoll:() => fetch()}};
+
+(async () => {
+  R.attachReportPush(view, stream);
+  await R.pollReportTask(view);
+  assert.equal(stream.status, 'done');
+  assert.equal(view.cache, 'body');
+  assert.equal(handlers.size, 1, 'retain push after primary completion');
+  assert.equal(timers.size, 1, 'continue polling the entered worker');
+  push({type:'insight', seq:1, insight:'insight'});
+  push({type:'termfill', seq:2, addendum:'glossary'});
+  push({type:'report_meta', seq:3, meta:{totalCostUsd:2}});
+  data = {...data, next_cursor:4, events:[], meta:{totalCostUsd:2}};
+  await R.pollReportTask(view);
+  assert.equal(stream.fullText, 'body\n\ninsight\n\nglossary\n');
+  assert.equal(view.cache, stream.fullText);
+  assert.equal(view.meta.totalCostUsd, 2);
+  fetch = async () => { throw new Error('controlled network loss'); };
+  await R.pollReportTask(view);
+  assert.equal(timers.size, 1, 'retry transient failure during postpasses');
+  fetch = async () => ({ok:true, json:async () => data});
+  data = {...data, workerActive:false, next_cursor:5, meta:{totalCostUsd:3},
+    events:[{type:'report_meta', seq:4, meta:{totalCostUsd:3}}]};
+  await R.pollReportTask(view);
+  assert.equal(view.meta.totalCostUsd, 3);
+  assert.equal(view.cache, 'body\n\ninsight\n\nglossary\n');
+  assert.equal(handlers.size, 0);
+  assert.equal(timers.size, 0, 'release the last pending timer');
+
+  // A running poll already in flight must not undo a newer done push.
+  const replacement = R.makeReportStreamState('paper-a', 'en', 'task-b');
+  view.stream = replacement;
+  R.attachReportPush(view, replacement);
+  let resolve;
+  fetch = () => new Promise(done => { resolve = done; });
+  const pending = R.pollReportTask(view);
+  push({type:'done', seq:0, report:'replacement', workerActive:true});
+  resolve({ok:true, json:async () => ({ok:true, status:'running',
+    workerActive:false, events:[], next_cursor:0})});
+  await pending;
+  assert.equal(replacement.workerActive, true);
+  assert.equal(handlers.size, 1);
+  assert.equal(timers.size, 1);
+  R.resetReportLocalState(view);
+  assert.equal(handlers.size, 0);
+  assert.equal(timers.size, 0);
+
+  const missing = R.makeReportStreamState('paper-a', 'en', 'removed-task');
+  missing.status = 'done'; missing.workerActive = true;
+  view.stream = missing;
+  R.attachReportPush(view, missing);
+  fetch = async () => ({ok:false, status:404});
+  await R.pollReportTask(view);
+  assert.equal(missing.workerActive, false);
+  assert.equal(handlers.size, 0, 'a removed producer cannot retain a subscription');
+  assert.equal(timers.size, 0);
+  console.log(JSON.stringify({postpasses:true, stalePoll:true, teardown:true}));
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+
+
+def test_report_observes_postpasses_until_worker_exit():
+    with compiled_typescript(
+        SOURCE,
+        contents=("export * from './report-runtime';\n"
+                  "export { createReportEventProjection } from './report-events';\n"
+                  "import { connectFeatureRuntime } from '../../feature-registry';\n"
+                  "connectFeatureRuntime(name => (window as any)[name], "
+                  "(name, value) => { (window as any)[name] = value; });\n"),
+    ) as runtime_js:
+        result = subprocess.run(
+            ['node', '-e', _POSTPASS_HARNESS, ROOT, runtime_js],
+            capture_output=True, text=True, timeout=60,
+        )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert all(json.loads(result.stdout.strip().splitlines()[-1]).values())

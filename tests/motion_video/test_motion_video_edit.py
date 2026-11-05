@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import time
 
@@ -34,6 +35,7 @@ def _touch(path, payload=b'mp4'):
 
 
 def _fake_media(monkeypatch):
+    media_probes = {}
     def fake_render(project_dir, output, **kw):
         _touch(output)
         return {'ok': True, 'output': output, 'elapsed': 0.1,
@@ -41,6 +43,8 @@ def _fake_media(monkeypatch):
     monkeypatch.setattr('lib.motion_video.render_project', fake_render)
 
     def fake_probe(path, **kw):
+        if os.fspath(path) in media_probes:
+            return dict(media_probes[os.fspath(path)])
         idx = os.path.join(os.path.dirname(path), 'index.html')
         dur = 3.0
         if os.path.isfile(idx):
@@ -48,6 +52,18 @@ def _fake_media(monkeypatch):
                           open(idx, encoding='utf-8').read())
             if m:
                 dur = float(m.group(1))
+        else:
+            # Seeded job-level media represents the whole two-scene film;
+            # a rendered scene still uses its own HTML duration above.
+            for parent in Path(path).parents:
+                storyboard = parent / 'scenes.json'
+                if not storyboard.is_file():
+                    continue
+                with storyboard.open(encoding='utf-8') as stream:
+                    scenes = json.load(stream)
+                dur = sum(float(scene.get('content_duration_s')
+                                or scene['end'] - scene['start']) for scene in scenes)
+                break
         return {'codec': 'h264', 'width': 1080, 'height': 1440, 'fps': 30.0,
                 'duration': dur, 'has_audio': False}
     monkeypatch.setattr('lib.motion_video.probe_video', fake_probe)
@@ -56,10 +72,12 @@ def _fake_media(monkeypatch):
         lambda inputs, output, **kw: _touch(output) or {
             'ok': True, 'output': output, 'duration': 6.0, 'mode': 'copy',
             'elapsed': 0.1})
-    monkeypatch.setattr(
-        'lib.motion_video.mux_audio_video',
-        lambda v, a, output, **kw: _touch(output) or {
-            'ok': True, 'output': output, 'duration': 6.0, 'elapsed': 0.1})
+    def fake_mux(video, audio, output, **kwargs):
+        _touch(output)
+        media_probes[os.fspath(output)] = {**fake_probe(video), 'has_audio': True}
+        return {'ok': True, 'output': output, 'duration': 6.0, 'elapsed': 0.1}
+
+    monkeypatch.setattr('lib.motion_video.mux_audio_video', fake_mux)
 
 
 # Grades (lib/motion_video/_quality.scene_grade): inline SVG makes a
@@ -837,7 +855,7 @@ def _seed_asset_job(tmp_path, html=None):
 def _asset_task(tmp_path, job, **over):
     task = _edit_task(tmp_path, job)
     task['query'] = '蓝色城市的夜景'
-    task['kind'] = 'stock'
+    task['asset_kind'] = 'stock'
     task.update(over)
     return task
 
@@ -886,7 +904,7 @@ def test_asset_swap_generate_rewrites_reference(monkeypatch, tmp_path):
     monkeypatch.setattr('lib.motion_video.check_composition_html',
                         lambda html: [])
     job, _scenes = _seed_asset_job(tmp_path)
-    task = _asset_task(tmp_path, job, kind='generate')
+    task = _asset_task(tmp_path, job, asset_kind='generate')
     run_scene_asset_swap_task(task)
 
     assert task['status'] == 'done', task.get('error')
@@ -941,5 +959,6 @@ def test_spawn_asset_swap_kind(monkeypatch, tmp_path):
     from lib.motion_video.engine import run_scene_asset_swap_task
     assert spawned['fn'] is run_scene_asset_swap_task
     assert spawned['task']['query'] == '夜景'
-    assert spawned['task']['kind'] == 'generate'
+    assert spawned['task']['asset_kind'] == 'generate'
+    assert spawned['task']['kind'] == 'motion-video'
     assert spawned['task']['target'] == 'assets/old.jpg'

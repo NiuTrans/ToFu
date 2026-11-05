@@ -31,7 +31,7 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════════
 
 # Calls to these tools are what we count as real work; everything else
-# (list_dir, read_files, grep_search, find_files, web_search, fetch_url, …)
+# (list_dir, read_files, search_files, find_files, web_search, fetch_url, …)
 # is exploration.
 #
 # ``code_exec`` is deliberately NOT a member here: the Flow round counter

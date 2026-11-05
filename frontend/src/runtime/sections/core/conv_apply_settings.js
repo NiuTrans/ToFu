@@ -3,11 +3,15 @@
  * conv_apply_settings.js — settings-column → conversation adoption.
  *
  * This pure adapter is the one frontend boundary from the settings envelope
- * to the in-memory catalog row. Add fields here and to the backend contract
- * together.
+ * to the in-memory catalog row. contracts/conversation_settings_v1.json
+ * declares every key read here; change the contract first.
+ *
+ * `projection` names the source: 'full' snapshot settings are authoritative
+ * for every key, while 'partial' sources (catalog rows, local command echoes)
+ * never clear state they do not carry.
  */
 
-function _applySettingsToConv(conv, settings) {
+function _applySettingsToConv(conv, settings, projection = 'partial') {
   if (!settings) return;
 
   settings = protectHydratingProjectSettings(conv, settings);
@@ -49,6 +53,11 @@ function _applySettingsToConv(conv, settings) {
     conv.humanGuidanceEnabled = settings.humanGuidanceEnabled;
   if (settings.planMode !== undefined)
     conv.planMode = settings.planMode === true;
+  if (settings.delegateMode !== undefined)
+    conv.delegateMode = settings.delegateMode === true;
+  /* Per-conversation write approval: only an explicit false means Manual. */
+  if (settings.autoApply !== undefined)
+    conv.autoApply = settings.autoApply !== false;
   if (settings.imageGenModel)
     conv.imageGenModel = settings.imageGenModel;
   if (settings.imageGenProviderId !== undefined)
@@ -59,8 +68,6 @@ function _applySettingsToConv(conv, settings) {
     conv.imageGenAspect = settings.imageGenAspect;
   if (settings.imageGenResolution)
     conv.imageGenResolution = settings.imageGenResolution;
-  if (settings.projectSummary !== undefined)
-    conv.projectSummary = settings.projectSummary;
   if (settings.projectPath !== undefined)
     conv.projectPath = settings.projectPath;
 
@@ -70,7 +77,8 @@ function _applySettingsToConv(conv, settings) {
       && settings._coordinatorSource.length <= 256 ? settings._coordinatorSource : null;
   if (settings.projectPaths !== undefined)
     conv.projectPaths = settings.projectPaths;
-  conv.paperDocument = settings.paperDocument || null;
+  if (projection === 'full' || settings.paperDocument !== undefined)
+    conv.paperDocument = settings.paperDocument || null;
   if (settings.readOnlyPaths !== undefined)
     conv.readOnlyPaths = settings.readOnlyPaths;
   if (settings.autoTranslate !== undefined)
@@ -80,18 +88,9 @@ function _applySettingsToConv(conv, settings) {
   if (settings.folderId !== undefined) conv.folderId = settings.folderId;
   if (settings.source) conv.source = settings.source;
   if (settings.clonedFrom) conv.clonedFrom = settings.clonedFrom;
-  if (settings.feishuUser) conv.feishuUser = settings.feishuUser;
   /* Autopilot run summaries — human-only sidecar (runId → {content,
    * translatedContent?, ts}). Not Turns; rendered as the run fold's
    * read-only report panel. Round-trips via the settings column. */
   if (settings.autopilotSummaries !== undefined)
     conv.autopilotSummaries = settings.autopilotSummaries;
-  /* Persist last-Turn catalog facts for metadata-only shells. */
-  if (settings.lastMsgRole) conv.lastMsgRole = settings.lastMsgRole;
-  if (settings.lastMsgTimestamp) conv.lastMsgTimestamp = settings.lastMsgTimestamp;
-  /* Settled-Turn facts for sidebar status before TurnStore hydration. Raw
-   * facts only; _convStatusFlags classifies them. */
-  if (settings.lastFinishReason !== undefined) conv.lastFinishReason = settings.lastFinishReason;
-  if (settings.lastMsgError !== undefined) conv.lastMsgError = settings.lastMsgError;
-  if (settings.lastMsgHasOutput !== undefined) conv.lastMsgHasOutput = settings.lastMsgHasOutput;
 }

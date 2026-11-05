@@ -1,4 +1,4 @@
-"""Swarm per-agent start clock survives a reload.
+"""Swarm per-agent start clock and round count survive a reload.
 
 Worse symptom than the paper-media panels: after a refresh the per-agent
 stopwatch does not show a wrong number, it **disappears entirely** while the
@@ -21,7 +21,9 @@ Pinned here:
      MILLISECONDS through the same `_epoch_ms` seam the rest of this batch uses
      (a seconds value would silently render a ~50-year elapsed);
   3. `filter_snapshot` preserves it through the multi-wave scoping path — that
-     rewrite is where a new per-agent field would most plausibly get dropped.
+     rewrite is where a new per-agent field would most plausibly get dropped;
+  4. the snapshot carries each agent's model `round` count, running or finished,
+     because the background-agent row shows it while collapsed.
 """
 
 import os
@@ -221,6 +223,37 @@ def test_snapshot_terminal_agent_has_no_started_at_but_keeps_elapsed():
     agent = snap['agents'][0]
     assert agent['status'] == 'done'
     assert agent['elapsed'] == 12.3
+
+
+# ── 4. the durable snapshot carries the round count ────────────────
+
+def test_snapshot_carries_round_count_for_running_and_finished_agents():
+    from types import SimpleNamespace
+    from lib.swarm.master import MasterOrchestrator
+    from lib.swarm.protocol import SubAgentResult, SubAgentStatus
+    import threading
+    m = MasterOrchestrator.__new__(MasterOrchestrator)
+    m._lock = threading.RLock()
+    finished, running, queued = _spec('finished'), _spec('running'), _spec('queued')
+    m._results_by_id = {'finished': (finished, SubAgentResult(
+        status=SubAgentStatus.COMPLETED.value, final_answer='ok', rounds_used=94))}
+    m._agents = {'running': SimpleNamespace(
+        result=SubAgentResult(status='running', rounds_used=12), _tool_log_lock=threading.Lock())}
+    m.specs = [finished, running, queued]
+    m._terminated = False
+    m._aborted = False
+    m.task_id = 't1'
+
+    class _FakeSched:
+        def started_at_map(self):
+            return {'running': time.time() - 60}
+
+    m._scheduler = _FakeSched()
+    m._resolve_spec_model = lambda spec: 'test-model'
+    agents = {agent['id']: agent for agent in m._build_agent_snapshot()['agents']}
+    assert (agents['finished']['status'], agents['finished']['round']) == ('done', 94)
+    assert (agents['running']['status'], agents['running']['round']) == ('running', 12)
+    assert (agents['queued']['status'], agents['queued']['round']) == ('pending', 0)
 
 
 if __name__ == '__main__':

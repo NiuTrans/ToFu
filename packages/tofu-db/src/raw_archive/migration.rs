@@ -110,6 +110,13 @@ fn verify_indexes(
             return Err(invalid_data("raw archive snapshot covering index differs"));
         }
     }
+    let identity = ArchiveIdentity::from_document(doc);
+    let age_row = database.entity_get(tx, &identity.age_key(tx)?)?;
+    if age_row != Some(identity.encode()?)
+        && (age_row.is_some() || owner_age_index_complete(database, tx)?)
+    {
+        return Err(invalid_data("raw archive snapshot age index differs"));
+    }
     if database.entity_get(tx, &claim_key(tx, &doc.archive_id)?)?
         != Some(tx.owner_user_id().to_be_bytes().to_vec())
     {
@@ -402,6 +409,21 @@ mod tests {
                 json!({"count":0})
             );
         }
+    }
+    #[test]
+    fn restored_snapshots_publish_and_verify_their_age_index_row() {
+        let (_, mut db) = prepared();
+        call(&mut db, "restore", snapshot("a")).unwrap();
+        let document: ArchiveDocument = serde_json::from_value(snapshot("a")).unwrap();
+        let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let key = ArchiveIdentity::from_document(&document)
+            .age_key(&tx)
+            .unwrap();
+        assert!(db.entity_get(&mut tx, &key).unwrap().is_some());
+        assert!(owner_age_index_complete(&db, &mut tx).unwrap());
+        db.entity_delete(&mut tx, key).unwrap();
+        db.commit(tx).unwrap();
+        assert!(call(&mut db, "get", json!({"archive_id":"a"})).is_err());
     }
     #[test]
     fn malformed_snapshots_and_corrupt_covering_indexes_fail_closed() {

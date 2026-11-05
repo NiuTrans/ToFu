@@ -12,14 +12,15 @@ shared body for a different slot: a Gemini attempt bakes
 ``tool_calls[0].extra_content.google.thought_signature`` into a PREFIX
 tool_call, then the recovered Claude attempt re-serializes the polluted prefix
 → different wire bytes → prompt-cache key shift → full prefix miss. On the
-OpenAI transport path (sankuai gateway, ``api_protocol='openai'``) the body is
+OpenAI transport path (example-corp gateway, ``api_protocol='openai'``) the body is
 serialized VERBATIM (no Anthropic allowlist rebuild), so the pollution reaches
-the wire — matching mrne3bqe (aws.claude-opus-4.8 via sankuai) hitting 503→429
+the wire — matching mrne3bqe (aws.claude-opus-4.8 via example-corp) hitting 503→429
 slot swaps at R4/R5.
 
-Fix: deep-copy ``body['messages']`` before model families that perform per-slot
-or wire-preparation rewrites. Non-mutating OpenAI/Responses slots reuse the
-canonical history by identity instead of copying a conversation per retry.
+Fix: every per-slot and wire-preparation rewrite returns an adapted copy of
+only what it changes and never writes the history it was given, so no slot
+attempt copies the conversation and none can pollute another (a deep-frozen
+history proves it: any in-place write raises).
 
 The assertions are on ACTUAL serialized bytes, and every guard has a neuter
 negative control that reintroduces the shallow copy and MUST flip.
@@ -42,7 +43,7 @@ _MODEL = 'aws.claude-opus-4.8'
 
 
 class _Slot:
-    def __init__(self, model, provider_id='sankuai', thinking_format='',
+    def __init__(self, model, provider_id='default', thinking_format='',
                  protocol='', responses_profile=''):
         self.model = model
         self.provider_id = provider_id
@@ -76,7 +77,7 @@ def _history():
 def _prebuilt_body():
     body = build_body(_MODEL, _history(), max_tokens=2048, thinking_enabled=True,
                       thinking_depth='medium', tools=_tools(), stream=True,
-                      provider_id='sankuai')
+                      provider_id='default')
     body['_task_id'] = 'taskX'
     return body
 
@@ -96,25 +97,26 @@ def _openai_wire(body):
 
 
 # ── Shallow-copy neuter (pre-fix behaviour) for the negative controls. ──
+def _inject_signature_in_place(messages):
+    """The pre-fix Gemini rewrite: writes into the first tool_call it was given."""
+    for msg in messages:
+        if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+            extra = msg['tool_calls'][0].setdefault('extra_content', {})
+            extra.setdefault('google', {})['thought_signature'] = (
+                'skip_thought_signature_validator')
+
+
 def _adapt_shallow(slot, body_or_messages):
-    """Reconstructs the PRE-FIX shallow-copy path: dict() without the messages
-    deep-copy, then the same per-slot in-place rewrites. Used only to prove the
-    guards have teeth."""
-    from lib.llm import (_downscale_oversized_images,
-                         _strip_trailing_assistant_for_claude, is_claude)
-    from lib.llm.body import (_validate_image_blocks,
-                              _inject_gemini_thought_signatures)
+    """Reconstructs the PRE-FIX path: dict() aliases the history and the
+    per-slot rewrite edits it in place. Used only to prove the guards have
+    teeth."""
     from lib.model_info import is_gemini as _is_gemini
 
     body = dict(body_or_messages)   # SHALLOW — messages aliased (the bug)
     body['model'] = slot.model
     body['tools'] = _tools()
-    if is_claude(slot.model) and body.get('messages'):
-        _strip_trailing_assistant_for_claude(body['messages'], slot.model)
-        _validate_image_blocks(body['messages'])
-        _downscale_oversized_images(body['messages'], slot.model)
     if _is_gemini(slot.model) and body.get('messages'):
-        _inject_gemini_thought_signatures(body['messages'], slot.model)
+        _inject_signature_in_place(body['messages'])
     return body
 
 
@@ -130,23 +132,19 @@ def test_adapt_does_not_mutate_caller_messages():
 
 
 @pytest.mark.unit
-def test_mutating_slot_returns_independent_messages_list():
-    """A cache-marker slot receives a caller-independent message graph."""
-    body = _prebuilt_body()
-    adapted = _adapt(_Slot(_MODEL), body)
-    assert adapted['messages'] is not body['messages'], (
-        'adapted messages IS the caller list object — in-place rewrites leak')
+@pytest.mark.parametrize('model', [_MODEL, 'gemini-3-pro', 'glm-5', 'qwen-max'])
+def test_every_rewriting_model_family_adapts_a_frozen_history(model):
+    """Rewriting slots adapt a history they cannot write: any in-place write
+    to the deep-frozen input raises, and the result equals a mutable run."""
+    from lib.conversation_sync.settled_rows import settle
 
-
-@pytest.mark.unit
-@pytest.mark.parametrize('model', ['gemini-3-pro', 'glm-5', 'qwen-max'])
-def test_every_mutating_model_family_receives_independent_messages(model):
     body = _prebuilt_body()
     before = copy.deepcopy(body['messages'])
+    expected = _openai_wire(_adapt(_Slot(model), copy.deepcopy(body)))
 
-    adapted = _adapt(_Slot(model), body)
+    adapted = _adapt(_Slot(model), settle(body))
 
-    assert adapted['messages'] is not body['messages']
+    assert _openai_wire(adapted) == expected
     assert body['messages'] == before
 
 
@@ -222,7 +220,7 @@ def test_model_fallback_discards_foreign_admission_evidence(monkeypatch):
     monkeypatch.setattr(
         heuristic,
         'cheap_estimate',
-        lambda messages: estimates.append(messages) or 10_000,
+        lambda messages, **_kwargs: estimates.append(messages) or 10_000,
     )
     body = {
         'model': 'gpt-5.6-sol',

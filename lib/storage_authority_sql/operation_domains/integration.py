@@ -67,6 +67,34 @@ def _delivery_denied(origin: Mapping[str, Any]) -> bool:
             and delivery.get('taskOutcome') in ('failed', 'cancelled', 'stopped'))
 
 
+def _delivery_needs_action(row: Mapping[str, Any], *, retained: bool) -> bool:
+    """The receipt asks the delivery worker to act (``delivery.py`` dispatch).
+
+    Retained sources are acknowledged; only an explicit startup recovery asks
+    for them, because their checkout marker can vanish without a commit.
+    """
+    origin = row['origin']
+    receipt = origin.get('delivery')
+    if not isinstance(receipt, dict):
+        return False
+    state = receipt.get('state')
+    if state in ('working', 'pending', 'blocked'):
+        return True
+    if state == 'failed':
+        retry = receipt.get('retry')
+        return (isinstance(retry, dict)
+                and retry.get('condition') == 'validation_inputs_changed')
+    if state != 'delivered' or origin.get('executionMode') != 'isolated-task':
+        return False
+    if ('deliveryCheckpoint' not in origin
+            and receipt.get('taskOutcome') == 'completed'
+            and receipt.get('publicationMode') == 'working_tree'):
+        return True
+    retirement = origin.get('sourceRetirement')
+    return (bool(row['managed']) and retirement != 'reclaimed'
+            and (retained or retirement != 'retained'))
+
+
 def _row_document(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         'id': int(row['id']),
@@ -425,6 +453,39 @@ def _delivery_page(session: Session, payload: Mapping[str, Any]) -> Any:
             'nextAfterId': int(rows[-1]['id']) if more else 0}
 
 
+def _delivery_action_page(session: Session, payload: Mapping[str, Any]) -> Any:
+    """Rows whose delivery receipt asks the worker to act, in ID order.
+
+    Windows of the requested page size are filtered here until a lookahead
+    match or the end, so cold history costs no application read per row.
+    """
+    after_id = max(0, int(payload.get('after_id', 0)))
+    limit = max(1, min(128, int(payload.get('limit', 64))))
+    retained = payload.get('retained') is True
+    rows: list[dict[str, Any]] = []
+    cursor = after_id
+    while len(rows) <= limit:
+        window = session.fetch_all(
+            'SELECT w.*, m.origin_json FROM integration_workspaces w '
+            'LEFT JOIN integration_workspace_meta m ON m.user_id = w.user_id '
+            'AND m.project_root = w.project_root AND m.task_id = w.task_id '
+            'WHERE w.id > ? ORDER BY w.id LIMIT ?',
+            (cursor, limit + 1))
+        for row in window:
+            document = _row_document(row)
+            if _delivery_needs_action(document, retained=retained):
+                rows.append(document)
+                if len(rows) > limit:
+                    break
+        if len(window) <= limit:
+            break
+        cursor = int(window[-1]['id'])
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return {'rows': rows, 'hasMore': more,
+            'nextAfterId': rows[-1]['id'] if more else 0}
+
+
 def _get_integrating(session: Session, payload: Mapping[str, Any]) -> Any:
     row = session.fetch_one(
         'SELECT id, user_id, project_root, task_id, title, workspace_path, managed, '
@@ -636,6 +697,8 @@ OPERATIONS = {
 
     'integration.workspace.delivery_page': ops.OperationSpec(
         'query', False, _delivery_page),
+    'integration.workspace.delivery_action_page': ops.OperationSpec(
+        'query', False, _delivery_action_page),
     'integration.workspace.get_integrating': ops.OperationSpec(
         'query', False, _get_integrating),
     'integration.workspace.quarantine': ops.OperationSpec(

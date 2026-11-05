@@ -5,6 +5,11 @@
 This package owns durable, resumable stage execution shared by long-running
 deliverable recipes. Read `docs/modules/production.md`.
 
+`workflows.py` declares fixed agent-based tools and compiles their typed nodes
+into this package's stage executor. The descriptor contract is
+`contracts/agent_tool_workflow_v1.schema.json`. Recipe callbacks retain model,
+tool and publication authority; descriptors never grant execution rights.
+
 ## Editing rules
 
 - Keep job identity, stage inputs/outputs, versions/digests, checkpoints,
@@ -33,3 +38,5 @@ observations retire only with physical workers.
 Run `test_production_substrate.py`, `test_production_runtime.py`, and the focused
 restart/lifecycle cases, then the consuming recipe's checkpoint, abort, quality,
 and publication tests.
+For agent-based tools also run `test_agent_tool_workflows.py` and the real Chat
+continuation scenario in `tests/llm/test_llm_replay_scenarios.py`.

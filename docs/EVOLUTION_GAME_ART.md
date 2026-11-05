@@ -1,39 +1,58 @@
 # Evolution office game art
 
-## Scene-first command center
+## Game screen
 
-**Problem.** Entering the studio through a notebook intake form hid the room
-and made live execution look like a disconnected second application.
-**Decision.** `#/evolution` opens the interactive studio directly. The durable
-program notebook remains at `#/evolution/programs`, accessible from the menu.
-The persistent conversational briefing shares the scene's mission desk, with
-optional model settings collapsed and an explicit dispatch action. Retry
-prepares that same input island; it never launches work automatically. A
-receipt-backed stage route in the task panel and one bounded journal excerpt
-connect the world to the existing goal API. Recorded stages are not labelled successful without a
-verdict. Room/library/delivery actions retain their goal-scoped owners.
-**Alternatives rejected.** A compulsory setup modal still delays entering the
-world; simulated progress, decorative agent counts and a second polling loop
-would separate presentation from backend authority. A new game runtime is
-unnecessary for this layout change: the existing collision-aware Canvas2D
-scene retains its visible-time lifecycle and on-demand room loading.
+**Problem.** The studio read as a web page wrapped around a picture: a navigation
+column, a framed canvas card with a caption, a task panel of accordions and a
+text toolbar, plus explanatory sentences everywhere ("click empty floor to
+move", "pausing animation only freezes the room"). It also misreported real
+state: a run whose executor had parked on a registered compute job showed
+"recording results" (the snapshot overlay relabeled the consumed terminal as
+`settling`), and park's placeholder text appeared as the deliverable.
+**Decision.** The route is one full-bleed game screen. A canvas world fills it;
+walnut-and-brass HUD chrome floats over it (quest banner, four-stage track,
+token/tool/time meters, room tiles, hotbar with one context action, toasts, an
+RPG dialogue box); parchment journal windows dock beside the world while the
+camera reframes the room. Everything visible comes from one pure projection
+(`studio/projection.ts`) of confirmed snapshots, so a compute park reads as
+"waiting on compute" with its job id, a stalled watcher as a red alert, a
+pending question as the asking role walking to the front door plus a choice
+dialogue, and a running stage's usage as a `≥` lower bound. Visible copy is
+state; names, long reasons and key hints live in tooltips and accessible
+labels. No surface repeats another: an open chat log marks the coordinator's
+line read so the dialogue box never echoes it, the actor sheet (portrait, live
+state, current tool, model) offers a decision only to the role that asked, and
+free-form swarm roles are named by a localized job title from their room theme.
+The backend snapshot overlay now returns the stored run once its
+terminal is in the receipts (`lib/evolution/runs.py::_terminal_snapshot`).
+A small purpose-built engine (`engine/`) supplies what a game screen needs and
+the old renderer lacked: a fixed-step loop over visible time that sleeps with no
+callbacks and wakes on one timer for the next keyframe, a camera that fits the
+room height inside the HUD frame with pan, wheel/pinch zoom and focus-follow on
+portrait screens, pointer hit testing on the canvas, in-world labels/emotes
+drawn crisply in screen space, short particle bursts for real events, and a
+stage that swaps scenes (main office, department rooms) and mirrors every
+target as an accessible button. The human gets an avatar (the only character
+they steer: click, WASD/arrows, E to use the nearest furniture); residents are
+never moved by the human, because their poses are backend state.
+**Alternatives rejected.** Restyling the web layout kept the panels and prose
+that made it feel like a form. Phaser/Pixi would add a WebGL context lifecycle,
+a second scene/input system and a large dependency without helping the real
+problems (state projection, art-aligned layout, accessibility); 11 actors over a
+painted room do not need GPU batching. A continuously running 60 FPS loop would
+burn CPU while a goal waits for hours; the keyframe sleep keeps idle cost at
+zero. Simulated progress bars, wandering idle agents or a player-steerable
+executor would separate presentation from backend authority.
 
-The command-center stylesheet is studio-only and uses shared design tokens.
-Scene focus hides the mission desk, never pauses or cancels backend work.
-Briefing focus follows the drawer's deferred native trigger restoration through
-one cancellable, zero-delay handoff; disposal or another drawer clears it.
-On narrow screens the mission precedes the world; drawers preserve focus
-return and room navigation. The HUD owns four fixed stage nodes and a human-wait
-notice, while the task inspector owns the single bounded journal excerpt. The
-scene has a plain theme-derived frame rather than a blurred artwork echo. There
-is no new timer, transport or retained history.
-Verify with `testing/studio.test.cjs`, `testing/route-host.test.cjs`, the studio
-browser journey, and the deterministic office render-cost measurement.
-On this host, its 3-role/8-visitor, 16-second virtual workload records 964
-callbacks at 0.20 ms p95 CPU submission time (not display FPS), with one
-maximum pending frame, zero idle/hidden callbacks and zero canvas backing
-pixels after disposal. These are regression measurements, not hardware-independent
-frame-rate guarantees; the new HUD adds no scheduler or transport.
+Studio styles live in `26-studio-game.css` and consume the theme-invariant
+`--studio-*` palette in `00-design-tokens.css`: the painted scene never changes
+with the chat theme, so neither does the chrome drawn over it. Shared `.ui-*`
+controls inside windows are themed by scoping the tokens they read. The HUD is
+one bar on wide screens; below 1024px the stage track and meters wrap in their
+own row under the quest, because a single row at those widths either covered
+the track with the meters or shrank the quest to its emblem. Verify with
+`testing/{projection,engine,office-scene,goal-room,office-rooms,studio}.test.cjs`,
+the studio browser journeys and the deterministic office render-cost measurement.
 
 The retained production art is in `frontend/src/features/evolution/assets/`.
 The eight `game-<role>.webp` files are independent 4×4 walking sheets; rows
@@ -122,11 +141,13 @@ per-frame alpha-height scaling, grid-center-only arrival, instantaneous torso
 cropping, and hidden backup timers compounded the apparent sliding and snapping.
 The pod renderer also alternated walking arm frames while a worker was seated.
 
-**Decision.** Keep the bounded Canvas2D renderer and make its engine seams
-explicit. `office-motion.ts` owns pure distance gait and pose easing;
+**Decision.** Keep Canvas2D and make its engine seams explicit.
+`office-motion.ts` owns pure distance gait and pose easing;
 `office-navigation.ts` owns constrained routes; `office-sprite-geometry.ts`
-interprets authored bounds; `office-canvas.ts` owns dirty paint suppression,
-backing-store limits, teardown, and constant-space counters.
+interprets authored bounds; `engine/loop.ts` and `engine/stage.ts` own the clock,
+backing store, sleep/wake decisions and teardown; `office-layout.ts` owns the
+art-aligned points (the earlier scene stacked "shelf" books on the reviewer's
+rug because its points predated the current art).
 `office-pod-motion.ts` owns selected-room actor transitions. No task state is
 created by these modules; DOM labels and accessible actor buttons remain real
 status projections.
@@ -153,20 +174,23 @@ status projections.
   articulation. Dedicated sit/stand sheets would improve this further without
   replacing the renderer. The selected-room actor uses the same gait/pose math
   and orthogonal desk approach, and no longer performs a fake working fidget.
-- One canvas per mounted scene; DPR is capped at 2 and world backing scale at
-  1.5 (at most 1440×1080 / 1,555,200 pixels). Motion paint cadence is at most
-  30 Hz; identical signatures do not clear or repaint. Resizing unchanged
-  backing dimensions does not reset the context. Image decode explicitly
-  invalidates the signature. Main-room DOM actor attributes also use dirty
-  signatures. Metrics expose requests, paints, skips, resizes, backing pixels;
-  main-room metrics additionally expose pending frames and actor count.
+- One stage canvas for the mounted studio, sized to the viewport at the device
+  pixel ratio so in-world labels stay crisp (raster memory is viewport × DPR² ×
+  4 bytes, e.g. about 20 MiB at 1440×900 and DPR 2; released on disposal).
+  Simulation advances fixed 1/60 s steps of visible time; a stalled frame
+  replays at most 250 ms. The world reports its next change: continuous frames
+  only while something moves, otherwise one timer to the next emote/screen
+  keyframe (160–900 ms periods, only while a role is live), otherwise no
+  callbacks. The accessible target layer rewrites only when its signature
+  changes. Metrics expose frames, steps, sleeps, timers, paints, resizes and
+  backing pixels.
 - Assets load by visible role and selected room; fallback people decode only
   after an authored sheet fails. At most three leads plus eight visitors are
   resident, **including departing visitors**. Latest bounded roster entries
   wait for a free slot instead of leaking old avatars during churn. Material
   props remain capped at eight and appear only for durable material records.
-- Stationary actors—including working actors—schedule **zero** animation
-  callbacks. No idle patrol, moonwalking or synthetic task progress. Hidden
+- Stationary actors schedule no continuous frames; a working actor's emote is
+  the only wake source, at its keyframe period. No idle patrol, moonwalking or synthetic task progress. Hidden
   scenes stop their clock and resume from the same pose without catching up.
   Reduced motion resolves an explicit action once and cancels callbacks; it
   does not strand a half-seated actor. Disposal is idempotent, cancels clocks
@@ -191,15 +215,14 @@ node --test frontend/src/features/evolution/testing/office-motion.test.cjs \
   frontend/src/features/evolution/testing/office-pod-motion.test.cjs \
   frontend/src/features/evolution/testing/office-runtime.test.cjs \
   frontend/src/features/evolution/testing/office-scene.test.cjs \
-  frontend/src/features/evolution/testing/office-rooms.test.cjs
+  frontend/src/features/evolution/testing/office-rooms.test.cjs \
+  frontend/src/features/evolution/testing/engine.test.cjs
 node frontend/src/features/evolution/testing/office-motion.bench.cjs
 ```
 
 A Node v24.14.1 run on the development host measured 100,000 eleven-actor gait
-updates in 44.916 ms (0.449 µs/update), 5,000 constrained door-to-seat routes in
-422.984 ms (84.597 µs/route), and 100,000 unchanged paint checks in 1.386 ms.
-Including warmup, the surface recorded 100,100 requests, **one paint and
-100,099 skips**. These are CPU microbenchmarks, not GPU, decode, frame-time or
+updates in 44.916 ms (0.449 µs/update) and 5,000 constrained door-to-seat routes
+in 422.984 ms (84.597 µs/route). These are CPU microbenchmarks, not GPU, decode, frame-time or
 end-to-end browser claims; timings are reported, not unstable CI thresholds.
 Deterministic tests enforce operation counts, constant-distance gait, source
 direction, foot geometry, exact endpoints, interrupted poses, hidden/reduced

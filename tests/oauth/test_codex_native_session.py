@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,14 +35,33 @@ def test_cold_initialize_is_not_repeated_at_cache_expiry(native, monkeypatch):
     assert command._verified[1] == command._session['born'] + command._CONTEXT_MAX_AGE_SECONDS
 
 
+class _HungRequestClock:
+    """The module clock stands still until the synthetic app-server has received
+    the hung request, then passes every budget at once.
+
+    Only the hung phase can therefore time out: spawn and earlier replies never
+    race a shortened budget, however slowly the host runs them.
+    """
+
+    def __init__(self, trace, method):
+        self._trace, self._marker = trace, f'"event": "{method}"'
+        self._now, self._expired = time.monotonic(), False
+
+    def monotonic(self):
+        if not self._expired and self._trace.exists():
+            self._expired = self._marker in self._trace.read_text()
+        return self._now + (1e6 if self._expired else 0.0)
+
+
 @pytest.mark.parametrize('method,phase', [('initialize', 'initialize'),
     ('config/read', 'config'), ('configRequirements/read', 'requirements')])
 def test_phase_hang_is_bounded_redacted_and_reaped(native, monkeypatch, caplog, method, phase):
     native['mode'].write_text('hang-' + method)
-    monkeypatch.setattr(command, '_DEADLINE_SECONDS', 0.3)
+    clock = _HungRequestClock(native['trace'], method)
+    monkeypatch.setattr(command, 'time', SimpleNamespace(monotonic=clock.monotonic))
     caplog.set_level(logging.DEBUG, logger=command.__name__)
     assert context(native) == {'shared_login_issue': 'codex_command_timeout'}
-    assert 'phase=' + phase in caplog.text
+    assert f'probe failed phase={phase} issue=codex_command_timeout' in caplog.text
     assert 'phase=spawn' in caplog.text and 'phase=initialize_sent' in caplog.text
     if method != 'initialize':
         assert 'phase=initialize_received' in caplog.text
@@ -55,7 +75,7 @@ def test_phase_hang_is_bounded_redacted_and_reaped(native, monkeypatch, caplog, 
 def test_shell_hang_is_honestly_pre_initialize_response(native, monkeypatch, caplog):
     with (native['home'] / '.bashrc').open('a') as stream:
         stream.write('\nsleep 60\n')
-    monkeypatch.setattr(command, '_DEADLINE_SECONDS', 0.3)
+    monkeypatch.setattr(command, '_EXCHANGE_SECONDS', 0.3)
     caplog.set_level(logging.DEBUG, logger=command.__name__)
     assert context(native) == {'shared_login_issue': 'codex_command_timeout'}
     assert 'phase=initialize_sent' in caplog.text

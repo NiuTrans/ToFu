@@ -37,12 +37,12 @@ DB-free by construction; skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
 from tests._paper_vite import compiled_typescript
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
@@ -50,13 +50,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 PAPER_TS = os.path.join(
     ROOT, 'frontend', 'src', 'features', 'paper', 'pdf-responsive.ts')
-ESBUILD = os.path.join(ROOT, 'scripts', 'vite_test_bundle.mjs')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -202,8 +195,6 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
             pass
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_paper_responsive_crossing_reasserts_view_and_refits(
         paper_responsive_js):
     proc = _run_harness(paper_responsive_js)
@@ -216,8 +207,7 @@ def test_paper_responsive_crossing_reasserts_view_and_refits(
 
 @pytest.fixture(scope='module')
 def paper_responsive_js():
-    if not os.path.isfile(ESBUILD):
-        pytest.skip('esbuild dev dependency not installed')
+    require_node_modules('vite')
     with compiled_typescript(
         PAPER_TS,
         expose_feature_registry_to_window=True,
@@ -238,8 +228,6 @@ def _run_neuter(patched_src: str, tag: str, tmp_path) -> str:
     return proc.stdout.strip()
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_triple_neuter_crossing_is_load_bearing(tmp_path):
     """Three independent neuters, each on a COPY; shipped file untouched."""
     src = open(PAPER_TS, encoding='utf-8').read()

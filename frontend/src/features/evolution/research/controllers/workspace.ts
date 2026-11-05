@@ -14,6 +14,7 @@ import { createProgramDraftStore, researchProgrammePath, programmeCreationDraftI
 import { resolveBrowserLocalStorage } from '../../../../core/browser-storage';
 import { goToWorkspace } from '../../../../application-shell/page-host';
 import type { ResearchStream } from '../controllers/runtime';
+import type {ResearchExecutionContext} from '../../../../api/evolution-runs';
 
 type JsonObject = Record<string, any>;
 type Workspace = JsonObject & {
@@ -466,10 +467,12 @@ function appendProgrammeEntry(host: HTMLElement): void {
       || !['done', 'degraded'].includes(globals()._researchStream?.status || ''), onClick: () => {
       const workspace = collect(), stream = globals()._researchStream;
       if (!workspace || !stream?.taskId || !workspace.selected_idea_id) return;
-      const source = {task_id: stream.taskId, idea_id: workspace.selected_idea_id};
+      const source = {task_id: workspace.selected_idea_source_task_id || stream.taskId, idea_id: workspace.selected_idea_id};
       const path = researchProgrammePath(source), identity = programmeCreationDraftIdentity(path);
       const drafts = createProgramDraftStore({owner: () => readLiveRuntimeBinding('_currentUserId'), scope: location.pathname, storage: () => resolveBrowserLocalStorage(window)});
-      if (!drafts.read(identity) && drafts.save(identity, {fields: [], researchSource: source, seedObjective: state.direction}) !== 'saved') {
+      const researchContext = JSON.parse(JSON.stringify({hypothesis: workspace.hypothesis,
+        protocol: workspace.protocol, capability_bindings: workspace.capability_bindings})) as ResearchExecutionContext;
+      if (!drafts.read(identity) && drafts.save(identity, {fields: [], researchSource: source, researchContext, seedObjective: state.direction}) !== 'saved') {
         state.error = tr('evolution.research.programmeDraftUnavailable', 'Programme draft could not be retained'); render(); return;
       }
       goToWorkspace(path);

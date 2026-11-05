@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 from tests._runtime_sections import native_module_path
@@ -194,7 +193,6 @@ const settle = async () => {
 """
 
 
-@pytest.mark.skipif(not shutil.which('node'), reason='node is required')
 def test_folder_list_singleflight_failure_and_empty_budget():
     result = subprocess.run(
         ['node', '-e', HARNESS, str(API_SOURCE), str(FOLDER_SOURCE),

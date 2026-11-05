@@ -21,14 +21,19 @@ from lib.server.server_loop_runtime import (
 pytestmark = pytest.mark.unit
 
 
-def test_worker_pool_sizes_are_bounded(monkeypatch, caplog):
-    monkeypatch.setattr('lib.server.server_loop_runtime.os.cpu_count', lambda: 256)
+@pytest.mark.parametrize('key', ['TOFU_AGENT_WORKERS', 'TOFU_SYNC_WORKERS'])
+@pytest.mark.parametrize('cpus', [1, 256])
+def test_worker_idle_targets_are_operator_or_deployment_default(monkeypatch, key, cpus):
+    from runtime_guards import deployment_resource_default
+    monkeypatch.setattr('lib.server.server_loop_runtime.os.cpu_count', lambda: cpus)
     logger = logging.getLogger('test.server-loop-runtime')
+    default = deployment_resource_default(key, {})
 
-    assert _worker_count('POOL', {}, logger) == 16
-    assert _worker_count('POOL', {'POOL': '3'}, logger) == 3
-    assert _worker_count('POOL', {'POOL': '900'}, logger) == 512
-    assert _worker_count('POOL', {'POOL': 'invalid'}, logger) == 16
+    assert _worker_count(key, {}, logger) == default
+    assert _worker_count(key, {key: '0'}, logger) == default
+    assert _worker_count(key, {key: 'invalid'}, logger) == default
+    assert _worker_count(key, {key: '3'}, logger) == 3
+    assert _worker_count(key, {key: '100000'}, logger) == 100000
 
 
 def test_executor_idle_budget_is_bounded_and_zero_disables(monkeypatch):
@@ -153,71 +158,77 @@ def test_runtime_retires_burst_threads_without_reducing_capacity():
                 'TOFU_EXECUTOR_IDLE_SECONDS': '0',
             },
         ).start()
-        old_sync = runtime.sync_executor
-        old_agent = runtime.agent_executor
-        assert old_sync is not None and old_agent is not None
-
         release = threading.Event()
-        started = threading.Event()
-        started_lock = threading.Lock()
-        started_count = 0
+        try:
+            old_sync = runtime.sync_executor
+            old_agent = runtime.agent_executor
+            assert old_sync is not None and old_agent is not None
 
-        def burst_worker():
-            nonlocal started_count
-            with started_lock:
-                started_count += 1
-                if started_count == 7:
-                    started.set()
-            release.wait(timeout=3)
+            started = threading.Event()
+            started_lock = threading.Lock()
+            started_count = 0
 
-        futures = [old_sync.submit(burst_worker) for _ in range(4)]
-        futures += [old_agent.submit(burst_worker) for _ in range(3)]
-        for _ in range(200):
-            if started.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert started.is_set()
-        release.set()
-        await asyncio.gather(*(
-            asyncio.wrap_future(future) for future in futures))
+            def burst_worker():
+                nonlocal started_count
+                with started_lock:
+                    started_count += 1
+                    if started_count == 7:
+                        started.set()
+                release.wait(timeout=3)
 
-        original_sync_snapshot = old_sync.idle_retirement_snapshot
-        old_sync.idle_retirement_snapshot = lambda idle: original_sync_snapshot(
-            idle, now=time.monotonic()+61)
-        with old_agent._lifecycle_lock:
-            old_agent._last_excess_activity = time.monotonic() - 61
+            futures = [old_sync.submit(burst_worker) for _ in range(4)]
+            futures += [old_agent.submit(burst_worker) for _ in range(3)]
+            for _ in range(200):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert started.is_set()
+            release.set()
+            await asyncio.gather(*(
+                asyncio.wrap_future(future) for future in futures))
 
-        # Future completion wakes the loop before the carrier finishes its
-        # callbacks. Retirement must wait for that physical ownership too.
-        for _ in range(200):
-            if (old_sync.idle_retirement_snapshot(60)['due'] and
-                    old_agent.idle_retirement_snapshot(60)['due']):
-                break
-            await asyncio.sleep(0.01)
-        retired = runtime._retire_idle_executors(60)
-        assert retired == {'sync': 4, 'agent': 3}
-        assert runtime.sync_executor is not old_sync
-        assert runtime.agent_executor is not old_agent
-        assert runtime.sync_executor._max_workers == 4
-        assert runtime.agent_executor._max_workers == 3
-        assert len(runtime.sync_executor._threads) == 0
-        assert len(runtime.agent_executor._threads) == 0
-        assert tasks_pkg._agent_executor is runtime.agent_executor
-        assert old_sync._shutdown and old_agent._shutdown
+            original_sync_snapshot = old_sync.idle_retirement_snapshot
+            old_sync.idle_retirement_snapshot = lambda idle: original_sync_snapshot(
+                idle, now=time.monotonic()+61)
+            original_agent_snapshot = old_agent.idle_retirement_snapshot
+            old_agent.idle_retirement_snapshot = lambda idle: original_agent_snapshot(
+                idle, now=time.monotonic()+61)
 
-        for _ in range(40):
-            if all(not thread.is_alive()
-                   for thread in (*old_sync._threads, *old_agent._threads)):
-                break
-            await asyncio.sleep(0.01)
-        assert all(not thread.is_alive()
-                   for thread in (*old_sync._threads, *old_agent._threads))
+            # Future completion wakes the loop before the carrier finishes its
+            # callbacks. Retirement must wait for that physical ownership too.
+            for _ in range(200):
+                if (old_sync.idle_retirement_snapshot(60)['due'] and
+                        old_agent.idle_retirement_snapshot(60)['due']):
+                    break
+                await asyncio.sleep(0.01)
+            retired = runtime._retire_idle_executors(60)
+            assert retired == {'sync': 4, 'agent': 3}
+            assert runtime.sync_executor is not old_sync
+            assert runtime.agent_executor is not old_agent
+            assert runtime.sync_executor._max_workers == 4
+            assert runtime.agent_executor._max_workers == 3
+            assert len(runtime.sync_executor._threads) == 0
+            assert len(runtime.agent_executor._threads) == 0
+            assert tasks_pkg._agent_executor is runtime.agent_executor
+            assert old_sync._shutdown and old_agent._shutdown
 
-        metrics = '\n'.join(prometheus_lines())
-        assert 'tofu_executor_idle_retirements_total' in metrics
-        assert 'tofu_executor_idle_retired_threads_total' in metrics
-        await runtime.stop()
-        hub.stop()
+            for _ in range(40):
+                if all(not thread.is_alive()
+                       for thread in (*old_sync._threads, *old_agent._threads)):
+                    break
+                await asyncio.sleep(0.01)
+            assert all(not thread.is_alive()
+                       for thread in (*old_sync._threads, *old_agent._threads))
+
+            metrics = '\n'.join(prometheus_lines())
+            assert 'tofu_executor_idle_retirements_total' in metrics
+            assert 'tofu_executor_idle_retired_threads_total' in metrics
+        finally:
+            release.set()
+            try:
+                await runtime.stop()
+            finally:
+                hub.stop()
 
     asyncio.run(exercise())
 
@@ -285,6 +296,24 @@ def test_sync_initializer_runs_once_per_carrier_and_keeps_thread_local_state():
     assert not pool._threads
 
 
+def test_sync_initializer_is_owned_without_stdlib_private_state(monkeypatch):
+    # CPython 3.14 removed ThreadPoolExecutor._initializer/_initargs.
+    from concurrent.futures import thread as stdlib_thread
+    original=stdlib_thread.ThreadPoolExecutor.__init__
+    def without_private_initializer(self,*args,**kwargs):
+        original(self,*args,**kwargs)
+        for name in ('_initializer','_initargs'):
+            self.__dict__.pop(name,None)
+    monkeypatch.setattr(stdlib_thread.ThreadPoolExecutor,'__init__',without_private_initializer)
+    local=threading.local()
+    def initialize(value):
+        local.value=value
+    with InstrumentedThreadPoolExecutor(1,'py314-init',initialize,('owned',),
+            metric_pool='sync-init-py314-test') as pool:
+        assert pool.submit(lambda:local.value).result(timeout=5)=='owned'
+    assert not pool._threads
+
+
 def test_sync_initializer_failure_settles_and_preserves_cancelled_work():
     from concurrent.futures import CancelledError
     from concurrent.futures.thread import BrokenThreadPool
@@ -328,6 +357,34 @@ pool.submit(write)
     result=subprocess.run([sys.executable,'-c',script,str(target)],env=env,capture_output=True,text=True,timeout=10)
     assert result.returncode==0,result.stderr
     assert target.read_text()=='completed'
+
+
+def test_sync_compat_interpreter_exit_closes_event_delivery_before_join(tmp_path):
+    import subprocess
+    import sys
+    import os
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    script = """import threading,time
+from lib.tasks_pkg.event_delivery import DeliveryLane,EventDeliveryCoordinator
+from lib.tasks_pkg import event_delivery
+from lib.storage.errors import StorageError
+owner=EventDeliveryCoordinator(workers=1,retry_delay=0,idle_timeout=.02)
+event_delivery._COORDINATOR=owner
+lane=DeliveryLane({'id':'standalone-exit-test','aborted':False})
+def persist():
+    raise StorageError('database_unavailable','injected exit outage')
+owner.submit(lane,1,128,persist,lambda:None)
+threading.Thread(target=lambda:owner.flush(lane),name='asyncio_0',daemon=False).start()
+while not owner.snapshot()['active_workers']:
+    time.sleep(.01)
+print('ready',flush=True)
+"""
+    env = dict(os.environ, PYTHONPATH=str(root))
+    result = subprocess.run([sys.executable, '-c', script], env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert 'ready' in result.stdout
 
 
 def test_compat_constructor_failure_retires_its_observation(monkeypatch):

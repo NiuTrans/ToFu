@@ -189,7 +189,9 @@ def test_session_command_has_no_network_host_mount_or_kvm(host_tmp_path):
         assert command[command.index("-cpu") + 1] == "max,-svm,-vmx"
         assert "-enable-kvm" not in command
         assert not {"-virtfs", "-fsdev"} & set(command)
-        assert str(Path.home()) not in rendered
+        # The test's own binary, kernel and state may sit below HOME (the
+        # private local-root opt-in); no other HOME path may reach QEMU.
+        assert str(Path.home()) not in rendered.replace(str(host_tmp_path), "<scratch>")
         assert session.session_dir.stat().st_mode & 0o077 == 0
     finally:
         session.delete()
@@ -1296,7 +1298,7 @@ def test_harbor_runner_builds_secret_free_single_trial_command(host_tmp_path):
     rendered = " ".join(argv)
     assert argv[0] == str(harbor.resolve())
     assert "rootless_vm.harbor_tofu_agent:TofuHostAgent" in argv
-    assert "deepseek-v4-flash-meituan" in argv
+    assert "deepseek-v4-flash-yourprovider" in argv
     assert "API_KEY" not in rendered
     assert argv[argv.index("--n-concurrent") + 1] == "1"
     for name in ("state", "cache", "jobs"):

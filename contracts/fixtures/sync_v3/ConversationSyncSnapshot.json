@@ -110,6 +110,42 @@
             "agentIds": [
               "s"
             ],
+            "author": {
+              "actor": "human",
+              "origin": {
+                "autopilotRunId": "s",
+                "blockId": "s",
+                "boardTaskId": "s",
+                "brain": {
+                  "answered": true,
+                  "epicId": "s",
+                  "epicTitle": "s",
+                  "method": "s",
+                  "originatorConv": "s",
+                  "originatorTitle": "s",
+                  "route": "s"
+                },
+                "channel": {
+                  "channel": "s",
+                  "eventIds": [
+                    "s"
+                  ],
+                  "thread": "s",
+                  "title": "s"
+                },
+                "forwardedFrom": {
+                  "conversationId": "s",
+                  "instructionId": "s",
+                  "steerId": "s",
+                  "turnId": "s"
+                },
+                "initiator": "human",
+                "peerHuman": true,
+                "scheduledTaskId": "s",
+                "sourceConversationId": "s"
+              },
+              "text": "s"
+            },
             "blockId": "s",
             "count": 1,
             "deliveryState": "pending",
@@ -170,6 +206,42 @@
             "agentIds": [
               "s"
             ],
+            "author": {
+              "actor": "human",
+              "origin": {
+                "autopilotRunId": "s",
+                "blockId": "s",
+                "boardTaskId": "s",
+                "brain": {
+                  "answered": true,
+                  "epicId": "s",
+                  "epicTitle": "s",
+                  "method": "s",
+                  "originatorConv": "s",
+                  "originatorTitle": "s",
+                  "route": "s"
+                },
+                "channel": {
+                  "channel": "s",
+                  "eventIds": [
+                    "s"
+                  ],
+                  "thread": "s",
+                  "title": "s"
+                },
+                "forwardedFrom": {
+                  "conversationId": "s",
+                  "instructionId": "s",
+                  "steerId": "s",
+                  "turnId": "s"
+                },
+                "initiator": "human",
+                "peerHuman": true,
+                "scheduledTaskId": "s",
+                "sourceConversationId": "s"
+              },
+              "text": "s"
+            },
             "blockId": "s",
             "count": 1,
             "deliveryState": "pending",
@@ -209,6 +281,42 @@
             "agentIds": [
               "s"
             ],
+            "author": {
+              "actor": "human",
+              "origin": {
+                "autopilotRunId": "s",
+                "blockId": "s",
+                "boardTaskId": "s",
+                "brain": {
+                  "answered": true,
+                  "epicId": "s",
+                  "epicTitle": "s",
+                  "method": "s",
+                  "originatorConv": "s",
+                  "originatorTitle": "s",
+                  "route": "s"
+                },
+                "channel": {
+                  "channel": "s",
+                  "eventIds": [
+                    "s"
+                  ],
+                  "thread": "s",
+                  "title": "s"
+                },
+                "forwardedFrom": {
+                  "conversationId": "s",
+                  "instructionId": "s",
+                  "steerId": "s",
+                  "turnId": "s"
+                },
+                "initiator": "human",
+                "peerHuman": true,
+                "scheduledTaskId": "s",
+                "sourceConversationId": "s"
+              },
+              "text": "s"
+            },
             "blockId": "s",
             "count": 1,
             "deliveryState": "pending",
@@ -268,6 +376,42 @@
             "agentIds": [
               "s"
             ],
+            "author": {
+              "actor": "human",
+              "origin": {
+                "autopilotRunId": "s",
+                "blockId": "s",
+                "boardTaskId": "s",
+                "brain": {
+                  "answered": true,
+                  "epicId": "s",
+                  "epicTitle": "s",
+                  "method": "s",
+                  "originatorConv": "s",
+                  "originatorTitle": "s",
+                  "route": "s"
+                },
+                "channel": {
+                  "channel": "s",
+                  "eventIds": [
+                    "s"
+                  ],
+                  "thread": "s",
+                  "title": "s"
+                },
+                "forwardedFrom": {
+                  "conversationId": "s",
+                  "instructionId": "s",
+                  "steerId": "s",
+                  "turnId": "s"
+                },
+                "initiator": "human",
+                "peerHuman": true,
+                "scheduledTaskId": "s",
+                "sourceConversationId": "s"
+              },
+              "text": "s"
+            },
             "blockId": "s",
             "count": 1,
             "deliveryState": "pending",
@@ -314,6 +458,7 @@
               "detailKey": "s",
               "durationMs": 1,
               "endedAt": 1,
+              "envelopeKind": "s",
               "failureStage": "s",
               "fromModel": "s",
               "id": "s",
@@ -581,6 +726,20 @@
             "originatorTitle": "s",
             "route": "s"
           },
+          "channel": {
+            "channel": "s",
+            "eventIds": [
+              "s"
+            ],
+            "thread": "s",
+            "title": "s"
+          },
+          "forwardedFrom": {
+            "conversationId": "s",
+            "instructionId": "s",
+            "steerId": "s",
+            "turnId": "s"
+          },
           "initiator": "human",
           "peerHuman": true,
           "scheduledTaskId": "s",
@@ -797,10 +956,13 @@
             }
           ],
           "summary": {
+            "admissionWaitMs": 1,
             "approvalWaitMs": 1,
             "compactionMs": 1,
+            "finalizeMs": 1,
             "flowStepMs": 1,
             "llmMs": 1,
+            "orchestrationMs": 1,
             "overBudget": [
               {
                 "budgetMs": 1,
@@ -810,6 +972,11 @@
                 "spanId": "s"
               }
             ],
+            "retryWaitMs": 1,
+            "roundPrepMs": 1,
+            "roundSettleMs": 1,
+            "spawnWaitMs": 1,
+            "startupMs": 1,
             "toolMs": 1,
             "totalMs": 1,
             "ttftMs": 1,

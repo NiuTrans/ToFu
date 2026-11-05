@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import patch
@@ -138,8 +139,9 @@ class TestSpawnReturnsHandle(unittest.TestCase):
 
         self.assertNotIn('await_agents', handle['message'])
         self.assertIn('poll(ids=', handle['message'])
-        self.assertIn('wait_s=30', handle['message'])
-        self.assertIn('60 seconds', handle['message'])
+        from lib.tools.poll import POLL_WAIT_CAP_S
+        self.assertIn(f'wait_s={POLL_WAIT_CAP_S}', handle['message'])
+        self.assertIn('returns as soon as an agent finishes', handle['message'])
         self.assertIn('No-ID poll() is a snapshot', handle['message'])
         # Full objective is the panel's rebuild contract; the on-disk log
         # path is not part of the model/UI payload.
@@ -779,7 +781,14 @@ class TestAwaitAgents(unittest.TestCase):
         self.assertIn('still running', result['note'])
         self.assertIn('slow', result['still_running'])
 
-    def test_repeated_no_progress_await_is_suppressed(self):
+    def test_repeated_no_progress_await_waits_again(self):
+        """A wait after a timeout is a fresh wait, never a skipped one.
+
+        The poll contract tells the model to wait again when only waiting
+        remains. Blocking costs no model request and still returns early on
+        completion, pending input or Stop, so skipping it only forces extra
+        model rounds.
+        """
         spec = SubTaskSpec(role='general', objective='slow', id='slow')
         orch = MasterOrchestrator(
             task_id=self.task_id, conv_id='c1', specs=[spec], user_id=1)
@@ -787,16 +796,15 @@ class TestAwaitAgents(unittest.TestCase):
         first = orch.await_agents(
             mode='all', ids=['slow'], timeout_seconds=0.02)
         self.assertTrue(first['timed_out'])
-        self.assertNotIn('wait_suppressed', first)
 
         started = time.monotonic()
         repeated = orch.await_agents(
-            mode='all', ids=['slow'], timeout_seconds=1.0)
+            mode='all', ids=['slow'], timeout_seconds=0.3)
         elapsed = time.monotonic() - started
 
-        self.assertLess(elapsed, 0.1)
+        self.assertGreaterEqual(elapsed, 0.25)
         self.assertTrue(repeated['timed_out'])
-        self.assertTrue(repeated['wait_suppressed'])
+        self.assertNotIn('wait_suppressed', repeated)
         self.assertEqual(repeated['still_running'], ['slow'])
 
     def test_narrow_await_surfaces_other_running_agents(self):
@@ -1668,39 +1676,51 @@ class TestAwaitDiskFallback(unittest.TestCase):
 
 class TestAutoContinueGuardrails(unittest.TestCase):
     """The settle hook must wake the main agent only under safe conditions:
-    enabled, conversation idle, inbox non-empty, latch free, chain < ceiling.
-    We patch the actual turn-start so no DB/LLM is touched and count calls."""
+    enabled, conversation idle, an owned settling session whose work was not
+    launched by a continuation, undelivered stamped results of that run, and
+    a free latch. There is no count ceiling (docs/AGENT_LIFECYCLE.md). We patch
+    the actual turn-start so no DB/LLM is touched and count calls."""
 
     def setUp(self):
         self.key = 'tac-' + str(id(self))
         agent_inbox.reset_for_test(self.key)
         import lib.swarm.integration as integ
         self.integ = integ
+        self.session = SimpleNamespace(
+            user_id=7, task_id='run-1', specs=[SubTaskSpec(id='a1')])
+        patcher = patch.object(
+            integ, 'get_active_session',
+            side_effect=lambda key: self.session if key == self.key else None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         with integ._autocontinue_lock:
-            integ._autocontinue_chain.pop(self.key, None)
             integ._autocontinue_inflight.discard(self.key)
 
     def tearDown(self):
         agent_inbox.reset_for_test(self.key)
         with self.integ._autocontinue_lock:
-            self.integ._autocontinue_chain.pop(self.key, None)
             self.integ._autocontinue_inflight.discard(self.key)
 
-    def _enqueue(self, status='completed'):
-        extra = {'status': status} if status is not None else None
+    def _enqueue(self, status='completed', run_id='run-1'):
+        extra = {'status': status} if status is not None else {}
+        if run_id is not None:
+            extra['swarm_run_id'] = run_id
         agent_inbox.enqueue(self.key, '<swarm-update>x</swarm-update>',
                             priority='later', mode='swarm-update', agent_id='a1',
-                            extra=extra)
+                            extra=extra or None)
 
-    def test_fires_when_idle_with_pending(self):
-        self._enqueue()
+    def _settle(self, source_id='source-task'):
         with patch.object(self.integ, '_key_is_live', return_value=False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
+            self.integ._maybe_autocontinue(self.key, 7, source_id=source_id)
+        return start
+
+    def test_fires_when_idle_with_pending(self):
+        self._enqueue()
+        start = self._settle()
         start.assert_called_once_with(
             self.key, 7, command_id='swarm-autocontinue:source-task')
-        self.assertEqual(self.integ._autocontinue_chain.get(self.key), 1)
 
     def test_skips_when_conversation_live(self):
         self._enqueue()
@@ -1711,62 +1731,62 @@ class TestAutoContinueGuardrails(unittest.TestCase):
         start.assert_not_called()
 
     def test_skips_when_inbox_empty(self):
-        with patch.object(self.integ, '_key_is_live', return_value=False), \
-             patch.object(self.integ, '_start_autocontinue_turn',
-                          return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
-        start.assert_not_called()
+        self._settle().assert_not_called()
 
     def test_fires_once_for_failure_diagnostic_closure(self):
         # Failure evidence permits a bounded diagnostic turn, not blind retry.
         self._enqueue(status='failed')
         self._enqueue(status='cancelled')
-        with patch.object(self.integ, '_key_is_live', return_value=False), \
-             patch.object(self.integ, '_start_autocontinue_turn',
-                          return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
-        start.assert_called_once()
-        self.assertEqual(self.integ._autocontinue_chain.get(self.key, 0), 1)
+        self._settle().assert_called_once()
         self.assertEqual(agent_inbox.peek(self.key), 2)
 
     def test_fires_when_at_least_one_update_completed(self):
         self._enqueue(status='failed')
         self._enqueue(status='completed')
-        with patch.object(self.integ, '_key_is_live', return_value=False), \
-             patch.object(self.integ, '_start_autocontinue_turn',
-                          return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
-        start.assert_called_once_with(
+        self._settle().assert_called_once_with(
             self.key, 7, command_id='swarm-autocontinue:source-task')
 
     def test_update_without_status_is_not_proof_of_completion(self):
         # Fail-closed: a legacy/unstamped update must not spawn an
         # unattended turn on the assumption that something succeeded.
         self._enqueue(status=None)
-        with patch.object(self.integ, '_key_is_live', return_value=False), \
-             patch.object(self.integ, '_start_autocontinue_turn',
-                          return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
-        start.assert_not_called()
+        self._settle().assert_not_called()
 
-    def test_chain_ceiling_blocks_runaway(self):
+    def test_new_required_work_opens_a_new_frontier_whoever_launched_it(self):
+        # Result-driven like the Coordinator: a follow-up wave launched by a
+        # continuation delivers new results and wakes the next continuation.
+        self.session.specs = [
+            SubTaskSpec(id='human-required'),
+            SubTaskSpec(id='explore', required_for_completion=False),
+        ]
         self._enqueue()
-        with self.integ._autocontinue_lock:
-            self.integ._autocontinue_chain[self.key] = self.integ.SWARM_AUTOCONTINUE_MAX_CHAIN
-        with patch.object(self.integ, '_key_is_live', return_value=False), \
-             patch.object(self.integ, '_start_autocontinue_turn',
-                          return_value=True) as start:
-            self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
-        start.assert_not_called()
+        first = self._settle().call_args.kwargs['command_id']
+        self._enqueue()
+        # The same delivered frontier keeps its identity: no duplicate wake.
+        self.assertEqual(self._settle().call_args.kwargs['command_id'], first)
+        self.session.specs.append(SubTaskSpec(id='continuation-follow-up'))
+        self.assertNotEqual(self._settle().call_args.kwargs['command_id'], first)
 
-    def test_failed_start_releases_chain_increment(self):
+    def test_other_runs_leftovers_never_authorize_a_wake(self):
+        self._enqueue(run_id='earlier-run')
+        self._enqueue(status='completed', run_id=None)
+        self._settle().assert_not_called()
+
+    def test_unknown_or_foreign_session_never_wakes(self):
+        self._enqueue()
+        self.session.user_id = 8
+        self._settle().assert_not_called()
+        self.session = None
+        self._settle().assert_not_called()
+
+    def test_failed_start_leaves_the_latch_free(self):
         self._enqueue()
         with patch.object(self.integ, '_key_is_live', return_value=False), \
              patch.object(self.integ, '_start_autocontinue_turn',
                           return_value=False):
             self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
-        # increment was rolled back so a later settle can retry
-        self.assertEqual(self.integ._autocontinue_chain.get(self.key, 0), 0)
+        self.assertNotIn(self.key, self.integ._autocontinue_inflight)
+        self._settle().assert_called_once()  # a later settle can retry
 
     def test_disabled_flag_is_a_noop(self):
         self._enqueue()
@@ -1776,11 +1796,32 @@ class TestAutoContinueGuardrails(unittest.TestCase):
             self.integ._maybe_autocontinue(self.key, 7, source_id='source-task')
         start.assert_not_called()
 
-    def test_reset_chain_clears_counter(self):
-        with self.integ._autocontinue_lock:
-            self.integ._autocontinue_chain[self.key] = 2
-        self.integ.reset_autocontinue_chain(self.key)
-        self.assertNotIn(self.key, self.integ._autocontinue_chain)
+
+class TestContinuationWaveChain(unittest.TestCase):
+    """A wave launched by an automatic continuation keeps the chain going."""
+
+    def setUp(self):
+        self.task_id = 'tchain-' + str(id(self))
+        _reset_global_state(self.task_id)
+
+    def tearDown(self):
+        _reset_global_state(self.task_id)
+
+    def test_continuation_launched_wave_wakes_the_next_continuation(self):
+        import lib.swarm.integration as integ
+        with _patch_factory(), \
+             patch.object(integ, 'SWARM_AUTOCONTINUE_ENABLED', True), \
+             patch.object(integ, '_key_is_live', return_value=False), \
+             patch.object(integ, '_start_autocontinue_turn',
+                          return_value=True) as start:
+            handle = json.loads(execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'next-stage', 'objective': 'Continue'}]},
+                task={'id': self.task_id, '_userId': 7,
+                      'config': {'_swarmAutoContinue': True}}))
+            self.assertEqual(handle['status'], 'async_launched', handle)
+            self.assertTrue(_wait_until(lambda: start.called, timeout=3.0))
+        self.assertEqual(start.call_args.args[:2], (self.task_id, 7))
 
 
 class TestRehydration(unittest.TestCase):
@@ -1790,7 +1831,7 @@ class TestRehydration(unittest.TestCase):
       * completed agents are preloaded into the results map (NOT re-run),
       * a completed-but-undelivered result is re-enqueued as <swarm-update>,
       * non-terminal agents are re-spawned and seeded from their checkpoint,
-      * load_resumable_sessions drops fully-terminal+delivered sessions.
+      * the resumable index drops fully-terminal+delivered sessions.
     """
 
     @classmethod
@@ -1835,16 +1876,13 @@ class TestRehydration(unittest.TestCase):
         self.p.save_agent(self.key, 'a1', role='researcher', objective='X',
                           status='completed', messages=[], result={'status': 'completed'},
                           rounds_used=1, delivered=True)
-        self.assertEqual(
-            [s for s in self.p.load_resumable_sessions() if s['swarm_key'] == self.key],
-            [])
+        self.assertNotIn(self.key, self.p.list_resumable_session_keys())
         # flip to undelivered → resumable (notification owed)
         self.p.mark_delivered  # noqa  (bare attribute reference, intentional)
         self.p.save_agent(self.key, 'a1', role='researcher', objective='X',
                           status='completed', messages=[], result={'status': 'completed'},
                           rounds_used=1, delivered=False)
-        keys = [s['swarm_key'] for s in self.p.load_resumable_sessions()]
-        self.assertIn(self.key, keys)
+        self.assertIn(self.key, self.p.list_resumable_session_keys())
 
     def test_ownerless_rehydrate_quarantines_once_and_preserves_evidence(self):
         from lib.swarm.integration._rehydrate import (
@@ -1861,19 +1899,15 @@ class TestRehydration(unittest.TestCase):
             status='running', messages=[{'role': 'user', 'content': 'work'}],
             rounds_used=1, delivered=False)
 
-        candidate = next(
-            session for session in self.p.load_resumable_sessions()
-            if session['swarm_key'] == self.key)
+        self.assertIn(self.key, self.p.list_resumable_session_keys())
+        candidate = self.p.load_session(self.key, required=True)
         self.assertFalse(_rehydrate_one(candidate))
 
         durable = self.p.load_session(self.key)
         self.assertEqual(durable['status'], 'quarantined:ownerless')
         self.assertEqual(durable['agents'][0]['status'], 'running')
         self.assertEqual(durable['agents'][0]['messages'][0]['content'], 'work')
-        self.assertNotIn(
-            self.key,
-            {session['swarm_key']
-             for session in self.p.load_resumable_sessions()})
+        self.assertNotIn(self.key, self.p.list_resumable_session_keys())
         self.assertEqual(rehydrate_swarms_on_startup(), 0)
 
     def test_native_upserts_preserve_creation_and_delivery_state(self):
@@ -1952,8 +1986,8 @@ class TestRehydration(unittest.TestCase):
                                     {'role': 'assistant', 'content': 'mid'}],
                           rounds_used=1, delivered=False)
 
-        sess = next(s for s in self.p.load_resumable_sessions()
-                    if s['swarm_key'] == self.key)
+        self.assertIn(self.key, self.p.list_resumable_session_keys())
+        sess = self.p.load_session(self.key, required=True)
 
         specs = [SubTaskSpec.from_dict(d) for d in sess['specs']]
         master = MasterOrchestrator(task_id='t2', conv_id=self.key, specs=specs,
@@ -1997,8 +2031,8 @@ class TestRehydration(unittest.TestCase):
                           messages=[{'role': 'assistant', 'content': 'undelivered ans'}],
                           result={'status': 'completed', 'final_answer': 'undelivered ans'},
                           rounds_used=1, delivered=False)
-        sess = next(s for s in self.p.load_resumable_sessions()
-                    if s['swarm_key'] == self.key)
+        self.assertIn(self.key, self.p.list_resumable_session_keys())
+        sess = self.p.load_session(self.key, required=True)
         specs = [SubTaskSpec.from_dict(d) for d in sess['specs']]
         master = MasterOrchestrator(task_id='t3', conv_id=self.key, specs=specs,
                                     user_id=1,

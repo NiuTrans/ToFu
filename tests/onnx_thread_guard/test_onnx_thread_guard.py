@@ -113,7 +113,7 @@ class TestOnnxThreadGuard:
 
     def test_thread_count_env_precedence(self, monkeypatch):
         """TOFU_ONNX_THREADS wins; falls back to legacy TOFU_DOCLING_THREADS;
-        else min(8, allowed_cpus)."""
+        else every allowed CPU."""
         import lib.onnx_thread_guard as guard
         monkeypatch.setenv('TOFU_ONNX_THREADS', '3')
         monkeypatch.setenv('TOFU_DOCLING_THREADS', '9')
@@ -121,8 +121,8 @@ class TestOnnxThreadGuard:
         monkeypatch.delenv('TOFU_ONNX_THREADS', raising=False)
         assert guard.onnx_thread_count() == 9
         monkeypatch.delenv('TOFU_DOCLING_THREADS', raising=False)
-        n = guard.onnx_thread_count()
-        assert 1 <= n <= 8
+        monkeypatch.setattr(guard, 'allowed_cpu_count', lambda: 96)
+        assert guard.onnx_thread_count() == 96
 
     def test_NEUTER_without_guard_default_stays_zero(self, fresh_guard):
         """NEUTER: prove the cap is load-bearing. If we DON'T install the

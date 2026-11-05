@@ -2,10 +2,11 @@
 
 Responsibility
 --------------
-Classify the current task shape and independently select two composable lanes:
+Independently select two composable lanes:
 
-* a programmatic data plane for bounded, deterministic read reductions; and
-* a multi-agent control plane for independent workstreams.
+* a resident programmatic data plane, active whenever the task has executable
+  tools (request wording does not gate it); and
+* a multi-agent control plane for task shapes with independent workstreams.
 
 This module does not know which provider will execute either lane.  Provider
 adapters resolve native acceleration versus the local JavaScript/Swarm
@@ -38,18 +39,6 @@ TOOL_ORCHESTRATION_POLICY_V2 = 'tool-orchestration/v2'
 ACTIVE_MULTI_AGENT_MODES = frozenset({'read_only', 'full'})
 
 
-_MANY = re.compile(
-    r'\b(multiple|several|all|across|batch|each|compare|rank|filter|join|'
-    r'deduplicat\w*|aggregate|validate|survey|research)\b|'
-    r'(多个|若干|所有|全部|逐个|批量|分别|比较|对比|排名|筛选|汇总|聚合|去重|验证|调研)',
-    re.I,
-)
-_PTC_SHAPE = re.compile(
-    r'\b(filter|join|rank|deduplicat\w*|aggregate|validate|compare|cross[- ]?check|'
-    r'survey|research|search|inspect|analy[sz]e)\b|'
-    r'(筛选|合并|关联|排名|去重|聚合|汇总|验证|交叉核对|比较|对比|调研|搜索|检查|分析)',
-    re.I,
-)
 _INDEPENDENT = re.compile(
     r'\b(parallel|independent|separate(?:ly)?|workstreams?|in parallel|'
     r'compare|across (?:the )?(?:modules|files|services|sources))\b|'
@@ -153,26 +142,6 @@ def _programmatic_stage(text: str) -> str:
         'evidence')
 
 
-def _observed_read_fanout(messages: Any, eligible: set[str]) -> bool:
-    """Return whether recent rounds already show eligible read-only fan-out."""
-    if not eligible:
-        return False
-    single = 0
-    total = 0
-    messages_with_calls = 0
-    for message in list(messages or ())[-12:]:
-        if not isinstance(message, dict) or message.get('role') != 'assistant':
-            continue
-        count = sum(1 for tc in (message.get('tool_calls') or ())
-                    if _tool_name(tc) in eligible)
-        if not count:
-            continue
-        messages_with_calls += 1
-        total += count
-        single = max(single, count)
-    return single >= 2 or (messages_with_calls >= 2 and total >= 3)
-
-
 def observed_single_tool_serial_chain(
         messages: Any, eligible: set[str], *, minimum: int,
         maximum: int) -> list[str]:
@@ -266,30 +235,22 @@ def resolve_tool_orchestration(
     local_tools = local_programmatic_tool_names(tools)
     use_v2 = str(policy_version or 'v1').lower() == 'v2'
 
+    from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
     programmatic = 'off'
     programmatic_reason = 'disabled'
     programmatic_tier = ''
-    if requested_programmatic == 'on':
+    # The default ``auto`` resolves like ``on``: the program action is a
+    # resident capability, not a guess about the request's wording.
+    if requested_programmatic in ACTIVE_PROGRAMMATIC_MODES:
         if eligible:
             programmatic_reason = 'resident_eligible_read_tools'
         elif local_tools:
             programmatic_reason = 'resident_task_tools'
         else:
             programmatic_reason = 'no_executable_tools'
-    elif requested_programmatic == 'auto':
-        if not local_tools:
-            programmatic_reason = 'no_executable_tools'
-        elif _MANY.search(text) and _PTC_SHAPE.search(text):
-            programmatic_reason = 'bounded_read_only_reduction'
-        elif _observed_read_fanout(messages, eligible):
-            programmatic_reason = 'observed_read_fanout'
-        else:
-            programmatic_reason = 'task_not_bounded_reduction_shape'
     if programmatic_reason in (
             'resident_eligible_read_tools',
-            'resident_task_tools',
-            'bounded_read_only_reduction',
-            'observed_read_fanout'):
+            'resident_task_tools'):
         programmatic = requested_programmatic
         from lib.tools.programmatic import programmatic_tier
         programmatic_tier = programmatic_tier(model, requested=requested_programmatic)
@@ -327,7 +288,6 @@ def resolve_tool_orchestration(
         programmatic_reason = 'exclusive_multi_agent_shape'
         programmatic_tier = ''
 
-    from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
     serial_chain = (
         observed_programmatic_serial_chain(messages, eligible)
         if programmatic in ACTIVE_PROGRAMMATIC_MODES else [])

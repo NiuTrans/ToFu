@@ -1,0 +1,5 @@
+{
+  "description": "A prose stream is cut without provider completion. The real root loop rewinds the round and resends the byte-identical request (same request digest), so the final answer is the retry alone: no partial prefix, no continuation prompt.",
+  "recorded_at": "2026-11-03",
+  "mode": "replay"
+}

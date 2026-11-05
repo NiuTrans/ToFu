@@ -24,15 +24,16 @@ def pool(monkeypatch):
     monkeypatch.setattr('lib.proxy.register_no_proxy_url', lambda url: None)
 
     def build(dispatcher):
-        dispatcher.slots.append(Slot(
+        configured = [Slot(
             key_name=f'configured-{state.revision}', api_key='synthetic',
             model='reload-model', capabilities={'text'},
-            provider_id='configured-provider'))
+            provider_id='configured-provider')]
         if state.fail:
             raise ValueError('injected configuration failure')
+        return configured, {}
 
     monkeypatch.setattr(LLMDispatcher, '_build_slots', build)
-    monkeypatch.setattr(LLMDispatcher, '_load_benchmark_data', lambda self: None)
+    monkeypatch.setattr(LLMDispatcher, '_load_benchmark_data', lambda self, slots: None)
     monkeypatch.setattr(health_local, '_get_dispatcher', factory.get_dispatcher)
     monkeypatch.setattr('lib.key_stats.is_key_enabled', lambda *a, **k: True)
 
@@ -137,7 +138,7 @@ def test_reload_serializes_with_mint_and_disposal(pool, monkeypatch):
     def blocked_build(dispatcher):
         build_started.set()
         assert finish_build.wait(5), 'test did not release rebuild'
-        build(dispatcher)
+        return build(dispatcher)
 
     monkeypatch.setattr(LLMDispatcher, '_build_slots', blocked_build)
     factory.reset_dispatcher()
@@ -146,13 +147,15 @@ def test_reload_serializes_with_mint_and_disposal(pool, monkeypatch):
         reloaded = workers.submit(current.initialize)
         try:
             assert build_started.wait(5)
-            minted = workers.submit(pool.mint, 'request-b')
-            disposed = workers.submit(ephemeral.dispose_ephemeral_slot, previous)
+            # Authority reads never hold the dispatcher lock: request routes
+            # register and retire while the configured pool is rebuilt.
+            new = workers.submit(pool.mint, 'request-b').result(timeout=5)
+            assert workers.submit(
+                ephemeral.dispose_ephemeral_slot, previous).result(timeout=5)
+            assert not reloaded.done()
         finally:
             finish_build.set()
         reloaded.result(timeout=5)
-        new = minted.result(timeout=5)
-        assert disposed.result(timeout=5)
 
     assert sum(s is new.slot for s in current.slots) == 1
     assert all(s is not previous.slot for s in current.slots)
@@ -166,8 +169,8 @@ def test_benchmark_refresh_cannot_reseed_live_request_slots(pool, monkeypatch):
     handle = pool.mint('request-a')
     handle.slot.latency_ema = 123
 
-    def seed(dispatcher):
-        for slot in dispatcher.slots:
+    def seed(dispatcher, slots):
+        for slot in slots:
             slot.latency_ema = 999
 
     monkeypatch.setattr(LLMDispatcher, '_load_benchmark_data', seed)
@@ -176,3 +179,36 @@ def test_benchmark_refresh_cannot_reseed_live_request_slots(pool, monkeypatch):
     current.initialize()
     assert handle.slot.latency_ema == 123
     assert [s.latency_ema for s in current.slots if s is not handle.slot] == [999]
+
+
+def test_reload_during_rebuild_leaves_the_next_call_to_rebuild(pool, monkeypatch):
+    build_started = threading.Event()
+    finish_build = threading.Event()
+    build = LLMDispatcher._build_slots
+
+    def blocked_build(dispatcher):
+        built = build(dispatcher)
+        build_started.set()
+        assert finish_build.wait(5), 'test did not release rebuild'
+        return built
+
+    monkeypatch.setattr(LLMDispatcher, '_build_slots', blocked_build)
+    factory.reset_dispatcher()
+    current = factory.get_dispatcher()
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        reloaded = workers.submit(current.initialize)
+        try:
+            assert build_started.wait(5)
+            pool.revision = 2
+            factory.reset_dispatcher()
+        finally:
+            finish_build.set()
+        reloaded.result(timeout=5)
+
+    # The stale build is visible, but a later call rebuilds from revision 2.
+    assert [s.key_name for s in current.slots] == ['configured-1']
+    assert not current._initialized
+    monkeypatch.setattr(LLMDispatcher, '_build_slots', build)
+    current.initialize()
+    assert current._initialized
+    assert [s.key_name for s in current.slots] == ['configured-2']

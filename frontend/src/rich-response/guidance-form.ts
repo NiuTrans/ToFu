@@ -50,8 +50,8 @@ export function renderGuidanceForm(doc:Document,block:form_prompt,ports:ChoicePo
         try{const answers=JSON.parse(value.response??'');for(const item of answers)if(inputs[item.index])inputs[item.index].value=item.answer;}catch{/* Historical free-text batch replies stay visible in receipt. */}
       }else inputs[0].value=value.response??'';
     }
-    status.textContent=value.state==='answered'?text('rich.answerSaved','Answer saved')
-      :value.state==='stale'?text('rich.answerStale','This question is no longer answerable. Reload to check its current state.'):text('rich.surface.unsaved','Answers are not saved until you submit.');
+    status.textContent=value.state==='answered'?value.note??text('rich.answerSaved','Answer saved')
+      :value.state==='stale'?text('rich.answerStale','This question is no longer answerable. Reload to check its current state.'):value.note??text('rich.surface.unsaved','Answers are not saved until you submit.');
   }
   async function run(write:boolean){
     if(disposed||flight||!ports||(write&&submit.disabled))return;

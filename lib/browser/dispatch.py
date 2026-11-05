@@ -238,6 +238,7 @@ _WORKING_TAB_TOOLS = frozenset({
     'browser_check',
     'browser_select_option',
     'browser_scroll',
+    'browser_screenshot',
 })
 
 _ORIGIN_RELATIVE_FETCH_RE = re.compile(
@@ -378,6 +379,8 @@ def execute_browser_tool(
         runtime_args['display_metadata'] = display_metadata
     if work_key:
         runtime_args['work_key'] = work_key
+    if cancellation is not None:
+        runtime_args['cancel_event'] = cancellation
     runtime = BrowserToolRuntime(**runtime_args)
     if (
         fn_name in _WORKING_TAB_TOOLS

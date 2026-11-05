@@ -1,6 +1,14 @@
 """Only verified provider consumption may acknowledge drained inbox deliveries."""
 from __future__ import annotations
 
+import lib.llm as _fallback_llm
+import lib.log as _fallback_log
+import lib.tasks_pkg.llm_fallback._pool as _fallback_pool
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.llm_fallback._usage as _fallback_usage
+import lib.tasks_pkg.manager._events as _fallback_events
+
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -8,7 +16,6 @@ from unittest.mock import Mock
 import pytest
 
 from lib import agent_inbox
-from lib.cgroup_guard import MemoryPressureError
 from lib.llm import AbortedError, BadRequestError, PermissionError_
 from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
 from lib.tasks_pkg.orchestrator import _llm_round_call as round_call
@@ -74,21 +81,20 @@ def _assert_pending(delivery):
 def _provider_runtime(monkeypatch, stream, *, fallback_model='fallback-model'):
     """Keep the actual fallback policy and round seam; isolate provider I/O."""
     import lib.tasks_pkg.llm_fallback._call as fallback
-    monkeypatch.setattr(fallback, 'stream_llm_response', stream)
-    monkeypatch.setattr(fallback, '_get_fallback_model', lambda task: fallback_model)
-    monkeypatch.setattr(fallback, '_attempt_pool_rescue', lambda *a, **kw: None)
-    monkeypatch.setattr(fallback, '_emit_round_usage', lambda *a, **kw: None)
-    monkeypatch.setattr(fallback, '_log_stream_attempt_outcome', lambda *a, **kw: None)
-    monkeypatch.setattr(fallback, 'append_event', lambda *a, **kw: None)
-    monkeypatch.setattr(fallback, 'audit_log', lambda *a, **kw: None)
-    monkeypatch.setattr(fallback, 'model_supports_vision', lambda model: False)
-    monkeypatch.setattr(fallback, 'build_body',
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: fallback_model)
+    monkeypatch.setattr(_fallback_pool, '_attempt_pool_rescue', lambda *a, **kw: None)
+    monkeypatch.setattr(_fallback_usage, '_emit_round_usage', lambda *a, **kw: None)
+    monkeypatch.setattr(_fallback_transport, '_log_stream_attempt_outcome', lambda *a, **kw: None)
+    monkeypatch.setattr(_fallback_events, 'append_event', lambda *a, **kw: None)
+    monkeypatch.setattr(_fallback_log, 'audit_log', lambda *a, **kw: None)
+    monkeypatch.setattr(_fallback_llm, 'model_supports_vision', lambda model: False)
+    monkeypatch.setattr(_fallback_llm, 'build_body',
                         lambda model, messages, **kw: {'model': model, 'messages': messages})
     return fallback
 
 
 @pytest.mark.parametrize('failure,exit_prefix', [
-    ('memory', 'local_memory_pressure'),
     ('rejected', 'request_rejected'),
     ('no-fallback', 'opus_error_with_tool_calls'),
     ('both-failed', 'both_models_failed'),
@@ -97,9 +103,7 @@ def _provider_runtime(monkeypatch, stream, *, fallback_model='fallback-model'):
 def test_actual_fallback_failures_preserve_drained_completion(
         monkeypatch, delivery, failure, exit_prefix):
     error = PermissionError_('provider refused credentials')
-    if failure == 'memory':
-        error = MemoryPressureError('local request cannot fit')
-    elif failure == 'rejected':
+    if failure == 'rejected':
         error = BadRequestError('API HTTP 400: invalid request')
     elif failure == 'aborted':
         error = AbortedError('owner cancelled')
@@ -107,9 +111,6 @@ def test_actual_fallback_failures_preserve_drained_completion(
     fallback = _provider_runtime(
         monkeypatch, stream,
         fallback_model='' if failure == 'no-fallback' else 'fallback-model')
-    if failure == 'memory':
-        monkeypatch.setattr(fallback, '_attempt_request_payload_recovery',
-                            lambda *a, **kw: (None, error, None))
     assert delivery.call() == 'break'
     assert delivery.rs.exit_reason.startswith(exit_prefix)
     _assert_pending(delivery)

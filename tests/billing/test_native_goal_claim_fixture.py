@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.billing.cost import transfer_native_child_fees
+from lib.billing.native_cost import transfer_native_child_fees
 from lib.billing.native_actor_fees import capture, from_checkpoint
 from lib.billing.native_aggregate_fees import project
 from lib.goal_runs.contract import goal_run_policy

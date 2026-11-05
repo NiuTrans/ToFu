@@ -1,9 +1,9 @@
 """Behavior contract for the typed backend/storage availability owners.
 
-The backend verdict requires two consecutive failed liveness probes. Push and
-browser events are suspicion signals only; proxy authentication denial is not
-an outage. The storage readiness warning is deliberately independent and owns
-one visibility-aware, self-stopping recovery poll.
+Connection unavailability requires two consecutive failed probes. Bare push
+opens and browser events only trigger checks; fresh inbound heartbeat evidence
+supersedes stale HTTP failures. Neither connection loss nor proxy authentication
+denial proves a server crash. Storage readiness remains independently owned.
 """
 
 from __future__ import annotations
@@ -96,6 +96,8 @@ function createEnvironment() {
   let healthStatus = 200;
   let probeCount = 0;
   let networkOnline = true;
+  let deferProbe = false;
+  let releaseProbe = null;
   const pushReadings = new Set();
   const pushReconnects = new Set();
   const recovery = {push: 0, streams: 0, conversations: 0, catalog: 0, notices: 0};
@@ -115,6 +117,7 @@ function createEnvironment() {
     isNetworkOnline: () => networkOnline,
     probeHealth: async () => {
       probeCount += 1;
+      if (deferProbe) return new Promise((resolve) => { releaseProbe = resolve; });
       return {ok: healthOk, status: healthStatus};
     },
     subscribePushReading: (listener) => {
@@ -149,8 +152,10 @@ function createEnvironment() {
     dom, scheduler, monitor, recovery, logs, pushReadings, pushReconnects,
     setHealth(ok, status = ok ? 200 : 503) { healthOk = ok; healthStatus = status; },
     setNetworkOnline(value) { networkOnline = value; },
-    emitPush(connected) {
-      for (const listener of pushReadings) listener({connected});
+    deferHealth() { deferProbe = true; },
+    releaseHealth(ok) { releaseProbe({ok, status: ok ? 200 : 503}); },
+    emitPush(connected, lastInboundAt) {
+      for (const listener of pushReadings) listener({connected, lastInboundAt});
     },
     probeCount: () => probeCount,
     banner: () => dom.window.document.getElementById('backend-offline-banner'),
@@ -215,6 +220,61 @@ const flush = async () => {
     await flush();
     observed.recovered = env.banner() === null
       && dom.window.document.title === 'Tofu';
+  } else if (scenario === 'push-heartbeat-recovery') {
+    env.setHealth(false);
+    env.emitPush(false);
+    await flush();
+    scheduler.fireTimeout(4000);
+    await flush();
+    const before = env.probeCount();
+    env.emitPush(true, scheduler.port.now());
+    await flush();
+    observed.recovered = monitor.snapshot().phase === 'online'
+      && env.banner() === null && dom.window.document.title === 'Tofu'
+      && env.probeCount() === before && recovery.conversations === 1
+      && !scheduler.active('interval', 5000);
+  } else if (scenario === 'stale-probe-after-heartbeat') {
+    env.deferHealth();
+    env.emitPush(false);
+    await flush();
+    scheduler.advance(1);
+    env.emitPush(true, scheduler.port.now());
+    env.releaseHealth(false);
+    await flush();
+    observed.online = monitor.snapshot().phase === 'online'
+      && monitor.snapshot().consecutiveFailures === 0
+      && !monitor.snapshot().probing && env.banner() === null
+      && !scheduler.active('timeout', 4000);
+  } else if (scenario === 'stale-push-is-not-proof') {
+    const oldReceipt = scheduler.port.now();
+    env.emitPush(true, oldReceipt);
+    scheduler.advance(10_000);
+    env.setHealth(false);
+    env.emitPush(false);
+    await flush();
+    scheduler.fireTimeout(4000);
+    await flush();
+    env.emitPush(true, oldReceipt);
+    env.emitPush(true);
+    await flush();
+    observed.stillUnavailable = monitor.snapshot().phase === 'offline'
+      && !!env.banner() && recovery.notices === 0;
+  } else if (scenario === 'network-cause-changes') {
+    env.setHealth(false);
+    env.emitPush(false);
+    await flush();
+    scheduler.fireTimeout(4000);
+    await flush();
+    env.setNetworkOnline(false);
+    dom.window.dispatchEvent(new dom.window.Event('offline'));
+    observed.localNetwork = env.banner().textContent.includes('网络断开desc')
+      && dom.window.document.title.startsWith('【网络断开】');
+    env.setNetworkOnline(true);
+    dom.window.dispatchEvent(new dom.window.Event('online'));
+    await flush();
+    observed.recheckingServer = !env.banner().textContent.includes('网络断开desc')
+      && !dom.window.document.title.startsWith('【网络断开】')
+      && monitor.snapshot().phase === 'offline';
   } else if (scenario === 'snooze') {
     env.setHealth(false);
     env.emitPush(false);
@@ -257,6 +317,7 @@ const flush = async () => {
     env.setHealth(false);
     env.emitPush(false);
     dom.window.dispatchEvent(new dom.window.Event('offline'));
+    env.emitPush(true, scheduler.port.now());
     await flush();
     observed.suppressed = monitor.snapshot().plannedInterruption === true
       && monitor.snapshot().phase === 'online'
@@ -490,7 +551,6 @@ def _run_harness(bundle: str, harness: str, scenario: str) -> dict[str, object]:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.skipif(not HAS_BROWSER_DEPS, reason="node/jsdom unavailable")
 @pytest.mark.parametrize(
     ("scenario", "expected"),
     [
@@ -509,6 +569,10 @@ def _run_harness(bundle: str, harness: str, scenario: str) -> dict[str, object]:
         }),
         ("proxy-hiccup", {"confirmationArmed": True, "quiet": True}),
         ("browser-network", {"networkBanner": True, "recovered": True}),
+        ("push-heartbeat-recovery", {"recovered": True}),
+        ("stale-probe-after-heartbeat", {"online": True}),
+        ("stale-push-is-not-proof", {"stillUnavailable": True}),
+        ("network-cause-changes", {"localNetwork": True, "recheckingServer": True}),
         ("snooze", {"hidden": True, "tickFired": True, "reshown": True}),
         ("lifecycle", {
             "initialSubscriptions": True,
@@ -528,7 +592,6 @@ def test_backend_availability_outcomes(
     assert _run_harness(BACKEND_BUNDLE, _BACKEND_HARNESS, scenario) == expected
 
 
-@pytest.mark.skipif(not HAS_BROWSER_DEPS, reason="node/jsdom unavailable")
 @pytest.mark.parametrize(
     ("scenario", "expected"),
     [

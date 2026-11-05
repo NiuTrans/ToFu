@@ -249,6 +249,60 @@ exposed. Installing native PDF dependencies for every web search would add
 startup and deployment costs. The extractor owns typed failure; fetch owns its
 existing failure/diagnostic projection.
 
+## Included local PDF reading and source fidelity
+
+**Problem:** the base package could fetch PDF bytes but required a native extra
+to read them. Some native library builds also fail to load on older hosts.
+Small text budgets discarded the rich-text prefix or let the raw-text reader
+overshoot; line-number guessing removed genuine numeric evidence. A URL-only
+cache could reuse the wrong PDF budget, including PDFs without a `.pdf` suffix.
+
+**Decision:** include lazy `pypdf>=6.21.1,<7` for local text extraction when the
+optional native reader cannot load. Preserve the preferred classic native
+Markdown path and raw native fallback when available. The base reader includes
+rotated text, uses the upstream finite parser/decompression limits and adds no
+OCR, remote service, model call, password handling or persistent cache.
+All readers preserve numeric source lines and use one literal prefix collector;
+positive budgets bound source characters plus an explicit truncation marker.
+Raw readers stop before another page once the budget is reached. Short readable
+PDFs count as evidence; empty/image-only, locked and malformed files remain typed
+failures. Documents and byte streams close on success and failure.
+
+`pdf_max_chars` retains the existing PDF-specific budget; `max_chars` controls
+ordinary page previews. Preview PDF entries share the existing bounded cache,
+keyed by URL and effective PDF budget rather than a filename guess. Full and
+query-focused reads continue bypassing preview entries. Cached truncation is
+reported through the same diagnostic flag.
+
+**Resource evidence:** on the development host, three public text PDFs (0.10–
+2.11 MiB) took 1.04–2.11 seconds including package/parser import and peaked at
+79–132 MiB RSS in a base+MCP wheel environment with pypdf 6.21.1. Each mode ran
+in a fresh process without network/model work. Separately qualified in the
+host environment, native raw took 0.65–0.73 seconds at 92–100 MiB;
+the optional classic Markdown path took 1.45–9.49 seconds at 296–463 MiB.
+These are single-sample compatibility measurements, not performance bounds or
+retrieval-quality scores. Compressed PDFs can expand far beyond their download
+size; a character budget does not bound the memory needed to parse a page.
+Existing byte/parser limits and caller worker lifecycles still apply. Web-only
+imports activate none of the PDF/OCR libraries; no resident worker is added.
+
+**Alternatives considered:** requiring a native extra leaves basic document
+evidence unavailable in a default installation; making the native stack
+mandatory adds deployment and startup costs. Replacing native Markdown with
+plain text would discard its table/layout benefit. Remote conversion adds a
+service dependency and changes source access. Guessing which standalone numbers
+are expendable or caching arbitrary previews as complete evidence loses facts.
+The library instead preserves literal extracted text; scans need separate OCR,
+and extraction does not overcome HTTP refusals or guarantee reading order.
+
+Specifications: `test_default_pdf.py` (base/ABI failure, Unicode, rotation,
+encryption, limits and closure), `test_pdf_failure_evidence.py` (fidelity and
+public cache), `test_lazy_pdf_dependencies.py` (idle imports/concurrent loading),
+and the existing native classic-seam tests. Community references:
+[pypdf extraction](https://pypdf.readthedocs.io/en/stable/user/extract-text.html),
+[pypdf package](https://pypi.org/project/pypdf/). The minimum version includes the
+current [upstream stream-parser work limits and fixes](https://pypdf.readthedocs.io/en/stable/meta/CHANGELOG.html#version-6-21-1-2026-10-17).
+
 ## Snippet groups and fetched evidence
 
 **Problem:** similar titles and search snippets need not describe identical
@@ -316,6 +370,18 @@ received sidecar; only its ordering changes. Primary evidence is ranked in its
 own pool. Neither ordering nor a successful fetch upgrades lexical uncertainty
 to factual support. Explicit `rerank=False` keeps both pools in their existing
 order. The library, host and MCP share this projection and its existing bounds.
+
+**Mixed-script bodies:** a Chinese, Cyrillic or Arabic query may contain a Latin
+product name. Testing only whether the body introduces a new script misses an
+English document whose script is already present in that query. The common
+`classify_relevance` owner therefore recognizes unequal query/body script sets
+in either direction, requiring an actual body. Its existing fetched cross-language
+path keeps the document accessible while preserving `weak_match`/`unverified`;
+it does not grant lexical or factual support. Same-script misses and snippet-only
+listings retain their existing candidate boundary. Lowering the lexical coverage
+threshold instead would mislabel unrelated same-script pages. The public pipeline
+tests in `test_search_evidence_recovery.py` exercise both directions and retain
+the uncertainty assertions.
 
 No network/model call, resident worker, cache or durable record is added. The
 extra local scoring pass is bounded by the already received candidate pool.
@@ -394,6 +460,178 @@ negative operands are constraints, not positive subject evidence. Quoted
 literals remain subjects. CJK bigrams come from contiguous runs; non-Latin
 words, accents and numeric versions remain matchable. This is lexical matching,
 not semantic equivalence or factual verification.
+
+**Chinese lexical admission. Problem:** question framing can inflate bigram
+overlap with query-repeating snippets, but removing it also changes evidence
+coverage, candidate admission and the prominence of the requested relation.
+
+**Decision:** retain the shared contiguous-bigram default. Admit a replacement
+only with frozen development/validation roles, preserved literal/operator and
+source boundaries, measured local cost, and separate free-web evidence. A gain
+on judged passage pools alone does not establish a gain in the native search
+pipeline. Keep earlier negative cohorts intact when changing a measurement.
+Exact reference-URL rank is a source-discovery diagnostic; another page can
+provide the requested information. Metadata relevance judgments must be blind
+to variant/rank and distinguish requested information from a broader subject
+page. Assistant judgments are not independent human labels or fact verification.
+
+**Alternatives not admitted:** replacing bigrams with
+[Jieba](https://github.com/fxsjy/jieba) accurate segmentation improved development
+scores but regressed on the frozen validation questions and added dictionary
+memory. Removing unquoted Chinese question forms improved a separate 1,277-query
+MIRACL judged-passage comparison (nDCG@5 0.431 to 0.457), but a new free-web
+metadata cohort did not pass its declared non-regression gate. Among its first
+result downgrades, individual-director duties displaced board duties, and naval
+precursor history displaced a founding-date snippet. Do not generalize that
+passage gain into a default matching policy, or optimize for one preferred host.
+These are admission limits of the evaluated policies, not a rejection of all
+dictionary analyzers or a claim that question framing always helps relevance.
+
+**CJK evidence coverage. Problem:** `tokenize` also emits the two characters
+of a two-character run as single tokens, but a longer run in a page yields
+bigrams only. Those query characters therefore never matched ordinary page
+text, yet they counted in the evidence denominator. For `大模型 推理加速 vLLM 原理`
+the relevant listing `vLLM 推理原理（一）…` scored 3/9 and was classified
+`weak_match`. Weak listings beyond the recall floor are not fetched, so the
+readable relevant pages were never read; only blocked Zhihu/CSDN listings were
+established, and the search delivered one readable page.
+
+**Decision:** evidence terms (`lexical.subject_terms`, used by classification,
+fetch admission and deepening) drop a lone CJK character when a subject bigram
+contains it; a one-character run keeps its character. The same listing scores
+3/7 and is fetched. Ranking and excerpts keep the unchanged `tokenize` model,
+so the contiguous-bigram default above is not replaced.
+
+**Evidence:** the 25-case synthetic benchmark was unchanged (all four metrics
+1.0 before and after). A live 10-query Chinese technical cohort, run minutes
+apart through the same host path, delivered 34 readable results (33
+established) against 33 (32) before. Kubernetes and vector-database queries
+gained two readable pages each and the vLLM query read the two pages it
+previously skipped. Redis lost two readable pages through fetch failures on an
+identical delivered URL set; one Transformer slot went to a Zhihu listing
+instead of a readable page. This is one small live cohort with network
+variance, not a relevance-quality estimate. **Alternative not admitted:**
+dropping single characters from `tokenize` itself would also change BM25
+ranking and excerpts, which this policy reserves for a measured replacement.
+
+**Local neural ranking admission. Problem:** lexical matching misses semantic
+relations, but a neural relevance score can still prefer a different event or
+role and cannot recover evidence absent from the retrieved pool. Local weights
+avoid an inference API charge; they still consume download, CPU and memory
+resources and require an explicit lifecycle.
+
+**Decision:** retain the current default while qualifying an optional local
+reranker through the same candidate, evidence, ranking and delivery owners.
+The Apache-2.0 creator models
+[Qwen3-Reranker-0.6B](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/tree/e61197ed45024b0ed8a2d74b80b4d909f1255473)
+and [BGE-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e)
+improved a 393-query Chinese development comparison from 0.429 nDCG@5 to
+0.794 and 0.782. These are previously exposed judged passage pools, not a
+retrieval holdout or evidence that one model is generally best. The paired
+Qwen-minus-BGE interval includes zero; Qwen won the frozen quality-first point
+selection, while BGE was faster on the measured CPU.
+
+In a separate 28-query free-web validation, the guarded Qwen prototype improved
+discounted visible-metadata utility by 3.0% and direct-information listings from
+84 to 86. Eleven queries improved, fifteen tied and two regressed; one first
+result received a lower relevance grade after a broad lineup lead was replaced
+by a video excerpt naming Black Label Society rather than the requested Black
+Sabbath lineup. This is an excerpt judgment, not a verified concert-history
+error. Labels used the complete delivered titles/snippets with arm and rank
+hidden, and ambiguity alternatives were sealed before revealing results.
+They are assistant relevance
+judgments, not independent human labels, factual accuracy or agent completion.
+Recorded alternative grades retain an overall utility gain, but English
+direct-information count can decrease by one. Keep that uncertainty visible.
+
+Neural probabilities must not make unrelated listings eligible for upstream
+rank priors: positivity is not lexical evidence or a calibrated truth threshold.
+Preserve the common native-prior guard, evidence classes, literal source text,
+diversity and explicit rerank-disable behavior. A prototype that omitted this
+guard was corrected and replayed before collecting the fresh validation; its
+earlier measurements do not qualify the corrected policy by themselves.
+
+Default admission also requires model facts through the shared
+[`MODEL_REGISTRATION.md`](../../../docs/MODEL_REGISTRATION.md) boundary, an
+explicit non-chat ranking capability, and correct treatment of local execution
+cost versus reference API prices. Missing API prices are not zero prices.
+The Qwen artifact has an admitted, pinned manifest generated into
+`tofu_search/generated_local_models.py`; publication alone does not install or
+execute it. The host taxonomy excludes rerankers from chat selection/dispatch.
+
+**Optional execution decision:** `LocalReranker` accepts that pinned artifact
+through an explicit caller-owned scope. Python configuration, scoped host
+binding and MCP startup reuse the common final ranking pipeline. A disposable
+CPU worker binds its launching parent before input/model loading, verifies all
+model bytes, loads dependencies lazily and retires its
+process group before releasing capacity. Deadline/model/resource failures keep
+lexical ranking; Stop and unresolved cleanup propagate. Source text, evidence
+classes, uncertainty separation, entity/domain diversity and the native-prior
+guard remain shared. Prefetch stays lexical. Neither model discovery, downloads
+nor writes to the host's Model store occur during search.
+
+Runtime qualification on 2026-10-22 replayed all 28 frozen free-web queries:
+primary and complete uncertain-candidate URL orders matched the guarded
+prototype exactly, with source/evidence fields preserved. This is an exposed
+cohort parity check. A predeclared hash sample of 64 nonoverlapping Chinese MIRACL
+validation pools, previously available to lexical studies but not scored by the
+neural candidate, qualified the current fetched-body representation. nDCG@5 was
+0.417 → 0.788, MRR 0.467 → 0.804 and Hit@1 17/64 → 44/64. There were 47 nDCG
+wins, 9 ties and 8 losses; all inputs completed without fallback. The text
+representation reuses query-focused body passages, including the existing
+title/snippet weights, with the qualified 1,024-token scorer limit. These known
+candidate pools measure ordering, not free-web recall, truth or agent accuracy.
+They support optional execution, not changing the default or claiming broad
+superiority. Both runs forbade Python socket connections and made no inference
+or paid-search API calls. Resource bounds and observed latency/RSS live in
+[`RESOURCE_CONTROL.md`](../../../docs/RESOURCE_CONTROL.md#optional-local-search-ranking).
+
+**Alternatives rejected:** making the model implicit would impose download and
+residency costs on default search before broad quality admission. A permanent
+worker retains shape-dependent caches: the earlier Torch development process
+reached 8.4 GiB. Disabling its oneDNN cache reduced residency in a probe but
+increased median latency about 3.4 times, so that policy was not adopted.
+
+A paired 64-pool development check also rejected removing duplicated title/snippet
+weights from the neural body representation: nDCG@5 changed 0.7868 → 0.7884,
+while MRR fell 0.8032 → 0.7834 and Hit@1 fell 44/64 → 42/64. Both arms used
+the same process and retained their batch-of-eight boundaries, with balanced
+arm order. These previously exposed pools are development evidence. Three
+identical-input CPU repeats differed in floating-point scores while retaining
+the same order for that one query; archived scores are not an exact control for
+small numerical changes. Preserve current paired controls and raw scores.
+
+A separate 32-query free-web diagnostic used sixteen hash-selected English
+queries from the [WebCode dataset](https://github.com/exa-labs/benchmarks/tree/0d817af66fb6c47afb7b097b9f4e40a763b6fc3a)
+and literal Chinese translations. Collection used the default free engines,
+native automatic fetching, no browser extra, no model filter and no paid API.
+It received 511 final candidates, including 149 retained bodies; 233 fetch
+attempts yielded 154 bodies and 79 failures, with one search deadline. Before
+the mixed-script correction, eight queries had no primary result. Replaying the optional scorer preserved the
+original pools and completed all 32 calls; literal benchmark excerpts appeared
+in primary top-three bodies for 12 → 13 queries. This is a wording diagnostic,
+not answer accuracy, official WebCode scoring or a multilingual quality ranking.
+Source-version differences make exact reference-URL hits insufficient, and
+the sample contains only sixteen independent source questions. These observations
+do not justify making the optional model the default. Retrieval, extraction,
+uncertain discovery and end-to-end agent success require separate qualification.
+
+An additional 128-pool CPU comparison preserved active tokens and positions
+while padding sequence lengths to multiples of 64. Peak RSS fell from 5.2 to
+2.8 GiB, but forty complete orders and five first results changed, so this is
+not an admitted transparent optimization. Computing only the two label logits
+preserved all 128 orders, with about 5% lower peak memory and 9% higher median
+latency in that run. Floating-point scores were not identical. Repeated input
+groups showed stable residency; these observations do not prove a leak, broad
+backend parity, or a suitable production worker lifetime.
+
+**Alternatives not admitted:** mandatory paid search/reranking services conflict
+with the [free-search contract](free-search.md); an unconditional in-process
+model adds startup and retained-memory costs; a positive-score cutoff invents
+an evidence rule; replacing the pipeline with a separate neural search loop
+duplicates its existing owners. Pure reranking also leaves a pool containing
+only question-repeating promotional pages without an answer: source recovery
+and fetched evidence need separate validation.
 
 Technical symbols are lexical evidence: `C++` and `C#` remain distinct,
 and balanced `O(...)`, `Ω(...)` and `Θ(...)` notation retains a bounded atomic

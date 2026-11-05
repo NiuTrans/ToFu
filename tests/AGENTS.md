@@ -43,18 +43,46 @@ boundary; everything else stays real.
 
 - Replay is the default in scenario tests: keyless, hermetic, xdist-safe.
   Request identity is a sha256 over normalized `{model, messages, system,
-  tools}` (cwd/tmp → `{{CWD}}`, home → `{{HOME}}`, dates → `{{DATE}}`); calls
-  match the script in strict recording order and drift/exhaustion raises
-  `ScenarioDriftError`.
+  tools}` (cwd/tmp → `{{CWD}}`, home → `{{HOME}}`, host OS name and release →
+  `{{OS}}`, dates → `{{DATE}}`); calls match the script in strict recording
+  order and drift/exhaustion raises `ScenarioDriftError`.
+- The normalized request behind every recorded field digest lives in the
+  shared content-addressed store `tests/fixtures/llm_replay/requests/`
+  (`<field>-<digest prefix>.json`, verified by digest on load). A drift error
+  names the JSON path and the recorded vs current values of the first
+  difference; `tests/llm/test_llm_replay_unit.py::TestFixtureCorpus` requires
+  every committed step to resolve and rejects unreferenced entries.
 - Record requires `TOFU_LLM_REPLAY=record` AND `TOFU_PARITY_LIVE=1` plus a real
   provider key. It writes `script.next.jsonl` next to the fixture — never over
   a committed `script.jsonl`; a new generation is reviewed and renamed by hand.
   Offline re-generation of committed fixtures uses
-  `TOFU_LLM_REPLAY_AUTHOR=1` (same `.next` output, no network).
-- **Fix fixtures, not normalizers.** When a legitimate product change alters
-  the request (new prompt section, new tool schema), re-record the scenario
-  and review the digest diff; never teach the normalizer a new special case
-  to keep a stale fixture green.
+  `TOFU_LLM_REPLAY_AUTHOR=1` (same `.next` output, no network; the committed
+  script's events and results are the seed, so only digests change).
+- Re-record after an intended request change, from the repository root of the
+  merged tree:
+
+  ```sh
+  rm -f tests/fixtures/llm_replay/*/script.next.jsonl
+  TOFU_LLM_REPLAY_AUTHOR=1 python3 -m pytest -q -p no:cacheprovider -n 6 \
+    tests/llm/test_llm_replay_scenarios.py tests/llm/test_upstream_turn_replay.py
+  for d in tests/fixtures/llm_replay/*/; do
+    if [ -f "$d/script.next.jsonl" ]; then mv "$d/script.next.jsonl" "$d/script.jsonl"; fi
+  done
+  python3 -m pytest -q -p no:cacheprovider tests/llm/test_llm_replay_unit.py
+  git diff -M tests/fixtures/llm_replay/requests
+  ```
+
+  The unit run names unreferenced store entries to delete; the final diff is
+  the review: every changed request line must trace to an intended commit.
+- **Fix fixtures, not normalizers.** The normalizer tokenizes host facts only
+  (paths, home, host OS, dates). When a legitimate product change alters the
+  request (new prompt section, new tool schema), re-record the scenario and
+  review the request diff; never teach the normalizer a new special case to
+  keep a stale fixture green.
+- **Scenarios never race the wall clock.** When a timeout or delay decides
+  request bytes, the scenario expires the production timer explicitly
+  (`test_parallel_tools_timeout`); a sleep that outlasts a real timer flakes
+  on a loaded host.
 - Inject pre-chunk provider failures (429/5xx) with a `{"kind":"error"}`
   step; streamed content/tool events with `stream` steps; non-streaming
   completions with `chat` steps. Every scenario asserts the durable event

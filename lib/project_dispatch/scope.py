@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import os
 import stat
 
-from lib.llm.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError, ToolAdmissionRefused
 
 FILE_TOOLS = frozenset({'read_files', 'write_file', 'edit_file'})
 _CONSULT = {'mode': 'consult', 'tools': [], 'readPaths': [], 'writePaths': [], 'maxToolCalls': 0}
@@ -74,6 +74,23 @@ def profile_for(assignment):
 def _exact_fields(value, allowed):
     if not isinstance(value, dict) or any(key not in allowed for key in value):
         raise ValueError('File scope refuses unknown/internal control fields and alternate transports')
+
+
+def _argument_refusal(name, error):
+    """Type an argument-shape refusal as this file surface's contract error.
+
+    The shape is the dispatch copy's stricter argument contract, not authority:
+    the pipeline rejects only this call, which never runs, with a next_action.
+    Path and grant refusals stay ToolAdmissionRefused/ValueError and fail the turn.
+    """
+    from lib.tools.contracts import ARGUMENT_ALTERNATIVES, ToolContractError
+    message = str(error).rstrip('.') + '.'
+    # The read_files copy says "exactly one of path or reads"; the shared
+    # alternatives rule already names how to choose.
+    if name == 'read_files':
+        return ToolContractError('invalid_argument_value', message,
+                                 next_action=ARGUMENT_ALTERNATIVES[name].next_action)
+    return ToolContractError('invalid_argument_value', message)
 
 
 def _paths(name, args):
@@ -149,7 +166,7 @@ class FileScope:
         binding = validate_task(self.task)
         row = owned_workspace(self.task, binding)
         if row['workspace_path'] != self.root:
-            raise AbortedError('File execution workspace ownership changed')
+            raise ToolAdmissionRefused('File execution workspace ownership changed')
         path = _relative(path)
         if (path not in self.paths or not relative_path_allowed(path, self.read_prefixes)
                 or write and (self.tool == 'read_files' or not relative_path_allowed(path, self.write_prefixes))):
@@ -291,51 +308,72 @@ class FileScope:
 
 
 def admit_tool(task, name, args, project_path=None):
-    """Fresh durable authority before refs, remote routing, preimages or I/O."""
-    from .admission import validate_task, repository_for, owned_workspace
+    """Fresh durable authority before refs, remote routing, preimages or I/O.
+
+    The single dispatch admission of every executor, ahead of soft role
+    policies, custom handlers and catalogs. Default deny: authority that cannot
+    be re-established is a typed refusal like any other and stops the task with
+    its dispatch cause; only a cooperative Stop keeps its cancellation.
+    """
+    from .admission import validated_dispatch, owned_workspace, stop_on_authority_failure
     task = task or {}
-    binding = validate_task(task)
-    if binding is None:
-        return None
-    profile = profile_for(repository_for(binding).validate(binding))
+    try:
+        validated = validated_dispatch(task)
+        if validated is None:
+            return None
+        # The one live validation of this admission also fixes its profile.
+        binding, assignment = validated
+        profile = profile_for(assignment)
+    except Exception as error:
+        from lib.turn_verdict import DISPATCH_AUTHORITY_ABORT_REASONS
+        if task.get('aborted') and task.get('_abort_reason') not in DISPATCH_AUTHORITY_ABORT_REASONS:
+            raise
+        stop_on_authority_failure(task, error)
+        raise ToolAdmissionRefused(f'Project dispatch authority is unavailable: {error}',
+                                   tool_name=name) from error
+    if task.get('_tool_env') is not None:
+        raise ToolAdmissionRefused('Project dispatch authority cannot be shadowed by a custom tool environment',
+                                   tool_name=name)
     if profile['mode'] == 'coordinator':
-        if (name not in profile['tools'] or task.get('_tool_env') is not None
+        if (name not in profile['tools']
                 or project_path is not None and project_path != binding['projectPath']):
-            raise AbortedError('Coordinator call exceeds its original continuation policy')
+            raise ToolAdmissionRefused('Coordinator call exceeds its original continuation policy', tool_name=name)
         return None
     if profile['mode'] == 'project':
         if name not in profile['tools']:
-            raise AbortedError('Worker tool is outside its original Coordinator capability ceiling')
-        if task.get('_tool_env') is not None:
-            raise AbortedError('Delegated workers cannot replace their tool environment')
+            raise ToolAdmissionRefused('Worker tool is outside its original Coordinator capability ceiling', tool_name=name)
         row = owned_workspace(task, binding)
         if project_path is not None and project_path != row['workspace_path']:
-            raise AbortedError('Worker call root differs from its registered isolated workspace')
+            raise ToolAdmissionRefused('Worker call root differs from its registered isolated workspace', tool_name=name)
         # Ordinary project, command, browser and MCP owners keep their own
         # admission/approval/teardown. This profile is not a file sandbox claim.
         return None
     if profile['mode'] != 'files' or name not in profile['tools'] or name not in FILE_TOOLS:
-        raise AbortedError('Project dispatch has no authority for this exact tool')
+        raise ToolAdmissionRefused('Project dispatch has no authority for this exact tool', tool_name=name)
     cfg = task.get('config') or {}
     if any(cfg.get(key) for key in ('remoteWorktree', 'remoteWorktreeBinding', 'remoteWorkspace',
                                    'workspaceRef', 'projectPaths', 'allowOutsideWorkspace')):
-        raise AbortedError('File dispatch cannot use remote or expanded workspace authority')
+        raise ToolAdmissionRefused('File dispatch cannot use remote or expanded workspace authority', tool_name=name)
     from lib.desktop.remote import remote_worktree_binding
     if remote_worktree_binding(cfg):
-        raise AbortedError('File dispatch cannot use a remote transport')
-    paths = tuple(_relative(path) for path in _paths(name, args))
+        raise ToolAdmissionRefused('File dispatch cannot use a remote transport', tool_name=name)
+    try:
+        requested = _paths(name, args)
+    except ValueError as error:
+        raise _argument_refusal(name, error) from error
+    paths = tuple(_relative(path) for path in requested)
     for path in paths:
         if (not relative_path_allowed(path, profile['readPaths'])
                 or name != 'read_files' and not relative_path_allowed(path, profile['writePaths'])):
-            raise AbortedError('File target is outside its accepted read/write prefixes')
+            raise ToolAdmissionRefused('File target is outside its accepted read/write prefixes', tool_name=name)
     row = owned_workspace(task, binding)
     root = row['workspace_path']
     if project_path is not None and project_path != root:
-        raise AbortedError('File call root differs from its durably owned workspace')
+        raise ToolAdmissionRefused('File call root differs from its durably owned workspace', tool_name=name)
     if os.path.realpath(root) != root:
-        raise AbortedError('Owned workspace root must not be a symlink alias')
+        raise ToolAdmissionRefused('Owned workspace root must not be a symlink alias', tool_name=name)
     if not hasattr(os, 'O_NOFOLLOW') or os.open not in os.supports_dir_fd or os.replace not in os.supports_dir_fd and os.rename not in os.supports_dir_fd:
-        raise AbortedError('Descriptor-confined file I/O is unavailable on this platform')
+        raise ToolAdmissionRefused('Descriptor-confined file I/O is unavailable on this platform', tool_name=name)
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         metadata = os.fstat(descriptor)
@@ -373,7 +411,7 @@ def assert_firstparty_file_handler(name, handler):
     """Main gateway calls this before any custom handler/transport can shadow a name."""
     from lib.tasks_pkg.handlers.project import _handle_project_tool
     if name not in FILE_TOOLS or handler is not _handle_project_tool:
-        raise AbortedError('File grants require the exact first-party project handler')
+        raise ToolAdmissionRefused('File grants require the exact first-party project handler', tool_name=name)
 
 
 def checkpoint_paths_allowed(request, paths):

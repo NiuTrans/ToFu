@@ -1,39 +1,66 @@
 /**
- * Turn-local action evidence states. Each keyed tool/program owns its summary;
- * this controller never creates controls or hides authored content.
- * Entry points: update, patchBlock, completeBlock. No backend or transcript state.
+ * Turn-local round overview and reader choices. Existing keyed tool nodes keep
+ * their evidence owners; the overview never hides a mounted call.
+ * No backend, transport or transcript state. Content mounting stays in Surface.
  */
 import type { ConversationBlockViewModel, ConversationTurnViewModel } from '../presentation/conversation-view-model';
-import { toolBlockOwnsSummary, toolBlockActivityState, type ActionActivityState } from '../presentation/round-outline';
+import type { GroupedTurnEntry } from '../presentation/grouped-turn-layout';
+import { toolBlockOwnsSummary, toolBlockActivityState, selectRoundOutline,
+  type ActionActivityState, type RoundOutlineSection } from '../presentation/round-outline';
 import { hasAcceptedWorkUnit } from '../presentation/tool-execution-groups';
+import { decorateToolSummary, toolSummaryIdentity } from './tool-summary';
+import { setStableData as setData } from './renderers/stable-dom';
 
-export type RoundOutlineLabel = `roundOutline.${'active' | 'background' | 'attention' | 'returned'}`;
+export type RoundOutlineLabel = `roundOutline.${'active' | 'background' | 'attention' | 'returned'
+  | 'activity' | 'round' | 'tools' | 'search' | 'matches' | 'moreMatches' | 'previousMatches'}`;
 export type RoundOutlineTranslator = (key: RoundOutlineLabel, count?: number) => string;
 const english: RoundOutlineTranslator = (key, n) => ({
   'roundOutline.active': 'In progress', 'roundOutline.background': `${n} in background`,
   'roundOutline.attention': 'Review details', 'roundOutline.returned': 'Response returned',
+  'roundOutline.activity': 'Execution', 'roundOutline.round': `Round ${n}`,
+  'roundOutline.tools': `${n} tool calls`, 'roundOutline.search': 'Find a call',
+  'roundOutline.matches': `${n} matching calls`, 'roundOutline.moreMatches': 'More matches',
+  'roundOutline.previousMatches': 'Previous matches',
 })[key];
 
 type MountedAction = { state: ActionActivityState; initialized?: boolean };
 
 /** Adjacent operational leaves share a visual surface. This is decoration of
  * the mounted sequence, never grouping, reparenting or disclosure ownership.
- * Durable deliverables and authored narration always interrupt the surface. */
-function isProcessLeaf(block: ConversationBlockViewModel): boolean {
+ * Durable deliverables, authored narration and the tool panel header always
+ * interrupt the surface. */
+function isProcessLeaf(block: GroupedTurnEntry): boolean {
   if (block.kind === 'tool' || block.kind === 'program') return !hasAcceptedWorkUnit(block.round);
   return ['thinking', 'injections', 'system-note', 'system-note-group',
     'compaction', 'activity-event', 'activity-event-group', 'file-changes'].includes(block.kind);
 }
 
 type ProcessEdge = 'single' | 'start' | 'middle' | 'end';
+type RoundControls = {
+  section: RoundOutlineSection; header: HTMLElement; label: HTMLElement;
+  search: HTMLInputElement; results: HTMLElement;
+  blocks: ConversationBlockViewModel[]; limit: number;
+};
 
 export class RoundOutline {
   private readonly actions = new Map<string, MountedAction>();
   private readonly processEdges = new Map<string, ProcessEdge>();
   private readonly translate: RoundOutlineTranslator;
+  private readonly rounds = new Map<string, RoundControls>();
+  private readonly beforeBlocks = new Map<string, HTMLElement[]>();
 
-  constructor(_container: HTMLElement, translate?: RoundOutlineTranslator) {
+  constructor(private readonly container: HTMLElement, translate?: RoundOutlineTranslator,
+    private reveal?: (blockId: string) => void) {
     this.translate = translate ?? english;
+  }
+
+  /** Detached controls may still be held by focus/inspection code. They must
+   * neither retain old tool payloads nor navigate a replacement Surface. */
+  dispose(): void {
+    this.reveal = undefined;
+    for (const controls of this.rounds.values()) controls.blocks = [];
+    this.actions.clear(); this.processEdges.clear(); this.rounds.clear();
+    this.beforeBlocks.clear();
   }
 
   private evidenceDisclosure(node: HTMLElement): HTMLDetailsElement | null {
@@ -44,7 +71,7 @@ export class RoundOutline {
     return details && !details.closest('.sw-panel') ? details : null;
   }
 
-  update(turn: ConversationTurnViewModel, blocks: ReadonlyArray<ConversationBlockViewModel>): void {
+  update(turn: ConversationTurnViewModel, blocks: ReadonlyArray<GroupedTurnEntry>): void {
     const next = new Map<string, MountedAction>();
     this.processEdges.clear();
     if (turn.role === 'assistant') {
@@ -55,7 +82,7 @@ export class RoundOutline {
             : (process[index + 1] ? 'start' : 'single'));
       });
       for (const block of blocks) {
-        if (!toolBlockOwnsSummary(block)) continue;
+        if (block.kind === 'tool-panel' || !toolBlockOwnsSummary(block)) continue;
         const item = this.actions.get(block.blockId) ?? { state: 'returned' as const };
         item.state = toolBlockActivityState(block);
         next.set(block.blockId, item);
@@ -63,26 +90,115 @@ export class RoundOutline {
     }
     this.actions.clear();
     for (const [id, item] of next) this.actions.set(id, item);
+    this.updateRounds(turn, blocks);
   }
 
-  patchBlock(node: HTMLElement, block: ConversationBlockViewModel): void {
-    node.dataset.deliverable = String(block.kind === 'text' && block.deliverable);
-    const edge = this.processEdges.get(block.blockId);
-    if (edge) node.dataset.processEdge = edge;
-    else delete node.dataset.processEdge;
-    const item = this.actions.get(block.blockId);
-    if (item) {
-      node.dataset.toolSummary = 'self-contained';
-      node.dataset.actionState = item.state;
-    } else {
-      delete node.dataset.toolSummary;
-      delete node.dataset.actionState;
+  private updateRounds(turn: ConversationTurnViewModel, mounted: ReadonlyArray<GroupedTurnEntry>): void {
+    this.beforeBlocks.clear();
+    const mountedIds = new Set(mounted.map(block => block.blockId));
+    const byId = new Map(turn.blocks.map(block => [block.blockId, block]));
+    const sections = selectRoundOutline(turn).filter(section => section.toolCount > 8);
+    const retained = new Set(sections.map(section => section.id));
+    for (const [id, controls] of this.rounds) {
+      if (!retained.has(id)) { controls.header.remove(); this.rounds.delete(id); }
     }
-    // Visibility is owned by the content window, never internal round identity.
-    node.hidden = false;
+    for (const section of sections) {
+      const tools = section.blockIds.map(id => byId.get(id)!).filter(toolBlockOwnsSummary);
+      let controls = this.rounds.get(section.id);
+      if (!controls) { controls = this.createControls(section); this.rounds.set(section.id, controls); }
+      controls.section = section; controls.blocks = tools;
+      controls.label.textContent = `${this.translate('roundOutline.activity')} · ${
+        this.translate('roundOutline.round', section.identity.llmRound + 1)} · ${
+        this.translate('roundOutline.tools', section.toolCount)}`;
+      controls.header.title = [section.identity.attemptId, section.identity.taskId].filter(Boolean).join(' · ');
+      controls.search.setAttribute('aria-label', `${this.translate('roundOutline.search')} · ${
+        this.translate('roundOutline.round', section.identity.llmRound + 1)}`);
+      const first = tools.find(block => mountedIds.has(block.blockId));
+      if (first) this.beforeBlocks.set(first.blockId, [controls.header]);
+      else controls.header.remove();
+      // Search DOM is reader-owned while streaming. Recompute only on input,
+      // so an arriving result cannot replace the focused result button.
+    }
+  }
+
+  private createControls(section: RoundOutlineSection): RoundControls {
+    const doc = this.container.ownerDocument;
+    const header = doc.createElement('div'); header.className = 'conversation-round-header';
+    const label = doc.createElement('span'); label.className = 'conversation-round-label';
+    const search = doc.createElement('input'); search.type = 'search';
+    search.className = 'conversation-round-search';
+    search.placeholder = this.translate('roundOutline.search');
+    search.setAttribute('aria-label', this.translate('roundOutline.search'));
+    const results = doc.createElement('div'); results.className = 'conversation-round-matches'; results.hidden = true;
+    const controls: RoundControls = { section, header, label, search, results, blocks: [], limit: 20 };
+    header.append(label, search, results);
+    search.addEventListener('input', () => { controls.limit = 20; this.search(controls); });
+    search.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { search.value = ''; results.hidden = true; }
+    });
+    return controls;
+  }
+
+  private search(controls: RoundControls): void {
+    const query = controls.search.value.trim().toLocaleLowerCase();
+    controls.results.hidden = !query;
+    controls.results.replaceChildren();
+    if (!query) return;
+    const matches = controls.blocks.filter(block => {
+      const identity = toolSummaryIdentity(block);
+      return `${identity.name} ${identity.target} ${identity.intent} ${block.blockId}`.toLocaleLowerCase().includes(query);
+    });
+    const doc = this.container.ownerDocument;
+    const count = doc.createElement('span'); count.setAttribute('role', 'status');
+    count.textContent = this.translate('roundOutline.matches', matches.length); controls.results.append(count);
+    controls.limit = Math.max(20, Math.min(controls.limit, Math.ceil(matches.length / 20) * 20));
+    for (const block of matches.slice(controls.limit - 20, controls.limit)) {
+      const blockId = block.blockId;
+      const identity = toolSummaryIdentity(block);
+      const hit = doc.createElement('button'); hit.type = 'button';
+      hit.textContent = `${identity.name} · ${identity.intent}${identity.target ? ` · ${identity.target}` : ''}`;
+      hit.title = blockId;
+      hit.addEventListener('click', () => {
+        this.reveal?.(blockId);
+        const node = [...this.container.querySelectorAll<HTMLElement>(':scope > [data-block-id]')]
+          .find(node => node.dataset.blockId === blockId);
+        if (node) {
+          node.tabIndex = -1;
+          node.focus({ preventScroll: true }); node.scrollIntoView?.({ block: 'center', behavior: 'instant' });
+        }
+      });
+      controls.results.append(hit);
+    }
+    if (controls.limit > 20) {
+      const previous = doc.createElement('button'); previous.type = 'button';
+      previous.textContent = this.translate('roundOutline.previousMatches');
+      previous.addEventListener('click', () => { controls.limit -= 20; this.search(controls);
+        controls.results.querySelector('button')?.focus(); });
+      controls.results.append(previous);
+    }
+    if (matches.length > controls.limit) {
+      const more = doc.createElement('button'); more.type = 'button';
+      more.textContent = this.translate('roundOutline.moreMatches');
+      more.addEventListener('click', () => { controls.limit += 20; this.search(controls);
+        controls.results.querySelector('button')?.focus(); });
+      controls.results.append(more);
+    }
+  }
+
+  beforeBlock(blockId: string): readonly HTMLElement[] { return this.beforeBlocks.get(blockId) ?? []; }
+
+  /* Every commit re-patches every mounted block, several times a second while
+   * a reply streams; an unchanged value is never rewritten. */
+  patchBlock(node: HTMLElement, block: ConversationBlockViewModel): void {
+    const item = this.actions.get(block.blockId);
+    setData(node, 'deliverable', String(block.kind === 'text' && block.deliverable));
+    setData(node, 'processEdge', this.processEdges.get(block.blockId));
+    setData(node, 'toolSummary', item ? 'self-contained' : undefined);
+    setData(node, 'actionState', item?.state);
   }
 
   completeBlock(node: HTMLElement, block: ConversationBlockViewModel): void {
+    decorateToolSummary(node, block);
     const item = this.actions.get(block.blockId);
     if (!item) return;
     if (!item.initialized) {
@@ -96,9 +212,12 @@ export class RoundOutline {
     }
     // Generic results otherwise lack a verdict. Merge it into their sole row;
     // commands, approvals and rich warning cards already own explicit states.
-    const summary = node.querySelector<HTMLElement>('.ptool-result-header');
+    const summary = node.querySelector<HTMLElement>('[data-action-summary], .ptool-result-header');
     const prior = summary?.querySelector<HTMLElement>('.conversation-action-state');
-    if (!summary || item.state === 'returned') { prior?.remove(); return; }
+    if (!summary || item.state === 'returned' || summary.querySelector(
+      '.ptool-badge:not([hidden]), .ptool-cmd-status, .ptc-status, .hg-badge, .sw-status-pill, .conversation-tool-card__chip:not([hidden])')) {
+      prior?.remove(); return;
+    }
     const state = prior ?? node.ownerDocument.createElement('span');
     state.className = 'conversation-action-state';
     state.dataset.state = item.state;

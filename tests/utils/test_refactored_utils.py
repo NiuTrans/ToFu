@@ -24,6 +24,61 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 
 # ═══════════════════════════════════════════════════════════
+#  0. fast_deepcopy — copy.deepcopy contract on builtin JSON trees
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestFastDeepcopy:
+    """fast_deepcopy must be observably identical to copy.deepcopy."""
+
+    def test_identity_relationships_match_copy_deepcopy(self):
+        import copy
+
+        from lib.utils import fast_deepcopy
+
+        class Sub(dict):
+            pass
+
+        class Hooked:
+            def __deepcopy__(self, memo):
+                clone = Hooked()
+                clone.copied = True
+                return clone
+
+        shared = {'k': [1, {'z': None}]}
+        cyclic = {'name': 'root'}
+        cyclic['self'] = cyclic
+        loop = [1]
+        loop.append(loop)
+        source = {
+            'a': shared, 'b': shared, 'tuple': (shared, [3]), 'set': {1, 2},
+            'sub': Sub(x=[1]), 'hooked': Hooked(), 'cyclic': cyclic, 'loop': loop,
+            (1, 2): 'tuple-key', 'nested': [[[]], {}, [{'deep': [shared]}]],
+        }
+        expected, actual = copy.deepcopy(source), fast_deepcopy(source)
+
+        assert actual['a'] is actual['b'] is actual['tuple'][0] is actual['nested'][2][0]['deep'][0]
+        assert (expected['a'] is expected['b']) and actual['a'] is not shared
+        assert actual['cyclic']['self'] is actual['cyclic']
+        assert actual['loop'][1] is actual['loop']
+        assert type(actual['sub']) is Sub and actual['sub']['x'] is not source['sub']['x']
+        assert actual['hooked'].copied is True
+        assert actual['set'] == {1, 2} and actual['set'] is not source['set']
+        assert actual[(1, 2)] == 'tuple-key'
+        assert actual['nested'][0] is not source['nested'][0]
+
+    def test_json_tree_is_detached_and_equal(self):
+        from lib.utils import fast_deepcopy
+
+        source = {'rows': [{'id': index, 'tags': ['a', 'b'], 'score': index / 3,
+                            'flag': index % 2 == 0, 'empty': None} for index in range(50)]}
+        copied = fast_deepcopy(source)
+        assert copied == source
+        copied['rows'][0]['tags'].append('mutated')
+        assert source['rows'][0]['tags'] == ['a', 'b']
+
+
+# ═══════════════════════════════════════════════════════════
 #  1. repair_json
 # ═══════════════════════════════════════════════════════════
 

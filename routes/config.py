@@ -12,6 +12,7 @@ import sys
 from quart import request
 
 from lib.config_dir import config_path as _config_path
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.api_response import (
     api_bad_request,
@@ -179,38 +180,14 @@ def get_server_config():
         for k, v in saved['models'].items():
             models[k] = v
 
+    # Search limits are fixed tofu-search defaults; the saved search section
+    # holds only the fetch blocklist and the optional search gateway.
+    from lib.search.search_gateway import catalog_payload, public_gateway_settings
     search_info = {
-        'profile': getattr(_lib, 'SEARCH_PROFILE', 'balanced'),
-        'overrides': dict(getattr(_lib, 'SEARCH_OVERRIDES', {}) or {}),
-        'fetch_top_n': getattr(_lib, 'FETCH_TOP_N', 6),
-        'fetch_timeout': getattr(_lib, 'FETCH_TIMEOUT', 15),
-        'max_chars_search': getattr(_lib, 'FETCH_MAX_CHARS_SEARCH', 60000),
-        'max_chars_direct': getattr(_lib, 'FETCH_MAX_CHARS_DIRECT', 200000),
-        'max_chars_pdf': getattr(_lib, 'FETCH_MAX_CHARS_PDF', 0),
-        'max_bytes': getattr(_lib, 'FETCH_MAX_BYTES', 20 * 1024 * 1024),
         'skip_domains': sorted(getattr(_lib, 'SKIP_DOMAINS', set())),
-        'llm_content_filter': getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True),
-        'deepen_enabled': getattr(_lib, 'SEARCH_DEEPEN_ENABLED', False),
+        'gateway': public_gateway_settings(saved.get('search')),
+        'gateway_catalog': catalog_payload(),
     }
-    if 'search' in saved:
-        search_info.update(saved['search'])
-        # Apply saved llm_content_filter on config load (page refresh / startup)
-        if 'llm_content_filter' in saved['search']:
-            _lib.LLM_CONTENT_FILTER_ENABLED = bool(saved['search']['llm_content_filter'])
-            from lib.search.search_runtime import sync_search_config_if_loaded
-            sync_search_config_if_loaded()
-
-    # Live backend search status (tofu-search version / engines / extension
-    # reachability / filter model+mode) — the piece that lets the Settings UI
-    # show what the backend will ACTUALLY do, not just the saved knobs.
-    try:
-        from lib.search.search_settings import status_payload as _ss_status
-        from routes.api_v1.auth import current_auth
-        search_status = _ss_status(
-            owner_user_id=current_auth().owner_user_id)
-    except Exception as _e:
-        logger.warning('[ServerConfig] search status unavailable: %s', _e)
-        search_status = {'ok': False, 'error': str(_e)}
 
     server_info = {
         'Python': sys.version.split()[0],
@@ -375,7 +352,6 @@ def get_server_config():
     return api_ok({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
-        'search_status': search_status,
         'server_info': server_info,
         'feishu': feishu_info,
         'mcp_tool_summary': mcp_tool_summary,
@@ -625,7 +601,7 @@ def save_server_config():
             from lib.cost_experiments.cost_experiments import normalize_cost_experiment_config
             cost_experiment_prep = normalize_cost_experiment_config(
                 data['cost_experiment'], strict=True)
-        except ValueError as e:
+        except BadRequest as e:
             return api_bad_request('cost_experiment: %s' % e)
 
     # ── Bypass-list pre-processing ──
@@ -639,6 +615,21 @@ def save_server_config():
             data['proxy_bypass_domains'])
         if bypass_err:
             return api_bad_request('proxy_bypass_domains: %s' % bypass_err)
+
+    # Search gateway: validate before any vault write; the plaintext key is
+    # split off here and only its vault reference is persisted.
+    gateway_key = ''
+    if isinstance(data.get('search'), dict):
+        # gateway_catalog is a read-only GET projection; an imported export
+        # carries it and must not persist a stale copy of the catalog.
+        data['search'] = {k: v for k, v in data['search'].items() if k != 'gateway_catalog'}
+        if 'gateway' in data['search']:
+            from lib.search.search_gateway import prepare_gateway_update
+            try:
+                gateway_prep, gateway_key = prepare_gateway_update(data['search']['gateway'])
+            except BadRequest as e:
+                return api_bad_request('search.gateway: %s' % e)
+            data['search']['gateway'] = gateway_prep
 
     # ── Proxy pool pre-processing (OUTSIDE the atomic mutator) ──
     # Sanitize + split URL userinfo into the credentials vault BEFORE the
@@ -656,7 +647,7 @@ def save_server_config():
             for _pid, _secret in creds.items():
                 _vault_set('proxy_%s_auth' % _pid, _secret,
                            note='proxy pool credential')
-        except ValueError as e:
+        except BadRequest as e:
             return api_bad_request('proxy_pool credential: %s' % e)
         pool_prep = entries
         try:
@@ -669,6 +660,13 @@ def save_server_config():
                     pool_old_credential_ids.add(_pid)
         except Exception as e:
             logger.debug('[ServerConfig] prior proxy_pool read failed: %s', e)
+
+    if gateway_key:
+        from lib.search.search_gateway import store_gateway_key
+        try:
+            store_gateway_key(gateway_key)
+        except BadRequest as e:
+            return api_bad_request('search.gateway api_key: %s' % e)
 
     # The whole read-modify-write runs inside ONE ``update_json_atomic``
     # mutator so it is serialised (per-path thread lock + cross-process
@@ -714,13 +712,17 @@ def save_server_config():
             changes.append('presets')
 
         if 'search' in data and isinstance(data['search'], dict):
-            existing['search'] = data['search']
-            # LLM content filter is a separate module-level flag
-            if 'llm_content_filter' in data['search']:
-                _lib.LLM_CONTENT_FILTER_ENABLED = bool(data['search']['llm_content_filter'])
-                from lib.search.search_runtime import sync_search_config_if_loaded
-                sync_search_config_if_loaded()
-                logger.info('[Config] LLM content filter → %s', _lib.LLM_CONTENT_FILTER_ENABLED)
+            prior_search = existing.get('search')
+            prior_gateway = prior_search.get('gateway') if isinstance(prior_search, dict) else None
+            # Retired tuning keys from an older client or an imported export
+            # are dropped: only these two search keys are saved settings.
+            existing['search'] = {key: data['search'][key]
+                                  for key in ('skip_domains', 'gateway')
+                                  if key in data['search']}
+            # A payload without the gateway section (older clients, the agent
+            # settings tool) must not silently disable a configured gateway.
+            if 'gateway' not in existing['search'] and isinstance(prior_gateway, dict):
+                existing['search']['gateway'] = prior_gateway
             changes.append('search.*')
 
         if 'hidden_models' in data and isinstance(data['hidden_models'], list):

@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from lib.log import get_logger
@@ -17,6 +18,7 @@ from .conv_affinity import (
     sticky_routing_enabled,
 )
 from .slot import Slot
+from .slot_pool import SlotPool
 
 logger = get_logger(__name__)
 
@@ -43,13 +45,81 @@ class _SharedContentionAdmission:
     admitted: bool
 
 
+class _KeyAdmission:
+    """Key-health verdicts for one selection.
+
+    A key may be auto-disabled for the rest of today when its success rate
+    dropped below the threshold, or a user may have toggled it off in
+    Settings. Reads use the credential-health identity the recorder writes
+    (``Slot.key_stats_provider_id`` / ``key_stats_key_name``), share one
+    key-store freshness check (``key_admission_batch``) and read each slot
+    at most once per selection. ``lib.key_stats.is_key_enabled`` is resolved
+    per selection so the package facade remains the patch seam.
+    """
+
+    def __init__(self, *, enforced: bool = True, credentials=None):
+        self._read = None
+        self._batch = nullcontext()
+        self._verdicts: dict[int, bool] = {}
+        if not enforced:
+            return
+        try:
+            from lib.key_stats import is_key_enabled, key_admission_batch
+        except ImportError as e:
+            logger.debug('[Dispatch] key_stats.is_key_enabled unavailable: %s', e)
+            return
+        self._read = is_key_enabled
+        self._batch = key_admission_batch(credentials=credentials)
+
+    def __enter__(self):
+        self._batch.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._batch.__exit__(*exc_info)
+
+    def admits(self, slot) -> bool:
+        verdict = self._verdicts.get(id(slot))
+        if verdict is None:
+            verdict = self._verdicts[id(slot)] = self._probe(slot)
+        return verdict
+
+    def _probe(self, slot) -> bool:
+        if self._read is None:
+            return True
+        try:
+            return bool(self._read(
+                slot.key_stats_provider_id(),
+                slot.key_stats_key_name(),
+                model=slot.model))
+        except Exception as e:
+            logger.debug('[Dispatch] is_key_enabled probe failed for %s/%s: %s',
+                         slot.provider_id, slot.key_name, e)
+            return True
+
+
+def _observe_route_selection(seconds: float, pinned: bool, chosen) -> None:
+    try:
+        from lib.observability import record_route_selection
+        record_route_selection(
+            seconds, scope='pinned' if pinned else 'shared',
+            outcome='selected' if chosen is not None else 'none')
+    except Exception as e:
+        logger.debug('[Dispatch] route-selection metric skipped: %s', e)
+
+
 class LLMDispatcher:
     """Manages a pool of (key, model) slots and picks the best one per request."""
 
     def __init__(self):
-        self.slots: list[Slot] = []
+        self._pool = SlotPool()
         self._initialized = False
         self._lock = threading.Lock()
+        # One configured-pool build at a time. Builders read the routing
+        # authority (storage, secrets) without holding ``_lock``; the
+        # generation tells a finished build whether a reload arrived meanwhile.
+        self._build_lock = threading.Lock()
+        self._configuration_generation = 0
         # name → logical model_id, built ONLY from each entry's own
         # {model_id} ∪ wire ids — never merged across entries/providers.
         # Owner directive 2026-08-06: routing keys on model_id alone; config
@@ -65,6 +135,31 @@ class LLMDispatcher:
         # Compatibility projection retained for the diagnostics endpoint.
         # Explicit v2 Connections make protocol-face refusal unnecessary.
         self.face_refusals: list[dict] = []
+
+    @property
+    def slots(self) -> SlotPool:
+        """Every live slot; selection reads its pin-scoped views (slot_pool.py)."""
+        return self._pool
+
+    @slots.setter
+    def slots(self, slots) -> None:
+        # Assignment copies into a new indexed pool: later mutations of the
+        # assigned list are not seen; mutate ``dispatcher.slots`` instead.
+        if slots is not getattr(self, '_pool', None):
+            self._pool = SlotPool(slots)
+
+    def _credential_index(self, namespace: str) -> list:
+        """Key-health siblings from this pool. Key admission calls it with the
+        lock held, so it never resolves the dispatcher through the factory."""
+        return self._pool.key_stats_key_names(namespace)
+
+    def _selection_scope(self, pinned_provider: str | None) -> list[Slot]:
+        """Live slots this execution context may select. Caller holds the lock.
+
+        A pinned context sees only its own provider/route group; an unpinned
+        one sees only configured slots, never another request's group.
+        """
+        return self._pool.scope(pinned_provider)
 
     def resource_snapshot(self) -> dict:
         """Observe native slot reservations without initializing providers."""
@@ -92,40 +187,56 @@ class LLMDispatcher:
         """
         with self._lock:
             self._initialized = False
+            self._configuration_generation += 1
 
     def initialize(self):
-        """Build configured slots atomically around request-owned lifetimes."""
+        """Build configured slots, then swap them in around request-owned ones.
+
+        The build reads the routing authority and resolves secrets (storage
+        round trips) without the dispatcher lock, so picks, mints and
+        disposals proceed meanwhile; callers needing the configured pool wait
+        on ``_build_lock`` instead. The swap is one critical section that
+        keeps every request-scoped slot live at that moment. A reload during
+        the build publishes the finished build but leaves the next call to
+        rebuild, as a reload right after a build always did.
+        """
         if self._initialized:
             return
-        with self._lock:
+        with self._build_lock:
             if self._initialized:
                 return
-            request_slots = [s for s in self.slots if s.request_scoped]
-            self.slots = []
-            self._logical_index.clear()
-            self._direct_models.clear()
+            with self._lock:
+                generation = self._configuration_generation
             try:
-                self._build_slots()
-                self._load_benchmark_data()
+                configured, logical_index = self._build_slots()
+                # Benchmark seeds/pruning apply only to configured slots.
+                self._load_benchmark_data(configured)
             except Exception:
                 # A partial configured pool is never eligible, and a failed
                 # rebuild must not orphan the handles of active requests.
-                self.slots = []
-                self._logical_index.clear()
-                self._direct_models.clear()
+                with self._lock:
+                    self._pool.replace_configured([])
+                    self._logical_index = {}
+                    self._direct_models = set()
                 raise
-            finally:
-                # Benchmark seeds/pruning apply only to configured slots.
-                self.slots.extend(request_slots)
-            self._initialized = True
-            logger.info('Initialized %d slots:', len(self.slots))
-            for s in self.slots:
-                caps = ','.join(sorted(s.capabilities))
-                logger.debug('  %s:%s rpm=%.0f '
-                      'lat=%.0fms caps=[%s]', s.key_name, s.model, s.rpm_limit, s.latency_ema, caps)
+            with self._lock:
+                self._pool.replace_configured(configured)
+                self._logical_index = logical_index
+                self._direct_models = set()
+                self._initialized = (
+                    generation == self._configuration_generation)
+        logger.info('Initialized %d configured slots', len(configured))
+        for s in configured:
+            caps = ','.join(sorted(s.capabilities))
+            logger.debug('  %s:%s rpm=%.0f '
+                  'lat=%.0fms caps=[%s]', s.key_name, s.model, s.rpm_limit, s.latency_ema, caps)
 
-    def _build_slots(self):
-        """Create operator slots exclusively from model-routing v2."""
+    def _build_slots(self) -> tuple[list[Slot], dict[str, str]]:
+        """Create operator slots exclusively from model-routing v2.
+
+        Returns the configured slots and their logical-model index; never
+        touches the live pool.
+        """
         # ── Benchmark / multi-tenant fail-loud mode ──
         # When set, build NO operator-curated slots at all. The only way to
         # dispatch is then an owner-authorized model-routing v2 candidate
@@ -139,15 +250,16 @@ class LLMDispatcher:
             logger.warning('[Dispatch] TOFU_DISABLE_CONFIGURED_SLOTS set — '
                            'building 0 operator slots; request-scoped v2 '
                            'route groups remain available')
-            return
-        self._build_slots_from_model_routing()
+            return [], {}
+        return self._build_slots_from_model_routing()
 
-    def _build_slots_from_model_routing(self) -> None:
+    def _build_slots_from_model_routing(self) -> tuple[list[Slot], dict[str, str]]:
         """Materialize the personal operator pool from the v2 repository.
 
         Request handlers use owner-specific ephemeral route groups. The shared
         pool exists for personal background tasks that have no HTTP request
         boundary; distributed mode intentionally requires owner enumeration.
+        Returns the built slots and their logical-model index.
         """
         from lib.identity import PERSONAL_USER_ID
         from lib.model_routing import (
@@ -170,7 +282,7 @@ class LLMDispatcher:
                 'must supply an authenticated owner route group',
                 deployment_configuration.mode,
             )
-            return
+            return [], {}
         repository = ModelRoutingRepository()
         boundary = OwnerBoundary.create(PERSONAL_USER_ID)
         try:
@@ -187,12 +299,13 @@ class LLMDispatcher:
             logger.warning(
                 '[Dispatch] model-routing authority unavailable; starting '
                 'with 0 shared slots: %s', exc)
-            return
+            return [], {}
         if not authority.revision:
             logger.error('[Dispatch] model-routing v2 authority is not active')
-            return
+            return [], {}
 
         emitted: set[tuple[str, str]] = set()
+        built: list[Slot] = []
         entry_groups: list[tuple[str, set[str]]] = []
         # One compiler for the whole build: re-normalizing and re-indexing the
         # full aggregate per model made this loop quadratic in document size.
@@ -251,6 +364,7 @@ class LLMDispatcher:
                     provider_id=candidate.provider_id,
                     routing_provider_id=candidate.provider_id,
                     routing_owner_user_id=boundary.owner_user_id,
+                    routing_tenant_id=boundary.tenant_id,
                     route_offering_id=candidate.offering['offering_id'],
                     route_deployment_id=candidate.deployment['deployment_id'],
                     route_connection_id=candidate.connection['connection_id'],
@@ -281,16 +395,16 @@ class LLMDispatcher:
                         + float(pricing.get('output') or 0.0)
                     ) / 2000.0,
                 )
-                self.slots.append(slot)
+                built.append(slot)
                 entry_group.add(candidate.deployment['wire_model_id'])
             entry_groups.append((model['model_id'], entry_group))
-        self._build_logical_index(entry_groups)
         logger.info(
             '[Dispatch] Built %d slots from model-routing v2 revision %d',
-            len(self.slots), authority.revision)
+            len(built), authority.revision)
+        return built, self._build_logical_index(entry_groups)
 
-    def _load_benchmark_data(self):
-        """Load benchmark_results.json to seed slot parameters and prune dead slots."""
+    def _load_benchmark_data(self, slots: list[Slot]) -> None:
+        """Seed configured *slots* from benchmark_results.json; prune dead ones in place."""
         benchmark_file = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             'debug', 'benchmark_results.json'
@@ -313,7 +427,7 @@ class LLMDispatcher:
         bench_keys = data.get('keys', {})        # {"primary": "...8427", ...}
         bench_label_to_ours = {}
         for bench_label, bench_suffix in bench_keys.items():
-            for slot in self.slots:
+            for slot in slots:
                 if slot.api_key.endswith(bench_suffix.lstrip('.')):
                     bench_label_to_ours[bench_label] = slot.key_name
                     break
@@ -321,7 +435,7 @@ class LLMDispatcher:
         updated = 0
         dead_slots = []
 
-        for slot in self.slots:
+        for slot in slots:
             entry_key = f'{slot.key_name}:{slot.model}'
             entry = models_data.get(entry_key)
             # Also try matching via benchmark label mapping
@@ -381,13 +495,13 @@ class LLMDispatcher:
         # Remove dead slots
         if dead_slots:
             for s in dead_slots:
-                self.slots.remove(s)
+                slots.remove(s)
                 logger.debug('  [Dispatch] Removed dead slot: %s:%s', s.key_name, s.model)
 
         logger.info('Loaded benchmark data: %d slots updated, %d dead removed',
                     updated, len(dead_slots))
 
-    def _build_logical_index(self, entry_groups: list):
+    def _build_logical_index(self, entry_groups: list) -> dict[str, str]:
         """Build name → logical model_id from each entry's OWN identity set.
 
         Owner directive 2026-08-06: routing keys on ``model_id`` ALONE.
@@ -432,7 +546,7 @@ class LLMDispatcher:
                            'entries %s — routing it by exact model_id only; '
                            'rename or drop the duplicate alias to silence '
                            'this', name, sorted(claimants))
-        self._logical_index = index
+        return index
 
     def _route_logical(self, model: str) -> str | None:
         """Resolve a picker/preset/stored-conv name to its logical model_id.
@@ -552,6 +666,28 @@ class LLMDispatcher:
     def _pick(self, capability, prefer_model, exclude_models,
               exclude_keys, *, exclude_pairs=None, reserve=False,
               strict_model=False) -> Slot | None:
+        """Select one slot and record the selection latency for every thread.
+
+        ``route_selection`` is otherwise timed only inside an admitted
+        translation timing scope; agent and background threads report here.
+        """
+        started = time.monotonic()
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
+        chosen = None
+        try:
+            chosen = self._pick_in_scope(
+                capability, prefer_model, exclude_models, exclude_keys,
+                exclude_pairs=exclude_pairs, reserve=reserve,
+                strict_model=strict_model, pinned_provider=pinned_provider)
+            return chosen
+        finally:
+            _observe_route_selection(
+                time.monotonic() - started, bool(pinned_provider), chosen)
+
+    def _pick_in_scope(self, capability, prefer_model, exclude_models,
+                       exclude_keys, *, exclude_pairs, reserve, strict_model,
+                       pinned_provider) -> Slot | None:
         """Internal pick logic — optionally atomic with record_request.
 
         Args:
@@ -566,200 +702,189 @@ class LLMDispatcher:
         """
         self.initialize()
 
-        # ── Daily key-health filter ──
-        # A key may be auto-disabled for the rest of today if its success rate
-        # dropped below the threshold, or a user may have manually toggled it
-        # off in Settings. Look up once per pick call.
-        try:
-            from lib.key_stats import is_key_enabled as _key_enabled
-        except ImportError as e:
-            logger.debug('[Dispatch] key_stats.is_key_enabled unavailable: %s', e)
-            _key_enabled = None
-
-        def _slot_key_enabled(s):
-            if _key_enabled is None:
-                return True
-            try:
-                return _key_enabled(
-                    s.key_stats_provider_id(),
-                    s.key_stats_key_name(),
-                    model=s.model)
-            except Exception as e:
-                logger.debug('[Dispatch] is_key_enabled probe failed for %s/%s: %s',
-                             s.provider_id, s.key_name, e)
-                return True
+        def selectable(slot, required) -> bool:
+            """Pool-state filters, cheapest first; key health comes last."""
+            if required not in slot.capabilities or not slot.is_available:
+                return False
+            if exclude_models and slot.model in exclude_models:
+                return False
+            if exclude_keys and slot.key_name in exclude_keys:
+                return False
+            if exclude_pairs and (slot.key_name, slot.model) in exclude_pairs:
+                return False
+            # Guard: never dispatch embedding/image_gen-only slots
+            #   for chat operations (safety net against capability leaks).
+            #   Skip the guard when the caller explicitly asks for a
+            #   non-chat capability (image_gen, embedding).
+            return (required in self._NON_CHAT_CAPS
+                    or self._is_chat_compatible(slot))
 
         # ── Hard provider pin (multi-tenant isolation) ──
         # When the current task thread is bound to a request-scoped v2 route
         # group, the picker may ONLY select that group's slots — for EVERY
         # capability, never silently falling back to an operator-curated
         # key. See lib/llm_dispatch/provider_pin.py for the full rationale
-        # (the cross-request credential leak this prevents).
-        from lib.llm_dispatch.provider_pin import get_pinned_provider
-        _pinned_provider = get_pinned_provider()
+        # (the cross-request credential leak this prevents). The pool scope
+        # is that group alone; an unpinned context sees only configured
+        # slots (slot_pool.py), so neither scans the other's slots.
+        # Entering the key-health batch checks key-store freshness once,
+        # before the global lock. Key health is then read under the lock:
+        # serialized picks keep the key-stats lock uncontended, whereas
+        # concurrent picks interleaving one acquisition per slot convoyed on
+        # it under GIL pressure (docs/modules/llm_io.md, "Slot pool scopes").
+        with _KeyAdmission(credentials=self._credential_index) as key_health:
+            with self._lock:
+                return self._select_locked(
+                    self._selection_scope(pinned_provider), selectable,
+                    key_health, capability=capability,
+                    prefer_model=prefer_model, reserve=reserve,
+                    strict_model=strict_model,
+                    pinned_provider=pinned_provider)
 
-        def _slot_provider_ok(s):
-            return (not _pinned_provider) or s.provider_id == _pinned_provider
-
-        with self._lock:
-            candidates = []
-            for slot in self.slots:
-                if capability not in slot.capabilities:
-                    continue
-                # Guard: never dispatch embedding/image_gen-only slots
-                #   for chat operations (safety net against capability leaks).
-                #   Skip the guard when the caller explicitly asks for a
-                #   non-chat capability (image_gen, embedding).
-                if capability not in self._NON_CHAT_CAPS and not self._is_chat_compatible(slot):
-                    continue
-                if exclude_models and slot.model in exclude_models:
-                    continue
-                if exclude_keys and slot.key_name in exclude_keys:
-                    continue
-                if exclude_pairs and (slot.key_name, slot.model) in exclude_pairs:
-                    continue
-                if not slot.is_available:
-                    continue
-                if not _slot_key_enabled(slot):
-                    continue
-                if not _slot_provider_ok(slot):
-                    continue
-                candidates.append(slot)
-
+    def _select_locked(self, scope, selectable, key_health, *, capability,
+                       prefer_model, reserve, strict_model,
+                       pinned_provider) -> Slot | None:
+        """Choose among *scope* while holding ``self._lock``."""
+        candidates = [slot for slot in scope
+                      if selectable(slot, capability) and key_health.admits(slot)]
+        if not candidates:
+            # Pinned-provider isolation: a pinned task whose own slot
+            #   is momentarily unavailable (cooldown/excluded) must WAIT,
+            #   never widen onto an operator key. Return None so the
+            #   dispatch retry loop keeps cycling within the provider.
+            if pinned_provider:
+                return None
+            # strict_model: if the user chose a specific model and all
+            #   its slots are in cooldown, return None immediately so the
+            #   retry loop waits — do NOT fall back to another model.
+            if strict_model and prefer_model:
+                return None
+            # Fallback: try ignoring capability constraint for text
+            if capability != 'text':
+                candidates = [slot for slot in scope
+                              if selectable(slot, 'text')
+                              and key_health.admits(slot)]
             if not candidates:
-                # Pinned-provider isolation: a pinned task whose own slot
-                #   is momentarily unavailable (cooldown/excluded) must WAIT,
-                #   never widen onto an operator key. Return None so the
-                #   dispatch retry loop keeps cycling within the provider.
-                if _pinned_provider:
-                    return None
-                # strict_model: if the user chose a specific model and all
-                #   its slots are in cooldown, return None immediately so the
-                #   retry loop waits — do NOT fall back to another model.
-                if strict_model and prefer_model:
-                    return None
-                # Fallback: try ignoring capability constraint for text
-                if capability != 'text':
-                    for slot in self.slots:
-                        if 'text' in slot.capabilities and slot.is_available:
-                            if not self._is_chat_compatible(slot):
-                                continue
-                            if not _slot_key_enabled(slot):
-                                continue
-                            if not _slot_provider_ok(slot):
-                                continue
-                            if not (exclude_models and slot.model in exclude_models):
-                                if not (exclude_keys and slot.key_name in exclude_keys):
-                                    if not (exclude_pairs and (slot.key_name, slot.model) in exclude_pairs):
-                                        candidates.append(slot)
-                if not candidates:
-                    return None
-
-            # ── Conversation-sticky routing ──
-            # Anthropic's prompt cache is keyed per API key, so a conversation
-            # must keep landing on the SAME key round-to-round or every flip
-            # costs a full cache_creation write + 0% read. When this thread is
-            # bound to a conv (run_task sets it) and that conv has a recent
-            # sticky key, prefer the eligible candidate on that key over the
-            # raw min-score pick. The sticky key is a SOFT preference: if it's
-            # not among the eligible candidates (cooled down / excluded /
-            # disabled), we fall through to score-based selection and rebind.
-            _sticky = (sticky_routing_enabled() and get_conv_affinity()) or None
-            _sticky_route_key = str(prefer_model or f'cap:{capability}')
-            _sticky_key = (get_preferred_key(
-                _sticky, route_key=_sticky_route_key) if _sticky else None)
-
-            def _select(pool):
-                """Pick the best slot in *pool*, honoring the sticky key when eligible."""
-                selection_now = time.monotonic()
-                self._expire_shared_contention_locked(selection_now)
-                pool = self._earliest_shared_contention_pool_locked(
-                    pool, selection_now)
-                if _sticky_key:
-                    on_key = [s for s in pool if s.key_name == _sticky_key]
-                    # Only honor the sticky key when it isn't in cooldown
-                    # (score=inf). Otherwise let the normal picker route around it.
-                    if on_key:
-                        best_sticky = min(on_key, key=lambda s: s.score())
-                        if best_sticky.score() != float('inf'):
-                            return best_sticky
-                if (_pinned_provider and pool
-                        and all(getattr(s, 'route_rank', -1) >= 0 for s in pool)):
-                    # Eligibility, cooldown and contention already filtered
-                    # this request's authorized group. Scores cannot reorder
-                    # its compiler-owned provider/deployment preference.
-                    return min(pool, key=lambda s: s.route_rank)
-                return min(pool, key=lambda s: s.score())
-
-            if prefer_model:
-                # model_id-only routing (owner directive 2026-08-06): a slot
-                # is preferred iff it serves the resolved logical model_id.
-                matcher = self._prefer_matcher(prefer_model)
-                preferred = [s for s in candidates if matcher(s)]
-                if preferred:
-                    chosen = _select(preferred)
-                elif strict_model:
-                    # User explicitly chose this model — all its slots are
-                    #   in candidates but none match the logical id (shouldn't
-                    #   happen normally, but guard against it).  Return None.
-                    return None
-                else:
-                    chosen = _select(candidates)
-            else:
-                chosen = _select(candidates)
-
-            # strict_model: if the best candidate has score=inf it means
-            #   all matching slots are in cooldown.  Return None so the
-            #   retry loop waits — don't silently dispatch a cooldown'd slot
-            #   or fall back to a different model.
-            if strict_model and chosen.score() == float('inf'):
                 return None
 
-            # ── Record the chosen key as this conv's sticky key ──
-            # Done for every pick (not just sticky hits) so the FIRST round of
-            # a conversation seeds the affinity, and a forced fallback (sticky
-            # key cooled down) rebinds to the healthy key it landed on.
-            if _sticky and chosen is not None:
-                # A churn signal worth grepping: the conv had a sticky key but
-                # the picker landed elsewhere (cooled down / excluded), which
-                # costs a fresh per-key prompt-cache write this round. Logged at
-                # INFO (not DEBUG) because this is the exact event that re-bills
-                # the prompt cache — production app.log is INFO+, so a DEBUG line
-                # left us blind to the most expensive routing decision.
-                _fell_back = bool(_sticky_key and chosen.key_name != _sticky_key)
-                if _fell_back:
-                    logger.info('[Dispatch] conv=%s sticky key %s unavailable '
-                                '— rebinding to %s (model=%s); prompt cache will '
-                                'be re-written on the new key',
-                                _sticky[:8], _sticky_key, chosen.key_name,
-                                chosen.model)
-                # Diagnostic: record WHY the key differed (soft-fallback vs
-                # no-affinity) so the cache byte-probe can classify a routing
-                # flip. Best-effort, never affects routing.
-                try:
-                    from lib.llm_dispatch.conv_affinity import record_pick_decision
-                    record_pick_decision(
-                        preferred_key=_sticky_key, chosen_key=chosen.key_name,
-                        fell_back=_fell_back)
-                except Exception as _pd_err:
-                    logger.debug('[Dispatch] pick-decision record failed: %s', _pd_err)
-                record_conv_key(_sticky, chosen.key_name,
-                                route_key=_sticky_route_key)
+        # ── Conversation-sticky routing ──
+        # Anthropic's prompt cache is keyed per API key, so a conversation
+        # must keep landing on the SAME key round-to-round or every flip
+        # costs a full cache_creation write + 0% read. When this thread is
+        # bound to a conv (run_task sets it) and that conv has a recent
+        # sticky key, prefer the eligible candidate on that key over the
+        # raw min-score pick. The sticky key is a SOFT preference: if it's
+        # not among the eligible candidates (cooled down / excluded /
+        # disabled), we fall through to score-based selection and rebind.
+        _sticky = (sticky_routing_enabled() and get_conv_affinity()) or None
+        _sticky_route_key = str(prefer_model or f'cap:{capability}')
+        _sticky_affinity = (get_preferred_key(
+            _sticky, route_key=_sticky_route_key) if _sticky else None)
 
-            # ── Isolation observability ──
-            # One line per pick so a provider leak is a single grep:
-            #   pinned=ephemeral:… but provider=… mismatched → leak.
-            # Only emitted when a pin is active (operator UI traffic stays
-            # quiet). debug-level: high volume, on the hot path.
-            if _pinned_provider:
-                logger.debug('[Dispatch] pick model=%s provider=%s key=%s '
-                             'pinned=%s', chosen.model, chosen.provider_id,
-                             chosen.key_name, _pinned_provider)
+        def _select(pool):
+            """Pick the best slot in *pool*, honoring the sticky key when eligible."""
+            selection_now = time.monotonic()
+            self._expire_shared_contention_locked(selection_now)
+            pool = self._earliest_shared_contention_pool_locked(
+                pool, selection_now)
+            if _sticky_affinity:
+                # Match on the STABLE affinity identity (route credential
+                # + deployment), not the request-random key_name, so a
+                # failover rebind survives the next turn's fresh mint.
+                on_key = [s for s in pool
+                          if s.affinity_key() == _sticky_affinity]
+                # Only honor the sticky key when it isn't in cooldown
+                # (score=inf). Otherwise let the normal picker route around it.
+                if on_key:
+                    best_sticky = min(on_key, key=lambda s: s.score())
+                    if best_sticky.score() != float('inf'):
+                        return best_sticky
+            if (pinned_provider and pool
+                    and all(getattr(s, 'route_rank', -1) >= 0 for s in pool)):
+                # Eligibility and contention already filtered this
+                # request's authorized group, and scores cannot reorder
+                # its compiler-owned provider/deployment preference.
+                # Cooldown is NOT a candidate filter (score() reports it
+                # as inf), so readiness gates the rank order here: a
+                # cooling top rank must not shadow a ready sibling. With
+                # every route cooling, rank order names the fallback and
+                # a strict caller waits on it.
+                ready = [s for s in pool if s.score() != float('inf')]
+                return min(ready or pool, key=lambda s: s.route_rank)
+            return min(pool, key=lambda s: s.score())
 
-            if reserve:
-                chosen.record_request()  # atomic: inflight++ while still holding lock
+        if prefer_model:
+            # model_id-only routing (owner directive 2026-08-06): a slot
+            # is preferred iff it serves the resolved logical model_id.
+            matcher = self._prefer_matcher(prefer_model)
+            preferred = [s for s in candidates if matcher(s)]
+            if preferred:
+                chosen = _select(preferred)
+            elif strict_model:
+                # User explicitly chose this model — all its slots are
+                #   in candidates but none match the logical id (shouldn't
+                #   happen normally, but guard against it).  Return None.
+                return None
+            else:
+                chosen = _select(candidates)
+        else:
+            chosen = _select(candidates)
 
-            return chosen
+        # strict_model: if the best candidate has score=inf it means
+        #   all matching slots are in cooldown.  Return None so the
+        #   retry loop waits — don't silently dispatch a cooldown'd slot
+        #   or fall back to a different model.
+        if strict_model and chosen.score() == float('inf'):
+            return None
+
+        # ── Record the chosen key as this conv's sticky key ──
+        # Done for every pick (not just sticky hits) so the FIRST round of
+        # a conversation seeds the affinity, and a forced fallback (sticky
+        # key cooled down) rebinds to the healthy key it landed on.
+        if _sticky and chosen is not None:
+            # A churn signal worth grepping: the conv had a sticky key but
+            # the picker landed elsewhere (cooled down / excluded), which
+            # costs a fresh per-key prompt-cache write this round. Logged at
+            # INFO (not DEBUG) because this is the exact event that re-bills
+            # the prompt cache — production app.log is INFO+, so a DEBUG line
+            # left us blind to the most expensive routing decision.
+            _chosen_affinity = chosen.affinity_key()
+            _fell_back = bool(_sticky_affinity
+                              and _chosen_affinity != _sticky_affinity)
+            if _fell_back:
+                logger.info('[Dispatch] conv=%s sticky key %s unavailable '
+                            '— rebinding to %s (model=%s); prompt cache will '
+                            'be re-written on the new key',
+                            _sticky[:8], _sticky_affinity, _chosen_affinity,
+                            chosen.model)
+            # Diagnostic: record WHY the key differed (soft-fallback vs
+            # no-affinity) so the cache byte-probe can classify a routing
+            # flip. Best-effort, never affects routing.
+            try:
+                from lib.llm_dispatch.conv_affinity import record_pick_decision
+                record_pick_decision(
+                    preferred_key=_sticky_affinity,
+                    chosen_key=_chosen_affinity,
+                    fell_back=_fell_back)
+            except Exception as _pd_err:
+                logger.debug('[Dispatch] pick-decision record failed: %s', _pd_err)
+            record_conv_key(_sticky, _chosen_affinity,
+                            route_key=_sticky_route_key)
+
+        # ── Isolation observability ──
+        # One line per pick so a provider leak is a single grep:
+        #   pinned=ephemeral:… but provider=… mismatched → leak.
+        # Only emitted when a pin is active (operator UI traffic stays
+        # quiet). debug-level: high volume, on the hot path.
+        if pinned_provider:
+            logger.debug('[Dispatch] pick model=%s provider=%s key=%s '
+                         'pinned=%s', chosen.model, chosen.provider_id,
+                         chosen.key_name, pinned_provider)
+
+        if reserve:
+            chosen.record_request()  # atomic: inflight++ while still holding lock
+
+        return chosen
 
     def pick_top_n(self, n=2, capability='text', prefer_model=None,
                    exclude_models=None, reserve=True) -> list[Slot]:
@@ -770,10 +895,12 @@ class LLMDispatcher:
                      returned slot (default True).
         """
         self.initialize()
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
 
         with self._lock:
             candidates = []
-            for slot in self.slots:
+            for slot in self._selection_scope(pinned_provider):
                 if capability not in slot.capabilities:
                     continue
                 if exclude_models and slot.model in exclude_models:
@@ -814,8 +941,10 @@ class LLMDispatcher:
         round-robin or parallel dispatch (e.g. pdf_parser VLM).
         """
         self.initialize()
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
         with self._lock:
-            candidates = [s for s in self.slots
+            candidates = [s for s in self._selection_scope(pinned_provider)
                           if capability in s.capabilities and s.is_available]
             candidates.sort(key=lambda s: s.score())
             return candidates[:n]
@@ -859,8 +988,8 @@ class LLMDispatcher:
             return 0
         changed = 0
         with self._lock:
-            for slot in self.slots:
-                if slot.provider_id != provider_id or slot.model != model:
+            for slot in self._pool.by_provider(provider_id):
+                if slot.model != model:
                     continue
                 if slot.mark_route_missing(error):
                     changed += 1
@@ -883,8 +1012,10 @@ class LLMDispatcher:
         owner-authorized route.
         """
         self.initialize()
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
         with self._lock:
-            candidates = [s for s in self.slots
+            candidates = [s for s in self._selection_scope(pinned_provider)
                           if s.model == model and s.is_available]
             if not candidates:
                 return '', '', None
@@ -932,45 +1063,57 @@ class LLMDispatcher:
         # provider's slots, so the retry loop waits for THAT provider to
         # recover instead of treating operator slots as a fallback.
         from lib.llm_dispatch.provider_pin import get_pinned_provider
-        _pinned_provider = get_pinned_provider()
-        from lib.key_stats import (
-            is_key_enabled as _key_enabled,
-            is_strict_billing_stop_admission,
-        )
-        _strict_key_admission = is_strict_billing_stop_admission()
+        pinned_provider = get_pinned_provider()
+        from lib.key_stats import is_strict_billing_stop_admission
 
-        def _key_policy_admits(slot) -> bool:
-            if not _strict_key_admission:
-                return True
-            try:
-                return _key_enabled(
-                    slot.provider_id, slot.key_name, model=slot.model)
-            except Exception as exc:
-                logger.debug(
-                    '[Dispatch] strict key admission probe failed for %s/%s: %s',
-                    slot.provider_id, slot.key_name, exc)
-                return True
+        # Key health counts only under strict billing-stop admission. It uses
+        # the picker's credential-health identity and freshness batch.
+        with _KeyAdmission(enforced=is_strict_billing_stop_admission(),
+                           credentials=self._credential_index) as key_health:
+            with self._lock:
+                return any(
+                    capability in s.capabilities and s.is_available
+                    and s.model not in ex_models and s.key_name not in ex_keys
+                    and (s.key_name, s.model) not in ex_pairs
+                    and self._is_chat_compatible(s)
+                    and (matcher is None or matcher(s))
+                    and key_health.admits(s)
+                    for s in self._selection_scope(pinned_provider))
 
+    def responses_state_binding(self, origin_deployments, *,
+                                prefer_model=None) -> frozenset:
+        """``(key_name, model)`` pairs that cannot replay this request's state.
+
+        Encrypted Responses state decrypts only on the upstream that minted it
+        (2026-10-31: failover from the Kunlun Deployment of ``gpt-6.1-sol`` to
+        its public Deployment was rejected ``invalid_encrypted_content``, and
+        so was the next turn). ``origin_deployments`` names the Deployments
+        that minted the state a request replays. When a slot on one of them is
+        in this request's scope (provider pin, preferred model), every other
+        Responses slot in that scope is returned for the caller to exclude for
+        the whole dispatch: failover may rotate the origin's credentials, wait
+        for it or fail with its own error, never resend the ciphertext
+        elsewhere. Other protocols are not returned; checked conversion omits
+        or refuses the ciphertext there. Availability and exclusions are
+        ignored on purpose, so a cooling or excluded origin still binds. An
+        origin outside the scope (model switched, Deployment removed) binds
+        nothing.
+        """
+        origins = frozenset(origin_deployments or ())
+        if not origins:
+            return frozenset()
+        self.initialize()
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
+        matcher = self._prefer_matcher(prefer_model) if prefer_model else None
         with self._lock:
-            for s in self.slots:
-                if capability not in s.capabilities:
-                    continue
-                if not s.is_available:
-                    continue
-                if s.model in ex_models or s.key_name in ex_keys:
-                    continue
-                if (s.key_name, s.model) in ex_pairs:
-                    continue
-                if not self._is_chat_compatible(s):
-                    continue
-                if _pinned_provider and s.provider_id != _pinned_provider:
-                    continue
-                if matcher is not None and not matcher(s):
-                    continue
-                if not _key_policy_admits(s):
-                    continue
-                return True
-        return False
+            scope = self._selection_scope(pinned_provider)
+            if not any(s.route_deployment_id in origins
+                       and (matcher is None or matcher(s)) for s in scope):
+                return frozenset()
+            return frozenset((s.key_name, s.model) for s in scope
+                             if s.protocol == 'responses'
+                             and s.route_deployment_id not in origins)
 
 
     # ── Shared-project contention (external saturation) ──
@@ -1260,11 +1403,11 @@ class LLMDispatcher:
         ex_keys = exclude_keys or set()
         ex_pairs = exclude_pairs or set()
         from lib.llm_dispatch.provider_pin import get_pinned_provider
-        _pinned_provider = get_pinned_provider()
+        pinned_provider = get_pinned_provider()
         now = time.time()
         causes = set()
         with self._lock:
-            for s in self.slots:
+            for s in self._selection_scope(pinned_provider):
                 if capability not in s.capabilities:
                     continue
                 if s.model in ex_models or s.key_name in ex_keys:
@@ -1272,8 +1415,6 @@ class LLMDispatcher:
                 if (s.key_name, s.model) in ex_pairs:
                     continue
                 if not self._is_chat_compatible(s):
-                    continue
-                if _pinned_provider and s.provider_id != _pinned_provider:
                     continue
                 if s.cooldown_until > now:
                     # A cooldown stamped before cooldown_reason existed
@@ -1319,24 +1460,31 @@ class LLMDispatcher:
         """
         if not conv_id:
             return None
-        sticky_key = get_preferred_key(
+        sticky_affinity = get_preferred_key(
             conv_id, route_key=str(prefer_model or 'cap:text'))
-        if not sticky_key:
+        if not sticky_affinity:
             return None
         ex_keys = exclude_keys or set()
         ex_pairs = exclude_pairs or set()
-        if sticky_key in ex_keys:
-            return None
         matcher = self._prefer_matcher(prefer_model) if prefer_model else None
+        # The recorded identity is stable (route credential+deployment), shared
+        # across request-scoped groups; the pinned-provider scope confines the
+        # hold to slots the current execution context is actually authorized
+        # to pick — the same gate the picker applies.
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
         now = time.time()
         best_remaining = None
         with self._lock:
-            for s in self.slots:
-                if s.key_name != sticky_key:
+            for s in self._selection_scope(pinned_provider):
+                if s.affinity_key() != sticky_affinity:
                     continue
-                if matcher is not None and not matcher(s):
+                # Exclusions name this dispatch attempt's failed key_names.
+                if s.key_name in ex_keys:
                     continue
                 if (s.key_name, s.model) in ex_pairs:
+                    continue
+                if matcher is not None and not matcher(s):
                     continue
                 if not self._is_chat_compatible(s):
                     continue
@@ -1349,20 +1497,24 @@ class LLMDispatcher:
                     best_remaining = remaining
         if best_remaining is None:
             return None
-        return (best_remaining, sticky_key)
+        return (best_remaining, sticky_affinity)
 
     def summarize_slots(self, capability: str = None) -> str:
-        """Return a compact one-line summary of all slots for logging.
+        """Return a compact one-line summary of the selectable slots for logging.
 
         Format: ``key_0/model:rpm=45/60 inf=2 err=0 | key_1/model:rpm=...``
-        Only includes slots matching *capability* if specified.
+        Lists the current execution context's selection scope (its provider
+        pin's group, or the configured pool), only slots matching
+        *capability* if specified.
         """
         self.initialize()
+        from lib.llm_dispatch.provider_pin import get_pinned_provider
+        pinned_provider = get_pinned_provider()
         parts = []
         with self._lock:
-            for s in sorted(self.slots, key=lambda s: s.score()):
-                if capability and capability not in s.capabilities:
-                    continue
+            scope = [s for s in self._selection_scope(pinned_provider)
+                     if not capability or capability in s.capabilities]
+            for s in sorted(scope, key=lambda s: s.score()):
                 rpm = s.current_rpm_usage
                 parts.append(
                     f'{s.key_name}/{s.model}:'

@@ -28,6 +28,7 @@ Removed in the async migration (no longer exist):
 
 
 from lib.swarm.message_contract import SEND_AGENT_MESSAGE_TOOL, GET_AGENT_MESSAGES_TOOL
+from lib.tools.poll import POLL_WAIT_CAP_S
 
 TEAM_MESSAGE_TOOL_NAMES = frozenset(tool['function']['name'] for tool in
                                    (SEND_AGENT_MESSAGE_TOOL, GET_AGENT_MESSAGES_TOOL))
@@ -59,9 +60,9 @@ SUB_AGENT_DENYLIST = frozenset({
     'ask_human',
 
     'set_approval_delegate',
-    # kill is control-plane authority over background handles (including
-    # sibling agents); a worker must never hold it.
-    'kill',
+    # poll/kill are not denied: a leaf worker's handles are only the bg_*
+    # commands it started (lib.swarm.routing.is_leaf_worker), so they grant no
+    # control over sibling agents, its coordinator or other tasks.
 })
 
 STORE_ARTIFACT_TOOL = {
@@ -172,12 +173,16 @@ def _build_spawn_agents_description() -> str:
         "fire-and-forget: continue useful local work or end the turn for "
         "automatic delivery. Do not sleep, predict results, or read "
         "`output_file` for progress. If only waiting remains, use "
-        "`poll(ids=[<returned agent ids>], wait_s=60, mode='any')`; no-id "
+        f"`poll(ids=[<returned agent ids>], wait_s={POLL_WAIT_CAP_S}, mode='any')`, "
+        "which returns as soon as an agent finishes; no-id "
         "`poll` is a dashboard, not a wait. Each completion arrives with the agent's "
-        "full result; `get_agent_result(id)` re-reads it later. A running "
+        "full result; `get_agent_result` re-reads it later by agent id and "
+        "swarm_run_id, also after the run ends. A running "
         "main agent receives individual results at round "
         "boundaries; an idle conversation is auto-resumed only after the whole "
-        "swarm settles, subject to Stop and continuation limits. Failures may "
+        "swarm settles, subject to Stop. Agents launched during such an "
+        "automatic continuation never wake another one; their results arrive "
+        "with the next turn. Failures may "
         "trigger one bounded diagnosis/closure pass, not an unlimited retry loop. "
         "Do not promise a wakeup on each agent completion or treat failed work "
         "as side-effect-free.\n\n"
@@ -194,6 +199,14 @@ SPAWN_AGENTS_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
+                "templates": {
+                    "type": "object",
+                    "additionalProperties": {"type": "object"},
+                    "description": (
+                        "Shared presets by name: {objective?, context?, role?, "
+                        "tools?, output_schema?}."
+                    ),
+                },
                 "agents": {
                     "type": "array",
                     "description": (
@@ -216,7 +229,29 @@ SPAWN_AGENTS_TOOL = {
                                 "type": "string",
                                 "description": (
                                     "Self-contained goal, rationale, necessary "
-                                    "context, and expected output."
+                                    "context, and expected output. Required unless "
+                                    "the agent's template has one, which precedes it."
+                                ),
+                            },
+                            "template": {
+                                "type": "string",
+                                "description": (
+                                    "A `templates` name: its objective and context "
+                                    "precede this agent's; its role, tools and "
+                                    "output_schema apply unless set here."
+                                ),
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": (
+                                    "Template values, appended as a sorted list."
+                                ),
+                            },
+                            "output_schema": {
+                                "type": "object",
+                                "description": (
+                                    "JSON Schema (type object) for the final "
+                                    "answer; the result is compact JSON."
                                 ),
                             },
                             "required_for_completion": {
@@ -254,7 +289,6 @@ SPAWN_AGENTS_TOOL = {
                                 ),
                             },
                         },
-                        "required": ["objective"],
                     },
                 },
             },
@@ -299,7 +333,7 @@ AWAIT_AGENTS_TOOL = {
                     ),
                 },
                 "timeout_seconds": {
-                    "type": "integer",
+                    "type": "integer", "minimum": 0, "maximum": 60, "default": 60,
                     "description": (
                         "Max wait in seconds (default and hard cap 60). "
                         "On timeout, returns partial results + still-running list."
@@ -324,6 +358,11 @@ GET_AGENT_RESULT_TOOL = {
             "again. Completion updates already carry the full result — use "
             "this to re-read an earlier result after it aged out of your "
             "context.\n\n"
+            "Results are durable per run: pass `swarm_run_id` (from the "
+            "spawn_agents handle or a `<swarm-update>`) to read a run of this "
+            "conversation that has ended, was evicted after inactivity, or was "
+            "replaced by a later wave. Without it, ids resolve in the current "
+            "swarm.\n\n"
             "For MULTIPLE agents in one call, provide an `agent_ids` array — "
             "all results come back together in a single `results` list. This "
             "is much better than issuing several separate get_agent_result "
@@ -336,6 +375,15 @@ GET_AGENT_RESULT_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
+                "swarm_run_id": {
+                    "type": "string",
+                    "description": (
+                        "Exact run handle: `swarm_run_id` of the spawn_agents "
+                        "handle or `<swarm-run-id>` of a `<swarm-update>`. "
+                        "Needed for an ended, evicted or earlier wave; omit for "
+                        "the current swarm."
+                    ),
+                },
                 "agent_id": {
                     "type": "string",
                     "description": (

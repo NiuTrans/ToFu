@@ -42,6 +42,7 @@ from ._logs import (  # noqa: E402,F401
     _parse_app_log_ts,
     _safe_tail_lines,
 )
+from ._cache import _collect_cache_read_share_divergence  # noqa: E402,F401
 from ._audit import (  # noqa: E402,F401
     _audit_ts_aware,
     _collect_audit_events,
@@ -89,6 +90,7 @@ __all__ = [
     '_collect_audit_events',
     '_collect_error_log_excerpts',
     '_collect_app_log_signals',
+    '_collect_cache_read_share_divergence',
     '_collect_audit_secondary',
     '_classify_error_signature',
     '_collect_recurring_issues',

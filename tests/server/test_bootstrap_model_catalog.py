@@ -56,9 +56,9 @@ def test_bootstrap_loader_projects_authored_offering_recipes():
     templates = bootstrap._load_provider_templates()
     by_key = {template['key']: template for template in templates}
 
-    assert 'meituan' in by_key
-    assert by_key['meituan']['offering_recipes']
-    assert by_key['meituan']['models'] == by_key['meituan']['offering_recipes']
+    assert 'yourprovider' in by_key
+    assert by_key['yourprovider']['offering_recipes']
+    assert by_key['yourprovider']['models'] == by_key['yourprovider']['offering_recipes']
 
 
 def test_bootstrap_stages_secret_free_provider_and_selected_default(
@@ -109,6 +109,29 @@ def test_bootstrap_stages_secret_free_provider_and_selected_default(
     pending = json.loads(pending_path.read_text(encoding='utf-8'))
     assert [m['model_id'] for m in pending['models']] == [
         'new-live', 'private']
+
+
+def test_bootstrap_stage_bound_never_drops_the_chosen_models(
+        tmp_path, monkeypatch):
+    """Relay catalogues list 1,000+ ids. The staged draft stays bounded, but
+    the model setup selected and a pinned manual model are always staged:
+    truncating after they were appended pointed the saved default at a model
+    the imported provider never received."""
+    monkeypatch.setattr(_bootstrap_providers, '_bootstrap_data_root',
+                        lambda: str(tmp_path))
+    live = [_model(f'vendor/model-{index:04d}') for index in range(1100)]
+    manual = _model('private-wire', catalog_pinned=True, catalog_source='manual')
+    bootstrap._bootstrap_persist_provider(
+        'https://api.example.test/v1', 'secret', live + [manual],
+        templates=[], default_model='vendor/model-1099')
+
+    pending = json.loads((tmp_path / 'config/.bootstrap-provider-pending.json')
+                         .read_text(encoding='utf-8'))
+    staged = [m['model_id'] for m in pending['models']]
+    assert pending['default_model'] == 'vendor/model-1099'
+    assert {'vendor/model-1099', 'private-wire'} <= set(staged)
+    assert len(staged) == 1024
+    assert staged[:2] == ['vendor/model-0000', 'vendor/model-0001']
 
 
 def test_bootstrap_discovery_rejects_link_local_target(monkeypatch):

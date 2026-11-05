@@ -858,40 +858,19 @@
   color: var(--s-ink);
   margin-bottom: 6px;
 }
-.sysprompt-control-row {
-  display: flex;
-  align-items: stretch;
-  gap: 10px;
-  margin-bottom: var(--space-2);
-}
-.sysprompt-control-row select {
-  flex: 1;
-  min-width: 0;
-}
-.sysprompt-control-row .stg-btn-balance {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-/* ── System-prompt compact summary row (editor lives in a modal) ── */
-.sysprompt-summary-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: 10px;
-}
+/* ── System-prompt row (General): label + live summary; the editor is a modal ── */
+.sysprompt-row-text { flex: 1; min-width: 0; }
+.sysprompt-row > button { flex: none; white-space: nowrap; }
 .sysprompt-summary {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--font-size-sm);
+  margin-top: 3px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
   color: var(--s-ink-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.sysprompt-summary.has-value {
-  color: var(--s-ink);
-  font-family: 'JetBrains Mono', monospace;
-}
+.sysprompt-summary.has-value { color: var(--s-ink); }
 /* ── Per-block system-prompt editor ── */
 .sysprompt-blocks-head {
   display: flex;
@@ -1016,3 +995,13 @@
   border-top: 1px solid var(--border-color, rgba(128,128,128,0.12));
 }
 .sysprompt-block:not(.is-open) .sysprompt-block-text { display: none; }
+
+/* Source selection and disk provenance for the skill library. */
+.skills-library-controls { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-3); margin-bottom:var(--space-4); }
+.skills-library-controls[hidden] { display:none; }
+.skills-library-filter { flex:1 1 100%; min-width:0; }
+.skills-library-controls select { max-width:100%; }
+.skill-source-path { grid-column:2 / -1; min-width:0; overflow-wrap:anywhere; font-size:var(--font-size-xs); color:var(--s-ink-soft); }
+.skills-library-warning { flex-basis:100%; white-space:pre-line; overflow-wrap:anywhere; }
+
+@keyframes skillsToastIn{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}

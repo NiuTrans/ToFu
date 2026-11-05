@@ -178,17 +178,40 @@ class AnthropicTranslateTest(unittest.TestCase):
         self.assertIn('input_json_delta', out)
         self.assertIn('"stop_reason": "tool_use"', out)
 
-    def test_malformed_body_raises_valueerror_for_count_tokens_guard(self):
-        # count_tokens now wraps translate_anthropic_request in try/except
-        # ValueError → 400 (mirroring /v1/messages). This asserts the raise
-        # the guard relies on: a non-array `messages` is a ValueError, not an
-        # uncaught 500. (NEUTER context: without the route guard this same
-        # exception escapes count_tokens as a 500.)
+    def test_content_filter_projects_as_refusal_not_end_turn(self):
+        import asyncio
+        from lib.compat.anthropic import (
+            build_anthropic_response, stream_anthropic_chunks,
+        )
+        task = {
+            'id': 'refused', 'content': '', 'status': 'done',
+            'finishReason': 'content_filter', 'streamState': 'provider_finished',
+            'events': [{'type': 'done', 'finishReason': 'content_filter',
+                        'streamState': 'provider_finished', 'seq': 0}],
+            'events_lock': threading.Lock(),
+        }
+        self.assertEqual(
+            build_anthropic_response(task, model='claude')['stop_reason'],
+            'refusal')
+
+        async def _drain():
+            return [f async for f in stream_anthropic_chunks(task, model='claude')]
+        out = ''.join(asyncio.new_event_loop().run_until_complete(_drain()))
+        self.assertIn('"stop_reason": "refusal"', out)
+        self.assertNotIn('"stop_reason": "end_turn"', out)
+
+    def test_malformed_body_raises_badrequest_for_count_tokens_guard(self):
+        # count_tokens and /v1/messages answer only the translator's typed
+        # BadRequest with 400; any other exception is a server fault. This
+        # asserts the raise both guards rely on: a non-array `messages` is the
+        # caller's fault and names its field.
         from lib.compat.anthropic import translate_anthropic_request
-        with self.assertRaises(ValueError):
+        from lib.error_envelope import BadRequest
+        with self.assertRaises(BadRequest) as caught:
             translate_anthropic_request({
                 'model': 'claude', 'max_tokens': 10, 'messages': 'not-a-list',
             })
+        self.assertEqual(caught.exception.field, 'messages')
 
 
 if __name__ == '__main__':

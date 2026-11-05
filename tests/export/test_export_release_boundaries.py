@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 
 _AUDIT_SYNTHETIC_REPO_PATHS = {
     'scripts/helper.mjs', 'scripts/private_only.py',
-    'packages/sample/scripts/runtime.ts', 'lib/frozen.ts',
+    'packages/sample/scripts/runtime.ts', 'lib/frozen.ts', 'lib/core.py',
 }
 
 

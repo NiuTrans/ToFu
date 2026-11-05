@@ -3,7 +3,7 @@
  */
 import { createAlert, createChoice } from '../ui';
 import { t } from '../i18n';
-import type { ProjectDispatchDependency, ProjectDispatchDependencyState, ProjectDispatchView } from '../api/project-dispatch.generated';
+import type { ProjectDispatchDependency, ProjectDispatchDependencyState, ProjectDispatchHistoryRow } from '../api/project-dispatch.generated';
 const text = (value: string, tag = 'p') => {
   const node = document.createElement(tag); node.textContent = value; return node;
 };
@@ -36,7 +36,7 @@ function referenceLabel(reference: ProjectDispatchDependency): string {
     grantRevision: reference.grantRevision, resultRevision: reference.resultRevision })
     + (reference.checkpointSha ? ` · ${t('projectDispatch.checkpoint', { sha: reference.checkpointSha })}` : '');
 }
-function candidateReference(view: ProjectDispatchView): ProjectDispatchDependency | null {
+function candidateReference(view: ProjectDispatchHistoryRow): ProjectDispatchDependency | null {
   if (view.revoked || view.execution?.status !== 'completed' || !Number.isSafeInteger(view.grantRevision)
     || view.grantRevision < 1 || !Number.isSafeInteger(view.execution.resultRevision) || view.execution.resultRevision! < 1) return null;
   const files = view.request.profile?.mode === 'files';
@@ -48,7 +48,7 @@ export function createDispatchDependencies(path: string, canSelect: () => boolea
   const el = document.createElement('section'); el.className = 'ui-stack ui-stack--tight';
   el.dataset.testid = 'dispatch-dependencies';
   let selected: ProjectDispatchDependency[] = [];
-  let candidates: ProjectDispatchView[] = [];
+  let candidates: ProjectDispatchHistoryRow[] = [];
   let disabled = false;
   let known = false;
   const samePath = (value: string) => value.replace(/[/\\]+$/, '') === path.replace(/[/\\]+$/, '');
@@ -100,7 +100,7 @@ export function createDispatchDependencies(path: string, canSelect: () => boolea
     el,
     references: () => selected.map(pin => ({ ...pin })),
     restore(pins: ProjectDispatchDependency[] = []) { selected = pins.map(pin => ({ ...pin })); render(); },
-    update(views: ProjectDispatchView[] | null) {
+    update(views: readonly ProjectDispatchHistoryRow[] | null) {
       known = views !== null;
       candidates = (views || []).slice(0, 128).filter(view => samePath(view.request.projectPath)
         && !view.revoked && view.execution?.status === 'completed');
@@ -122,7 +122,7 @@ const reasonKeys = {
   evidence_unavailable: 'projectDispatch.dependencyReasonEvidenceUnavailable', dependency_changed: 'projectDispatch.dependencyReasonDependencyChanged',
   checkpoint_changed: 'projectDispatch.dependencyReasonCheckpointChanged',
 } as const satisfies Record<ProjectDispatchDependencyState['reason'], Parameters<typeof t>[0]>;
-export function dependencyProjection(view: ProjectDispatchView): HTMLElement | null {
+export function dependencyProjection(view: ProjectDispatchHistoryRow): HTMLElement | null {
   if (!view.request.dependencies?.length) return null;
   const el = document.createElement('section'); el.className = 'ui-stack ui-stack--tight';
   el.dataset.testid = 'dependency-states'; el.append(text(t('projectDispatch.dependencyStates'), 'strong'));

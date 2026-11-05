@@ -554,8 +554,7 @@ fn scan(
             .and_then(|total| total.checked_add(row.to_string().len()))
             .filter(|total| *total <= MIGRATION_SESSION_MAX_PAGE_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "task result migration catalog exceeds its page budget",
                 )
             })?;

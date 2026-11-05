@@ -1,4 +1,8 @@
-"""Isolated real SQLite operations for paper application tests, including workers."""
+"""Isolated real SQLite operations with atomic bootstrap for paper tests.
+
+The production SQLite adapter initializes schemas in one startup transaction.
+This fixture preserves that boundary and closes failed constructor resources.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -14,10 +18,16 @@ from lib.storage_authority_sql.schema import initialize_schema
 class TransactionClient:
     def __init__(self, path):
         self.connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-        self.connection.row_factory = sqlite3.Row
-        self.session = SQLiteSession(self.connection)
-        initialize_schema(self.session)
-        self.registry = build_registry()
+        try:
+            self.connection.row_factory = sqlite3.Row
+            self.session = SQLiteSession(self.connection)
+            self.connection.execute('BEGIN IMMEDIATE')
+            with self.connection:
+                initialize_schema(self.session)
+                self.registry = build_registry()
+        except BaseException:
+            self.connection.close()
+            raise
         self.fail_commit = None
         self.guard = threading.RLock()
 

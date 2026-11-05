@@ -11,13 +11,18 @@ ASK_HUMAN_TOOL = {
     "function": {
         "name": "ask_human",
         "description": (
-            "Pause and ask the user questions. Use only when work cannot safely "
-            "continue without an irreversible decision, subjective preference/product "
-            "intent, or a fact unavailable from the conversation, files, and tools. "
-            "First inspect context, use a quick read/grep when useful, and take a "
-            "sensible reversible default when the user can correct the result. Do not "
-            "ask for something you can decide. Supports free text or choices. "
-            "Use `questions[]` to ask 2-8 questions as a single form (one interaction)."
+            "Ask the user questions only for an irreversible decision, subjective "
+            "preference/product intent, or a fact unavailable from the conversation, "
+            "files, and tools. First inspect context, use a quick read/grep when "
+            "useful, and take a sensible reversible default when the user can correct "
+            "the result. Do not ask for something you can decide. Supports free text "
+            "or choices; `questions[]` asks 2-8 questions as one form. "
+            "blocking=true (default) means pause and ask: the turn waits for the "
+            "answer, so use it only when nothing useful can proceed without it. "
+            "blocking=false shows the question and returns at once: state in the "
+            "question which default you apply meanwhile and keep working on what does "
+            "not depend on the answer; the reply arrives later as a normal user message "
+            "quoting the question."
         ),
         "parameters": {
             "type": "object",
@@ -102,6 +107,13 @@ ASK_HUMAN_TOOL = {
                     "description": (
                         "Batch mode: 2-8 questions asked as one form (single interaction). "
                         "When present, top-level question/response_type/options are ignored."
+                    ),
+                },
+                "blocking": {
+                    "type": "boolean",
+                    "description": (
+                        "Default true: wait for the answer. false: show the question "
+                        "(or form) and return at once."
                     ),
                 },
             },

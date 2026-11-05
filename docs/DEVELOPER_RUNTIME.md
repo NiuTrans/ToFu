@@ -6,6 +6,586 @@ HTTP/SSE sidecar, model-routing setup, transient state, and release artifacts.
 The full backend API is documented in
 [HEADLESS_API.md](contracts/HEADLESS_API.md).
 
+## Start with a configured sidecar
+
+```bash
+pip install tofu-agent
+tofu-agent serve
+```
+
+Open `http://127.0.0.1:15001/setup`, configure model access, and save. Then:
+
+```bash
+curl http://127.0.0.1:15001/api/v1/agent/run \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: first-run' \
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+For application integrations, start with [Python composition](#python-composition)
+or the [HTTP/SSE contract](#lightweight-httpsse-contract). Model configuration
+uses the [complete v2 envelope](#model-routing-ownership); CLI callers may pass
+`--model-routing-file model-routing.json`. Review [restart semantics](#state-and-restart-semantics)
+before choosing between the lightweight runtime and the durable application.
+
+## Product boundary
+
+```text
+Python caller ── tofu_agent.AgentRuntime ─┐
+                                         ├─ transient TaskRuntime
+HTTP caller ── tofu-agent sidecar ────────┘          │
+                                                    ▼
+                                        production agent orchestrator
+                                                    │
+                                          v2 route / tools / MCP
+```
+
+`AgentRuntime` uses the same task and agent execution seams as the full
+application. Each invocation carries an explicit `PrincipalContext`, owns one
+transient runtime with declared retention and teardown, and uses the canonical
+`tofu.model-routing/v2` candidate compiler. It does not initialize full-app
+routes, conversations, accounts, billing, scheduler state, or the storage
+sidecar. Task/event replay, idempotency, and active runs exist only in process
+memory and disappear at restart. Retention limits never evict active execution
+identity or restrict admission.
+
+This is a composition mode, not another orchestrator or provider-routing state
+machine.
+
+**Ingress affinity initialization — Problem:** ordinary embedded and worker task creation imported Quart solely to discover that no request existed. **Decision:** `manager/_registry.py` queries request affinity when Quart is already loaded. Web requests retain clipped direct keys and reconnectability; background tasks retain conversation-store inheritance and durable birth metadata. Explicit principal/owner validation still precedes every task. **Alternatives considered:** importing the framework on every first task taxes storage-free composition; skipping affinity for all transient tasks loses real request routing metadata. Verify `tests/tasks_pkg/test_task_ingress_affinity.py` and `benchmarks/task_affinity_measure.py`; first-task clocks exclude common imports, and loaded-web/long-residency checks remain separate boundaries.
+
+## Python composition
+
+For the shortest embedded call, configure `TOFU_AGENT_MODEL_ROUTING` with the
+complete JSON [v2 access envelope](#model-routing-ownership), then run:
+
+```python
+from tofu_agent import AgentRuntime, ModelRoutingConfig
+
+access = ModelRoutingConfig.from_env(required=True)
+with AgentRuntime.local(model_routing=access) as runtime:
+    result = runtime.run([{"role": "user", "content": "Hello"}])
+print(result.content)
+```
+
+For explicit execution handles, event cursors and trusted native composition:
+
+```python
+from tofu_agent import AgentRuntime, ModelRoutingConfig, NativeAgentConfiguration
+access = ModelRoutingConfig.from_mapping(model_routing_envelope)
+with AgentRuntime.local(model_routing=access) as runtime:
+    execution = runtime.start([{"role": "user", "content": "Inspect this project"}],
+        routing={"preferred_provider_id": "gateway-a"},
+        config={"thinking": "high", "tools": ["search", "fetch"], "project": "/workspace/project"},
+        request_id="run-owned-by-caller", timeout_s=600)
+    for event in execution.events(cursor=0): consume(event)
+    result = execution.result()
+# Optional Rust composition: borrow an admitted host, running loop, callback
+# executor and launch capacity; profile declares HTTP/ACK/model-counter limits.
+native = NativeAgentConfiguration(host=host, loop=loop, executor=callbacks,
+    configuration=profile, working_directory=workdir, resource_policy=launch_policy,
+    pending_calls=pending_calls, pending_bytes=pending_bytes)
+runtime = AgentRuntime(principal=principal, model_routing=access, native_execution=native)
+try:
+    result = await runtime.run_async([{"role": "user", "content": "Inspect this project"}])
+finally:
+    await runtime.close_async()  # join before caller closes host/loop/callbacks
+```
+
+`AgentRuntime.local()` constructs an explicit personal principal. A server or
+enterprise adapter constructs `AgentRuntime(principal=..., model_routing=...)`
+with its authenticated owner instead of relying on a module global. A single
+request may pass `model_routing=...` to use a complete one-run envelope; it
+does not persist or mutate the runtime default. Rust uses the same issued route, preparation, tools and account; no Python model fallback. Use async calls on its serving loop; sync callers require another lane. Native results wait for worker/client cleanup. `capabilities.execution.backend` reports the selected engine; CLI `--engine rust --native-archive ARCHIVE --native-profile PROFILE.json` owns its demand-driven callback executor (fixed `TOFU_AGENT_WORKERS` idle hint, no queue or pending-call count limit) and admitted image; default promotion remains pending.
+
+Optional repository extraction has its own trusted configuration, independent
+of the model execution engine. Install `tofu-repo-kernel` 0.4.0 or later with its
+stream artifact and either a pinned grammar bundle (0.7+) or a reviewed external directory. For example,
+with an existing routing `access`, the application's already-issued
+`launch_policy`, and an admitted project:
+
+```python
+from tofu_agent import AgentRuntime, NativeRepositoryConfiguration
+repository = NativeRepositoryConfiguration.from_launch_policy(
+    # Omit grammar_directory to select the installed pinned bundle.
+    launch_policy=launch_policy,
+    timeout=60.0,
+)
+with AgentRuntime.local(model_routing=access, native_repository=repository) as runtime:
+    result = runtime.run(
+        [{"role": "user", "content": "Use repo_map to summarize this project"}],
+        config={"tools": ["repo_map"], "project": "/workspace/project"},
+    )
+```
+
+Path-list, request and per-file output ceilings follow the existing launch policy's `frame_maximum`, without another probe or allocation of those ceilings. Source reads use the canonical source/reference admission bound; file growth between stat and read cannot consume the host-sized frame allowance. Explicit overrides remain available through `NativeRepositoryConfiguration(grammar_directory, limits=(path_bytes, request_bytes, file_frame_bytes, source_read_bytes), timeout=...)`. An omitted/None grammar directory selects the installed pinned bundle; an explicit path keeps trusted external selection. Construction imports no native image/parser package. The runtime owns one lazy sealed executable and each task owns a cancellable root/owner scope in the shared ExecutionSession. Close joins active task cleanup before disposing the image; timeout retains it for a retry. `capabilities.repository_extraction` reports the selected backend and reference default, not readiness or performance certification. Selected failures do not fall back. This configuration is not a wire/CLI option. Full catalog coverage and performance admission remain required before default promotion; installed grammar integrity, plain-directory fallback and launch capacity are implemented. Standalone rounds validate MCP wire without application storage, skip durable tool provenance for transient tasks, and resolve requirement identity before importing durable acceptance; an issued inherited requirement still uses its original owner checks.
+
+| Method | Contract |
+|---|---|
+| `run` / `run_async` | Submit once and wait for a typed terminal `AgentResult`. |
+| `stream` / `stream_async` | Submit once and yield native events. |
+| `start` | Return an `AgentExecution` immediately. |
+| `events(cursor=N)` | Replay from the absolute next sequence, then follow live. |
+| `event_page(cursor=N)` | Return one bounded replay page. |
+| `snapshot()` | Return the stable `agent.run` projection. |
+| `abort()` | Request cooperative cancellation for the owned task. |
+| `close()` / `close_async()` | Reject new work and join bounded teardown; timeout retains borrowed owners for retry on both execution backends. |
+
+SDK project retirement — Problem: a native task could finish while its detached file-history observer was still writing under the caller's project; immediate temporary-directory retirement then raced those writes. Python SDK cleanup also treated the terminal notification as worker completion. Decision: transient history completion runs on the existing task/callback worker, after terminal publication, and both SDK adapters keep admission and borrowed resources until the worker and resource disposal finish. `close` raises `AgentTimeoutError` if its join deadline expires; the runtime rejects new work but retains outstanding owners for a later close retry. Alternatives rejected: sleeping before deletion does not establish completion; suppressing snapshots loses history; detaching a second shutdown worker repeats the lifetime defect. Durable application observers retain their existing post-terminal scheduling. No new worker, pool or persistent store is introduced. A real installed two-task model/repository cycle holds the second history operation, observes timeout with one active SDK task, then releases it and verifies both history jobs and all native children joined before teardown. See failure and verification receipts.
+
+Admission is unlimited when `max_inflight` is omitted or zero: every submitted run starts, and hardware never caps, queues or refuses it. A positive argument or `TOFU_AGENT_MAX_INFLIGHT` is an explicit operator cap; a run beyond it raises `AgentOverloadedError` instead of waiting. The CLI follows the same precedence. Each runtime owns a lazy dedicated agent executor, closed with the runtime. Async event/result observers wait on loop notifications and consume no blocked I/O threads. Independent runtime instances never replace the application's executor. Overload (explicit cap only), configuration, timeout, closed-runtime, and execution failures retain distinct public exception types. `abort()` and `close(abort=True)` use the task engine's owned cancellation boundary: signal both cancellation representations, invoke registered resource cleanup, and wake client-tool waiters. An expired caller must not leave native workers consuming shared executor capacity. Cancellation remains cooperative; the terminal verdict, rather than `status=done` alone, reports its outcome.
+
+### Terminal success and diagnostics
+
+`AgentResult.ok` and `tofu-agent run`'s JSON `ok`/exit status share the canonical
+turn verdict. `status=done` only means execution settled, not success. A normal
+finish (`stop`, `done`, `completed`, `end_turn`) with no error or conflicting
+stream evidence succeeds; missing finish, truncation, cancellation, malformed
+streams and exhausted recovery do not. A provider tool handoff is not complete
+at this autonomous-run boundary. Failures retain content, tool receipts, usage
+and verifier-independent trajectory artifacts; callers must not discard partial
+work or rewrite benchmark rewards merely because runtime health failed.
+When `tofu-agent run` exceeds `--timeout-s` it aborts the run and, once teardown
+joins, the `status=timeout` document (exit 3) keeps the settled content, usage,
+tool-round count and requested trajectory; an unjoined teardown reports only
+the timeout.
+
+The result optionally carries `stream_state` and `stream_diagnostics`: at most 16 recent per-request parser receipts with trace/round, provider finish and DONE observations, malformed-frame count, transport bytes, SSE events and output character/tool counts. These are not summed usage flags and contain no request bodies, credentials or provider text. They distinguish a positively terminated empty response from a cut/malformed stream; missing historical receipts cannot prove which upstream component caused a previous empty response. ATIF uses explicit current-run transcript provenance; legacy input-only snapshots rebuild current native tool receipts after the human request boundary, so historical tools neither suppress nor duplicate this run.
+
+Empty-terminal recovery adds one explicit correction to the preserved history
+per attempt and shares a two-recovery whole-task budget. It never rewinds tool
+receipts or retries the whole turn after side effects. Cancellation, pending
+human interaction and real stream cuts retain their own existing policies.
+
+### Harness compatibility defaults
+
+`tofu-agent run|serve|doctor --harness-profile auto|off|longcat_flash` defaults to
+`auto`. Auto defaults to registry-backed full native exposure, preserving explicit
+exposure, Tool Search and programmatic-calling settings. LongCat marker recovery
+is selected automatically for LongCat model names; other models' text is untouched.
+Empty-terminal recovery and workspace safety fixes apply to every model, even off. Python callers can use
+`AgentRuntime.local(harness_profile='longcat_flash')` (also supported by the
+constructor); each run may override the process default with
+`config={'harnessProfile': 'off'}` or `'longcat_flash'`.
+
+The explicit `longcat_flash` profile selects registry-backed full native exposure,
+disables Tool Search wrapping, and disables programmatic calling. Common coding
+tools (find/search/read/edit/write/command and background command controls) are
+therefore direct definitions from the same enabled registry, not copied schemas.
+This does not enable disabled capabilities, relax permissions, change execution
+scope, or bypass input validation. Existing schema budgets still apply.
+
+LongCat terminal text beginning with `<longcat_tool_call>` or
+`<longcat_arg_key>` is classified as invalid protocol for native-tool reissue.
+The observed format does **not** establish a safe complete call grammar, typed
+argument encoding, or replay identity: this profile never executes XML text,
+even apparently complete packets. Quoted examples, code fences and prose are
+not normalized; malformed or truncated packets are never guessed. Native calls
+in the same response take precedence and suppress text-driven reissue to avoid
+duplicating side effects. The shared termination recovery owner controls the
+whole-task budget (at most two recovery rounds), not this profile helper.
+
+Desktop-relayed streams propagate cancellation through response-header waiting.
+Cancellation closes the pending relay and escapes without trying another device;
+this also bounds that wait when the transient compaction budget expires.
+
+## Lightweight HTTP/SSE contract
+
+Start locally with `tofu-agent doctor` and `tofu-agent serve`. For Rust, all three commands accept `--engine rust --native-archive ARCHIVE --native-profile PROFILE.json`; the unpriced profile declares SDK HTTP/counter/ACK bounds and cannot supply routes or credentials. CLI joins runtime, host/image and callbacks in that order; SIGINT cancels the active native request. `doctor` validates the local archive and reports `execution.backend`. Missing/invalid native composition fails without Python fallback.
+
+> **Namespace note:** the `tofu-agent` composition mounts the `/api/v1`
+> namespace below natively — it is a separate lightweight server, not the
+> retired full-backend v1 mount. On the full Tofu backend the same product
+> contract is served under `/api/v4` (its `/api/v1` returns 426); see
+> [HEADLESS_API.md](contracts/HEADLESS_API.md).
+
+| Method and path | Purpose |
+|---|---|
+| `GET /setup` | Static model-routing control plane. |
+| `GET /api/v1/setup/model-routing` | Redacted active aggregate, source, editability, and storage state. |
+| `POST /api/v1/setup/model-routing/test` | Validate the full envelope and probe its computed primary Deployment without saving. |
+| `PUT /api/v1/setup/model-routing` | Encrypt, save, and hot-apply the full envelope. |
+| `DELETE /api/v1/setup/model-routing` | Remove saved access and unconfigure later runs. |
+| `GET /health/live` | Dependency-free liveness. |
+| `GET /health/ready` | Redacted readiness and bounded capacity. |
+| `GET /api/v1/capabilities` | Installed runtime, model-routing state, events, and limits. |
+| `POST /api/v1/agent/run` | Blocking result, SSE (`stream:true`), or HTTP 202 (`async:true`). |
+| `GET /api/v1/tasks/{id}` | Current run projection. |
+| `GET /api/v1/tasks/{id}/events?cursor=N` | Bounded replay page. |
+| `GET /api/v1/tasks/{id}/stream?cursor=N` | Native replay and live SSE. |
+| `POST /api/v1/tasks/{id}/abort` | Cooperative abort. |
+| `POST /api/v1/tasks/{id}/tools/{call_id}/result` | Resolve one client tool call. |
+
+The sidecar deliberately omits conversations, full-app provider repositories,
+accounts, billing, scheduling, files, and feature routes. The setup service
+owns one process default aggregate; it is not the full app's owner repository.
+
+A minimal managed-default request is:
+
+```http
+POST /api/v1/agent/run
+Authorization: Bearer <TOFU_AGENT_TOKEN>
+Idempotency-Key: <stable caller key>
+Content-Type: application/json
+
+{"messages":[{"role":"user","content":"Hello"}]}
+```
+
+`Prefer: respond-async` or `"async":true` returns 202, `Location`, and
+`X-Tofu-Task-Id`. `"stream":true` returns `agent.run.chunk` SSE. Every
+event has an absolute `id`/`seq`; resume an existing task with
+`cursor=last_seq+1` or `Last-Event-ID:last_seq`. Streaming never resubmits a
+run after a transport disconnect.
+
+Idempotency is scoped to the runtime principal. The same key/body returns the
+same execution; a different body returns `409 idempotency_conflict`. Startup
+reservations and unfinished executions remain pinned. Count and TTL (measured
+from reservation) evict only finished responses; active work may exceed the
+terminal retention count without refusal. After eviction the key may start a
+new run. These records remain process-local, not restart-durable.
+
+**Problem:** response-cache eviction could erase a live execution identity, and
+HTTP cancellation during physical startup could strand an unpublished claim.
+**Decision:** the admission worker publishes or withdraws its own reservation;
+observer cancellation joins admission and preserves the resulting execution.
+Terminal response retention stays in the existing index. **Alternatives
+rejected:** expiring active keys permits duplicate effects; clearing a claim on
+disconnect races a worker that may already have launched; refusing new work at
+the retention count makes a cache limit an execution limit.
+
+The controlled retention check uses 1,000 synthetic live executions with a
+terminal limit of 16: all 1,000 identities remain while live, then pruning keeps
+16 after completion. Python `tracemalloc` observed 1,563,062 versus 63,148 retained
+bytes for this index/fixture, excluding real task state and process RSS. Verify
+TTL/count pressure, conflict handling, cancellation and failed-admission retry
+with `tests/server/test_headless_agent_server.py`.
+
+### Authentication
+
+`/`, liveness/readiness, `/setup`, and setup assets are public and contain
+no configuration. Every `/api/v1/setup/*`, agent, and task route follows the
+same auth policy; setup data routes also reject cross-site browser requests.
+With `TOFU_AGENT_TOKEN`, an exact Bearer token is required. Without a token,
+automatic mode accepts only loopback bind, peer, and Host authority. The CLI
+refuses an exposed tokenless bind unless `--allow-unauthenticated` is explicit;
+the OCI image therefore requires a token.
+
+The setup page holds a bearer token only in JavaScript memory. It uses no
+cookies, browser storage, or external resources. A remote one-time
+`/setup#token=...` fragment is removed from the address bar immediately and
+is never sent to the server. Disable setup with `--no-setup` or
+`TOFU_AGENT_SETUP_ENABLED=0`.
+
+## State and restart semantics
+
+| Property | Developer runtime | Full application |
+|---|---|---|
+| Task/event authority | Bounded process memory | Storage sidecar |
+| Reconnect | Cursor resume while this process lives | Durable task replay |
+| Restart | Runs and idempotency records are lost | Durable domains recover by policy |
+| Model access | Encrypted v2 file or explicit envelope | Owner-aware v2 repository |
+| Database/full Tofu UI | Never initialized | Declared application lifecycle |
+| Accounts/billing | None | Auth and repository boundaries |
+
+Model-access durability does not imply task durability.
+
+### Background commands
+
+A runtime task's job label is not a saved application conversation, so no
+conversation receives command completions; the run that launched a command
+reads it. When shell or base tools are enabled, `poll` and `kill` stay
+available. A command still running after `AUTO_BACKGROUND_AFTER_S` (120 s)
+moves to the background and returns a `bg_*` handle, like an explicit
+`background=true` command. A finished command's result is injected at the
+run's next round boundary, once, and not after `poll` already showed it;
+`poll(id=..., wait_s=...)` returns status or the terminal result, and a
+blocking wait also returns when another of the run's commands finishes. `kill`
+stops an owned command. A command still running when its run returns
+continues in its own process session and nothing delivers its result after
+that; closing or terminating the runtime does not provide a portable
+service-lifetime guarantee ([handoff decision](LLM_COST_OPTIMIZATION.md#long-waits-and-the-conversation-tail-ttl)). Result handles
+and delivery state are process-local; a runtime restart cannot recover them.
+These controls do not imply durable task/event replay, conversation delivery,
+or storage-backed sub-agent lineage. The full application retains its
+saved-conversation completion delivery and restart recovery.
+
+This differs from a full-server API request created with
+`saved_conversation=False`: that response-scoped request refuses explicit
+background commands and stops its handed-off commands when the response ends,
+because nothing it starts may outlive the response. See [No saved conversation](contracts/HEADLESS_API.md#no-saved-conversation).
+
+### Workspace confinement and the local operator
+
+`AgentRuntime(remote_principal=True)` is the default for the constructor and
+`AgentRuntime.local`: each run is an agent-run request, so
+`lib/project_mod/abs_path_guard.py` confines absolute file reads/writes to the
+registered roots and `run_command` applies the remote-caller environment
+(`HOME`/`TMPDIR` inside the workspace, delete/move shims, workspace delete
+containment). `tofu-agent serve` keeps that default because HTTP callers are
+remote. `tofu-agent run` constructs `remote_principal=False`: the operator who
+launched the process is the principal, which receives the same local CLI policy
+as the desktop product. An embedder that submits only for its own local
+operator may pass `False`; request JSON can never select it.
+
+Problem: the `run` CLI inherited the agent-run marker, so a local one-shot run
+had `HOME=/workspace`, could not move or delete files outside it, and kept
+installs and configuration where the user's shell never looks. Decision: the
+trusted composition declares its caller once at construction. Alternatives
+rejected: a request flag lets a remote caller lift its own confinement, and
+flipping the SDK default would silently unconfine embedders that serve others.
+
+## Choose an extension boundary
+
+| Need | Existing public or application boundary |
+|---|---|
+| Supply tools for one request | [Custom tools](CUSTOM_TOOLS.md): client handoff, webhook or sandbox execution; select augment/exclusive explicitly. |
+| Install a Python tool package | [`tofu.tools` entry points](contracts/TOOL_PLUGINS.md): installed descriptors plus request-level plugin selection. |
+| Connect an external service | MCP through the runtime's existing tool discovery and execution gateway. |
+| Add reusable task instructions | [Skills](modules/skills.md), with bodies loaded when selected. |
+| Observe tool or compaction lifecycle inside the application | [`tool_hooks.py`](../lib/tasks_pkg/tool_hooks.py): programmatic application hooks, not a project-script loader. |
+
+Tool declarations, authority, execution and result handling stay with their
+existing owners. Context changes use the [registered context composer](CONTEXT_INJECTIONS.md).
+These entry points do not introduce a second agent loop or a second persistence
+owner. The examples and contracts above describe their actual scope; an
+installed tool plugin is not a general-purpose hot-reloadable UI extension.
+
+## Release artifacts
+
+All public artifacts use the repository [`VERSION`](../VERSION):
+
+| Artifact | Public name | Entry point |
+|---|---|---|
+| Python runtime | `tofu-agent` | `import tofu_agent`; `tofu-agent` CLI |
+| Python remote SDK | `tofu-sdk` | `import tofu_sdk` |
+| TypeScript SDK | `@rangehow/tofu-sdk` | `import { Tofu } …` |
+| OCI runtime | `ghcr.io/rangehow/tofu-agent:<version>` | port `15001` |
+
+The runtime wheel contains the agent kernel, model-routing compiler, provider
+wire adapters, tools/MCP, and a dependency-free static setup page. It excludes
+the full application routes, storage implementations, Tofu UI assets, tests, and
+runtime data. The OCI `agent` target installs that wheel into a
+dependency-only final image.
+
+The OCI build installs the standalone `tofu-repo-kernel` platform wheel into
+API, Worker and Headless environments. Rust compiles only in the dependency
+builder; runtime images contain `libgcc-s1` and the verified wheel. Image gates
+reject compiler/database-server tools and require both `python -m tofu_repo_kernel`
+and the application lazy selector to certify native activation. The portable
+Python runtime wheel keeps the native component optional and its existing
+missing/invalid-component fallback; no runtime compiler or download is added.
+
+工具结果的 capture/composition 只依赖可随 wheel 分发的纯 Python 契约投影，
+不得在导入时依赖完整应用的 `lib.storage` 或 checkout 的 `contracts/`。
+`contracts/tool_result_query_v1.json` 是唯一源；生成器
+`scripts/gen_tool_result_query_contract.py` 产出 `lib/tool_results/tool_result_query_generated.py`，
+由发行成员门禁和 `tests/tools/test_result_contract_distribution.py` 校验。
+持久化才进入 owner-scoped storage 边界；轻量运行时的小结果无需存储服务。
+
+## Model-routing ownership
+
+The standalone runtime accepts one complete access envelope:
+
+```json
+{
+  "model_routing": {
+    "contract_version": "tofu.model-routing/v2",
+    "revision": 0,
+    "creators": [
+      {"creator_id": "openai", "name": "OpenAI"}
+    ],
+    "models": [
+      {
+        "creator_id": "openai",
+        "model_id": "gpt-x",
+        "display_name": "GPT X",
+        "capabilities": ["text", "thinking"],
+        "context_window": 131072,
+        "quality_rank": 100
+      }
+    ],
+    "providers": [
+      {"provider_id": "gateway-a", "name": "Gateway A", "scope": "owner"}
+    ],
+    "provider_accesses": [
+      {
+        "provider_access_id": "gateway-a-access",
+        "provider_id": "gateway-a",
+        "enabled": true,
+        "quota_policy": {"rpm": 60}
+      }
+    ],
+    "connections": [
+      {
+        "connection_id": "gateway-a-primary",
+        "provider_access_id": "gateway-a-access",
+        "base_url": "https://models.example/v1",
+        "protocol": "openai",
+        "enabled": true,
+        "priority": 0,
+        "extra_headers": {}
+      }
+    ],
+    "credentials": [
+      {
+        "credential_id": "gateway-a-key",
+        "provider_access_id": "gateway-a-access",
+        "kind": "api_key",
+        "secret_reference": "gateway-a-secret",
+        "key_hint": "configured",
+        "enabled": true,
+        "authorization": {
+          "connection_ids": ["gateway-a-primary"],
+          "models": [{"creator_id": "openai", "model_id": "gpt-x"}]
+        },
+        "quota_policy": {}
+      }
+    ],
+    "offerings": [
+      {
+        "offering_id": "gateway-a-gpt-x",
+        "provider_access_id": "gateway-a-access",
+        "identity_state": "confirmed",
+        "model": {"creator_id": "openai", "model_id": "gpt-x"},
+        "enabled": true,
+        "capabilities": ["text", "thinking"],
+        "context_window": 131072,
+        "priority": 0
+      }
+    ],
+    "deployments": [
+      {
+        "deployment_id": "gateway-a-gpt-x-primary",
+        "offering_id": "gateway-a-gpt-x",
+        "connection_id": "gateway-a-primary",
+        "wire_model_id": "vendor/gpt-x",
+        "identity_confidence": "high",
+        "probe_status": "unprobed",
+        "priority": 0
+      }
+    ]
+  },
+  "model": {"creator_id": "openai", "model_id": "gpt-x"},
+  "routing": {"preferred_provider_id": "gateway-a"},
+  "credential_secrets": {"gateway-a-secret": "sk-..."}
+}
+```
+
+The aggregate contains only redacted credential metadata and opaque secret
+references. `credential_secrets` is a separate map keyed by those references;
+it is excluded from `repr`, readiness, capabilities, setup reads, task
+snapshots, and results. A non-local enabled Credential must have exactly one
+configured secret value. Plain model strings, `model@provider`, provider
+blocks, aliases, and request-ID pools are rejected.
+
+The configured `model` is the process default. Each run may override it with
+another structured official Model or provider-scoped pending Offering from the
+same aggregate and may supply request `routing` policy. Each admitted run gets
+a request-owned slot group and keeps it until terminal settlement; a setup
+change affects only later runs.
+
+### Authority order
+
+The sidecar resolves configuration in this order:
+
+1. `--model-routing-json` or `--model-routing-file`;
+2. `TOFU_AGENT_MODEL_ROUTING`, containing the exact JSON envelope above;
+3. the encrypted saved setup document;
+4. unconfigured.
+
+`TOFU_AGENT_MODEL_ROUTING_FILE` supplies the CLI file default. CLI/environment
+authority makes the setup API read-only until the override is removed and the
+process restarts. `.env` values never override already-present process
+environment values.
+
+A fresh sidecar may start unconfigured. `GET /health/live` remains 200 while
+`GET /health/ready` returns 503 with `setup_required:true`. The bundled
+`/setup` page edits the complete v2 aggregate, sends one minimal probe against
+the computed primary Deployment, and hot-applies a successful save.
+
+### Encrypted setup storage
+
+| Item | Default / override |
+|---|---|
+| Model-routing document | `~/.config/tofu-agent/model-routing.json`; `TOFU_AGENT_CONFIG_PATH` overrides it |
+| Encryption key | Adjacent `model-routing.json.key`; `TOFU_AGENT_CONFIG_KEY` overrides it |
+| Permissions | Owner read/write only (`0600`) |
+
+`XDG_CONFIG_HOME` is honored on Unix and `APPDATA` on Windows. The file
+stores public aggregate metadata plus one Fernet-encrypted
+`credential_secrets` envelope. File and key writes are atomic; a corrupt file,
+missing key, unsupported schema, or decryption failure fails closed. Back up
+the document and adjacent key together. Delete removes the document but retains
+the key to avoid secret churn on a later save.
+
+## Verification and release
+
+Minimum gates for a public runtime change are:
+
+```bash
+pytest -q tests/agent_core/test_agent_provider_setup.py tests/tasks_pkg/test_public_agent_runtime.py \
+  tests/server/test_headless_agent_server.py
+pytest -q tests/tasks_pkg/test_inprocess_facade.py tests/sdk/test_sdk_sse_parser.py
+npm run build --prefix clients/typescript
+uvx --from build --with 'setuptools==80.10.2' --with 'wheel==0.48.0' \
+  pyproject-build --no-isolation
+python3 scripts/check_developer_runtime_artifacts.py dist/tofu_agent-*.whl
+```
+
+Build from a clean checkout or an isolated setuptools `build_base`; an old
+`build/lib` can leak previously packaged application modules despite current
+package exclusions. Validate the actual artifact before installation or release.
+Stream-terminal changes also run `tests/evaluations/test_harness_stream_end_to_end.py`:
+loopback HTTP recovery and exhaustion must preserve each completed tool receipt.
+
+Packaged domain readers retain the same `contracts/<name>.json` or YAML
+paths as the checkout. `setup.py` copies the canonical machine-readable schemas
+byte for byte into wheel assets; the sdist includes those inputs and the build
+hook. Guides and schema-generation tools stay outside the wheel. Artifact checks
+require startup-critical swarm, paper-build and resource-policy schemas.
+Problem: installed task executor imports previously depended on checkout-only
+schema paths. Decision: preserve one schema authority and its relative paths at
+build time. Alternatives: handwritten fallbacks duplicate wire authority;
+patching each eager import leaves later optional domains with the same defect.
+Schemas are loaded by their owning domains, not by the packaging layer.
+
+The clean-wheel smoke installs only the wheel outside the repository, checks
+that database drivers and full-app assets are absent while setup assets are
+present, runs `tofu-agent doctor`, and completes one turn against a controlled
+OpenAI-compatible server. Release workflows publish Python/TypeScript/OCI
+artifacts from the same version and gate secrets, SBOMs, and image
+vulnerabilities before registry publication.
+
+## Restart timeline logging
+
+While the browser renders the restart progress bar, the backend attributes
+its wall time per stage so a slow restart can be located in one grep:
+
+- `logs/app.log` (old worker, prepare band): approval pending/approved,
+  `[Update] in-request frontend preflight passed in Ns`, `[Update]
+  Supervisor accepted deferred worker restart in Ns`. When the manager
+  cannot be reached or refuses, `[Update] Manager delegation unavailable
+  (…); falling back to in-place re-exec` marks the last-resort path, and a
+  later `[Update] Restart refused by every bridge; acceptance stamp rolled
+  back …` means no restart happened and a retry is safe.
+- `logs/server-manager.log` (supervisor + manager, shutdown and boot
+  bands): quiescence outcome and wait, `worker pid=N SIGTERM sent`,
+  `worker pid=N exited cleanly Ns after SIGTERM` (or the SIGKILL
+  escalation warning), sidecar drain/reap, `frontend preflight starting /
+  passed in Ns` (a rebuild prints timestamped `Frontend artifact is stale…
+  / rebuilt and validated in Ns` lines inline), `worker spawned pid=N
+  source=… totalSinceRequest=Ns`, and `worker ready pid=N source=…
+  bootTime=Ns` when the readiness probe first passes.
+- `logs/server-console.log` (worker image): `production runtime shutdown
+  begin / took Ns` plus the per-step shutdown timings, then the usual
+  `[boot + Ns] [startup phase M/9] done | name | Ns` lines and the final
+  `Boot time: Ns` banner.
+
+UI-originated restarts carry `requestedAt` end to end (update route →
+`supervisor_protocol.request_deferred_worker_restart` → supervisor →
+`LifecycleManager.restart(requested_at=…)`), so manager stage lines suffix
+`totalSinceRequest=Ns`; CLI/automatic recoveries log stage elapsed only.
+
 ## Native terminal durability policy
 
 Supply TerminalPolicy plus explicit terminal_persistence configuration to NativeProcessClient.run (also forwarded by run_native_route). The profile declares operation_id, explicit nullable ACK grace, maximum attempts and frame bytes; null delegates waiting to the persistence owner and EOF, never treating exit or late Stop as a commit. Missing/zero grace refuses. Problem: durable-only terminal admission excluded storage-free tasks. Decision: NativeTaskTerminalPolicy and prepared/task entries require explicit `transient=True`, reuse required delivery, reject Turn/wallet/checkpoint/resume authority and fence lifetime changes. Alternatives: implicit task-marker selection weakens durable admission; a second finalizer duplicates settlement. AgentRuntime now accepts trusted NativeAgentConfiguration; CLI run/serve/doctor owns an operator-supplied local archive/profile; default promotion remains pending. Policy.persist receives the same PrincipalContext, task, operation and ordinal plus frozen event/receipt JSON bytes; accessors return detached views. Durable ports accept only after durable acknowledgment; an explicit transient task port accepts after required receiver delivery (no restart durability), retries only idempotently, or rejects. The native Task retains the same terminal candidate across requested retries; terminal visibility follows accepted persistence. Callback failure raises NativePersistenceError with cause, and ACK transport failure remains a durability error. Missing policy fails before launch. A final event that differs from the accepted candidate or arrives without ACK is refused by the host. Cancellation joins callbacks and bounded ACK work. Cleanup can still persist an aborted candidate; late cancellation cannot rewrite an already frozen outcome. Applications must persist/reconcile candidate debt using the supplied operation identity after timeout or process loss; this port never reruns models to repair storage. Frame/attempt/grace limits are explicit, not business success evidence. Real subprocess/archive tests cover bounded persistence retries and joined cleanup. **Problem:** ROOT history also carries private host context metadata. **Decision:** Chat borrows generated fields/order and normalizes text/context seams. **Alternatives rejected:** blacklists leak new fields; stripping history loses context. Verify Python chat-wire oracles, cache/HTTP/ROOT parity; model-specific normalization, default selection, complete protocol coverage and process-loss recovery remain pending.
@@ -37,7 +617,7 @@ settlement parity, not production default or whole-system performance admission.
 
 **Problem:** provider-global OAuth files cannot authorize an arbitrary owner, and native routing could not bind live credential resolution to its selected route. **Decision:** compile_native_route accepts an explicit credential_resolver for Codex OAuth only when the authorized candidate selects openai_responses/codex. The issued single-use route binds owner and tenant and carries that port privately; consume/close relinquish its reference. No global token store is selected. run_native_route binds it to NativeModelAccountPolicy for one joined execution scope and releases it afterward. Each NativeCredentialRequest carries the explicit principal, task/attempt, credential ID/private reference, subscription, exact selected endpoint, wire model, stable cache key, private extra headers and cancellation signal. The resolver must validate source ownership, revocation and destination before returning complete headers. Existing owner-aware auth implementations belong behind this port; it is not an authorization bypass or new token vault.
 
-Codex's canonical route_feature binding admits encrypted reasoning replay and cache affinity unless explicitly narrowed. The existing responses_cache_affinity_key helper derives the key from task/conversation identity. A supported cache feature places exactly that key into the borrowed native body; conflicting or disabled cache overrides refuse. Key bytes are bounded by the generated stdio policy. Missing resolver/dialect/account binding or incomplete authorization refuses before native HTTP; invalid owner/tenant or protocol refuses before secret lookup. Login/refresh failure retains its typed SDK cause, settles proven unsent reservation and does not retry model/tool effects. **Alternatives rejected:** calling a global token loader borrows another owner's identity; startup-only credentials expire mid-run; random per-round cache IDs lose affinity; silently selecting a keyed alternative changes the requested subscription.
+Codex's canonical route_feature binding admits encrypted reasoning replay and cache affinity unless explicitly narrowed. `lib.llm.cache_affinity.cache_affinity_key` derives the key from the request lineage (a child invocation, else the conversation, else the task). A supported cache feature places exactly that key into the borrowed native body; conflicting or disabled cache overrides refuse. Key bytes are bounded by the generated stdio policy. Missing resolver/dialect/account binding or incomplete authorization refuses before native HTTP; invalid owner/tenant or protocol refuses before secret lookup. Login/refresh failure retains its typed SDK cause, settles proven unsent reservation and does not retry model/tool effects. **Alternatives rejected:** calling a global token loader borrows another owner's identity; startup-only credentials expire mid-run; random per-round cache IDs lose affinity; silently selecting a keyed alternative changes the requested subscription.
 
 Verify native-route/account binding unit tests, the 30-case Python request oracle,
 cache key refusal tests and test_native_oauth_route_installed against a verified
@@ -185,20 +765,28 @@ with `tests/tasks_pkg/test_native_gateway.py` and the `gateway_write` case in
 `tests/storage/test_native_task_terminal.py` using a verified native archive and
 disposable authority. Exact ROOT wire comparison still gates default selection.
 
-## Qualified native tool parallelism
+## Native tool parallelism
 
-Native application composition derives `parallel_tool_names` from the common
-tool-dispatch write/ordered-state policy, intersected with its admitted read
-catalog. An explicit subset can narrow it; `[]` selects ordered dispatch.
-Standalone stdio/SDK omission retains ordered dispatch. Older artifacts reject
-the new configuration before provider/tool effects and require a matching build.
+Native application composition selects `concurrent_tool_dispatch`: every call
+of a round starts at once, writes included, and Rust keeps only the call order
+the gateway binds on round settlement. The decision record is "Native
+application rounds" in [TOOL_EXECUTION_POLICY.md](contracts/TOOL_EXECUTION_POLICY.md);
+verify it with `test_native_gateway_concurrent.py`,
+`test_native_parallel_writes_installed.py` and Rust `agent_stdio`/`tool_scheduler`.
+An explicit `parallel_tool_names` instead selects the read-qualified scheduler
+below: the common tool-dispatch write/ordered-state policy intersected with the
+admitted read catalog, where a subset narrows it and `[]` selects ordered
+dispatch. Standalone stdio/SDK omission of both retains ordered dispatch. Older
+artifacts reject either field before provider/tool effects and require a
+matching build.
 
 Problem: the CLI, stdio callback reader and application gateway each serialized
 independent reads even when the shared executor could overlap them. Decision:
 bind the existing Rust Scheduler, multiplex only active tool replies on the one
 control reader, and dispatch qualified callbacks through the existing canonical
 pipeline/executor. Control/model/approval exchanges retain their exclusive slot;
-writes and ordered state actions such as `todo_write` retain provider order.
+in this qualified mode, writes and ordered state actions such as `todo_write`
+retain provider order.
 The original `model_call_id` correlates identical calls independently of response
 arrival; it grants no approval and does not replace the single-use `call_id`
 approval receipt. The application binds model declarations before callbacks.
@@ -337,7 +925,31 @@ encoding. It opens no authority and creates no worker/driver. Explicit byte
 bounds, Recovery, joined pause release and terminal persistence remain caller-owned.
 Lease callbacks retain the runtime; drop them before opening a replacement authority.
 
-NativeCheckpointStore captures a generation-bound WAL witness under authority and waits outside its writer before returning reads/CAS, passive replay/current retry, pending publication or source ACK. Plain Strict inline-sync is supported; deferred WAL without a coordinator refuses construction before any lease write. Latched sync errors refuse reads and retries, preserving the live journal fence. Runtime close marks closed, joins entered checkpoint Store calls through a shared read/write lifecycle guard, then retires existing drivers. Closed or disarmed callbacks refuse before I/O; Drop still never releases the durable lease. **Alternatives rejected:** cloning/opening a database splits authority; waiting under its writer blocks commit pipelining; treating commit/visible metadata as fsync can publish an unconfirmed terminal frontier. Verify real runtime owner/ close/reopen, blocked flush/close joining, native-store WAL fault/replay/ACK tests and existing checkpoint neighbors. Rust binding is explicit; C ABI/semantic routing, SQL adapters, crash takeover and production-default execution remain pending.
+NativeCheckpointStore captures a generation-bound WAL witness under authority
+and waits outside its writer before returning reads/CAS, passive replay/current
+retry, pending publication or source ACK. Plain Strict inline-sync is supported;
+deferred WAL without a coordinator refuses construction before any lease write.
+Latched sync errors refuse reads and retries, preserving the live journal fence.
+Runtime close marks closed, joins entered checkpoint Store calls through a shared
+read/write lifecycle guard, then retires existing drivers. Closed or disarmed
+callbacks refuse before I/O; Drop still never releases the durable lease.
+
+**Alternatives rejected:** cloning/opening a database splits authority; waiting
+under its writer blocks commit pipelining; treating commit/visible metadata as
+fsync can publish an unconfirmed terminal frontier. Verify real runtime
+owner/close/reopen, blocked flush/close joining, native-store WAL fault/replay/ACK
+tests and existing checkpoint neighbors.
+
+The [C ABI and SQL adapters](#native-checkpoint-c-abi-and-standalone-sdk) reuse
+the shared Rust journal through their declared transports. Process-death evidence
+belongs to `tofu_runtime::checkpoint_writer`; application recovery enters through
+the [checkpoint host policy](#native-checkpoint-host-policy). Availability of
+these ports does not itself select the application's executor or storage backend.
+The executable recovery contracts are the
+[ROOT process-loss tests](../tests/tasks_pkg/test_native_root_recovery.py),
+[SQL storage boundaries](../tests/storage_authority_sql/test_native_checkpoint_storage.py)
+and [public SQL service recovery](../tests/tasks_pkg/test_native_sql_production_recovery.py).
+
 ## Native checkpoint C ABI and standalone SDK
 
 **Problem:** installed hosts lacked callable native journal ports, and output
@@ -512,465 +1124,6 @@ routing, write approval, checkpoint storage, progress, billing and multimodal
 policy remain pending. The Rust subprocess tests cover actual stdio/TCP
 composition and protocol failures; they do not certify application performance.
 
-## Product boundary
-
-```text
-Python caller ── tofu_agent.AgentRuntime ─┐
-                                         ├─ transient TaskRuntime
-HTTP caller ── tofu-agent sidecar ────────┘          │
-                                                    ▼
-                                        production agent orchestrator
-                                                    │
-                                          v2 route / tools / MCP
-```
-
-`AgentRuntime` uses the same task and agent execution seams as the full
-application. Each invocation carries an explicit `PrincipalContext`, owns one
-bounded transient runtime, and uses the canonical
-`tofu.model-routing/v2` candidate compiler. It does not initialize full-app
-routes, conversations, accounts, billing, scheduler state, or the storage
-sidecar. Task/event replay, idempotency, and active runs exist only in bounded
-process memory and disappear at restart.
-
-This is a composition mode, not another orchestrator or provider-routing state
-machine.
-
-**Ingress affinity initialization — Problem:** ordinary embedded and worker task creation imported Quart solely to discover that no request existed. **Decision:** `manager/_registry.py` queries request affinity when Quart is already loaded. Web requests retain clipped direct keys and reconnectability; background tasks retain conversation-store inheritance and durable birth metadata. Explicit principal/owner validation still precedes every task. **Alternatives considered:** importing the framework on every first task taxes storage-free composition; skipping affinity for all transient tasks loses real request routing metadata. Verify `tests/tasks_pkg/test_task_ingress_affinity.py` and `benchmarks/task_affinity_measure.py`; first-task clocks exclude common imports, and loaded-web/long-residency checks remain separate boundaries.
-
-## Release artifacts
-
-All public artifacts use the repository [`VERSION`](../VERSION):
-
-| Artifact | Public name | Entry point |
-|---|---|---|
-| Python runtime | `tofu-agent` | `import tofu_agent`; `tofu-agent` CLI |
-| Python remote SDK | `tofu-sdk` | `import tofu_sdk` |
-| TypeScript SDK | `@rangehow/tofu-sdk` | `import { Tofu } …` |
-| OCI runtime | `ghcr.io/rangehow/tofu-agent:<version>` | port `15001` |
-
-The runtime wheel contains the agent kernel, model-routing compiler, provider
-wire adapters, tools/MCP, and a dependency-free static setup page. It excludes
-the full application routes, storage implementations, Tofu UI assets, tests, and
-runtime data. The OCI `agent` target installs that wheel into a
-dependency-only final image.
-
-The OCI build installs the standalone `tofu-repo-kernel` platform wheel into
-API, Worker and Headless environments. Rust compiles only in the dependency
-builder; runtime images contain `libgcc-s1` and the verified wheel. Image gates
-reject compiler/database-server tools and require both `python -m tofu_repo_kernel`
-and the application lazy selector to certify native activation. The portable
-Python runtime wheel keeps the native component optional and its existing
-missing/invalid-component fallback; no runtime compiler or download is added.
-
-工具结果的 capture/composition 只依赖可随 wheel 分发的纯 Python 契约投影，
-不得在导入时依赖完整应用的 `lib.storage` 或 checkout 的 `contracts/`。
-`contracts/tool_result_query_v1.json` 是唯一源；生成器
-`scripts/gen_tool_result_query_contract.py` 产出 `lib/tool_results/tool_result_query_generated.py`，
-由发行成员门禁和 `tests/tools/test_result_contract_distribution.py` 校验。
-持久化才进入 owner-scoped storage 边界；轻量运行时的小结果无需存储服务。
-
-## Model-routing ownership
-
-The standalone runtime accepts one complete access envelope:
-
-```json
-{
-  "model_routing": {
-    "contract_version": "tofu.model-routing/v2",
-    "revision": 0,
-    "creators": [
-      {"creator_id": "openai", "name": "OpenAI"}
-    ],
-    "models": [
-      {
-        "creator_id": "openai",
-        "model_id": "gpt-x",
-        "display_name": "GPT X",
-        "capabilities": ["text", "thinking"],
-        "context_window": 131072,
-        "quality_rank": 100
-      }
-    ],
-    "providers": [
-      {"provider_id": "gateway-a", "name": "Gateway A", "scope": "owner"}
-    ],
-    "provider_accesses": [
-      {
-        "provider_access_id": "gateway-a-access",
-        "provider_id": "gateway-a",
-        "enabled": true,
-        "quota_policy": {"rpm": 60}
-      }
-    ],
-    "connections": [
-      {
-        "connection_id": "gateway-a-primary",
-        "provider_access_id": "gateway-a-access",
-        "base_url": "https://models.example/v1",
-        "protocol": "openai",
-        "enabled": true,
-        "priority": 0,
-        "extra_headers": {}
-      }
-    ],
-    "credentials": [
-      {
-        "credential_id": "gateway-a-key",
-        "provider_access_id": "gateway-a-access",
-        "kind": "api_key",
-        "secret_reference": "gateway-a-secret",
-        "key_hint": "configured",
-        "enabled": true,
-        "authorization": {
-          "connection_ids": ["gateway-a-primary"],
-          "models": [{"creator_id": "openai", "model_id": "gpt-x"}]
-        },
-        "quota_policy": {}
-      }
-    ],
-    "offerings": [
-      {
-        "offering_id": "gateway-a-gpt-x",
-        "provider_access_id": "gateway-a-access",
-        "identity_state": "confirmed",
-        "model": {"creator_id": "openai", "model_id": "gpt-x"},
-        "enabled": true,
-        "capabilities": ["text", "thinking"],
-        "context_window": 131072,
-        "priority": 0
-      }
-    ],
-    "deployments": [
-      {
-        "deployment_id": "gateway-a-gpt-x-primary",
-        "offering_id": "gateway-a-gpt-x",
-        "connection_id": "gateway-a-primary",
-        "wire_model_id": "vendor/gpt-x",
-        "identity_confidence": "high",
-        "probe_status": "unprobed",
-        "priority": 0
-      }
-    ]
-  },
-  "model": {"creator_id": "openai", "model_id": "gpt-x"},
-  "routing": {"preferred_provider_id": "gateway-a"},
-  "credential_secrets": {"gateway-a-secret": "sk-..."}
-}
-```
-
-The aggregate contains only redacted credential metadata and opaque secret
-references. `credential_secrets` is a separate map keyed by those references;
-it is excluded from `repr`, readiness, capabilities, setup reads, task
-snapshots, and results. A non-local enabled Credential must have exactly one
-configured secret value. Plain model strings, `model@provider`, provider
-blocks, aliases, and request-ID pools are rejected.
-
-The configured `model` is the process default. Each run may override it with
-another structured official Model or provider-scoped pending Offering from the
-same aggregate and may supply request `routing` policy. Each admitted run gets
-a request-owned slot group and keeps it until terminal settlement; a setup
-change affects only later runs.
-
-### Authority order
-
-The sidecar resolves configuration in this order:
-
-1. `--model-routing-json` or `--model-routing-file`;
-2. `TOFU_AGENT_MODEL_ROUTING`, containing the exact JSON envelope above;
-3. the encrypted saved setup document;
-4. unconfigured.
-
-`TOFU_AGENT_MODEL_ROUTING_FILE` supplies the CLI file default. CLI/environment
-authority makes the setup API read-only until the override is removed and the
-process restarts. `.env` values never override already-present process
-environment values.
-
-A fresh sidecar may start unconfigured. `GET /health/live` remains 200 while
-`GET /health/ready` returns 503 with `setup_required:true`. The bundled
-`/setup` page edits the complete v2 aggregate, sends one minimal probe against
-the computed primary Deployment, and hot-applies a successful save.
-
-### Encrypted setup storage
-
-| Item | Default / override |
-|---|---|
-| Model-routing document | `~/.config/tofu-agent/model-routing.json`; `TOFU_AGENT_CONFIG_PATH` overrides it |
-| Encryption key | Adjacent `model-routing.json.key`; `TOFU_AGENT_CONFIG_KEY` overrides it |
-| Permissions | Owner read/write only (`0600`) |
-
-`XDG_CONFIG_HOME` is honored on Unix and `APPDATA` on Windows. The file
-stores public aggregate metadata plus one Fernet-encrypted
-`credential_secrets` envelope. File and key writes are atomic; a corrupt file,
-missing key, unsupported schema, or decryption failure fails closed. Back up
-the document and adjacent key together. Delete removes the document but retains
-the key to avoid secret churn on a later save.
-
-## Python composition
-
-```python
-from tofu_agent import AgentRuntime, ModelRoutingConfig, NativeAgentConfiguration
-access = ModelRoutingConfig.from_mapping(model_routing_envelope)
-with AgentRuntime.local(model_routing=access) as runtime:
-    execution = runtime.start([{"role": "user", "content": "Inspect this project"}],
-        routing={"preferred_provider_id": "gateway-a"},
-        config={"thinking": "high", "tools": ["search", "fetch"], "project": "/workspace/project"},
-        request_id="run-owned-by-caller", timeout_s=600)
-    for event in execution.events(cursor=0): consume(event)
-    result = execution.result()
-# Optional Rust composition: borrow an admitted host, running loop, callback
-# executor and launch capacity; profile declares HTTP/ACK/model-counter limits.
-native = NativeAgentConfiguration(host=host, loop=loop, executor=callbacks,
-    configuration=profile, working_directory=workdir, resource_policy=launch_policy,
-    pending_calls=pending_calls, pending_bytes=pending_bytes)
-runtime = AgentRuntime(principal=principal, model_routing=access, native_execution=native)
-try:
-    result = await runtime.run_async([{"role": "user", "content": "Inspect this project"}])
-finally:
-    await runtime.close_async()  # join before caller closes host/loop/callbacks
-```
-
-`AgentRuntime.local()` constructs an explicit personal principal. A server or
-enterprise adapter constructs `AgentRuntime(principal=..., model_routing=...)`
-with its authenticated owner instead of relying on a module global. A single
-request may pass `model_routing=...` to use a complete one-run envelope; it
-does not persist or mutate the runtime default. Rust uses the same issued route, preparation, tools and account; no Python model fallback. Use async calls on its serving loop; sync callers require another lane. Native results wait for worker/client cleanup. `capabilities.execution.backend` reports the selected engine; CLI `--engine rust --native-archive ARCHIVE --native-profile PROFILE.json` owns its launch-sized callback executor and admitted image; default promotion remains pending.
-
-Optional repository extraction has its own trusted configuration, independent
-of the model execution engine. Install `tofu-repo-kernel` 0.4.0 or later with its
-stream artifact and either a pinned grammar bundle (0.7+) or a reviewed external directory. For example,
-with an existing routing `access`, the application's already-issued
-`launch_policy`, and an admitted project:
-
-```python
-from tofu_agent import AgentRuntime, NativeRepositoryConfiguration
-repository = NativeRepositoryConfiguration.from_launch_policy(
-    # Omit grammar_directory to select the installed pinned bundle.
-    launch_policy=launch_policy,
-    timeout=60.0,
-)
-with AgentRuntime.local(model_routing=access, native_repository=repository) as runtime:
-    result = runtime.run(
-        [{"role": "user", "content": "Use repo_map to summarize this project"}],
-        config={"tools": ["repo_map"], "project": "/workspace/project"},
-    )
-```
-
-Path-list, request and per-file output ceilings follow the existing launch policy's `frame_maximum`, without another probe or allocation of those ceilings. Source reads use the canonical source/reference admission bound; file growth between stat and read cannot consume the host-sized frame allowance. Explicit overrides remain available through `NativeRepositoryConfiguration(grammar_directory, limits=(path_bytes, request_bytes, file_frame_bytes, source_read_bytes), timeout=...)`. An omitted/None grammar directory selects the installed pinned bundle; an explicit path keeps trusted external selection. Construction imports no native image/parser package. The runtime owns one lazy sealed executable and each task owns a cancellable root/owner scope in the shared ExecutionSession. Close joins active task cleanup before disposing the image; timeout retains it for a retry. `capabilities.repository_extraction` reports the selected backend and reference default, not readiness or performance certification. Selected failures do not fall back. This configuration is not a wire/CLI option. Full catalog coverage and performance admission remain required before default promotion; installed grammar integrity, plain-directory fallback and launch capacity are implemented. Standalone rounds validate MCP wire without application storage, skip durable tool provenance for transient tasks, and resolve requirement identity before importing durable acceptance; an issued inherited requirement still uses its original owner checks.
-
-| Method | Contract |
-|---|---|
-| `run` / `run_async` | Submit once and wait for a typed terminal `AgentResult`. |
-| `stream` / `stream_async` | Submit once and yield native events. |
-| `start` | Return an `AgentExecution` immediately. |
-| `events(cursor=N)` | Replay from the absolute next sequence, then follow live. |
-| `event_page(cursor=N)` | Return one bounded replay page. |
-| `snapshot()` | Return the stable `agent.run` projection. |
-| `abort()` | Request cooperative cancellation for the owned task. |
-| `close()` / `close_async()` | Reject new work and join bounded teardown; timeout retains borrowed owners for retry on both execution backends. |
-
-SDK project retirement — Problem: a native task could finish while its detached file-history observer was still writing under the caller's project; immediate temporary-directory retirement then raced those writes. Python SDK cleanup also treated the terminal notification as worker completion. Decision: transient history completion runs on the existing task/callback worker, after terminal publication, and both SDK adapters keep admission and borrowed resources until the worker and resource disposal finish. `close` raises `AgentTimeoutError` if its join deadline expires; the runtime rejects new work but retains outstanding owners for a later close retry. Alternatives rejected: sleeping before deletion does not establish completion; suppressing snapshots loses history; detaching a second shutdown worker repeats the lifetime defect. Durable application observers retain their existing post-terminal scheduling. No new worker, pool or persistent store is introduced. A real installed two-task model/repository cycle holds the second history operation, observes timeout with one active SDK task, then releases it and verifies both history jobs and all native children joined before teardown. See failure and verification receipts.
-
-Admission uses the shared launch hardware budget when `max_inflight` is omitted or zero; `TOFU_AGENT_MAX_INFLIGHT` or a positive argument supplies an explicit capacity. The CLI follows the same precedence. `TOFU_RESOURCE_PROFILE=throughput` scales foreground workers to effective CPU and available memory; the default `balanced` profile reserves a larger desktop share. Each runtime owns a lazy dedicated agent executor, closed with the runtime. Async event/result observers wait on loop notifications and consume no blocked I/O threads. Independent runtime instances never replace the application's executor. Overload, configuration, timeout, closed-runtime, and execution failures retain distinct public exception types. `abort()` and `close(abort=True)` use the task engine's owned cancellation boundary: signal both cancellation representations, invoke registered resource cleanup, and wake client-tool waiters. An expired caller must not leave native workers consuming shared executor capacity. Cancellation remains cooperative; the terminal verdict, rather than `status=done` alone, reports its outcome.
-
-### Terminal success and diagnostics
-
-`AgentResult.ok` and `tofu-agent run`'s JSON `ok`/exit status share the canonical
-turn verdict. `status=done` only means execution settled, not success. A normal
-finish (`stop`, `done`, `completed`, `end_turn`) with no error or conflicting
-stream evidence succeeds; missing finish, truncation, cancellation, malformed
-streams and exhausted recovery do not. A provider tool handoff is not complete
-at this autonomous-run boundary. Failures retain content, tool receipts, usage
-and verifier-independent trajectory artifacts; callers must not discard partial
-work or rewrite benchmark rewards merely because runtime health failed.
-
-The result optionally carries `stream_state` and `stream_diagnostics`: at most 16 recent per-request parser receipts with trace/round, provider finish and DONE observations, malformed-frame count, transport bytes, SSE events and output character/tool counts. These are not summed usage flags and contain no request bodies, credentials or provider text. They distinguish a positively terminated empty response from a cut/malformed stream; missing historical receipts cannot prove which upstream component caused a previous empty response. ATIF uses explicit current-run transcript provenance; legacy input-only snapshots rebuild current native tool receipts after the human request boundary, so historical tools neither suppress nor duplicate this run.
-
-Empty-terminal recovery adds one explicit correction to the preserved history
-per attempt and shares a two-recovery whole-task budget. It never rewinds tool
-receipts or retries the whole turn after side effects. Cancellation, pending
-human interaction and real stream cuts retain their own existing policies.
-
-### Harness compatibility defaults
-
-`tofu-agent run|serve|doctor --harness-profile auto|off|longcat_flash` defaults to
-`auto`. Auto defaults to registry-backed full native exposure, preserving explicit
-exposure, Tool Search and programmatic-calling settings. LongCat marker recovery
-is selected automatically for LongCat model names; other models' text is untouched.
-Empty-terminal recovery and workspace safety fixes apply to every model, even off. Python callers can use
-`AgentRuntime.local(harness_profile='longcat_flash')` (also supported by the
-constructor); each run may override the process default with
-`config={'harnessProfile': 'off'}` or `'longcat_flash'`.
-
-The explicit `longcat_flash` profile selects registry-backed full native exposure,
-disables Tool Search wrapping, and disables programmatic calling. Common coding
-tools (find/search/read/edit/write/command and background command controls) are
-therefore direct definitions from the same enabled registry, not copied schemas.
-This does not enable disabled capabilities, relax permissions, change execution
-scope, or bypass input validation. Existing schema budgets still apply.
-
-LongCat terminal text beginning with `<longcat_tool_call>` or
-`<longcat_arg_key>` is classified as invalid protocol for native-tool reissue.
-The observed format does **not** establish a safe complete call grammar, typed
-argument encoding, or replay identity: this profile never executes XML text,
-even apparently complete packets. Quoted examples, code fences and prose are
-not normalized; malformed or truncated packets are never guessed. Native calls
-in the same response take precedence and suppress text-driven reissue to avoid
-duplicating side effects. The shared termination recovery owner controls the
-whole-task budget (at most two recovery rounds), not this profile helper.
-
-Desktop-relayed streams propagate cancellation through response-header waiting.
-Cancellation closes the pending relay and escapes without trying another device;
-this also bounds that wait when the transient compaction budget expires.
-
-## Lightweight HTTP/SSE contract
-
-Start locally with `tofu-agent doctor` and `tofu-agent serve`. For Rust, all three commands accept `--engine rust --native-archive ARCHIVE --native-profile PROFILE.json`; the unpriced profile declares SDK HTTP/counter/ACK bounds and cannot supply routes or credentials. CLI joins runtime, host/image and callbacks in that order; SIGINT cancels the active native request. `doctor` validates the local archive and reports `execution.backend`. Missing/invalid native composition fails without Python fallback.
-
-> **Namespace note:** the `tofu-agent` composition mounts the `/api/v1`
-> namespace below natively — it is a separate lightweight server, not the
-> retired full-backend v1 mount. On the full Tofu backend the same product
-> contract is served under `/api/v4` (its `/api/v1` returns 426); see
-> [HEADLESS_API.md](contracts/HEADLESS_API.md).
-
-| Method and path | Purpose |
-|---|---|
-| `GET /setup` | Static model-routing control plane. |
-| `GET /api/v1/setup/model-routing` | Redacted active aggregate, source, editability, and storage state. |
-| `POST /api/v1/setup/model-routing/test` | Validate the full envelope and probe its computed primary Deployment without saving. |
-| `PUT /api/v1/setup/model-routing` | Encrypt, save, and hot-apply the full envelope. |
-| `DELETE /api/v1/setup/model-routing` | Remove saved access and unconfigure later runs. |
-| `GET /health/live` | Dependency-free liveness. |
-| `GET /health/ready` | Redacted readiness and bounded capacity. |
-| `GET /api/v1/capabilities` | Installed runtime, model-routing state, events, and limits. |
-| `POST /api/v1/agent/run` | Blocking result, SSE (`stream:true`), or HTTP 202 (`async:true`). |
-| `GET /api/v1/tasks/{id}` | Current run projection. |
-| `GET /api/v1/tasks/{id}/events?cursor=N` | Bounded replay page. |
-| `GET /api/v1/tasks/{id}/stream?cursor=N` | Native replay and live SSE. |
-| `POST /api/v1/tasks/{id}/abort` | Cooperative abort. |
-| `POST /api/v1/tasks/{id}/tools/{call_id}/result` | Resolve one client tool call. |
-
-The sidecar deliberately omits conversations, full-app provider repositories,
-accounts, billing, scheduling, files, and feature routes. The setup service
-owns one process default aggregate; it is not the full app's owner repository.
-
-A minimal managed-default request is:
-
-```http
-POST /api/v1/agent/run
-Authorization: Bearer <TOFU_AGENT_TOKEN>
-Idempotency-Key: <stable caller key>
-Content-Type: application/json
-
-{"messages":[{"role":"user","content":"Hello"}]}
-```
-
-`Prefer: respond-async` or `"async":true` returns 202, `Location`, and
-`X-Tofu-Task-Id`. `"stream":true` returns `agent.run.chunk` SSE. Every
-event has an absolute `id`/`seq`; resume an existing task with
-`cursor=last_seq+1` or `Last-Event-ID:last_seq`. Streaming never resubmits a
-run after a transport disconnect.
-
-Idempotency is scoped to the runtime principal and bounded by count and TTL.
-The same key/body returns the same execution; a different body returns
-`409 idempotency_conflict`.
-
-### Authentication
-
-`/`, liveness/readiness, `/setup`, and setup assets are public and contain
-no configuration. Every `/api/v1/setup/*`, agent, and task route follows the
-same auth policy; setup data routes also reject cross-site browser requests.
-With `TOFU_AGENT_TOKEN`, an exact Bearer token is required. Without a token,
-automatic mode accepts only loopback bind, peer, and Host authority. The CLI
-refuses an exposed tokenless bind unless `--allow-unauthenticated` is explicit;
-the OCI image therefore requires a token.
-
-The setup page holds a bearer token only in JavaScript memory. It uses no
-cookies, browser storage, or external resources. A remote one-time
-`/setup#token=...` fragment is removed from the address bar immediately and
-is never sent to the server. Disable setup with `--no-setup` or
-`TOFU_AGENT_SETUP_ENABLED=0`.
-
-## State and restart semantics
-
-| Property | Developer runtime | Full application |
-|---|---|---|
-| Task/event authority | Bounded process memory | Storage sidecar |
-| Reconnect | Cursor resume while this process lives | Durable task replay |
-| Restart | Runs and idempotency records are lost | Durable domains recover by policy |
-| Model access | Encrypted v2 file or explicit envelope | Owner-aware v2 repository |
-| Database/full Tofu UI | Never initialized | Declared application lifecycle |
-| Accounts/billing | None | Auth and repository boundaries |
-
-Model-access durability does not imply task durability.
-
-## Restart timeline logging
-
-While the browser renders the restart progress bar, the backend attributes
-its wall time per stage so a slow restart can be located in one grep:
-
-- `logs/app.log` (old worker, prepare band): approval pending/approved,
-  `[Update] in-request frontend preflight passed in Ns`, `[Update]
-  Supervisor accepted deferred worker restart in Ns`. When the manager
-  cannot be reached or refuses, `[Update] Manager delegation unavailable
-  (…); falling back to in-place re-exec` marks the last-resort path, and a
-  later `[Update] Restart refused by every bridge; acceptance stamp rolled
-  back …` means no restart happened and a retry is safe.
-- `logs/server-manager.log` (supervisor + manager, shutdown and boot
-  bands): quiescence outcome and wait, `worker pid=N SIGTERM sent`,
-  `worker pid=N exited cleanly Ns after SIGTERM` (or the SIGKILL
-  escalation warning), sidecar drain/reap, `frontend preflight starting /
-  passed in Ns` (a rebuild prints timestamped `Frontend artifact is stale…
-  / rebuilt and validated in Ns` lines inline), `worker spawned pid=N
-  source=… totalSinceRequest=Ns`, and `worker ready pid=N source=…
-  bootTime=Ns` when the readiness probe first passes.
-- `logs/server-console.log` (worker image): `production runtime shutdown
-  begin / took Ns` plus the per-step shutdown timings, then the usual
-  `[boot + Ns] [startup phase M/9] done | name | Ns` lines and the final
-  `Boot time: Ns` banner.
-
-UI-originated restarts carry `requestedAt` end to end (update route →
-`supervisor_protocol.request_deferred_worker_restart` → supervisor →
-`LifecycleManager.restart(requested_at=…)`), so manager stage lines suffix
-`totalSinceRequest=Ns`; CLI/automatic recoveries log stage elapsed only.
-
-## Verification and release
-
-Minimum gates for a public runtime change are:
-
-```bash
-pytest -q tests/agent_core/test_agent_provider_setup.py tests/tasks_pkg/test_public_agent_runtime.py \
-  tests/server/test_headless_agent_server.py
-pytest -q tests/tasks_pkg/test_inprocess_facade.py tests/sdk/test_sdk_sse_parser.py
-npm run build --prefix clients/typescript
-uvx --from build --with 'setuptools==80.10.2' --with 'wheel==0.48.0' \
-  pyproject-build --no-isolation
-python3 scripts/check_developer_runtime_artifacts.py dist/tofu_agent-*.whl
-```
-
-Build from a clean checkout or an isolated setuptools `build_base`; an old
-`build/lib` can leak previously packaged application modules despite current
-package exclusions. Validate the actual artifact before installation or release.
-Stream-terminal changes also run `tests/evaluations/test_harness_stream_end_to_end.py`:
-loopback HTTP recovery and exhaustion must preserve each completed tool receipt.
-
-Packaged domain readers retain the same `contracts/<name>.json` or YAML
-paths as the checkout. `setup.py` copies the canonical machine-readable schemas
-byte for byte into wheel assets; the sdist includes those inputs and the build
-hook. Guides and schema-generation tools stay outside the wheel. Artifact checks
-require startup-critical swarm, paper-build and resource-policy schemas.
-Problem: installed task executor imports previously depended on checkout-only
-schema paths. Decision: preserve one schema authority and its relative paths at
-build time. Alternatives: handwritten fallbacks duplicate wire authority;
-patching each eager import leaves later optional domains with the same defect.
-Schemas are loaded by their owning domains, not by the packaging layer.
-
-The clean-wheel smoke installs only the wheel outside the repository, checks
-that database drivers and full-app assets are absent while setup assets are
-present, runs `tofu-agent doctor`, and completes one turn against a controlled
-OpenAI-compatible server. Release workflows publish Python/TypeScript/OCI
-artifacts from the same version and gate secrets, SBOMs, and image
-vulnerabilities before registry publication.
-
 ## Native task Stop notification
 
 Problem: a plain threading.Event cannot wake an async native host blocked on a silent provider. Decision: TaskRuntime creates AbortSignal, retaining Event wait/is_set semantics and exposing disposable loop Future subscriptions. The native host owns one subscription and joins its watcher before process teardown. At an already-settled native terminal candidate it detaches notification before projection, so deadline projection cannot masquerade as user cancellation. An initial Stop enters native cancellation through cancel_requested without rewriting the original deadline; active Stop enters the existing joined host cancellation and terminal/account settlement. Durable native tasks require this owned signal before route consumption. Existing externally supplied plain Events remain intact and are refused by native task composition. Alternatives rejected: polling adds idle work; a blocking waiter consumes a worker; replacing supplied Events breaks caller identity; deadline zero changes recovery policy. Actual installed-process tests cover no-request initial Stop and silent HTTP cancellation with canonical terminal ACK and unknown dispatched usage. Default production entry and whole-system performance promotion remain pending.
@@ -1001,7 +1154,11 @@ Problem: a restored native token account retained consumption but omitted the pr
 
 ### Selected TofuDB priced recovery admission
 
-Problem: standalone fee tests missed ROOT's null limits and already hydrated Continue prefix, and did not prove the selected authority retained prices or respected terminal acknowledgements across reopen. Decision: standard TofuDB builds include native-runtime-checkpoints while keeping provider-json-order disabled in that dependency; journal creation, takeover and invocation remain explicit. Journal null round/tool limits preserve unlimited execution; finite limits still fence the frontier. --no-default-features retains an engine-only build. The shared installed fixture accepts owned checkpoint/terminal composition for real backend tests. SDK response capacity follows the explicit caller bound within Python buffer representation; allocation failure refuses before journal dispatch without replay, rather than imposing a private 16 MiB quota. Actual NativeCheckpointPolicy and NativeTaskTerminalPolicy commit through one EmbeddedRuntime, join/close it, reopen the same authority and restore old fees before the second HTTP request. Hydrated paid rows/usage must exactly match the journal before shared account restore; commit rechecks the unchanged projection. A lost terminal ACK retries the same candidate and confirms the canonical task-result writer without repeating tools or fees. Alternatives: memory-only proof leaves storage fences untested; a separate test writer bypasses application CAS; closing only the client leaves the authority lease alive; opt-in packaging leaves default engine artifacts unable to provide the native journal. Verify test_native_checkpoint_policy with exact private binary/library/source identity, test_native_fee_checkpoint_installed and actual ROOT test_native_root_recovery. This proves explicit prepared ROOT Suspend/reopen, not public conversation Continue command admission, in-flight takeover or default Rust execution. Explicit recover accepts abandoned new/completed frontiers only after Store proves the recorded Linux boot/PID-view/start identity has exited, using pidfd rather than missing procfs rows or a zombie leader ([Linux process identity](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html), [pidfd exit readiness](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)); live, foreign, inaccessible and legacy identities and passive replay targets refuse; completed publication joins accepted canonical projection events. Structural projection derives checklist state before terminal, so completed tool progress survives SIGKILL. Problem: crash kept a valid completed frontier permanently leased. Decision: proof plus the existing CAS advances generation using Keep; alternatives of expiry-based stealing or replaying inflight work can duplicate effects. Verify system_native_abrupt_recovery_20261011.json. Actual prepared ROOT pause/reopen evidence: system_native_root_recovery_20261011.json.
+Problem: standalone fee tests missed ROOT's null limits and already hydrated Continue prefix, and did not prove the selected authority retained prices or respected terminal acknowledgements across reopen. Decision: standard TofuDB builds include native-runtime-checkpoints while keeping provider-json-order disabled in that dependency; journal creation, takeover and invocation remain explicit. Journal null round/tool limits preserve unlimited execution; finite limits still fence the frontier. --no-default-features retains an engine-only build. The shared installed fixture accepts owned checkpoint/terminal composition for real backend tests. SDK response capacity follows the explicit caller bound within Python buffer representation; allocation failure refuses before journal dispatch without replay, rather than imposing a private 16 MiB quota. Actual NativeCheckpointPolicy and NativeTaskTerminalPolicy commit through one EmbeddedRuntime, join/close it, reopen the same authority and restore old fees before the second HTTP request. Hydrated paid rows/usage must exactly match the journal before shared account restore; commit rechecks the unchanged projection. A lost terminal ACK retries the same candidate and confirms the canonical task-result writer without repeating tools or fees. Alternatives: memory-only proof leaves storage fences untested; a separate test writer bypasses application CAS; closing only the client leaves the authority lease alive; opt-in packaging leaves default engine artifacts unable to provide the native journal. Verify test_native_checkpoint_policy with exact private binary/library/source identity, test_native_fee_checkpoint_installed and actual ROOT test_native_root_recovery. This proves explicit prepared ROOT Suspend/reopen, not public conversation Continue command admission, in-flight takeover or default Rust execution. Explicit recover accepts abandoned new/completed frontiers only after Store proves the recorded Linux boot/PID-view/start identity has exited, using pidfd (or the equivalent whole-group exit evidence below where pidfd_open is unavailable) rather than missing procfs rows or a zombie leader alone ([Linux process identity](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html), [pidfd exit readiness](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)); live, foreign, inaccessible and legacy identities and passive replay targets refuse; completed publication joins accepted canonical projection events. Structural projection derives checklist state before terminal, so completed tool progress survives SIGKILL. Problem: crash kept a valid completed frontier permanently leased. Decision: proof plus the existing CAS advances generation using Keep; alternatives of expiry-based stealing or replaying inflight work can duplicate effects. Verify system_native_abrupt_recovery_20261011.json. Actual prepared ROOT pause/reopen evidence: system_native_root_recovery_20261011.json.
+
+### Writer-death proof without pidfd_open
+
+Problem: `checkpoint_writer::quiescent` refused with a storage error whenever `pidfd_open` returned `ENOSYS` (Linux before 5.3, including the 4.18 deployment host), so abrupt-loss recovery, pending handoff and Goal claims could never prove an abandoned writer dead there; 41 TofuDB library tests failed on that host. Decision: only on `ENOSYS`, the captured boot/PID-namespace/start identity is checked with kernel evidence equal to pidfd readiness, which reports exit only when the last thread of the group exits ([pidfd_open](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)): `kill(pid, 0)` returning `ESRCH`, a changed `/proc/<pid>/stat` start tick, or a `Z`/`X` leader whose kernel thread count has dropped to the leader itself. `EPERM` means alive; hidden or unreadable procfs rows and every other pidfd error still refuse. Alternatives rejected: refusing on such kernels leaves recovery permanently unavailable; a zombie leader alone grants takeover while sibling threads can still write; skipping the specifications there hides the production gap. `checkpoint_writer` tests run both evidence paths against real SIGKILL/reap, a recycled start tick and a zombie leader with a live thread.
 
 ### Native application generation defaults
 
@@ -1113,7 +1270,7 @@ lib.resource_control.runtime.launch_policy result. native_resources fills
 missing byte/count fields using that issued capacity and the host Budget; it
 never probes or changes host resources. Explicit overrides remain. Callers
 may use `native_production_profile.compile_native_application_profile` for HTTP, counting and terminal defaults; route binding still supplies epoch/model identity.
-`compile_native_transport_budget` shares launch-sized image/stdio bounds with SDK composition; neither compiler grants model/tool authority or production selection.
+`compile_native_transport_budget` shares the fixed launch-policy image/stdio byte bound (`frame_maximum`, never probe-derived) with SDK composition; neither compiler grants model/tool authority or production selection.
 
 ApprovalRequest.remaining_seconds is optional. An explicit null remaining_ms
 from a task without expiry preserves ordinary approval and joined Stop; finite
@@ -1194,7 +1351,7 @@ Verify `test_native_application_profiles.py` and `test_native_application_profil
 
 ## Application-owned native worker reuse
 
-**Problem:** the persistent CLI was not owned by durable application invocation. **Decision:** trusted NativeRootConfiguration(worker_reuse=True) enables demand workers on NativeHost through the issued launch policy. Preparation configures lazily on the existing sync executor; actual acquisition binds to the serving loop. Reuse keys include the complete principal (tenant/subject/scopes), resolved cwd plus device/inode, and immutable transport budget. Busy workers never queue other tasks: demand starts another worker. root_maximum sizes total idle reuse only, not execution admission. Cache eviction/host shutdown closes and joins workers before image release; active clients settle through the same shutdown handlers, model account, route and terminal ports as transient execution. The process view translates scoped frames and treats joined worker readiness as invocation EOF/exit; one bounded pump owns physical stdout. Late writes cannot reuse a closed view. Failure/cancelled cleanup retires the worker, never retries the task automatically. Failed startup joins and releases the acquired image. **Alternatives rejected:** owner ID alone crosses tenant/auth scopes; path text alone misses replaced directories; a bounded active pool caps machine capacity; retaining a failed callback/process loses unknown financial or delivery debt. Wrapper overhead is distinct from original inner-frame admission. Rust adds only canonical envelope bytes to transport parsing and still checks the original inner frame size. Native worker version is generated from the canonical schema. `system_native_application_worker_reuse_20261013.json` retains real repeated ROOT work, worker PID/sequence/idle witnesses and exact money/work. The fixture uses disposable SQLite; no live backend switches or deployments. The option remains false by default. Full native-authority warm/cold/stopped-memory performance admission, broader tool/Flow/concurrency coverage and default Rust migration remain pending. Existing failed full warm results are not waived.
+**Problem:** the persistent CLI was not owned by durable application invocation. **Decision:** trusted NativeRootConfiguration(worker_reuse=True) enables demand workers on NativeHost through the issued launch policy. Preparation configures lazily on the existing sync executor; actual acquisition binds to the serving loop. Reuse keys include the complete principal (tenant/subject/scopes), resolved cwd plus device/inode, and immutable transport budget. Busy workers never queue other tasks: demand starts another worker. The fixed `TOFU_AGENT_WORKERS` idle hint sizes total idle reuse only, not execution admission. Cache eviction/host shutdown closes and joins workers before image release; active clients settle through the same shutdown handlers, model account, route and terminal ports as transient execution. The process view translates scoped frames and treats joined worker readiness as invocation EOF/exit; one bounded pump owns physical stdout. Late writes cannot reuse a closed view. Failure/cancelled cleanup retires the worker, never retries the task automatically. Failed startup joins and releases the acquired image. **Alternatives rejected:** owner ID alone crosses tenant/auth scopes; path text alone misses replaced directories; a bounded active pool caps machine capacity; retaining a failed callback/process loses unknown financial or delivery debt. Wrapper overhead is distinct from original inner-frame admission. Rust adds only canonical envelope bytes to transport parsing and still checks the original inner frame size. Native worker version is generated from the canonical schema. `system_native_application_worker_reuse_20261013.json` retains real repeated ROOT work, worker PID/sequence/idle witnesses and exact money/work. The fixture uses disposable SQLite; no live backend switches or deployments. The option remains false by default. Full native-authority warm/cold/stopped-memory performance admission, broader tool/Flow/concurrency coverage and default Rust migration remain pending. Existing failed full warm results are not waived.
 
 Release ownership fence: **Problem:** a retired invocation could clear an idle
 worker or release a later invocation on the same process. **Decision:** release

@@ -1,5 +1,7 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v5.5.2)
+ * Tofu Browser Bridge — Background Service Worker.
+ * Composes worker lifecycle owners and Chrome/page command handlers.
+ * The running version comes from manifest.json.
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -7,8 +9,14 @@
  *     Response: { commands: [{id, type, params}, ...] }
  *
  *   Results are piggy-backed on the next poll request.
- *   No separate result POST = no dropped packets through VSCode proxy.
+ *   Connection lifecycle and receipt settlement live in worker/.
  */
+
+importScripts(
+  'worker/result-outbox.js',
+  'worker/command-execution.js',
+  'worker/poll-transport.js',
+);
 
 // ══════════════════════════════════════════
 //  Configuration
@@ -42,8 +50,9 @@ const COMMAND_TIMEOUT_OVERRIDES = {
 const PROTOCOL_VERSION = 2;
 const BROWSER_CAPABILITIES = [
   'tabs', 'navigate', 'read', 'snapshot', 'click', 'fill', 'press',
-  'select', 'scroll', 'wait', 'execute', 'iframes', 'network_capture',
-  'network_body', 'deep_collect', 'research_hints', 'devtools_console', 'js_debugger',
+  'select', 'scroll', 'wait', 'execute', 'iframes', 'frame_authority', 'network_capture',
+  'network_body', 'deep_collect', 'research_hints', 'research_origin_guard',
+  'devtools_console', 'js_debugger',
   'upload', 'file_export', 'downloads', 'screenshot',
 ];
 // Auto re-pair (owner decree 2026-08-04): the extension must NEVER send the
@@ -85,12 +94,6 @@ let SERVER_URL = '';
 let CLIENT_ID = '';               // Stable per-device client identifier
 let PROFILE_NAME = '';
 let BRIDGE_SECRET = '';           // Owner-scoped agents:bridge credential
-let pollActive = false;
-let connected = false;
-let lastError = '';
-let authFailures = 0;             // consecutive 401s (reset on any success)
-let needsRepair = false;          // parked: auto re-pair keeps running (see attemptAutoRepair)
-let _retryTimer = null;           // pending setTimeout(poll) handle (cancelable)
 let _repairInFlight = false;      // one repair ladder at a time
 let _lastRepairTabAt = 0;         // last repair that had to OPEN a tab
 
@@ -115,10 +118,6 @@ try {
 let EXT_VERSION = '';
 try { EXT_VERSION = (chrome.runtime.getManifest() || {}).version || ''; } catch (e) { /* */ }
 
-// Result-nudge: track the in-flight poll so a freshly-completed command can
-// abort the idle long-poll and be delivered immediately (see executeAndReport).
-let _activePollController = null;
-let _flushPending = false;        // true ⇒ active poll aborted to flush a result
 
 // ── CatPaw Credit Hub quota telemetry ─────────────────────────────────
 // The Credit-Hub console (console.catpaw.internal.example.com) authenticates its
@@ -189,55 +188,49 @@ function creditHubQuotaSnapshot() {
   return _creditHubQuota;
 }
 
-// Result queue: completed results waiting to be sent with next poll
-const _resultQueue = [];        // [{id, result, error}, ...]
-const _inflight = new Set();    // Command IDs currently executing
-const POLL_RESULT_BATCH_MAX = 32;
-let _pollResultBatchMax = POLL_RESULT_BATCH_MAX;
-// The smallest server profile accepts a 16 MiB poll body. Keep exact UTF-8
-// result bytes below 12 MiB so frame metadata and non-result fields retain
-// headroom. This also prevents one screenshot from becoming a memory bomb.
-const POLL_RESULT_BODY_MAX_BYTES = 12 * 1024 * 1024;
-const POLL_RESULT_OVERSIZE_ERROR =
-  `Browser command result exceeded the ${POLL_RESULT_BODY_MAX_BYTES / (1024 * 1024)} MiB poll transport limit`;
-
-function _compactOversizeResult(candidate) {
-  return {
-    id: candidate && candidate.id,
-    result: null,
-    error: POLL_RESULT_OVERSIZE_ERROR,
-  };
+/** Capture the transport identity once; an accepted command keeps this scope. */
+function bridgeConnection() {
+  return Object.freeze({serverUrl: SERVER_URL, clientId: CLIENT_ID, profile: PROFILE_NAME,
+    headers: Object.freeze(buildHeaders())});
 }
 
-function _takeBoundedResultBatch() {
-  const candidates = _resultQueue.splice(
-    0, Math.min(_pollResultBatchMax, _resultQueue.length));
-  const batch = [];
-  let encodedBytes = 0;
-  for (let index = 0; index < candidates.length; index += 1) {
-    let candidate = candidates[index];
-    let serialized = '';
-    try {
-      serialized = JSON.stringify(candidate);
-    } catch (_) {
-      candidate = _compactOversizeResult(candidate);
-      serialized = JSON.stringify(candidate);
-    }
-    let candidateBytes = new TextEncoder().encode(serialized).byteLength;
-    if (candidateBytes > POLL_RESULT_BODY_MAX_BYTES) {
-      candidate = _compactOversizeResult(candidate);
-      serialized = JSON.stringify(candidate);
-      candidateBytes = new TextEncoder().encode(serialized).byteLength;
-    }
-    if (batch.length && encodedBytes + candidateBytes > POLL_RESULT_BODY_MAX_BYTES) {
-      _resultQueue.unshift(...candidates.slice(index));
-      break;
-    }
-    batch.push(candidate);
-    encodedBytes += candidateBytes;
-  }
-  return batch;
-}
+const bridgeOutbox = new BrowserResultOutbox();
+const bridgeCommands = new BrowserCommandExecutor({
+  outbox: bridgeOutbox,
+  createResources: () => _createTemporaryTabScope(),
+  execute: (command, resources, connection) => executeCommand(
+    command.type, command.params || {}, resources, connection),
+  timeout: type => COMMAND_TIMEOUT_OVERRIDES[type] || COMMAND_TIMEOUT,
+  withTimeout: (...args) => withTimeout(...args),
+  now: () => Date.now(),
+  describeError: error => _textForDiagnostic(error),
+  settled: connection => bridgeTransport.nudge(connection),
+  log: message => console.log(`[Bridge] ${message}`),
+  warn: message => console.warn(`[Bridge] ${message}`),
+  error: message => console.error(`[Bridge] ${message}`),
+});
+const bridgeTransport = new BrowserPollTransport({
+  outbox: bridgeOutbox,
+  connection: bridgeConnection,
+  frame: connection => ({clientId: connection.clientId, chromeMajor: CHROME_MAJOR,
+    extVersion: EXT_VERSION, protocolVersion: PROTOCOL_VERSION,
+    capabilities: BROWSER_CAPABILITIES, profile: connection.profile,
+    creditHubQuota: creditHubQuotaSnapshot() || undefined}),
+  fetch: (...args) => fetch(...args),
+  setTimeout: (...args) => setTimeout(...args),
+  clearTimeout: timer => clearTimeout(timer),
+  badge: state => updateBadge(state),
+  log: message => console.log(`[Bridge] ${message}`),
+  warn: message => console.warn(`[Bridge] ${message}`),
+  repair: connection => attemptAutoRepair({serverUrl: connection.serverUrl}),
+  dispatch: (command, connection) => executeAndReport(command, connection),
+}, {
+  fetchTimeout: FETCH_TIMEOUT, interval: POLL_INTERVAL, retryDelay: POLL_RETRY_DELAY,
+  authRetryBase: AUTH_RETRY_BASE_DELAY, authRetryMax: AUTH_RETRY_MAX_DELAY,
+  authGiveUpAfter: AUTH_GIVE_UP_AFTER, upgradeRetryDelay: UPGRADE_RETRY_DELAY,
+  protocolVersion: PROTOCOL_VERSION,
+});
+
 // Response-body capture is deliberately bounded.  The payload is transient
 // reconstructible transport data: at most 1 MiB per capture, 384 KiB per
 // response, 80 metadata rows, and 12 recently navigated tabs.
@@ -315,10 +308,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
-// Stats
-let commandsExecuted = 0;
-let commandsFailed = 0;
-
 // Self-update watchdog: Chrome re-reads an unpacked install folder on
 // chrome.runtime.reload(), so once a freshly downloaded ZIP is unzipped
 // OVER the loaded folder, the next keepAlive tick sees the on-disk manifest
@@ -339,7 +328,7 @@ async function _maybeReloadForSelfUpdate() {
     if (!diskVersion || diskVersion === EXT_VERSION) return;
     // Queued results and executing commands live only in this worker's
     // memory — defer one tick rather than drop them on the floor.
-    if (_resultQueue.length > 0 || _inflight.size > 0) return;
+    if (bridgeOutbox.size > 0 || bridgeCommands.status().inflight > 0) return;
     console.warn(`[Bridge] Extension files updated on disk ` +
                  `(v${EXT_VERSION} → v${diskVersion}); reloading`);
     chrome.runtime.reload();
@@ -368,7 +357,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== 'keepAlive') return;
   _reapIdleNetworkCaptures();
   _maybeReloadForSelfUpdate();
-  if (!pollActive && SERVER_URL) {
+  if (!bridgeTransport.isRunning() && SERVER_URL) {
     console.log('[Bridge] Alarm keepAlive: restarting poll loop');
     startPolling();
   }
@@ -433,26 +422,13 @@ function setBridgeSecret(secret) {
   console.log('[Bridge] Bridge secret', BRIDGE_SECRET ? 'set' : 'cleared');
   // The user may have just fixed a wrong secret: drop the backoff and cancel
   // a parked 5-minute probe so the new credentials are tried NOW.
-  _resetAuthBackoff();
-  if (pollActive) {
-    if (_activePollController) { try { _activePollController.abort(); } catch (_) {} }
-    _scheduleNextPoll(0);
-  }
+  void bridgeTransport.reconnect();
 }
 
 function buildHeaders() {
   const h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
   if (BRIDGE_SECRET) h['X-Bridge-Secret'] = BRIDGE_SECRET;
   return h;
-}
-
-function buildPollHeaders() {
-  return {
-    ...buildHeaders(),
-    // Pre-auth recovery hint only. The authenticated JSON frame below remains
-    // the authoritative protocol declaration.
-    'X-Browser-Protocol-Version': String(PROTOCOL_VERSION),
-  };
 }
 
 // ══════════════════════════════════════════
@@ -488,7 +464,7 @@ function setServer(url) {
   console.log('[Bridge] Server:', SERVER_URL);
   chrome.storage.local.set({ serverUrl: url });
   registerOriginMarker(url);
-  _resetAuthBackoff();
+  bridgeTransport.resetAuthentication();
   stopPolling();
   startPolling();
 }
@@ -529,8 +505,17 @@ function registerOriginMarker(serverUrl) {
  * client, so whatever auth the app carries (cookie session / SSO /
  * bearer) applies exactly as it does for the panel's mint button.
  * Returns {token} or {error}. */
-function _tofuMintBridgeKey() {
+function _tofuMintBridgeKey(expectedServerUrl) {
   try {
+    // This function is serialized into the page. Recheck the live location:
+    // the tab can navigate after the worker selected it for pairing.
+    const server = new URL(expectedServerUrl);
+    const page = new URL(window.location.href);
+    const base = server.pathname.replace(/\/+$/, '');
+    if (!['http:', 'https:'].includes(server.protocol) || page.origin !== server.origin
+        || !(page.pathname === base || page.pathname.startsWith(base + '/'))) {
+      return Promise.resolve({error: 'wrong-tofu-server'});
+    }
     const api = window.Api;
     if (!api || !api.desktop || typeof api.desktop.mintToken !== 'function') {
       return Promise.resolve({ error: 'tofu-api-unavailable' });
@@ -543,12 +528,16 @@ function _tofuMintBridgeKey() {
   }
 }
 
-async function _mintKeyViaTab(tabId) {
+async function _mintKeyViaTab(tabId, serverUrl = SERVER_URL) {
+  const previousSecret = BRIDGE_SECRET;
+  if (serverUrl !== SERVER_URL) return false;
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func: _tofuMintBridgeKey,
+    args: [serverUrl],
   });
+  if (serverUrl !== SERVER_URL || previousSecret !== BRIDGE_SECRET) return false;
   const r = results && results[0] && results[0].result;
   if (r && r.token) {
     console.log('[Bridge] Auto re-pair: fresh bridge key minted via a Tofu tab');
@@ -574,8 +563,15 @@ async function _mintKeyViaTab(tabId) {
 // navigation targets (replacing one would yank the chat out from under the
 // user) and never working-tab candidates — the server skips the isClient
 // rows cmdListTabs flags.
-function _isOwnServerTab(tab) {
-  return !!(tab && tab.url && SERVER_URL && tab.url.startsWith(SERVER_URL));
+function _isOwnServerTab(tab, serverUrl = SERVER_URL) {
+  if (!tab?.url || !serverUrl) return false;
+  try {
+    const server = new URL(serverUrl);
+    const page = new URL(tab.url);
+    const base = server.pathname.replace(/\/+$/, '');
+    return ['http:', 'https:'].includes(server.protocol) && page.origin === server.origin
+      && (page.pathname === base || page.pathname.startsWith(base + '/'));
+  } catch (_) { return false; }
 }
 
 /* Worker-restart reconciliation for the hidden repair tab. init() runs on
@@ -602,7 +598,7 @@ async function _reapOrphanedRepairTab() {
     serverUrl = String((cfg && cfg.serverUrl) || '').replace(/\/+$/, '');
   } catch (_) {}
   const url = String(tab.url || '');
-  const isOwn = !!(serverUrl && url.startsWith(serverUrl));
+  const isOwn = _isOwnServerTab(tab, serverUrl);
   if (isOwn && tab.status === 'complete') return;
   const stillOurs = !url || url.startsWith('about:') ||
     url.startsWith('chrome-error:') || isOwn;
@@ -612,19 +608,24 @@ async function _reapOrphanedRepairTab() {
 
 async function attemptAutoRepair(opts) {
   opts = opts || {};
-  if (_repairInFlight || !SERVER_URL) return false;
+  const serverUrl = opts.serverUrl || SERVER_URL;
+  const previousSecret = BRIDGE_SECRET;
+  const stillCurrent = () => serverUrl === SERVER_URL && previousSecret === BRIDGE_SECRET;
+  if (_repairInFlight || !serverUrl || !stillCurrent()) return false;
   _repairInFlight = true;
   try {
     let tabs = [];
     try { tabs = await chrome.tabs.query({}); } catch (e) { /* tabs unavailable */ }
+    if (!stillCurrent()) return false;
     const mine = tabs.filter((t) => t.id != null && _isOwnServerTab(t));
     for (const t of mine) {
       try {
-        if (await _mintKeyViaTab(t.id)) return true;
+        if (await _mintKeyViaTab(t.id, serverUrl)) return true;
       } catch (e) {
         console.warn('[Bridge] Auto re-pair: tab', t.id,
                      'not usable:', e && e.message);
       }
+      if (!stillCurrent()) return false;
     }
     // A Tofu tab exists but refused the mint — opening another copy changes
     // nothing; the next backed-off probe retries this same ladder.
@@ -635,7 +636,7 @@ async function attemptAutoRepair(opts) {
     }
     let tab = null;
     try {
-      tab = await chrome.tabs.create({ url: SERVER_URL,
+      tab = await chrome.tabs.create({ url: serverUrl,
                                        active: !!opts.forceTab });
     } catch (e) {
       console.warn('[Bridge] Auto re-pair: could not open a Tofu tab:',
@@ -653,7 +654,8 @@ async function attemptAutoRepair(opts) {
     }
     try {
       await waitForTabLoad(tab.id, 20000);
-      const ok = await _mintKeyViaTab(tab.id).catch(() => false);
+      const ok = stillCurrent()
+        && await _mintKeyViaTab(tab.id, serverUrl).catch(() => false);
       if (ok || !opts.forceTab) {
         try { await chrome.tabs.remove(tab.id); } catch (_) {}
       }
@@ -675,282 +677,11 @@ async function attemptAutoRepair(opts) {
 //  Polling — Single Endpoint
 // ══════════════════════════════════════════
 
-// Single pending-timer invariant: every path that schedules the next poll
-// goes through here, so two timers can never coexist (a pre-existing double-
-// loop hazard) and a user action (new secret / new server) can cancel a parked
-// 5-minute probe and reconnect instantly.
-function _scheduleNextPoll(delay) {
-  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
-  if (pollActive) {
-    _retryTimer = setTimeout(() => { _retryTimer = null; poll(); }, delay);
-  }
-}
-
-function _resetAuthBackoff() {
-  authFailures = 0;
-  needsRepair = false;
-}
-
-function startPolling() {
-  if (pollActive) return;
-  if (!SERVER_URL) return;
-  pollActive = true;
-  console.log('[Bridge] Polling started');
-  poll();
-}
-
-function stopPolling() {
-  if (!pollActive) return;
-  pollActive = false;
-  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
-  console.log('[Bridge] Polling stopped');
-}
-
-async function poll() {
-  if (!pollActive || !SERVER_URL) return;
-
-  // Declared outside the try so the catch can restore them on a flush abort.
-  let resultsToSend = [];
-  let timeoutId = null;
-  try {
-    // Drain one bounded result batch. Remaining completions ride the next
-    // poll; command settlement is idempotent and no result is discarded.
-    resultsToSend = _takeBoundedResultBatch();
-
-    const controller = new AbortController();
-    _activePollController = controller;
-    _flushPending = false;
-    timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-
-    const resp = await fetch(`${SERVER_URL}/api/browser/poll`, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: buildPollHeaders(),
-      // Carry the browser's OWN cookies for the server host: behind an
-      // SSO-fronted gateway (cloud-IDE preview proxy) the bridge secret
-      // alone can never pass the edge — the user's live SSO session can.
-      // The <all_urls> host permission makes Chrome attach them on this
-      // cross-origin extension fetch. This is what lets the bridge work
-      // through such proxies with zero configuration.
-      credentials: 'include',
-      body: JSON.stringify({
-        results: resultsToSend, clientId: CLIENT_ID, chromeMajor: CHROME_MAJOR,
-        extVersion: EXT_VERSION, protocolVersion: PROTOCOL_VERSION,
-        capabilities: BROWSER_CAPABILITIES, profile: PROFILE_NAME,
-        creditHubQuota: creditHubQuotaSnapshot() || undefined,
-      }),
-    });
-    clearTimeout(timeoutId);
-    _activePollController = null;
-
-    if (!resp.ok) {
-      if (resp.status === 401) {
-        // Hold the results so they survive the re-pair.
-        // Two DIFFERENT 401s land here and they are not fixed the same way:
-        //   * Tofu's own bridge gate ({error:'bridge_auth_required'}) — the
-        //     stored key is stale/revoked ⇒ silently mint a fresh one
-        //     through the user's Tofu tab (attemptAutoRepair);
-        //   * an SSO/proxy edge intercepting BEFORE Tofu — the poll now
-        //     carries the browser's cookies, so a live SSO session passes on
-        //     its own; a dead one recovers the next time a Tofu tab exists.
-        // Neither is EVER fixed by the user pasting a secret by hand.
-        _resultQueue.unshift(...resultsToSend);
-        authFailures += 1;
-        connected = false;
-        needsRepair = authFailures >= AUTH_GIVE_UP_AFTER;
-        const errBody = await resp.json().catch(() => null);
-        const isBridgeAuth = !!(errBody && errBody.error === 'bridge_auth_required');
-        lastError = isBridgeAuth
-          ? (needsRepair
-              ? `Bridge auth failed (401) ×${authFailures} — re-pairing automatically; an open Tofu tab finishes it instantly`
-              : 'Bridge auth failed (401) — re-pairing automatically…')
-          : (needsRepair
-              ? `Bridge blocked by a proxy/SSO edge (401 ×${authFailures}) — it clears by itself once your Tofu panel is open in a tab`
-              : 'Bridge blocked by a proxy/SSO edge (401) — retrying with your browser session…');
-        updateBadge(needsRepair ? 'repair' : 'error');
-        console.warn(`[Bridge] ${lastError}`);
-        attemptAutoRepair().catch(() => {});
-        const delay = Math.min(
-          AUTH_RETRY_BASE_DELAY * (2 ** (authFailures - 1)),
-          AUTH_RETRY_MAX_DELAY);
-        _scheduleNextPoll(delay);
-        return;
-      }
-      if (resp.status === 426) {
-        // Authentication succeeded, but this binary cannot enter the strict
-        // command protocol. Preserve completed results and park: retrying
-        // every three seconds cannot upgrade a side-loaded extension and only
-        // floods server diagnostics. The Local Control status endpoint sees
-        // the rejected device and offers the current pre-paired ZIP.
-        _resultQueue.unshift(...resultsToSend);
-        _resetAuthBackoff();
-        connected = false;
-        const errBody = await resp.json().catch(() => null);
-        const required = Number(
-          errBody && errBody.requiredProtocolVersion) || '?';
-        lastError = `Extension upgrade required (protocol ${PROTOCOL_VERSION} → ${required})`;
-        updateBadge('repair');
-        console.warn(`[Bridge] ${lastError}; parked until the next upgrade probe`);
-        _scheduleNextPoll(UPGRADE_RETRY_DELAY);
-        return;
-      }
-      if (resp.status === 429) {
-        // Admission pressure is transient. Preserve every result, remain
-        // visually connected, and obey the server instead of retrying harder.
-        _resultQueue.unshift(...resultsToSend);
-        const errBody = await resp.json().catch(() => null);
-        const headerSeconds = Number(resp.headers.get('Retry-After')) || 0;
-        const bodySeconds = Number(errBody && errBody.retryAfter) || 0;
-        const delay = Math.min(
-          AUTH_RETRY_MAX_DELAY,
-          Math.max(1000, (headerSeconds || bodySeconds || 3) * 1000));
-        connected = true;
-        lastError = '';
-        updateBadge('on');
-        console.warn(`[Bridge] Server admission busy; retrying in ${Math.ceil(delay / 1000)}s`);
-        _scheduleNextPoll(delay);
-        return;
-      }
-      if (resp.status === 413) {
-        // A lower proxy/server payload ceiling may be smaller than our known
-        // server floor. Preserve ordinary results and bisect the batch first;
-        // only a single result that still cannot fit becomes an explicit
-        // command error, so replay can never loop forever.
-        let payloadRetryDelay = 0;
-        if (resultsToSend.length > 1) {
-          _pollResultBatchMax = Math.max(
-            1, Math.floor(resultsToSend.length / 2));
-          _resultQueue.unshift(...resultsToSend);
-        } else if (resultsToSend.length === 1
-                   && resultsToSend[0].error !== POLL_RESULT_OVERSIZE_ERROR) {
-          _resultQueue.unshift(...resultsToSend.map(_compactOversizeResult));
-        } else {
-          // Even the compact floor was rejected. Retain it for recovery but
-          // back off, rather than manufacturing a zero-delay 413 loop.
-          _resultQueue.unshift(...resultsToSend);
-          payloadRetryDelay = POLL_RETRY_DELAY;
-        }
-        connected = true;
-        lastError = '';
-        updateBadge('on');
-        _scheduleNextPoll(payloadRetryDelay);
-        return;
-      }
-      if (resp.status >= 500) {
-        // Proxy error — put results back so they're not lost
-        _resultQueue.unshift(...resultsToSend);
-        console.warn(`[Bridge] Server/proxy returned ${resp.status}, retrying...`);
-        connected = true;
-        _scheduleNextPoll(POLL_RETRY_DELAY);
-        return;
-      }
-      throw new Error(`HTTP ${resp.status}`);
-    }
-
-    const data = await resp.json();
-    connected = true;
-    lastError = '';
-    _resetAuthBackoff();
-    updateBadge('on');
-
-    // Fire-and-forget: do NOT await command execution
-    if (data.commands && data.commands.length > 0) {
-      for (const cmd of data.commands) {
-        if (_inflight.has(cmd.id)) {
-          console.warn(`[Bridge] Skipping duplicate command: ${cmd.id}`);
-          continue;
-        }
-        executeAndReport(cmd);
-      }
-    }
-
-    _scheduleNextPoll(POLL_INTERVAL);
-
-  } catch (err) {
-    if (timeoutId) clearTimeout(timeoutId);
-    _activePollController = null;
-    // The server may or may not have received the frame. Settlement is
-    // owner/device/idempotency keyed, so replay is always safer than losing a
-    // completed result on a timeout, proxy reset, malformed response, or
-    // other transport error.
-    if (resultsToSend.length) _resultQueue.unshift(...resultsToSend);
-    if (err.name === 'AbortError') {
-      if (_flushPending) {
-        // Deliberate abort: a command result just landed, so we cut the idle
-        // long-poll short. Re-poll INSTANTLY (not the 100ms reconnect path) so
-        // the result goes out now instead of waiting the server's 8s window.
-        _flushPending = false;
-        _scheduleNextPoll(0);
-        return;
-      }
-      // Fetch timeout — normal (server long-poll returned nothing), just reconnect
-      connected = true;
-      _scheduleNextPoll(POLL_INTERVAL);
-      return;
-    }
-
-    connected = false;
-    lastError = err.message || 'Connection failed';
-    updateBadge('error');
-    console.warn(`[Bridge] Poll error: ${lastError}`);
-    _scheduleNextPoll(POLL_RETRY_DELAY);
-  }
-}
-
-// ══════════════════════════════════════════
-//  Command Execution (non-blocking)
-// ══════════════════════════════════════════
-
-async function executeAndReport(cmd) {
-  _inflight.add(cmd.id);
-  let result = null;
-  let error = null;
-  const temporaryTabs = _createTemporaryTabScope();
-
-  try {
-    console.log(`[Bridge] ▶ ${cmd.type} (${cmd.id.slice(0, 8)})`);
-    const start = Date.now();
-
-    const timeoutMs = COMMAND_TIMEOUT_OVERRIDES[cmd.type] || COMMAND_TIMEOUT;
-    result = await withTimeout(
-      executeCommand(cmd.type, cmd.params || {}, temporaryTabs),
-      timeoutMs,
-      `Command '${cmd.type}' timed out after ${timeoutMs / 1000}s`
-    );
-
-    commandsExecuted++;
-    console.log(`[Bridge] ✓ ${cmd.type} (${Date.now() - start}ms)`);
-  } catch (err) {
-    error = err.message || String(err);
-    commandsFailed++;
-    console.error(`[Bridge] ✗ ${cmd.type}: ${error}`);
-  } finally {
-    // Promise timeout alone cannot run a suspended handler's finally block.
-    // Close its resources independently before reporting settlement.
-    await temporaryTabs.close().catch((cleanupError) => {
-      console.warn('[TemporaryTabs] cleanup failed:', _textForDiagnostic(cleanupError));
-      if (!error) {
-        error = `Temporary browser tab cleanup failed: ${_textForDiagnostic(cleanupError)}`;
-        result = null;
-        commandsExecuted--;
-        commandsFailed++;
-      }
-    });
-  }
-
-  // Queue the result — it will be sent with the next poll
-  _resultQueue.push({ id: cmd.id, result, error });
-  _inflight.delete(cmd.id);
-
-  // ★ Result-nudge: if a long-poll is currently in-flight, abort it so a fresh
-  // poll carries this result out immediately instead of waiting up to the
-  // server's 8s long-poll window. _flushPending lets poll()'s catch distinguish
-  // this deliberate abort from the 12s fetch-timeout abort (instant re-poll vs
-  // the normal 100ms reconnect).
-  if (_activePollController && pollActive) {
-    _flushPending = true;
-    try { _activePollController.abort(); } catch (_) {}
-  }
+// Transport owns scheduling; command execution owns settlement and resources.
+function startPolling() { return bridgeTransport.start(); }
+function stopPolling() { bridgeTransport.stop(); }
+function executeAndReport(command, connection = bridgeConnection()) {
+  return bridgeCommands.execute(command, connection);
 }
 
 function withTimeout(promise, ms, timeoutMsg) {
@@ -967,7 +698,7 @@ function withTimeout(promise, ms, timeoutMsg) {
 //  Command Router
 // ══════════════════════════════════════════
 
-async function executeCommand(type, params, temporaryTabs) {
+async function executeCommand(type, params, temporaryTabs, connection = bridgeConnection()) {
   switch (type) {
     case 'list_tabs':      return cmdListTabs(params);
     case 'read_tab':       return cmdReadTab(params);
@@ -995,10 +726,10 @@ async function executeCommand(type, params, temporaryTabs) {
     case 'wait_for_element': return cmdWaitForElement(params);
     case 'summarize_page': return cmdSummarizePage(params);
     case 'get_app_state':  return cmdGetAppState(params);
-    case 'download':       return cmdDownload(params);
+    case 'download':       return cmdDownload(params, connection);
     case 'notify':         return cmdNotify(params);
-    case 'fetch_url':      return cmdFetchUrl(params, temporaryTabs);
-    case 'fetch_file_to_server': return cmdFetchFileToServer(params);
+    case 'fetch_url':      return cmdFetchUrl(params, temporaryTabs, connection);
+    case 'fetch_file_to_server': return cmdFetchFileToServer(params, connection);
     case 'research_url':   return cmdResearchUrl(params, temporaryTabs);
     case 'devtools':       return cmdDevtools(params);
     case 'page_state':     return cmdPageState(params);
@@ -1011,7 +742,7 @@ async function executeCommand(type, params, temporaryTabs) {
     case 'page_upload':    return cmdPageUpload(params);
     case 'network_capture_start': return cmdNetworkCaptureStart(params);
     case 'network_capture_stop': return cmdNetworkCaptureStop(params);
-    case 'wait_download':  return cmdWaitDownload(params);
+    case 'wait_download':  return cmdWaitDownload(params, connection);
     default:
       throw new Error(`Unknown command: ${type}`);
   }
@@ -1066,8 +797,7 @@ async function cmdReadTab(params) {
     await waitForTabLoad(tabId, 10000);
   }
 
-  const target = { tabId };
-  if (params.frameId != null) target.frameIds = [Number(params.frameId)];
+  const target = _pageTarget(params);
   const results = await chrome.scripting.executeScript({
     target,
     func: _extractContent,
@@ -1076,18 +806,24 @@ async function cmdReadTab(params) {
 
   if (results && results[0] && results[0].result) {
     const r = results[0].result;
-    r.title = tab.title || '';
-    r.url = tab.url || '';
+    if (params.frameId != null && (!r.url || results[0].documentId !== params.expectedDocumentId)) {
+      throw new Error('Cannot verify target frame content document');
+    }
+    if (typeof r.title !== 'string') r.title = tab.title || '';
+    if (!r.url) r.url = tab.url || '';
+    const snapshotTarget = results[0].documentId
+      ? {tabId, documentIds: [results[0].documentId]} : target;
     try {
       const snapshots = await chrome.scripting.executeScript({
-        target, func: _captureContentSnapshot, args: [maxChars, selector],
+        target: snapshotTarget, func: _captureContentSnapshot, args: [maxChars, selector],
       });
       if (snapshots[0] && snapshots[0].result) r.contentSnapshot = snapshots[0].result;
     } catch (_) { /* Optional enrichment must not break baseline HTML reads. */ }
     const network = _recentNetworkByTab.get(Number(tabId));
-    if (network && network.pageUrl === (tab.url || '')) {
+    if (network && (params.frameId == null || Number(params.frameId) === 0)
+        && network.pageUrl === r.url) {
       r.network = network;
-    } else if (network) {
+    } else if (network && network.pageUrl !== (tab.url || '')) {
       // Never attach a prior document's API data to the current page. Manual
       // browser navigations normally invalidate through webNavigation; this
       // exact-URL check is the fail-closed backstop for event races.
@@ -1096,6 +832,7 @@ async function cmdReadTab(params) {
     return r;
   }
 
+  if (params.frameId != null) throw new Error('No content returned by the authorized frame document');
   return { text: '', title: tab.title || '', url: tab.url || '', error: 'No content extracted' };
 }
 
@@ -1130,6 +867,7 @@ function waitForTabLoad(tabId, maxWait = 10000) {
 }
 
 function _extractContent(selector, maxChars) {
+  const source = {url: location.href, title: document.title || ''};
   if (selector) {
     const elements = document.querySelectorAll(selector);
     const results = [];
@@ -1144,7 +882,7 @@ function _extractContent(selector, maxChars) {
         ),
       });
     });
-    return { elements: results, count: elements.length };
+    return { ...source, elements: results, count: elements.length };
   }
 
   // Page HTML is the PRIMARY payload: the server runs trafilatura/BS4
@@ -1171,7 +909,7 @@ function _extractContent(selector, maxChars) {
   // threshold the page is an empty/error/redirect shell, so we ship innerText
   // and skip its (reflow-inducing) computation entirely on the common path.
   const MIN_HTML_FOR_EXTRACT = 2048;
-  const out = { html, htmlTruncated, meta };
+  const out = { ...source, html, htmlTruncated, meta };
   if (html.length < MIN_HTML_FOR_EXTRACT) {
     let text = document.body ? (document.body.innerText || document.body.textContent || '') : '';
     out.textLength = text.length;
@@ -3053,6 +2791,7 @@ async function cmdWaitForElement(params) {
         if (result.found) return result;
       }
     } catch (e) {
+      if (params.expectedDocumentId) throw e;
       // Element check failed, continue waiting
     }
 
@@ -3632,7 +3371,8 @@ function _createTemporaryTabScope() {
  * params: { url, maxChars?, timeoutMs? }
  * returns: { text, title, url, textLength, truncated, meta }
  */
-async function cmdFetchUrl(params, temporaryTabs = _createTemporaryTabScope()) {
+async function cmdFetchUrl(params, temporaryTabs = _createTemporaryTabScope(),
+  connection = bridgeConnection()) {
   const url = params.url;
   if (!url) throw new Error('No url specified');
   const maxChars = params.maxChars || 50000;
@@ -3660,7 +3400,7 @@ async function cmdFetchUrl(params, temporaryTabs = _createTemporaryTabScope()) {
   // the client device. A blocked/unclassifiable probe fails closed; a known
   // file response reuses that exact Response for server transfer.
   const fileReceipt = await _refuseFileResponseBeforeNavigation(
-    url, timeoutMs, params.fileTransfer || null);
+    url, timeoutMs, params.fileTransfer || null, connection);
   if (fileReceipt) return fileReceipt;
 
   // Create an inert background tab first.  Navigating directly in
@@ -3753,7 +3493,7 @@ function _responseLooksLikeFile(response) {
 }
 
 async function _refuseFileResponseBeforeNavigation(
-  url, timeoutMs, fileTransfer,
+  url, timeoutMs, fileTransfer, connection = bridgeConnection(),
 ) {
   const controller = new AbortController();
   const probeStartedAt = _monotonicNowMs();
@@ -3795,7 +3535,7 @@ async function _refuseFileResponseBeforeNavigation(
             ...fileTransfer, url,
             timeoutMs: remainingTransferMs,
             _response: response, _controller: controller,
-          });
+          }, connection);
         } catch (error) {
           // A classified file must fail closed. Falling through to tab
           // navigation here would resurrect the client-download bug.
@@ -3826,9 +3566,9 @@ async function _refuseFileResponseBeforeNavigation(
   }
 }
 
-function _transferHeaders(token, contentType, chunkSha256) {
-  const headers = buildHeaders();
-  headers['X-Browser-Client-Id'] = CLIENT_ID;
+function _transferHeaders(token, contentType, chunkSha256, connection) {
+  const headers = {...connection.headers};
+  headers['X-Browser-Client-Id'] = connection.clientId;
   headers['X-Transfer-Token'] = String(token || '');
   headers['Content-Type'] = contentType || 'application/json';
   if (chunkSha256) headers['X-Chunk-SHA256'] = chunkSha256;
@@ -3844,16 +3584,16 @@ function _transferErrorMessage(data, status) {
   return code ? `${code}: ${message}` : message;
 }
 
-async function _transferRequest(path, options) {
+async function _transferRequest(path, options, connection = bridgeConnection()) {
   const opts = options || {};
   let lastError = null;
   const attempts = opts.retry ? 2 : 1;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(`${SERVER_URL}${path}`, {
+      const response = await fetch(`${connection.serverUrl}${path}`, {
         method: opts.method || 'POST',
         headers: _transferHeaders(
-          opts.token, opts.contentType, opts.chunkSha256),
+          opts.token, opts.contentType, opts.chunkSha256, connection),
         credentials: 'include',
         body: opts.body,
         signal: opts.signal,
@@ -3905,7 +3645,8 @@ async function _sha256Hex(bytes) {
  * function never extracts/replays cookies and never calls chrome.downloads,
  * so it never writes to the client Downloads folder.
  */
-async function cmdFetchFileToServer(params) {
+async function cmdFetchFileToServer(params, connection = bridgeConnection()) {
+  const transferRequest = (path, options) => _transferRequest(path, options, connection);
   const url = String(params.url || '').trim();
   const transferId = String(params.transferId || '').trim();
   const transferToken = String(params.transferToken || '').trim();
@@ -3960,7 +3701,7 @@ async function cmdFetchFileToServer(params) {
       throw new Error(`Browser response exceeds the ${maxBytes}-byte limit`);
     }
     phase = 'starting server transfer';
-    await _transferRequest(`${basePath}/start`, {
+    await transferRequest(`${basePath}/start`, {
       token: transferToken,
       signal: controller.signal,
       body: JSON.stringify({
@@ -3990,7 +3731,7 @@ async function cmdFetchFileToServer(params) {
       const chunk = pending.subarray(0, pendingBytes);
       const chunkSha256 = await _sha256Hex(chunk);
       phase = 'uploading server chunk';
-      await _transferRequest(`${basePath}/chunks/${sequence}`, {
+      await transferRequest(`${basePath}/chunks/${sequence}`, {
         method: 'PUT', token: transferToken,
         contentType: 'application/octet-stream', chunkSha256,
         body: chunk, signal: controller.signal, retry: true,
@@ -4022,7 +3763,7 @@ async function cmdFetchFileToServer(params) {
     }
     await sendPendingChunk();
     phase = 'committing server file';
-    const receipt = await _transferRequest(`${basePath}/complete`, {
+    const receipt = await transferRequest(`${basePath}/complete`, {
       token: transferToken,
       signal: controller.signal,
       body: JSON.stringify({totalBytes, chunkCount: sequence}),
@@ -4056,7 +3797,7 @@ async function cmdFetchFileToServer(params) {
       const cleanupController = new AbortController();
       const cleanupTimer = setTimeout(() => cleanupController.abort(), 5000);
       try {
-        await _transferRequest(basePath, {
+        await transferRequest(basePath, {
           method: 'DELETE', token: transferToken,
           signal: cleanupController.signal, retry: false,
         });
@@ -4071,7 +3812,8 @@ async function cmdFetchFileToServer(params) {
 }
 
 // Self-contained for executeScript: never serialize subtree textContent (shadow CSS).
-function _captureContentSnapshot(maxChars, selector) {
+function _captureContentSnapshot(maxChars, selector, expectedOrigin) {
+  if (expectedOrigin && location.origin !== expectedOrigin) return {originMismatch: location.href};
   const cap = Math.max(1000, Math.min(80000, Number(maxChars) || 50000));
   const deadline = Date.now() + 80;
   const entries = [];
@@ -4184,7 +3926,8 @@ function _mergeResearchSnapshot(accumulator, snapshot, maxChars) {
   return added;
 }
 
-function _researchPageSignals(maxChars) {
+function _researchPageSignals(maxChars, expectedOrigin) {
+  if (expectedOrigin && location.origin !== expectedOrigin) return {originMismatch: location.href};
   const cap = Math.max(1000, Math.min(30000, Number(maxChars) || 30000));
   // Clean visible text is supplied by the isolated, bounded DOM snapshot.
   const fullText = '';
@@ -4285,7 +4028,8 @@ function _researchPageSignals(maxChars) {
   };
 }
 
-function _researchScrollStep() {
+function _researchScrollStep(expectedOrigin) {
+  if (expectedOrigin && location.origin !== expectedOrigin) return {originMismatch: location.href};
   const root = document.scrollingElement || document.documentElement;
   let target = root;
   let bestScore = root ? Math.max(0, root.scrollHeight - root.clientHeight) *
@@ -4322,7 +4066,8 @@ function _researchScrollStep() {
   };
 }
 
-function _researchAdvancePagination(mode) {
+function _researchAdvancePagination(mode, expectedOrigin) {
+  if (expectedOrigin && location.origin !== expectedOrigin) return {originMismatch: location.href};
   const normalizedMode = String(mode || 'auto');
   const roots = Array.from(document.querySelectorAll(
     'nav,[role="navigation"],[aria-label*="pagin" i],[class*="pagination" i],[class*="pager" i]'));
@@ -4421,18 +4166,42 @@ function _appendResearchText(accumulator, rawText, maxChars) {
   return added;
 }
 
-async function _readResearchSignals(tabId, maxChars) {
+class ResearchOriginChanged extends Error {
+  constructor(url) {
+    super('Research stopped after a cross-origin navigation');
+    this.url = String(url || '');
+  }
+}
+
+function _checkResearchOriginResult(result) {
+  if (result && result.originMismatch) throw new ResearchOriginChanged(result.originMismatch);
+  return result;
+}
+
+async function _requireResearchOrigin(tabId, expectedOrigin) {
+  const tab = await chrome.tabs.get(tabId);
+  let actual = '';
+  try { actual = new URL(tab.url || '').origin; } catch (_) {}
+  if (actual !== expectedOrigin) throw new ResearchOriginChanged(tab.url);
+  return tab;
+}
+
+async function _readResearchSignals(tabId, maxChars, expectedOrigin) {
+  await _requireResearchOrigin(tabId, expectedOrigin);
   try {
     const results = await chrome.scripting.executeScript({
       target: {tabId: Number(tabId)}, world: 'MAIN',
-      func: _researchPageSignals, args: [maxChars],
+      func: _researchPageSignals, args: [maxChars, expectedOrigin],
     });
     const signals = results && results[0] && results[0].result || null;
+    _checkResearchOriginResult(signals);
     if (!signals) return null;
     const snapshots = await chrome.scripting.executeScript({
-      target: {tabId: Number(tabId)}, func: _captureContentSnapshot, args: [maxChars],
+      target: {tabId: Number(tabId)}, func: _captureContentSnapshot,
+      args: [maxChars, '', expectedOrigin],
     });
     const snapshot = snapshots && snapshots[0] && snapshots[0].result;
+    _checkResearchOriginResult(snapshot);
     if (snapshot) {
       signals.contentSnapshot = snapshot;
       signals.text = [snapshot.text, ...snapshot.records.map(r => r.snippet)].join('\n').slice(0, maxChars);
@@ -4440,7 +4209,8 @@ async function _readResearchSignals(tabId, maxChars) {
       signals.fingerprint += '|' + snapshot.text.slice(-400) + '|' + snapshot.records.map(r => r.url).join('|');
     }
     return signals;
-  } catch (_) {
+  } catch (error) {
+    if (error instanceof ResearchOriginChanged) throw error;
     return null;
   }
 }
@@ -4484,77 +4254,71 @@ async function cmdResearchUrl(params, temporaryTabs = _createTemporaryTabScope()
     await chrome.tabs.update(tab.id, {url: requestedUrl});
     await waitForTabLoad(tab.id, Math.min(20000, timeoutMs));
     await _waitForCapturedPageSettle(tab.id, captureId, Math.min(15000, timeoutMs));
-    tab = await chrome.tabs.get(tab.id);
-    const initialOrigin = (() => { try { return new URL(tab.url || '').origin; } catch (_) { return ''; } })();
-    lastSignals = await _readResearchSignals(tab.id, maxChars);
+    tab = await _requireResearchOrigin(tab.id, requestedOrigin);
+    lastSignals = await _readResearchSignals(tab.id, maxChars, requestedOrigin);
     firstSignals = lastSignals;
     if (lastSignals) {
       seenFingerprints.add(String(lastSignals.fingerprint || ''));
       _appendResearchText(accumulator, lastSignals.text, maxChars);
       _mergeResearchSnapshot(accumulator, lastSignals.contentSnapshot, maxChars);
     }
-    if (initialOrigin !== requestedOrigin) {
-      stopReason = 'cross_origin_redirect';
-    } else {
-      for (let pageIndex = 0; pageIndex < maxPages && Date.now() < deadline; pageIndex++) {
-        let stagnantScrolls = 0;
-        for (let scrollIndex = 0; scrollIndex < maxScrolls && Date.now() < deadline; scrollIndex++) {
-          temporaryTabs.assertActive();
-          const scrollResult = await chrome.scripting.executeScript({
-            target: {tabId: tab.id}, world: 'MAIN', func: _researchScrollStep,
-          });
-          const scroll = scrollResult && scrollResult[0] && scrollResult[0].result || {};
-          await _waitForCapturedPageSettle(tab.id, captureId, Math.min(5000, deadline - Date.now()));
-          const signals = await _readResearchSignals(tab.id, maxChars);
-          const added = signals ? _appendResearchText(accumulator, signals.text, maxChars) +
-            _mergeResearchSnapshot(accumulator, signals.contentSnapshot, maxChars) : 0;
-          lastSignals = signals || lastSignals;
-          scrollsCompleted++;
-          stagnantScrolls = added > 0 ? 0 : stagnantScrolls + 1;
-          if ((!scroll.scrolled && scroll.atBottom) || (scroll.atBottom && stagnantScrolls >= 2)) break;
-        }
-        if (pageIndex + 1 >= maxPages || pagination === 'none' || Date.now() >= deadline) {
-          stopReason = Date.now() >= deadline ? 'time_budget' :
-            (pageIndex + 1 >= maxPages ? 'page_limit' : 'scroll_complete');
-          break;
-        }
+    for (let pageIndex = 0; pageIndex < maxPages && Date.now() < deadline; pageIndex++) {
+      let stagnantScrolls = 0;
+      for (let scrollIndex = 0; scrollIndex < maxScrolls && Date.now() < deadline; scrollIndex++) {
         temporaryTabs.assertActive();
-        const advanceRows = await chrome.scripting.executeScript({
-          target: {tabId: tab.id}, world: 'MAIN', func: _researchAdvancePagination,
-          args: [pagination],
+        await _requireResearchOrigin(tab.id, requestedOrigin);
+        const scrollResult = await chrome.scripting.executeScript({
+          target: {tabId: tab.id}, world: 'MAIN', func: _researchScrollStep,
+          args: [requestedOrigin],
         });
-        const advance = advanceRows && advanceRows[0] && advanceRows[0].result || {};
-        if (!advance.advanced) {
-          stopReason = advance.reason || 'no-next-page';
-          break;
-        }
-        temporaryTabs.assertActive();
-        if (advance.kind === 'link') await chrome.tabs.update(tab.id, {url: advance.href});
-        await waitForTabLoad(tab.id, Math.min(15000, Math.max(1000, deadline - Date.now())));
+        const scroll = scrollResult && scrollResult[0] && scrollResult[0].result || {};
+        _checkResearchOriginResult(scroll);
         await _waitForCapturedPageSettle(tab.id, captureId, Math.min(5000, deadline - Date.now()));
-        tab = await chrome.tabs.get(tab.id);
-        let currentOrigin = '';
-        try { currentOrigin = new URL(tab.url || '').origin; } catch (_) {}
-        if (currentOrigin !== requestedOrigin) {
-          stopReason = 'cross_origin_pagination_blocked';
-          break;
-        }
-        const signals = await _readResearchSignals(tab.id, maxChars);
-        const fingerprint = String(signals && signals.fingerprint || '');
+        const signals = await _readResearchSignals(tab.id, maxChars, requestedOrigin);
         const added = signals ? _appendResearchText(accumulator, signals.text, maxChars) +
-            _mergeResearchSnapshot(accumulator, signals.contentSnapshot, maxChars) : 0;
-        if (!signals || (seenFingerprints.has(fingerprint) && added === 0)) {
-          stopReason = 'pagination_stalled';
-          break;
-        }
-        seenFingerprints.add(fingerprint);
-        lastSignals = signals;
-        pagesVisited++;
+          _mergeResearchSnapshot(accumulator, signals.contentSnapshot, maxChars) : 0;
+        lastSignals = signals || lastSignals;
+        scrollsCompleted++;
+        stagnantScrolls = added > 0 ? 0 : stagnantScrolls + 1;
+        if ((!scroll.scrolled && scroll.atBottom) || (scroll.atBottom && stagnantScrolls >= 2)) break;
       }
+      if (pageIndex + 1 >= maxPages || pagination === 'none' || Date.now() >= deadline) {
+        stopReason = Date.now() >= deadline ? 'time_budget' :
+          (pageIndex + 1 >= maxPages ? 'page_limit' : 'scroll_complete');
+        break;
+      }
+      temporaryTabs.assertActive();
+      await _requireResearchOrigin(tab.id, requestedOrigin);
+      const advanceRows = await chrome.scripting.executeScript({
+        target: {tabId: tab.id}, world: 'MAIN', func: _researchAdvancePagination,
+        args: [pagination, requestedOrigin],
+      });
+      const advance = advanceRows && advanceRows[0] && advanceRows[0].result || {};
+      _checkResearchOriginResult(advance);
+      if (!advance.advanced) {
+        stopReason = advance.reason || 'no-next-page';
+        break;
+      }
+      temporaryTabs.assertActive();
+      if (advance.kind === 'link') await chrome.tabs.update(tab.id, {url: advance.href});
+      await waitForTabLoad(tab.id, Math.min(15000, Math.max(1000, deadline - Date.now())));
+      await _waitForCapturedPageSettle(tab.id, captureId, Math.min(5000, deadline - Date.now()));
+      tab = await _requireResearchOrigin(tab.id, requestedOrigin);
+      const signals = await _readResearchSignals(tab.id, maxChars, requestedOrigin);
+      const fingerprint = String(signals && signals.fingerprint || '');
+      const added = signals ? _appendResearchText(accumulator, signals.text, maxChars) +
+          _mergeResearchSnapshot(accumulator, signals.contentSnapshot, maxChars) : 0;
+      if (!signals || (seenFingerprints.has(fingerprint) && added === 0)) {
+        stopReason = 'pagination_stalled';
+        break;
+      }
+      seenFingerprints.add(fingerprint);
+      lastSignals = signals;
+      pagesVisited++;
     }
     const network = await _stopNetworkCaptureInternal(captureId, {remember: false});
     captureId = null;
-    tab = await chrome.tabs.get(tab.id);
+    tab = await _requireResearchOrigin(tab.id, requestedOrigin);
     let cookieNames = [];
     try {
       const cookies = await chrome.cookies.getAll({url: tab.url || requestedUrl});
@@ -4571,6 +4335,14 @@ async function cmdResearchUrl(params, temporaryTabs = _createTemporaryTabScope()
       initialStatePayloads: firstSignals && firstSignals.initialStatePayloads || {},
       cookieNames, network,
       research: {pagesVisited, scrollsCompleted, stopReason,
+        maxPages, maxScrolls, pagination, elapsedMs: timeoutMs - Math.max(0, deadline - Date.now())},
+    };
+  } catch (error) {
+    if (!(error instanceof ResearchOriginChanged)) throw error;
+    return {
+      requestedUrl, url: error.url, title: '', collectedText: '', textLength: 0,
+      truncated: false, network: {responses: []},
+      research: {pagesVisited, scrollsCompleted, stopReason: 'cross_origin_redirect',
         maxPages, maxScrolls, pagination, elapsedMs: timeoutMs - Math.max(0, deadline - Date.now())},
     };
   } finally {
@@ -4639,12 +4411,12 @@ async function cmdNavigate(params) {
 //  Downloads & Notifications
 // ══════════════════════════════════════════
 
-async function cmdDownload(params) {
+async function cmdDownload(params, connection = bridgeConnection()) {
   const opts = { url: params.url };
   if (params.filename) opts.filename = params.filename;
   if (params.saveAs !== undefined) opts.saveAs = params.saveAs;
   const downloadId = await chrome.downloads.download(opts);
-  return { location: 'device_downloads', clientId: CLIENT_ID, downloadId };
+  return { location: 'device_downloads', clientId: connection.clientId, downloadId };
 }
 
 // ══════════════════════════════════════════
@@ -4654,11 +4426,32 @@ async function cmdDownload(params) {
 function _pageTarget(params) {
   const target = { tabId: Number(params.tabId) };
   if (!target.tabId) throw new Error('No tabId specified');
-  if (params.frameId != null) target.frameIds = [Number(params.frameId)];
+  if (params.frameId != null) {
+    if (!params.expectedDocumentId) throw new Error('Target frame document authorization is required');
+    target.documentIds = [String(params.expectedDocumentId)];
+  }
   return target;
 }
 
+async function _frameDocument(params, pinned = false) {
+  const frameId = Number(params.frameId);
+  if (!Number.isInteger(frameId) || frameId < 0) throw new Error('Invalid target frame ID');
+  const details = {tabId: Number(params.tabId), frameId};
+  if (pinned) {
+    if (!params.expectedDocumentId) throw new Error('Target frame document authorization is required');
+    details.documentId = String(params.expectedDocumentId);
+  }
+  const frame = await chrome.webNavigation.getFrame(details);
+  if (!frame || !frame.documentId || frame.documentLifecycle !== 'active'
+      || !/^https?:\/\//i.test(frame.url || '')
+      || (pinned && frame.documentId !== details.documentId)) {
+    throw new Error('Cannot verify target frame document');
+  }
+  return {frameId, url: frame.url, documentId: frame.documentId};
+}
+
 async function _assertExpectedDomain(params, knownTab) {
+  if (params.frameId != null) await _frameDocument(params, true);
   if (!params.expectedDomain) return;
   const tab = knownTab || await chrome.tabs.get(Number(params.tabId));
   let actual = '';
@@ -4682,10 +4475,12 @@ function _selectorForPageParams(params) {
 
 async function cmdPageState(params) {
   const tab = await chrome.tabs.get(Number(params.tabId));
-  return {
+  const state = {
     tabId: tab.id, url: tab.url || '', title: tab.title || '',
     status: tab.status || '', active: !!tab.active, windowId: tab.windowId,
   };
+  if (params.frameId != null) state.frame = await _frameDocument(params);
+  return state;
 }
 
 function _snapshotPage(maxElements) {
@@ -6085,13 +5880,13 @@ async function _waitForCapturedPageSettle(tabId, captureId, timeoutMs) {
   }
 }
 
-async function cmdWaitDownload(params) {
+async function cmdWaitDownload(params, connection = bridgeConnection()) {
   const downloadId = Number(params.downloadId);
   const timeoutMs = Math.max(1000, Math.min(120000, Number(params.timeoutMs) || 60000));
   const current = await chrome.downloads.search({id: downloadId});
   if (!current.length) throw new Error(`Download ${downloadId} not found`);
   if (current[0].state === 'complete') {
-    return {...current[0], location: 'device_downloads', clientId: CLIENT_ID};
+    return {...current[0], location: 'device_downloads', clientId: connection.clientId};
   }
   if (current[0].state === 'interrupted') throw new Error(current[0].error || 'Download interrupted');
   return new Promise((resolve, reject) => {
@@ -6106,7 +5901,7 @@ async function cmdWaitDownload(params) {
         const rows = await chrome.downloads.search({id: downloadId});
         resolve({
           ...(rows[0] || {id: downloadId, state: 'complete'}),
-          location: 'device_downloads', clientId: CLIENT_ID,
+          location: 'device_downloads', clientId: connection.clientId,
         });
       } else if (delta.state.current === 'interrupted') {
         clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener);
@@ -6194,19 +5989,13 @@ function updateBadge(state) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'getStatus') {
     sendResponse({
-      connected,
+      ...bridgeTransport.status(),
+      ...bridgeCommands.status(),
       serverUrl: SERVER_URL,
       clientId: CLIENT_ID,
       hasBridgeSecret: !!BRIDGE_SECRET,
-      pollActive,
-      lastError,
-      authFailures,
-      needsRepair,
-      inflight: _inflight.size,
-      resultQueue: _resultQueue.length,
+      resultQueue: bridgeOutbox.size,
       repairBusy: _repairInFlight,
-      commandsExecuted,
-      commandsFailed,
     });
     return true;
   }
@@ -6230,9 +6019,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;   // async sendResponse
   }
   if (msg.type === 'toggle') {
-    if (pollActive) { stopPolling(); updateBadge('off'); }
+    if (bridgeTransport.isRunning()) { stopPolling(); updateBadge('off'); }
     else { startPolling(); }
-    sendResponse({ pollActive });
+    sendResponse({ pollActive: bridgeTransport.isRunning() });
     return true;
   }
 });

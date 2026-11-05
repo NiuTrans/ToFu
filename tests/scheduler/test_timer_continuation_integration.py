@@ -60,10 +60,16 @@ def test_trigger_receipt_retry_never_restarts_executor(continuation, monkeypatch
 
     faulty = FaultClient()
     monkeypatch.setattr(_loop, '_timer_client', lambda **kwargs: faulty)
-    assert _loop._execute_continuation(timer) is None
+    assert _loop._execute_continuation(timer).kind == 'retry'
     assert len(started) == 1
     retry = _loop._execute_continuation(timer)
-    assert retry == (None if committed_before_failure else started[0])
+    if committed_before_failure:
+        # The receipt committed but its ACK was lost: the row is already
+        # terminal, so the replay must not announce a second delivery.
+        assert retry.kind == 'closed'
+    else:
+        assert retry.kind == 'started'
+        assert retry.task_id == started[0]
     assert len(started) == 1
     row = get_timer(timer['id'], user_id=1)
     assert row['status'] == 'triggered'
@@ -74,14 +80,40 @@ def test_trigger_receipt_retry_never_restarts_executor(continuation, monkeypatch
     assert turns[0]['projection']['origin']['initiator'] == 'timer'
 
 
-def test_busy_agent_lane_keeps_ready_timer_without_extra_turn(continuation):
+def test_poll_finishing_after_delivery_keeps_the_receipt(continuation):
+    """A background poll in flight while an operator delivers commits its
+    verdict afterwards; the settled watcher's receipt and budget must hold."""
+    from lib.scheduler.timer import _loop, get_timer, get_timer_poll_log
+
+    timer, started = continuation
+    assert _loop._execute_continuation(timer).kind == 'started'
+    _loop._record_poll(timer['id'], 'wait', 'Timer no longer active', 0,
+                       poll_id=f"{timer['id']}.p1", user_id=1)
+    row = get_timer(timer['id'], user_id=1)
+    assert row['status'] == 'triggered'
+    assert row['last_poll_decision'] == 'started'
+    assert row['poll_count'] == 0
+    assert get_timer_poll_log(timer['id'], user_id=1) == []
+    assert len(started) == 1
+
+
+def test_busy_agent_lane_delivers_without_extra_turn(continuation):
+    """The second timer meets a lane that the first continuation still owns.
+
+    A watcher never owns that lane, so the due obligation must be delivered
+    into it rather than dropped. The first continuation's attempt is still
+    live and task-bound, so the steer window is open: the continuation is
+    committed into that Turn as a durable injection block and no Turn is
+    added. The durable queue is only the fallback once that window closed.
+    """
     from lib.scheduler.timer import _loop, create_timer, cancel_timer, get_timer
     from lib.storage import get_storage_client
     from lib.storage.errors import StorageError
     from lib.turn_lifecycle import list_turns
 
     timer, started = continuation
-    assert _loop._execute_continuation(timer) == started[0]
+    first = _loop._execute_continuation(timer)
+    assert first.kind == 'started' and first.task_id == started[0]
     waiting = create_timer(user_id=1, conv_id=timer['conv_id'],
                            check_instruction='Verify another result',
                            continuation_message='Read another result', max_polls=1)
@@ -90,12 +122,20 @@ def test_busy_agent_lane_keeps_ready_timer_without_extra_turn(continuation):
             'timer_id': waiting['id'], 'user_id': 1,
             'last_poll_decision': 'ready', 'poll_count': 1,
         }, 'ready:' + waiting['id'])
-        assert _loop._execute_continuation(waiting) is None
+        delivered = _loop._execute_continuation(waiting)
+        assert delivered.kind == 'steered'
+        assert delivered.accepted
         row = get_timer(waiting['id'], user_id=1)
-        assert row['status'] == 'active' and row['last_poll_decision'] == 'ready'
+        assert row['status'] == 'triggered'
+        assert row['last_poll_decision'] == 'steered'
         assert row['poll_count'] == 1
         assert len(started) == 1
-        assert len(list_turns(timer['conv_id'], user_id=1)['turns']) == 2
+        turns = list_turns(timer['conv_id'], user_id=1)['turns']
+        assert len(turns) == 2
+        injections = turns[-1]['projection']['_userSteerInjects']
+        assert [item['blockId'] for item in injections] == [
+            f"injection:user-steer:timer:{waiting['id']}"]
+        assert 'Read another result' in injections[0]['previews'][0]['text']
         try:
             denied = _loop._execute_continuation({**waiting, 'user_id': 2})
         except StorageError as error:
@@ -103,7 +143,7 @@ def test_busy_agent_lane_keeps_ready_timer_without_extra_turn(continuation):
             # owner-filtered SQL reads instead return an absent timer.
             assert error.code == 'database_forbidden'
         else:
-            assert denied is None
+            assert denied.kind == 'closed'
         assert len(started) == 1
     finally:
         cancel_timer(waiting['id'], user_id=1)

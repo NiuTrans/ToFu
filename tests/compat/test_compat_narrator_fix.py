@@ -21,6 +21,8 @@ checks both streaming and synchronous public response builders.
 
 from __future__ import annotations
 
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+
 import asyncio
 import json as _json
 import os
@@ -97,7 +99,7 @@ def _install_stub(monkeypatch):
         return [{'title': 'GT stub', 'snippet': 'deterministic',
                  'url': 'https://x.invalid', 'source': 'stub'}]
 
-    monkeypatch.setattr(llm_fb, 'stream_llm_response', _stub)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', _stub)
     monkeypatch.setattr(tofu_search, 'perform_web_search', _stub_search)
     monkeypatch.setattr(search_core, 'perform_web_search', _stub_search)
 

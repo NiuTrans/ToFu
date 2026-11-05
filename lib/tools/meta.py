@@ -38,7 +38,7 @@ def build_project_tool_meta(fn_name, fn_args, tool_content):
 #
 # WHY THIS IS ANCHORED ON A PREFIX AND NEVER A SUBSTRING. "content contains
 # 'Error:'" is NOT usable: ``read_files`` on ``logs/error.log`` and
-# ``grep_search`` matching the word both return content full of ``Error:``
+# ``search_files`` matching the word both return content full of ``Error:``
 # while having SUCCEEDED. What separates them is POSITION — every successful
 # result carries an execution-layer header first (``File: <p> (lines …)``,
 # ``grep "<pat>" — N matches:``, ``$ <cmd>``), so only a FAILURE can begin with
@@ -129,7 +129,7 @@ def _build_read_files(meta, fn_name, fn_args, tool_content, path):
         meta['badge'] = f'{n_unique} file{"s" if n_unique > 1 else ""}'
 
 
-def _build_grep_search(meta, fn_name, fn_args, tool_content, path):
+def _build_search_files(meta, fn_name, fn_args, tool_content, path):
     searches = fn_args.get('searches')
     if searches and isinstance(searches, list):
         # Batch mode: count total matches across all searches
@@ -462,6 +462,21 @@ def _build_default(meta, fn_name, fn_args, tool_content, path):
     meta['badge'] = ''
 
 
+def _build_inspect_video(meta, fn_name, fn_args, tool_content, path):
+    # Image results are presented by the handler; this covers text results:
+    # a text-only model's probe/transcript view and typed failures.
+    from lib.tools.result_envelope import tool_result_error
+    error = tool_result_error(tool_content)
+    if error is not None:
+        meta['type'] = 'error'
+        meta['badge'] = error.code
+        meta['snippet'] = (error.message or error.code)[:120].replace('\n', ' ')
+        return
+    lines = tool_content.split('\n', 2)
+    meta['snippet'] = (lines[1] if len(lines) > 1 else lines[0])[:120]
+    meta['badge'] = 'video'
+
+
 def _build_mcp_tool(meta, fn_name, fn_args, tool_content, path):
     from lib.mcp.types import parse_namespaced_name
     parsed = parse_namespaced_name(fn_name)
@@ -502,7 +517,8 @@ def _stamp_outside_workspace(meta, summaries, flagged):
 _META_BUILDERS = {
     'read_file':    _build_read_files,   # legacy — persisted tool rounds only
     'read_files':   _build_read_files,
-    'grep_search':  _build_grep_search,
+    'search_files': _build_search_files,
+    'grep_search':  _build_search_files,  # retired name — persisted rounds
     'list_dir':     _build_list_dir,
     'find_files':   _build_find_files,
     'write_file':   _build_write_file,
@@ -512,6 +528,7 @@ _META_BUILDERS = {
     'run_command':  _build_run_command,
     'insert_content': _build_insert_content,
     'insert_contents': _build_insert_content,
+    'inspect_video': _build_inspect_video,
 }
 
 

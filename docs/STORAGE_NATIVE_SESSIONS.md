@@ -50,6 +50,59 @@ close during probe/handshake, post-probe deadlines, BaseException cleanup and
 idle shrink in `tests/storage/test_storage_v2_{client,deadlines,pool_handoff}.py`;
 real socket EOF/pending-byte checks in `tests/tofudb/test_tofudb_v2_client.py`.
 
+## Recovery and interrupted ownership
+
+Problem: a managed restart replaces the endpoint and authentication secret,
+but an already-entered call retained the dead client. Repeating that client's
+RPC could never reach the replacement. A second exit during the replacement's
+handshake or the restart worker's final handoff could also lose its recovery
+wakeup; a stale ready response then masked the exit. Counting the same exit
+again as a failed startup prematurely exhausted the crash breaker.
+
+Decision: `StorageRuntime` records an exit generation and only publishes a
+handshake from that generation. It relinquishes restart ownership under the
+same lock that records crashes, and counts each observed exit once. Native
+clients bind a runtime-owned recovery resolver before publication. After an
+availability failure, ordinary replay-safe operations resolve the current
+client inside their original aggregate deadline, checking native protocol and
+owner/tenant scope. Replay keeps the same command ID and payload and uses the
+existing durable receipt. Managed availability retries consume the existing
+time budget instead of three immediate attempts at the dead endpoint.
+Standalone retry counts, protocol/integrity refusal, SQL ambiguous-write rules
+and instance-bound checkpoint control remain independent of that resolver.
+Stopping or degraded runtimes refuse recovery; the resolver never starts a
+store or changes the selected backend.
+
+The supervisor detaches and closes the exited generation's client before
+calling recovery callbacks. A readiness race produces `StorageError`, not a
+raw runtime exception. An exchange is reusable only after `request()` returns
+a complete response: cancellation, unexpected exceptions and partial-frame
+failures retire the owned socket, preserving the original exception. A failed
+post-handshake timeout setup closes its not-yet-published session. Closed health
+lanes cannot reopen sockets. Local pre-dispatch oversize refusal and complete
+classified server responses retain their existing alignment rules.
+
+The native accept loop treats `Interrupted`, `ConnectionAborted` and
+`ConnectionReset` as connection-local observations, returning to parent-lease
+checks and readiness polling. Other accept failures remain terminal; authority
+panic/poison and malformed-frame fences are not weakened.
+
+Alternatives considered: increasing retry counts still targets the wrong
+endpoint; increasing the crash limit hides duplicate accounting; retrying all
+errors crosses integrity and checkpoint-instance boundaries; relying on cyclic
+GC delays socket retirement. No durable record, worker, queue or admission limit
+is added. Recovery adds one counter per runtime and one resolver reference per
+managed client; connection teardown releases the existing transport resources.
+
+Verification: `test_storage_recovery_handoff.py`,
+`test_storage_v2_interrupted_request.py` and `test_storage_v2_managed_recovery.py`
+cover both restart races, once-only crash accounting, scope/deadline/Stop fences,
+and interrupted ownership. `test_native_lost_ack_recovery.py` commits to a real
+strict-durability daemon, kills it before returning the ACK to its caller, then
+replays through the retained client and verifies exactly one record version.
+The listener fault tests retain accept-error classification and healthy TCP
+acceptance; the application contract exercises daemon, embedded and SQL paths.
+
 Lifecycle measurement: 64 independent Unix socket-pair sessions entered in
 0.51 ms with idle target 1 and no admission wait. Holding them added 128 file
 descriptors; return retained 2 descriptors (one pair), and close returned to

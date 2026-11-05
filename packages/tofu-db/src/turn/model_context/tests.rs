@@ -480,8 +480,152 @@ fn writer_without_invalidation_cannot_reuse_an_earlier_epoch_certificate() {
     assert!(certificate(&db).is_none());
     SCANNED_HEADERS.with(|n| n.set(0));
     let read = context(&db, 7, true);
-    assert_eq!(SCANNED_HEADERS.with(|n| n.get()), 8);
+    // The stale anchor is refuted only at its position; the uncovered page
+    // is then walked again from the lane head.
+    assert_eq!(SCANNED_HEADERS.with(|n| n.get()), 8 + 8);
     assert_eq!(read["covered"], 0);
     assert_eq!(read["continuationStatus"], "history_changed");
     assert_eq!(read["historyProof"], context(&db, 7, false)["historyProof"]);
+}
+
+/// Production-shaped one-append transactions; the per-commit device barrier
+/// is deferred while seeding because lane length, not WAL durability, is
+/// under test. Reads and checkpoint saves run under the strict default.
+fn long_lane(history: usize) -> (tempfile::TempDir, AuthorityDatabase) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+    db.set_wal_durability(crate::wal::WalDurability::Normal).unwrap();
+    for index in 0..history {
+        append(&mut db, index);
+    }
+    db.set_wal_durability(crate::wal::WalDurability::Strict).unwrap();
+    (directory, db)
+}
+
+#[test]
+fn lanes_beyond_ten_thousand_turns_keep_certified_and_cold_continuations() {
+    // The removed ceiling refused every proof past 10,000 headers.
+    const HISTORY: usize = 10_050;
+    let (directory, mut db) = long_lane(HISTORY);
+    assert_eq!(save(&mut db, HISTORY - 1), HISTORY, "first certification walks the lane once");
+    assert_eq!(certificate(&db).unwrap().count, (HISTORY - 1) as u64);
+    append(&mut db, HISTORY);
+    append(&mut db, HISTORY + 1);
+    SCANNED_HEADERS.with(|n| n.set(0));
+    let warm = context(&db, HISTORY + 1, true);
+    assert_eq!(SCANNED_HEADERS.with(|n| n.get()), 3, "certified reads walk terminal and suffix");
+    assert_eq!(warm["covered"], HISTORY);
+    assert_eq!(warm["continuationStatus"], "available");
+    let cold = context(&db, HISTORY + 1, false);
+    assert_eq!(cold["historyProof"], warm["historyProof"]);
+    assert_eq!(cold["historyProof"]["count"], HISTORY + 1);
+    assert_eq!(cold["nextTurnId"], Value::Null);
+    let all = cold["turns"].as_array().unwrap();
+    assert_eq!(all.len(), HISTORY + 2);
+    assert_eq!(warm["turns"], Value::Array(all[HISTORY..].to_vec()));
+    assert_eq!(save(&mut db, HISTORY + 1), 3, "advancing past 10,000 resumes certified state");
+    assert_eq!(certificate(&db).unwrap().count, (HISTORY + 1) as u64);
+
+    drop(db);
+    let mut db = AuthorityDatabase::open(directory.path()).unwrap();
+    assert!(stored_certificate(&db).is_some());
+    assert!(certificate(&db).is_none(), "a new epoch never trusts the old certificate");
+    append(&mut db, HISTORY + 2);
+    SCANNED_HEADERS.with(|n| n.set(0));
+    let reopened = context(&db, HISTORY + 2, true);
+    assert_eq!(SCANNED_HEADERS.with(|n| n.get()), HISTORY + 3, "one streamed walk");
+    assert_eq!(reopened["covered"], HISTORY + 2);
+    assert_eq!(reopened["continuationStatus"], "available");
+    assert_eq!(reopened["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened["historyProof"], context(&db, HISTORY + 2, false)["historyProof"]);
+    assert_eq!(save(&mut db, HISTORY + 2), HISTORY + 3, "an epoch's first save reauthenticates");
+    append(&mut db, HISTORY + 3);
+
+    let mut tx = db.begin(7, 11).unwrap();
+    edit(&db, &mut tx, 3, json!({"content":"edited long ago"}));
+    db.commit(tx).unwrap();
+    assert!(certificate(&db).is_none(), "an edit far below the anchor clears the certificate");
+    SCANNED_HEADERS.with(|n| n.set(0));
+    let changed = context(&db, HISTORY + 3, true);
+    assert_eq!(SCANNED_HEADERS.with(|n| n.get()), 2 * (HISTORY + 4));
+    assert_eq!(changed["covered"], 0);
+    assert_eq!(changed["continuationStatus"], "history_changed");
+    assert_eq!(changed["continuation"], Value::Null);
+    assert_eq!(changed["turns"].as_array().unwrap().len(), HISTORY + 4);
+    assert_eq!(changed["turns"][3]["projection"]["content"], "edited long ago");
+    assert_eq!(changed["historyProof"], context(&db, HISTORY + 3, false)["historyProof"]);
+}
+
+fn page_after(
+    db: &AuthorityDatabase,
+    index: usize,
+    replay: bool,
+    after: &str,
+) -> io::Result<Value> {
+    let mut tx = db.begin(7, 11).unwrap();
+    read(db, &mut tx, CONVERSATION, &format!("turn-{index}"), replay, Some(after))
+        .map(|bytes| serde_json::from_slice(&bytes.unwrap().into_bytes()).unwrap())
+}
+
+fn turn_ids(page: &Value) -> Vec<String> {
+    page["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["turnId"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn names(range: std::ops::Range<usize>) -> Vec<String> {
+    range.map(|index| format!("turn-{index}")).collect()
+}
+
+fn assert_outside(result: io::Result<Value>) {
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(error.to_string(), "context page cursor is outside the selected suffix");
+}
+
+#[test]
+fn cursors_select_after_themselves_on_certified_cold_and_stale_anchor_paths() {
+    let (vfs, mut db) = simulated();
+    for index in 0..10 {
+        append(&mut db, index);
+    }
+    save(&mut db, 5);
+    for replay in [true, false] {
+        let page = page_after(&db, 9, replay, "turn-7").unwrap();
+        assert_eq!(page["covered"], if replay { 6 } else { 0 });
+        assert_eq!(turn_ids(&page), names(8..10));
+        assert_eq!(page["historyProof"], context(&db, 9, replay)["historyProof"]);
+        assert_outside(page_after(&db, 9, replay, "turn-9"));
+        assert_outside(page_after(&db, 9, replay, "unknown"));
+    }
+    assert_eq!(turn_ids(&page_after(&db, 9, false, "turn-2").unwrap()), names(3..10));
+    assert_outside(page_after(&db, 9, true, "turn-5"));
+    assert_outside(page_after(&db, 9, true, "turn-2"));
+
+    drop(db);
+    let mut db = AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs).unwrap();
+    assert!(certificate(&db).is_none());
+    let page = page_after(&db, 9, true, "turn-6").unwrap();
+    assert_eq!(page["covered"], 6);
+    assert_eq!(turn_ids(&page), names(7..10));
+    assert_outside(page_after(&db, 9, true, "turn-5"));
+    assert_outside(page_after(&db, 9, true, "turn-1"));
+
+    let mut tx = db.begin(7, 11).unwrap();
+    edit(&db, &mut tx, 0, json!({"content":"edited"}));
+    db.commit(tx).unwrap();
+    for (after, selected) in [(1, 2..10), (5, 6..10), (7, 8..10)] {
+        SCANNED_HEADERS.with(|n| n.set(0));
+        let page = page_after(&db, 9, true, &format!("turn-{after}")).unwrap();
+        assert_eq!(page["covered"], 0);
+        assert_eq!(page["continuationStatus"], "history_changed");
+        assert_eq!(turn_ids(&page), names(selected.clone()));
+        // One full walk, then only the page after the cursor.
+        assert_eq!(SCANNED_HEADERS.with(|n| n.get()), 10 + selected.len());
+    }
+    assert_outside(page_after(&db, 9, true, "turn-9"));
+    assert_outside(page_after(&db, 9, true, "unknown"));
 }

@@ -1,5 +1,6 @@
 """Compiled source identity must survive staging and track transitive inputs."""
 from pathlib import Path
+import json
 import os
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ from serverctl_pkg import native_engine as engines
 
 pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
+_AUDIT_SYNTHETIC_REPO_PATHS = {'tests/fixtures/input.json'}
 
 
 def test_manifest_identity_parse_failure_is_not_an_empty_closure(tmp_path):
@@ -74,11 +76,17 @@ edition = "2021"
         (vendor / 'src/ignored.rs').write_text('not retained by include rules')
     environment = dict(os.environ, CARGO_TARGET_DIR=str(tmp_path / 'build-cache'))
 
-    def compiled(location):
-        result = subprocess.run([cargo, 'run', '--offline', '--quiet'], cwd=location,
+    def compiled(location, *, fresh=None):
+        result = subprocess.run([cargo, 'run', '--offline', '--quiet', '--message-format=json'], cwd=location,
                                 env=environment, capture_output=True, text=True, timeout=120)
         assert result.returncode == 0, result.stderr
-        return result.stdout.strip()
+        lines = result.stdout.splitlines()
+        if fresh is not None:
+            artifacts = [json.loads(line) for line in lines if line.startswith('{')]
+            engine = [event for event in artifacts if event.get('reason') == 'compiler-artifact'
+                      and event['target']['name'] == 'tofu-db']
+            assert engine and all(event['fresh'] is fresh for event in engine)
+        return lines[-1].strip()
 
     (root / 'contracts').mkdir(exist_ok=True)
     contract = root / 'contracts/input.json'
@@ -98,6 +106,7 @@ edition = "2021"
     stamp = staged_contract.stat().st_mtime_ns
     engines._sync_build_snapshot(root, crate, snapshot)
     assert staged_contract.stat().st_mtime_ns == stamp
+    assert compiled(snapshot, fresh=True) == before
     contract.write_text('"changed"')
     changed = compiled(crate)
     assert changed != before and changed == engines.source_fingerprint(root)

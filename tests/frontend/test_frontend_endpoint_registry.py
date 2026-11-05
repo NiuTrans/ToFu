@@ -67,6 +67,27 @@ assert.notEqual(rawA,rawB);assert.equal((await rawA.json()).value,'body');assert
 """)
 
 
+def test_report_open_resolves_in_one_lookup_and_deepen_retains_its_cache_read(registry_bundle):
+    run_registry(registry_bundle, r"""
+const requests=[];
+global.fetch=async(url,options)=>{
+  requests.push({url,body:JSON.parse(options.body)});
+  return new Response(JSON.stringify({data:{report:'server-selected report',lang:'en'},meta:{}}),
+    {headers:{'content-type':'application/json'}});
+};
+assert.equal(typeof api.paper.reportResolve,'function');
+const report=await api.paper.reportResolve('known-paper','zh','unused source');
+assert.equal(report.lang,'en');assert.equal(requests.length,1);
+assert.ok(requests[0].url.endsWith('/api/v4/paper/report/lookup'));
+assert.deepEqual(requests[0].body,{lang:'zh',include_cache:true,paper_hash:'known-paper'});
+await api.paper.reportResolve('','review:iclr:en','source for an unknown paper');
+assert.equal(requests.length,2);
+assert.deepEqual(requests[1].body,{lang:'review:iclr:en',include_cache:true,paper_text:'source for an unknown paper'});
+await api.paper.reportCache({paper_hash:'known-paper',lang:'zh'});
+assert.equal(requests.length,3);assert.ok(requests[2].url.endsWith('/api/v4/paper/report/cache'));
+""")
+
+
 def test_get_singleflight_capacity_limits_retention_without_limiting_requests(registry_bundle):
     run_registry(registry_bundle, r"""
 const pending=[];global.fetch=()=>new Promise(resolve=>pending.push(resolve));

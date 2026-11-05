@@ -208,6 +208,27 @@ function _mkSnap() {
   global._isThinkingCapable = () => false;
 }
 
+// ── Each root records its own branch, even when the roots agree ─────────
+// The rail writes every root as `root:branch`; a capture that collapsed
+// agreeing roots into one entry would leave the other roots branch-less.
+{
+  const saved = global.projectState;
+  global.projectState = { active: true, path: '/w/a', extraRoots: [{ path: '/w/b' }, { path: '/w/c' }],
+    gitBranch: 'main', gitBranches: [{ path: '/w/a', branch: 'main' }, { path: '/w/b', branch: 'main' }] };
+  const snap = buildTurnCtxSnapshot();
+  check('capture_records_each_root_branch',
+        snap && JSON.stringify(snap.git) === JSON.stringify(
+          { branch: 'main', branches: [{ path: '/w/a', branch: 'main' }, { path: '/w/b', branch: 'main' }] }),
+        'git=' + JSON.stringify(snap && snap.git));
+  // A status payload without per-root probes still names the primary's branch.
+  global.projectState = { active: true, path: '/w/a', gitBranch: 'dev' };
+  const legacy = buildTurnCtxSnapshot();
+  check('capture_primary_branch_without_probes',
+        legacy && JSON.stringify(legacy.git) === JSON.stringify({ branch: 'dev', branches: [{ path: '/w/a', branch: 'dev' }] }),
+        'git=' + JSON.stringify(legacy && legacy.git));
+  global.projectState = saved;
+}
+
 // ── 'default' echoed on the DONE frame resolves, never clobbers to bare token ─
 {
   const savedOpts = global._composerReasoningOptions;
@@ -296,5 +317,5 @@ def test_turn_ctx_fact_card_and_reconcile():
     # Sanity: assert the total number of PASS lines matches the harness so
     # a silently-skipped case can't slip through as a false green.
     passes = [l for l in output.splitlines() if l.startswith('PASS')]
-    assert len(passes) >= 21, (
-        f'expected >=21 PASS lines, got {len(passes)}:\n{output}')
+    assert len(passes) >= 23, (
+        f'expected >=23 PASS lines, got {len(passes)}:\n{output}')

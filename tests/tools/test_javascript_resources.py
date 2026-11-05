@@ -1,8 +1,11 @@
-"""Program heap budgets scale from observed capacity, preserving overrides."""
+"""The program heap limit is a fixed engine constant, preserving overrides."""
 import pytest
 import runtime_guards as guards
 
 pytestmark = pytest.mark.unit
+
+# wasm32 engine maximum; owner decision 2026-10-24: hardware never sizes it.
+_FIXED_HEAP_MIB = 1024
 
 
 def snapshot(capacity=None, available=None):
@@ -21,17 +24,11 @@ def resolve(environment=None, capacity=None, available=None):
         snapshot=snapshot(capacity, available))
 
 
-def test_heap_scales_up_and_down_with_capacity_and_headroom():
-    lean = resolve(capacity=2048, available=1024)
-    reference = resolve(capacity=8192, available=6144)
-    workstation = resolve(capacity=65536, available=49152)
-    assert 16 <= lean < reference < workstation <= 1024
-    assert resolve(capacity=65536, available=1024) == lean
-
-
-def test_probe_failure_is_lean_and_distributed_default_is_explicit():
-    assert resolve() == 32
-    assert resolve({'TOFU_DEPLOYMENT_MODE':'distributed'}) == 256
+@pytest.mark.parametrize('capacity,available', [
+    (None, None), (2048, 1024), (8192, 6144), (65536, 49152), (65536, 1024)])
+@pytest.mark.parametrize('mode', ['personal', 'distributed'])
+def test_heap_is_identical_on_every_host_and_mode(capacity, available, mode):
+    assert resolve({'TOFU_DEPLOYMENT_MODE': mode}, capacity, available) == _FIXED_HEAP_MIB
 
 
 @pytest.mark.parametrize('value,expected', [('128',128),('1',16),('999999',1024)])
@@ -40,5 +37,5 @@ def test_explicit_override_is_preserved_with_finite_bounds(value, expected):
 
 
 @pytest.mark.parametrize('value', ['broken','0','-3',''])
-def test_malformed_override_falls_back_to_probed_capacity(value):
-    assert resolve({'TOFU_PROGRAM_HEAP_MAX_MIB':value},8192,6144) == resolve(capacity=8192,available=6144)
+def test_malformed_override_falls_back_to_the_fixed_heap(value):
+    assert resolve({'TOFU_PROGRAM_HEAP_MAX_MIB':value},8192,6144) == _FIXED_HEAP_MIB

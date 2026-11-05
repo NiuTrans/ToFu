@@ -1712,6 +1712,9 @@ pub(crate) fn delete(
     crate::queue::delete_conversation(database, transaction, &request.conversation_id)?;
     crate::timer::delete_conversation(database, transaction, &request.conversation_id)?;
     crate::raw_archive::delete_conversation(database, transaction, &request.conversation_id)?;
+    crate::turn::dispatchable_index::retire_conversation(
+        database, transaction, &request.conversation_id,
+    )?;
     // Derived model continuations are discarded, never archived with trash.
     crate::model_continuation::delete_conversation(
         database,
@@ -1865,6 +1868,18 @@ pub(crate) fn restore(
         transaction,
         &request.conversation_id,
     )?;
+    // The recency directory records the live count when the header funnel
+    // maintains it, so the restored conversation must be counted first.
+    let count_key = key(
+        transaction.tenant_id(),
+        transaction.owner_user_id(),
+        CONVERSATION_COUNT_NAMESPACE,
+        COUNT_KEY,
+    )?;
+    let next_count = read_count(database, transaction, &count_key)?
+        .checked_add(1)
+        .ok_or_else(|| invalid_data("conversation count overflow"))?;
+    database.entity_put(transaction, count_key, next_count.to_le_bytes().to_vec())?;
     store_header_with_cas_read(
         database,
         transaction,
@@ -1897,16 +1912,6 @@ pub(crate) fn restore(
         next_epoch.to_le_bytes().to_vec(),
     )?;
     crate::transcript_archive::invalidate(database, transaction, &request.conversation_id)?;
-    let count_key = key(
-        transaction.tenant_id(),
-        transaction.owner_user_id(),
-        CONVERSATION_COUNT_NAMESPACE,
-        COUNT_KEY,
-    )?;
-    let next_count = read_count(database, transaction, &count_key)?
-        .checked_add(1)
-        .ok_or_else(|| invalid_data("conversation count overflow"))?;
-    database.entity_put(transaction, count_key, next_count.to_le_bytes().to_vec())?;
     crate::search_dirty::mark(
         database,
         transaction,
@@ -2354,8 +2359,7 @@ pub(crate) fn backfill_activity_candidates(
             .ok_or_else(|| invalid_data("conversation activity backfill byte count overflow"))?;
         if next_source_bytes > MAX_ACTIVITY_CANDIDATE_BACKFILL_SOURCE_BYTES_PER_TRANSACTION {
             if processed_rows == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                return Err(crate::resource_exhaustion::domain_bound(
                     "conversation activity backfill source row exceeds its byte bound",
                 ));
             }
@@ -2496,8 +2500,7 @@ pub(crate) fn activity_dates(
             break;
         }
         if page_number + 1 == MAX_INDEX_SCAN_PAGES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "conversation activity-date scan exceeds its page budget",
             ));
         }
@@ -2554,6 +2557,35 @@ pub(crate) fn get(
     before_sequence: Option<i64>,
     deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<Option<Vec<u8>>> {
+    get_anchored(
+        database,
+        transaction,
+        conversation_id,
+        include_messages,
+        message_window,
+        before_sequence,
+        None,
+        deadline_elapsed,
+    )
+}
+
+/// `conversation.get`, optionally windowed around one main-lane Turn.
+///
+/// An anchor at main-lane sequence S selects the ordinary window ending at
+/// `S + 1 + message_window / 2`; an anchor that is not a main-lane Turn of
+/// this conversation selects the empty window ending at 0. Either way the
+/// page reports `anchor_sequence` (S or null), exactly like the SQL authority.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn get_anchored(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    include_messages: bool,
+    message_window: usize,
+    before_sequence: Option<i64>,
+    anchor_turn_id: Option<&str>,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<Vec<u8>>> {
     let Some((mut metadata, _physical_version)) =
         load_header(database, transaction, conversation_id)?
     else {
@@ -2581,6 +2613,27 @@ pub(crate) fn get(
         return Err(invalid_data("conversation header identity is malformed"));
     }
     metadata.insert("search_text".to_owned(), Value::String(String::new()));
+    let anchor_sequence = match anchor_turn_id {
+        Some(anchor) if include_messages && message_window != 0 => Some(
+            crate::turn::main_lane_sequence(
+                database,
+                transaction,
+                conversation_id,
+                anchor,
+                deadline_elapsed,
+            )?,
+        ),
+        Some(_) => return Err(invalid_input("conversation anchor requires a message window")),
+        None => None,
+    };
+    let before_sequence = match anchor_sequence {
+        Some(Some(sequence)) => Some(
+            i64::try_from(sequence.saturating_add(1 + message_window as u64 / 2))
+                .unwrap_or(i64::MAX),
+        ),
+        Some(None) => Some(0),
+        None => before_sequence,
+    };
     let (messages, total_count, start, end) = if include_messages {
         crate::turn::legacy_messages(
             database,
@@ -2610,10 +2663,14 @@ pub(crate) fn get(
         "source": "sidecar"
     });
     if include_messages && message_window != 0 {
-        response.as_object_mut().unwrap().insert(
-            "message_page".to_owned(),
-            json!({"total_count": total_count, "start": start, "end": end}),
-        );
+        let mut page = json!({"total_count": total_count, "start": start, "end": end});
+        if let Some(sequence) = anchor_sequence {
+            page["anchor_sequence"] = json!(sequence);
+        }
+        response
+            .as_object_mut()
+            .unwrap()
+            .insert("message_page".to_owned(), page);
     }
     serde_json::to_vec(&response)
         .map(Some)
@@ -2847,14 +2904,70 @@ fn primary_catalog_page(
     let items = headers.into_iter().take(request.limit)
         .map(|(_, _, header)| project_header(header, request.settings_keys.as_deref()))
         .collect::<io::Result<Vec<_>>>()?;
+    encode_catalog_page(items, total_count, has_more)
+}
+
+fn encode_catalog_page(items: Vec<Value>, total_count: u64, has_more: bool) -> io::Result<Vec<u8>> {
     let response = serde_json::to_vec(&json!({
         "items": items, "total_count": total_count, "has_more": has_more,
     })).map_err(|_| invalid_data("conversation catalog cannot be encoded"))?;
     if response.len() > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES {
-        return Err(io::Error::new(io::ErrorKind::OutOfMemory,
-            "conversation catalog response exceeds 8 MiB"));
+        return Err(crate::resource_exhaustion::domain_bound(
+            "conversation catalog response exceeds 8 MiB",));
     }
     Ok(response)
+}
+
+// Unfolded catalog pages inside the recency directory window hydrate only
+// their own rows instead of every owner header. The directory's coverage gates
+// and per-row checks decide; any disagreement keeps the exact legacy plans.
+// Conversations beyond a truncated directory are older than all its entries,
+// so every one of them follows a cursor that some entry still follows. A
+// cursor past the last entry of a truncated directory has an unknown position.
+fn directory_catalog_page(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &CatalogPageRequest,
+) -> io::Result<Option<Vec<u8>>> {
+    if request.folder_id.is_some() {
+        return Ok(None);
+    }
+    let Some((live_count, entries)) = recency::covered_entries(database, transaction)? else {
+        return Ok(None);
+    };
+    let start = request.before_updated_at_ms.map_or(0, |before_updated_at_ms| {
+        entries.partition_point(|(updated_at_ms, conversation_id)| {
+            *updated_at_ms > before_updated_at_ms
+                || *updated_at_ms == before_updated_at_ms
+                    && conversation_id.as_slice() >= request.before_id.as_bytes()
+        })
+    });
+    let live_count_rows = usize::try_from(live_count)
+        .map_err(|_| invalid_data("conversation count exceeds address space"))?;
+    if start == entries.len() && entries.len() < live_count_rows {
+        return Ok(None);
+    }
+    let following = live_count_rows - start;
+    let page_rows = following.min(request.limit);
+    let Some(rows) = entries.get(start..start + page_rows) else {
+        return Ok(None);
+    };
+    let mut items = Vec::with_capacity(page_rows);
+    for (updated_at_ms, conversation_id) in rows {
+        let Ok(conversation_id) = std::str::from_utf8(conversation_id) else {
+            return Ok(None);
+        };
+        let Some((header, _)) = load_header(database, transaction, conversation_id)? else {
+            return Ok(None);
+        };
+        if header.get("updated_at").and_then(Value::as_u64) != Some(*updated_at_ms)
+            || header.get("id").and_then(Value::as_str) != Some(conversation_id)
+        {
+            return Ok(None);
+        }
+        items.push(project_header(header, request.settings_keys.as_deref())?);
+    }
+    encode_catalog_page(items, live_count, following > request.limit).map(Some)
 }
 
 pub(crate) fn catalog_page(
@@ -2862,6 +2975,9 @@ pub(crate) fn catalog_page(
     transaction: &mut AuthorityTransaction,
     request: &CatalogPageRequest,
 ) -> io::Result<Vec<u8>> {
+    if let Some(page) = directory_catalog_page(database, transaction, request)? {
+        return Ok(page);
+    }
     let tenant_id = transaction.tenant_id();
     let owner_user_id = transaction.owner_user_id();
     let count_key = key(tenant_id, owner_user_id, CONVERSATION_COUNT_NAMESPACE, COUNT_KEY)?;
@@ -2958,8 +3074,7 @@ pub(crate) fn catalog_page(
             break;
         }
         if page_number + 1 == MAX_INDEX_SCAN_PAGES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "conversation catalog scan exceeds its bounded page budget",
             ));
         }
@@ -2967,19 +3082,7 @@ pub(crate) fn catalog_page(
     }
     let has_more = items.len() > request.limit;
     items.truncate(request.limit);
-    let response = serde_json::to_vec(&json!({
-        "items": items,
-        "total_count": total_count,
-        "has_more": has_more
-    }))
-    .map_err(|_| invalid_data("conversation catalog cannot be encoded"))?;
-    if response.len() > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            "conversation catalog response exceeds 8 MiB",
-        ));
-    }
-    Ok(response)
+    encode_catalog_page(items, total_count, has_more)
 }
 
 // Updated-time indexes retain historical OCC tombstones. For small owners,
@@ -3040,8 +3143,8 @@ fn primary_ordered_list(
         let separator = usize::from(response.len() > 1);
         if response.len().checked_add(separator + bytes.len() + 1)
             .is_none_or(|length| length > maximum_bytes) {
-            return Err(io::Error::new(io::ErrorKind::OutOfMemory,
-                "conversation list response exceeds its byte budget"));
+            return Err(crate::resource_exhaustion::domain_bound(
+                "conversation list response exceeds its byte budget",));
         }
         if separator != 0 { response.push(b','); }
         response.extend_from_slice(&bytes);
@@ -3198,8 +3301,7 @@ pub(crate) fn list(
                 .checked_add(document_bytes.len() + usize::from(!documents.is_empty()))
                 .filter(|bytes| *bytes <= maximum_response_bytes)
                 .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::OutOfMemory,
+                    crate::resource_exhaustion::domain_bound(
                         "conversation list response exceeds its byte budget",
                     )
                 })?;
@@ -3212,8 +3314,7 @@ pub(crate) fn list(
             break;
         }
         if page_number + 1 == MAX_INDEX_SCAN_PAGES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "conversation list scan exceeds its bounded page budget",
             ));
         }
@@ -3231,8 +3332,7 @@ pub(crate) fn list(
     }
     response.push(b']');
     if response.len() > maximum_response_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "conversation list response exceeds its byte budget",
         ));
     }

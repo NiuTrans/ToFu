@@ -74,6 +74,7 @@ def run_task_sync(
     user_id: int,
     timeout: float = 600,
     progress_fn=None,
+    execution_profile: str | None = None,
 ) -> str:
     """Run a task synchronously and return the final content string.
 
@@ -94,6 +95,9 @@ def run_task_sync(
         starts (e.g. ``"Running web_search: latest news"``). Lets a
         non-streaming consumer stream intermediate progress while the task
         runs. Exceptions from the callback are swallowed (logged at debug).
+    execution_profile : str, optional
+        A ``lib.tasks_pkg.execution_profile`` profile that narrows the task
+        below ``user_id``'s account; it replaces ``config``.
 
     Returns
     -------
@@ -104,7 +108,8 @@ def run_task_sync(
     conv_id = cfg.pop('conversationId', short_id('sync-', 8))
     messages = cfg.pop('messages', [])
 
-    task = create_task(conv_id, messages, cfg, user_id=int(user_id))
+    task = create_task(conv_id, messages, cfg, user_id=int(user_id),
+                       execution_profile=execution_profile)
     done_event = threading.Event()
     result_box: list = []
 

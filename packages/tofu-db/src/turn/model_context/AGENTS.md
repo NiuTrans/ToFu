@@ -1,6 +1,7 @@
 # Context frontier owner
 
-- `../model_context.rs` owns public v2 proof selection and bounded response pages.
+- `../model_context.rs` owns public v2 proof selection, the streamed header walk
+  (one index page held, no page-count or Turn cap) and bounded response pages.
 - `frontier.rs` owns the private certificate in the existing continuation lane
   directory, authority certification, and the shared header-mutation hook.
 - `sha_state.rs` owns the bounded resumable SHA256 state; RustCrypto owns block

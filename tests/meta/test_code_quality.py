@@ -123,6 +123,8 @@ def _parsed_trees(directory: Path) -> tuple[tuple[str, ast.Module], ...]:
 _LOG_OR_HANDLE_NAMES = frozenset({
     'debug', 'info', 'warning', 'error', 'critical', 'exception',
     'log_exception', 'audit_log',
+    # Records a bounded durable error and routes it to the Router Watchdog.
+    '_stalled',
     'api_internal_error', 'api_error', 'api_bad_request',
     'api_not_found', 'api_unauthorized', 'api_forbidden',
     'api_conflict', 'api_payload_too_large', 'api_method_not_allowed',
@@ -182,11 +184,14 @@ class _ContextMixin(ast.NodeVisitor):
 
     def __init__(self):
         self._func_stack: list[str] = []
+        self._function_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self._loop_depth = 0
 
     def visit_FunctionDef(self, node):
         self._func_stack.append(node.name)
+        self._function_nodes.append(node)
         self.generic_visit(node)
+        self._function_nodes.pop()
         self._func_stack.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -302,7 +307,7 @@ def _finding_sig(rel: str, f: dict) -> tuple[str, str, str]:
 _FAULT_CONTAINMENT_SIGS = frozenset({
     # Timing observers must not recursively log their own sink failure.
     ('lib/llm/diagnostic_timing.py', '_emit', 'Exception'),
-    ('lib/observability.py', 'measure_task_startup.anchor', 'Exception'),
+    ('lib/observability.py', '_measure_task_phase.anchor', 'Exception'),
     ('lib/tools/execution_timing.py', 'tool_execution_timing', 'Exception'),
     ('lib/incident_journal.py', '_record_text', 'Exception'),
     ('lib/incident_journal.py', '_exception_signature', 'Exception'),
@@ -315,6 +320,9 @@ _FAULT_CONTAINMENT_SIGS = frozenset({
      '_emit_context_summary', 'Exception'),
     ('lib/tasks_pkg/manager/_persist.py',
      'terminal_state_log_summary', 'Exception'),
+    # CPython ignores at-fork callback errors. This barrier must finish without
+    # acquiring any logger locks held by another thread at the fork.
+    ('lib/project_mod/workspace_lease.py', '_before_fork', 'BaseException'),
     # Contracts module: guaranteed non-raising clamp returns the already-safe
     # input untouched; pulling lib.log into this leaf module is not wanted.
     ('lib/tools/contracts.py', 'clamp_arguments_to_schema', 'Exception'),
@@ -325,6 +333,53 @@ _ASSIGNMENT_FAULT_CONTAINMENT_SIGS = _FAULT_CONTAINMENT_SIGS | frozenset({
     ('lib/logging_pkg/log_rate_limit.py', '_snapshot', 'Exception'),
     ('lib/logging_pkg/log_record_values.py', '_safe_string', 'Exception'),
 })
+
+
+def _handler_defers_raise(node, function) -> bool:
+    """Recognize capture/cleanup/rethrow without granting a blanket exemption.
+
+    Require a direct capture and a top-level non-None rethrow in the same
+    function. Any intervening overwrite or early exit fails closed. This is
+    deliberately narrower than general exception-flow analysis.
+    """
+    if (function is None or node.name is None
+            or any(isinstance(child, (ast.Return, ast.Break, ast.Continue))
+                   for child in ast.walk(node))):
+        return False
+    for capture in node.body:
+        if not (isinstance(capture, ast.Assign) and len(capture.targets) == 1
+                and isinstance(capture.targets[0], ast.Name)
+                and isinstance(capture.value, ast.Name)
+                and capture.value.id == node.name):
+            continue
+        alias = capture.targets[0].id
+        if alias == node.name or any(
+                isinstance(child, (ast.Global, ast.Nonlocal)) and alias in child.names
+                for child in ast.walk(function)):
+            continue
+        for guard in function.body:
+            match guard:
+                case ast.If(
+                    test=ast.Compare(left=ast.Name(id=name), ops=[ast.IsNot()],
+                                     comparators=[ast.Constant(value=None)]),
+                    body=[ast.Raise(exc=ast.Name(id=raised))], orelse=[]
+                ) if name == alias == raised and guard.lineno > node.end_lineno:
+                    start = (capture.end_lineno, capture.end_col_offset)
+                    end = (guard.lineno, guard.col_offset)
+                    between = [child for child in ast.walk(function)
+                               if start < (getattr(child, 'lineno', 0),
+                                           getattr(child, 'col_offset', 0)) < end]
+                    if not any(
+                        isinstance(child, (ast.Return, ast.Break, ast.Continue,
+                                           ast.Yield, ast.YieldFrom, ast.FunctionDef,
+                                           ast.AsyncFunctionDef, ast.ClassDef))
+                        or (isinstance(child, ast.Name) and child.id == alias
+                            and isinstance(child.ctx, (ast.Store, ast.Del)))
+                        or (isinstance(child, ast.ExceptHandler) and child.name == alias)
+                        for child in between
+                    ):
+                        return True
+    return False
 
 
 class _AssignSilentCatchFinder(_ContextMixin):
@@ -348,7 +403,9 @@ class _AssignSilentCatchFinder(_ContextMixin):
                            ast.Pass, ast.Return, ast.Continue, ast.Break))
             for s in body
         )
-        if only_assign_or_flow and not _handler_has_log_or_raise(node):
+        function = self._function_nodes[-1] if self._function_nodes else None
+        if (only_assign_or_flow and not _handler_has_log_or_raise(node)
+                and not _handler_defers_raise(node, function)):
             if not _all_exc_exempt(_exc_type_str(node)):
                 self.issues.append(self._record(node))
         self.generic_visit(node)
@@ -502,6 +559,56 @@ class TestGuardStaysRunnable:
     backlog of untriaged findings accumulate). These meta-tests keep the guard
     both FAST (git-index discovery) and SHARP (the finders still bite a genuine
     new silent catch, and the allowlists carry no dead entries)."""
+
+    @pytest.mark.parametrize('after, silent', [
+        ('cleanup()\nif captured is not None:\n    raise captured', False),
+        ('cleanup()\nreturn receipt', True),
+        ('captured = None\nif captured is not None:\n    raise captured', True),
+        ('if ready:\n    return receipt\nif captured is not None:\n    raise captured', True),
+        ('if ready:\n    if captured is not None:\n        raise captured', True),
+        ('def later():\n    if captured is not None:\n        raise captured', True),
+        ('if other is not None:\n    raise other', True),
+        ('try:\n    cleanup()\nexcept Exception as captured:\n    log()\n'
+         'if captured is not None:\n    raise captured', True),
+    ])
+    def test_deferred_exception_is_not_a_silent_fallback(self, after, silent):
+        import textwrap
+
+        source = '''def finish():
+    captured = None
+    with lock:
+        try:
+            commit()
+        except BaseException as error:
+            captured = error
+            outcome = "failed"
+        finally:
+            commit = None
+        freeze_receipt()
+'''
+        source += textwrap.indent(after, '    ') + '\n'
+        finder = _AssignSilentCatchFinder()
+        finder.visit(ast.parse(source))
+        assert bool(finder.issues) is silent
+
+    @pytest.mark.parametrize('capture', [
+        'captured = error; captured = None',
+        'captured = error; return receipt',
+        'return receipt; captured = error',
+    ])
+    def test_deferred_raise_cannot_hide_same_line_overwrite_or_return(self, capture):
+        source = f'''def finish():
+    captured = None
+    try:
+        commit()
+    except BaseException as error:
+        {capture}
+    if captured is not None:
+        raise captured
+'''
+        finder = _AssignSilentCatchFinder()
+        finder.visit(ast.parse(source))
+        assert finder.issues
 
     def test_discovery_is_git_indexed_not_oswalk(self):
         """``_py_files`` MUST resolve via the git index, never ``os.walk``.

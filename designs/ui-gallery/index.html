@@ -13,7 +13,9 @@
 <link rel="stylesheet" href="../../frontend/src/styles/fonts.css">
 <link rel="stylesheet" href="../../static/styles.css">
 <style>
-  body{height:auto;overflow:auto;display:block;padding:var(--space-6);background:var(--bg-primary)}
+  /* The app locks its mobile viewport; this standalone gallery is a document. */
+  html{height:auto;overflow:visible!important}
+  body{position:static!important;height:auto!important;overflow:visible!important;display:block;padding:var(--space-6);background:var(--bg-primary)}
   .gal{max-width:960px;margin:0 auto}
   .gal-title{font-family:var(--font-ui);font-size:var(--font-size-3xl);font-weight:var(--weight-bold);color:var(--text-primary)}
   .gal-sub{font-size:var(--font-size-lg);color:var(--text-secondary);line-height:var(--leading-body)}
@@ -88,7 +90,7 @@
     <h2 class="gal-h2">布局原语 Layout</h2>
     <p class="gal-note">工具栏内所有控件共享同一高度标尺(28/34/42),混排天然对齐——不再依赖手工微调 margin。</p>
     <div class="gal-box ui-toolbar ui-toolbar--between ui-row--wrap">
-      <div class="ui-toolbar">
+      <div class="ui-toolbar ui-row--wrap">
         <button class="ui-btn ui-btn--primary">主要操作</button>
         <button class="ui-btn ui-btn--secondary">次要操作</button>
         <button class="ui-btn ui-btn--ghost">幽灵按钮</button>
@@ -137,6 +139,11 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/></svg>
         </button>
         </span>
+        <span class="ui-tooltip-anchor" data-tooltip="显示隐藏文件夹（已开启）">
+        <button class="ui-icon-btn ui-icon-btn--sm" aria-label="显示隐藏文件夹" aria-pressed="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        </span>
         <span class="ui-tooltip-anchor ui-tooltip-anchor--bottom" data-tooltip="删除(下方提示)">
         <button class="ui-icon-btn ui-icon-btn--lg" aria-label="删除">
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 4h10M6.5 4V2.8c0-.4.3-.8.8-.8h1.4c.5 0 .8.4.8.8V4M4.5 4l.7 9c0 .5.4 1 1 1h3.6c.6 0 1-.5 1-1l.7-9"/></svg>
@@ -149,7 +156,7 @@
   <!-- ── 表单 ── -->
   <section class="ui-card ui-stack" aria-label="表单">
     <h2 class="gal-h2">表单 Fields</h2>
-    <div class="ui-grid ui-stack--loose" style="--ui-grid-min:280px">
+    <div class="ui-grid ui-stack--loose" style="--ui-grid-min:min(280px,100%)">
       <div class="ui-stack">
         <div class="ui-field">
           <label class="ui-field__label" for="gal-f1">项目名称</label>
@@ -211,7 +218,7 @@
   <section class="ui-card ui-stack" aria-label="对话框">
     <h2 class="gal-h2">对话框 Dialog</h2>
     <p class="gal-note">基于原生 <code>&lt;dialog&gt;</code>:焦点圈定、Esc 关闭、top-layer 渲染均由平台提供,无需一行业务代码。</p>
-    <div class="ui-row">
+    <div class="ui-row ui-row--wrap">
       <button class="ui-btn ui-btn--primary" id="gal-open-dialog">打开示例对话框</button>
 
       <button class="ui-btn ui-btn--secondary" id="gal-open-project-dialog">项目工作台弹窗</button>

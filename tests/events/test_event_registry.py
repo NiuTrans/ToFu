@@ -21,7 +21,10 @@ is that external frontends discover the vocabulary from the registry.
 
 from __future__ import annotations
 
+import ast
+import functools
 import glob
+import importlib
 import os
 import re
 
@@ -89,6 +92,19 @@ _BACKEND_FILES = [
     'lib/swarm/events.py',
     'lib/presence/registry.py',
 ]
+
+# Every module that imports the chat task-stream delivery seam is scanned too.
+# A module can deliver a task event directly only by importing one of these
+# names, so deriving the set covers a new emitter (a handler, a tool
+# environment, a new package) without a list edit. The list above remains for
+# emitters that reach the seam through callbacks and sinks.
+_EMITTER_ROOTS = ('lib', 'routes', 'tofu_agent')
+_DELIVERY_SEAM = {
+    'lib.tasks_pkg.manager': frozenset({'append_event', '_events'}),
+    'lib.tasks_pkg.manager._events': frozenset({'append_event'}),
+    'lib.agent_core.events': frozenset({'emit', 'emit_phase'}),
+}
+_SEAM_NAME_RE = re.compile(r'\b(?:append_event|_events|emit|emit_phase)\b')
 
 # ``'type': 'X'`` strings that are NOT SSE events — message-content blocks
 # (OpenAI/Anthropic shapes) and tool-call wrappers that happen to share the
@@ -177,10 +193,42 @@ def _resolve_scan_targets(entries: list[str]) -> tuple[list[str], list[str]]:
     return resolved, unresolved
 
 
+def _imported_module(rel: str, node: ast.ImportFrom) -> str:
+    """Absolute module named by an ``ImportFrom`` inside the module at *rel*."""
+    if not node.level:
+        return node.module or ''
+    package = rel[:-len('.py')].replace(os.sep, '.').split('.')[:-1]
+    if node.level > 1:
+        package = package[:len(package) - (node.level - 1)]
+    return '.'.join(package + ([node.module] if node.module else []))
+
+
+@functools.cache
+def _delivery_seam_importers() -> tuple[str, ...]:
+    """Every production module importing a name declared in ``_DELIVERY_SEAM``."""
+    found: list[str] = []
+    for root in _EMITTER_ROOTS:
+        for dirpath, _dirs, names in os.walk(os.path.join(REPO, root)):
+            for name in sorted(names):
+                if not name.endswith('.py'):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), REPO)
+                src = _read(rel)
+                if not _SEAM_NAME_RE.search(src):
+                    continue
+                if any(isinstance(node, ast.ImportFrom) and any(
+                        alias.name in _DELIVERY_SEAM.get(_imported_module(rel, node), ())
+                        for alias in node.names)
+                       for node in ast.walk(ast.parse(src, filename=rel))):
+                    found.append(rel)
+    return tuple(found)
+
+
 def _backend_emitted_types() -> set[str]:
     from lib.agent_core.events import EventType
     found: set[str] = set()
-    for rel in _resolve_scan_targets(_BACKEND_FILES)[0]:
+    scanned = set(_resolve_scan_targets(_BACKEND_FILES)[0])
+    for rel in sorted(scanned | set(_delivery_seam_importers())):
         src = _read(rel)
         # Literal ``'type': 'x'`` emissions.
         for m in _TYPE_RE.finditer(src):
@@ -260,13 +308,23 @@ def test_scan_targets_all_resolve():
         'orchestrator/dispatch/executor/endpoint/manager packages to contribute '
         'many more. The scan list has probably drifted off the real code.')
     assert len(front_ok) >= 2, f'frontend scan collapsed to {len(front_ok)} file(s)'
+    for module, names in _DELIVERY_SEAM.items():
+        provider = importlib.import_module(module)
+        missing = sorted(name for name in names if not hasattr(provider, name))
+        assert not missing, (
+            f'{module} no longer provides {missing}: the derived emitter scan '
+            'would silently stop finding the modules that import it. Point '
+            '_DELIVERY_SEAM at the module that now owns task-event delivery.')
+    assert _delivery_seam_importers(), (
+        'no production module imports the task-event delivery seam; the '
+        'derived emitter scan has drifted off the real code')
 
 
 def test_terminal_and_interaction_specs_consistent():
     """done is terminal; interaction events require a response."""
     assert get_event_spec('done').terminal is True
     for t in ('human_guidance_request', 'write_approval_request',
-              'stdin_request', 'approval_required'):
+              'stdin_request', 'approval_required', 'custom_tool_call'):
         assert get_event_spec(t).requires_response is True, t
 
 
@@ -316,6 +374,30 @@ def test_reconstruction_whitelists_stay_registered():
     assert not unregistered, (
         'STRUCTURAL_EVENT_TYPES names unregistered type(s): '
         + ', '.join(unregistered))
+
+
+def test_every_terminal_replay_type_is_a_registered_terminal_event():
+    """TaskRuntime.finish stamps ``task_terminal_event_type(status)`` on the
+    guaranteed final frame. The type is computed, so the emitter scan cannot
+    see it; an unregistered one makes delivery refuse every task ending in that
+    status (aborted paper, research and podcast workers did)."""
+    from lib.agent_core.events import all_event_specs
+    from lib.task_replay.task_replay import (
+        TASK_REPLAY_TERMINAL_EVENT_TYPES, task_terminal_event_type)
+    terminal = {spec.type for spec in all_event_specs() if spec.terminal}
+    produced = {task_terminal_event_type(status)
+                for status in TASK_REPLAY_TERMINAL_EVENT_TYPES}
+    assert produced <= terminal, (
+        'terminal replay types without a terminal EventSpec: '
+        + ', '.join(sorted(produced - terminal)))
+
+
+def test_an_aborted_runtime_task_delivers_its_terminal_frame():
+    from lib.agent_core.events import require_registered_event
+    from lib.task_replay.task_replay import task_terminal_event_type
+    frame = {'type': task_terminal_event_type('aborted'), 'status': 'aborted',
+             'partial': 'kept text'}
+    require_registered_event(frame)
 
 
 if __name__ == '__main__':

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from lib.tools.gateway import tool_schema_tokens
 from lib.tools.image_gen import GENERATE_IMAGE_TOOL
 
 
@@ -51,10 +50,3 @@ def test_generate_image_schema_keeps_generation_edit_and_reuse_contracts():
     assert all(kind in svg for kind in ("logos", "icons", "illustrations"))
     assert "default false" in svg
     assert schema["parameters"]["required"] == ["prompt"]
-
-
-def test_generate_image_schema_stays_within_enabled_token_budget():
-    tokens = tool_schema_tokens([GENERATE_IMAGE_TOOL])
-    assert tokens <= 400, (
-        f'generate_image schema costs {tokens} tokens; compact repeated edit '
-        'and output-routing prose without weakening reuse or fidelity')

@@ -268,6 +268,37 @@ def test_manual_compaction_uses_atomic_turn_authority(monkeypatch):
     assert store.notified is True
 
 
+@pytest.mark.unit
+def test_completed_rewrite_retires_a_request_scheduled_while_busy(monkeypatch):
+    """An idle compaction fulfils a working-view request left from a busy reply."""
+
+    class _ScheduledStore(_FakeStore):
+        marker = {'requestId': 'busy-request', 'requestedAt': 1, 'reason': 'task_active'}
+        cleared = []
+
+        def scheduled_working_view_compaction(self, conv_id, *, user_id):
+            return dict(self.marker) if self.marker else None
+
+        def clear_scheduled_working_view_compaction(self, conv_id, *, user_id, request_id):
+            self.cleared.append((conv_id, user_id, request_id))
+            self.marker = None
+            return True
+
+    store = _ScheduledStore(_long_conv())
+    man = _install(monkeypatch, store)
+    res = man.compact_conversation_now('c', user_id=1, config={}, task={'convId': 'c'})
+    assert res['ok'] is True
+    assert store.cleared == [('c', 1, 'busy-request')]
+
+    failed = _ScheduledStore(_long_conv())
+    failed.marker, failed.cleared = dict(_ScheduledStore.marker), []
+    failed._fail_cas = True
+    man = _install(monkeypatch, failed)
+    assert man.compact_conversation_now(
+        'c', user_id=1, config={}, task={'convId': 'c'})['ok'] is False
+    assert failed.cleared == []
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Test 1b — RAW-SPACE constraint: never split a tool round; raw estimate
 #            >> api-form-blind _estimate_msg_tokens on the same raw row.
@@ -977,12 +1008,33 @@ def test_new_coordinator_protection_at_commit_retains_source_and_settles_archive
         raise ManualCompactionRefused('coordinator_context_compaction_unsupported')
 
     monkeypatch.setattr(store, 'compact_turn_transcript', refuse)
+    scheduled = []
+
+    def schedule(conv_id, *, user_id, reason):
+        scheduled.append((conv_id, user_id, reason))
+        return {'requestId': 'request-1', 'requestedAt': 7, 'created': True}
+
+    monkeypatch.setattr(store, 'schedule_working_view_compaction', schedule, raising=False)
     result = man.compact_conversation_now('c', user_id=1, config={})
-    assert result['ok'] is False
-    assert result['error'] == 'coordinator_context_compaction_unsupported'
+    # The rewrite stays refused; the owner's request moves to the working view.
+    assert result['ok'] is True and result['scheduled'] is True
+    assert (result['requestId'], result['protection']) == ('request-1', 'coordinator')
+    assert scheduled == [('c', 1, 'coordinator_context_compaction_unsupported')]
     assert result['receipt']['status'] == 'aborted'
-    assert result['receipt']['outcomeReason'] == result['error']
+    assert result['receipt']['outcomeReason'] == 'coordinator_context_compaction_unsupported'
     assert store.saved is None and store.messages == original
+
+
+@pytest.mark.unit
+def test_store_without_scheduling_port_refuses_protected_compaction(monkeypatch):
+    from lib.tasks_pkg.compaction._manual import schedule_protected_compaction
+
+    class Protected:
+        def manual_compaction_rejection(self, conv_id, *, user_id, messages=()):
+            return 'project_context_compaction_unsupported'
+
+    assert schedule_protected_compaction('c', user_id=1, store=Protected()) == {
+        'ok': False, 'error': 'turn_protocol_unsupported'}
 
 
 @pytest.mark.unit

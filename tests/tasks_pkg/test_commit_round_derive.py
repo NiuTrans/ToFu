@@ -672,9 +672,11 @@ def test_failed_journal_write_never_emits_a_committed_change(monkeypatch, tmp_pa
     monkeypatch.setattr(modifications, '_get_session_dir', lambda _root: str(tmp_path))
     monkeypatch.setattr(modifications, '_roots', {})
     monkeypatch.setattr(modifications, '_live_change_listeners', [lambda *args: emitted.append(args)])
-    def fail(_directory, _mutate):
+    def fail(*_args, **_kwargs):
         raise OSError('injected full journal volume')
-    monkeypatch.setattr(modifications, '_locked_rmw', fail)
+    # Both durable record commits: the append fast path and the whole-index fold.
+    monkeypatch.setattr(modifications, '_append_to_tail', fail)
+    monkeypatch.setattr(modifications, '_atomic_json_write', fail)
     assert modifications._record_modification(str(tmp_path), 'write_file', 'main.tex', task_id=TASK_ID) is False
     assert emitted == []
 

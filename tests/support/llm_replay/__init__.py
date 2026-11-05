@@ -7,13 +7,22 @@ agent loop, tool pipeline, dispatch layer, and persistence run.  Replay is
 the default in scenario tests (keyless, hermetic); live record requires
 ``TOFU_LLM_REPLAY=record`` + ``TOFU_PARITY_LIVE=1`` and writes
 ``script.next.jsonl`` next to the fixture — never over the committed
-``script.jsonl``.  See ``tests/AGENTS.md`` § LLM record/replay.
+``script.jsonl``.  The recorded normalized requests live in a shared
+content-addressed store (``request_store.py``) so drift errors and re-record
+diffs show field-level changes (``diff.py``).  See ``tests/AGENTS.md`` § LLM
+record/replay.
 """
 
 from __future__ import annotations
 
 import os
 
+from tests.support.llm_replay.diff import (
+    ABSENT,
+    Difference,
+    describe_difference,
+    request_differences,
+)
 from tests.support.llm_replay.normalize import (
     chat_request_proxy,
     normalize_value,
@@ -22,6 +31,12 @@ from tests.support.llm_replay.normalize import (
 )
 from tests.support.llm_replay.recorder import RECORD_OUTPUT_NAME, Recorder
 from tests.support.llm_replay.replayer import ReplaySession, ScenarioDriftError
+from tests.support.llm_replay.request_store import (
+    REQUEST_STORE_DIRNAME,
+    RequestStoreError,
+    load_recorded_request,
+    stored_request_path,
+)
 from tests.support.llm_replay.script import (
     ChatStep,
     ErrorStep,
@@ -32,21 +47,29 @@ from tests.support.llm_replay.script import (
 )
 
 __all__ = [
+    'ABSENT',
     'ChatStep',
+    'Difference',
     'ErrorStep',
     'RECORD_OUTPUT_NAME',
+    'REQUEST_STORE_DIRNAME',
     'Recorder',
     'ReplaySession',
+    'RequestStoreError',
     'ScenarioDriftError',
     'ScriptError',
     'Step',
     'StreamStep',
     'chat_request_proxy',
+    'describe_difference',
+    'load_recorded_request',
     'load_script',
     'mode_from_env',
     'normalize_value',
     'normalized_field_digests',
     'normalized_request_digest',
+    'request_differences',
+    'stored_request_path',
 ]
 
 _MODE_RECORD = 'record'

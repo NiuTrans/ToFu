@@ -247,7 +247,6 @@ fn verify_authority_timed(
     let mut loose_verified = 0_u64;
     let mut corrupt_ids: Vec<String> = Vec::new();
     let loose_result = blocks.visit_block_shards(
-        crate::authority_gc::MAX_AUTHORITY_GC_PHYSICAL_BLOCKS,
         |_, block_ids| {
             for block_id in block_ids {
                 match blocks.get(block_id) {

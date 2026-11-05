@@ -5,7 +5,7 @@ Covers:
 * dispose removes it again; double-dispose is idempotent
 * count_ephemeral_slots() reflects the live count
 * invalid args are rejected before touching the pool
-* private hosts trigger no_proxy registration
+* private hosts bypass the proxy only while a slot holds them
 """
 
 import os
@@ -24,14 +24,16 @@ class EphemeralSlotTest(unittest.TestCase):
         # listening. The mint-time reachability probe (added 2026-06) would
         # reject those, so disable it here — these tests exercise pool
         # mechanics, not reachability. A dedicated test below re-enables it.
-        self._prev_preflight = os.environ.get('TOFU_EPHEMERAL_PREFLIGHT')
+        self._saved_env = {k: os.environ.get(k) for k in (
+            'TOFU_EPHEMERAL_PREFLIGHT', 'TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT')}
         os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = '0'
 
     def tearDown(self):
-        if self._prev_preflight is None:
-            os.environ.pop('TOFU_EPHEMERAL_PREFLIGHT', None)
-        else:
-            os.environ['TOFU_EPHEMERAL_PREFLIGHT'] = self._prev_preflight
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def _initial_count(self):
         from lib.llm_dispatch.factory import get_dispatcher
@@ -124,21 +126,32 @@ class EphemeralSlotTest(unittest.TestCase):
         finally:
             dispose_ephemeral_slot(handle)
 
-    def test_private_host_registers_no_proxy(self):
+    def test_private_host_bypasses_proxy_only_while_minted(self):
         from lib import proxy
         from lib.llm_dispatch.ephemeral import (
             dispose_ephemeral_slot, mint_ephemeral_slot,
         )
-        h = mint_ephemeral_slot(
-            base_url='http://10.0.0.99:8080/v1',  # RFC1918 private
-            api_key='', model_id='m1',
-            owner='no-proxy-test',
-        )
+        url = 'http://10.0.0.99:8080/v1'  # RFC1918 private
+        before = (proxy.describe_route(url), os.environ.get('no_proxy'))
+        first, second = (
+            mint_ephemeral_slot(base_url=url, api_key='', model_id='m1',
+                                owner='no-proxy-test')
+            for _ in range(2))
         try:
-            # The host should be in the registered set after mint.
-            self.assertIn('10.0.0.99', proxy._registered_hosts)
+            self.assertEqual(proxy.proxies_for(url), {'no_proxy': '*'})
+            self.assertEqual(proxy.describe_route(url)['decisionReason'],
+                             'registered_bypass')
+            # Libraries that read the environment bypass it too.
+            self.assertIn('10.0.0.99', os.environ['no_proxy'].split(','))
+            # A concurrent request to the same host keeps its exemption.
+            dispose_ephemeral_slot(first)
+            self.assertEqual(proxy.describe_route(url)['decisionReason'],
+                             'registered_bypass')
         finally:
-            dispose_ephemeral_slot(h)
+            dispose_ephemeral_slot(first)
+            dispose_ephemeral_slot(second)
+        self.assertEqual(
+            (proxy.describe_route(url), os.environ.get('no_proxy')), before)
 
     def test_preflight_rejects_unreachable_self_hosted(self):
         # With the probe ENABLED (override setUp), a dead self-hosted /

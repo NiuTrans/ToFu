@@ -12,6 +12,8 @@
 /* Model identity stays with the fixed input area, outside transcript scrolling. */
 .composer-model-notice { margin-bottom: var(--space-2); }
 .composer-model-notice[hidden] { display: none; }
+/* Held through a conversation switch: the box stays, the outgoing facts do not. */
+.composer-model-notice[data-model-notice-held] { visibility: hidden; }
 .conversation-model-notice {
   min-width: 0;
   max-width: 100%;

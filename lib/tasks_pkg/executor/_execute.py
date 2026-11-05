@@ -13,11 +13,14 @@ from typing import Any
 
 from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.log import get_logger
+from lib.logging_pkg.log_record_values import text_value
 from lib.tasks_pkg.executor._finalize import _finalize_tool_round
 from lib.tasks_pkg.tool_runtime import context_for_task, unregister_context
 from lib.tasks_pkg.executor._effects import (
     begin_tool_effect, finish_tool_effect, uncertain_effect_error, tool_exception_result,
+    is_tool_cancellation,
 )
+from lib.tool_results.tool_round_status import FAILED_TOOL_ROUND_STATUSES
 
 logger = get_logger(__name__)
 
@@ -50,12 +53,12 @@ def _audit_direct_executor_outcome(task, round_entry, *, status=None):
         status = round_entry.get('status')
         if runtime_state == 'cancelled':
             status = 'aborted'
-        elif status in ('error', 'aborted', 'rejected', 'unanswerable'):
+        elif status in FAILED_TOOL_ROUND_STATUSES:
             pass
         elif runtime_state == 'error':
             status = 'error'
         else:
-            if status in (None, 'searching', 'executing'):
+            if status in (None, 'queued', 'searching', 'executing'):
                 status = 'done'
     from lib.tasks_pkg.tool_call_outcome import audit_round_outcome
     audit_round_outcome(task, round_entry, status=status)
@@ -76,17 +79,20 @@ def _execute_tool_one(
 ) -> tuple[str, str, bool]:
     """Execute one tool call and update its presentation round."""
 
+    from lib.project_dispatch.admission import is_dispatch_task
+    if is_dispatch_task(task):
+        # Dispatch authority decides first: the soft role policies below would
+        # turn its refusal into a model-visible result the turn continues past.
+        from lib.project_dispatch.scope import admit_tool
+        admit_tool(task, fn_name, fn_args, project_path=project_path)
     from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
     coordinator_denial = coordinator_call_rejection(task, fn_name, fn_args, project_path)
     if coordinator_denial:
         return tc_id, coordinator_denial, False
-    from lib.project_dispatch.admission import is_dispatch_task
-    if is_dispatch_task(task):
-        from lib.project_dispatch.scope import admit_tool
-        admit_tool(task, fn_name, fn_args, project_path=project_path)
-        if task.get('_tool_env') is not None:
-            from lib.llm.llm_errors import AbortedError
-            raise AbortedError('Project file authority cannot be shadowed by a custom tool environment')
+    from lib.tasks_pkg.delegate_mode import delegate_call_rejection
+    delegate_denial = delegate_call_rejection(task, fn_name, fn_args)
+    if delegate_denial:
+        return tc_id, delegate_denial, False
     if task.get('aborted'):
         logger.info('[Executor] Skipping tool %s (tc_id=%s) — task aborted',
                     fn_name, tc_id[:8])
@@ -253,12 +259,22 @@ def _dispatch_admitted_tool_one(
                     )
                     _validate_handler_result(result, tc_id)
         except Exception as exc:
+            from lib.project_mod.run_command import CommandAdmissionRefusal
+            if isinstance(exc, CommandAdmissionRefusal) and isinstance(round_entry, dict):
+                # A pre-execution write-scope refusal proves this process never
+                # ran the command. Correct the optimistic entry to not_started
+                # before finish_tool_effect would stamp it unknown.
+                effect = round_entry.get('executionEffect')
+                if isinstance(effect, dict) and effect.get('state') == 'entered':
+                    round_entry['executionEffect'] = {**effect, 'state': 'not_started'}
             finish_tool_effect(round_entry)
-            context.settle_once(
-                'cancelled' if context.cancellation_requested else 'error')
+            owner_cancelled = context.cancellation_requested
+            context.settle_once('cancelled' if owner_cancelled else 'error')
             round_entry['_runtimeState'] = context.terminal_state
             return _handler_error_result(
-                task, fn_name, tc_id, fn_args, rn, round_entry, exc)
+                task, fn_name, tc_id, fn_args, rn, round_entry, exc,
+                terminal_status=('aborted' if owner_cancelled
+                                 and is_tool_cancellation(exc) else 'error'))
 
         except BaseException:
             finish_tool_effect(round_entry)
@@ -269,8 +285,7 @@ def _dispatch_admitted_tool_one(
         finish_tool_effect(round_entry, returned=True)
         from lib.tools.result_value import tool_result_failure_verdict
         verdict = tool_result_failure_verdict(result[1])
-        if verdict and round_entry.get('status') not in {
-                'error', 'aborted', 'rejected', 'unanswerable'}:
+        if verdict and round_entry.get('status') not in FAILED_TOOL_ROUND_STATUSES:
             round_entry['status'] = verdict
             round_entry['_cacheableResult'] = False
             try:
@@ -286,8 +301,8 @@ def _dispatch_admitted_tool_one(
                          if round_entry.get('_toolResultPublicationClosed') else None)
         state = ('cancelled' if context.cancellation_requested or verdict == 'aborted'
                  or closed_status == 'aborted'
-                 else 'error' if verdict or closed_status in {
-                     'error', 'rejected', 'unanswerable'} else 'done')
+                 else 'error' if verdict or closed_status in FAILED_TOOL_ROUND_STATUSES
+                 else 'done')
         context.settle_once(state)
         round_entry['_runtimeState'] = context.terminal_state
         return result
@@ -295,24 +310,28 @@ def _dispatch_admitted_tool_one(
         unregister_context(context)
 
 
-def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
+def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc,
+                          *, terminal_status='error'):
     """Convert one uncaught handler exception into a model-visible result."""
+    error_detail = text_value(exc)
     try:
         arg_preview = json.dumps(fn_args, ensure_ascii=False)[:300]
     except Exception as dump_exc:
         logger.debug('[Executor] fn_args dump failed for %s: %s',
-                     fn_name, dump_exc)
-        arg_preview = repr(fn_args)[:300]
+                     fn_name, text_value(dump_exc))
+        arg_preview = text_value(fn_args)[:300]
 
     from lib.project_mod.config import UnknownWorkspaceRootError
-    if isinstance(exc, UnknownWorkspaceRootError):
+    if terminal_status == 'aborted':
+        logger.info('[Tool:%s] owner cancellation acknowledged (tc_id=%s)', fn_name, tc_id[:8])
+    elif isinstance(exc, UnknownWorkspaceRootError):
         logger.info(
             '[Tool:%s] recoverable workspace-root error returned to LLM: %s '
-            '(tc_id=%s)', fn_name, exc, tc_id[:8])
+            '(tc_id=%s)', fn_name, error_detail, tc_id[:8])
     elif isinstance(exc, ValueError):
         logger.warning(
             '[Tool:%s] recoverable ValueError (returned to LLM): %s '
-            '(tc_id=%s args=%.300s)', fn_name, exc, tc_id[:8], arg_preview)
+            '(tc_id=%s args=%.300s)', fn_name, error_detail, tc_id[:8], arg_preview)
     else:
         logger.error(
             '[Executor] Tool handler %s raised %s (tc_id=%s args=%.300s) — '
@@ -323,18 +342,20 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
             from lib.log import audit_log
             audit_log(
                 'tool_error', tool=fn_name, exc_type=type(exc).__name__,
-                fingerprint=fingerprint(str(exc), exc_type=type(exc).__name__),
-                detail=str(exc)[:200],
+                fingerprint=fingerprint(error_detail, exc_type=type(exc).__name__),
+                detail=error_detail[:200],
             )
         except Exception as audit_exc:
             logger.debug('[Executor] tool_error audit emit failed for %s: %s',
-                         fn_name, audit_exc)
+                         fn_name, text_value(audit_exc))
 
     err_msg = (
         f'Error: tool "{fn_name}" execution failed with '
-        f'{type(exc).__name__}: {exc}. '
+        f'{type(exc).__name__}: {error_detail}. '
         f'Arguments received: {arg_preview}'
     )
+    if terminal_status == 'aborted':
+        err_msg = f'Tool "{fn_name}" was cancelled by its owner.'
     content = uncertain_effect_error(round_entry, err_msg)
     if isinstance(exc, _InvalidToolHandlerResult) and content == err_msg:
         from lib.tools.result_envelope import typed_tool_error
@@ -357,9 +378,9 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
                 task, rn, round_entry,
                 [{'type': 'error', 'content': content, 'toolName': fn_name}],
                 query_override=round_entry.get('query', fn_name),
-                status='error',
+                status=terminal_status,
             )
         except Exception as finalize_exc:
             logger.debug('[Executor] _finalize_tool_round on error path failed '
-                         'for %s: %s', fn_name, finalize_exc)
+                         'for %s: %s', fn_name, text_value(finalize_exc))
     return tc_id, content, False

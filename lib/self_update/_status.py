@@ -112,8 +112,11 @@ def _working_tree_status_cached() -> dict:
     return value
 
 
-def check_for_update() -> dict:
+def check_for_update(*, repository=None) -> dict:
     """Assemble the full update-check payload for the UI.
+
+    ``repository`` is this request's ``observe_repository()`` result; with it
+    the checkout probe reuses that git process instead of spawning its own.
 
     Returns a dict with: current, latest, tag, update_available,
     git_available, update_method, dirty, blocking (truncated),
@@ -127,7 +130,8 @@ def check_for_update() -> dict:
     failure is captured in the payload.
     """
     cur = _facade('current_version', current_version)()
-    _is_git = _facade('git_available', git_available)()
+    _is_git = (_facade('git_available', git_available)() if repository is None
+               else git_available(repository))
     payload = {
         'current': cur,
         'latest': None,

@@ -396,9 +396,9 @@ content-free progress metrics.
 
 `sequencer.rs` owns the one background writer. Submitters hash blocks and encode
 envelopes before admission; the worker waits no more than 1 ms and never groups
-more than 64 requests or 8 MiB. The queue derives from 1/128 of launch-probed
-memory headroom, falls back to a lean 64 requests/16 MiB, and has hard ceilings
-of 1,024 requests/256 MiB, blocking backpressure, terminal-error fanout,
+more than 64 requests or 8 MiB. Enqueue accepts every prepared transaction
+without a slot or residency quota, so neither memory headroom nor a request
+count blocks or rejects a writer. The queue keeps terminal-error fanout,
 graceful drain, and bounded operational metrics.
 
 Every WAL append path, including commits over already-published block
@@ -480,11 +480,14 @@ rounds, mark builds, completion, and exhausted budgets. Completion requires an
 unchanged full catalog-window pass; manifest changes reset coverage, and plans
 do not advance it. Budget exhaustion returns explicit incomplete metrics.
 
-Before reachability marking, it stream-matches at most 20 million loose-block
-directory entries while retaining at most two paths, then removes at most one
-strictly named, size-bounded `.new-*` block temporary and syncs its shard. This
+Before reachability marking, it stream-matches every loose-block directory
+entry while retaining at most two paths, then removes at most one strictly
+named, size-bounded `.new-*` block temporary and syncs its shard. This
 prevents interrupted block publication from leaking files or forcing a later
-directory-sized allocation; malformed temporary names fail closed.
+directory-sized allocation; malformed temporary names fail closed. The block
+listing holds one shard's entries at a time and takes entry kinds from the
+directory listing, so no store size fails it and listed files are not statted
+(`docs/TOFUDB_ONLINE_GC.md`, "Loose listing without a store-wide total").
 
 After all reclaimable loose, orphan-file, and manifest-segment victims are
 absent, GC may compact one bounded set of reachable loose blocks. It excludes
@@ -584,11 +587,16 @@ bytes. Per-read CRC32C and content-hash verification is unchanged; unit
 regressions pin single-handle reuse, LRU eviction at the bound, and eviction
 on segment removal.
 
-The verified block-payload cache also bounds recency metadata and admits at most
-65,536 entries and 131,072 allocated recency slots under its existing launch-derived
-byte budget. Shared vectors are charged by allocated capacity; zero capacity
-disables all population and releases payload and metadata allocations. Cache
-policy comes from `blockPayloadReadCache` in the native IR contract.
+The verified block-payload cache is bounded by its launch-derived byte budget
+alone: each entry is charged its shared vector's allocated capacity plus a fixed
+metadata overhead (`entryOverheadBytes`), so zero-byte entries stay bounded
+without a separate count cap. Recency is an exact LRU kept as an intrusive list
+over a slot slab, so hits, inserts and evictions are constant time and never
+allocate recency records. A replacement payload catalog clears the cache only
+when it drops a previously referenced segment; pure additions keep verified
+payloads warm. Zero capacity disables all population and releases payload and
+metadata allocations. Cache policy comes from `blockPayloadReadCache` in the
+native IR contract; the measurement is recorded in `docs/TOFUDB_BLOCK_READ_PATH.md`.
 
 The decoded-page cache retains verified immutable pages only. Repeated hits compact
 stale recency records once they exceed twice the resident page count, preserving

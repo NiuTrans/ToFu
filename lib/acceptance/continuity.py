@@ -41,7 +41,8 @@ def review_source(turn, principal, *, attempt=None):
             or source['tenant'] != str(principal.tenant_id or '')
             or source['conversation'] != turn['conversationId'] or source['turn'] == turn['turnId']):
         raise LifecycleNotFound('Turn review source scope unavailable')
-    original = get_turn(source['conversation'], source['turn'], user_id=source['owner'])
+    original = get_turn(source['conversation'], source['turn'], user_id=source['owner'],
+                        include_projection=False)
     if (original['actor'] != 'assistant' or original['laneId'] != 'main'
             or original['currentAttemptId'] != source['attempt']):
         raise LifecycleNotFound('Turn review source execution was superseded')

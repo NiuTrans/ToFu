@@ -6,12 +6,14 @@ import subprocess
 import threading
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_recent_models_shared_tabs_and_reopen(browser, tmp_path):
+    require_node_modules('vite')
     from playwright.sync_api import expect
 
     bundle = tmp_path / 'picker.js'

@@ -48,17 +48,27 @@ def test_directory_reference_reuses_original_capture_without_argument_roundtrip(
     assert 'input_' not in retained_state and 'PRIVATE_ARGUMENT' not in retained_state
 
 
-@pytest.mark.parametrize('same_result', [False, True])
-def test_new_capture_invalidates_old_reference_even_with_identical_arguments_call_id_or_body(inputs, same_result):
+def test_changed_capture_invalidates_old_reference_even_with_identical_arguments_or_call_id(inputs):
     _, effects, retain, run = inputs
     first = retain([3], {'part':'a'})
-    second = retain([3] if same_result else [8], {'part':'a'})
+    second = retain([8], {'part':'a'})
     assert first != second
     stale, stats = run('try { tools.result({ref:'+json.dumps(first)+'}); } finally { await tools.invoke("write_rows",{}); }')
     assert stale['kind'] == 'observation' and stale['reason'] == 'retained_result_unavailable'
     assert stats['result_reads'] == stats['tool_calls'] == 0 and not effects
     value, _ = run('return tools.result({ref:'+json.dumps(second)+'})[0];')
-    assert value == (3 if same_result else 8)
+    assert value == 8
+
+
+def test_byte_identical_recapture_keeps_its_reference(inputs):
+    # Identical sources keep identical model views (dedup, unchanged receipts,
+    # prompt cache); a random new handle would make every repeat differ.
+    task, effects, retain, run = inputs
+    first = retain([3], {'part':'a'})
+    assert retain([3], {'part':'a'}) == first
+    assert len(list_program_inputs(task, {}, user_id=7, catalog_names={'read_rows'})['inputs']) == 1
+    value, stats = run('return tools.result({ref:'+json.dumps(first)+'})[0];')
+    assert value == 3 and stats['tool_calls'] == 0 and not effects
 
 
 @pytest.mark.parametrize('case', ['owner','turn','copied_bank','catalog','terminal','tier','replay','evicted','budget'])

@@ -94,3 +94,6 @@
   color: var(--error-color);
   overflow-wrap: anywhere;
 }
+.ptool-artifact-failure[data-tool-effect-outcome="not_started"] {
+  color: var(--text-secondary);
+}

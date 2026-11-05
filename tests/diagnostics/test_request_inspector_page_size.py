@@ -8,16 +8,24 @@ from lib.tasks_pkg.request_inspector_history import SnapshotHistoryRead
 
 pytestmark = pytest.mark.unit
 
+SIZE_REFUSALS = [
+    pytest.param("storage_payload_too_large", id="payload-too-large"),
+    # Engines built before the stream point-read bound was classified report
+    # it as a protocol refusal whose sanitized message is only its code.
+    pytest.param("database_protocol_error", id="unclassified-engine-refusal"),
+]
+
 
 class PageError(Exception):
-    def __init__(self, code):
-        super().__init__(code)
+    def __init__(self, code, message=None):
+        super().__init__(code if message is None else message)
         self.code = code
 
 
 class Pages:
-    def __init__(self, code="storage_payload_too_large", reject_single=False):
+    def __init__(self, code="storage_payload_too_large", message=None, reject_single=False):
         self.code = code
+        self.message = message
         self.reject_single = reject_single
         self.calls = []
         self.rows = [
@@ -33,13 +41,14 @@ class Pages:
         after, limit = args["after_sequence"], args["limit"]
         self.calls.append((after, limit))
         if limit > 1 or self.reject_single:
-            raise PageError(self.code)
+            raise PageError(self.code, self.message)
         return [row for row in self.rows if row["sequence"] > after][:limit]
 
 
+@pytest.mark.parametrize("code", SIZE_REFUSALS)
 @pytest.mark.parametrize("reader", ["structural", "history"])
-def test_page_size_retries_same_cursor_and_returns_complete_exact_payload(monkeypatch, reader):
-    pages = Pages()
+def test_page_size_retries_same_cursor_and_returns_complete_exact_payload(monkeypatch, reader, code):
+    pages = Pages(code)
     if reader == "structural":
         import lib.storage
         monkeypatch.setattr(lib.storage, "get_storage_client", lambda: pages)
@@ -60,18 +69,26 @@ def test_page_size_retries_same_cursor_and_returns_complete_exact_payload(monkey
         1000, 500, 250, 125, 62, 31, 15, 7, 3, 1]]
 
 
-@pytest.mark.parametrize("code", ["database_unavailable", "database_integrity", "database_protocol_error"])
-def test_other_failures_are_not_size_retry_candidates(monkeypatch, code):
+@pytest.mark.parametrize("code,message", [
+    ("database_unavailable", None),
+    ("database_integrity", None),
+    ("database_resource_exhausted", None),
+    # A protocol failure that carries client or fence text is not the
+    # engine's text-free bound refusal.
+    ("database_protocol_error", "Storage response correlation failed"),
+])
+def test_other_failures_are_not_size_retry_candidates(monkeypatch, code, message):
     import lib.storage
-    pages = Pages(code)
+    pages = Pages(code, message)
     monkeypatch.setattr(lib.storage, "get_storage_client", lambda: pages)
     assert ri._read_events_uncached("page-failure", rebuild=False) == ([], False)
     assert pages.calls == [(-1, 1000)]
 
 
-def test_single_row_size_rejection_stops_without_partial_success(monkeypatch):
+@pytest.mark.parametrize("code", SIZE_REFUSALS)
+def test_single_row_size_rejection_stops_without_partial_success(monkeypatch, code):
     import lib.storage
-    pages = Pages(reject_single=True)
+    pages = Pages(code, reject_single=True)
     monkeypatch.setattr(lib.storage, "get_storage_client", lambda: pages)
     assert ri._read_events_uncached("page-single", rebuild=False) == ([], False)
     assert pages.calls[-1] == (-1, 1)

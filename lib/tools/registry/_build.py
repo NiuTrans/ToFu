@@ -51,6 +51,20 @@ def _build_retained_agents(ctx: ToolContext) -> list[dict]:
     return [LIST_AGENTS_TOOL, MANAGE_AGENTS_TOOL]
 
 
+def _build_chat_exploration(ctx: ToolContext) -> list[dict]:
+    from lib.tools.exploration import available
+    if not ctx.durable_state_available or not available(
+            ctx.cfg, conversation_id=ctx.conv_id, owner=ctx.owner_user_id):
+        return []
+    from lib.tools.exploration import build_exploration_tools
+    return build_exploration_tools()
+
+
+def _handle_chat_exploration(*args, **kwargs):
+    from lib.tasks_pkg.handlers.exploration import handle_exploration
+    return handle_exploration(*args, **kwargs)
+
+
 def _build_search_settings(ctx: ToolContext) -> list[dict]:
     # update_search_settings tunes the pipeline web_search/fetch_url run on,
     # so its wire exposure rides the SAME gate. Registered as its own spec
@@ -81,9 +95,6 @@ def _handle_knowledge(*args, **kwargs):
 
 
 def _build_fetch(ctx: ToolContext) -> list[dict]:
-    # Built per call: the schema's ``reason`` param follows the runtime
-    # LLM_CONTENT_FILTER_ENABLED flag — a module-level constant would freeze
-    # whatever the import-time snapshot saw (same rationale as build_search_tool).
     from lib.tools.search import build_fetch_url_tool
     return [build_fetch_url_tool()]
 
@@ -109,6 +120,13 @@ def _build_inspect_image(ctx: ToolContext) -> list[dict]:
     # dispatch path drops the resulting image for text-only models anyway.
     from lib.tools.image_edit import INSPECT_IMAGE_TOOL
     return [INSPECT_IMAGE_TOOL]
+
+
+def _build_inspect_video(ctx: ToolContext) -> list[dict]:
+    # Always available like inspect_image. A deployment without ffmpeg or
+    # with video analysis disabled answers the call with a typed error.
+    from lib.tools.video_inspect import INSPECT_VIDEO_TOOL
+    return [INSPECT_VIDEO_TOOL]
 
 
 def _build_project_result_meta(
@@ -144,9 +162,16 @@ def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
         tools = list(project_tools)
     else:
         tools = [CODE_EXEC_TOOL]
-    return with_command_input_observation_scope(
+    tools = with_command_input_observation_scope(
         tools, evolution=(ctx.cfg or {}).get('evolution'),
         project_ready=ctx.project_ready)
+    if ctx.no_saved_conversation:
+        from lib.tools.background_guidance import project_no_saved_conversation_tools
+        tools = project_no_saved_conversation_tools(tools)
+    elif not ctx.delivers_deferred_completions:
+        from lib.tools.background_guidance import project_run_completion_tools
+        tools = project_run_completion_tools(tools)
+    return tools
 
 
 def _build_browser(ctx: ToolContext) -> list[dict]:
@@ -161,6 +186,105 @@ def _build_browser(ctx: ToolContext) -> list[dict]:
     logger.debug('[Task %s] Browser tools unavailable: extension not connected',
                  ctx.tid)
     return []
+
+
+def _browser_tool_spec() -> ToolSpec:
+    """Spec for the extension-driven browser family (see build_builtin_specs)."""
+    return ToolSpec('browser', _build_browser, phase='base',
+                    # 15 names = BROWSER_TOOLS (13) + ADVANCED_BROWSER_TOOLS (2).
+                    # v2 (): the ten retired names are NOT
+                    # declared — their tool_registry registration shrank with
+                    # BROWSER_TOOL_NAMES, so there is no handler left to declare
+                    # (their display formatters remain for history rendering).
+                    provides=frozenset({
+                        'browser_navigate', 'browser_read_page', 'browser_list_tabs',
+                        'browser_research_page', 'browser_devtools', 'browser_site',
+                        'browser_close_tab', 'browser_click', 'browser_type',
+                        'browser_press_key', 'browser_execute_js',
+                        'browser_screenshot', 'browser_get_cookies',
+                        'browser_get_history', 'browser_fill_form',
+                        'browser_menu_click',
+                        'browser_check', 'browser_select_option',
+                        'browser_scroll',
+                    }),
+                    # search_hints: private retrieval aliases/intents (ranking
+                    # weight ×3, never serialized into the wire schema). Without
+                    # them, terse wire descriptions let BM25 mis-rank core intents
+                    # ("click a button" → get_cookies, "read the page" →
+                    # list_tabs, "go to a url" → list_tabs). Each action verb is
+                    # pinned to its tool; browser_fill_form yields click/button
+                    # terms to browser_click.
+                    search_hints={
+                        'browser_click': (
+                            'click press button link tap element click on '
+                            'single one 点击 按钮 链接 点击元素 单击'),
+                        'browser_navigate': (
+                            'navigate go to open website url visit load page '
+                            '打开网址 访问 跳转 进入网站'),
+                        'browser_read_page': (
+                            'read see view page content text what is on extract '
+                            '看页面 读取内容 页面文字 提取'),
+                        'browser_type': (
+                            'type enter input text field write 输入 填写 打字'),
+                        'browser_fill_form': (
+                            'fill form multiple fields several at once upload '
+                            'file attach batch 填表 表单 上传文件 批量填写 多个字段'),
+                        'browser_press_key': (
+                            'press key enter escape tab keyboard shortcut hotkey '
+                            '按键 回车 快捷键'),
+                        'browser_check': (
+                            'check uncheck checkbox radio toggle switch '
+                            '勾选 复选框 单选 开关'),
+                        'browser_select_option': (
+                            'select option dropdown combobox pick choose '
+                            '下拉选择 选项 下拉框'),
+                        'browser_menu_click': (
+                            'menu right click context hover dropdown submenu '
+                            '菜单 右键 悬停 子菜单'),
+                        'browser_screenshot': (
+                            'screenshot capture image picture snap 截图 截屏'),
+                        'browser_list_tabs': (
+                            'list tabs open tabs current tab 标签页 列出标签'),
+                        'browser_close_tab': 'close tab 关闭标签页',
+                        'browser_execute_js': (
+                            'run javascript execute js code evaluate script '
+                            '执行js 运行脚本'),
+                        'browser_scroll': (
+                            'scroll down up top bottom page reveal more content '
+                            '滚动 下拉 翻页 到底部 查看更多'),
+                    },
+                    # These DRIVE the user's real browser session, so they belong
+                    # in the write partition + behind the Manual approval gate
+                    # (_pipeline.py derives needs_approval from it). Until this
+                    # was declared, browser_execute_js could run arbitrary JS in
+                    # the user's page with no prompt.
+                    # NOTE: this makes them SERIAL — a deliberate behaviour change;
+                    # concurrent clicks on one page were never actually safe.
+                    write_tools=frozenset({
+                        'browser_navigate', 'browser_click', 'browser_type',
+                        'browser_press_key', 'browser_execute_js',
+                        'browser_research_page', 'browser_devtools', 'browser_site',
+                        'browser_fill_form', 'browser_menu_click',
+                        'browser_close_tab',
+                        'browser_check', 'browser_select_option',
+                    }),
+                    # Read-only observers stay parallel-safe AND cacheable within
+                    # a task. browser_read_page/screenshot are deliberately NOT
+                    # idempotent — the page changes under us between calls.
+                    idempotent_tools=frozenset({
+                        'browser_list_tabs',
+                    }),
+                    # Read-only/idempotent does not mean snapshot-stable. Tabs,
+                    # page DOM, history and cookies may change between identical
+                    # calls, so this live family opts out of same-task reuse.
+                    cacheable_tools=frozenset(),
+                    # The composer flag is always on and has no toggle, so no
+                    # human choice pins this family: it stays Tool-Search
+                    # deferred instead of riding every request eagerly.
+                    discovery_policy='searchable',
+                    category='browser', description='Browser automation tools',
+                    gate='安装并连接浏览器扩展（设置 → 网络）',
+                    exposure_gate=lambda ctx: ctx.browser_enabled)
 
 
 def _build_desktop(ctx: ToolContext) -> list[dict]:
@@ -264,12 +388,162 @@ def _build_coordinator(ctx: ToolContext) -> list[dict]:
         if (row['request'].get('profile', {}).get('mode') != 'coordinator'
                 or binding['owner'] != ctx.owner_user_id or binding['recipientId'] != ctx.conv_id):
             return []
-    elif not ctx.owner_user_id or not coordinator_scope({
-            '_userId': ctx.owner_user_id, 'convId': ctx.conv_id,
-            'config': ctx.cfg}, ctx.project_path):
+        scope = None
+    else:
+        scope = coordinator_scope({'_userId': ctx.owner_user_id, 'convId': ctx.conv_id,
+                                   'config': ctx.cfg}, ctx.project_path) if ctx.owner_user_id else None
+        if not scope:
+            return []
+    from lib.tools.coordinator import COORDINATOR_TOOLS, ROUTER_TOOL_SCHEMAS, WATCHDOG_TOOL_SCHEMAS
+    from lib.router.policy import is_router_scope
+    from lib.router.watchdog.binding import is_watchdog_scope
+    # The owner's Global Router (docs/ROUTER.md) adds its routing tools and the
+    # Watchdog (R7) its monitoring tools; the coordinator policy enforces the
+    # same role ceiling on every call.
+    return list(COORDINATOR_TOOLS) + (list(ROUTER_TOOL_SCHEMAS) if is_router_scope(scope) else []) + (
+        list(WATCHDOG_TOOL_SCHEMAS) if is_watchdog_scope(scope) else [])
+
+
+def _coordinator_tool_spec() -> ToolSpec:
+    """Coordinator family, including the Global Router's routing tools and the
+    Watchdog's monitoring tools (schemas only for that role; see _build_coordinator)."""
+    return ToolSpec(
+        'coordinator', _build_coordinator, phase='base',
+        category='coordination',
+        description='Independent worker conversations and authorized dispatch',
+        gate='项目中绑定的 Coordinator 对话',
+        provides=frozenset({
+            'create_conversation', 'dispatch_project_assignment', 'get_project_assignment',
+            'report_to_user', 'update_task_progress', 'delegate_project_work', 'await_project_workers',
+            'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request',
+            'request_user_decision', 'route_to_project', 'get_router_projects', 'router_instruction_create',
+            'router_instruction_list', 'router_instruction_cancel',
+            'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck',
+            'watchdog_message', 'watchdog_notify_router', 'watchdog_configure_review'}),
+        write_tools=frozenset({
+            'create_conversation', 'dispatch_project_assignment', 'report_to_user', 'update_task_progress',
+            'delegate_project_work', 'review_project_work', 'cancel_project_work',
+            'finish_project_request', 'request_user_decision',
+            'route_to_project', 'router_instruction_create', 'router_instruction_cancel',
+            'watchdog_resolve_signals', 'watchdog_schedule_recheck', 'watchdog_message',
+            'watchdog_notify_router', 'watchdog_configure_review'}),
+        idempotent_tools=frozenset({
+            'get_project_assignment', 'report_to_user', 'update_task_progress', 'delegate_project_work',
+            'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work',
+            'finish_project_request', 'request_user_decision', 'route_to_project', 'get_router_projects',
+            'router_instruction_create', 'router_instruction_list', 'router_instruction_cancel',
+            'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck',
+            'watchdog_message', 'watchdog_notify_router', 'watchdog_configure_review'}),
+        cacheable_tools=frozenset())
+
+
+def _build_device_wait(ctx: ToolContext) -> list[dict]:
+    """await_device where device tools are (desktop or a remote worktree) and for routers.
+
+    A wake continues this task's own conversation, so headless requests and
+    child invocations get nothing. The coordinator family (base phase) has
+    already resolved the router role for this assembly; its tools in the
+    executable catalog are that verdict, so no second binding read is made.
+    """
+    if (not ctx.durable_state_available or not ctx.delivers_deferred_completions
+            or not ctx.owner_user_id or not ctx.conv_id):
         return []
-    from lib.tools.coordinator import COORDINATOR_TOOLS
-    return list(COORDINATOR_TOOLS)
+    router = any((tool.get('function') or {}).get('name') == 'delegate_project_work'
+                 for tool in ctx.executable_tool_catalog)
+    if not (ctx.desktop_enabled or ctx.project_remote or router):
+        return []
+    from lib.desktop.device_waits import AWAIT_DEVICE_TOOL
+    return [AWAIT_DEVICE_TOOL]
+
+
+def _desktop_tool_spec() -> ToolSpec:
+    """Connected desktop agent family (device tools gated by the desktop toggle)."""
+    return ToolSpec('desktop', _build_desktop, phase='base',
+                    # provides = LLM 可见的 10 个(desktop_move_file 刻意不
+                    # 暴露,见 lib/desktop_tools.py;它仍列在 write_tools 里)。
+                    provides=frozenset({
+                        'desktop_list_files', 'desktop_read_file',
+                        'desktop_write_file',
+                        'desktop_open_file', 'desktop_open_app',
+                        'desktop_run_command', 'desktop_screenshot',
+                        'desktop_gui_action', 'desktop_clipboard',
+                        'desktop_system_info',
+                    }),
+                    # 约束③:desktop 写/执行工具进串行写分区 + Manual 批准门 ——
+                    # 此前未声明,既进并行派发池(竞态)又绕过批准门。
+                    # desktop_system_info 豁免(其 kill 分支由 agent 侧参数级
+                    # exec 门把守);GUI/screenshot 走 allow_gui 层,不进写分区。
+                    write_tools=frozenset({
+                        'desktop_write_file', 'desktop_move_file',
+                        'desktop_run_command', 'desktop_open_app',
+                        'desktop_open_file',
+                    }),
+                    search_hints={
+                        'desktop_screenshot': (
+                            'capture display monitor current screen desktop '
+                            '截屏 屏幕 桌面画面'),
+                        'desktop_clipboard': 'copy paste clipboard 剪贴板 复制 粘贴',
+                        'desktop_list_files': 'list computer files 查看电脑文件',
+                        'desktop_read_file': 'read computer file 读取电脑文件',
+                        'desktop_write_file': 'write save computer file 保存电脑文件',
+                        'desktop_run_command': 'run local command shell 执行本地命令',
+                        'desktop_open_app': 'launch application 打开应用',
+                        'desktop_open_file': 'open local file 打开文件',
+                        'desktop_gui_action': 'mouse keyboard click type 鼠标 键盘',
+                        'desktop_system_info': 'computer system information 系统信息',
+                    },
+                    discovery_policy='searchable',
+                    category='desktop', description='Desktop agent tools',
+                    gate='连接桌面 agent（设置 → 设备）',
+                    exposure_gate=lambda ctx: ctx.desktop_enabled,
+                    pin_on_exposure=True)
+
+
+def _device_wait_tool_spec() -> ToolSpec:
+    """Durable device-online continuation (docs/modules/remote_execution.md)."""
+    return ToolSpec(
+        'device_wait', _build_device_wait, phase='capability',
+        provides=frozenset({'await_device'}),
+        direct_wire_tools=frozenset({'await_device'}),
+        # It persists a wait that outlives the turn and later starts one.
+        write_tools=frozenset({'await_device'}),
+        idempotent_tools=frozenset({'await_device'}),
+        cacheable_tools=frozenset(), discovery_policy='searchable',
+        search_hints={'await_device': (
+            'device offline reconnect online again wait for computer laptop desktop agent '
+            '设备离线 等待设备上线 电脑重新连接')},
+        category='desktop', description='Wake this conversation when a device reconnects',
+        gate='桌面工具或远程工作区可用，或路由器对话；会话持久存储可用')
+
+
+def _build_channels(ctx: ToolContext) -> list[dict]:
+    """Channel tools for the owner's Global Router; channel_read for subscribers.
+
+    ``lib.channels.tools`` owns the authority boundary; this projection never
+    widens it and every call is checked again at execution.
+    """
+    if (not ctx.durable_state_available or ctx.no_saved_conversation
+            or not ctx.owner_user_id or not ctx.conv_id):
+        return []
+    from lib.channels.tools import visible_tools
+    return visible_tools(ctx.owner_user_id, ctx.conv_id)
+
+
+def _channel_tool_spec() -> ToolSpec:
+    """Channel family: the Global Router's channel tools, channel_read for subscribers."""
+    tools = frozenset({'channel_threads', 'channel_read', 'channel_send', 'channel_configure_thread',
+                       'channel_subscribe', 'channel_unsubscribe', 'channel_outbox',
+                       'channel_outbox_approve'})
+    return ToolSpec('channels', _build_channels, phase='base',
+                    category='channels',
+                    description='External channel threads, subscriptions and outbox (大象, GitHub)',
+                    gate='Global Router 对话（已配置大象或 GitHub 账号）；订阅者仅 channel_read',
+                    provides=tools,
+                    write_tools=frozenset({'channel_send', 'channel_configure_thread',
+                                           'channel_subscribe', 'channel_unsubscribe',
+                                           'channel_outbox_approve'}),
+                    idempotent_tools=tools,
+                    cacheable_tools=frozenset())
 
 
 def _build_human_guidance(ctx: ToolContext) -> list[dict]:
@@ -300,7 +574,7 @@ def _build_memory(ctx: ToolContext) -> list[dict]:
 def _build_skills(ctx: ToolContext) -> list[dict]:
     # Compact read/discovery tools stay direct: installed-skill routing should
     # not pay an extra gateway round before load_skill can amplify the task.
-    if ctx.lean or not ctx.has_base_tools:
+    if ctx.lean or (not ctx.has_base_tools and not ctx.cfg.get('skillSelection')):
         return []
     from lib.skills import SKILL_READ_TOOLS
     return list(SKILL_READ_TOOLS)
@@ -344,13 +618,24 @@ def _build_scheduler(ctx: ToolContext) -> list[dict]:
     from lib.scheduler.tool_defs import SCHEDULER_TOOLS
     logger.debug('[Task %s] ⏰ Scheduler tools enabled (%d tools)',
                  ctx.tid, len(SCHEDULER_TOOLS))
-    return [tool for tool in SCHEDULER_TOOLS
-            if tool["function"]["name"] != "timer_create"]
+    tools = [tool for tool in SCHEDULER_TOOLS
+             if tool["function"]["name"] != "timer_create"]
+    if not ctx.delivers_deferred_completions:
+        from lib.scheduler.tool_defs import schedule_tools_without_current_conversation
+        tools = schedule_tools_without_current_conversation(
+            tools, reason=('this request has no saved conversation'
+                           if ctx.no_saved_conversation else
+                           'this task has no conversation of its own'))
+    return tools
 
 
 def _build_timer_watcher(ctx: ToolContext) -> list[dict]:
     """Keep the readiness handoff discoverable without a catalog search."""
-    if not ctx.durable_state_available or ctx.lean or not ctx.has_base_tools:
+    # A fired timer continues the task's own conversation; a headless job
+    # label or a task without a conversation has none (the handler refuses a
+    # stray call as well).
+    if (not ctx.durable_state_available or not ctx.delivers_deferred_completions
+            or ctx.lean or not ctx.has_base_tools):
         return []
     from lib.scheduler.tool_defs import TIMER_TOOL_CREATE
     return [TIMER_TOOL_CREATE]
@@ -411,9 +696,9 @@ def _build_background(ctx: ToolContext) -> list[dict]:
     # or code_exec, swarm via spawn_agents), and are deliberately NOT
     # retracted by the lean seam — retracting them while keeping
     # run_command(background=true) would strand live handles behind a
-    # dead-end pointer.
-    if not ctx.durable_state_available:
-        return []
+    # dead-end pointer. A task without a saved conversation keeps them: its
+    # handed-off commands reach only its own run (no conversation to publish
+    # into), which is exactly when an explicit control is needed.
     has_swarm = any(
         tool.get('function', {}).get('name') == 'spawn_agents'
         for tool in ctx.executable_tool_catalog)
@@ -421,6 +706,15 @@ def _build_background(ctx: ToolContext) -> list[dict]:
             or ctx.has_base_tools or has_swarm):
         return []
     from lib.tools.poll import KILL_TOOL, POLL_TOOL
+    if ctx.no_saved_conversation:
+        # Such a request starts no sub-agent, but a command still running
+        # after AUTO_BACKGROUND_AFTER_S hands off, so poll and kill address
+        # its bg_* handles and cross-conversation task handles.
+        from lib.tools.background_guidance import project_no_saved_conversation_tools
+        return project_no_saved_conversation_tools([POLL_TOOL, KILL_TOOL])
+    if not ctx.delivers_deferred_completions:
+        from lib.tools.background_guidance import project_run_completion_tools
+        return project_run_completion_tools([POLL_TOOL, KILL_TOOL])
     return [POLL_TOOL, KILL_TOOL]
 
 
@@ -494,10 +788,16 @@ def _build_mcp_live(
         from lib.mcp import get_bridge
         bridge = get_bridge(ctx.owner_user_id)
         if bridge.connected:
-            # The bridge cache is process-shared. Give each task an isolated
-            # catalog before any provider projection can add/remove fields.
-            from copy import deepcopy
-            mcp_tools = deepcopy(bridge.get_openai_tool_defs())
+            # Definitions are values frozen once per exact catalog generation
+            # and shared by every assembly of it; projections copy before
+            # changing a field, so an unchanged round copies nothing.
+            frozen_defs = getattr(bridge, 'get_frozen_openai_tool_defs', None)
+            if frozen_defs is not None:
+                mcp_tools = list(frozen_defs()[1])
+            else:
+                # Lightweight/fake bridges have no generation: isolate per call.
+                from copy import deepcopy
+                mcp_tools = deepcopy(bridge.get_openai_tool_defs())
             ctx.cfg['_mcpAllowedToolCatalog'] = mcp_tools
             if mcp_tools:
                 catalog_fingerprint = ''
@@ -807,9 +1107,9 @@ def build_builtin_specs() -> list[ToolSpec]:
                  category='project', description='Zoom/rotate/crop image viewer',
                  gate='常开（无需项目）'),
         ToolSpec('project', _build_project_or_code_exec, phase='base',
-                 compatibility_tools=frozenset({'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents', 'check_background_command', 'kill_background_command'}),
+                 compatibility_tools=frozenset({'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents', 'check_background_command', 'kill_background_command', 'grep_search'}),
                  provides=frozenset({
-                     'grep_search', 'find_files',
+                     'search_files', 'grep_search', 'find_files',
                      'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                      'insert_content', 'insert_contents',
                      'run_command',
@@ -822,16 +1122,19 @@ def build_builtin_specs() -> list[ToolSpec]:
                      'run_command', 'kill_background_command',
                  }),
                  idempotent_tools=frozenset({
-                     'grep_search', 'find_files',
+                     'search_files', 'grep_search', 'find_files',
                      'check_background_command', 'repo_map',
                  }),
                  programmatic_tools=frozenset({
-                     'grep_search', 'find_files',
+                     'search_files', 'grep_search', 'find_files',
                  }),
+                 # The repository outline is a rare structural aid: no prompt,
+                 # result or recovery pointer names it, so it stays deferred.
+                 discovery_policy_by_name={'repo_map': 'searchable'},
                  search_hints={
-                     'grep_search': (
+                     'search_files': (
                          'symbol references usages occurrences who calls '
-                         'code content search 查找引用 谁调用了'),
+                         'code content search grep ripgrep 查找引用 谁调用了'),
                      'find_files': (
                          'locate filenames glob config files 查找文件 配置文件'),
                      'write_file': 'create overwrite save file 写入 保存文件',
@@ -856,139 +1159,8 @@ def build_builtin_specs() -> list[ToolSpec]:
                  exposure_gate=lambda ctx: (
                      ctx.project_ready or ctx.code_exec_enabled),
                  result_meta_builder=_build_project_result_meta),
-        ToolSpec('browser', _build_browser, phase='base',
-                 # 15 names = BROWSER_TOOLS (13) + ADVANCED_BROWSER_TOOLS (2).
-                 # v2 (): the ten retired names are NOT
-                 # declared — their tool_registry registration shrank with
-                 # BROWSER_TOOL_NAMES, so there is no handler left to declare
-                 # (their display formatters remain for history rendering).
-                 provides=frozenset({
-                     'browser_navigate', 'browser_read_page', 'browser_list_tabs',
-                     'browser_research_page', 'browser_devtools', 'browser_site',
-                     'browser_close_tab', 'browser_click', 'browser_type',
-                     'browser_press_key', 'browser_execute_js',
-                     'browser_screenshot', 'browser_get_cookies',
-                     'browser_get_history', 'browser_fill_form',
-                     'browser_menu_click',
-                     'browser_check', 'browser_select_option',
-                     'browser_scroll',
-                 }),
-                 # search_hints: private retrieval aliases/intents (ranking
-                 # weight ×3, never serialized into the wire schema). Without
-                 # them, terse wire descriptions let BM25 mis-rank core intents
-                 # ("click a button" → get_cookies, "read the page" →
-                 # list_tabs, "go to a url" → list_tabs). Each action verb is
-                 # pinned to its tool; browser_fill_form yields click/button
-                 # terms to browser_click. NOTE: _builtin_specs.py mirrors this
-                 # ToolSpec for structure tests — keep them in sync.
-                 search_hints={
-                     'browser_click': (
-                         'click press button link tap element click on '
-                         'single one 点击 按钮 链接 点击元素 单击'),
-                     'browser_navigate': (
-                         'navigate go to open website url visit load page '
-                         '打开网址 访问 跳转 进入网站'),
-                     'browser_read_page': (
-                         'read see view page content text what is on extract '
-                         '看页面 读取内容 页面文字 提取'),
-                     'browser_type': (
-                         'type enter input text field write 输入 填写 打字'),
-                     'browser_fill_form': (
-                         'fill form multiple fields several at once upload '
-                         'file attach batch 填表 表单 上传文件 批量填写 多个字段'),
-                     'browser_press_key': (
-                         'press key enter escape tab keyboard shortcut hotkey '
-                         '按键 回车 快捷键'),
-                     'browser_check': (
-                         'check uncheck checkbox radio toggle switch '
-                         '勾选 复选框 单选 开关'),
-                     'browser_select_option': (
-                         'select option dropdown combobox pick choose '
-                         '下拉选择 选项 下拉框'),
-                     'browser_menu_click': (
-                         'menu right click context hover dropdown submenu '
-                         '菜单 右键 悬停 子菜单'),
-                     'browser_screenshot': (
-                         'screenshot capture image picture snap 截图 截屏'),
-                     'browser_list_tabs': (
-                         'list tabs open tabs current tab 标签页 列出标签'),
-                     'browser_close_tab': 'close tab 关闭标签页',
-                     'browser_execute_js': (
-                         'run javascript execute js code evaluate script '
-                         '执行js 运行脚本'),
-                     'browser_scroll': (
-                         'scroll down up top bottom page reveal more content '
-                         '滚动 下拉 翻页 到底部 查看更多'),
-                 },
-                 # These DRIVE the user's real browser session, so they belong
-                 # in the serial write partition + behind the Manual approval
-                 # gate (_pipeline.py derives needs_approval from it). Until
-                 # this was declared, browser_execute_js could run arbitrary JS
-                 # in the user's page with no prompt, from the parallel pool.
-                 # NOTE: this makes them SERIAL — a deliberate behaviour change;
-                 # concurrent clicks on one page were never actually safe.
-                 write_tools=frozenset({
-                     'browser_navigate', 'browser_click', 'browser_type',
-                     'browser_press_key', 'browser_execute_js',
-                     'browser_research_page', 'browser_devtools', 'browser_site',
-                     'browser_fill_form', 'browser_menu_click',
-                     'browser_close_tab',
-                     'browser_check', 'browser_select_option',
-                 }),
-                 # Read-only observers stay parallel-safe AND cacheable within
-                 # a task. browser_read_page/screenshot are deliberately NOT
-                 # idempotent — the page changes under us between calls.
-                 idempotent_tools=frozenset({
-                     'browser_list_tabs',
-                 }),
-                 # Read-only/idempotent does not mean snapshot-stable. Tabs,
-                 # page DOM, history and cookies may change between identical
-                 # calls, so this live family opts out of same-task reuse.
-                 cacheable_tools=frozenset(),
-                 discovery_policy='searchable',
-                 category='browser', description='Browser automation tools',
-                 gate='安装并连接浏览器扩展（设置 → 网络）',
-                 exposure_gate=lambda ctx: ctx.browser_enabled,
-                 pin_on_exposure=True),
-        ToolSpec('desktop', _build_desktop, phase='base',
-                 # provides = LLM 可见的 10 个(desktop_move_file 刻意不
-                 # 暴露,见 lib/desktop_tools.py;它仍列在 write_tools 里)。
-                 provides=frozenset({
-                     'desktop_list_files', 'desktop_read_file',
-                     'desktop_write_file',
-                     'desktop_open_file', 'desktop_open_app',
-                     'desktop_run_command', 'desktop_screenshot',
-                     'desktop_gui_action', 'desktop_clipboard',
-                     'desktop_system_info',
-                 }),
-                 # 约束③:desktop 写/执行工具进串行写分区 + Manual 批准门 ——
-                 # 此前未声明,既进并行派发池(竞态)又绕过批准门。
-                 # desktop_system_info 豁免(其 kill 分支由 agent 侧参数级
-                 # exec 门把守);GUI/screenshot 走 allow_gui 层,不进写分区。
-                 write_tools=frozenset({
-                     'desktop_write_file', 'desktop_move_file',
-                     'desktop_run_command', 'desktop_open_app',
-                     'desktop_open_file',
-                 }),
-                 search_hints={
-                     'desktop_screenshot': (
-                         'capture display monitor current screen desktop '
-                         '截屏 屏幕 桌面画面'),
-                     'desktop_clipboard': 'copy paste clipboard 剪贴板 复制 粘贴',
-                     'desktop_list_files': 'list computer files 查看电脑文件',
-                     'desktop_read_file': 'read computer file 读取电脑文件',
-                     'desktop_write_file': 'write save computer file 保存电脑文件',
-                     'desktop_run_command': 'run local command shell 执行本地命令',
-                     'desktop_open_app': 'launch application 打开应用',
-                     'desktop_open_file': 'open local file 打开文件',
-                     'desktop_gui_action': 'mouse keyboard click type 鼠标 键盘',
-                     'desktop_system_info': 'computer system information 系统信息',
-                 },
-                 discovery_policy='searchable',
-                 category='desktop', description='Desktop agent tools',
-                 gate='连接桌面 agent（设置 → 设备）',
-                 exposure_gate=lambda ctx: ctx.desktop_enabled,
-                 pin_on_exposure=True),
+        _browser_tool_spec(),
+        _desktop_tool_spec(),
         # End of base phase: appending HERE keeps every earlier prefix
         # byte-stable for the prompt cache (the produce note above).
         ToolSpec('page_preview', _build_page_preview, phase='base',
@@ -1016,10 +1188,9 @@ def build_builtin_specs() -> list[ToolSpec]:
                  programmatic_tools=frozenset({
                      'list_conversations', 'get_conversation',
                  }),
-                 # Eager: the per-turn sibling-conversation digest names these
-                 # two by function name when they are registered — deferring
-                 # them re-creates the phantom-tool gap the project-mode
-                 # branch was added to close.
+                 # Eager: an @-referenced conversation is an explicit user
+                 # pointer, and project delegation briefs tell workers to use
+                 # get_conversation for the complete request.
                  category='conversation', description='Conversation reference tools',
                  gate='项目模式 或 @ 提及一个会话'),
         # Project Brain contributes zero schemas.  These two tools belong to
@@ -1031,6 +1202,12 @@ def build_builtin_specs() -> list[ToolSpec]:
                      'send_project_message', 'get_project_messages', 'consider_project_message',
                  }),
                  write_tools=frozenset({'send_project_message', 'consider_project_message'}),
+                 # The mailbox belongs to the sending conversation; the
+                 # integration tools address the task's own workspace instead.
+                 saved_conversation_tools=frozenset({
+                     'send_project_message', 'get_project_messages',
+                     'consider_project_message',
+                 }),
                  discovery_policy='searchable',
                  search_hints={
                      'integration_checkpoint': (
@@ -1043,16 +1220,8 @@ def build_builtin_specs() -> list[ToolSpec]:
                  category='conversation',
                  description='Isolated project integration execution controls',
                  gate='项目模式'),
-        ToolSpec('coordinator', _build_coordinator, phase='base',
-                 category='coordination',
-                 description='Independent worker conversations and authorized dispatch',
-                 gate='项目中绑定的 Coordinator 对话',
-                 provides=frozenset({'create_conversation', 'dispatch_project_assignment',
-                                    'get_project_assignment', 'report_to_user', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request'}),
-                 write_tools=frozenset({'create_conversation', 'dispatch_project_assignment', 'report_to_user', 'delegate_project_work', 'review_project_work', 'cancel_project_work', 'finish_project_request'}),
-                 idempotent_tools=frozenset({'get_project_assignment', 'report_to_user', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request'}),
-                 timeout_ms_by_name={'await_project_workers': 1_805_000},
-                 cacheable_tools=frozenset()),
+        _coordinator_tool_spec(),
+        _channel_tool_spec(),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
                  category='human', description='Ask the human for guidance',
@@ -1097,7 +1266,10 @@ def build_builtin_specs() -> list[ToolSpec]:
                          '内网 登录 文件 压缩包 链接 按钮'
                      ),
                  },
-                 discovery_policy='eager',
+                 # Rare domain capability: deferred behind Tool Search. Shell
+                 # guidance names it and run_command reroutes authenticated
+                 # downloads to it, so the exact name stays reachable.
+                 discovery_policy='searchable',
                  native_route_groups=frozenset({
                      'search', 'fetch', 'browser', 'download'}),
                  category='browser',
@@ -1116,7 +1288,7 @@ def build_builtin_specs() -> list[ToolSpec]:
         # with source files, so it opts out of same-task result reuse.
         # Track C: PID-anchored citations. Search/audit are read-only network
         # lookups; paper_cite_insert mutates .bib/.tex through the journaled
-        # write tools, so it rides the serial write partition + Manual
+        # write tools, so it rides the write partition + Manual
         # approval like paper_import_arxiv. Results change with the
         # literature indexes and source files, so nothing is cacheable.
         # paper_quality follows paper_build at the END of the base phase.
@@ -1124,6 +1296,36 @@ def build_builtin_specs() -> list[ToolSpec]:
         # tree and retained build artifacts, the dossier is deterministic
         # text, and the scaffold is a text proposal — no write partition,
         # no approval gate, no same-task result reuse.
+        # inspect_video is appended at the END of the base phase so every
+        # earlier tool keeps its prompt-cache position. Read-only and always
+        # available like inspect_image, and eager for the same reason: model-
+        # visible results name it (read_files' video/audio refusal, fetch_url's
+        # staged video/audio note, the page-media inventory footer), so a pointer-
+        # named tool stays on the wire and routing keeps it in _ALWAYS. The
+        # hints still rank it when a schema budget routes the surface through
+        # local Tool Search. Never cached: a staged path can change outside
+        # this task's write fence.
+        ToolSpec('inspect_video', _build_inspect_video, phase='base',
+                 provides=frozenset({'inspect_video'}),
+                 idempotent_tools=frozenset({'inspect_video'}),
+                 cacheable_tools=frozenset(),
+                 search_hints={
+                     'inspect_video': (
+                         'watch view analyze understand describe summarize '
+                         'video clip movie recording screencast mp4 mov webm mkv '
+                         'avi key frames extract frames screenshots timestamps '
+                         'scenes transcript subtitles speech audio what happens '
+                         'in the video downloaded staged '
+                         'listen hear audio file sound podcast episode song '
+                         'music voice memo mp3 m4a aac wav ogg opus flac '
+                         'transcribe audio speech-to-text what is said '
+                         '看视频 视频 理解视频 分析视频 视频内容 讲了什么 抽帧 关键帧 '
+                         '截图 字幕 转录 语音 录屏 '
+                         '听 听一下 音频 播客 录音 音乐 歌曲 说了什么 转写'),
+                 },
+                 category='project',
+                 description='Video frames, probe facts and transcript viewer',
+                 gate='常开（无需项目）'),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
                  discovery_policy_by_name={name: 'searchable' for name in ('update_memory', 'delete_memory', 'merge_memories')},
@@ -1272,7 +1474,10 @@ def build_builtin_specs() -> list[ToolSpec]:
                  write_tools=frozenset({'record_working_fact'}),
                  idempotent_tools=frozenset({'read_working_facts'}), cacheable_tools=frozenset(),
                  programmatic_tools=frozenset({'read_working_facts'}),
-                 contracts=WORKING_FACT_CONTRACTS, discovery_policy='searchable', script_safe=True,
+                 contracts=WORKING_FACT_CONTRACTS, script_safe=True,
+                 discovery_policy_by_name={'record_working_fact': 'searchable'},
+                 # Facts are an aggregate of the owned saved conversation.
+                 saved_conversation_tools=frozenset({'read_working_facts', 'record_working_fact'}),
                  catalog_active_only=True, handler=_handle_working_facts,
                  category='memory', description='Conversation working facts with versioned sources',
                  gate='持久会话存储可用'),
@@ -1280,6 +1485,13 @@ def build_builtin_specs() -> list[ToolSpec]:
                  compatibility_tools=frozenset({'await_agents'}),
                  contextual_tools=frozenset({'store_artifact', 'read_artifact', 'list_artifacts'}),
                  discovery_policy_by_name={name: 'searchable' for name in ('send_agent_message', 'get_agent_messages', 'set_approval_delegate')},
+                 # Sub-agents and approval delegates register in, and report
+                 # into, a saved conversation; the handlers refuse a stray
+                 # spawn_agents call as well.
+                 saved_conversation_tools=frozenset({
+                     'spawn_agents', 'get_agent_result', 'send_agent_message',
+                     'get_agent_messages', 'set_approval_delegate',
+                 }),
                  # provides lists every name this family has a handler for on
                  # the MAIN dispatch registry (@tool_registry.tool_set over
                  # SWARM_TOOL_NAMES), which is wider than what build() puts in
@@ -1349,6 +1561,17 @@ def build_builtin_specs() -> list[ToolSpec]:
                  category='tools',
                  description='Local tool discovery and stable execution gateway',
                  gate='工具搜索启用时出现'),
+        ToolSpec('chat_exploration', _build_chat_exploration, phase='capability',
+                 provides=frozenset({'get_exploration', 'manage_exploration'}),
+                 saved_conversation_tools=frozenset({'get_exploration', 'manage_exploration'}),
+                 write_tools=frozenset({'manage_exploration'}),
+                 idempotent_tools=frozenset({'get_exploration'}), cacheable_tools=frozenset(),
+                 discovery_policy='searchable',
+                 search_hints={'get_exploration': 'research plan experiment progress evidence 长期探索 科研 论文 进度',
+                               'manage_exploration': 'start pause resume research experiments skills 长期探索 科研 论文 启动 暂停 继续'},
+                 category='evolution', description='Human Chat controls for durable research and exploration',
+                 gate='已保存的人类 Chat；执行时复核当前 Turn 和权限',
+                 handler=_handle_chat_exploration),
         ToolSpec('evolution', _build_evolution_teach, phase='capability',
                  discovery_policy='searchable',
                  direct_wire_tools=frozenset({'evolution_coordinate'}),
@@ -1369,8 +1592,7 @@ def build_builtin_specs() -> list[ToolSpec]:
                  provides=frozenset({'poll', 'kill'}),
                  write_tools=frozenset({'kill'}),
                  idempotent_tools=frozenset({'poll'}),
-                 # Background state changes constantly; results are never
-                 # cacheable across rounds.
+                 # Background state changes constantly; never cacheable across rounds.
                  cacheable_tools=frozenset(),
                  # Lifecycle control is never a discovery-only capability.
                  pin_on_exposure=True,
@@ -1386,6 +1608,10 @@ def build_builtin_specs() -> list[ToolSpec]:
         ToolSpec('retained_agents', _build_retained_agents,
                  phase='capability',
                  provides=frozenset({'list_agents', 'manage_agents'}),
+                 # A retained agent is a sub-agent: its assignment registers
+                 # in, and reports into, a saved conversation; the handler
+                 # refuses a stray assignment as well.
+                 saved_conversation_tools=frozenset({'list_agents', 'manage_agents'}),
                  write_tools=frozenset({'manage_agents'}),
                  discovery_policy='searchable',
                  search_hints={'list_agents': (
@@ -1396,7 +1622,7 @@ def build_builtin_specs() -> list[ToolSpec]:
                      'create assign reset archive long-term subagent '
                      '常驻 长期 子智能体 团队 记忆 派工')},
                  category='swarm', description='Reusable team agents',
-                 gate='Durable application runtime only',
+                 gate='Durable application runtime with a saved conversation',
                  exposure_gate=lambda ctx: ctx.durable_state_available),
         ToolSpec('evolution_artifact', _build_evolution_artifact,
                  phase='capability', provides=frozenset({'evolution_artifact'}),
@@ -1427,6 +1653,7 @@ def build_builtin_specs() -> list[ToolSpec]:
                      and (ctx.cfg.get('evolution') or {}).get('stage') in ('executing', 'reviewing'),
                  handler=_handle_evolution_teach),
         build_rich_spec(),
+        _device_wait_tool_spec(),
         # ── per-request custom tools (always last; handlers are task-local) ──
         ToolSpec('custom', _build_custom, phase='capability',
                  category='custom',

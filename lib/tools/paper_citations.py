@@ -132,8 +132,14 @@ PAPER_CITATION_AUDIT_TOOL = {
     "function": {
         "name": "paper_citation_audit",
         "description": (
-            "Verify every .bib entry / \\cite key in the paper against "
-            "OpenAlex: flags probable-hallucinated entries (not found), "
+            "Audit local .bib entries / \\cite keys and verify a bounded batch "
+            "against OpenAlex. Follow next_cursor to cover the bibliography; "
+            "retry_cursor retries unverified rows in that batch. Keep the same "
+            "path. Source edits invalidate cursors. Skipped entries remain "
+            "unverified; combine all page results with the same source_digest "
+            "before judging full-document coverage. A last page does not "
+            "certify earlier pages. Flags "
+            "probable-hallucinated entries (not found), "
             "metadata mismatches (title/year/author), RETRACTED papers, "
             "duplicate keys, undefined citations and unused entries. Run "
             "before submission or after bulk citation edits."
@@ -146,6 +152,15 @@ PAPER_CITATION_AUDIT_TOOL = {
                     "description": (
                         "Optional main .tex file to select the paper document. "
                         "Defaults to the conversation's selected paper document."
+                    )
+                },
+                "cursor": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "pattern": "^c1:[0-9a-f]{64}:(0|[1-9][0-9]{0,9})$",
+                    "description": (
+                        "Continuation from next_cursor, or retry_cursor to recheck "
+                        "a batch with skipped entries. Omit to start a new audit."
                     )
                 }
             }

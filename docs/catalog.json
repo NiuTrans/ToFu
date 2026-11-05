@@ -8,6 +8,18 @@
   },
   "contracts": [
     {
+      "path": "contracts/site_knowledge_v1.schema.json",
+      "guard": "tests/llm_dispatch/test_site_knowledge_repository.py"
+    },
+    {
+      "path": "contracts/request_inspector_projection_v1.json",
+      "guard": "tests/diagnostics/test_request_inspector_projection.py"
+    },
+    {
+      "path": "contracts/local_model_artifacts_v1.schema.json",
+      "guard": "tests/model_routing/test_local_model_artifacts.py"
+    },
+    {
       "path": "contracts/native_flow_abi_v1.json",
       "guard": "tests/orchestration/test_native_flow_topology.py"
     },
@@ -64,6 +76,10 @@
       "guard": "tests/conversation/test_execution_identity.py"
     },
     {
+      "path": "contracts/conversation_settings_v1.json",
+      "guard": "tests/conversation/test_conversation_settings_contract.py"
+    },
+    {
       "path": "contracts/project_dispatch_v1.schema.json",
       "generator": "scripts/gen_project_dispatch_contract.py",
       "guard": "tests/project_mod/test_project_dispatch_repository.py"
@@ -96,6 +112,15 @@
       "path": "contracts/project_coordination_v1.schema.json",
       "generator": "scripts/gen_project_coordination_contract.py",
       "guard": "tests/project_mod/test_project_coordination.py"
+    },
+    {
+      "path": "contracts/router_v1.schema.json",
+      "generator": "scripts/gen_project_coordination_contract.py",
+      "guard": "tests/api/test_api_v4_router.py"
+    },
+    {
+      "path": "contracts/device_waits_v1.schema.json",
+      "guard": "tests/desktop/test_device_waits.py"
     },
     {
       "path": "contracts/research_model_budget_v1.schema.json",
@@ -471,6 +496,16 @@
       "path": "contracts/native_checkpoint_storage_abi_v1.h",
       "generator": "scripts/gen_native_checkpoint_storage_abi.py",
       "guard": "tests/storage_authority_sql/test_native_checkpoint_storage.py"
+    },
+    {
+      "path": "contracts/channels_v1.schema.json",
+      "generator": "scripts/gen_channels_contract.py",
+      "guard": "tests/channels/test_routes.py"
+    },
+    {
+      "path": "contracts/channels_v1.schema.json",
+      "generator": "scripts/gen_channels_contract.py",
+      "guard": "tests/channels/test_github_account.py"
     }
   ],
   "authority": [
@@ -481,6 +516,8 @@
     "docs/WORKSPACE_ACCEPTANCE.md",
     "docs/DESKTOP_CLIENTS.md",
     "docs/PROJECT_COORDINATION.md",
+    "docs/CHANNELS.md",
+    "docs/ROUTER.md",
     "docs/README.md",
     "docs/DEVELOPER_RUNTIME.md",
     "docs/DESIGN_SYSTEM.md",

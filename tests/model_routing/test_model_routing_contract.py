@@ -1008,6 +1008,34 @@ def test_unavailable_route_surfaces_safe_authorization_diagnostics():
     assert 'https://' not in str(captured.value)
 
 
+def test_unbound_pending_identity_reports_identity_pending_not_registration():
+    """A provider model no registered Model claims has no registration to fix."""
+    from types import SimpleNamespace
+    from lib.model_routing.dispatch_adapter import mint_routed_slot_group
+    from lib.model_routing.domain import ProviderOfferingRef
+    doc = _full_document()
+    offering = doc['offerings'][0]
+    offering.pop('model')
+    offering.update(identity_state='pending_identity', pending_model_id='gpt-future-test')
+    repository = SimpleNamespace(get=lambda owner: SimpleNamespace(document=doc))
+    with pytest.raises(ModelRoutingError) as captured:
+        mint_routed_slot_group(repository, OwnerBoundary.create(23), NativeModelSelection(
+            None, ProviderOfferingRef('provider-a', offering['offering_id'])))
+    assert captured.value.kind == 'model_identity_pending'
+
+
+def test_draft_model_reports_registration_incomplete():
+    from types import SimpleNamespace
+    from lib.model_routing.dispatch_adapter import mint_routed_slot_group
+    doc = _full_document()
+    doc['models'][0]['registration_state'] = 'pending_metadata'
+    repository = SimpleNamespace(get=lambda owner: SimpleNamespace(document=doc))
+    with pytest.raises(ModelRoutingError) as captured:
+        mint_routed_slot_group(repository, OwnerBoundary.create(23),
+                               NativeModelSelection(ModelRef('creator', 'alpha'), None))
+    assert captured.value.kind == 'model_registration_incomplete'
+
+
 def _candidate_product_document(deployments=100, credentials=200):
     document = _full_document()
     base_deployment = document['deployments'][0]
@@ -1085,11 +1113,11 @@ def test_full_primary_prefix_does_not_compile_unused_fallbacks(monkeypatch):
     boundary = OwnerBoundary.create(23)
     from tests.support.model_registration import complete_registration
     repository.compare_and_swap(boundary, complete_registration(_full_document()), expected_revision=0)
-    monkeypatch.setattr(adapter, 'compile_model_fallback_candidates',
+    monkeypatch.setattr(adapter.RouteCandidateCompiler, 'compile_fallbacks',
                         lambda *a, **kw: pytest.fail('unused fallback scan'))
     def reached_mint(**kwargs):
         raise RuntimeError('selected bounded candidate reached transport binding')
-    monkeypatch.setattr(adapter, 'mint_ephemeral_slot', reached_mint)
+    monkeypatch.setattr(adapter, 'prepare_ephemeral_slot', reached_mint)
     with pytest.raises(RuntimeError, match='reached transport binding'):
         adapter.mint_routed_slot_group(repository, boundary,
             NativeModelSelection(ModelRef('creator', 'alpha'), None, ''), max_candidates=1)

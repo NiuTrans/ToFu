@@ -158,7 +158,7 @@ test('empty archived text remains empty instead of adding placeholder text to th
 
 test('inspector polls preserve the selected original, native disclosure, focus and execution record identity',async()=>{
  const d=dom(),host=document.getElementById('host'),calls=[];
- const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,detailed:true,openTask(){},
+ const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,sections:['records'],openTask(){},
   readOutcome:async(id,task,offset,signal)=>{calls.push({id,task,offset,signal});return{outcome:page('Original <b>hypothesis</b>')};}});
  inspector.update({run:run()});assert.equal(calls.length,0);
  const trigger=host.querySelector('[data-outcome-task-id=executor]');trigger.click();await tick();
@@ -169,24 +169,24 @@ test('inspector polls preserve the selected original, native disclosure, focus a
  assert.equal(calls.length,1);assert.equal(host.querySelector('[data-outcome-task-id=executor]'),trigger);
  assert.equal(host.querySelector('.evo-outcome-reader pre'),original);assert.equal(document.activeElement,original);
  assert.equal(original.scrollTop,12);assert.equal(disclosure.open,true);assert.match(selected.toString(),/Original <b>hypothesis<\/b>/);
- assert.match(host.querySelector('.evo-mission-records').textContent,/Delivery finished/);
+ assert.match(host.querySelector('.evo-records').textContent,/Delivery finished/);
  inspector.dispose();d.window.close();
 });
 
 test('long record histories keep a bounded DOM and remain pageable while a source stays open',async()=>{
  const d=dom(),host=document.getElementById('host'),opened=[];
  const receipts=Array.from({length:205},(_,i)=>({task_id:'task-'+i,stage:'executing',terminal_verdict:'completed',outcome_available:true,actuals:{tokens:1,tool_calls:0,wall_clock_seconds:1}}));
- const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,detailed:true,openTask:id=>opened.push(id),
+ const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,sections:['records'],openTask:id=>opened.push(id),
   readOutcome:async(id,task)=>({outcome:page('Paged history source',0,{task_id:task})})});
  inspector.update({run:run({task_id:'task-204',receipts})});
- assert.equal(host.querySelectorAll('.evo-mission-record').length,20);
+ assert.equal(host.querySelectorAll('.evo-record').length,20);
  host.querySelector('[data-outcome-task-id="task-204"]').click();await tick();
  const original=host.querySelector('.evo-outcome-reader pre');
  host.querySelector('[data-record-action=older]').click();
- assert.equal(host.querySelectorAll('.evo-mission-record').length,20);assert.equal(original.textContent,'Paged history source');
+ assert.equal(host.querySelectorAll('.evo-record').length,20);assert.equal(original.textContent,'Paged history source');
  assert.equal(host.querySelector('[data-task-id="task-184"]').textContent.includes('Delivery finished'),true);
  for(let i=0;i<20&&!host.querySelector('[data-record-action=older]').disabled;i++)host.querySelector('[data-record-action=older]').click();
- assert.equal(host.querySelectorAll('.evo-mission-record').length,5);assert.ok(host.querySelector('[data-task-id="task-0"]'));
+ assert.equal(host.querySelectorAll('.evo-record').length,5);assert.ok(host.querySelector('[data-task-id="task-0"]'));
  assert.equal(host.querySelector('.evo-outcome-reader pre'),original);
  host.querySelector('[data-source-action=close]').click();
  assert.equal(document.activeElement,host.querySelector('.evo-run-records > h3'));
@@ -195,7 +195,7 @@ test('long record histories keep a bounded DOM and remain pageable while a sourc
 
 test('switching run scope aborts the pending original and legacy records remain usable',async()=>{
  const d=dom(),host=document.getElementById('host');let resolve,signal;const opened=[];
- const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,detailed:true,openTask:id=>opened.push(id),
+ const inspector=load('studio/goal-run-inspector').mountGoalRunInspector(host,{copy,sections:['records'],openTask:id=>opened.push(id),
   readOutcome:(id,task,offset,abort)=>{signal=abort;return new Promise(done=>resolve=done);}});
  inspector.update({run:run()});host.querySelector('[data-outcome-task-id=executor]').click();
  inspector.update({run:run({run_id:'run-b',task_id:'legacy',receipts:[]})});assert.equal(signal.aborted,true);
@@ -207,7 +207,7 @@ test('switching run scope aborts the pending original and legacy records remain 
 test('invalid review output stays inspectable while its retry decision is visible',async()=>{
  const d=dom(),host=document.getElementById('host');
  const {mountGoalRunInspector}=load('studio/goal-run-inspector');
- const inspector=mountGoalRunInspector(host,{copy,openTask(){},detailed:true,readOutcome:async(id,task)=>({outcome:page('Preface then invalid JSON',0,{task_id:task,stage:'reviewing'})})});
+ const inspector=mountGoalRunInspector(host,{copy,openTask(){},sections:['records'],readOutcome:async(id,task)=>({outcome:page('Preface then invalid JSON',0,{task_id:task,stage:'reviewing'})})});
  const receipt={task_id:'bad-review',stage:'reviewing',terminal_verdict:'completed',outcome_available:true,actuals:{tokens:30,tool_calls:0,wall_clock_seconds:3},
   review_format_retry:{error:'invalid_json',admitted:true,intent_id:'frozen',refusal:''}};
  inspector.update({run:run({receipts:[receipt]}),loading:false});

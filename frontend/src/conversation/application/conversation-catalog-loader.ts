@@ -35,6 +35,7 @@ export interface ConversationCatalogLoaderPorts {
   ): readonly string[];
   hasEveryAppliedRow(conversationIds: ReadonlySet<string>): boolean;
   writeCache(rows: readonly unknown[]): Promise<unknown>;
+  onSettled?(succeeded: boolean): void;
   wait?(milliseconds: number, signal: AbortSignal): Promise<void>;
   setTimeout?(callback: () => void, milliseconds: number): number;
   clearTimeout?(timer: number): void;
@@ -290,6 +291,14 @@ export function createConversationCatalogLoader(
     } catch (error) {
       lastServerLoadOk = false;
       if (!disposed) warn(errorMessage(error));
+    } finally {
+      if (!disposed) {
+        try {
+          ports.onSettled?.(lastServerLoadOk);
+        } catch {
+          // Connection presentation never changes the catalog load result.
+        }
+      }
     }
   };
 

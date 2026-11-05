@@ -288,10 +288,13 @@
     "supervisorSelection": "selectable-certified-backend-not-default"
   },
   "nativeFastpath": {
-    "activation": "explicit-existing-local-base-measured-3x-fsync-win",
+    "activation": "explicit-or-automatic-existing-local-base-measured-3x-fsync-or-3x-metadata-win-within-2x-fsync-regression",
     "transport": "daemon-only-strict-local-commit",
     "markerMaximumBytes": 16384,
     "minimumFsyncSpeedup": 3,
+    "minimumMetadataSpeedup": 3,
+    "maximumFsyncRegression": 2,
+    "automaticAdmission": "fastpath-admission-auto-serves-classic-on-typed-pre-relocation-refusal-fenced-and-integrity-errors-fail-closed",
     "sourceFence": "exclusive-source-lease-and-durable-FASTPATH-marker",
     "preparation": "FASTPATH_PENDING-source-uuid-sequence-hash-paths-resume-only-unchanged-source",
     "namespace": "sha256-utf8-canonical-durable-authority-path",
@@ -308,7 +311,10 @@
     "lossWindow": "acknowledged-local-commits-after-latest-complete-shadow-snapshot-if-local-volume-is-lost",
     "recovery": "resume-native-restore-or-restore-lost-front-from-same-lineage-shadow-never-stale-seed",
     "exit": "offline-fastpath-export-to-new-verified-authority-preserve-all-original-artifacts",
-    "readinessField": "nativeFastpath-null-or-effective-paths-and-sync-cadence"
+    "readinessField": "nativeFastpath-null-or-effective-paths-and-sync-cadence",
+    "readinessDeclinedField": "nativeFastpathDeclined-null-or-auto-admission-typed-refusal-reason-and-bounded-detail",
+    "automaticSelection": "supervisor-nominates-shared-placement-native-authority-base-from-background-census-capacity-inodes-activation-cost-and-probe-mirror",
+    "capacityGovernance": "pressure-reclaims-reconstructible-co-tenants-critical-requests-journaled-lossless-export-before-next-launch"
   },
   "resourceProbe": {
     "lifecycle": "one-shot-before-authority-open",
@@ -406,23 +412,27 @@
     }
   },
   "nativeResourceExhaustionDiagnostics": {
-    "contract": "tofudb.resource-exhaustion-reasons/v1",
+    "contract": "tofudb.resource-exhaustion-reasons/v2",
     "field": "resourceExhaustionReasons",
     "reasonNames": [
       "raw_archive_owner_capacity",
       "raw_archive_conversation_capacity",
       "raw_archive_restore_byte_budget",
       "domain_resource_bound",
+      "capacity_quota",
       "request_accounting_overflow",
       "allocation_reservation_failure",
       "os_memory_failure",
       "other"
     ],
-    "fixedCounterBytes": 64,
-    "formatScratchBytes": 256,
-    "scope": "process-cumulative reason for io OutOfMemory mapped to unchanged ResourceExhausted; no direct semantic resource failures or host OOM inference",
-    "classification": "exact internal constant whitelist, typed TryReserveError, raw OS ENOMEM; otherwise other",
-    "privacy": "only fixed reason labels and counts; never paths, keys, request bodies or original error text",
+    "fixedCounterBytes": 72,
+    "scope": "process-cumulative reason and retry policy of every database_resource_exhausted refusal: io OutOfMemory classified by the semantic mapper and bounds the semantic surface enforces itself; no host OOM inference",
+    "classification": "the class the construction site declares through a typed resource_exhaustion constructor (domain bound, capacity quota, accounting overflow, reservation failure, raw-archive capacity), a typed TryReserveError, or a raw OS ENOMEM; anything else is other and message text is never evidence",
+    "nonRetryableReasons": [
+      "domain_resource_bound"
+    ],
+    "retryPolicy": "a database_resource_exhausted refusal whose reason is a nonRetryableReason arrives retryable=false with its fixed construction-site literal as errorMessage (a deterministic bound that the identical request re-hits); every other reason stays retryable=true and echoes the code (transient capacity, quota or memory shedding)",
+    "privacy": "only fixed reason labels and counts; never paths, keys, request bodies or original error text; a bound's errorMessage is a compile-time literal",
     "lifecycle": "process-local counters; no worker, cache, persistent state or per-request log IO",
     "snapshotConsistency": "independent atomic loads; not a transactional multi-counter snapshot"
   },

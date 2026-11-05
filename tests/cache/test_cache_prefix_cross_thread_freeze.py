@@ -17,8 +17,8 @@ thread is cold. Raising the floor only ever PROTECTS more messages from
 compaction — cache-safe by construction.
 
 Pins:
-  1. cross-thread fallback returns the prior thread's boundary when the
-     current thread is cold (the fix).
+  1. cross-thread fallback returns the prior thread's boundary (its whole
+     sent count) when the current thread is cold (the fix).
   2. own warm state still wins (no regression to the same-thread path).
   3. an unrelated conv's state never leaks into the boundary.
   4. END-TO-END freeze: a tool_result that entered the cached prefix on
@@ -70,9 +70,9 @@ def test_cross_thread_fallback_returns_prior_thread_boundary():
         st._cache_states[(1, conv, 999999)] = _make_state(200, read=50000)
     try:
         # Current real thread has NO entry for this conv → without the fix
-        # this returns 0; with the fix it returns the sibling's 200-2.
+        # this returns 0; with the fix it returns the sibling's sent 200.
         got = get_cache_prefix_count(conv, user_id=1)
-        assert got == 198, f'expected cross-thread fallback 198, got {got}'
+        assert got == 200, f'expected cross-thread fallback 200, got {got}'
     finally:
         with st._cache_lock:
             st._cache_states.clear()
@@ -91,7 +91,7 @@ def test_own_warm_state_still_wins():
         st._cache_states[(1, conv, 111111)] = _make_state(999, read=60000)
     try:
         got = get_cache_prefix_count(conv, user_id=1)
-        assert got == 298, f'own warm state must win (298), got {got}'
+        assert got == 300, f'own warm state must win (300), got {got}'
     finally:
         with st._cache_lock:
             st._cache_states.clear()
@@ -124,7 +124,7 @@ def test_same_conversation_id_never_leaks_across_owners():
         st._cache_states[(2, conv, 222222)] = _make_state(500, read=90000)
     try:
         assert get_cache_prefix_count(conv, user_id=1) == 0
-        assert get_cache_prefix_count(conv, user_id=2) == 498
+        assert get_cache_prefix_count(conv, user_id=2) == 500
     finally:
         with st._cache_lock:
             st._cache_states.clear()
@@ -152,8 +152,8 @@ def test_single_zero_round_does_not_open_guard():
         st._cache_states[(1, conv, 333333)] = _s
     try:
         got = get_cache_prefix_count(conv, user_id=1)
-        assert got == 398, (
-            f'one cold round must NOT open the guard (398), got {got}')
+        assert got == 400, (
+            f'one cold round must NOT open the guard (400), got {got}')
     finally:
         with st._cache_lock:
             st._cache_states.clear()
@@ -186,63 +186,16 @@ def test_cold_streak_never_reopens_guard():
     try:
         # Below-threshold sibling holds its floor (max semantics).
         got = get_cache_prefix_count(conv, user_id=1)
-        assert got == 498, (
-            f'below-threshold sibling must hold the floor (498), got {got}')
+        assert got == 500, (
+            f'below-threshold sibling must hold the floor (500), got {got}')
         # Even with ONLY streak-cold entries the boundary must NOT collapse:
         # the sent prefix stays frozen; a genuinely dead cache is recovered
         # by one ordinary re-write, not by letting L1 rewrite history.
         with st._cache_lock:
             del st._cache_states[(1, conv, 555555)]
         got_cold = get_cache_prefix_count(conv, user_id=1)
-        assert got_cold == 398, (
-            f'streak-cold must not reopen the guard (398), got {got_cold}')
-    finally:
-        with st._cache_lock:
-            st._cache_states.clear()
-
-
-@pytest.mark.parametrize('cold_streak', [0, 1, 2])
-def test_warm_read_keeps_durable_baseline_before_guard_opens(
-    monkeypatch, cold_streak,
-):
-    """A transient miss must not make a warm prefix look free to rewrite."""
-    st = _fresh_state_module()
-    from lib.tasks_pkg.cache_tracking import _persist
-    conv = f'warm-read-transient-{cold_streak}'
-
-    monkeypatch.setattr(
-        _persist, 'read_last_turn_cache_read',
-        lambda _conv_id, *, user_id: 90_000)
-    with st._cache_lock:
-        st._cache_states.clear()
-        current = _make_state(400, read=0, write=0)
-        current.cold_streak = cold_streak
-        st._cache_states[st._state_key(conv, user_id=1)] = current
-    try:
-        assert st.get_warm_cache_read(conv, user_id=1) == 90_000
-    finally:
-        with st._cache_lock:
-            st._cache_states.clear()
-
-
-def test_verified_cold_current_task_overrides_stale_warm_fallbacks(monkeypatch):
-    """Round three is newer evidence than durable or sibling warm history."""
-    st = _fresh_state_module()
-    from lib.tasks_pkg.cache_tracking import _persist
-    conv = 'warm-read-proven-cold'
-
-    monkeypatch.setattr(
-        _persist, 'read_last_turn_cache_read',
-        lambda _conv_id, *, user_id: 90_000)
-    with st._cache_lock:
-        st._cache_states.clear()
-        current = _make_state(400, read=0, write=0)
-        current.cold_streak = st.COLD_STREAK_GUARD_OPEN
-        st._cache_states[st._state_key(conv, user_id=1)] = current
-        st._cache_states[(1, conv, 999999)] = _make_state(
-            500, read=120_000, write=0)
-    try:
-        assert st.get_warm_cache_read(conv, user_id=1) == 0
+        assert got_cold == 400, (
+            f'streak-cold must not reopen the guard (400), got {got_cold}')
     finally:
         with st._cache_lock:
             st._cache_states.clear()
@@ -304,7 +257,7 @@ def test_e2e_single_miss_keeps_prefix_frozen_then_recovers():
     from lib.tasks_pkg.cache_tracking._detect import detect_cache_break
     from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
     conv = 'conv-streak-e2e'
-    # 9 messages → a sent prefix of 7 (EDITABLE_TAIL_COUNT=2).
+    # 9 messages sent → all 9 are the protected prefix.
     msgs = [{'role': 'system', 'content': 'S' * 200}]
     for i in range(4):
         msgs.append({'role': 'user', 'content': f'u{i}'})
@@ -315,23 +268,23 @@ def test_e2e_single_miss_keeps_prefix_frozen_then_recovers():
         # Round 1: warm (a big write establishes the entry).
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
                            usage=_usage(0, 90000), user_id=1)
-        assert get_cache_prefix_count(conv, user_id=1) == 7
+        assert get_cache_prefix_count(conv, user_id=1) == 9
         # Round 2: the transient gateway miss (read=0, write=0). Guard must
         # stay UP — this is exactly where the old gate collapsed and let L1
         # rewrite msg[35]/msg[42].
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
                            usage=_usage(0, 0), user_id=1)
-        assert get_cache_prefix_count(conv, user_id=1) == 7, (
+        assert get_cache_prefix_count(conv, user_id=1) == 9, (
             'one transient miss opened the guard — the 2026-08-01 loop')
         # Round 3: still zero (write-visibility race). Guard STILL up.
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
                            usage=_usage(0, 0), user_id=1)
-        assert get_cache_prefix_count(conv, user_id=1) == 7
+        assert get_cache_prefix_count(conv, user_id=1) == 9
         # Round 4: the entry is read back (bytes never mutated) → streak
         # resets, guard remains.
         detect_cache_break(conv, msgs, None, 'claude-opus-4',
                            usage=_usage(85000, 0), user_id=1)
-        assert get_cache_prefix_count(conv, user_id=1) == 7
+        assert get_cache_prefix_count(conv, user_id=1) == 9
         assert st._cache_states[(1, conv, __import__('threading').get_ident())].cold_streak == 0
     finally:
         with st._cache_lock:
@@ -452,8 +405,7 @@ def test_e2e_prefix_frozen_across_fresh_thread_turn():
 
     built = _build_convo_with_cold_tool()
     n = len(built)
-    from lib.tasks_pkg.cache_tracking._detect import EDITABLE_TAIL_COUNT
-    prior_boundary = max(0, n - EDITABLE_TAIL_COUNT)  # what a warm sibling holds
+    prior_boundary = n  # what a warm sibling holds: its whole sent request
 
     # Turn A cached this exact prefix (no mutation — the reference bytes).
     fp_cached = canonical_messages(built)
@@ -583,7 +535,7 @@ def test_persisted_floor_maxed_with_memory_sibling():
             # a LIVE warm sibling with a LARGER boundary (298)
             st._cache_states[(1, conv, 424242)] = _make_state(300, read=70000)
         got = get_cache_prefix_count(conv, user_id=1)
-        assert got == 298, f'max(mem 298, persisted 100) == 298, got {got}'
+        assert got == 300, f'max(mem 300, persisted 100) == 300, got {got}'
     finally:
         mp.undo()
         with st._cache_lock:
@@ -600,7 +552,6 @@ def test_boundary_clamped_when_history_shrinks():
     (bug); compaction would be fully suppressed."""
     st = _fresh_state_module()
     from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
-    from lib.tasks_pkg.cache_tracking._detect import EDITABLE_TAIL_COUNT
     import lib.tasks_pkg.cache_tracking._persist as _persist
     conv = 'conv-shrink-1'
     _persist._reset_read_cache_for_tests()
@@ -615,12 +566,12 @@ def test_boundary_clamped_when_history_shrinks():
         _persist.advance_persisted_boundary(conv, 398, user_id=1)  # durable HWM also large
 
         # History has since SHRUNK to 50 messages (post macro-compaction).
+        # The boundary falls to what exists; once the shrunk request is sent
+        # the thread's own state takes over (L1 keeps working — see
+        # tests/compaction/test_l1_sent_step_admission.py).
         clamped = get_cache_prefix_count(conv, current_msg_count=50, user_id=1)
-        assert clamped == 50 - EDITABLE_TAIL_COUNT == 48, (
-            f'clamp: boundary must fall to current 48, got {clamped}')
-        # It must be < current_msg_count so is_in_cache_prefix leaves the tail
-        # editable → micro_compact still runs.
-        assert clamped < 50
+        assert clamped == 50, (
+            f'clamp: boundary must fall to the current 50, got {clamped}')
 
         # NEUTER: no current_msg_count → clamp off → the stale monotonic value
         # (the bug: boundary >= real message count → compaction fully disabled).

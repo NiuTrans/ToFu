@@ -9,7 +9,7 @@ export type ResumeOption = Omit<Partial<TurnResumeOption>, 'operation'> & {
 
 export interface TurnFinishPresentation {
   tone: 'success' | 'warning' | 'error';
-  label: 'Completed' | 'Interrupted' | 'Truncated' | 'Failed';
+  label: 'Completed' | 'Interrupted' | 'Truncated' | 'Refused' | 'Failed';
   detail: string;
   errorKind?: string;
   retryable?: boolean;
@@ -18,6 +18,17 @@ export interface TurnFinishPresentation {
 
 function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value ? value : fallback;
+}
+
+/** Settlement causes of a content-filter outcome (`lib/turn_verdict`). */
+const REFUSAL_CAUSES: ReadonlySet<string> = new Set(['model_refusal', 'content_filter']);
+
+/** A truncated turn ended by a model refusal or a gateway content filter. */
+export function isRefusedTurn(
+  turn: Pick<TurnRecord, 'status' | 'settlement'> | null | undefined,
+): boolean {
+  return turn?.status === 'truncated'
+    && REFUSAL_CAUSES.has(String(turn.settlement?.cause ?? ''));
 }
 
 /** Use a matching, complete server clock; never reconstruct elapsed time. */
@@ -70,6 +81,16 @@ export function presentTurnFinish(
       tone: 'warning',
       label: 'Interrupted',
       detail: text(settlement.cause, 'generation_interrupted'),
+      resumeOptions: resumeTurnOptions(turn),
+    };
+  }
+  if (isRefusedTurn(turn)) {
+    const error = normalizeErrorEnvelope(settlement.error);
+    return {
+      tone: 'warning',
+      label: 'Refused',
+      detail: text(error?.message, text(error?.detail, text(settlement.cause, 'content_filter'))),
+      ...(error?.kind ? { errorKind: error.kind } : {}),
       resumeOptions: resumeTurnOptions(turn),
     };
   }

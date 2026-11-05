@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from lib.vite_assets import validate_vite_artifact
+from tests._jsdom import require_shipped_graph
 
 
 pytestmark = pytest.mark.unit
@@ -33,6 +34,7 @@ def test_shell_has_one_vite_asset_slot_and_no_classic_inventory():
 
 
 def test_vite_manifest_closes_over_every_emitted_asset():
+    require_shipped_graph()
     manifest = validate_vite_artifact()
     assert manifest['frontend/src/main.ts']['isEntry'] is True
     assert manifest['frontend/src/admin.ts']['isEntry'] is True
@@ -40,7 +42,7 @@ def test_vite_manifest_closes_over_every_emitted_asset():
 
 
 def test_main_registers_runtime_before_lazy_feature_dispatch():
-    source = _read('frontend/src/main.ts')
+    source = _read('frontend/src/application.ts')
     assert "from './runtime/app-runtime.js'" in source
     runtime_at = source.index("from './runtime/app-runtime.js'")
     feature_at = source.index("import('./features/settings')")
@@ -70,11 +72,11 @@ def test_orchestration_transport_and_views_are_explicit_vite_owners():
 def test_classic_bundler_and_feature_bridge_are_removed():
     assert not (ROOT / 'lib/js_bundler.py').exists()
     assert not (ROOT / 'static/js').exists()
-    assert 'feature-bridge.js' not in _read('frontend/src/main.ts')
+    assert 'feature-bridge.js' not in _read('frontend/src/application.ts')
 
 
 def test_feature_domains_are_dynamic_imports_not_a_monolithic_bundle():
-    source = _read('frontend/src/main.ts')
+    source = _read('frontend/src/application.ts')
     for domain in (
         'settings', 'memory', 'skills', 'paper', 'image', 'project-brain',
         'myday', 'orchestration', 'infrastructure',

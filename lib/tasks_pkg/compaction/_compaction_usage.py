@@ -67,8 +67,9 @@ def record_compaction_usage(conv_id: str, usage: dict | None,
             'usage': dict(usage),
         }
         if isinstance(dispatch, dict):
-            if dispatch.get('model'):
-                call_row['model'] = str(dispatch['model'])
+            if dispatch.get('logical_model') or dispatch.get('model'):
+                call_row['model'] = str(
+                    dispatch.get('logical_model') or dispatch['model'])
             if dispatch.get('provider_id'):
                 call_row['provider_id'] = str(dispatch['provider_id'])
         calls = acc.setdefault('calls', [])

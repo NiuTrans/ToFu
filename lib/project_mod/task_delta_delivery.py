@@ -7,6 +7,7 @@ independent of workspace delivery. No validation checkout is materialized.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tempfile
 
@@ -14,17 +15,131 @@ from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_claims
 from lib.project_mod.delivery_retry import input_fingerprint, retry_evidence, conflicted_paths, pin_receipt
 
 
-def _merge_workspace_delta(root, source, patch_path, task_id, index_path):
+def checkpoint_has_no_delta(row) -> bool:
+    """Prove an ordinary captured task has no filesystem effect to authorize."""
+    from lib import integration_control as ic
+
+    origin = row.get('origin') or {}
+    if (origin.get('delivery') or {}).get('repair'):
+        return False  # Repair proposals retain their independent publication fence.
+    baseline = origin.get('sourceSnapshot') or origin.get('inputHeadSha')
+    checkpoint = row.get('checkpoint_sha')
+    return bool(baseline and checkpoint and ic._git(
+        Path(row['project_root']), ['diff', '--quiet', baseline, checkpoint, '--'],
+    ).returncode == 0)
+
+
+def retired_workspace_placeholder(root: Path, workspace: Path) -> bool:
+    """Recognize a removed checkout's empty/file-history-bootstrap directory.
+
+    An existing Git identity, registered worktree, symlink, or durable file
+    prevents reclamation. Git discovery must never walk into the parent repo
+    and mistake its HEAD/index for this former checkout's identity.
+    """
+    from lib import integration_control as ic
+    from lib.file_history.store import readme_path
+
+    marker = workspace / '.git'
+    if workspace.is_symlink() or marker.exists() or marker.is_symlink():
+        return False
+    listed = ic._git(root, ['worktree', 'list', '--porcelain'], check=True).stdout
+    if any(Path(line[9:]).resolve() == workspace.resolve()
+           for line in listed.splitlines() if line.startswith('worktree ')):
+        return False
+    history_marker = Path(readme_path(str(workspace)))
+    pending = [workspace]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    return False
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif not entry.is_file(follow_symlinks=False) or Path(entry.path) != history_marker:
+                    return False
+    return True
+
+
+def _canonical_tree(root, head):
+    """Capture live checkout bytes as a tree; comparisons never mint a commit.
+
+    Retry polls of a blocked delivery used to commit every capture of a shared
+    checkout that other sessions keep editing: one unreachable commit per poll
+    and task (63k of 89k unreachable loose objects in Tofu's repository on
+    2026-10-27). Only a merge, a pin or a receipt needs the commit.
+    """
+    from lib import integration_control as ic
+    with tempfile.TemporaryDirectory(prefix='tofu-index-') as directory:
+        return ic._alternate_index_tree(root, head, str(Path(directory) / 'index'))
+
+
+def _tree_entries(root, rev, paths):
+    from lib import integration_control as ic
+    listed = ic._git(root, ['--literal-pathspecs', 'ls-tree', '-r', '-z', '--full-tree', rev,
+                            '--', *paths], check=True).stdout
+    entries = {}
+    for entry in listed.split('\0'):
+        if '\t' in entry:
+            meta, path = entry.split('\t', 1)
+            mode, _, blob = meta.split(' ')
+            entries[path] = (mode, blob)
+    return entries
+
+
+def _pending_task_paths(root, source, baseline, checkpoint):
+    """Split the task delta against the captured canonical source.
+
+    Overlapping chains re-carry commits already delivered under other SHAs.
+    A path whose source entry already equals the checkpoint entry is applied;
+    re-applying it would only fail. `git apply --3way` cannot merge a creation
+    patch onto an existing path (it reports "does not match index"), so a path
+    the task creates that the source already holds with other bytes is an
+    add/add conflict named explicitly.
+    """
+    from lib import integration_control as ic
+    paths = [path for path in ic._git(root, ['diff', '--no-renames', '--name-only', '-z',
+                                             baseline, checkpoint], check=True).stdout.split('\0') if path]
+    if not paths:
+        return [], []
+    before, current, wanted = (_tree_entries(root, rev, paths) for rev in (baseline, source, checkpoint))
+    pending = [path for path in paths if current.get(path) != wanted.get(path)]
+    conflicts = [path for path in pending
+                 if path not in before and path in current and path in wanted]
+    return pending, conflicts
+
+
+def _merge_workspace_delta(root, source, patch_path, task_id, index_path, baseline, checkpoint):
     """Resolve against captured workspace bytes without touching its index."""
     from lib import integration_control as ic
 
     environment = {'GIT_INDEX_FILE': str(index_path)}
     ic._git(root, ['read-tree', source], env=environment, check=True)
-    applied = ic._git(root, ['apply', '--cached', '--3way', '--whitespace=nowarn',
-                             str(patch_path)], env=environment)
+    pending, created_conflicts = _pending_task_paths(root, source, baseline, checkpoint)
+    if created_conflicts:
+        return '', ('task and canonical both created different content at: '
+                    + ', '.join(created_conflicts[:20])), sorted(created_conflicts)
+    if pending:
+        Path(patch_path).write_text(ic._git(root, [
+            '--literal-pathspecs', 'diff', '--no-renames', '--binary', '--full-index', '--no-ext-diff',
+            '--no-textconv', baseline, checkpoint, '--', *pending], check=True).stdout, encoding='utf-8')
+        applied = ic._git(root, ['apply', '--cached', '--3way', '--whitespace=nowarn',
+                                 str(patch_path)], env=environment)
+    else:
+        applied = ic._git(root, ['write-tree'], env=environment)
     if applied.returncode:
         conflicts = ic._git(root, ['ls-files', '-u', '-z'], env=environment, check=True).stdout
-        return '', applied.stderr or applied.stdout or f'Git merge failed with exit {applied.returncode}', conflicted_paths(conflicts)
+        paths = conflicted_paths(conflicts)
+        from lib.project_mod.generated_integration import (
+            GeneratedOutputError, resolve_generated_conflicts)
+        try:
+            rebuilt = resolve_generated_conflicts(root, paths, checkpoint,
+                lambda _root, args, env=None, **kwargs: ic._git(
+                    root, args, env={**environment, **(env or {})},
+                    input_text=kwargs.pop('stdin', None), **kwargs))
+        except GeneratedOutputError as error:
+            return '', str(error), paths
+        if rebuilt is None:
+            return '', applied.stderr or applied.stdout or f'Git merge failed with exit {applied.returncode}', paths
     tree = ic._git(root, ['write-tree'], env=environment, check=True).stdout.strip()
     target = ic._git(root, ['commit-tree', tree, '-p', source, '-m',
                             f'Tofu workspace delivery: {task_id}'], env={
@@ -59,6 +174,8 @@ def deliver_task_delta(row, receipt, save_receipt):
     claims = [('file', str(root / path)) for path in changed]
 
     def hold(latest, current):
+        if not changed and not repair:
+            return None  # Terminal bookkeeping has no filesystem publication.
         from lib.project_dispatch.publication import publication_reason
         reason = publication_reason(latest, current)
         if reason:
@@ -114,12 +231,18 @@ def deliver_task_delta(row, receipt, save_receipt):
             if not allowed:
                 return receipt
             head = ic._rev(root, 'HEAD')
-            source = ic._alternate_index_checkpoint(
-                root, head, task_id, reuse_commit=(receipt.get('retry') or {}).get('sourceSha') or '')
-            if not changed:
+            if (head and ic._git(root, [
+                    'merge-base', '--is-ancestor', checkpoint, head]).returncode == 0):
                 return save(locked=True, state='delivered', phase='no_changes', reason='',
                             checkpointSha=row['checkpoint_sha'], deltaCheckpointSha=checkpoint,
-                            headSha=head, targetSha=source, publicationMode='working_tree')
+                            headSha=head, targetSha=head, publicationMode='committed')
+            source = _canonical_tree(root, head)
+            reuse = (receipt.get('retry') or {}).get('sourceSha') or ''
+            if not changed:
+                return save(locked=True, state='delivered', phase='no_changes', reason='',
+                            checkpointSha=row['checkpoint_sha'], deltaCheckpointSha=checkpoint, headSha=head,
+                            targetSha=ic._checkpoint_tree(root, head, source, task_id, reuse_commit=reuse),
+                            publicationMode='working_tree')
             previous_target = receipt.get('targetSha')
             if (receipt.get('phase') == 'commit_adoption' and previous_target and head
                     and receipt.get('checkpointSha') == row['checkpoint_sha']
@@ -146,6 +269,7 @@ def deliver_task_delta(row, receipt, save_receipt):
                 return save(locked=True, state='blocked', phase='workspace_adoption',
                             reason=(receipt.get('reason') if receipt.get('reason') != 'workspace_busy' else
                                     'task_delta_conflict: unchanged conflict inputs require an owned repair checkpoint'))
+            source = ic._checkpoint_tree(root, head, source, task_id, reuse_commit=reuse)
 
         patch = ic._git(root, ['diff', '--binary', '--full-index', '--no-ext-diff',
                               '--no-textconv', baseline, checkpoint], check=True).stdout
@@ -153,7 +277,7 @@ def deliver_task_delta(row, receipt, save_receipt):
             patch_path = Path(directory) / 'task.patch'
             patch_path.write_text(patch, encoding='utf-8')
             target, conflict, paths = _merge_workspace_delta(
-                root, source, patch_path, task_id, Path(directory) / 'index')
+                root, source, patch_path, task_id, Path(directory) / 'index', baseline, checkpoint)
             if conflict:
                 with ic._repo_lock(str(root)):
                     ref = f'refs/tofu/delivery-inputs/u{owner}/{ic._safe_task(task_id)}'
@@ -169,7 +293,7 @@ def deliver_task_delta(row, receipt, save_receipt):
                 _, receipt, allowed = admitted()
                 if not allowed:
                     return receipt
-                current = ic._alternate_index_checkpoint(root, ic._rev(root, 'HEAD'), task_id)
+                current = _canonical_tree(root, ic._rev(root, 'HEAD'))
                 if not same_paths(source, current):
                     return save(locked=True, state='blocked', phase='workspace_adoption',
                                 reason='canonical_changed_during_merge', retry=None)
@@ -201,9 +325,12 @@ def reclaim_delivered_workspace(row) -> bool:
 
     Called under the task tree-retirement lease, outside canonical writer admission.
     Immutable checkpoint refs retain delivered bytes. Uncaptured source/index
-    edits and ignored artifacts retain the checkout for recovery/undo.
+    edits and durable ignored artifacts, including FileHistory undo history,
+    retain the checkout for recovery/undo. Managed-repository shared-data links
+    are reconstructible; removal unlinks them without touching their targets.
     """
     from lib import integration_control as ic
+    from lib.file_history.store import readme_path
     if not row.get('managed'):
         return False
     baseline = (row.get('origin') or {}).get('sourceSnapshot')
@@ -218,6 +345,15 @@ def reclaim_delivered_workspace(row) -> bool:
     # ordinary delivered edits still look dirty. Compare against the captured
     # checkpoint, not HEAD, and require durable reachability before retirement.
     if ic._rev(root, ic._checkpoint_ref(int(row['user_id']), row['task_id'])) != checkpoint:
+        return False
+    if retired_workspace_placeholder(root, workspace):
+        return _retire_captured_workspace(row, root, workspace, baseline, checkpoint)
+    discovered = ic._git(workspace, ['rev-parse', '--show-toplevel', '--git-common-dir'])
+    identity = discovered.stdout.splitlines()
+    canonical = ic._git(root, ['rev-parse', '--git-common-dir'], check=True).stdout.strip()
+    if (discovered.returncode or len(identity) != 2
+            or Path(identity[0]).resolve() != workspace.resolve()
+            or (workspace / identity[1]).resolve() != (root / canonical).resolve()):
         return False
     source_head = ic._rev(workspace, 'HEAD')
     if not source_head or ic._git(root, ['merge-base', '--is-ancestor', source_head, checkpoint]).returncode:
@@ -248,10 +384,21 @@ def reclaim_delivered_workspace(row) -> bool:
         if any(not entry.is_symlink() for entry in dependencies.iterdir()):
             return False
     reconstructible = {'.venv', 'node_modules', '.pytest_cache', '.ruff_cache', '__pycache__'}
-    durable_ignored = [path for path in ignored.split('\0') if path
-                       and not any(part in reconstructible for part in Path(path).parts)]
+    # An empty FileHistory store is only its regenerated bootstrap marker;
+    # snapshots, the tracked index and backups remain durable undo history.
+    marker = Path(os.path.relpath(readme_path(str(workspace)), str(workspace))).as_posix()
+    from lib.project_mod.managed_repository import is_shared_link
+    durable_ignored = [path for path in ignored.split('\0') if path and path != marker
+                       and not any(part in reconstructible for part in Path(path).parts)
+                       and not is_shared_link(root, workspace, path)]
     if durable_ignored:
         return False
+    return _retire_captured_workspace(row, root, workspace, baseline, checkpoint)
+
+
+def _retire_captured_workspace(row, root, workspace, baseline, checkpoint):
+    from lib import integration_control as ic
+
     # Retain serialization only for identity revalidation and controlled Git
     # administration; discard/checkpoint changes during scans preserve the tree.
     with ic._repo_lock(str(root)):

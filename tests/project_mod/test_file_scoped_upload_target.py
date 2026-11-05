@@ -1,71 +1,55 @@
 """Rename-on-upload protects its actual candidate, not only the input path."""
+import os
 from pathlib import Path
 import threading
+import time
 
 import pytest
 
-from lib.project_mod.workspace_lease import workspace_file_write_lease
+from lib.project_mod.file_edit_mutex import file_edit_mutex
 from lib.project_mod.write_tools import _ops
 from tests.project_mod.test_file_scoped_publication import project as project  # noqa: F401
 
 pytestmark = pytest.mark.unit
 
 
-def test_busy_rename_candidate_does_not_get_overwritten_or_block_other_files(project, monkeypatch):
-    monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '0')
+def test_rename_candidate_taken_while_waiting_is_never_overwritten(project):
     target = Path(project, 'first (1).txt')
     ready, release = threading.Event(), threading.Event()
-    errors = []
+    errors, results = [], []
 
     def hold_candidate():
         try:
-            with workspace_file_write_lease(target):
+            with file_edit_mutex([os.path.realpath(target)]):
                 ready.set()
                 assert release.wait(5)
+                target.write_text('concurrent')
         except BaseException as error:
             errors.append(error)
             ready.set()
 
     worker = threading.Thread(target=hold_candidate)
+    uploader = threading.Thread(target=lambda: results.append(
+        _ops.save_uploaded_file(project, 'first.txt', b'upload', on_conflict='rename')))
     worker.start()
     try:
         assert ready.wait(5)
         assert not errors
-        result = _ops.save_uploaded_file(project, 'first.txt', b'upload', on_conflict='rename')
-        assert result['ok'] is False, result
-        assert not result.get('mutationApplied')
-        assert not target.exists()
-        assert Path(project, 'first.txt').read_text() == 'A'
+        # The candidate's mutex never delays an unrelated file.
         unrelated = _ops.tool_write_file(project, 'second.txt', 'other')
         assert unrelated['ok'], unrelated
+        uploader.start()
+        time.sleep(0.2)
+        assert results == []  # waits for the edit of its own candidate
     finally:
         release.set()
         worker.join(5)
-        assert not worker.is_alive()
-        assert not errors
-    result = _ops.save_uploaded_file(project, 'first.txt', b'upload', on_conflict='rename')
-    assert result['ok'], result
-    assert Path(result['path']).read_bytes() == b'upload'
-
-
-def test_candidate_occupied_between_selection_and_admission_is_not_clobbered(project, monkeypatch):
-    select = _ops._dedupe_target
-    intercepted = []
-
-    def competing_creation(path):
-        candidate = select(path)
-        if not intercepted:
-            Path(candidate).write_bytes(b'other-writer')
-            intercepted.append(candidate)
-        return candidate
-
-    monkeypatch.setattr(_ops, '_dedupe_target', competing_creation)
-    result = _ops.save_uploaded_file(project, 'first.txt', b'upload', on_conflict='rename')
-    assert len(intercepted) == 1
-    assert Path(intercepted[0]).read_bytes() == b'other-writer'
-    assert Path(project, 'first.txt').read_bytes() == b'A'
-    if result['ok']:
-        assert result['path'] != intercepted[0]
-        assert Path(result['path']).read_bytes() == b'upload'
-    else:
-        assert not result.get('mutationApplied')
+        if uploader.is_alive() or uploader.ident is not None:
+            uploader.join(5)
+    assert not worker.is_alive() and not uploader.is_alive()
+    assert not errors
+    (result,) = results
+    assert result['ok'] is False, result
+    assert not result.get('mutationApplied')
+    assert target.read_text() == 'concurrent'
+    assert Path(project, 'first.txt').read_text() == 'A'

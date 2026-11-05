@@ -1,47 +1,226 @@
-/* Agent tool chain */
-.sw-a-tools{display:flex;align-items:center;gap:var(--space-1);flex-wrap:wrap;margin-bottom:6px}
-.sw-a-tool-tag svg,.sw-dep-tag svg{display:block}
-.sw-a-tool-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-tertiary)}
-/* ── Per-agent execution timeline ── */
-.sw-a-timeline{display:flex;flex-direction:column;gap:2px;margin:6px 0;padding:6px var(--space-2);background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:6px}
-.sw-tl-row{font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-secondary)}
-.sw-tl-line{display:flex;align-items:center;gap:6px;padding:3px var(--space-1);border-radius:4px;transition:background .12s}
-.sw-tl-expandable .sw-tl-line{cursor:pointer}
-.sw-tl-expandable:hover .sw-tl-line{background:rgba(255,255,255,0.04)}
-.sw-tl-dot{display:inline-flex;align-items:center;justify-content:center;width:10px;height:10px;border-radius:50%;font-size:8px;flex-shrink:0;color:#fff;font-weight:700}
-.sw-tl-dot.sw-tl-running{background:rgba(251,191,36,0.55);box-shadow:0 0 0 2px rgba(251,191,36,0.15);animation:swTlPulse 1.2s ease-in-out infinite}
-.sw-tl-dot.sw-tl-done{background:rgba(74,222,128,0.6)}
-.sw-tl-dot svg{width:7px;height:7px}
-.sw-tl-dot.sw-tl-failed{background:rgba(248,113,113,0.6)}
-@keyframes swTlPulse{0%,100%{opacity:1}50%{opacity:0.45}}
-.sw-tl-icon{font-size:10px;opacity:0.85;flex-shrink:0}
-.sw-tl-name{color:var(--text-primary);font-weight:500;flex-shrink:0}
-.sw-tl-args{color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
-.sw-tl-elapsed{color:var(--text-tertiary);font-size:9px;flex-shrink:0;margin-left:auto}
-.sw-tl-chev{color:var(--text-tertiary);font-size:9px;transition:transform .15s;flex-shrink:0}
-.sw-tl-row.sw-tl-open .sw-tl-chev{transform:rotate(180deg)}
-.sw-tl-detail{display:none;margin:var(--space-1) 6px 2px 22px;padding:6px var(--space-2);background:rgba(0,0,0,0.18);border-left:2px solid rgba(255,255,255,0.1);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto}
-.sw-tl-row.sw-tl-open .sw-tl-detail,.sw-tl-row[open] .sw-tl-detail,.sw-a-latest .sw-tl-detail{display:block}
-summary.sw-tl-line{list-style:none}
-summary.sw-tl-line::-webkit-details-marker{display:none}
-.sw-tl-row[open] .sw-tl-chev{transform:rotate(180deg)}
-.sw-a-tool-history{max-height:320px;overflow:auto;overscroll-behavior:contain}
-@media (max-width:600px){.sw-header{flex-wrap:wrap}.sw-agent-grid{padding:var(--space-1) var(--space-2) 10px}.sw-a-header{gap:6px}.sw-tl-name{flex-shrink:1;overflow-wrap:anywhere}.sw-a-model{max-width:45%}}
-@media (prefers-reduced-motion:reduce){.sw-panel.sw-active,.sw-a-running .sw-a-status-icon,.sw-tl-dot.sw-tl-running,.sw-active .sw-header-icon{animation:none!important}.sw-a-body{animation:none}}
-.sw-tl-detail-error{border-left-color:#f87171;color:#fca5a5}
-.sw-tl-omitted,.sw-tl-truncated{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-tertiary)}
-.sw-tl-omitted{padding:2px var(--space-1);border-bottom:1px dashed rgba(255,255,255,0.08)}
-.sw-tl-truncated{margin-top:5px;padding-top:5px;border-top:1px dashed rgba(255,255,255,0.08)}
-/* Agent output preview */
-.sw-a-preview{font-size:var(--font-size-xs);color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:var(--space-2);background:rgba(255,255,255,0.02);border-radius:6px;border:1px solid rgba(255,255,255,0.04);max-height:220px;overflow-y:auto;overscroll-behavior:contain;white-space:pre-wrap;word-break:break-word}
-.sw-a-err{font-size:10px;color:#f87171;font-family:'JetBrains Mono',monospace;padding:var(--space-1) var(--space-2);background:rgba(248,113,113,0.05);border-radius:4px;margin-bottom:6px}
-.sw-a-err-title{font-weight:600;margin-bottom:var(--space-1)}
-.sw-a-err-details{margin-top:var(--space-1)}
-.sw-a-err-details>summary{cursor:pointer;color:var(--text-secondary)}
-.sw-a-err-details>summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.sw-a-err-reason{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;margin-top:var(--space-1)}
-.sw-a-meta{display:flex;align-items:center;gap:10px;font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
-/* ── Footer stats ── */
-.sw-footer{display:flex;align-items:center;gap:var(--space-3);padding:10px 18px;border-top:1px solid rgba(251,191,36,0.08);font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
-.sw-complete .sw-footer{border-top-color:rgba(74,222,128,0.08)}
-.sw-footer-sep{color:var(--text-tertiary);opacity:0.3}
+/* ── Agent work: per-call timeline, result and failure ──
+   Rows use the parent tool panel's glyph language: one tool glyph, tinted by
+   the call's state, then the tool name, its arguments and the elapsed time.
+   The latest call shows its output in a quiet well; earlier calls fold above
+   it. The timer card reuses these rows (.timer-poll-trace) so a poll's tool
+   activity reads like an agent's. */
+/* Bare tool names (no per-call record): quiet identities, not chips. */
+.sw-a-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin-block: var(--space-1) var(--space-2);
+}
+.sw-a-tool-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--tool-row-meta-ink);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  line-height: var(--leading-title);
+}
+.sw-a-tool-tag svg { display: block; flex: 0 0 auto; width: 12px; height: 12px; color: var(--tool-row-glyph-ink); }
+
+.sw-a-timeline { display: flex; flex-direction: column; min-width: 0; margin-block: var(--space-1); }
+.sw-a-tool-history {
+  min-width: 0;
+  max-height: 320px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sw-a-latest { min-width: 0; }
+.sw-a-activity-label,
+.sw-a-activity-empty {
+  padding-block: var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+}
+.sw-a-activity-label { font-weight: var(--weight-medium); letter-spacing: 0.02em; }
+
+.sw-tl-row { min-width: 0; color: var(--text-secondary); font-size: var(--conversation-font-size-caption); }
+.sw-tl-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--space-6);
+  border-radius: var(--radius-xs);
+}
+summary.sw-tl-line { list-style: none; cursor: pointer; }
+summary.sw-tl-line::-webkit-details-marker { display: none; }
+.sw-tl-expandable > .sw-tl-line:hover { background: var(--sw-hover); }
+.sw-tl-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--tool-row-glyph-ink);
+}
+.sw-tl-icon svg { display: block; width: 13px; height: 13px; }
+.sw-tl-running .sw-tl-icon { color: var(--tool-row-glyph-ink-live); animation: swTlPulse 1.2s ease-in-out infinite; }
+.sw-tl-failed .sw-tl-icon { color: var(--error-text); }
+.sw-tl-name {
+  flex: 0 0 auto;
+  max-width: 60%;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-tl-failed .sw-tl-name { color: var(--error-text); }
+.sw-tl-args {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-tl-elapsed {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  color: var(--tool-row-meta-ink);
+  font-variant-numeric: tabular-nums;
+}
+.sw-tl-chev {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  transform: rotate(-90deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.sw-tl-chev svg { display: block; }
+.sw-tl-row[open] .sw-tl-chev,
+.sw-tl-row.sw-tl-open .sw-tl-chev { transform: none; }
+/* Status dots remain for the timer card's poll trace. */
+.sw-tl-dot {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  color: var(--text-on-accent);
+}
+.sw-tl-dot svg { width: 7px; height: 7px; }
+.sw-tl-dot.sw-tl-done { background: var(--tool-row-ok-ink); }
+.sw-tl-dot.sw-tl-failed { background: var(--error-text); }
+.sw-tl-dot.sw-tl-running { background: var(--accent); animation: swTlPulse 1.2s ease-in-out infinite; }
+@keyframes swTlPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.sw-tl-detail {
+  display: none;
+  max-height: 200px;
+  margin: var(--space-1) 0 var(--space-2) var(--space-6);
+  padding: var(--space-2) var(--space-3);
+  overflow-y: auto;
+  border: var(--control-edge-inset) solid var(--sw-rule);
+  border-radius: var(--radius-xs);
+  background: var(--sw-well);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sw-tl-row[open] .sw-tl-detail,
+.sw-tl-row.sw-tl-open .sw-tl-detail,
+.sw-a-latest .sw-tl-detail { display: block; }
+.sw-tl-detail-error { border-color: var(--error-border); background: var(--error-bg); color: var(--error-text); }
+.sw-tl-omitted,
+.sw-tl-truncated {
+  color: var(--text-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-caption);
+}
+.sw-tl-omitted { padding-block: var(--space-1); }
+.sw-tl-truncated {
+  margin-top: var(--space-2);
+  padding-top: var(--space-1);
+  border-top: var(--control-edge-inset) dashed var(--sw-rule);
+}
+
+/* ── Result and failure ── */
+.sw-a-preview {
+  max-height: 220px;
+  margin-block: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: var(--control-edge-inset) solid var(--sw-rule);
+  border-radius: var(--radius-xs);
+  background: var(--sw-well);
+  color: var(--text-primary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sw-a-err {
+  margin-block: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--control-edge-inset) solid var(--error-border);
+  border-radius: var(--radius-xs);
+  background: var(--error-bg);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-body);
+}
+.sw-a-err-title { color: var(--error-text); font-weight: var(--weight-semibold); }
+.sw-a-err-details { margin-top: var(--space-1); }
+.sw-a-err-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-tertiary);
+  list-style: none;
+  cursor: pointer;
+}
+.sw-a-err-details > summary::-webkit-details-marker { display: none; }
+.sw-a-err-details > summary::after {
+  content: "";
+  box-sizing: border-box;
+  width: 6px;
+  height: 6px;
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.sw-a-err-details[open] > summary::after { transform: rotate(45deg); }
+.sw-a-err-details > summary:hover { color: var(--text-secondary); }
+.sw-a-err-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sw-a-err-reason {
+  max-height: 220px;
+  margin: var(--space-1) 0 0;
+  overflow: auto;
+  color: var(--error-text);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sw-a-meta {
+  color: var(--tool-row-meta-ink);
+  font-size: var(--conversation-font-size-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 600px) {
+  .sw-tl-detail { margin-inline-start: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.sw-a-running .sw-a-status-icon, .sw-tl-running .sw-tl-icon, .sw-tl-dot.sw-tl-running, .sw-spinner, .sw-async-dot) {
+    animation: none;
+  }
+  .sw-agent > .sw-a-body { animation: none; }
+}

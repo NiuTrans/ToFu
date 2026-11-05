@@ -32,7 +32,7 @@ Repository = "https://github.com/rangehow/ToFu"
 
 # ── Entry points: how the Tofu host discovers and mounts this plugin ──
 # Each group is consumed by a registry in core:
-#   tofu.blueprints → routes/plugin_registry.py::discover_blueprint_plugins
+#   tofu.blueprints → lib/app/plugin_registry.py::discover_blueprint_plugins
 #   tofu.storage    → lib/storage/plugin_registry.py::discover_plugin_manifests
 #   tofu.flags      → lib/feature_registry (feature-flag declarations)
 [project.entry-points."tofu.blueprints"]

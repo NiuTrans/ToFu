@@ -1,178 +1,215 @@
-/* ── Folder browser (standalone card) ── */
-.folder-browser {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-secondary);
-  overflow: hidden;
-  margin-bottom: var(--space-3);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+/* ── Shared server-folder browser ──────────────────────────────────────
+   Markup: frontend/src/features/project/folder-browser.ts, mounted by the
+   Project Co-Pilot workbench pane and by sidebar folder settings. Colors
+   read the --project-* roles so both hosts paint one paper/ink/gold card;
+   a host may retune only the frame through --folder-browser-frame. */
+.folder-browser{
+  display:flex;flex-direction:column;min-width:0;min-height:0;
+  background:var(--project-panel);color:var(--project-ink);
+  border:var(--folder-browser-frame,var(--project-panel-width) solid var(--project-ink));
+  border-radius:var(--radius);
+  box-shadow:var(--folder-browser-shadow,none);
+  overflow:hidden;
+  font-family:var(--font-ui);
 }
-.folder-browser-empty {
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
-  padding: 44px var(--space-5);
-  text-align: center;
-  font-size: 12.5px;
-  color: var(--text-tertiary);
-}
-.folder-browser-empty::before {
-  content: "";
-  width: 40px; height: 40px;
-  background: var(--accent-subtle);
-  border-radius: 12px;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'/%3E%3C/svg%3E") center / 22px no-repeat;
-          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z'/%3E%3C/svg%3E") center / 22px no-repeat;
-}
-.folder-browser-header {
-  display: flex; align-items: center; gap: 6px;
-  padding: 10px var(--space-3);
-  background: linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
-  border-bottom: 1px solid var(--border);
-  font-size: var(--font-size-sm);
-}
-/* ── Breadcrumb trail (VS Code style, clickable, scrolls horizontally) ── */
-.pm-breadcrumb {
-  flex: 1; min-width: 0;
-  display: flex; align-items: center; gap: 1px;
-  overflow-x: auto; overflow-y: hidden;
-  white-space: nowrap;
-  scrollbar-width: none;
-}
-.pm-breadcrumb::-webkit-scrollbar { display: none; }
-.pm-crumb {
-  flex-shrink: 0;
-  background: none; border: none; cursor: pointer;
-  color: var(--text-secondary);
-  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 500;
-  padding: 3px 6px; border-radius: var(--radius-xs); line-height: 1;
-  display: inline-flex; align-items: center;
-  transition: color 0.12s, background 0.12s;
-}
-.pm-crumb:hover { color: var(--text-primary); background: var(--bg-hover); }
-.pm-crumb-root { padding: var(--space-1) 6px; color: var(--text-tertiary); }
-.pm-crumb-current { color: var(--accent); font-weight: 700; }
-.pm-crumb-sep { flex-shrink: 0; color: var(--text-tertiary); opacity: 0.5; font-size: var(--font-size-xs); user-select: none; }
+.folder-browser [hidden]{display:none}
 
-.pm-up-btn, .pm-eye-btn {
-  flex-shrink: 0;
-  width: 28px; height: 28px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-xs);
-  cursor: pointer; color: var(--text-secondary);
-  transition: color 0.12s, background 0.12s, border-color 0.12s;
+/* Toolbar: up · breadcrumb trail · new folder · hidden toggle */
+.folder-browser-bar{
+  display:flex;align-items:center;gap:var(--space-1);flex-shrink:0;
+  padding:var(--space-2);
+  background:var(--project-band);
+  border-bottom:var(--control-edge-inset) solid var(--project-line);
 }
-.pm-up-btn:hover, .pm-eye-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
-.pm-up-btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
-.pm-eye-btn.active { background: var(--accent-subtle); color: var(--accent); border-color: rgba(110, 86, 207, 0.3); }
+.folder-browser-crumbs{flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+/* Long trails scroll to the open folder; fade the trimmed start instead of a hard cut. */
+.folder-browser-crumbs[data-clipped]{
+  -webkit-mask-image:linear-gradient(to right,transparent,black var(--space-6));
+  mask-image:linear-gradient(to right,transparent,black var(--space-6));
+}
+.folder-browser-crumbs::-webkit-scrollbar{display:none}
+.folder-browser-crumb-list{display:flex;align-items:center;margin:0;padding:0;list-style:none;white-space:nowrap}
+.folder-browser-crumb-item{display:flex;align-items:center;flex-shrink:0}
+.folder-browser-crumb-item+.folder-browser-crumb-item::before{
+  content:'/';color:var(--project-muted);opacity:0.5;
+  font-family:var(--font-mono);font-size:var(--font-size-sm);
+}
+/* A root crumb ("/", "C:\") already ends in a separator. */
+.folder-browser-crumb-item[data-root]+.folder-browser-crumb-item::before{content:none}
+.folder-browser-crumb{
+  display:inline-block;max-width:24ch;height:var(--control-h-sm);
+  padding:0 var(--space-1);
+  border:0;border-radius:var(--radius-xs);background:transparent;
+  color:var(--project-muted);
+  font-family:var(--font-mono);font-size:var(--font-size-sm);
+  line-height:var(--control-h-sm);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+button.folder-browser-crumb{cursor:pointer;transition:background var(--motion-fast) var(--ease-standard),color var(--motion-fast) var(--ease-standard)}
+button.folder-browser-crumb:hover{background:var(--bg-hover);color:var(--project-ink)}
+button.folder-browser-crumb:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.folder-browser-crumb[aria-current]{color:var(--project-ink);font-weight:var(--weight-semibold)}
 
-.folder-browser-list {
-  max-height: 260px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  padding: 6px;
+/* Filter that also accepts a typed path. Inputs sit inside legacy .modal
+   shells, so every inherited input declaration is restated here. */
+.folder-browser-search{
+  display:flex;align-items:center;gap:var(--space-2);flex-shrink:0;
+  margin:var(--space-2) var(--space-2) var(--space-1);
+  padding:0 var(--space-1) 0 var(--space-2);
+  border:var(--control-edge-inset) solid var(--project-line);
+  border-radius:var(--radius-sm);
+  background:var(--project-surface);
+  transition:border-color var(--motion-fast) var(--ease-standard),box-shadow var(--motion-fast) var(--ease-standard);
 }
-.folder-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: var(--space-2) 10px;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background 0.12s, box-shadow 0.12s;
-  font-size: var(--font-size-md);
-  position: relative;
+.folder-browser-search:focus-within{border-color:var(--project-accent);box-shadow:var(--focus-ring)}
+.folder-browser-search-icon{flex-shrink:0;width:var(--space-4);height:var(--space-4);color:var(--project-muted)}
+.folder-browser .folder-browser-input{
+  flex:1;min-width:0;width:auto;height:var(--control-h-md);
+  margin:0;padding:0;
+  border:0;border-radius:0;background:transparent;box-shadow:none;outline:none;
+  color:var(--project-ink);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  -webkit-appearance:none;appearance:none;
 }
-.folder-item:hover { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent); }
+.folder-browser .folder-browser-input::placeholder{color:var(--project-muted)}
+.folder-browser .folder-browser-filter::-webkit-search-cancel-button,
+.folder-browser .folder-browser-filter::-webkit-search-decoration{-webkit-appearance:none;appearance:none}
 
-/* Drag-and-drop-into-folder affordance (save-to-disk, distinct from chat drop) */
-.folder-browser.fb-drop-active { outline: 2px dashed var(--accent); outline-offset: -3px; border-radius: var(--radius-sm); }
-.folder-item.fb-drop-row {
-  background: var(--accent-subtle);
-  box-shadow: inset 0 0 0 2px var(--accent);
-}
-.folder-item.fb-drop-row .folder-name { color: var(--accent); }
-.folder-item.folder-hidden { opacity: 0.45; }
-.folder-item .fi-folder { flex-shrink: 0; transition: transform 0.12s; }
-.folder-item:hover .fi-folder { transform: scale(1.08); }
-.folder-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 18px; }
-.folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: var(--font-size-md); font-weight: 500; }
-.folder-code-badge {
-  font-size: 8.5px; padding: 2px 7px; font-weight: 700; letter-spacing: 0.04em;
-  background: rgba(245, 158, 11, 0.14); color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.22);
-  border-radius: 20px; font-family: 'JetBrains Mono', monospace; text-transform: uppercase;
-}
-.folder-item-count { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; font-family: 'JetBrains Mono', monospace; }
+/* Host content above the list (Co-Pilot remote devices) never starves it. */
+.folder-browser-prelude{flex-shrink:0;max-height:40%;overflow-y:auto;padding:0 var(--space-2)}
 
-/* Per-row "add to workspace" button — appears on hover */
-.folder-add-btn {
-  flex-shrink: 0; width: 25px; height: 25px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--accent-subtle); border: 1px solid transparent; border-radius: 8px;
-  color: var(--accent); cursor: pointer;
-  opacity: 0; transform: scale(0.7);
-  transition: opacity 0.12s, transform 0.12s, background 0.12s, color 0.12s;
+/* Scroll region and rows */
+.folder-browser-list{
+  flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  padding:var(--space-1) var(--space-2) var(--space-2);
 }
-.folder-item:hover .folder-add-btn { opacity: 1; transform: scale(1); }
-.folder-add-btn:hover { background: var(--accent); color: #fff; }
+.folder-browser-list:focus-visible{outline:none;box-shadow:inset var(--focus-ring)}
+.folder-browser-list[aria-busy="true"] .folder-browser-rows{opacity:0.55}
+.folder-browser-rows{display:flex;flex-direction:column;gap:var(--control-edge-inset)}
+.folder-browser-row{
+  position:relative;display:flex;align-items:center;gap:var(--space-1);
+  min-width:0;border-radius:var(--radius-sm);
+  transition:background var(--motion-fast) var(--ease-standard);
+}
+.folder-browser-row:hover{background:var(--bg-hover)}
+.folder-browser-row[data-added="true"]{background:color-mix(in srgb,var(--project-accent) 9%,transparent)}
+.folder-browser-row[data-added="true"]::before{
+  content:'';position:absolute;inset-block:var(--space-2);inset-inline-start:0;
+  width:var(--project-panel-width);border-radius:var(--radius-pill);background:var(--project-accent);
+}
+.folder-browser-open{
+  display:flex;align-items:center;gap:var(--space-2);flex:1;min-width:0;
+  height:var(--control-h-md);padding:0 var(--space-2);
+  border:0;border-radius:var(--radius-sm);background:transparent;
+  color:var(--project-ink);font-family:var(--font-ui);font-size:var(--font-size-md);
+  text-align:start;cursor:pointer;
+}
+.folder-browser-open:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.folder-browser-icon{flex-shrink:0;width:var(--space-4);height:var(--space-4);color:var(--project-muted)}
+.folder-browser-row[data-code="true"] .folder-browser-icon{color:var(--project-accent)}
+.folder-browser-name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--weight-medium)}
+.folder-browser-row[data-hidden-dir="true"] .folder-browser-name,
+.folder-browser-row[data-hidden-dir="true"] .folder-browser-icon{opacity:0.6}
+.folder-browser-badge{
+  flex-shrink:0;padding:0 var(--space-1);
+  border-radius:var(--radius-pill);
+  background:color-mix(in srgb,var(--project-accent) 16%,transparent);
+  color:var(--project-ink);
+  font-size:var(--font-size-xs);font-weight:var(--weight-semibold);line-height:var(--leading-body);
+}
+.folder-browser-count{
+  flex-shrink:0;margin-inline-start:auto;
+  color:var(--project-muted);font-size:var(--font-size-xs);font-variant-numeric:tabular-nums;
+}
+.folder-browser-chevron{flex-shrink:0;width:var(--space-3);height:var(--space-3);color:var(--project-muted);opacity:0.5}
+.folder-browser-name+.folder-browser-chevron,
+.folder-browser-badge+.folder-browser-chevron{margin-inline-start:auto}
+.folder-browser-row:hover .folder-browser-chevron{opacity:1;color:var(--project-ink)}
 
-/* Per-row "delete folder" button — appears on hover, mirrors the add button */
-.folder-del-btn {
-  flex-shrink: 0; width: 25px; height: 25px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(239, 68, 68, 0.10); border: 1px solid transparent; border-radius: 8px;
-  color: #ef4444; cursor: pointer;
-  opacity: 0; transform: scale(0.7);
-  transition: opacity 0.12s, transform 0.12s, background 0.12s, color 0.12s;
+/* Row actions reveal on hover/focus; touch keeps them reachable. */
+.folder-browser-row-actions{
+  display:flex;align-items:center;gap:var(--control-edge-inset);flex-shrink:0;
+  padding-inline-end:var(--space-1);
+  opacity:0;transition:opacity var(--motion-fast) var(--ease-standard);
 }
-.folder-item:hover .folder-del-btn { opacity: 1; transform: scale(1); }
-.folder-del-btn:hover { background: #ef4444; color: #fff; }
+.folder-browser-row:hover .folder-browser-row-actions,
+.folder-browser-row:focus-within .folder-browser-row-actions,
+.folder-browser-row[data-added="true"] .folder-browser-row-actions{opacity:1}
+.folder-browser-row[data-added="true"] [data-action="add"] svg{color:var(--project-accent)}
+@media(pointer:coarse){.folder-browser-row-actions{opacity:1}}
 
-/* Chevron drill-in affordance — subtle at rest, hidden on hover (add button takes over) */
-.folder-chevron { flex-shrink: 0; color: var(--text-tertiary); opacity: 0.35; transition: opacity 0.12s; }
-.folder-item:hover .folder-chevron { display: none; }
+/* Inline delete confirmation replaces the row in place. */
+.folder-browser-row[data-confirming]{background:var(--error-bg);box-shadow:inset 0 0 0 var(--control-edge-inset) var(--error-border)}
+.folder-browser-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);width:100%;padding:var(--space-2) var(--space-3)}
+.folder-browser-confirm-text{display:flex;flex-direction:column;gap:var(--space-1);flex:1 1 14rem;min-width:0;margin:0;font-size:var(--font-size-sm);line-height:var(--leading-title)}
+.folder-browser-confirm-text strong{color:var(--project-ink);overflow-wrap:anywhere}
+.folder-browser-confirm-text span{color:var(--project-muted)}
+.folder-browser-confirm-actions{display:flex;gap:var(--space-2);margin-inline-start:auto}
 
-/* Already-added folder: dimmed, check-marked, not re-addable */
-.folder-item.folder-added { background: rgba(245, 158, 11, 0.06); }
-.folder-item.folder-added .folder-name { color: var(--text-secondary); }
-.folder-item.folder-added .folder-add-btn { display: none; }
-.folder-item.folder-added::after {
-  content: "✓ added"; flex-shrink: 0;
-  font-size: 9.5px; font-weight: 700; letter-spacing: 0.03em;
-  color: #f59e0b; padding: 2px 7px;
-  background: rgba(245, 158, 11, 0.12); border-radius: 20px;
+/* Typed-path jump and inline folder creation */
+.folder-browser-jump{
+  display:flex;align-items:center;gap:var(--space-2);width:100%;min-width:0;
+  height:var(--control-h-md);margin-bottom:var(--space-1);padding:0 var(--space-2);
+  border:var(--control-edge-inset) dashed var(--project-accent);border-radius:var(--radius-sm);
+  background:color-mix(in srgb,var(--project-accent) 8%,transparent);
+  color:var(--project-ink);font-family:var(--font-ui);font-size:var(--font-size-md);
+  text-align:start;cursor:pointer;
 }
+.folder-browser-jump svg{flex-shrink:0;width:var(--space-4);height:var(--space-4);color:var(--project-accent)}
+.folder-browser-jump:hover{background:color-mix(in srgb,var(--project-accent) 14%,transparent)}
+.folder-browser-jump:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.folder-browser-jump-label{flex-shrink:0;font-weight:var(--weight-semibold)}
+.folder-browser-jump-path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--project-muted);font-family:var(--font-mono);font-size:var(--font-size-sm)}
+.folder-browser-create{
+  display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);
+  margin-bottom:var(--space-1);padding:var(--space-2);
+  border:var(--control-edge-inset) dashed var(--project-accent);border-radius:var(--radius-sm);
+  background:color-mix(in srgb,var(--project-accent) 6%,transparent);
+}
+.folder-browser-create .folder-browser-icon{color:var(--project-accent)}
+.folder-browser .folder-browser-create-input{
+  flex:1 1 8rem;height:var(--control-h-sm);padding:0 var(--space-2);
+  border:var(--control-edge-inset) solid var(--project-line);border-radius:var(--radius-xs);
+  background:var(--project-panel);
+}
+.folder-browser .folder-browser-create-input:focus{border-color:var(--project-accent);box-shadow:var(--focus-ring)}
+.folder-browser-create-error{flex-basis:100%;margin:0;color:var(--error-text);font-size:var(--font-size-sm);overflow-wrap:anywhere}
 
-.folder-browser-footer {
-  padding: 10px var(--space-3);
-  border-top: 1px solid var(--border);
-  background: linear-gradient(0deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
-  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+/* States */
+.folder-browser-state{
+  display:flex;align-items:center;justify-content:center;gap:var(--space-2);
+  padding:var(--space-8) var(--space-4);
+  color:var(--project-muted);font-size:var(--font-size-sm);text-align:center;
 }
-.folder-browser-footer kbd {
-  display: inline-block; min-width: 15px; text-align: center;
-  font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
-  padding: 0 var(--space-1); border-radius: 4px;
-  background: var(--bg-active); border: 1px solid var(--border-light);
-  color: var(--text-secondary);
+/* Empty but present: a live region must exist before its first message. */
+.folder-browser-state:empty{padding:0}
+.folder-browser-alert{
+  display:flex;align-items:center;gap:var(--space-2);
+  margin-bottom:var(--space-2);padding:var(--space-2) var(--space-3);
+  border:var(--control-edge-inset) solid var(--error-border);border-radius:var(--radius-sm);
+  background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-sm);
 }
+.folder-browser-alert-text{flex:1;min-width:0;overflow-wrap:anywhere}
+.folder-browser-note{margin:var(--space-2) 0 0;color:var(--project-muted);font-size:var(--font-size-xs);text-align:center}
 
-/* Transient browser states (loading / empty / error) — injected by project.js */
-.fb-state {
-  display: flex; flex-direction: column; align-items: center; gap: var(--space-3);
-  padding: 44px var(--space-5); text-align: center;
-  font-size: 12.5px; color: var(--text-tertiary);
+/* Footer: open path · add it */
+.folder-browser-footer{
+  display:flex;align-items:center;gap:var(--space-3);flex-shrink:0;
+  padding:var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  background:var(--project-band);
+  border-top:var(--control-edge-inset) solid var(--project-line);
 }
-.fb-state-spinner {
-  width: 26px; height: 26px;
-  border: 2.5px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+/* RTL box + isolated LTR path: overflow trims the path's start, so the
+   open folder's own name always stays visible. */
+.folder-browser-current{
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  direction:rtl;text-align:left;
+  color:var(--project-muted);font-family:var(--font-mono);font-size:var(--font-size-xs);
 }
-.fb-state-error { color: var(--error-text); }
-.fb-state-error::before {
-  content: "!"; flex-shrink: 0;
-  width: 30px; height: 30px; line-height: 28px;
-  font-weight: 800; font-size: var(--font-size-xl);
-  border: 2px solid currentColor; border-radius: 50%;
-  opacity: 0.7;
-}
+.folder-browser-footer .ui-btn{flex-shrink:0}
+
+/* Co-Pilot file drop onto the browser (project.js drop zone) */
+.folder-browser.fb-drop-active{outline:var(--project-panel-width) dashed var(--project-accent);outline-offset:calc(-2 * var(--project-panel-width))}
+.folder-browser-row.fb-drop-row{background:color-mix(in srgb,var(--project-accent) 16%,transparent);box-shadow:inset 0 0 0 var(--control-edge-inset) var(--project-accent)}
+.folder-browser-row.fb-drop-row .folder-browser-name{color:var(--project-ink)}
 

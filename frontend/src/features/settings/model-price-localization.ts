@@ -22,6 +22,9 @@ const LANGUAGE_LOCALE: Readonly<Record<string, string>> = Object.freeze({
   ja: 'ja-JP',
   ko: 'ko-KR',
   en: 'en-US',
+  fr: 'fr-FR',
+  de: 'de-DE',
+  ru: 'ru-RU',
 });
 
 function languageRoot(language: unknown): string {

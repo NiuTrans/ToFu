@@ -38,6 +38,41 @@
     {
       "creator_id": "moonshot",
       "model_ids": [
+        "kimi-k3.1-pro"
+      ],
+      "inference_profile": {
+        "source": "official",
+        "reasoning": {
+          "support": "supported",
+          "wire_format": "reasoning_effort",
+          "can_disable": false,
+          "supported_efforts": [
+            "low",
+            "high",
+            "max"
+          ],
+          "default_effort": "max",
+          "effort_map": {
+            "medium": "high",
+            "xhigh": "max",
+            "ultra": "max"
+          }
+        },
+        "sampling": {
+          "omit": [
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty"
+          ]
+        }
+      },
+      "evidence_url": "https://platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart",
+      "checked_at": "2026-10-27"
+    },
+    {
+      "creator_id": "moonshot",
+      "model_ids": [
         "kimi-k2.7-code",
         "kimi-k2.7-code-highspeed"
       ],
@@ -73,9 +108,17 @@
           "support": "supported",
           "wire_format": "reasoning_effort",
           "can_disable": false,
-          "supported_efforts": ["low", "medium", "high", "xhigh"],
+          "supported_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
           "default_effort": "high",
-          "effort_map": {"max": "xhigh", "ultra": "xhigh"}
+          "effort_map": {
+            "max": "xhigh",
+            "ultra": "xhigh"
+          }
         }
       }
     },
@@ -265,20 +308,62 @@
     },
     {
       "creator_id": "openai",
-      "model_ids": ["gpt-6.1-sol"],
+      "model_ids": [
+        "gpt-6.1-sol"
+      ],
       "inference_profile": {
         "source": "official",
         "reasoning": {
           "support": "supported",
           "wire_format": "reasoning_effort",
           "can_disable": false,
-          "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+          "supported_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
           "default_effort": "medium"
         },
-        "sampling": {"omit": ["temperature"]}
+        "sampling": {
+          "omit": [
+            "temperature"
+          ]
+        }
       },
       "evidence_url": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
       "checked_at": "2026-09-30"
+    },
+    {
+      "creator_id": "openai",
+      "model_ids": [
+        "gpt-6.1-terra"
+      ],
+      "inference_profile": {
+        "source": "official",
+        "reasoning": {
+          "support": "supported",
+          "wire_format": "reasoning_effort",
+          "can_disable": true,
+          "supported_efforts": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium"
+        },
+        "sampling": {
+          "omit": [
+            "temperature"
+          ]
+        }
+      },
+      "evidence_url": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+      "checked_at": "2026-10-28"
     },
     {
       "creator_id": "openai",
@@ -931,7 +1016,8 @@
         "deepseek-v4-pro",
         "deepseek-v4-flash-vision-exp",
         "deepseek-v4.1-flash",
-        "deepseek-v4-1-flash"
+        "deepseek-v4-1-flash",
+        "deepseek-v4.1-flash-1017"
       ],
       "inference_profile": {
         "source": "official",
@@ -977,7 +1063,7 @@
       ]
     },
     {
-      "creator_id": "meituan",
+      "creator_id": "yourprovider",
       "model_ids": [
         "LongCat-2.0"
       ],
@@ -1037,6 +1123,7 @@
           "support": "supported",
           "wire_format": "thinking_type",
           "enabled_type": "adaptive",
+          "display": "summarized",
           "effort_field": "effort",
           "can_disable": true,
           "supported_efforts": [
@@ -1066,7 +1153,6 @@
             "support": "supported",
             "wire_format": "thinking_type",
             "enabled_type": "adaptive",
-            "display": "summarized",
             "effort_field": "effort",
             "can_disable": true,
             "supported_efforts": [
@@ -1128,6 +1214,7 @@
           "support": "supported",
           "wire_format": "thinking_type",
           "enabled_type": "adaptive",
+          "display": "summarized",
           "effort_field": "effort",
           "can_disable": true,
           "supported_efforts": [
@@ -1150,7 +1237,37 @@
           ]
         }
       },
-      "evidence_url": "https://platform.claude.com/docs/en/models/sonnet-5-5/overview"
+      "evidence_url": "https://platform.claude.com/docs/en/models/sonnet-5-5/overview",
+      "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "thinking_type",
+            "enabled_type": "adaptive",
+            "effort_field": "effort",
+            "can_disable": true,
+            "supported_efforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default_effort": "high",
+            "effort_map": {
+              "ultra": "max"
+            }
+          },
+          "sampling": {
+            "omit": [
+              "temperature",
+              "top_p",
+              "top_k"
+            ]
+          }
+        }
+      ]
     },
     {
       "creator_id": "anthropic",
@@ -1164,6 +1281,7 @@
           "support": "supported",
           "wire_format": "thinking_type",
           "enabled_type": "adaptive",
+          "display": "summarized",
           "effort_field": "effort",
           "can_disable": true,
           "supported_efforts": [
@@ -1186,7 +1304,37 @@
           ]
         }
       },
-      "evidence_url": "https://platform.claude.com/docs/en/models/haiku-5-5/overview"
+      "evidence_url": "https://platform.claude.com/docs/en/models/haiku-5-5/overview",
+      "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "thinking_type",
+            "enabled_type": "adaptive",
+            "effort_field": "effort",
+            "can_disable": true,
+            "supported_efforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default_effort": "medium",
+            "effort_map": {
+              "ultra": "max"
+            }
+          },
+          "sampling": {
+            "omit": [
+              "temperature",
+              "top_p",
+              "top_k"
+            ]
+          }
+        }
+      ]
     },
     {
       "creator_id": "mistral",
@@ -1198,15 +1346,64 @@
         "reasoning": {
           "support": "supported",
           "wire_format": "reasoning_effort",
-          "can_disable": true,
+          "can_disable": false,
           "supported_efforts": [
-            "none",
+            "low",
+            "medium",
             "high"
           ],
-          "default_effort": "high"
+          "default_effort": "high",
+          "effort_map": {
+            "xhigh": "high",
+            "max": "high",
+            "ultra": "high"
+          }
         }
       },
-      "evidence_url": "https://docs.mistral.ai/studio/conversations/reasoning.md"
+      "evidence_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+      "checked_at": "2026-11-02",
+      "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "reasoning_effort",
+            "can_disable": true,
+            "supported_efforts": [
+              "none",
+              "high"
+            ],
+            "default_effort": "high"
+          }
+        }
+      ]
+    },
+    {
+      "creator_id": "stepfun",
+      "model_ids": [
+        "step-5-preview"
+      ],
+      "inference_profile": {
+        "source": "official",
+        "reasoning": {
+          "support": "supported",
+          "wire_format": "reasoning_effort",
+          "can_disable": false,
+          "supported_efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default_effort": "medium",
+          "effort_map": {
+            "xhigh": "high",
+            "max": "high",
+            "ultra": "high"
+          }
+        }
+      },
+      "evidence_url": "https://platform.stepfun.ai/docs/en/guides/developer/reasoning.md",
+      "checked_at": "2026-11-02"
     },
     {
       "creator_id": "anthropic",
@@ -1220,6 +1417,7 @@
           "support": "supported",
           "wire_format": "thinking_type",
           "enabled_type": "adaptive",
+          "display": "summarized",
           "effort_field": "effort",
           "can_disable": false,
           "supported_efforts": [
@@ -1242,7 +1440,37 @@
           ]
         }
       },
-      "evidence_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview"
+      "evidence_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+      "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "thinking_type",
+            "enabled_type": "adaptive",
+            "effort_field": "effort",
+            "can_disable": false,
+            "supported_efforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default_effort": "medium",
+            "effort_map": {
+              "ultra": "max"
+            }
+          },
+          "sampling": {
+            "omit": [
+              "temperature",
+              "top_p",
+              "top_k"
+            ]
+          }
+        }
+      ]
     },
     {
       "creator_id": "anthropic",
@@ -1258,6 +1486,7 @@
           "support": "supported",
           "wire_format": "thinking_type",
           "enabled_type": "adaptive",
+          "display": "summarized",
           "effort_field": "effort",
           "can_disable": false,
           "supported_efforts": [
@@ -1281,6 +1510,34 @@
         }
       },
       "previous_profiles": [
+        {
+          "source": "official",
+          "reasoning": {
+            "support": "supported",
+            "wire_format": "thinking_type",
+            "enabled_type": "adaptive",
+            "effort_field": "effort",
+            "can_disable": false,
+            "supported_efforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default_effort": "high",
+            "effort_map": {
+              "ultra": "max"
+            }
+          },
+          "sampling": {
+            "omit": [
+              "temperature",
+              "top_p",
+              "top_k"
+            ]
+          }
+        },
         {
           "source": "official",
           "reasoning": {

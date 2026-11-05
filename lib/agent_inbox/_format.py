@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 def format_swarm_update(*,
                          agent_id: str,
+                         swarm_run_id: str,
                          role: str,
                          status: str,
                          elapsed_seconds: float,
@@ -34,12 +35,17 @@ def format_swarm_update(*,
     for, and truncating it would force a second ``get_agent_result`` round
     trip for every non-trivial result. The durable per-agent log remains
     the audit copy.
+
+    ``swarm_run_id`` names the run that produced the result: with
+    ``agent-id`` it is the stable handle ``get_agent_result`` re-reads it by
+    after the session is evicted or a later wave replaces it.
     """
     result_clean = (result or '').replace('\r', ' ').strip()
 
     parts = [
         '<swarm-update>',
         f'  <agent-id>{_escape(agent_id)}</agent-id>',
+        f'  <swarm-run-id>{_escape(swarm_run_id)}</swarm-run-id>',
         f'  <role>{_escape(role)}</role>',
         f'  <status>{_escape(status)}</status>',
         f'  <elapsed-seconds>{elapsed_seconds:.1f}</elapsed-seconds>',

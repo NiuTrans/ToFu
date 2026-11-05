@@ -14,6 +14,46 @@ They distinguish a better execution data model from a native-engine advantage
 and from whole-Agent results; experimental primitives do not change production
 storage selection or weaken the acceptance criteria below.
 
+## SQLite reference and change review
+
+Problem: isolated improvements can leave deployment, recovery and maintenance
+costs outside the measured path. SQLite is an architectural reference as well
+as a numerical baseline. Decision: review the affected rows below before a
+storage change, reuse their existing owners, and name both the measured gain
+and the remaining gap. The presence of a module is implementation evidence;
+only matching results and qualified measurements establish parity.
+
+| SQLite principle and primary reference | Existing Tofu owner | Evidence required / current boundary |
+|---|---|---|
+| Simple embedding and distribution ([amalgamation](https://sqlite.org/amalgamation.html)) | `serverctl_pkg/native_engine.py`, desktop packaging, [native lifecycle](NATIVE_STORAGE_LIFECYCLE.md) | Build and certify before service interruption; unchanged sources reuse the artifact. Source-development rebuilds remain distinct from packaged startup. Keep source identity and rollback checks. |
+| Explicit WAL recovery and checkpoint work ([WAL](https://sqlite.org/wal.html)) | `engine.rs`, `entity_overlay.rs`, [recovery attribution](TOFUDB_RECOVERY_ATTRIBUTION.md) | Measure shutdown, reopen and first correct read, plus application request-to-readiness separately. Sweep retained history and unreplayed tail independently; a tiny reopened fixture cannot establish production RTO. |
+| Readers retain stable snapshots while a writer commits ([WAL concurrency](https://sqlite.org/wal.html#concurrency)) | `authority_query_view.rs`, [embedded phases](TOFUDB_EMBEDDED_PHASES.md) | Writer progress with old readers, concurrent suffix retention, and exact snapshot/owner fences. Reader-only throughput does not prove writer progress. |
+| Checkpoint work is explicit and resumable ([WAL checkpoints](https://sqlite.org/wal.html#checkpointing)) | `maintenance.rs`, `entity.rs`, [write overlay](TOFUDB_WRITE_PATH_OVERLAY.md) | Foreground latency, full-drain work, WAL bytes and oldest-reader pins are separate observations. Keep batching and durability boundaries; never copy SQLite page-checkpoint code into a content-addressed format without equivalent recovery proof. |
+| Atomic data and index changes ([atomic commit](https://sqlite.org/atomiccommit.html)) | `authority.rs`, `versioned_document.rs`, Turn transition owners | Commit-fault, lost-ACK, restart, deletion and restore checks must agree on primary state and derived indexes. A stale index cannot be hidden by returning fewer rows. |
+| Reuse verified pages and query work ([cache retention](https://sqlite.org/atomiccommit.html)) | [entity pages](TOFUDB_ENTITY_PAGES.md), [result cache](TOFUDB_QUERY_RESULT_CACHE.md), `cold_read_tests.rs` | Cold/warm I/O counts and output equality; snapshot, tenant, owner, operation and payload remain in cache identity. Cache retention never becomes work admission. |
+| Choose access paths that avoid unnecessary reads ([query optimizer](https://sqlite.org/optoverview.html)) | `entity.rs`, `tofusql.rs`, domain query owners | Measure page visits, rows materialized, output bytes and write cost. Prefix/range/covering access and pagination follow the actual operation; an extra index or a new generic optimizer needs evidence. |
+| Local calls avoid a network round trip ([small queries](https://sqlite.org/np1queryprob.html)) | `lib/storage/`, embedded and wire clients | Keep application-semantic and raw-engine comparisons distinct. The SQLite sidecar includes transport costs absent from direct SQLite calls; an N+1 rule must account for that boundary. |
+| Mature SQL, search and JSON tools ([FTS5](https://sqlite.org/fts5.html), [JSON](https://sqlite.org/json1.html)) | SQL authority, search projections, existing TofuSQL catalog | Reuse the current capability owner. Native catalog/search support does not establish full SQLite SQL/extension parity; compare ordering, Unicode, continuation and error semantics on the same corpus. |
+| Incremental online backup ([backup API](https://sqlite.org/backup.html)) | `online_backup.rs`, `fastpath.rs`, [online GC](TOFUDB_ONLINE_GC.md) | Restore and read the pinned snapshot, exercise writer overlap and interrupted publication, and retain the previous valid recovery generation. Backup-file existence is insufficient. |
+| Stable interfaces and durable formats ([version policy](https://sqlite.org/versionnumbers.html)) | Native format/schema gates, `build.rs`, release certification | Pin engine/library/source identities and test supported historical stores. A successful current-version round trip does not certify upgrade/rollback compatibility. |
+| Fault testing and optimization equivalence ([SQLite testing](https://sqlite.org/testing.html)) | `vfs.rs`, `entity_overlay_tests.rs`, semantic differential suite and filesystem certification | Compare optimized/reference outputs; retain I/O errors, short writes, sync loss, malformed input and real process-crash coverage. Existing tests do not establish SQLite-level coverage or device power-loss guarantees. |
+| Match the storage architecture to its deployment ([appropriate uses](https://sqlite.org/whentouse.html)) | Selected-authority lifecycle, [storage operations](STORAGE_OPERATIONS.md), local/FUSE comparison cohorts | SQLite's local WAL/shared-memory and network-locking assumptions are not a blanket FUSE guarantee. Benchmark the actual volume and durability; backend changes remain explicit owner decisions. |
+
+Alternatives rejected: copying every SQLite feature introduces capabilities
+without a demonstrated product need; quoting raw-SQL microbenchmarks as whole
+application wins drops semantic work; checking only the latest complaint leaves
+unmeasured lifecycle costs. New machinery requires a concrete gap in the common
+owner and an experiment that beats measurement noise without changing results.
+
+The existing `storage_performance_charter_v1.json` and
+`tofudb_charter_assess.py` own numerical acceptance. Their history-scaling,
+distracted-host and reader/writer-scaling gaps remain visible until matching
+evidence exists. The nightly `check_perf_regression.py` job measures task replay;
+it is not the native-versus-SQLite certification. Focused comparison-harness
+tests run in the ordinary unit suite. Full native/SQLite, actual-volume and
+process-crash receipts remain explicit verification work; no new background
+benchmark service or automatic production restart is introduced.
+
 ## Loose-block length reuse
 
 Problem: loose-block reads validated handle length, then RealFile queried the
@@ -82,7 +122,7 @@ alone with the original event admission ceiling. Queue residency, worker count
 and connection pools retain the existing launch-probed sizing. Metrics expose
 the active composition ceiling and maximum estimated composition bytes.
 
-A flush barrier ends its FIFO prefix; future events and their provider failures cannot join or invalidate it. Accepted events receive an ordinal, and a barrier records the last accepted ordinal. One bounded primitive failure summary and its earliest ordinal persist until batcher closure, covering actual provider/RPC failure and accepted events cancelled before dispatch. The summary retains no exception, traceback or event graph. Every covered barrier receives a fresh typed error; later success is not proof that the failed accepted prefix became durable. The explicit per-row `attempt_not_live` rejection also records an unstored accepted event without changing its business result or sibling ACKs; natural-key deduplication remains durable. Claimed ambiguous confirmation timeouts and observational callback failures do not invent persistence failure. Six added integer/slot fields cost 256 additional retained bytes per queued event within the existing byte quota.
+A flush barrier ends its FIFO prefix; future events and their provider failures cannot join or invalidate it. Accepted events receive an ordinal, and a barrier records the last accepted ordinal. One bounded primitive failure summary and its earliest ordinal persist until batcher closure, covering actual provider/RPC failure and accepted events cancelled before dispatch. The summary retains no exception, traceback or event graph. Every covered barrier receives a fresh typed error; later success is not proof that the failed accepted prefix became durable. The explicit per-row `attempt_not_live` rejection also records an unstored accepted event without changing its business result or sibling ACKs; natural-key deduplication remains durable. A claimed event's producer awaits its batch outcome instead of timing out, and observational callback failures do not invent persistence failure. Six added integer/slot fields cost 256 additional retained bytes per queued event within the existing byte quota.
 
 Alternatives: a fixed small item cap starves cheap events and ignores payload
 size; increasing the native carried ceiling changes bounded replay memory and
@@ -90,6 +130,74 @@ does not address lock work; using the wire bytes alone misses metadata and
 native format costs. SQL and older/invalid native declarations retain legacy
 wire grouping and do not claim this optimization. The headroom fraction is a
 selection policy to measure, not an optimality claim.
+
+## Loose batch publication per hash shard
+
+Problem: a transaction whose carried payload exceeds the format's 2 MiB carried
+ceiling, and a checkpoint's fallback materialization, publish every pending
+block as a loose file before the WAL record or CONTROL publication that relies
+on it. `BlockStore::flush_pending_selection` did this one file at a time: two
+stats, a shard `mkdir` probe, create, write and rename per block, then a second
+pass that stat'ed, reopened and double-synced every file, then the shard
+directory barriers. Wall time was the sum of every metadata round trip, which
+costs milliseconds on DolphinFS. Live engine telemetry on 2026-11-02 (one 8.6 h
+process lifetime) showed the maintenance component spending 26,013 s in 5,680
+commits (4.6 s each, 84% of wall time). Read-only `/proc` sampling put the
+maintenance thread entirely in `openat`/`statx`/`rename`/`write` under
+`projections/tofudb-search/blocks/`: search-projection commits spilled their
+pages one file at a time. That worker also runs the background overlay drain;
+over one 90 s window `overlayBackgroundChunks` stayed flat while 31 overlay
+merges ran on the foreground commit-path backstop. The 3.86/3.76 s event-batch
+spill above is the same path under the authority mutex.
+
+Decision: the batch is grouped by hash shard. Each shard writes every absent
+block and syncs it on its creating handle before the rename, so a published name
+never carries unsynced content and the reopen pass disappears. It then syncs
+verified existing copies and fsync-only marks and issues one directory barrier.
+Shard directories are independent, so a VFS that declares
+`supports_concurrent_file_publication` (`RealVfs`) runs every shard but the
+first on a scoped worker; the caller takes the first and joins all before
+returning. A batch that runs under the authority mutex therefore finishes all
+of its I/O inside the hold, which the online collector's deletion holds rely
+on. The partition is the on-disk format's (one shard per first content-ID
+byte), not a sized pool, and a refused thread spawn runs its shard on the
+caller. Workers inherit the caller's stats component; request-profile spans are
+thread-bound, so worker VFS time appears as the enclosing stage's exclusive
+time. Deterministic simulation and wrapper VFSes keep one caller at a time so
+fault traces stay reproducible. `ensure_shard` also marks a shard this store
+created until its root barrier succeeds: previously a retry after a failed
+barrier found the directory, skipped the barrier, and its acknowledged blocks
+could vanish on power loss. Without a failure the operation sequence is
+unchanged, which the certification matrix's pre-created shards rely on.
+
+Measurements (2026-11-02, DolphinFS volume hosting production data, live
+traffic, debug test profile on both sides): a disposable harness committed
+fresh random payloads through `Engine::commit_transaction` on a new authority
+and timed the steady second spill (existing shards), alternating baseline, this
+change, and this change with shard concurrency withheld, three rounds each.
+500 x 8 KiB: baseline 4.86/6.35/5.98 s, concurrent 0.83/0.66/0.73 s, sequential
+4.46/5.38/4.62 s. 2,048 x 4 KiB over two passes: baseline 18.1-20.9 s,
+concurrent 2.13-2.40 s, sequential 15.9-20.0 s. First spills that also create
+shards: 500 x 8 KiB baseline 5.0-5.4 s, concurrent 0.89-1.31 s. The per-file
+protocol alone is at most a modest gain; shard concurrency supplies the 8-9x.
+These are storage-only spill commits; they do not establish application or
+whole-Agent latency, and the effect on the live maintenance worker is
+unmeasured until a deployed engine reports it.
+
+Alternatives rejected: packing a spill into one payload segment writes one file
+but puts catalog publication, CONTROL and online-GC coupling on the commit path;
+raising the carried ceiling changes bounded WAL replay memory; a fixed or
+CPU-sized worker pool adds a sizing knob to a format-defined partition;
+remembering published shards per process would remove the remaining `mkdir`
+probe but makes the operation trace depend on which blocks share a shard,
+breaking reproducible fault campaigns.
+
+Verification: `block_loose_batch_tests.rs` runs error, torn-write and lost-sync
+campaigns over every operation kind on concurrent shard workers, retries each
+failed batch to a durable state, proves workers run concurrently under the
+caller's component, covers the failed-root-barrier retry and runs a real
+filesystem batch; the certification matrix and loose-race specifications
+cover the sequential path.
 
 ## Request cost attribution
 
@@ -485,6 +593,19 @@ maintenance, multi-user concurrency control) that this workload never uses.
 `scripts/tofudb_perf_compare.py` drives **identical operation mixes through
 each backend's production client stack** — not raw engine primitives:
 
+The script owns adapters, engine lifetime, CLI selection and measurement/report
+policy. `scripts/tofudb_workloads/` owns the ordered workload catalog and its
+record, history, search, concurrency and recovery implementations. Problem:
+one closure mixed every corpus and lifecycle while hiding shared captures.
+Decision: explicit invocation inputs carry owner, namespace, scale and timestamps;
+execution and summary ports preserve the existing adapter and clock boundaries.
+The catalog retains phase order and independent Turn identities. Alternatives
+rejected: separate benchmark loops would drift from the common measurement
+owner; moving the complete closure intact would leave the mixed responsibilities.
+The existing certification source inventory includes the workload package,
+including local edits and new files. Old frozen receipts remain historical;
+omitting the new source inputs cannot qualify a report as the current checkout.
+
 * `tofudb` — the native production stack: either a `tofu-db serve` process over
   storage.v2 or `--native-client embedded` through the loaded C ABI and Python
   adapter. Every report records the chosen transport.
@@ -504,6 +625,41 @@ Footprints are post-workload, before-shutdown observations, not live-payload byt
 In-process counters cover the harness: an upper bound, not device IO or isolated database amplification. Daemon startup/shutdown tails and separate authority init are excluded.
 Verified lifecycle accounting invalidates historical embedded totals reset across reopen; latency and footprint remain separate evidence.
 PostgreSQL is not a benchmark dimension (see below).
+
+Disposable native authorities own a private parent containing their data
+directory and the engine's default sibling backup directory. Problem: owning
+only the data directory let independent runs share backup state and left
+synthetic backups behind after shutdown. Decision: the existing engine lifetime
+owns the parent in both daemon and embedded modes, including failed startup.
+Alternative rejected: deleting the caller's shared backup directory could
+destroy another authority's recovery points. Production backup policy and the
+declared authority/projection footprint scope stay with their existing owners;
+[storage operations](STORAGE_OPERATIONS.md) defines the cleanup verification.
+
+Concurrent measurement sessions have one lifecycle owner. Problem: opening or
+closing a per-thread session outside the worker's error boundary could leave a
+partial reader population reported as successful timing. Decision: acquisition,
+execution and owned-session cleanup all contribute failures to the phase;
+cleanup failures retain the original operation failure as well. Workers borrow
+an engine without an `open_session` port and never close that shared owner.
+Every declared reader and writer operation must be sampled before a phase can
+report success. Alternatives rejected: thread warnings are not a measurement
+verdict, and accepting only the surviving readers changes the measured workload.
+Verify `tests/tofudb/test_comparison_worker_lifecycle.py`.
+
+`WorkloadWorkers` also owns the explicit phase carriers and start barrier.
+Problem: partial startup left accepted workers behind the barrier; a join
+deadline could return while sessions still borrowed the engine. Decision:
+startup failure, deadline and coordinator interruption fence subsequent work,
+release the barrier, and await accepted callbacks and their session finalizers
+before returning or re-raising the original exception. The measurement deadline
+invalidates timing; it is not permission to abandon in-flight calls, which keep
+their existing operation deadlines. Completion receipts remain independent of
+an interrupted thread join. A late bootstrap is fenced before session access;
+an abrupt worker exit invalidates timing while retaining its diagnostic hook.
+Alternatives rejected: closing a shared engine from a worker breaks ownership;
+a general task pool adds scheduling and startup-retry policy to the declared
+benchmark carriers. Verify `tests/tofudb/test_comparison_phase_lifecycle.py`.
 
 ### History-scaled phases
 
@@ -538,6 +694,16 @@ behind it**. The report carries per-family `cold_read`/`warm_read` latency
 summaries; the timeout storm's signature is a cold read orders of magnitude
 above its warm twin on a high-latency volume. An engine lacking a family is
 reported as an explicit `cold_read_unsupported` gap, never a dropped sample.
+Only the adapter's typed unsupported-operation signal can establish that gap,
+before any sample for that optional family exists. I/O, timeout and recovery
+errors fail the phase. `record.get` is mandatory in every round; a prior
+round's sample cannot stand in for a failed first read. Both cold and warm
+point reads must return the exact seeded JSON value; verification occurs
+outside the latency clock, and missing/changed data fails the phase. A capability that
+disappears after a successful sample also invalidates the phase.
+The existing charter assessor treats any native/SQLite cold-read gap as
+insufficient maintenance evidence, including older receipts that mislabeled
+an execution failure. A favorable reopen number cannot override that gap.
 
 The deterministic half of the same incident is gated in CI without any
 wall-clock assertion: `packages/tofu-db/src/cold_read_tests.rs` counts VFS

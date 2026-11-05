@@ -34,7 +34,18 @@ logger = get_logger(__name__)
 # Keys are matched case-insensitively (see :func:`resolve_tool_name`), so the
 # Claude-Code CamelCase variants (``Read``/``Grep``/``Edit`` …) are covered by
 # the same lowercase entries.
+#
+# Pure renames are the stricter subset: the successor keeps the identical
+# schema and handler. Only these may carry a stored name forward where names
+# are matched against a live catalog as authority (swarm restart receipts,
+# spawn allowlists); habit aliases such as ``read_artifact`` name a different
+# capability and never do.
+RENAMED_TOOL_NAMES: dict[str, str] = {
+    'grep_search': 'search_files',
+}
+
 _TOOL_NAME_ALIASES: dict[str, str] = {
+    **RENAMED_TOOL_NAMES,
     # ── file reading ──
     'read_file': 'read_files',
     'read': 'read_files',
@@ -56,17 +67,16 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     'listdir': 'list_dir',
     'dir': 'list_dir',
     # ── content search ──
-    'grep': 'grep_search',
-    'grep_file': 'grep_search',
-    'search': 'grep_search',
-    'search_text': 'grep_search',
-    'ripgrep': 'grep_search',
-    'rg': 'grep_search',
+    'grep': 'search_files',
+    'grep_file': 'search_files',
+    'search': 'search_files',
+    'search_text': 'search_files',
+    'ripgrep': 'search_files',
+    'rg': 'search_files',
     # ── filename search ──
     'find': 'find_files',
     'find_file': 'find_files',
     'glob': 'find_files',
-    'search_files': 'find_files',
     # ── writing ──
     'write': 'write_file',
     'writefile': 'write_file',
@@ -282,7 +292,7 @@ def resolve_tool_name(name: str, known: set[str] | None = None) -> tuple[str, st
         return target, 'alias'
 
     # 3. Case-insensitive match against a real tool (e.g. 'Grep' → no static
-    #    entry needed if 'grep_search' weren't aliased; 'Read_Files' → ...).
+    #    entry needed if 'search_files' weren't aliased; 'Read_Files' → ...).
     low = name.lower()
     ci_matches = [t for t in valid if t.lower() == low]
     if len(ci_matches) == 1:

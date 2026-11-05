@@ -18,7 +18,7 @@ pytestmark=pytest.mark.unit
 
 
 @pytest.mark.parametrize('committed',[False,True])
-def test_native_translation_once_and_post_commit_only_after_acknowledgement(committed):
+def test_native_completion_submits_no_reply_preview_and_post_commit_only_after_acknowledgement(committed):
     async def run():
         task={'id':'task','_userId':7,'status':'running','messages':[],'abort_event':AbortSignal()}
         client=SimpleNamespace(principal=principal(),budget=SimpleNamespace(frame_bytes=4096))
@@ -47,7 +47,8 @@ def test_native_translation_once_and_post_commit_only_after_acknowledgement(comm
                 patch('lib.translate.submit_round_segment') as translation:
             await run_native_task(client,object(),configuration,task=task,executor=executor,
                 callbacks={},working_directory=Path('/tmp'),round_policy=rounds,after_terminal=after)
-            translation.assert_called_once_with(task,3,'final prose')
+            # The durable whole-turn job translates the reply once after settlement.
+            translation.assert_not_called()
             assert completion.call_count==int(committed)
             assert order==(['joined','completion'] if committed else ['joined'])
     asyncio.run(run())

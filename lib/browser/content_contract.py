@@ -3,10 +3,13 @@
 Schemas feed model tools and executable boundary tests. This module owns only
 bounded values, never browser transport, access decisions, or persistence.
 Collectors in ``content`` consume ReadTarget and return CONTENT_RECEIPT_SCHEMA.
+JsonReadSource/JSON_READ_SOURCE_SCHEMA own the observed addresses of dedicated
+JSON data reads; live policy remains in BrowserPage and acceptance in read_pipeline.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from urllib.parse import urlsplit
 
 READ_TARGET_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
@@ -103,4 +106,49 @@ def content_budget(value, default=30000) -> int:
         raise ValueError('max_chars must be an integer') from exc
 
 
-__all__ = ['READ_TARGET_SCHEMA', 'CONTENT_RECEIPT_SCHEMA', 'ReadTarget', 'content_budget']
+def _http_origin(url) -> tuple[str, str, int]:
+    if not isinstance(url, str):
+        raise ValueError('JSON source URLs must be absolute HTTP(S) URLs')
+    parts = urlsplit(url)
+    if (parts.scheme not in ('http', 'https') or not parts.hostname
+            or parts.username is not None or parts.password is not None):
+        raise ValueError('JSON source URLs must be absolute HTTP(S) URLs without credentials')
+    port = parts.port
+    default_port = 443 if parts.scheme == 'https' else 80
+    return parts.scheme, parts.hostname, default_port if port is None else port
+
+
+@dataclass(frozen=True)
+class JsonReadSource:
+    """Observed addresses of a same-origin data read, never a permission token."""
+
+    document_url: str
+    request_url: str
+    response_url: str
+
+    @classmethod
+    def from_value(cls, value, *, expected_document_url: str) -> 'JsonReadSource':
+        if not isinstance(value, dict) or set(value) != set(JSON_READ_SOURCE_SCHEMA['required']):
+            raise ValueError('JSON source requires document_url, request_url and response_url')
+        source = cls(**value)
+        origin = _http_origin(expected_document_url)
+        if any(_http_origin(url) != origin for url in source.urls):
+            raise ValueError('JSON source must remain on the captured document origin')
+        return source
+
+    @property
+    def urls(self) -> tuple[str, str, str]:
+        return self.document_url, self.request_url, self.response_url
+
+
+JSON_READ_SOURCE_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'required': [field.name for field in fields(JsonReadSource)],
+    'properties': {field.name: {'type': 'string', 'format': 'uri', 'minLength': 1}
+                   for field in fields(JsonReadSource)},
+    'description': 'Observed document, request and final response URLs; all must share the captured document origin and pass live read policy.',
+}
+
+
+__all__ = ['READ_TARGET_SCHEMA', 'CONTENT_RECEIPT_SCHEMA', 'ReadTarget', 'content_budget',
+           'JSON_READ_SOURCE_SCHEMA', 'JsonReadSource']

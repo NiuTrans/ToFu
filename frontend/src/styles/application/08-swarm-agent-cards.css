@@ -1,62 +1,248 @@
-/* ── Agent grid ── */
-.sw-agent-grid{display:flex;flex-direction:column;gap:var(--space-1);padding:var(--space-1) 14px var(--space-3)}
-.sw-empty{padding:6px 2px;font-size:var(--font-size-sm);color:var(--text-tertiary)}
-/* ── Agent card ── */
-.sw-agent{border-radius:8px;border:1px solid var(--border);background:var(--bg-tertiary);transition:border-color .3s,background .3s;overflow:hidden}
-.sw-agent.sw-a-running{border-color:rgba(96,165,250,0.45);background:linear-gradient(135deg,rgba(96,165,250,0.10),rgba(96,165,250,0.04)),var(--bg-tertiary)}
-.sw-agent.sw-a-done,.sw-agent.sw-a-completed{border-color:rgba(74,222,128,0.40);background:var(--bg-tertiary)}
-.sw-agent.sw-a-failed,.sw-agent.sw-a-error{border-color:rgba(248,113,113,0.45);background:linear-gradient(135deg,rgba(248,113,113,0.08),rgba(248,113,113,0.03)),var(--bg-tertiary)}
-/* Stalled: judged silent by the liveness beacon — amber (distinct from
-   failed-red: the agent may still come back, and did in the smoke test). */
-.sw-agent.sw-a-stalled{border-color:rgba(251,191,36,0.45);background:linear-gradient(135deg,rgba(251,191,36,0.08),rgba(251,191,36,0.03)),var(--bg-tertiary)}
-.sw-a-stalled .sw-a-status-icon{color:#fbbf24}
-.sw-a-stalled .sw-a-role-tag{background:rgba(251,191,36,0.10);border-color:rgba(251,191,36,0.25);color:#fcd34d}
-/* Waiting is a status, not disabled content: instructions and results stay readable. */
-.sw-agent.sw-a-pending{border-style:dashed}
-/* Agent card header (always visible) */
-.sw-a-header{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);padding:10px var(--space-3);cursor:pointer;user-select:none}
-.sw-a-status-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:16px;height:16px}
-.sw-a-running .sw-a-status-icon{animation:agentPulse 1.5s ease-in-out infinite}
-.sw-a-pending .sw-a-status-icon{color:var(--text-tertiary)}
-.sw-a-running .sw-a-status-icon{color:#60a5fa}
-.sw-a-done .sw-a-status-icon,.sw-a-completed .sw-a-status-icon{color:#4ade80}
-.sw-a-failed .sw-a-status-icon,.sw-a-error .sw-a-status-icon{color:#f87171}
-.sw-a-role{font-size:var(--font-size-sm);font-weight:600;color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sw-a-num{font-size:var(--font-size-xs);font-weight:600;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;flex-shrink:0;min-width:22px;text-align:right}
-.sw-a-role-tag{font-size:10px;padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--text-primary);background:rgba(251,191,36,0.10);border:1px solid rgba(251,191,36,0.20);text-transform:lowercase;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
-.sw-a-header .sw-a-phase-pill{margin-left:auto}
-/* ── File-modification flag: pill on agents that wrote/edited files ── */
-.sw-a-edited{display:inline-flex;align-items:center;gap:3px;flex-shrink:0;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:1px 6px;border-radius:8px;color:#fbbf24;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.3)}
-.sw-a-edited svg{display:block}
-/* subtle amber left-accent on the card itself so edited agents stand out */
-.sw-agent.sw-a-has-edits{box-shadow:inset 2px 0 0 rgba(251,191,36,0.45)}
-.sw-a-running .sw-a-role-tag{background:rgba(96,165,250,0.10);border-color:rgba(96,165,250,0.25);color:#93c5fd}
-.sw-a-done .sw-a-role-tag,.sw-a-completed .sw-a-role-tag{background:rgba(74,222,128,0.08);border-color:rgba(74,222,128,0.20);color:#86efac}
-.sw-a-failed .sw-a-role-tag,.sw-a-error .sw-a-role-tag{background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.20);color:#fca5a5}
-.sw-a-id{font-size:10px;padding:1px 6px;border-radius:6px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary);background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);cursor:copy;min-width:0;max-width:100%;overflow-wrap:anywhere;text-align:left;letter-spacing:0.02em;transition:background .15s,color .15s}
-.sw-a-id:hover{color:var(--text-secondary);background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.12)}
-.sw-a-id-copied{color:#4ade80 !important;background:rgba(74,222,128,0.10) !important;border-color:rgba(74,222,128,0.25) !important}
-.sw-a-id-copied::after{content:" copied";font-size:9px;margin-left:2px}
-.sw-a-model{font-size:10px;padding:1px 7px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--text-secondary);background:rgba(167,139,250,0.10);border:1px solid rgba(167,139,250,0.22);flex-shrink:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-[data-theme="tofu"] .sw-a-model{color:#5b4a8a;background:rgba(124,92,184,0.12);border-color:rgba(124,92,184,0.32)}
-.sw-a-phase-pill{font-size:10px;padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-weight:500;flex-shrink:0}
-.sw-a-pending .sw-a-phase-pill{color:var(--text-tertiary);background:rgba(255,255,255,0.04)}
-.sw-a-running .sw-a-phase-pill{color:#60a5fa;background:rgba(96,165,250,0.1)}
-.sw-a-done .sw-a-phase-pill,.sw-a-completed .sw-a-phase-pill{color:#4ade80;background:rgba(74,222,128,0.08)}
-.sw-a-failed .sw-a-phase-pill,.sw-a-error .sw-a-phase-pill{color:#f87171;background:rgba(248,113,113,0.08)}
-.sw-a-timer{font-size:10px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;flex-shrink:0}
-.sw-a-chevron{font-size:10px;color:var(--text-tertiary);transition:transform .15s;flex-shrink:0}
-/* Agent card body (collapsible) */
-.sw-a-body{padding:0 var(--space-3) 10px;display:none;animation:fadeIn .2s ease}
-.sw-a-id:focus-visible,.sw-a-task>summary:focus-visible,.sw-a-tool-history>summary:focus-visible,.sw-tl-line:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.sw-a-task{margin:2px 0 var(--space-2)}
-.sw-a-task>summary,.sw-a-tool-history>summary{cursor:pointer;font-size:var(--font-size-xs);color:var(--text-secondary);padding:var(--space-1) 0}
-.sw-a-task .sw-a-objective{max-height:240px;overflow:auto;overscroll-behavior:contain}
-.sw-a-activity-label,.sw-a-activity-empty{font-size:var(--font-size-xs);color:var(--text-secondary);padding:var(--space-1) 0}
-.sw-a-activity-label{font-weight:600}
-.sw-status-pill.sw-pill-queued{color:var(--text-secondary);background:var(--bg-tertiary)}
-.sw-agent.sw-a-open .sw-a-body{display:block}
-.sw-agent.sw-a-open .sw-a-chevron{transform:rotate(180deg)}
-.sw-a-objective{font-size:var(--font-size-xs);color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:6px var(--space-2);background:rgba(255,255,255,0.02);border-radius:6px;border-left:2px solid rgba(251,191,36,0.3);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
-.sw-a-done .sw-a-objective,.sw-a-completed .sw-a-objective{border-left-color:rgba(74,222,128,0.3)}
-.sw-a-failed .sw-a-objective,.sw-a-error .sw-a-objective{border-left-color:rgba(248,113,113,0.3)}
+/* ── Agents: a divided list inside the card ──
+   Each agent is one row: state glyph, ordinal, role with its log ID and
+   model, the edit flag, the phase in its state color, one clock and the
+   disclosure caret. Only the role reads as a name; IDs and models are quiet
+   identifiers. An open agent's body hangs from a spine under its glyph, the
+   evidence inset the rest of the conversation uses. No per-agent boxes or
+   tints: the glyph and phase carry state. */
+.sw-agent-grid { display: flex; flex-direction: column; min-width: 0; }
+.sw-agent { min-width: 0; }
+.sw-agent + .sw-agent { border-top: var(--control-edge-inset) solid var(--sw-rule); }
+.sw-empty {
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-body);
+}
+.sw-agent-grid > .sw-a-err { margin: var(--space-2) var(--space-3); }
+
+/* ── Agent row ── */
+.sw-a-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-md);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.sw-a-header:hover { background: var(--sw-hover); }
+.sw-a-status-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--tool-row-glyph-ink);
+}
+.sw-a-status-icon svg { display: block; }
+.sw-a-running .sw-a-status-icon { color: var(--tool-row-glyph-ink-live); animation: agentPulse 1.5s ease-in-out infinite; }
+.sw-a-done .sw-a-status-icon { color: var(--tool-row-ok-ink); }
+.sw-a-failed .sw-a-status-icon { color: var(--error-text); }
+.sw-a-stalled .sw-a-status-icon { color: var(--tool-row-glyph-ink-attention); }
+.sw-a-num {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-variant-numeric: tabular-nums;
+}
+.sw-a-ident {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+.sw-a-role-tag {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-a-ids {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+.sw-a-id,
+.sw-a-model {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  line-height: var(--leading-title);
+}
+.sw-a-id {
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-tertiary);
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: copy;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+.sw-a-id:hover { color: var(--text-secondary); text-decoration: underline dotted; text-underline-offset: 2px; }
+.sw-a-id.sw-a-id-copied { color: var(--tool-row-ok-ink); text-decoration: none; }
+.sw-a-id.sw-a-id-copied::after { content: " \2713"; }
+.sw-a-model {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-a-id + .sw-a-model::before {
+  content: "\00b7";
+  margin-inline-end: var(--space-2);
+  color: var(--text-tertiary);
+}
+.sw-a-edited {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border: var(--control-edge-inset) solid var(--chip-warn-border);
+  border-radius: var(--radius-pill);
+  background: var(--chip-warn-bg);
+  color: var(--chip-warn-color);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--space-5);
+}
+.sw-a-edited svg { display: block; }
+/* The phase is a status word: quiet meta text unless the agent needs the
+   reader. The state glyph already carries live and success ink. */
+.sw-a-phase-pill {
+  flex: 0 0 auto;
+  color: var(--tool-row-meta-ink);
+  font-size: var(--conversation-font-size-meta);
+  white-space: nowrap;
+}
+.sw-a-failed .sw-a-phase-pill { color: var(--error-text); }
+.sw-a-stalled .sw-a-phase-pill { color: var(--warning-text); }
+.sw-a-timer {
+  flex: 0 0 auto;
+  min-width: 3ch;
+  color: var(--tool-row-meta-ink);
+  font-size: var(--conversation-font-size-meta);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+.sw-a-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  transform: rotate(-90deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.sw-a-chevron svg { display: block; }
+.sw-agent.sw-a-open .sw-a-chevron { transform: none; }
+
+/* ── Agent body: hangs from a spine under the state glyph ── */
+.sw-a-body { display: none; min-width: 0; }
+.sw-agent.sw-a-open .sw-a-body { display: block; }
+.sw-agent > .sw-a-body {
+  margin: 0 var(--space-3) var(--space-3) calc(var(--space-3) + var(--space-2));
+  padding: 0 0 0 calc(var(--space-4) - var(--control-edge-inset));
+  border-inline-start: var(--control-edge-inset) solid var(--sw-spine);
+  animation: fadeIn var(--motion-base) var(--ease-standard);
+}
+
+/* Disclosure rows inside a body (brief, history, messages) share one quiet
+   grammar: a label, an optional one-line preview and a trailing caret. */
+:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages) > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: 0;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  list-style: none;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages) > summary::-webkit-details-marker { display: none; }
+:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages) > summary:hover { background: var(--sw-hover); color: var(--text-primary); }
+:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages) > summary::after {
+  content: "";
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-inline: auto var(--space-1);
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  color: var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages)[open] > summary::after { transform: rotate(45deg); }
+/* Inside the card the hover wash bleeds past the text edge the rows share;
+   the agent dock's narrow column keeps rows flush. */
+.sw-agent > .sw-a-body :is(:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages) > summary, .sw-tl-line) {
+  margin-inline: calc(-1 * var(--space-2));
+  padding-inline: var(--space-2);
+}
+:is(.sw-a-task, .sw-a-tool-history, .sw-a-messages) > summary:focus-visible,
+.sw-a-id:focus-visible,
+.sw-tl-line:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The brief: label plus its opening line until opened. */
+.sw-a-task { margin-block: var(--space-1); min-width: 0; }
+.sw-a-task-label { flex: 0 0 auto; font-weight: var(--weight-medium); }
+.sw-a-task-brief {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-a-task[open] .sw-a-task-brief { display: none; }
+.sw-a-objective {
+  max-height: 240px;
+  margin-block: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: var(--control-edge-inset) solid var(--sw-rule);
+  border-radius: var(--radius-xs);
+  background: var(--sw-well);
+  color: var(--text-primary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Phones: an agent row keeps its state, role, phase and clock on the first
+   line; its log ID and model take a second line instead of squeezing the
+   role, and the body indents less. */
+@media (max-width: 600px) {
+  .sw-a-header { flex-wrap: wrap; row-gap: 0; }
+  .sw-a-ident { display: contents; }
+  .sw-a-role-tag { flex: 1 1 auto; min-width: 0; }
+  .sw-a-ids {
+    order: 1;
+    flex: 1 1 100%;
+    padding-inline-start: calc(var(--space-4) + var(--space-2));
+    padding-block-end: var(--space-1);
+  }
+  .sw-agent > .sw-a-body { padding-inline-start: calc(var(--space-3) - var(--control-edge-inset)); }
+}

@@ -12,12 +12,16 @@ import json
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable
 from types import SimpleNamespace
 
 from lib.image_mime import sniff_image_mime
 from lib.log import get_logger
 from lib.swarm.liveness import ProgressBeacon, thread_progress_sink
+from lib.swarm.persistence_contract import (
+    SWARM_CHECKPOINT_MARKER_RESULT_FIELDS, SWARM_CHECKPOINT_MARKER_TEXT_CHARACTERS,
+)
 from lib.swarm.presentation_budget import (
     SWARM_TOOL_ARGS_BRIEF_CHARS, SWARM_TOOL_TIMELINE_DETAIL_CHARS,
     SWARM_TOOL_TIMELINE_ROW_LIMIT,
@@ -25,6 +29,7 @@ from lib.swarm.presentation_budget import (
 from lib.swarm.protocol import ArtifactStore, SubAgentResult, SubAgentStatus, SubTaskSpec, SwarmEvent
 from lib.swarm.registry import get_role_model_hint, get_role_system_suffix, resolve_model_for_tier, scope_tools_for_spec
 from lib.swarm.tools import ARTIFACT_TOOLS
+from lib.utils import fast_deepcopy
 
 logger = get_logger(__name__)
 
@@ -271,22 +276,33 @@ class SubAgent:
             self._artifact_hint = (
                 'Shared artifacts: use the supplied artifact tools to share evidence. '
                 'Use list_artifacts for the complete index. Available: ' + (hint or '(none)'))
+        output_contract = ''
+        if spec.output_schema is not None:
+            from lib.swarm.spawn_contracts import output_contract_text
+            output_contract = output_contract_text(spec.output_schema)
         self.messages = build_child_messages(
             objective=spec.objective, context=spec.context,
             system_prompt=system_prompt_base, role_policy=self._role_policy,
-            artifact_hint=self._artifact_hint)
+            artifact_hint=self._artifact_hint, output_contract=output_contract)
         self.context_task = {'id': self.agent_id, 'config': copy.deepcopy(parent_task.get('config') or {})}
         self.result = SubAgentResult()
         self.progress_beacon = ProgressBeacon()
-        self.swarm_key, self.output_file = '', ''
+        self.swarm_key, self.swarm_run_id, self.output_file = '', '', ''
         self._round_offset = 0
         self._child = None
+        # (messages, result without marker fields, append base id) exactly as
+        # this run's last acknowledged write left them: detached copies that a
+        # compact marker overlays and an append extends. The id is '' when the
+        # authority keeps no append base.
+        self._durable_checkpoint = None
         self._cleaned_up = False
         self._last_presence_beat = 0.0
         self._log_bytes = 0
         self._log_buffer = bytearray()
         self._log_initialized = False
         self._tool_count = 0
+        # The word this agent's swarm card currently shows (its last phase).
+        self._card_phase = ''
 
         self._run_started_at = None
         self._recovered_elapsed = 0.0
@@ -300,7 +316,7 @@ class SubAgent:
                 or self.parent_task.get('_invocationStorageFree')):
             return None
         from lib.swarm.run_messages import binding_for
-        return binding_for(self.parent_task, self.spec, self.swarm_key)
+        return binding_for(self.parent_task, self.spec, self.swarm_key, run_id=self.swarm_run_id)
 
     def restore_checkpoint(self, messages: list, rounds: int,
                            result: dict | None = None) -> None:
@@ -448,6 +464,13 @@ class SubAgent:
                          previewTruncated=entry.get('preview_truncated', False), error=entry['error'],
                          errorFullChars=entry.get('error_full_chars', 0),
                          errorTruncated=entry.get('error_truncated', False))
+        self._card_phase = 'tool_use'
+
+    def _restate_card_phase(self, *, phase: str) -> None:
+        if phase != self._card_phase:
+            self._card_phase = phase
+            self._emit_event('agent_phase', '', phase=phase, status='running',
+                             round_num=self.result.rounds_used)
 
     def _on_invocation_event(self, event: dict) -> None:
         from lib.agent_core.publication import check_publication
@@ -469,12 +492,20 @@ class SubAgent:
             if time.monotonic() - self._last_presence_beat >= 5:
                 self._last_presence_beat = time.monotonic()
                 self._presence_heartbeat()
+            # waiting_model has no closing frame: the browser ends a root
+            # model wait at its first delta, but the card never receives child
+            # deltas, so the agent restates its word once per change.
+            if event.get('content'):
+                self._restate_card_phase(phase='writing')
+            elif event.get('thinking'):
+                self._restate_card_phase(phase='thinking')
         elif kind == 'phase':
             phase = event.get('phase') or 'working'
             meta = {key: event[key] for key in ('detailKey', 'detailArgs', 'attempt') if key in event}
             self._emit_stream_phase(phase, event.get('detail') or '', **meta)
             self._emit_event('agent_phase', event.get('detail') or '', phase=phase,
                              status='running', round_num=self.result.rounds_used, **meta)
+            self._card_phase = phase
         elif kind in {'tool_start', 'tool_result', 'tool_complete'}:
             self._project_tool_event(event)
         elif kind in {'round_end', 'done'}:
@@ -500,6 +531,7 @@ class SubAgent:
         if self.result.checkpoint_phase == 'terminal_delivery':
             self.result.status = 'completed'
             self.result.final_answer = str(child.get('content') or '')
+            self._settle_output_contract()
         if child.get('_checkpointUsage') and not child.get('_invocationCheckpointUsageMerged'):
             from lib.cost import accumulate_usage_into
             merged = {}
@@ -519,6 +551,7 @@ class SubAgent:
         from lib.turn_verdict import derive_task_verdict
         start = time.monotonic()
         self.result.status = 'running'
+        self._durable_checkpoint = None
 
         recovered_elapsed = self.result.elapsed_seconds
 
@@ -533,14 +566,10 @@ class SubAgent:
                 if timeout_seconds <= 0:
                     raise TimeoutError('Invocation active-time allowance exhausted before resume')
             message_binding = self._message_binding()
-            role_policy = self._role_policy
-            if message_binding is not None:
-                from lib.swarm.team_messages import team_guidance
-                role_policy += team_guidance(message_binding)
             child = create_child_invocation(
                 self.parent_task, model=self.model, tools=self.tools,
                 objective=self.spec.objective, context=self.spec.context,
-                system_prompt=self._system_prompt, role_policy=role_policy,
+                system_prompt=self._system_prompt, role_policy=self._role_policy,
                 artifact_hint=self._artifact_hint,
                 project_path=self.project_path, thinking_enabled=self.thinking_enabled,
                 checkpoint_messages=self.messages, checkpoint_sink=self._save_checkpoint,
@@ -549,7 +578,8 @@ class SubAgent:
                 event_sink=self._on_invocation_event, abort_check=self.abort_check,
                 timeout_seconds=timeout_seconds,
                 progress_beacon=self.progress_beacon, progress_key=self.spec.id,
-                execution_limits=self.spec.execution_limits)
+                execution_limits=self.spec.execution_limits,
+                output_schema=self.spec.output_schema)
             self._child = child
             from lib.swarm.message_contract import worker_message_contracts
             child['_invocationToolContracts'] = worker_message_contracts(
@@ -576,11 +606,16 @@ class SubAgent:
                 self.result.error_message = str(error.get('detail') or error.get('message') or error) if isinstance(error, dict) else str(error)
         except Exception as error:
             from lib.llm.llm_errors import AbortedError
+            from lib.tasks_pkg.native_parent import NativeParentSettled
             child = self._child or {}
             internal_stop = child.get('_invocationStopReason') in {'stalled', 'deadline'}
+            # Owner Stop also settles the issuer; that refusal is cancellation.
+            stopped_issuer = isinstance(error, NativeParentSettled) and self.abort_check()
             cancelled = not internal_stop and not child.get('_invocationDeliveryError') and (
-                isinstance(error, AbortedError) or child.get('aborted'))
+                isinstance(error, AbortedError) or child.get('aborted') or stopped_issuer)
             self.result.status = 'cancelled' if cancelled else 'failed'
+            if isinstance(error, NativeParentSettled) and not stopped_issuer:
+                self.result.recovery_reason = error.reason
             failure = child.get('error') if internal_stop else None
             self.result.error_message = (
                 str(failure.get('detail') or failure.get('message') or failure)
@@ -597,6 +632,7 @@ class SubAgent:
                 self.result.final_answer = '\n'.join(
                     block.get('text') or '' for block in child.get('segments') or []
                     if block.get('type') == 'text')
+            self._settle_output_contract()
             self.result.reasoning_trace = (child.get('thinking') or '')[-2000:]
             self.messages = child.get('messages') or self.messages
             usage = child.get('usage') or (recovered_result if self._child is None else {}) or {}
@@ -672,11 +708,28 @@ class SubAgent:
                 self._cleanup()
         return self.result
 
+    def _settle_output_contract(self) -> None:
+        """Canonicalize a completed structured answer or record its violation.
+
+        A violation keeps the raw answer and the completed status: retrying a
+        worker that already acted could replay its side effects.
+        """
+        if self.result.status != 'completed' or self.spec.output_schema is None:
+            return
+        from lib.swarm.spawn_contracts import canonical_json, parse_structured_answer
+        value, error = parse_structured_answer(self.result.final_answer, self.spec.output_schema)
+        if value is None:
+            self.result.contract_error = f'output_schema violation: {error}'
+        else:
+            self.result.final_answer = canonical_json(value)
+            self.result.contract_error = ''
+
     def _cleanup(self) -> None:
         if self._cleaned_up:
             return
         self._cleaned_up = True
         self.messages = []
+        self._durable_checkpoint = None
         self._child = None
         self.context_task.clear()
 
@@ -901,7 +954,13 @@ class SubAgent:
         at run end. No-op unless ``self.swarm_key`` was set by the master.
         Model/tool intent, ready receipts and terminal results require ACK.
         Classified pressure waits on one frozen command; it never authorizes
-        another effect or restarts the agent.
+        another effect or restarts the agent. The write is the smallest one
+        that leaves the durable row exactly as a full save would: a
+        constant-size marker when only compact result fields changed since
+        this run's last acknowledged write (the pre-request ``model_in_flight``
+        write-ahead), an append of the new messages when the transcript only
+        grew, and otherwise (first write of a run, a compacted or rewritten
+        prefix, a refused append base) a full save.
         """
         required = final or self.result.checkpoint_phase in (
             'ready', 'tools_in_flight', 'model_in_flight', 'terminal_delivery')
@@ -910,20 +969,49 @@ class SubAgent:
             return False
         try:
             from lib.swarm import persistence
+            result = self.result.to_dict()
+            task = self._child or self.context_task
+            durable, self._durable_checkpoint = self._durable_checkpoint, None
+            marker = (None if final or not required
+                      else self._checkpoint_marker(durable, result, self.messages))
+            if marker is not None and persistence.mark_agent_checkpoint(
+                    self.swarm_key, self.spec.id, rounds_used=self.result.rounds_used,
+                    result=marker, task=task):
+                self._durable_checkpoint = durable
+                return True
+            # One detached snapshot is both the sent result and the next base.
+            settled = self._settled_fields(result)
+            result = {key: settled[key] if key in settled else value
+                      for key, value in result.items()}
             status = self.result.status or SubAgentStatus.RUNNING.value
-            persistence.save_agent(
+            status = 'running' if status == 'interrupted' else status
+            checkpoint_id = uuid.uuid4().hex
+            appended = self._appended_messages(durable) if required else None
+            if appended is not None and persistence.append_agent_checkpoint(
+                    self.swarm_key, self.spec.id, base_checkpoint_id=durable[2],
+                    base_message_count=len(durable[0]), checkpoint_id=checkpoint_id,
+                    messages=appended, result=result, status=status,
+                    rounds_used=self.result.rounds_used, task=task,
+                    cancellable=not final):
+                durable[0].extend(appended)
+                self._durable_checkpoint = (durable[0], settled, checkpoint_id)
+                return True
+            messages = fast_deepcopy(self.messages)
+            acknowledgement = persistence.save_agent(
                 self.swarm_key, self.spec.id,
                 role=self.spec.role,
                 objective=self.spec.objective,
-                status='running' if status == 'interrupted' else status,
-                messages=self.messages,
-                result=self.result.to_dict(),
+                status=status,
+                messages=messages,
+                result=result,
                 rounds_used=self.result.rounds_used,
                 required=required,
-                task=self._child or self.context_task,
+                task=task,
                 cancellable=not final,
-            )
-
+                checkpoint_id=checkpoint_id)
+            if acknowledgement is not None:
+                recorded = acknowledgement.get('checkpoint_id') == checkpoint_id
+                self._durable_checkpoint = (messages, settled, checkpoint_id if recorded else '')
             return True
         except Exception as e:
             logger.debug('[Agent:%s] checkpoint failed (non-fatal): %s',
@@ -931,6 +1019,48 @@ class SubAgent:
 
             if required:
                 raise
+
+    @staticmethod
+    def _settled_fields(result: dict) -> dict:
+        return fast_deepcopy({key: value for key, value in result.items()
+                              if key not in SWARM_CHECKPOINT_MARKER_RESULT_FIELDS})
+
+    @staticmethod
+    def _checkpoint_marker(durable, result: dict, messages: list) -> dict | None:
+        """Compact fields to overlay, or None when a larger write is required.
+
+        A marker is exact only while the transcript and every other result
+        field equal this run's last acknowledged write. Otherwise (first
+        checkpoint, injected or compacted messages, settled tool results, a
+        status change) an append or a full save is written.
+        """
+        if durable is None:
+            return None
+        durable_messages, settled, _ = durable
+        marker = {key: result[key] for key in SWARM_CHECKPOINT_MARKER_RESULT_FIELDS}
+        if any(not (value is None or isinstance(value, (bool, int, float)) or (
+                isinstance(value, str)
+                and len(value) <= SWARM_CHECKPOINT_MARKER_TEXT_CHARACTERS))
+               for value in marker.values()):
+            return None
+        if {key: value for key, value in result.items()
+                if key not in SWARM_CHECKPOINT_MARKER_RESULT_FIELDS} != settled:
+            return None
+        return marker if messages == durable_messages else None
+
+    def _appended_messages(self, durable) -> list | None:
+        """Detached messages beyond the durable base, or None if it cannot grow.
+
+        Appending is exact only while the authority keeps this run's base and
+        the live transcript still starts with every message that base holds,
+        unchanged; a compacted, rewritten or shortened prefix saves in full.
+        """
+        if durable is None or not durable[2]:
+            return None
+        base = durable[0]
+        if len(self.messages) < len(base) or self.messages[:len(base)] != base:
+            return None
+        return fast_deepcopy(self.messages[len(base):])
 
 
     def _handle_store_artifact(self, args: dict) -> str:

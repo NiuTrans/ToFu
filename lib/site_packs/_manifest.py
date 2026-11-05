@@ -10,22 +10,19 @@ registry.
 from __future__ import annotations
 
 import json
-import re
+from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
-SCHEMA_PATH = Path(__file__).parents[2] / 'contracts' / 'site_pack_v1.schema.json'
+from ._contract import schema_validator
+from ._inputs import operation_input_schema, prepare_steps, walk_steps
+from ._templates import template_params
 
 #: Inline input/output schemas stay small enough to audit and to project into
 #: model-facing tool schemas without a prompt budget surprise.
 MAX_INLINE_SCHEMA_CHARS = 8192
-
-_TEMPLATE_RE = re.compile(r'\{([a-zA-Z_][a-zA-Z0-9_]*)(\|raw)?\}')
-
-_validator: Draft202012Validator | None = None
-
 
 class ManifestError(ValueError):
     """A pack file failed schema or semantic validation."""
@@ -74,27 +71,6 @@ class PackManifest:
     source_path: str = ''
 
 
-def _schema_validator() -> Draft202012Validator:
-    global _validator
-    if _validator is None:
-        schema = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))
-        Draft202012Validator.check_schema(schema)
-        _validator = Draft202012Validator(schema)
-    return _validator
-
-
-def _template_params(template: str) -> set[str]:
-    return {m.group(1) for m in _TEMPLATE_RE.finditer(template or '')}
-
-
-def _walk_steps(steps: list):
-    """Yield every step, descending into try groups."""
-    for step in steps or []:
-        yield step
-        if step.get('do') == 'try':
-            yield from _walk_steps(step.get('steps'))
-
-
 def _check_semantics(raw: dict, *, source: str) -> None:
     auth = raw.get('auth')
     seen_ops: set[str] = set()
@@ -108,36 +84,40 @@ def _check_semantics(raw: dict, *, source: str) -> None:
             schema = op.get(key) or {'type': 'object'}
             if len(json.dumps(schema)) > MAX_INLINE_SCHEMA_CHARS:
                 raise ManifestError(f'{where}: {key} exceeds the inline schema budget')
+            try:
+                Draft202012Validator.check_schema(schema)
+            except SchemaError as exc:
+                raise ManifestError(f'{where}: invalid {key}: {exc.message}') from exc
         params = set((op.get('input_schema') or {}).get('properties') or {})
         access = op.get('access') or 'read'
-        steps = op.get('steps') or []
-        kinds = [s.get('do') for s in _walk_steps(steps)]
+        steps = tuple(walk_steps(op.get('steps')))
+        kinds = {step['do'] for step in steps}
+        extracted_slots = {step['into'] for step in steps if step['do'] == 'extract'}
         if 'ensure_auth' in kinds and not (auth and auth.get('login_url')):
             raise ManifestError(f'{where}: ensure_auth requires the pack auth section')
         if 'click' in kinds and access != 'write':
             raise ManifestError(
                 f'{where}: click is a mutation and requires access="write"')
-        for step in _walk_steps(steps):
+        for step in steps:
             do = step.get('do')
             referenced: set[str] = set()
             if do in ('navigate', 'research'):
-                referenced |= _template_params(step.get('url') or '')
+                referenced |= template_params(step.get('url') or '')
             elif do == 'fill':
-                referenced |= _template_params(step.get('value') or '')
+                referenced |= template_params(step.get('value') or '')
             elif do == 'extract':
                 referenced |= set(step.get('args_from_params') or [])
-            else:
-                for key in ('times_from_param', 'query_from_param',
-                            'limit_from_param', 'max_chars_from_param',
-                            'max_pages_from_param'):
-                    if step.get(key):
-                        referenced.add(step[key])
+            for key in ('times_from_param', 'query_from_param',
+                        'limit_from_param', 'max_chars_from_param',
+                        'max_pages_from_param'):
+                if step.get(key):
+                    referenced.add(step[key])
             unknown = referenced - params
             if unknown:
                 raise ManifestError(
                     f'{where}: step {do} references params not in input_schema: '
                     + ', '.join(sorted(unknown)))
-        for step in _walk_steps(steps):
+        for step in steps:
             if step.get('do') != 'normalize':
                 continue
             kind = step.get('kind')
@@ -146,25 +126,38 @@ def _check_semantics(raw: dict, *, source: str) -> None:
                     if not step.get(key):
                         raise ManifestError(
                             f'{where}: search_records normalize requires {key}')
-            if kind == 'detail' and 'fields' in step and not any(
-                    s.get('do') == 'extract' and s.get('into') == 'fields'
-                    for s in _walk_steps(steps)):
+            if kind == 'detail' and 'fields' in step and 'fields' not in extracted_slots:
                 raise ManifestError(
                     f'{where}: detail fields require an extract into "fields" step')
-            if kind == 'json_payload' and not any(
-                    (s.get('do') == 'extract' and s.get('into') == 'payload')
-                    or s.get('do') == 'research'
-                    for s in _walk_steps(steps)):
+            if kind == 'json_payload' and 'payload' not in extracted_slots and 'research' not in kinds:
                 raise ManifestError(
                     f'{where}: json_payload normalize requires an extract '
                     'into "payload" or a research step')
+
+
+def _parse_operation(op: dict) -> PackOperation:
+    steps = prepare_steps(op['steps'])
+    return PackOperation(
+        name=op['name'],
+        description=op['description'],
+        access=op.get('access') or 'read',
+        input_schema=operation_input_schema(op.get('input_schema') or {'type': 'object'}, steps),
+        output_schema=op.get('output_schema') or {'type': 'object'},
+        session=op.get('session') or 'ephemeral',
+        window_mode=op.get('window_mode') or 'background',
+        timeout=int(op.get('timeout') or 30),
+        min_interval_s=int(op.get('min_interval_s') or 0),
+        cooldown_s=int(op.get('cooldown_s') or 0),
+        steps=steps,
+    )
 
 
 def parse_manifest(raw: dict, *, source: str) -> PackManifest:
     """Validate one pack document and return its typed manifest."""
     if not isinstance(raw, dict):
         raise ManifestError(f'{source}: pack file must be a JSON object')
-    error = next(_schema_validator().iter_errors(raw), None)
+    raw = deepcopy(raw)
+    error = next(schema_validator().iter_errors(raw), None)
     if error is not None:
         raise ManifestError(f'{source}: {error.message}')
     _check_semantics(raw, source=source)
@@ -182,22 +175,7 @@ def parse_manifest(raw: dict, *, source: str) -> PackManifest:
             domain=str(auth_raw.get('domain') or ''),
             project=bool(auth_raw.get('project', True)),
         )
-    operations = tuple(
-        PackOperation(
-            name=op['name'],
-            description=op['description'],
-            access=op.get('access') or 'read',
-            input_schema=op.get('input_schema') or {'type': 'object'},
-            output_schema=op.get('output_schema') or {'type': 'object'},
-            session=op.get('session') or 'ephemeral',
-            window_mode=op.get('window_mode') or 'background',
-            timeout=int(op.get('timeout') or 30),
-            min_interval_s=int(op.get('min_interval_s') or 0),
-            cooldown_s=int(op.get('cooldown_s') or 0),
-            steps=tuple(dict(s) for s in op.get('steps') or ()),
-        )
-        for op in raw.get('operations') or ()
-    )
+    operations = tuple(_parse_operation(op) for op in raw['operations'])
     return PackManifest(
         id=raw['id'],
         name=raw['name'],

@@ -22,8 +22,8 @@ use crate::generated_tofudb_ir::{
 pub use crate::generated_tofudb_ir::{
     MAX_AUTHORITY_GC_BLOCKS_PER_ROUND, MAX_AUTHORITY_GC_ORPHAN_PAYLOAD_SEGMENT_FILES_REMOVED,
     MAX_AUTHORITY_GC_PAYLOAD_SEGMENTS_SCANNED, MAX_AUTHORITY_GC_PAYLOAD_SEGMENT_FILES_SCANNED,
-    MAX_AUTHORITY_GC_PHYSICAL_BLOCKS, MAX_AUTHORITY_GC_SESSION_CALLS,
-    MAX_AUTHORITY_GC_TEMPORARY_BLOCK_FILES_REMOVED, MAX_AUTHORITY_GC_TEMPORARY_BYTES,
+    MAX_AUTHORITY_GC_SESSION_CALLS, MAX_AUTHORITY_GC_TEMPORARY_BLOCK_FILES_REMOVED,
+    MAX_AUTHORITY_GC_TEMPORARY_BYTES,
     MAX_AUTHORITY_GC_VICTIM_BYTES, MIN_AUTHORITY_GC_PAYLOAD_COMPACTION_BLOCKS,
 };
 use crate::payload_manifest::MAX_PAYLOAD_SEGMENTS;
@@ -40,7 +40,6 @@ pub struct AuthorityGarbageCollectionBudget {
     pub maximum_victim_bytes: u64,
     pub maximum_temporary_bytes: u64,
     pub maximum_blocks_per_round: usize,
-    pub maximum_physical_blocks: usize,
 }
 
 impl AuthorityGarbageCollectionBudget {
@@ -49,7 +48,6 @@ impl AuthorityGarbageCollectionBudget {
             maximum_victim_bytes: MAX_AUTHORITY_GC_VICTIM_BYTES,
             maximum_temporary_bytes: LEAN_AUTHORITY_GC_TEMPORARY_BYTES,
             maximum_blocks_per_round: MAX_AUTHORITY_GC_BLOCKS_PER_ROUND,
-            maximum_physical_blocks: MAX_AUTHORITY_GC_PHYSICAL_BLOCKS,
         }
     }
 
@@ -63,7 +61,6 @@ impl AuthorityGarbageCollectionBudget {
             maximum_victim_bytes: MAX_AUTHORITY_GC_VICTIM_BYTES,
             maximum_temporary_bytes,
             maximum_blocks_per_round: MAX_AUTHORITY_GC_BLOCKS_PER_ROUND,
-            maximum_physical_blocks: MAX_AUTHORITY_GC_PHYSICAL_BLOCKS,
         }
     }
 
@@ -74,8 +71,6 @@ impl AuthorityGarbageCollectionBudget {
             || self.maximum_temporary_bytes > MAX_AUTHORITY_GC_TEMPORARY_BYTES
             || self.maximum_blocks_per_round == 0
             || self.maximum_blocks_per_round > MAX_AUTHORITY_GC_BLOCKS_PER_ROUND
-            || self.maximum_physical_blocks == 0
-            || self.maximum_physical_blocks > MAX_AUTHORITY_GC_PHYSICAL_BLOCKS
         {
             return Err(invalid_input("authority GC budget exceeds its hard bounds"));
         }
@@ -321,9 +316,7 @@ fn collect_authority_garbage(
     let run_directory = work_directory.join("gc-runs");
     ensure_directory(&run_directory, &work_directory, vfs.as_ref())?;
 
-    let temporary_plan = engine
-        .block_store()
-        .plan_temporary_file(budget.maximum_physical_blocks)?;
+    let temporary_plan = engine.block_store().plan_temporary_file()?;
     if let Some(candidate) = &temporary_plan.candidate {
         if mode == AuthorityGarbageCollectionMode::Plan {
             return Ok(AuthorityGarbageCollectionMetrics {
@@ -406,7 +399,6 @@ fn collect_authority_garbage(
         .min(MAX_SEGMENT_PAYLOAD_BYTES);
     let mut more_payload_compaction_candidates = false;
     let scan_result = engine.block_store().visit_block_shards(
-        budget.maximum_physical_blocks,
         |shard, block_ids| {
             if block_ids.is_empty() {
                 return Ok(());
@@ -750,7 +742,6 @@ mod tests {
             maximum_victim_bytes: MAX_AUTHORITY_GC_VICTIM_BYTES,
             maximum_temporary_bytes: LEAN_AUTHORITY_GC_TEMPORARY_BYTES,
             maximum_blocks_per_round: MAX_AUTHORITY_GC_BLOCKS_PER_ROUND,
-            maximum_physical_blocks: MAX_AUTHORITY_GC_PHYSICAL_BLOCKS,
         }
     }
 
@@ -2102,23 +2093,28 @@ mod tests {
     }
 
     #[test]
-    fn gc_loose_directory_scan_bound_is_enforced_at_scaled_budget() {
-        // Scale factor: the documented 20,000,000 loose-directory-entry scan
-        // bound is scaled to 16; the extra orphans must fail closed instead
-        // of scanning past the bound.
+    fn gc_loose_directory_scan_completes_past_the_retired_store_wide_total() {
+        // Scale factor: the retired 20,000,000-entry loose-directory total is
+        // scaled to 16. A store above it is collected instead of failing
+        // closed on every round.
         let (vfs, mut database, key) = authority_database_with_live_value();
-        for index in 0..17_u32 {
-            database
-                .write_orphan_block_for_test(format!("gc-scan-bound-orphan-{index}").as_bytes())
-                .unwrap();
-        }
+        let orphans: Vec<_> = (0..17_u32)
+            .map(|index| {
+                database
+                    .write_orphan_block_for_test(format!("gc-scan-bound-orphan-{index}").as_bytes())
+                    .unwrap()
+            })
+            .collect();
         vfs.arm_fault(None).unwrap();
-        let budget = AuthorityGarbageCollectionBudget {
-            maximum_physical_blocks: 16,
-            ..test_budget()
-        };
-        let error = database.collect_garbage(budget).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let metrics = database.collect_garbage(test_budget()).unwrap();
+        assert!(metrics.scanned_blocks > 16);
+        assert!(metrics.removed_blocks >= 17);
+        for orphan in orphans {
+            assert_eq!(
+                database.read_block_for_test(orphan).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+        }
         drop(database);
         vfs.crash().unwrap();
         let reopened = AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs).unwrap();

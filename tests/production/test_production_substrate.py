@@ -413,8 +413,11 @@ def test_unstarted_worker_failure_preserves_running_checkpoint_and_stops_submiss
             executor.submit = observed_submit
             yield executor
     monkeypatch.setattr(concurrency, 'production_executor', observed_factory)
+    # The executor retries one failed carrier start; refusing every carrier
+    # after stage a's keeps stage b's worker genuinely unstarted.
     def start(thread):
-        if thread.name == 'production-stage_1':
+        if (thread.name.startswith('production-stage_')
+                and thread.name != 'production-stage_0'):
             raise RuntimeError('injected physical thread failure')
         return original_start(thread)
     monkeypatch.setattr(threading.Thread, 'start', start)
@@ -472,10 +475,20 @@ def test_failed_parallel_checkpoint_is_not_resurrected_by_another_commit(tmp_pat
     assert set(ctx['artifacts']) == {'b'}
 
 
-def test_concurrent_production_pools_aggregate_owned_observations(monkeypatch):
+def _scraped_pool(name):
+    from lib.observability import prometheus_lines
+    keys = ('workers', 'queued', 'active', 'resident_threads', 'abandoned')
+    series = {f'tofu_executor_{key}{{pool="{name}"}}': key for key in keys}
+    gauges = {}
+    for line in prometheus_lines():
+        metric, _, value = line.rpartition(' ')
+        if metric in series:
+            gauges[series[metric]] = float(value)
+    return gauges
+
+
+def test_concurrent_production_pools_aggregate_owned_observations():
     from lib.production import concurrency
-    snapshots = []
-    monkeypatch.setattr(concurrency,'publish_executor_state',lambda name,**state:snapshots.append(state))
     first_entered=threading.Barrier(3);second_entered=threading.Event()
     first_release=threading.Event();second_release=threading.Event()
     def first():
@@ -490,24 +503,28 @@ def test_concurrent_production_pools_aggregate_owned_observations(monkeypatch):
             first_entered.wait(timeout=2)
             remaining=peer.submit(second)
             assert second_entered.wait(timeout=2)
-            assert snapshots[-1]['active']==3
+            assert _scraped_pool('production-stage')['active']==3
             first_release.set()
             for call in calls:call.result(timeout=2)
-        assert snapshots[-1]['active']==1
-        assert snapshots[-1]['resident_threads']==1
+        scraped=_scraped_pool('production-stage')
+        assert scraped['active']==1
+        assert scraped['resident_threads']==1
         second_release.set();remaining.result(timeout=2)
-    assert snapshots[-1]['active']==snapshots[-1]['resident_threads']==0
+    scraped=_scraped_pool('production-stage')
+    assert scraped['active']==scraped['resident_threads']==0
     assert not any(owner.name == 'production-stage' for owner in concurrency._POOL_SNAPSHOTS)
 
 
 def test_observation_outage_does_not_block_owned_stage_work(tmp_path, monkeypatch):
+    from lib import observability
     from lib.production import concurrency, stages as st
     def fail(*args, **kwargs):raise RuntimeError('metrics unavailable')
-    monkeypatch.setattr(concurrency,'publish_executor_state',fail)
+    monkeypatch.setattr(observability,'publish_executor_state',fail)
     artifacts = st.run_independent_stages([st.Stage('a',lambda ctx:{'ok':True})],{},
         state_path=str(tmp_path/'state.json'),max_workers=1)
     assert artifacts['a']=={'ok':True}
     assert not any(owner.name == 'production-stage' for owner in concurrency._POOL_SNAPSHOTS)
+    observability.prometheus_lines()  # a failing observer cannot break the scrape
 
 
 def test_owned_results_start_sixty_four_jobs_with_one_idle_hint():

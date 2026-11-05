@@ -22,8 +22,9 @@ _TEST_RE = re.compile(r'\b(pytest|unittest|npm test|pnpm test|cargo test|go test
 _ERROR_RE = re.compile(r'\b(error|failed|failure|traceback|exception|fatal)\b',
                        re.IGNORECASE)
 _QUERY_TOOLS = frozenset({
-    'web_search', 'fetch_url', 'grep_search', 'find_files', 'read_files',
-    'list_dir', 'inspect_image', 'search_mcp_tools', 'search_tools',
+    'web_search', 'fetch_url', 'search_files', 'grep_search', 'find_files',
+    'read_files', 'list_dir', 'inspect_image', 'inspect_video',
+    'search_mcp_tools', 'search_tools',
 })
 _MUTATION_TOOLS = frozenset({
     'write_file', 'apply_diff', 'apply_diffs', 'insert_content',

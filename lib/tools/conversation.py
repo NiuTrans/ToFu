@@ -15,7 +15,11 @@ CONV_REF_LIST_TOOL = {
             'inspect same-owner, same-project worker evidence needed to delegate, '
             'review or follow the current authorized request. Otherwise do not '
             'browse history proactively. Project mode scopes to siblings; '
-            'scope=all requires an explicit user request beyond that project.'
+            'scope=all requires an explicit user request beyond that project. '
+            'The current conversation is never listed; the result names its ID '
+            'for get_conversation. A keyword match in message text names the '
+            'matching Turn ID and a snippet (also for the current conversation); '
+            'read that page with get_conversation(conversation_id, turn_id).'
         ),
         'parameters': {
             'type': 'object',
@@ -42,6 +46,13 @@ CONV_REF_GET_TOOL = {
             'review or follow the current authorized request. Otherwise do not '
             'browse history proactively. Use an ID from list_conversations or '
             'the current assignment/result evidence.\n\n'
+            'The current conversation\'s own ID needs no user request: it returns '
+            'this conversation\'s durable transcript, including Turns that may be '
+            'outside your current working view (for example after compaction). '
+            'Page to those older Turns with before=N.\n\n'
+            'To read a specific Turn (for example a list_conversations match), '
+            'pass turn_id: the page around that Turn, with older/newer before=N '
+            'hints in the header.\n\n'
             '`raw` defaults to true: a structured, unsummarized DB record with '
             'row metadata/settings and every field of each delivered message, '
             'including full tool rounds. Set `raw=false` only for a readable '
@@ -56,7 +67,10 @@ CONV_REF_GET_TOOL = {
             'properties': {
                 'conversation_id': {
                     'type': 'string',
-                    'description': 'Conversation ID, usually from list_conversations.',
+                    'description': (
+                        'Conversation ID, usually from list_conversations; the '
+                        'current conversation\'s own ID reads its durable transcript.'
+                    ),
                 },
                 'include_tool_details': {
                     'type': 'boolean',
@@ -90,6 +104,16 @@ CONV_REF_GET_TOOL = {
                         'Exclusive 1-based end cursor (min 1) for an older page. '
                         "Omit for latest; use the header's positive before=N hint. "
                         'Never pass 0.'
+                    ),
+                },
+                'turn_id': {
+                    'type': 'string',
+                    'minLength': 1,
+                    'maxLength': 128,
+                    'description': (
+                        'Read the page containing this main-transcript Turn, e.g. '
+                        'a Turn ID named by a list_conversations match. Exclusive '
+                        'with before.'
                     ),
                 },
             },

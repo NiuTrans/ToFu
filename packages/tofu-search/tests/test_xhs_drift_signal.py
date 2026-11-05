@@ -20,7 +20,9 @@ All offline: providers are fakes registered through tofu_search.providers.
 import pytest
 
 import tofu_search
+from tofu_search._provider_scope import browser_scope
 from tofu_search.search.engines import xhs
+from tofu_search.search.engines._xhs_sessions import browser_guard
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +72,6 @@ class _FakeKnowledgeProvider(tofu_search.SiteKnowledgeProvider):
 @pytest.fixture
 def rig(monkeypatch):
     """Clean providers + guard + drift listeners around every test."""
-    xhs._GUARD.reset()
     tofu_search.clear_site_drift_listeners()
     # Neutralize pacing/cache so consecutive queries all reach the page-load
     # path (same convention as test_xhs_browser_reroute).
@@ -81,7 +82,6 @@ def rig(monkeypatch):
     tofu_search.register_auth_source_provider(None)
     tofu_search.register_site_knowledge_provider(None)
     tofu_search.clear_site_drift_listeners()
-    xhs._GUARD.reset()
 
 
 def _install(browser_result, *, knowledge=None, cookies=None):
@@ -143,6 +143,7 @@ def test_drift_emitted_when_anchors_but_no_cards(rig):
     site, url, evidence = events[0]
     assert site == 'xiaohongshu.com'
     assert evidence['anchors'] == 7
+    assert evidence['transport'] == 'browser'
     assert '咖啡' in evidence['page_title']
 
 
@@ -181,7 +182,7 @@ def test_drift_still_feeds_empty_backoff(rig):
     tofu_search.configure(xhs_backoff_cooldown_s=1800)
     for q in ('q1', 'q2', 'q3'):
         xhs.search_xhs(q)
-    assert xhs._GUARD.in_cooldown(), (
+    assert browser_guard(browser_scope.current_binding()).in_cooldown(), (
         'drifted empties must still trip the risk-control backoff — '
         'hammering a drifting selector is still hammering the account')
 

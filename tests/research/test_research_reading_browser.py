@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 from tests._runtime_sections import _require_frontend_bundler
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(scope='module')
 def research_dom_bundle(tmp_path_factory):
+    require_node_modules('vite')
     output = tmp_path_factory.mktemp('research-browser') / 'dom.js'
     subprocess.run([
         'node', str(ROOT / 'scripts/vite_test_bundle.mjs'),

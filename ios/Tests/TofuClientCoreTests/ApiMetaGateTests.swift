@@ -7,10 +7,10 @@ final class ApiMetaGateTests: XCTestCase {
     /// META_PATH against the origin would drop it and hit the wrong server.
     func test_metaUrl_keeps_proxy_prefix() {
         XCTAssertEqual(
-            ApiMetaGate.metaUrl("https://h.example/proxy/15000/"),
+            ServerUrl.parse("https://h.example/proxy/15000/")!.endpoint(ApiV4Contract.metaPath),
             "https://h.example/proxy/15000/api/v4/meta"
         )
-        XCTAssertEqual(ApiMetaGate.metaUrl("https://h.example"), "https://h.example/api/v4/meta")
+        XCTAssertEqual(ServerUrl.parse("https://h.example")!.endpoint("api/v4/meta"), "https://h.example/api/v4/meta")
     }
 
     func test_matching_major_is_compatible() {

@@ -204,7 +204,8 @@ function enterImageGenMode() {
     runtimeScope.exitPaperMode();
   }
   if (typeof runtimeScope.setAgentMode === 'function'
-      && (ImageGenerationComposerState.planMode || ImageGenerationComposerState.autopilotEnabled || ImageGenerationComposerState.activeFlow)) {
+      && (ImageGenerationComposerState.planMode || ImageGenerationComposerState.delegateMode
+          || ImageGenerationComposerState.autopilotEnabled || ImageGenerationComposerState.activeFlow)) {
     if (runtimeScope.setAgentMode('standard') !== true) return false;
   }
   _applyImageGenUI(true);

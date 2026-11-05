@@ -27,24 +27,18 @@ Skips cleanly when node + jsdom aren't installed.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 _UPLOAD_SRC = runtime_section_path('upload.js')
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
 _HARNESS = r"""
@@ -148,6 +142,7 @@ const fakeFile = { type: 'image/png', name: 'photo.png' };
 
 
 def _run(neuter=False):
+    require_node_modules('jsdom')
     harness = os.path.join(HERE, '_img_optimistic_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
@@ -166,8 +161,6 @@ def _run(neuter=False):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_optimistic_preview_lifecycle():
     """The chip appears instantly with a processing overlay, then reconciles to
     a fully-formed entry (base64 + url, no transient fields) once compress +
@@ -185,8 +178,6 @@ def test_optimistic_preview_lifecycle():
         assert marker in output, output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_optimistic_push_is_load_bearing():
     """NC: with the optimistic push removed (chip pushed only AFTER compress),
     no chip exists while compression is still in flight — proving the instant

@@ -1,3 +1,5 @@
+import { destroyPodcastRuntime } from './podcast-runtime';
+import { destroyVideoRuntime } from './video-runtime';
 import { featureRegistry } from '../../feature-registry';
 import { renderPaperWorkbench } from './workbench';
 import { destroyPaperEvidence } from './evidence';
@@ -38,13 +40,9 @@ type PaperLifecycleWindow = Window & {
   _destroyResearchRuntime?: () => void;
   _destroyPaperRecommend?: () => void;
   _destroyArxivFetch?: () => void;
-  _destroyPodcastRuntime?: () => void;
-  _destroyVideoRuntime?: () => void;
   _destroyBabelRuntime?: () => void;
   _destroyReportRuntime?: () => void;
   _destroyPaperPdfViewer?: () => void;
-  _pcStopPolling?: () => void;
-  _pvStopPolling?: () => void;
   _destroyPaperLifecycle?: typeof destroyPaperLifecycle;
   _destroyPaperSession?: typeof destroyPaperSession;
   _installPaperLifecycle?: typeof installPaperLifecycle;
@@ -224,12 +222,10 @@ export function destroyPaperSession(): void {
   state._destroyResearchRuntime?.();
   state._destroyPaperRecommend?.();
   state._destroyArxivFetch?.();
-  state._destroyPodcastRuntime?.();
-  state._destroyVideoRuntime?.();
+  destroyPodcastRuntime();
+  destroyVideoRuntime();
   state._destroyBabelRuntime?.();
   state._destroyReportRuntime?.();
-  state._pcStopPolling?.();
-  state._pvStopPolling?.();
 }
 
 export function installPaperLifecycle(): void {

@@ -27,26 +27,10 @@ public struct SupervisorUrl: Equatable, Sendable {
     /// Derive the supervisor base from a Tofu server URL, or nil if the URL is
     /// not a valid absolute http(s) URL.
     public static func fromServerUrl(_ serverUrl: String) -> SupervisorUrl? {
-        let trimmed = serverUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let components = URLComponents(string: trimmed),
-              let scheme = components.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let host = components.host, !host.isEmpty else { return nil }
-        var origin = "\(scheme)://\(host.lowercased())"
-        if let port = components.port, port != (scheme == "https" ? 443 : 80) {
-            origin += ":\(port)"
-        }
-        // The supervisor rides one port up from whatever port the URL's
-        // `/proxy/<port>/` segment names; only a URL with no proxy segment
-        // at all falls back to the conventional default.
-        let segments = components.path.split(separator: "/").map(String.init)
-        var siblingPort = supervisorPort
-        if let proxyIndex = segments.firstIndex(of: "proxy"),
-           proxyIndex + 1 < segments.count,
-           let tofuPort = Int(segments[proxyIndex + 1]) {
-            siblingPort = String(tofuPort + 1)
-        }
-        return SupervisorUrl(base: "\(origin)/proxy/\(siblingPort)", origin: origin)
+        guard let server = ServerUrl.parse(serverUrl) else { return nil }
+        let proxyPort = Rx.group(#"/(?:absproxy|proxy)/(\d+)(?:/|$)"#, in: server.path).flatMap(Int.init)
+        let sibling = proxyPort.flatMap { (1...65534).contains($0) ? String($0 + 1) : nil } ?? supervisorPort
+        return SupervisorUrl(base: "\(server.origin)\(server.codeServerRootPath)proxy/\(sibling)", origin: server.origin)
     }
 
     /// Build a full endpoint URL. For GET /status the projectPath is passed as
@@ -58,15 +42,7 @@ public struct SupervisorUrl: Equatable, Sendable {
     ) -> String {
         let root = "\(supervisor.base)/\(name)"
         guard let projectPathForQuery else { return root }
-        return "\(root)?projectPath=\(formEncode(projectPathForQuery))"
-    }
-
-    /// java.net.URLEncoder parity: unreserved set is [A-Za-z0-9.-_*], space → +.
-    private static func formEncode(_ value: String) -> String {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_*")
-        return value
-            .addingPercentEncoding(withAllowedCharacters: allowed)?
-            .replacingOccurrences(of: "%20", with: "+") ?? value
+        return "\(root)?projectPath=\(FormEncoding.component(projectPathForQuery))"
     }
 
     /// Turn an opaque supervisor call failure (HTTP status + raw message) into

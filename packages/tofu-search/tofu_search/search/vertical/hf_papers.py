@@ -3,10 +3,12 @@
 import re
 from concurrent.futures import as_completed
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 
 from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
-from tofu_search.search.vertical import base
 from tofu_search.search.vertical.base import _HEADERS, _TIMEOUT, logger
+
+base = import_module('tofu_search.search.vertical.base')  # leaf, not via package: base.py
 
 TYPE = 'hf_papers'
 DOMAIN = 'academic'

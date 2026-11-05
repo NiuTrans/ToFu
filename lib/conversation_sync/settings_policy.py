@@ -5,14 +5,27 @@ callers may neither supply that slot nor receive it. Filter patches before a
 storage merge; never read/replace settings to restore a private value, which
 would race a concurrent reset/freeze. Trusted storage reads and CAS writes do
 not pass through this boundary.
+
+The public vocabulary that crosses the browser boundary is declared once in
+contracts/conversation_settings_v1.json; server projections derive from it.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 
 from lib.conversation_sync.execution_identity import RESERVED_EXECUTION_FIELDS
+
+CONVERSATION_SETTINGS_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / 'contracts'
+     / 'conversation_settings_v1.json').read_text(encoding='utf-8'))
+#: Settings keys carried by the sidebar catalog projection.
+CATALOG_SETTING_KEYS = frozenset(
+    key for key, spec in CONVERSATION_SETTINGS_CONTRACT['keys'].items()
+    if spec.get('catalog'))
 MCP_WIRE_DECLARATIONS_SETTING_KEY = '_mcpWireDeclarations'
 PRIVATE_CONVERSATION_SETTING_KEYS = (
     frozenset({MCP_WIRE_DECLARATIONS_SETTING_KEY}) | RESERVED_EXECUTION_FIELDS

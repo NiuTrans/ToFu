@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(SQLite3)
 import SQLite3
+#else
+import CSQLite
+#endif
 
 /// Store-layer failure.
 public enum TofuStoreError: Error, Equatable {
@@ -74,7 +78,7 @@ public final class SQLiteProfileStore: ProfileStore, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return readRows("SELECT \(Self.columns) FROM servers WHERE alias = ?") { stmt in
-            bindText(stmt, 1, alias)
+            self.bindText(stmt, 1, alias)
         }.first
     }
 
@@ -139,18 +143,24 @@ public final class SQLiteProfileStore: ProfileStore, @unchecked Sendable {
         }
     }
 
-    public func setAuthType(_ id: Int64, _ authType: AuthType) {
-        mutate("UPDATE servers SET authType = ? WHERE id = ?") { stmt in
-            bindText(stmt, 1, authType.rawValue)
-            sqlite3_bind_int64(stmt, 2, id)
-        }
-    }
-
-    public func setCookieHost(_ id: Int64, _ host: String?) {
-        mutate("UPDATE servers SET cookieHost = ? WHERE id = ?") { stmt in
+    public func setCookieHostIfCurrent(_ profile: Profile, _ host: String) -> Bool {
+        lock.lock()
+        var stmt: OpaquePointer?
+        guard !Task.isCancelled else { lock.unlock(); return false }
+        var matched = false
+        let sql = "UPDATE servers SET cookieHost = ? WHERE id = ? AND baseUrl = ? AND alias = ? AND authType = ?"
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             bindText(stmt, 1, host)
-            sqlite3_bind_int64(stmt, 2, id)
+            sqlite3_bind_int64(stmt, 2, profile.id)
+            bindText(stmt, 3, profile.baseUrl)
+            bindText(stmt, 4, profile.alias)
+            bindText(stmt, 5, profile.authType.rawValue)
+            matched = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1
         }
+        sqlite3_finalize(stmt)
+        lock.unlock()
+        if matched { notify() }
+        return matched
     }
 
     // MARK: - internals

@@ -1,6 +1,5 @@
 """Shared paper-route blueprint, PDF guards, and artifact-cache projections."""
 
-import asyncio
 import os
 import tempfile
 from collections.abc import Mapping
@@ -9,7 +8,7 @@ from quart import Blueprint
 
 
 from lib.log import get_logger
-from lib.paper.artifact_repository import PaperArtifactRepository, PaperReport
+from lib.paper.artifact_repository import PaperReport
 from lib.paper.report_artifact_keys import (
     checkpoints_lang_key,
     insight_lang_key,
@@ -144,11 +143,6 @@ def _parse_report_meta(row):
     return dict(raw) if isinstance(raw, Mapping) else None
 
 
-def _parse_insight_row_meta(row):
-    """Return the Sidecar-decoded insight metadata document."""
-    return _parse_report_meta(row)
-
-
 def _report_reopen_sibling_groups(lang, fallback_lang=None):
     """Map every selectable plain base language to its persisted companions."""
     sibling_groups = {}
@@ -160,30 +154,10 @@ def _report_reopen_sibling_groups(lang, fallback_lang=None):
     return sibling_groups
 
 
-async def _cached_insight_row(phash, lang, *, user_id: int):
-    """Read the one sibling insight row used by both reopen projections."""
-    if is_review_family(lang):
-        return None, "", ""
-    ui_lang = parse_report_lang(lang)["ui_lang"]
-    try:
-        cache_key = insight_lang_key(ui_lang)
-        row = await asyncio.to_thread(
-            PaperArtifactRepository(user_id).get_report,
-            phash,
-            cache_key,
-        )
-    except Exception as e:
-        logger.warning(
-            "[Paper:Report] Cached-insight lookup failed hash=%s: %s", phash, e
-        )
-        return None, ui_lang, ""
-    return row, ui_lang, cache_key
-
-
 def _structured_insight_payload(row, ui_lang):
     if not row or not row.report:
         return None
-    meta = _parse_insight_row_meta(row)
+    meta = _parse_report_meta(row)
     if not isinstance(meta, dict) or not isinstance(meta.get("items"), dict):
         return None
     return {
@@ -223,89 +197,12 @@ def _project_cached_insight(body, row, *, phash, ui_lang):
         body, row, phash=phash, cache_key=insight_lang_key(ui_lang)), None
 
 
-async def _enrich_cached_insight(body, phash, lang, *, user_id: int):
-    """Return ``(body, structured_payload)`` from one sibling-row read."""
-    row, ui_lang, cache_key = await _cached_insight_row(
-        phash, lang, user_id=user_id)
-    if cache_key:
-        return _project_cached_insight(
-            body, row, phash=phash, ui_lang=ui_lang)
-    return body, None
-
-
-async def _load_cached_insight_payload(phash, lang, *, user_id: int):
-    """Load the STRUCTURED insight payload for a v2 row, else None.
-
-    v2 rows (meta carries grounded ``items`` with resolved ``anchor_idx``) are
-    served as a separate payload so the reader can distribute anchored cards
-    (design §3.2) — their markdown is NOT merged into the report body. v1
-    rows (legacy, meta without items) return None here and keep the merged
-    read path in ``_append_cached_insight``.
-    """
-    row, ui_lang, _cache_key = await _cached_insight_row(
-        phash, lang, user_id=user_id)
-    return _structured_insight_payload(row, ui_lang)
-
-
-async def _load_cached_checkpoints_payload(phash, lang, *, user_id: int):
-    """Load the persisted checkpoint items for this paper+lang, else None.
-
-    Read-path only — never regenerates. The frontend distributes flip cards
-    from the structured items; nothing merges into the report body.
-    """
-    if is_review_family(lang):
-        return None
-    ui_lang = parse_report_lang(lang)["ui_lang"]
-    try:
-        row = await asyncio.to_thread(
-            PaperArtifactRepository(user_id).get_report,
-            phash,
-            checkpoints_lang_key(ui_lang),
-        )
-    except Exception as e:
-        logger.warning(
-            "[Paper:Report] Cached-checkpoints lookup failed hash=%s: %s", phash, e
-        )
-        return None
-    return _project_cached_checkpoints(row, ui_lang=ui_lang)
-
-
 def _project_cached_checkpoints(row, *, ui_lang):
     """Project one prefetched checkpoint row without another storage read."""
-    meta = _parse_insight_row_meta(row) if row else None
+    meta = _parse_report_meta(row) if row else None
     if not isinstance(meta, dict) or not isinstance(meta.get("items"), list):
         return None
     return {"items": meta["items"], "lang": ui_lang}
-
-
-async def _append_cached_insight(body, phash, lang, *, user_id: int):
-    """Merge the sibling persisted ``insight:<ui>`` row into a cached report body.
-
-    Read-path only — NEVER triggers a new insight generation. When a plain
-    report is served from the DB cache, look up the separately-persisted insight
-    section (key ``insight:<ui_lang>``) and append its markdown so a reopened
-    paper shows the insight the reader generated earlier, instead of it silently
-    vanishing until a forced regenerate.
-
-    Guards (so this is byte-identical to today for papers without an insight):
-      * skips Review Mode entirely (insight is only produced for plain reports);
-      * no-op when no insight row exists / it is empty;
-      * never double-appends if ``body`` already contains the section (a cache
-        row that was persisted with the insight baked in, or a re-entry);
-      * v2 rows (structured items in meta) are NOT merged — the reader gets
-        them via ``_load_cached_insight_payload`` and distributes anchored
-        cards client-side.
-    """
-    ins_row, _ui_lang, cache_key = await _cached_insight_row(
-        phash, lang, user_id=user_id)
-    # v2 row → served as structured payload, never merged (see above).
-    _meta = _parse_insight_row_meta(ins_row)
-    if isinstance(_meta, dict) and isinstance(_meta.get("items"), dict):
-        return body
-    # Match the exact header line, not a bare emoji/prefix that can occur in a
-    # normal report heading (the P0 fixture covers that historical collision).
-    return _append_legacy_insight(
-        body, ins_row, phash=phash, cache_key=cache_key)
 
 
 def _merge_prefetched_termfill(body, meta, row, *, phash, ui_lang):

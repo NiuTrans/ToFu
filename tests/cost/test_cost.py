@@ -175,6 +175,86 @@ class ComputeCostTest(unittest.TestCase):
             clear_provider_pricing('test-provider')
 
 
+class CacheWriteTtlCostTest(unittest.TestCase):
+    """Anthropic bills 1-hour cache writes at 2x base input, 5-minute at 1.25x.
+
+    Opus 5.5 official rates: $4 input, $5 5m write, $8 1h write, $0.20 read
+    (https://platform.claude.com/docs/en/about-claude/pricing).
+    """
+
+    @staticmethod
+    def _usage(write_5m, write_1h, **extra):
+        return {'input_tokens': 0, 'output_tokens': 0,
+                'cache_read_input_tokens': 0,
+                'cache_creation_input_tokens': write_5m + write_1h,
+                'cache_creation': {'ephemeral_5m_input_tokens': write_5m,
+                                   'ephemeral_1h_input_tokens': write_1h},
+                **extra}
+
+    def test_opus_55_one_hour_writes_bill_at_documented_rate(self):
+        r = compute_cost(self._usage(400_000, 600_000), model_id='claude-opus-5.5')
+        # 0.4M x $5 + 0.6M x $8
+        self.assertAlmostEqual(r['cacheWriteCostUsd'], 6.8, places=6)
+        self.assertEqual(r['cacheWriteTokens'], 1_000_000)
+        self.assertEqual(r['cacheWrite1hTokens'], 600_000)
+        self.assertEqual(r['pricingSnapshot']['rates']['cacheWrite1hMul'], 2.0)
+
+    def test_without_breakdown_every_write_keeps_row_multiplier(self):
+        usage = self._usage(400_000, 600_000)
+        usage.pop('cache_creation')
+        r = compute_cost(usage, model_id='claude-opus-5.5')
+        self.assertAlmostEqual(r['cacheWriteCostUsd'], 5.0, places=6)
+        self.assertNotIn('cacheWrite1hTokens', r)
+        self.assertNotIn('cacheWrite1hMul', r['pricingSnapshot']['rates'])
+
+    def test_row_one_hour_multiplier_wins(self):
+        row = {'input': 10.0, 'output': 0.0, 'cacheWriteMul': 1.25,
+               'cacheReadMul': 0.1, 'cacheWrite1hMul': 3.0,
+               '_pricingSource': 'route_offering'}
+        r = compute_cost(self._usage(0, 1_000_000), model_id='unit-model',
+                         pricing_override=row)
+        self.assertAlmostEqual(r['cacheWriteCostUsd'], 30.0, places=6)
+
+    def test_claude_row_with_its_own_write_rate_keeps_it_for_one_hour_writes(self):
+        row = {'input': 10.0, 'output': 0.0, 'cacheWriteMul': 1.0,
+               'cacheReadMul': 0.1, '_pricingSource': 'route_offering'}
+        r = compute_cost(self._usage(0, 1_000_000), model_id='claude-opus-5.5',
+                         pricing_override=row)
+        self.assertAlmostEqual(r['cacheWriteCostUsd'], 10.0, places=6)
+
+    def test_non_anthropic_row_without_one_hour_rate_is_unchanged(self):
+        row = {'input': 10.0, 'output': 0.0, 'cacheWriteMul': 1.25,
+               'cacheReadMul': 0.1, '_pricingSource': 'route_offering'}
+        r = compute_cost(self._usage(0, 1_000_000), model_id='unit-model',
+                         pricing_override=row)
+        self.assertAlmostEqual(r['cacheWriteCostUsd'], 12.5, places=6)
+
+    def test_breakdown_never_exceeds_reported_write_total(self):
+        usage = self._usage(0, 1_000_000)
+        usage['cache_creation_input_tokens'] = 500_000
+        r = compute_cost(usage, model_id='claude-opus-5.5')
+        self.assertEqual(r['cacheWrite1hTokens'], 500_000)
+        self.assertAlmostEqual(r['cacheWriteCostUsd'], 4.0, places=6)
+
+
+class Claude55CacheReadRateTest(unittest.TestCase):
+    """Opus 5.5 and Sonnet 5.5 cache hits bill at 0.05x base input.
+
+    Opus 5.5 $0.20 / Sonnet 5.5 $0.10 per 1M read tokens
+    (https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+    """
+
+    def test_documented_read_rate_for_both_spellings(self):
+        usage = {'input_tokens': 0, 'output_tokens': 0,
+                 'cache_read_input_tokens': 1_000_000,
+                 'cache_creation_input_tokens': 0}
+        for model_id, usd in (('claude-opus-5.5', 0.20), ('claude-opus-5-5', 0.20),
+                              ('claude-sonnet-5.5', 0.10), ('claude-sonnet-5-5', 0.10)):
+            with self.subTest(model_id=model_id):
+                r = compute_cost(dict(usage), model_id=model_id)
+                self.assertAlmostEqual(r['costUsd'], usd, places=6)
+
+
 class NormalizeUsageTest(unittest.TestCase):
     """Pure key-aliasing helper — no cache-convention math."""
 
@@ -259,7 +339,7 @@ class NormalizeUsageTest(unittest.TestCase):
         self.assertEqual(cost_mod.normalize_usage(anthropic)['input'], 42)
 
 
-# The exact usage payload the sankuai gateway returned for kimi-k3 on a warm
+# The exact usage payload the example-corp gateway returned for kimi-k3 on a warm
 # (second, byte-identical) request — probed live 2026-07-24. Note the hit is
 # reported as cached_tokens / prompt_tokens_details.cached_tokens /
 # effectiveCachedTokens while the canonical cache_read_tokens is pinned at 0.

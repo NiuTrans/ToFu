@@ -9,86 +9,105 @@ is no TestFlight/App Store distribution yet. The settings page's iOS row
 flips from "in development" to a real download link once
 `TOFU_IOS_CLIENT_URL` points at a published build.
 
-## Layout
+## Ownership
 
-```
-Package.swift            SwiftPM authority for TofuClientCore (Foundation-only)
-project.yml              XcodeGen authority for the app target — the .xcodeproj
-                         and Info.plist are GENERATED (never committed, see
-                         .gitignore); regenerate with `xcodegen generate`
-Sources/TofuClientCore/  the ported logic, no UI frameworks:
-  ├─ ServerUrl / LoginForm / ApiMetaGate / TofuProbe / HealthProbe
-  │    URL + handshake + reachability rules (the vscode port-forwarding
-  │    discrimination: edge-401 ≠ Tofu-401 ≠ not-Tofu)
-  ├─ SessionManager / SessionController / InteractiveSso / ReauthCoordinator
-  │    login replay with bounded retry, host-change jar purge, SSO hand-off,
-  │    latched + failure-capped headless re-auth
-  ├─ ProfileStore (SQLite) / SecretStore (Keychain) / CookieSink (WKWebView jar)
-  ├─ SupervisorClient / SupervisorUrl / SupervisorBridge / SupervisorRunner
-  │    start/stop via the sibling-port supervisor + the start-pending
-  │    forgiveness handshake
-  └─ ServerLifecycle / ServerListViewModel / ProfileForm
-       pure state machines the SwiftUI layer renders
-Tests/TofuClientCoreTests/  XCTest ports of android/app/src/test
-TofuClient/              the SwiftUI shell (the only UIKit/WebKit/SwiftUI code):
-  ├─ TofuClientApp       entry point, builds the dependency graph
-  ├─ RootView            list / add-edit / web navigation switch
-  ├─ AppViewModel        wiring + status (all session logic lives in the core)
-  ├─ ProfileListView     server list/switcher + status chips
-  ├─ AddEditProfileView  validated form + live connection probe
-  ├─ SupervisorControlsView  Start/Stop/Check + start-pending commit
-  └─ WebScreenView       WKWebView + re-auth delegate + TofuNative/TofuDiag
-                         bridges + tofu:native-visibility + TLS gate
-```
+`Package.swift` owns the core library and tests. `project.yml` owns the app
+build; XcodeGen's project and Info.plist are generated outputs.
 
-## Build & test
+| Owner | Responsibility |
+|---|---|
+| `ServerUrl`, `SupervisorUrl`, `FormEncoding` | URL authority, proxy prefixes, endpoint and form encoding |
+| `SessionManager`, `LoginRetryPolicy` | Session orchestration, retries, stale-operation checks |
+| `GatewayLogin`, `LoginForm` | Bounded discovery and recognized password submission |
+| `GatewaySessionProbe`, `GatewayHTTP` | Protected endpoint evidence, per-URL cookies, explicit redirects |
+| `URLSessionHTTPClient`, `HTTPExchangeDelegate` | One reusable pool, per-request policy, response bounds and cancellation |
+| `CookieHeaders`, `BrowserCookies`, `CookieScope` | Cookie attributes, retention and request selection |
+| `ProfileStore`, `SQLiteProfileStore`, `SecretStore` | Atomic profile writes and alias-keyed credentials; Keychain is Apple-only |
+| `InteractiveSso`, `ReauthCoordinator`, `TrustedWebBridge` | Browser handoff, reauthentication and main-frame/origin admission |
+| `SupervisorClient`, `SupervisorRunner`, `ServerLifecycle` | Remote control and current-card lifecycle |
 
-Requires a Mac with Xcode 15+ (iOS 15 deployment target).
+`TofuClient/` owns SwiftUI/WebKit wiring. Browser policy belongs in the core;
+WebKit adapters await store callbacks and release outstanding screen tasks on
+disposal. The SPA remains the application UI authority.
+
+Problem: a single session implementation mixed URL guesses, password replay,
+cookie storage and authentication proof, while structure checks could pass even
+when the Swift code did not compile. Decision: use explicit owners and real
+Foundation, HTTP and SQLite tests, following Android's maintained
+[Gateway authentication contract](../android/README.md#gateway-authentication-contract).
+Alternatives rejected: arbitrary first-form submission, public health probes as
+proof of login, unconditional profile stamps, and platform stubs that conceal
+production compile or lifecycle failures.
+
+## Authentication contract
+
+- Saved `NONE` remains an explicit choice and performs zero native requests.
+  Proxy/absproxy defaults apply only when creating a profile. URL userinfo is
+  rejected; IPv6, non-default ports and code-server prefixes are preserved.
+- Discovery starts at the configured app URL and follows at most eight
+  same-origin redirects. Cookies are selected for each full request URL. A
+  foreign redirect, absent password or unknown/ambiguous form opens interactive
+  sign-in. Saved credentials are submitted only to one recognized code-server
+  form, preserving hidden fields and the return target.
+- Cached cookies and browser landing pages are candidates. Authentication
+  requires protected `/api/v4/conversations?limit=1&meta=1` metadata or Tofu's own
+  authentication refusal. A stopped app may use the configured supervisor's
+  versioned status response. Public health/meta, HTML and unrelated JSON do not
+  prove the gate has been passed. A valid issued code-server cookie after a
+  trusted password submission is also accepted, as on Android.
+- Cookie host stamps compare profile id, alias, URL and saved auth atomically;
+  a changed/deleted profile cannot be promoted by an old request. Recency and
+  project path changes are preserved. Password sharing requires the same HTTP
+  origin and code-server prefix.
+- Interactive mode is temporary screen state; it does not overwrite saved
+  auth. Returning to the configured login page may resume password sign-in
+  once. Main-frame messages and native reauth accept only the configured
+  origin, including scheme and port. Wire names `TofuNative.requestReauth`,
+  `TofuDiag.deliver`, `tofu:native-visibility`, `window.tofuStartPending` and
+  `SupervisorBridge.pendingDefaultsKey` stay shared with the SPA.
+- Authentication responses have a fixed 256 KiB protocol bound, enforced while
+  receiving data. HTTP 429 is definitive. Transient failures use three attempts;
+  warming 502/503/504 and timeouts use six. Cancellation stops retries and
+  prevents a late response from injecting cookies or stamping a profile.
+- Only an expiry-less `code-server-session` receives seven days of local
+  retention. Other session cookies remain session cookies; explicit expiry,
+  Domain/host-only, Path, Secure, HttpOnly and SameSite policy are retained.
+  Empty attributes and oversized Max-Age numbers cannot crash the parser.
+  Foundation conversion sets the absolute expiry and string flags explicitly;
+  reusing `HTTPCookie.properties` alone loses flags on some Foundation builds.
+
+## Build and verification
+
+Core tests require Swift 5.9+, Python 3 for the loopback fixture, and system
+SQLite headers on Linux. They execute production Foundation/URLSession and
+SQLite code without Keychain or WebKit substitutes:
 
 ```bash
-cd ios
-swift test                       # core unit tests, no simulator needed
-brew install xcodegen
-xcodegen generate                # project.yml → TofuClient.xcodeproj + Info.plist
-open TofuClient.xcodeproj        # or: xcodebuild build -scheme TofuClient \
-                                 #   -destination 'generic/platform=iOS Simulator' \
-                                 #   CODE_SIGNING_ALLOWED=NO
-```
-
-From the repo root (no Swift toolchain needed), the structure pins:
-
-```bash
+swift test --package-path ios
 python3 -m pytest tests/mobile/test_ios_client_structure.py
 ```
 
-CI (`.github/workflows/build-ios.yml`) runs both gates on every `ios/**`
-change: `swift test` on a macOS runner, then an unsigned simulator build.
+CI runs the core on Linux and macOS. The Apple-only SameSite adapter test runs
+on macOS. The existing macOS job also builds an unsigned iOS simulator app.
+A local simulator build requires Xcode 15+ and XcodeGen:
 
-## Invariants shared with android/ (port both ways or neither)
+```bash
+cd ios
+xcodegen generate
+xcodebuild build -project TofuClient.xcodeproj -scheme TofuClient \
+  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+```
 
-- The session cookie is `Domain`-pinned to the full host; a baseUrl host
-  change hard-purges the old host's jar (and website data) BEFORE re-login.
-- The secret is keyed by ALIAS, so a re-provisioned sandbox (new URL, same
-  logical server) reuses it after a one-tap URL edit.
-- code-server auth is per-host: a blank password on a host that already has
-  one saved reuses it.
-- INTERACTIVE_SSO is never intercepted by the re-auth machinery.
-- The supervisor sits on the sibling proxied port behind the same
-  code-server gate; the sibling is DERIVED from the profile URL's own
-  `/proxy/<port>/` segment (15000 → 15001, and any non-default port → its
-  own +1), falling back to 15001 only without a numeric segment. Start
-  commits a 45 s start-pending marker the web screen stamps into the page at
-  document start.
-- Login retry distinguishes a WARMING sandbox (proxy-edge 502/503/504, or a
-  connect timeout — the edge is up but nothing listens behind the tunnel
-  yet) from an ordinary flaky tunnel: warming rides a longer 6-attempt
-  ladder (2s→8s) because a cold container takes tens of seconds; definitive
-  answers (badCredentials / SSO hand-off / success) never retry, even
-  mid-ladder. `TofuProbe` surfaces the same 5xx as a WAKING verdict with
-  wait-and-retest guidance instead of an unreachable error.
-- Wire names `TofuNative.requestReauth`, `TofuDiag.deliver`,
-  `tofu:native-visibility`, `window.tofuStartPending` are a contract with
-  `frontend/`'s native bridge — rename nowhere or everywhere.
+Linux success does not validate Keychain, actual WKWebView persistence, TLS
+prompts, media capture or simulator linkage. Device checks remain necessary.
+WebKit's public website-data records are grouped by domain and do not expose
+scheme/port: old-profile cookie removal is exact-host/path aware and preserves
+parent-domain IdP cookies, while storage cleanup removes only records naming
+the exact old host. It cannot promise Android's exact-origin storage deletion;
+broader domain deletion was rejected because it affects other profiles. A
+profile-scoped WebKit data-store design needs a separate migration and device
+validation. Popup-based SSO still uses the system browser; cookies are never
+imported from that browser into the app.
 
 ## Distribution
 

@@ -50,6 +50,19 @@ test('live tool frames preserve canonical timing and round identities', () => {
   assert.equal(turn.projection.segments[0]._round.tEnd, 1250);
 });
 
+test('a queued announcement runs only after its status-bearing progress frame', () => {
+  const { createAutopilotVuTransientTurn, reduceAutopilotVuTransientTurn } = transientModule();
+  let turn = createAutopilotVuTransientTurn({ conversationId: 'conv-1', vuMsgId: 'vu-1' });
+  turn = reduceAutopilotVuTransientTurn(turn, frame('tool_start', {
+    roundNum: 2, toolCallId: 'call-q', toolName: 'run_command', query: 'make', status: 'queued',
+  }));
+  assert.equal(turn.projection.toolRounds[0].status, 'queued');
+  turn = reduceAutopilotVuTransientTurn(turn, frame('tool_progress', {
+    roundNum: 2, toolCallId: 'call-q', toolName: 'run_command', status: 'searching',
+  }));
+  assert.equal(turn.projection.toolRounds[0].status, 'searching');
+});
+
 test('tool_complete patches timing and identity without erasing terminal verdict', () => {
   const { createAutopilotVuTransientTurn, reduceAutopilotVuTransientTurn } = transientModule();
   let turn = createAutopilotVuTransientTurn({ conversationId: 'conv-1', vuMsgId: 'vu-1' });

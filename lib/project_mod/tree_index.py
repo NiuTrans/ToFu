@@ -1,19 +1,19 @@
-"""Persistent per-project file index ("locate DB") for grep_search / find_files.
+"""Persistent per-project file index ("locate DB") for search_files / find_files.
 
 Why this exists
 ───────────────
 On FUSE/network filesystems (DolphinFS, cross-DC mounts) the dominant cost of
-``grep_search`` / ``find_files`` is NOT reading file contents — it is the
+``search_files`` / ``find_files`` is NOT reading file contents — it is the
 directory walk itself: every query re-issues tens of thousands of
 readdir/stat RPCs before ripgrep/fd can even start.  On large or cold trees
 that walk alone regularly exceeds the 60s tool timeout.
 
 This module builds the walk ONCE, in the background, and keeps the result
-both in memory (LRU) and on disk (server-local sessions dir, NOT on the FUSE
-mount).  Query-time cost then becomes:
+both in memory (LRU) and on disk (an automatically selected local cache when
+eligible, otherwise the sessions directory). Query-time cost then becomes:
 
 * find_files  → pure in-memory glob over the cached relpath list (µs–ms).
-* grep_search → the index yields the exact candidate file list (ignore rules
+* search_files → the index yields the exact candidate file list (ignore rules
   and include-globs applied in memory); ripgrep is then invoked on EXPLICIT
   file paths, so it performs zero directory traversal and immediately
   parallelizes content reads.
@@ -29,15 +29,19 @@ Freshness model
   bounded stable interval. Reads past the base interval carry explicit age
   evidence. Entries older than ``MAX_AGE_S`` are no longer trusted and the
   caller falls back to the live subprocess walk.
-* A ``.gitignore`` write invalidates the index outright (ignore rules are
+* An ignore-rule file write (``.gitignore``/``.ignore`` at any depth,
+  ``.git/info/exclude``) invalidates the index outright (ignore rules are
   baked into the candidate list).
+* A query whose target prefix holds no indexed file — a pruned subtree such
+  as ``.tofu/worktrees/x`` or ``node_modules/pkg``, or a directory created
+  after the snapshot — declines to the live walk (:func:`covers`). An
+  explicit path is always searched, exactly as rg/fd search an explicit root.
 
-Ignore-rule parity with a raw rg/fd walk:
-* root ``.gitignore`` AND ``.git/info/exclude`` at the root scope, nested
-  ``.gitignore`` files scoped to their subtree, contents-level rules
-  (``/scripts/*``) that must not prune their own directory, and negation
-  whitelists — including whitelisted hidden entries (``!.env.example``),
-  which rg resurrects past its hidden-filter exactly as we do.
+Ignore-rule parity with a raw ``rg --hidden`` / ``fd --hidden`` walk:
+* root ``.gitignore``, ``.ignore`` AND ``.git/info/exclude`` at the root
+  scope, nested ``.gitignore``/``.ignore`` files scoped to their subtree,
+  contents-level rules (``/scripts/*``) that must not prune their own
+  directory, and negation whitelists.
 * One DELIBERATE superset: inside a git repo, behavior is identical; in a
   NON-git tree, rg≥13 ignores every .gitignore it finds (``--require-git``
   default) while this index still honours them — the user wrote those rules,
@@ -47,7 +51,9 @@ Ignore-rule parity with a raw rg/fd walk:
   un-ignores" rather than git's strict last-match-wins ordering across
   overlapping patterns/scopes.  The live subprocess fallback keeps full
   semantics for everything the index declines to serve.
-* Hidden entries, symlinks, and IGNORE_DIRS are skipped (rg/fd defaults).
+* Hidden entries are indexed like any other file (both live backends run
+  with ``--hidden``); symlinks and IGNORE_DIRS (``.git``, ``node_modules``,
+  ``.tofu``, ...) are skipped.
 
 Everything here is best-effort: no public function raises, and every failure
 mode degrades to the pre-index code path (live subprocess walk).
@@ -135,7 +141,10 @@ def _mem_roots():
         'TOFU_TREE_INDEX_MEM_ROOTS', minimum=1, maximum=8)
 
 
-_DISK_MAGIC = b'TFIX001\n'
+# Bump whenever the coverage policy changes: a persisted snapshot built under
+# an older policy would otherwise serve the wrong candidate set until refresh.
+# TFIX002: hidden entries included, ``.ignore`` files honoured.
+_DISK_MAGIC = b'TFIX002\n'
 
 
 # ═══════════════════════════════════════════════════════
@@ -203,11 +212,95 @@ def _translate_gitignore_glob(pat):
     return f'(?:^|/){body}(?:$|/)', dir_only
 
 
+_GI_WILDCARD = re.compile(r'[*?\[]')
+
+
+def _gi_classes_self_contained(glob):
+    """True when every ``[...]`` copied verbatim into the regex ends at its ``]``.
+
+    Python's regex parser reads ``[]`` / ``[^]`` / ``\\`` / ``[`` inside a class
+    differently from the translator's ``find(']')`` split, so such a class may
+    swallow the surrounding alternation; only the combined regex is exact then.
+    """
+    i = 0
+    while i < len(glob):
+        if glob[i] == '[':
+            j = glob.find(']', i + 1)
+            if j >= 0:
+                body = glob[i + 1:j]
+                if body in ('', '^') or '\\' in body or '[' in body:
+                    return False
+                i = j
+        i += 1
+    return True
+
+
+class _GiBucket:
+    """One rule bucket with the combined regex's exact ``.search`` truthiness.
+
+    The walk tests every entry against several hundred-alternative regexes;
+    an unanchored ``(?:^|/)`` alternation is re-tried at each ``/`` for every
+    alternative.  Wildcard-free unanchored globs are therefore answered with a
+    component-set lookup, ``*suffix`` / ``prefix*`` globs with component
+    ``endswith`` / ``startswith``, wildcard-free anchored globs with a
+    path-prefix lookup, and the remaining anchored alternatives with one
+    ``match`` instead of a ``search``.
+    """
+
+    __slots__ = ('_combined', '_names', '_paths', '_path_prefixes',
+                 '_suffixes', '_starts', '_anchored', '_unanchored')
+
+    def __init__(self, combined, entries):
+        self._combined = combined
+        names, paths, suffixes, starts, anchored, unanchored = (
+            set(), set(), [], [], [], [])
+        for src, glob in entries:
+            if not _GI_WILDCARD.search(glob):
+                (paths if src.startswith('^') else names).add(glob)
+            elif src.startswith('^'):
+                anchored.append(src)
+            elif glob[0] == '*' and not _GI_WILDCARD.search(glob[1:]):
+                suffixes.append(glob[1:])
+            elif glob[-1] == '*' and not _GI_WILDCARD.search(glob[:-1]):
+                starts.append(glob[:-1])
+            else:
+                unanchored.append(src)
+        self._names = frozenset(names)
+        self._paths = frozenset(paths)
+        self._path_prefixes = tuple(p + '/' for p in paths)
+        self._suffixes = tuple(suffixes)
+        self._starts = tuple(starts)
+        self._anchored = _gi_alternation(anchored)
+        self._unanchored = _gi_alternation(unanchored)
+
+    def search(self, rel):
+        if '\n' in rel:  # '$' and '.' newline semantics: defer to the regex
+            return self._combined.search(rel) is not None
+        if rel in self._paths or (
+                self._path_prefixes and rel.startswith(self._path_prefixes)):
+            return True
+        parts = rel.split('/')
+        if not self._names.isdisjoint(parts):
+            return True
+        if self._suffixes or self._starts:
+            for part in parts:
+                if part.endswith(self._suffixes) or part.startswith(self._starts):
+                    return True
+        if self._anchored is not None and self._anchored.match(rel) is not None:
+            return True
+        return self._unanchored is not None and self._unanchored.search(rel) is not None
+
+
+def _gi_alternation(srcs):
+    return re.compile('|'.join(f'(?:{s})' for s in srcs)) if srcs else None
+
+
 def _compile_gi_lines(lines):
     """Compile gitignore pattern lines into ``(ig_any, ig_dir, un_any, un_dir)``.
 
     ``*_any`` patterns match files and dirs; ``*_dir`` patterns (trailing
-    slash) match dirs only.  Any element may be ``None``.
+    slash) match dirs only.  Any element may be ``None``; the others expose
+    ``.search(rel)`` with the truthiness of the combined alternation regex.
     """
     ig_any, ig_dir, un_any, un_dir = [], [], [], []
     for line in lines:
@@ -221,13 +314,16 @@ def _compile_gi_lines(lines):
         if not src:
             continue
         bucket = (un_dir if dir_only else un_any) if negated else (ig_dir if dir_only else ig_any)
-        bucket.append(src)
+        bucket.append((src, line.rstrip('/').lstrip('/')))
 
-    def _c(srcs):
-        if not srcs:
+    def _c(entries):
+        if not entries:
             return None
         try:
-            return re.compile('|'.join(f'(?:{s})' for s in srcs))
+            combined = _gi_alternation([src for src, _glob in entries])
+            if not all(_gi_classes_self_contained(glob) for _src, glob in entries):
+                return combined
+            return _GiBucket(combined, entries)
         except re.error as e:
             logger.debug('[TreeIndex] gitignore regex compile failed: %s', e)
             return None
@@ -246,19 +342,28 @@ def _read_gi_lines(path):
         return []
 
 
-def _compile_gi_file(path):
-    """Compile one gitignore-format file into a 4-regex tuple."""
-    return _compile_gi_lines(_read_gi_lines(path))
+# Per-directory ignore files honoured by both rg and fd.
+IGNORE_RULE_FILES = ('.gitignore', '.ignore')
+
+
+def _compile_rule_files(directory, names):
+    """Compile the named ignore files of one directory into a 4-regex tuple."""
+    lines = []
+    for name in names:
+        lines += _read_gi_lines(os.path.join(directory, name))
+    return _compile_gi_lines(lines)
 
 
 def _compile_gitignore(base):
-    """Root-scope ignore rules: ``<base>/.gitignore`` + ``.git/info/exclude``.
+    """Root-scope ignore rules: ``.gitignore``, ``.ignore`` and ``.git/info/exclude``.
 
     Returns ``(ig_any, ig_dir, un_any, un_dir)``.  ``.git/info/exclude`` uses
     gitignore syntax and is honoured by rg/fd exactly like .gitignore — this
     is where local-only excludes (e.g. scratch entry points) live.
     """
-    lines = _read_gi_lines(os.path.join(base, '.gitignore'))
+    lines = []
+    for name in IGNORE_RULE_FILES:
+        lines += _read_gi_lines(os.path.join(base, name))
     lines += _read_gi_lines(os.path.join(base, '.git', 'info', 'exclude'))
     return _compile_gi_lines(lines)
 
@@ -300,28 +405,6 @@ def _ignored_by_gi(rel, is_dir, contexts):
         else:
             sub = rel
         if _gi_hit(sub, is_dir, rules):
-            return True
-    return False
-
-
-def _whitelisted(rel, contexts):
-    """True when a negation in any scope explicitly whitelists *rel*.
-
-    Used to resurrect hidden entries (``.env.example``) the way rg does.
-    """
-    for scope, rules in contexts:
-        if not rules or not any(rules):
-            continue
-        _ig_any, _ig_dir, un_any, un_dir = rules
-        if un_any is None and un_dir is None:
-            continue
-        if scope:
-            if not rel.startswith(scope + '/'):
-                continue
-            sub = rel[len(scope) + 1:]
-        else:
-            sub = rel
-        if (un_any and un_any.search(sub)) or (un_dir and un_dir.search(sub)):
             return True
     return False
 
@@ -437,38 +520,32 @@ def _scan_one_dir(abs_dir, rel_dir, depth, out, contexts):
     so this stays at ~1-2 RPCs per directory on FUSE.  Returns a list of
     ``(abs_dir, rel_dir, depth, child_contexts)`` tuples for the BFS.
 
-    A nested ``.gitignore`` in this directory extends ``contexts`` for its
-    own subtree — detected from the scandir listing itself, so it costs no
-    extra filesystem RPC.
+    Nested ``.gitignore``/``.ignore`` files in this directory extend
+    ``contexts`` for its own subtree — detected from the scandir listing
+    itself, so they cost no extra filesystem RPC. The rule files themselves
+    are ordinary searchable files.
     """
     subdirs = []
-    has_nested_gi = False
+    rule_files = []
     rows = []
     try:
         with os.scandir(abs_dir) as it:
             for entry in it:
-                name = entry.name
-                if name == '.gitignore':
-                    has_nested_gi = True  # hidden itself — never indexed
-                    continue
+                if entry.name in IGNORE_RULE_FILES:
+                    rule_files.append(entry.name)
                 rows.append(entry)
     except OSError as e:
         logger.debug('[TreeIndex] scandir failed for %s: %s', abs_dir, e)
         raise
 
-    if has_nested_gi and rel_dir:  # root scope is compiled separately already
-        nested = _compile_gi_file(os.path.join(abs_dir, '.gitignore'))
+    if rule_files and rel_dir:  # root scope is compiled separately already
+        nested = _compile_rule_files(abs_dir, sorted(rule_files))
         if any(nested):
             contexts = contexts + ((rel_dir, nested),)
 
     for entry in rows:
         name = entry.name
         rel_e = (rel_dir + '/' + name) if rel_dir else name
-        if name.startswith('.'):
-            # rg parity: hidden entries are skipped UNLESS a gitignore
-            # negation explicitly whitelists them (e.g. ``!.env.example``).
-            if not _whitelisted(rel_e, contexts):
-                continue
         try:
             if entry.is_symlink():
                 continue
@@ -800,11 +877,13 @@ def _drop_persisted_snapshot(root):
 
 
 # ═══════════════════════════════════════════════════════
-#  Disk persistence (server-local sessions dir — never on the FUSE mount)
+#  Reconstructible disk persistence; placement/retention: tree_index_storage
 # ═══════════════════════════════════════════════════════
 
 def _index_dir():
-    path = os.path.join(SESSIONS_DIR, 'project_indexes')
+    from lib.project_mod.tree_index_storage import index_directory
+
+    path = index_directory(SESSIONS_DIR)
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as e:
@@ -840,6 +919,10 @@ def _persist(entry):
         blob = (header + root_b + sizes_blob + mtimes_blob
                 + struct.pack('<I', len(paths_blob)) + paths_blob)
         final = _disk_path(root)
+        from lib.project_mod.tree_index_storage import prepare_write
+
+        if not prepare_write(final, len(blob)):
+            return False
         tmp = (final + f'.tmp.{os.getpid()}.{threading.get_ident()}.'
                f'{time.monotonic_ns()}')
         with open(tmp, 'wb') as f:
@@ -981,7 +1064,7 @@ def freshness_evidence(entry):
 # ═══════════════════════════════════════════════════════
 
 def _rel_admissible(entry, rel):
-    """Would the index policy (hidden / IGNORE_DIRS / ignore rules) admit *rel*?
+    """Would the index policy (IGNORE_DIRS / ignore rules) admit file *rel*?
 
     The write hook must not insert files a rebuild would exclude (a write
     into ``node_modules/`` or ``.git/`` must stay invisible).  Nested-scope
@@ -989,14 +1072,9 @@ def _rel_admissible(entry, rel):
     those; root-scope rules cover the common cases.
     """
     parts = rel.split('/')
-    for i, part in enumerate(parts):
-        if part in IGNORE_DIRS:
-            return False
-        if part.startswith('.'):
-            # Hidden entries survive only via an explicit whitelist negation.
-            if not _whitelisted(rel if i == len(parts) - 1 else '/'.join(parts[:i + 1]),
-                                (('', entry.root_rules),)):
-                return False
+    # IGNORE_DIRS prunes directories only; a FILE named ``build`` is indexed.
+    if any(part in IGNORE_DIRS for part in parts[:-1]):
+        return False
     rules = entry.root_rules
     if any(rules):
         if _gi_hit(rel, False, rules):
@@ -1015,8 +1093,8 @@ def note_write(abs_path):
     calls it), so agent-authored changes are reflected in the next query
     without waiting for the background refresh.  A vanished file (delete via
     run_command raced us) is dropped instead.  Ignore-rule sources
-    (``.gitignore`` at any depth, ``.git/info/exclude``) drop the whole index
-    — their semantics are baked into the candidate list.
+    (``.gitignore``/``.ignore`` at any depth, ``.git/info/exclude``) drop the
+    whole index — their semantics are baked into the candidate list.
     """
     if _disabled() or not abs_path:
         return
@@ -1031,14 +1109,14 @@ def note_write(abs_path):
         if ap != root and not ap.startswith(root + os.sep):
             continue
         rel = os.path.relpath(ap, root).replace(os.sep, '/')
-        if rel == '.gitignore' or rel.endswith('/.gitignore') \
+        if rel.rsplit('/', 1)[-1] in IGNORE_RULE_FILES \
                 or rel == '.git/info/exclude':
             logger.info('[TreeIndex] ignore rules written under %s (%s) — invalidating index',
                         root, rel)
             invalidate(root)
             return
         if not _rel_admissible(entry, rel):
-            continue  # not indexable (hidden/ignored) — nothing to record
+            continue  # not indexable (ignored) — nothing to record
         try:
             st = os.stat(ap)
             size, mtime = int(st.st_size), int(st.st_mtime)
@@ -1094,6 +1172,18 @@ def _prefix_bounds(entry, rel_prefix):
     lo = bisect.bisect_left(paths, prefix)
     hi = bisect.bisect_left(paths, prefix[:-1] + '0')  # '0' == '/' + 1
     return lo, hi
+
+
+def covers(entry, rel_prefix):
+    """True when the snapshot holds at least one file at or below *rel_prefix*.
+
+    An empty slice is not evidence of an empty directory: the target may lie
+    in a subtree the coverage policy prunes (an explicit ``.tofu/worktrees/x``
+    or ``node_modules/pkg`` request) or may postdate the snapshot. Callers
+    answer such targets from the live walk, which searches explicit roots.
+    """
+    lo, hi = _prefix_bounds(entry, rel_prefix)
+    return hi > lo
 
 
 def find_matching(entry, rel_prefix, pattern, cap, *, case_sensitive=False):

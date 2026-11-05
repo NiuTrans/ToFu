@@ -27,6 +27,7 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 CONTRACT_VERSION = 'tofu-benchmark/v1'
 CONTRACT_VERSION_V2 = 'tofu-benchmark/v2'
+RELEASE_ACCEPTANCE_POLICY = 'tofu-long-agent-quality-first/v1'
 KIMI_K3_PRICE_CARD = {
     'currency': 'USD',
     'inputUsdPerMillion': 2.76,
@@ -671,11 +672,13 @@ def canonical_benchmark_usage(usage: dict, *, usage_format: str = 'provider') ->
             details[parent] = value or {}
         # Responses input is cache-inclusive; the similarly named Anthropic
         # field is residual input. The caller must declare the wire format.
+        # Respelled as the cache-inclusive OpenAI shape, whose detail objects
+        # carry the same counters; lib.cost owns reading them.
         usage = {
             'prompt_tokens': usage['input_tokens'],
             'completion_tokens': usage['output_tokens'],
-            'cache_read_tokens': details['input_tokens_details'].get('cached_tokens', 0),
-            'reasoning_tokens': details['output_tokens_details'].get('reasoning_tokens', 0),
+            'prompt_tokens_details': details['input_tokens_details'],
+            'completion_tokens_details': details['output_tokens_details'],
             **({'total_tokens': usage['total_tokens']} if 'total_tokens' in usage else {}),
         }
     elif usage_format != 'provider':
@@ -709,9 +712,10 @@ def public_price_cost_from_usage(usage: dict | None, pricing: dict, *,
     reasoning count is still returned separately for observability. Missing
     input/output counters are invalid evidence, never a zero-cost call.
     """
-    from lib.cost import split_input_tokens
+    from lib.cost import normalize_usage, split_input_tokens
 
     canonical = canonical_benchmark_usage(usage, usage_format=usage_format)
+    counters = normalize_usage(canonical)
     uncached, total_input = split_input_tokens(canonical)
 
     def rate(*keys: str) -> float:
@@ -725,13 +729,13 @@ def public_price_cost_from_usage(usage: dict | None, pricing: dict, *,
             uncached * rate('uncachedInputUsdPerMillion',
                             'inputUsdPerMillion') / 1_000_000),
         'cacheReadCostUsd': (
-            canonical['cache_read_tokens']
+            counters['cache_read']
             * rate('cacheReadUsdPerMillion') / 1_000_000),
         'cacheWriteCostUsd': (
-            canonical['cache_write_tokens']
+            counters['cache_write']
             * rate('cacheWriteUsdPerMillion') / 1_000_000),
         'outputCostUsd': (
-            canonical['completion_tokens']
+            counters['output']
             * rate('outputUsdPerMillion') / 1_000_000),
     }
     return {
@@ -739,10 +743,10 @@ def public_price_cost_from_usage(usage: dict | None, pricing: dict, *,
         **{key: round(value, 9) for key, value in components.items()},
         'promptTokens': int(total_input),
         'uncachedInputTokens': int(uncached),
-        'cacheReadTokens': canonical['cache_read_tokens'],
-        'cacheWriteTokens': canonical['cache_write_tokens'],
-        'outputTokens': canonical['completion_tokens'],
-        'reasoningTokens': canonical['reasoning_tokens'],
+        'cacheReadTokens': counters['cache_read'],
+        'cacheWriteTokens': counters['cache_write'],
+        'outputTokens': counters['output'],
+        'reasoningTokens': counters['thinking'],
         'pricingSnapshot': dict(pricing),
     }
 
@@ -884,7 +888,11 @@ def acceptance_decision_v2(
     maximum_infrastructure_failure_rate: float,
     candidate_orchestration_adoption: dict,
 ) -> dict:
-    """Evaluate the frozen v2 Codex comparison gates without averaging harm."""
+    """Evaluate v2 evidence under the named quality-first acceptance policy.
+
+    The 2026-10-26 owner decision makes cost observational. Complete accounting
+    remains required; higher spend cannot reject quality or excuse harm.
+    """
     release_tasks = [dict(row) for row in task_table]
     validate_release_task_matrix_v2(release_tasks)
     expected_family_counts: dict[str, int] = {}
@@ -993,8 +1001,6 @@ def acceptance_decision_v2(
         'allFamiliesWithinFivePoints': all(
             row['withinFivePercentagePoints']
             for row in family_results.values()),
-        'costPerSuccessAtMostEightyFivePercent': (
-            cost_ratio is not None and cost_ratio <= 0.85),
         'p90OracleReadyAtMostEightyFivePercent': (
             latency_ratio is not None and latency_ratio <= 0.85),
         'zeroCriticalIncidents': int(candidate_critical_incidents) == 0,
@@ -1010,6 +1016,7 @@ def acceptance_decision_v2(
     eligible = all(gates.values())
     return {
         'contractVersion': CONTRACT_VERSION_V2,
+        'acceptancePolicy': RELEASE_ACCEPTANCE_POLICY,
         'quality': quality,
         'families': family_results,
         'candidateAgentCostPerSuccessUsd': candidate_cost_per_success,
@@ -1020,7 +1027,7 @@ def acceptance_decision_v2(
         'orchestrationAdoption': dict(adoption),
         'gates': gates,
         'releaseEligible': eligible,
-        'claim': ('quality/cost/latency gates passed against Codex'
+        'claim': ('quality/reliability/latency gates passed against Codex; cost reported only'
                   if eligible else
                   'not demonstrated; inspect failed gates and families'),
     }
@@ -1114,7 +1121,7 @@ def read_jsonl(path: str | os.PathLike[str]) -> list[dict]:
 __all__ = [
     'BenchmarkContractError', 'BenchmarkJsonlWriter', 'BenchmarkRecordV2',
     'CONTRACT_VERSION', 'CONTRACT_VERSION_V2', 'KIMI_K3_PRICE_CARD',
-    'RELEASE_TASK_MATRIX_V2',
+    'RELEASE_TASK_MATRIX_V2', 'RELEASE_ACCEPTANCE_POLICY',
     'DEFAULT_HARD_BUDGET_USD', 'DEFAULT_PAUSE_BUDGET_USD', 'budget_status',
     'acceptance_decision', 'acceptance_decision_v2',
     'build_manifest', 'build_manifest_v2', 'build_task_record',

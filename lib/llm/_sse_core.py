@@ -66,6 +66,8 @@ from lib.context_telemetry import (
     reusable_tool_schema_metrics,
 )
 from lib.llm.llm_errors import (
+    REQUEST_REPAIR_ERRORS,
+    BadRequestError,
     ModelLimitError,
     PromptTooLongError,
     ProviderStreamError,
@@ -79,6 +81,10 @@ from lib.llm.llm_errors import (
     provider_error_http_status,
     repair_mojibake,
 )
+from lib.llm.request_repair import (
+    apply_learned_request_facts,
+    mark_status_line_refusal,
+)
 from lib.log import get_logger
 from lib.model_info import (
     _learn_model_limit,
@@ -86,7 +92,6 @@ from lib.model_info import (
     is_claude,
     is_minimax,
 )
-from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
 
 logger = get_logger(__name__)
 
@@ -410,6 +415,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     preserved through OAuth token refresh and desktop-agent routing; it is
     deliberately not inferred in this transport layer.
     """
+    from lib.llm.request import require_wire_protocol
+    api_protocol = require_wire_protocol(api_protocol)
     if body.get('_reasoning_pending'):
         from lib.llm.reasoning import ReasoningContractError
         raise ReasoningContractError('unbound_reasoning', 'reasoning requires a selected destination')
@@ -418,6 +425,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # reusing an already-trimmed wire body would silently lose the immutable
     # executable catalog on the next attempt.
     body = dict(body)
+    # Restrict-only route/conversation evidence, applied to this copy before
+    # any protocol translation reads the canonical fields.
+    apply_learned_request_facts(body)
     _route_output_limit_key = str(
         body.get('_route_output_limit_key') or '')
     _raw_archive_context = body.get('_raw_archive_context')
@@ -441,6 +451,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     _task_id_for_latch = body.get('_task_id', '')
     _responses_transport_requested = str(
         body.get('_responses_transport') or 'sse').strip().lower()
+    # Only a task-round body (the sync tool loop, which owns a socket's
+    # lifetime) carries the transport intent; async relays never do.
+    _responses_transport_owned = '_responses_transport' in body
     _responses_feature_profile = str(
         body.get('_responses_feature_profile')
         or 'compatible').strip().lower()
@@ -448,6 +461,10 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
 
     from lib.llm.route_features import body_route_profile, route_feature
     _route_inference_profile = body_route_profile(body)
+    from lib.llm.cache_affinity import (
+        cache_affinity_evidence, cache_affinity_key,
+        merge_cache_affinity_headers)
+    _cache_affinity_key = cache_affinity_key(body)
 
     # Resolve native context management from the concrete selected route, not
     # from model-name folklore. Public API feature profiles may opt in; OAuth
@@ -494,6 +511,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         inference_profile=_route_inference_profile, activity_sink=_request_activity_sink)
     _budget_compacted_names = projection.budget_compacted_names
     _budget_dropped_names = projection.budget_dropped_names
+    _tool_name_budget_bytes = projection.tool_name_budget_bytes
     _executable_catalog = projection.executable_catalog
     _final_schema_budget = projection.final_schema_budget
     _multi_agent_backend = projection.multi_agent_backend
@@ -537,22 +555,29 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     wire_translator = None
     _responses_profile = ''
     from lib.llm.body._admission import enforce_body_input_limit
-    from lib.llm.request import detach_input, semantic_request_id, seal_request
-    # detach_input deep-copies the count-bearing fields; keep both sides so
-    # the request-local schema-evidence identity check can still match when
+    from lib.llm.request import (
+        detach_input, semantic_request_id, seal_request,
+        strip_internal_request_fields,
+    )
+    from lib.token_counter.evidence import TEXT_COUNT_VIEW_KEY
+    # detach_input deep-copies the count-bearing containers; keep both sides
+    # so the request-local schema-evidence identity check can still match when
     # no projection replaces the tools array downstream.
     _pre_detach_tools = body.get('tools')
     detach_input(body)
+    # Its encode also proves the detached input is valid JSON before counting.
+    _semantic_id = semantic_request_id(body)
     _detached_tools = body.get('tools')
     _detached_tools_snapshot = (
         list(_detached_tools) if isinstance(_detached_tools, list) else None)
     _admission_provider = str(body.get('_admission_provider_id') or '')
     _admission_logical_model = str(body.get('_admission_logical_model') or body.get('model') or '')
+    # Protocol translation drops private fields; the recount keeps the view.
+    _text_count_view = body.get(TEXT_COUNT_VIEW_KEY)
     _input_tokens = enforce_body_input_limit(
         body, model=body.get('model') or '', provider_id=_admission_provider)
     # Capture selected-slot compilation before translation strips private fields.
     _reasoning_resolution = dict(body.get('_reasoning_resolution') or {})
-    _semantic_id = semantic_request_id(body)
     _responses_transport = 'sse'
     if api_protocol == 'responses':
         from lib.llm.responses_outbound import (
@@ -585,6 +610,13 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                 and _responses_transport_requested == 'websocket'
                 and _responses_state_key):
             _responses_transport = 'websocket'
+        elif (_profile == 'codex' and _responses_transport_owned
+              and _responses_state_key):
+            # Codex CLI's built-in provider defaults to the Responses
+            # WebSocket (supports_websockets) and keeps HTTP SSE as its
+            # fallback; the public ``responses.transport`` flag does not
+            # govern this first-party subscription contract.
+            _responses_transport = 'websocket'
         logger.debug('%s [Responses] Translated request for Responses API '
                      '(profile=%s)', log_prefix, _profile)
     elif api_protocol == 'anthropic':
@@ -611,113 +643,17 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             body = apply_catpaw_shape(body)
         logger.debug('%s [Anthropic] Translated request for Messages API', log_prefix)
     else:
-        # OpenAI path serialises `body` verbatim (session.post(json=body)), so
-        # the internal latch key must be removed HERE — the single serialization
-        # boundary — rather than popped early (which broke the retry-stable
-        # latch, see above). The Anthropic/Responses branches rebuild `body`
-        # from an allowlist that never included internal underscore keys, so this only
-        # matters here.
-        # Build a wire-only top-level envelope instead of popping from the
-        # caller's canonical dict. ``stream_chat`` reuses that dict on a
-        # transport retry; destructive pops made attempt 2 lose the task TTL
-        # latch (and would also lose the Responses cache namespace if a caller
-        # switched protocol during failover). Nested messages/tools stay
-        # shared intentionally: add_cache_breakpoints has already normalized
-        # them and is idempotent on the next attempt.
-        _internal_keys = {
-            '_task_id', '_conv_id', '_working_set_tokens',
-            ADMITTED_INPUT_TOKENS_KEY,
-            '_gpt56_breakpoint_mode', '_programmatic_tool_calling',
-            '_programmatic_stage', '_programmatic_tier',
-            '_programmatic_eligible_tools', '_programmatic_serial_chain',
-            '_programmatic_exposure',
-            '_route_output_limit_key',
-            '_resolved_programmatic_backend', '_force_local_programmatic',
-            '_tool_search_mode', '_frontend_selected_tool_names',
-            '_tool_schema_budget_tokens',
-            '_tool_namespace_by_name', '_responses_transport',
-            '_executable_tool_catalog',
-            '_tool_wire_catalog',
-            '_tool_discovery_policy_by_name',
-            '_tool_search_catalog_size', '_tool_searchable_count',
-            '_tool_search_capabilities', '_resolved_tool_search_backend',
-            '_anthropic_native_tool_search',
-            '_force_local_tool_search', '_tool_search_fail_open',
-            '_reasoning_mode', '_text_verbosity', '_image_detail',
-            '_multi_agent_mode', '_multi_agent_stage',
-            '_multi_agent_max_concurrent_agents',
-            '_multi_agent_max_concurrent_subagents',
-            '_resolved_multi_agent_backend',
-            '_force_local_multi_agent',
-            '_tool_orchestration_policy_version',
-            '_tool_orchestration_composition', '_safety_identifier',
-            '_tool_orchestration_decision_sink',
-            '_request_activity_sink',
-            '_raw_archive_context',
-            TOOL_SCHEMA_EVIDENCE_KEY,
-            '_responses_feature_profile',
-            '_anthropic_native_compaction',
-        }
-        body = {key: value for key, value in body.items()
-                if key not in _internal_keys}
-        _message_sidecars = frozenset({
-            '_responses_items', '_anthropic_content_blocks',
-        })
-        if any(isinstance(msg, dict)
-               and any(key in msg for key in _message_sidecars)
-               for msg in body.get('messages') or ()):
-            body['messages'] = [
-                ({key: value for key, value in msg.items()
-                  if key not in _message_sidecars}
-                 if isinstance(msg, dict) else msg)
-                for msg in body.get('messages') or ()
-            ]
-        url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
-
-        # Strict OpenAI-compatible gateways (sankuai AIGC validation stage,
-        # probed 2026-08-31 with MiniMax-M2) hard-reject list-form message
-        # content with HTTP 400 even for a single text part — only bare
-        # strings pass. For those gateways collapse text-only part lists (no cache_control or
-        # non-text keys) into one joined string; parts carrying markers or
-        # multimodal blocks keep the list form. Build copies so the caller's
-        # canonical dict (reused on transport retries) stays untouched. Gateways
-        # honoring markers keep text lists even after their tail marker moves;
-        # otherwise the previous tail changes representation on the next call.
-        _collapsed = False
-        _new_messages = []
-        from lib.llm.cache import _gateway_honors_cache_markers
-        _preserve_text_parts = _gateway_honors_cache_markers(
-            body.get('model') or '')
-        for _msg in body.get('messages') or ():
-            _content = _msg.get('content') if isinstance(_msg, dict) else None
-            if (not _preserve_text_parts
-                    and isinstance(_content, list) and _content and all(
-                    isinstance(part, dict)
-                    and part.get('type') == 'text'
-                    and set(part) <= {'type', 'text'}
-                    for part in _content)):
-                _new_messages.append({
-                    **_msg,
-                    'content': ''.join(part['text'] for part in _content),
-                })
-                _collapsed = True
-            else:
-                _new_messages.append(_msg)
-        if _collapsed:
-            body['messages'] = _new_messages
+        from lib.llm.openai_outbound import openai_body_to_chat
+        body = openai_body_to_chat(body)
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
 
     if api_protocol == 'anthropic':
         from lib.llm.request import recount_anthropic_input
         _input_tokens = recount_anthropic_input(
-            body, model=body.get('model') or '', provider_id=_admission_provider)
-    if api_protocol == 'responses' and _responses_transport == 'websocket':
-        # WS streaming is inherent; seal the full effective response.create body.
-        body.pop('stream', None)
-        body['previous_response_id'] = None
-
-    # The sealed projection is byte-identical but deserialized, so keep the
-    # pre-seal tool list for the request-local schema-evidence identity check.
+            body, model=body.get('model') or '', provider_id=_admission_provider,
+            text_count_view=_text_count_view)
+    # The request-local schema-evidence identity check compares tool lists
+    # by identity, so capture the list that this projection is about to seal.
     _pre_seal_tools = body.get('tools')
     # When the tools array is provably untouched since detach (same list,
     # same elements), its content still equals the caller's pre-detach
@@ -746,12 +682,22 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             minimum_output_tokens=minimum_output)
         if output_limit:
             body[limit_key] = _model_budget_lease.max_output_tokens
+    # Codex CLI zstd-compresses every ChatGPT-backend /responses body
+    # (http-client/src/request.rs, level 3); the transport encodes the sealed
+    # JSON at send time, so diagnostics and WebSocket frames stay plain JSON.
+    _request_content_encoding = ''
+    if oauth == 'codex' and api_protocol == 'responses':
+        from lib.llm.request_encoding import ZSTD, zstd_available
+        if zstd_available():
+            _request_content_encoding = ZSTD
     _admitted_request = seal_request(
         body, model=body.get('model') or '', provider_id=_admission_provider,
         protocol=api_protocol, endpoint=url, input_tokens=_input_tokens,
-        semantic_id=_semantic_id, logical_model=_admission_logical_model)
-    # Diagnostics see the same detached projection the transport will send.
-    body = _admitted_request.wire_body()
+        semantic_id=_semantic_id, logical_model=_admission_logical_model,
+        content_encoding=_request_content_encoding)
+    # Diagnostics read the request-owned projection whose encode is the sealed
+    # payload; decoding those bytes again would only copy every prompt string.
+    body = strip_internal_request_fields(body)
 
     attempt_tag = f' (attempt {attempt+1})' if attempt > 0 else ''
     if log_prefix:
@@ -776,7 +722,16 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             hdrs['Authorization'] = f'Bearer {api_key}'
         if extra_headers:
             hdrs.update(extra_headers)
-    hdrs['M-TraceId'] = trace_id
+    merge_cache_affinity_headers(
+        hdrs, _route_inference_profile, protocol=api_protocol, oauth=oauth,
+        key=_cache_affinity_key)
+    if oauth != 'codex':
+        # Gateway trace correlation. chatgpt.com has no consumer for it, and
+        # first-party Codex requests never carry it; plan.trace_id still
+        # correlates local logs and archives.
+        hdrs['M-TraceId'] = trace_id
+    if _admitted_request.content_encoding:
+        hdrs['Content-Encoding'] = _admitted_request.content_encoding
     if (api_protocol == 'responses'
             and isinstance(body.get('multi_agent'), dict)
             and body['multi_agent'].get('enabled')):
@@ -789,6 +744,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
 
     if _request_activity_sink is not None:
         try:
+            from lib.llm.tool_wire import tool_name_bytes as _tool_name_bytes
             from lib.tools.gateway import (
                 tool_schema_fingerprint, tool_schema_tokens)
             _provider_tools = (
@@ -826,6 +782,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                 'schemaBudgetTokens': _final_schema_budget,
                 'budgetDroppedNames': _budget_dropped_names,
                 'compactedNames': _budget_compacted_names,
+                'toolNameBytes': _tool_name_bytes(_provider_tools),
+                'toolNameBudgetBytes': _tool_name_budget_bytes,
                 'executableToolCount': (
                     len(_executable_catalog)
                     if isinstance(_executable_catalog, list) else len(_provider_tools)),
@@ -860,13 +818,28 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     raw_dumper.wire_bytes = None
     raw_dumper.wire_field_bytes = None
     raw_dumper.wire_region = None
+    # The provider-visible tool surface as sent. A gateway may key cache reuse
+    # on it (Sankuai Claude: joined names over ~492 bytes never reuse), so the
+    # per-round record carries it next to the logical catalog size.
+    from lib.llm.tool_wire import tool_name_bytes
+    _sent_tools = body.get('tools')
+    raw_dumper.wire_tool_surface = {
+        'count': len(_sent_tools) if isinstance(_sent_tools, list) else 0,
+        'name_bytes': tool_name_bytes(_sent_tools),
+    }
     try:
         from lib.tasks_pkg.wire_fingerprint import (
-            capture_wire_message_evidence, marker_signature,
-            static_prefix_hash, system_fingerprint, wire_byte_region,
+            cache_relevant_controls, capture_wire_message_evidence,
+            marker_signature, static_prefix_hash, system_fingerprint,
+            wire_byte_region,
         )
-        _wire_items = body.get('messages') or body.get('input') or []
-        _message_evidence = capture_wire_message_evidence(_wire_items)
+        _wire_key = 'messages' if body.get('messages') else 'input'
+        _wire_items = body.get(_wire_key) or []
+        # Byte views hash the sealed per-message slices: no second encode.
+        _sealed_items = _admitted_request.sealed_items(_wire_key)
+        _message_evidence = capture_wire_message_evidence(
+            _wire_items, sealed=(None if _sealed_items is None else
+                                 (_admitted_request.payload, _sealed_items)))
         raw_dumper.wire_fp = _message_evidence.canonical
         raw_dumper.wire_static = static_prefix_hash(_wire_items)
         # TRUE-byte prefix: hash the ACTUAL serialized bytes per message (only
@@ -891,7 +864,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         # is invisible to it. This hashes the real serialized bytes so that
         # divergence can't be laundered into "eviction". See wire_byte_region.
         raw_dumper.wire_region = wire_byte_region(
-            body.get('system'), body.get('tools'))
+            body.get('system'), body.get('tools'),
+            cache_relevant_controls(body))
         # Capture WHERE the cache_control breakpoints sit — canonical_messages
         # deliberately strips them, so a miss caused purely by a breakpoint
         # being LOST in translation (byte-identical content) would otherwise be
@@ -963,7 +937,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             raw_dumper.wire_routing = routing_fingerprint(
                 key_hash=_routing.get('key_hash', ''),
                 anthropic_beta=_routing.get('anthropic_beta', ''),
-                endpoint=_routing.get('url', ''))
+                endpoint=_routing.get('url', ''),
+                affinity=cache_affinity_evidence(
+                    _cache_affinity_key, hdrs, body))
         except Exception as _rfpe:
             logger.debug('%s routing fingerprint build failed: %s',
                          log_prefix, _rfpe)
@@ -1036,8 +1012,7 @@ def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper
         # The status line precedes every body byte, so a non-200 answer proves
         # the provider never ran this prompt. Budget settlement needs that
         # proof to account the attempt at zero instead of leaving it unknown.
-        from lib.llm.llm_errors import mark_provider_refusal
-        raise mark_provider_refusal(error)
+        raise mark_status_line_refusal(error)
 
 
 def _wire_tool_names(tools) -> set[str]:
@@ -1148,7 +1123,7 @@ class SSEAccumulator:
         # calls), or (b) the model/gateway emitting the concatenated name
         # itself. The existing raw_sse_anomaly.log could NOT decide it: its
         # tool_calls samples are 100% ``toolu_bdrk_`` (bedrock line), zero
-        # frames from the sankuai OpenAI-compat line where the incident
+        # frames from the example-corp OpenAI-compat line where the incident
         # happened. So sample the shape here, on whatever line is live.
         # These counters change NO behaviour.
         self._tc_obs_index_absent = 0
@@ -1167,6 +1142,11 @@ class SSEAccumulator:
         # How many times a second tool name forced a new slot instead of being
         # concatenated onto the previous one (the 2026-07-27 root cause).
         self._tc_obs_slot_split = 0
+
+    def produced_output(self) -> bool:
+        """Whether this attempt already received model output of any kind."""
+        return bool(self.content or self.thinking_text or self.thinking_signature
+                    or self.tool_calls_acc or self._mm_buf)
 
     def mark_aborted(self):
         self.aborted_by_client = True
@@ -1478,14 +1458,22 @@ class SSEAccumulator:
             # Preserve codes, billing/reset details and explicit gateway
             # status. Message-only classification loses quota vs throttling
             # and turns deterministic request/auth errors into network faults.
-            _classify_http_error(
-                structured_status,
-                repair_mojibake(json.dumps({'error': eo}, ensure_ascii=False)),
-                _model_id, self.log_prefix,
-                max_tokens=self.body.get('max_tokens', 0),
-                route_limit_key=self.route_output_limit_key,
-                credential_present=self.credential_present,
-            )
+            try:
+                _classify_http_error(
+                    structured_status,
+                    repair_mojibake(json.dumps({'error': eo}, ensure_ascii=False)),
+                    _model_id, self.log_prefix,
+                    max_tokens=self.body.get('max_tokens', 0),
+                    route_limit_key=self.route_output_limit_key,
+                    credential_present=self.credential_present,
+                )
+            except REQUEST_REPAIR_ERRORS as error:
+                if not self.produced_output():
+                    raise
+                # The provider already generated for this attempt, so this is
+                # not an up-front request rejection: a restrict-only retry
+                # would discard delivered output and learn a false fact.
+                raise BadRequestError(str(error)) from error
         _detected_limit = _parse_token_limit_from_error(err_text, _model_id)
         if _detected_limit:
             _learn_model_limit(
@@ -1597,7 +1585,7 @@ class SSEAccumulator:
         # and the opaque Claude signature, in separate chunks:
         #   [{"type":"thinking","thinking":"…"}]    ← text delta
         #   [{"type":"thinking","signature":"…"}]   ← signature (once per turn)
-        # The Meituan/sankuai OpenAI-compat gateway uses exactly this shape
+        # The YourProvider/example-corp OpenAI-compat gateway uses exactly this shape
         # for Claude models, so harvest both keys here.
         rd_parts = delta.get('reasoning_details')
         if isinstance(rd_parts, list):
@@ -2265,6 +2253,10 @@ class SSEAccumulator:
                 msg['content'] = content
         else:
             msg['content'] = content
+        finalize_native_items = getattr(
+            self.wire_translator, 'finalized_response_items', None)
+        if callable(finalize_native_items) and _responses_items:
+            msg['_responses_items'] = finalize_native_items(msg)
         # Log cache info. Stamp the canonical cache keys onto the raw usage
         # dict FIRST so every downstream raw-dict consumer (api_rounds, the
         # SSE usage payload, persisted metadata, the frontend popover) sees
@@ -2425,7 +2417,7 @@ class SSEAccumulator:
             )
 
         # Diagnostics: tool_calls finish reason with ZERO payload
-        # (2026-08-06 kimi-k3/sankuai incident, conv msh3qeplzneph5 R3).
+        # (2026-08-06 kimi-k3/example-corp incident, conv msh3qeplzneph5 R3).
         # The gateway closed the stream cleanly reporting
         # finish_reason=tool_calls, yet not one tool_call delta accumulated
         # — the model's tool calls were lost UPSTREAM. Downstream this used
@@ -2511,6 +2503,9 @@ class SSEAccumulator:
         usage['trace_id'] = self.trace_id
         if resp_trace and resp_trace != self.trace_id:
             usage['resp_trace_id'] = resp_trace
+        _model_refusal = getattr(self.wire_translator, 'model_refusal', None)
+        if isinstance(_model_refusal, dict):
+            usage['_model_refusal'] = dict(_model_refusal)
         # ── Relay the post-translation wire fingerprint into `usage` ──
         # Captured in prepare_request (the only point seeing the final wire
         # bytes) and carried on the RawSSEDumper. detect_cache_break reads these
@@ -2551,6 +2546,9 @@ class SSEAccumulator:
         _wrouting = getattr(self.raw_dumper, 'wire_routing', None)
         if _wrouting is not None:
             usage['_wire_routing'] = _wrouting
+        _wtools = getattr(self.raw_dumper, 'wire_tool_surface', None)
+        if _wtools is not None:
+            usage['_wire_tool_surface'] = _wtools
 
         self.raw_dumper.line(
             'terminal: ' + json.dumps({

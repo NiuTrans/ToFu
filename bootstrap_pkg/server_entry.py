@@ -56,10 +56,8 @@ def delegate_server_start(server_args: list[str]) -> None:
             cfg = json.load(fh)
         target = cfg.get('python') or ''
         prefix = cfg.get('env_prefix') or ''
-        in_target = (
-            os.path.realpath(sys.prefix) == os.path.realpath(prefix)
-            if prefix else os.path.realpath(sys.executable) == os.path.realpath(target)
-        )
+        from serverctl_pkg.runtime_replica import runs_marked_environment
+        in_target = runs_marked_environment(target, prefix)
         if target and os.access(target, os.X_OK) and not in_target \
                 and os.environ.get('_TOFU_ENV_REEXEC') != '1':
             os.environ['_TOFU_ENV_REEXEC'] = '1'

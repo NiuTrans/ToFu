@@ -20,6 +20,11 @@ HTML_SAFETY = native_module_path(
     '.native/proxy-html-safety.js',
     os.path.join(ROOT, 'frontend', 'src', 'html-safety.ts'),
 )
+SAVE_SETTINGS = native_module_path(
+    '.native/settings-save.js',
+    os.path.join(ROOT, 'frontend', 'src', 'features', 'settings', 'save-export.ts'),
+)
+
 
 _BODY = r'''
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -97,6 +102,13 @@ const { window, document, check, report } = setup({
   },
 });
 
+// Match the production typed coordinator's ports; editor behavior remains real.
+Object.assign(featureRegistry, {
+  config: {}, _featureFlags: {}, _registeredModels: [],
+  _stgModelRouting: {contract_version: 'tofu.model-routing/v2'},
+  _stgModelRoutingSavedJson: JSON.stringify({contract_version: 'tofu.model-routing/v2'}),
+  _collectProxyPool, _collectProxyBypassDomains,
+});
 const $ = (id) => document.getElementById(id);
 const rows = () => document.querySelectorAll('#proxyPoolList .proxy-pool-row');
 const bypassRows = () => document.querySelectorAll('#proxyBypassList .proxy-bypass-row');
@@ -261,7 +273,7 @@ const bypassRows = () => document.querySelectorAll('#proxyBypassList .proxy-bypa
       bypassRows().length === 1 && $('proxyBypassCount').textContent === '1 项');
 
     // Save carries both editors and never resurrects legacy proxy_config.
-    await _saveServerConfig();
+    await saveSettings();
     check('save_payload_has_proxy_pool',
       Array.isArray(window.__savedPayload.proxy_pool) &&
       window.__savedPayload.proxy_pool.length === 2);
@@ -314,7 +326,7 @@ def test_proxy_pool_editor_frontend():
         body_js=_BODY,
         extra_targets=[
             HTML_SAFETY,
-            os.path.join(JS_DIR, 'settings', 'save_export.js'),
+            SAVE_SETTINGS,
         ],
         expect_pass=43,
         timeout=300,

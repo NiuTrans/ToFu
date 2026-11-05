@@ -1,6 +1,6 @@
 """Unconditional manager delegation for the in-app restart primitive.
 
-Pin for the root-cause fix of the stuck-retry incident: ``_perform_server_reexec``
+Pin for the root-cause fix of the stuck-retry incident: ``perform_server_reexec``
 must try the host-local Supervisor's deferred worker restart for EVERY launch
 mode, not only when ``TOFU_MANAGED_BY=supervisor`` happens to be set. The
 manager kills and respawns the worker from outside, so a restart never depends
@@ -9,6 +9,8 @@ fallback when the manager cannot be reached or refuses.
 """
 
 from __future__ import annotations
+
+import lib.server.server_reexec as reexec
 
 import pytest
 
@@ -21,7 +23,7 @@ def test_unmanaged_worker_delegates_to_manager(monkeypatch):
     calls = []
     monkeypatch.delenv('TOFU_MANAGED_BY', raising=False)
     monkeypatch.setenv('TOFU_PROJECT_PATH', '/project')
-    monkeypatch.setattr(upd, '_prepare_server_reexec_frontend', lambda: '')
+    monkeypatch.setattr(reexec, 'prepare_server_reexec_frontend', lambda: '')
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control',
         lambda project, **kwargs: calls.append((project, kwargs)) or {
@@ -33,7 +35,7 @@ def test_unmanaged_worker_delegates_to_manager(monkeypatch):
         'lib.server.server_reexec.begin_server_reexec',
         lambda reason: calls.append(('execv', reason)) or True)
 
-    assert upd._perform_server_reexec('update') is True
+    assert reexec.perform_server_reexec('update') is True
     assert calls == [('/project', {
         'stage': 'delegate',
         'reason': 'update',
@@ -46,7 +48,7 @@ def test_alien_managed_worker_delegates_to_manager(monkeypatch):
     calls = []
     monkeypatch.setenv('TOFU_MANAGED_BY', 'docker')
     monkeypatch.setenv('TOFU_PROJECT_PATH', '/project')
-    monkeypatch.setattr(upd, '_prepare_server_reexec_frontend', lambda: '')
+    monkeypatch.setattr(reexec, 'prepare_server_reexec_frontend', lambda: '')
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control',
         lambda project, **kwargs: calls.append((project, kwargs)) or {
@@ -55,7 +57,7 @@ def test_alien_managed_worker_delegates_to_manager(monkeypatch):
         },
     )
 
-    assert upd._perform_server_reexec('update') is True
+    assert reexec.perform_server_reexec('update') is True
     assert calls and calls[0][0] == '/project'
 
 
@@ -66,7 +68,7 @@ def test_manager_refusal_falls_back_to_self_execv(monkeypatch):
     calls = []
     monkeypatch.delenv('TOFU_MANAGED_BY', raising=False)
     monkeypatch.setenv('TOFU_PROJECT_PATH', '/project')
-    monkeypatch.setattr(upd, '_prepare_server_reexec_frontend', lambda: '')
+    monkeypatch.setattr(reexec, 'prepare_server_reexec_frontend', lambda: '')
 
     def refuse(project, **kwargs):
         raise RuntimeError('manager unreachable')
@@ -79,8 +81,8 @@ def test_manager_refusal_falls_back_to_self_execv(monkeypatch):
     monkeypatch.setattr(
         'lib.server.server_reexec.finish_server_reexec_preparation',
         lambda: calls.append(('finish',)) or True)
-    monkeypatch.setattr(upd, 'audit_log', lambda *a, **k: None)
+    monkeypatch.setattr(reexec, 'audit_log', lambda *a, **k: None)
 
-    assert upd._perform_server_reexec('update') is True
+    assert reexec.perform_server_reexec('update') is True
     assert ('begin', 'update') in calls
     assert ('finish',) in calls

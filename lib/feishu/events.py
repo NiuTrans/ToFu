@@ -2,11 +2,14 @@
 
 Processes incoming message events and menu click events from the Lark SDK
 dispatcher, routing them to the appropriate command or pipeline handler.
+Every event first passes the default-deny admission and resolves its sender
+(``lib.feishu.authority``); nothing runs for an unadmitted or unbound sender.
 """
 
 import json
 
-from lib.feishu._state import ALLOWED_USERS, get_user_lock, pin_user_session
+from lib.feishu._state import get_user_lock, pin_user_session
+from lib.feishu.authority import is_admitted, resolve_sender
 from lib.feishu.commands import MENU_MAP, dispatch_command
 from lib.feishu.conversation import clear_pending, get_pending
 from lib.feishu.messaging import send_text
@@ -33,11 +36,13 @@ def _is_duplicate(msg_id: str) -> bool:
     return False
 
 
+_UNBOUND_REPLY = ('❌ 该飞书账号尚未绑定应用用户。请配置 '
+                  'FEISHU_USER_OWNER_MAP 或 FEISHU_DEFAULT_OWNER_USER_ID。')
+
+
 def _check_allowed(open_id: str) -> bool:
-    """Check if user is in the allowed-users list (empty = allow all)."""
-    if not ALLOWED_USERS:
-        return True
-    return open_id in ALLOWED_USERS
+    """Default deny: only explicitly allowlisted or owner-mapped senders."""
+    return is_admitted(open_id)
 
 
 def handle_message_event(event_data) -> None:
@@ -120,8 +125,14 @@ def handle_message_event(event_data) -> None:
                 if pending:
                     clear_pending(open_id)
 
-                # Try slash command first
-                cmd_response = dispatch_command(open_id, text)
+                sender = resolve_sender(open_id)
+                if sender is None:
+                    logger.error('[FeishuBot] No application owner mapped for %s', open_id[:12])
+                    send_text(message_id, _UNBOUND_REPLY, chat_id=chat_id, open_id=open_id)
+                    return
+
+                # Try slash command first (the owner's alone)
+                cmd_response = dispatch_command(sender, text)
                 if cmd_response is not None:
                     send_text(
                         message_id, cmd_response,
@@ -130,7 +141,7 @@ def handle_message_event(event_data) -> None:
 
                 # Regular message → run LLM pipeline
                 response = run_task_pipeline(
-                    open_id, text, source_message_id=message_id)
+                    sender, text, source_message_id=message_id)
                 send_text(
                     message_id, response, chat_id=chat_id, open_id=open_id)
 
@@ -187,7 +198,11 @@ def handle_menu_event(event_data) -> None:
             send_text(None, '⛔ 你没有权限使用此机器人', chat_id=chat_id, open_id=open_id)
             return
 
-        cmd_response = dispatch_command(open_id, cmd_text)
+        sender = resolve_sender(open_id)
+        if sender is None:
+            send_text(None, _UNBOUND_REPLY, chat_id=chat_id, open_id=open_id)
+            return
+        cmd_response = dispatch_command(sender, cmd_text)
         if cmd_response:
             send_text(None, cmd_response, chat_id=chat_id, open_id=open_id)
 

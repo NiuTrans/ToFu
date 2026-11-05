@@ -1,8 +1,8 @@
 """Manual-compaction closure and context-gauge contracts.
 
-The retained context-bar owner is exercised with small Node harnesses: idle
-guarding, authoritative Turn hydration, one terminal toast, live summary
-progress, and post-compaction usage selection. The typed ConversationSurface
+The retained context-bar owner is exercised with small Node harnesses: a busy
+conversation's scheduled (non-rewriting) reply, authoritative Turn hydration,
+one terminal toast, live summary progress, and post-compaction usage selection. The typed ConversationSurface
 suite separately owns compaction-card rendering; this file only pins the
 adapter's request-render and gauge-refresh seams.
 """
@@ -73,11 +73,22 @@ global.t = (k, vars) => k;   // identity i18n
 
 // ── Spies ──
 let posted = null, reloaded = false, rendered = false, flashed = null, cacheRemoved = false;
+// A busy conversation answers with a scheduled working-view request.
 global.Api = { compactions: {
-  compactNow: async (cid, opts) => { posted = { cid, opts }; return {
+  compactNow: async (cid, opts) => { posted = { cid, opts };
+    return (CONV && CONV.activeTaskId) ? {
+      ok: true, scheduled: true, alreadyScheduled: false, requestId: 'r1',
+      requestedAt: 1, protection: null, appliesAt: 'next_model_call' } : {
     ok: true, archiveId: 42, tokensBefore: 50000, tokensAfter: 8000,
     msgsBefore: 40, msgsAfter: 5, reductionPct: 84 }; },
 }};
+global.createScheduledCompactions = () => {
+  const accepted = new Map();
+  return { accept(id, res) { if (res && res.scheduled) { accepted.set(id, res); return res; } return null; },
+           pending: (id) => accepted.has(id), current: (id) => accepted.get(id) || null,
+           forget: (id) => accepted.delete(id) };
+};
+global.scheduledCompactionNotice = () => 'scheduled';
 global.ConvCache = { remove: async () => { cacheRemoved = true; } };
 global.convIsBusy = (conv) => Boolean(conv && conv.activeTaskId);
 global.hydrateConversationRuntime = async () => { reloaded = true; };
@@ -101,12 +112,14 @@ function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
   //        conv whose only assistant is the summary. We expose it indirectly:
   //        updateContextBar reads it; we just ensure no throw + closure works.
 
-  // ── (2) IDLE GUARD: task active → no POST ──
+  // ── (2) BUSY: task active → the request is sent and the server schedules
+  //        it; nothing was rewritten, so nothing is reloaded ──
   CONV = { id: 'c1', model: 'm', activeTaskId: 'task-1',
            _testTurns: [{ role:'assistant', _isCompactionSummary:true, _estimatedPromptTokens: 8000 }] };
-  posted = null;
+  posted = null; reloaded = false; cacheRemoved = false;
   await window.runManualCompaction('c1');
-  check('idle_guard_no_post_when_task_active', posted === null);
+  check('busy_request_is_scheduled_without_reload',
+        posted && posted.cid === 'c1' && reloaded === false && cacheRemoved === false);
 
   // ── (3) SUCCESS CLOSURE: idle conv → POST + full closure fires ──
   CONV = { id: 'c1', model: 'm', activeTaskId: null,
@@ -135,6 +148,17 @@ _CTXBAR_HARNESS = _CTXBAR_HARNESS.replace(
 
 def _run(harness_src: str, js_path: str, tmp_name: str):
     harness = os.path.join(HERE, tmp_name)
+    # createContextMeter obtains its document from the host after its TS
+    # migration; the synthetic elements must expose that production boundary.
+    harness_src = harness_src.replace(
+        "eval(fs.readFileSync(process.argv[2], 'utf8'));",
+        "for (const host of [document.getElementById('convStatusStrip'), document.body]) "
+        "if (host && !host.ownerDocument) host.ownerDocument = document;\n"
+        "eval(fs.readFileSync(process.argv[2], 'utf8'));",
+    ).replace(
+        '    let outcome = null;\n    _setCompacting(true);',
+        '    let outcome = null;\n    _manualCompactionId = convId;',
+    )
     with open(harness, 'w') as f:
         f.write(harness_src)
     try:
@@ -155,29 +179,30 @@ def test_context_bar_idle_guard_and_closure():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'manual-compaction closure regression:\n' + output
-    for want in ('PASS idle_guard_no_post_when_task_active', 'PASS closure_posted',
+    for want in ('PASS busy_request_is_scheduled_without_reload', 'PASS closure_posted',
                  'PASS closure_cache_removed', 'PASS closure_reloaded_messages',
                  'PASS closure_rerendered'):
         assert want in output, f'missing {want}\n{output}'
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_context_bar_idle_guard_neuter(tmp_path):
-    """NEUTER: force the idle probe to always report idle → a task-active conv
-    would then POST. Proves the idle guard is load-bearing."""
+def test_context_bar_scheduled_reply_neuter(tmp_path):
+    """NEUTER: drop the scheduled-reply branch → a busy conversation's
+    scheduled answer would run the destructive reload closure. Proves the
+    branch is load-bearing."""
     src = open(os.path.join(JS_DIR, 'context-bar.js'), encoding='utf-8').read()
-    anchor = "  function _convHasLiveTask(conv) {"
+    anchor = "      if (scheduled) {"
     assert anchor in src
-    neutered = src.replace(anchor, anchor + "\n    return false;  // NEUTER", 1)
+    neutered = src.replace(anchor, "      if (false) {  // NEUTER", 1)
     assert neutered != src
     nfile = tmp_path / 'context-bar-neutered.js'
     nfile.write_text(neutered, encoding='utf-8')
     proc = _run(_CTXBAR_HARNESS, str(nfile), '_ctxbar_neuter_harness.js')
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    # With the guard neutered, the task-active case POSTs → the guard check FAILS.
-    assert 'FAIL idle_guard_no_post_when_task_active' in output, (
-        'NEUTER did not bite — idle guard is not actually gating the POST:\n' + output)
+    # With the branch neutered, the scheduled reply reloads → the check FAILS.
+    assert 'FAIL busy_request_is_scheduled_without_reload' in output, (
+        'NEUTER did not bite — the scheduled branch is not gating the reload:\n' + output)
 
 
 # ── Gauge scheme-B fallback: test _lastUsageTokens via a dedicated harness ──
@@ -658,8 +683,9 @@ global.t = (k, vars) => k;   // identity i18n → toast msg === the i18n KEY
 // ── Toast spy: RECORD every call (msg, level) ──
 let TOASTS = [];
 global.showToast = (msg, level) => { TOASTS.push({ msg, level }); };
-global.ConvCache = { remove: async () => {} };
-global.hydrateConversationRuntime = async () => {};
+let RELOADS = 0;
+global.ConvCache = { remove: async () => { RELOADS++; } };
+global.hydrateConversationRuntime = async () => { RELOADS++; };
 global.requestAuthoritativeConversationRender = () => {};
 
 // compactNow behavior is swapped per-case via global.__mode.
@@ -668,6 +694,10 @@ global.Api = { compactions: { compactNow: async (cid) => {
   if (global.__mode === 'nothing') { const e = new Error('nothing'); e.code = 'nothing_to_compact'; throw e; }
   if (global.__mode === 'nothing_softfail') { return { ok: false, code: 'nothing_to_compact' }; }
   if (global.__mode === 'ok') { return { ok: true, archiveId: 7, tokensBefore: 50000, tokensAfter: 8000, reductionPct: 84 }; }
+  if (global.__mode === 'scheduled' || global.__mode === 'already') {
+    return { ok: true, scheduled: true, alreadyScheduled: global.__mode === 'already',
+             requestId: 'r1', requestedAt: 1, protection: 'coordinator', appliesAt: 'next_reply' };
+  }
   const e = new Error('boom'); throw e;
 }}};
 
@@ -703,6 +733,18 @@ function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
   check('ok_is_success', TOASTS.length === 1 && TOASTS[0].level === 'success');
   check('ok_no_running', !TOASTS.some(t => t.msg === 'compactNow.running'));
 
+  // Case 4: protected conversation → one informational toast; nothing was
+  //         rewritten, so the transcript is not reloaded.
+  TOASTS = []; RELOADS = 0; global.__mode = 'scheduled';
+  await window.runManualCompaction('c1');
+  check('scheduled_single_info_toast', TOASTS.length === 1 && TOASTS[0].level === 'info'
+        && TOASTS[0].msg === 'compactNow.scheduled');
+  check('scheduled_no_reload', RELOADS === 0);
+  TOASTS = []; global.__mode = 'already';
+  await window.runManualCompaction('c1');
+  check('already_scheduled_toast', TOASTS.length === 1
+        && TOASTS[0].msg === 'compactNow.alreadyScheduled');
+
   console.log(out.join('\n'));
 })();
 """
@@ -723,7 +765,8 @@ def test_manual_compaction_single_terminal_toast():
     for want in ('PASS nothing_single_toast', 'PASS nothing_is_info_not_warning',
                  'PASS no_running_toast_ever', 'PASS nothing_and_running_never_coexist',
                  'PASS softfail_single_toast', 'PASS ok_single_toast',
-                 'PASS ok_is_success'):
+                 'PASS ok_is_success', 'PASS scheduled_single_info_toast',
+                 'PASS scheduled_no_reload', 'PASS already_scheduled_toast'):
         assert want in output, f'missing {want}\n{output}'
 
 

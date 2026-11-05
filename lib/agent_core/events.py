@@ -28,8 +28,10 @@ What it is / is NOT
   out-of-contract channel vocabularies (docs/contracts/EVENTS.md §1 scope ruling) stay
   outside this registry by design.  Within the governed vocabulary,
   :func:`build_event` rejects UNREGISTERED types (strict under pytest, warn
-  in production) and durable reconstruction paths refuse unknown types via
-  :func:`assert_registered_event_types`; the drift test
+  in production), the task-stream delivery seam refuses them in every mode
+  via :func:`require_registered_event`, and durable reconstruction paths
+  refuse unknown types via :func:`assert_registered_event_types`; the drift
+  test
   ``tests/events/test_event_registry.py`` asserts (a) every ``'type':`` string
   emitted in core is registered here, and (b) every type the frontend
   handles is registered.
@@ -62,6 +64,7 @@ import os
 import sys
 import threading
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import Any, Callable
 
 from lib.log import get_logger
@@ -170,6 +173,10 @@ class EventSpec:
     schema: tuple[FieldSpec, ...] | None = None
     read_policy: str = 'durable'
 
+    @cached_property
+    def _compiled_schema(self) -> _CompiledSchema:
+        return _CompiledSchema(self.schema or ())
+
 
 @dataclass(frozen=True)
 class PhaseSpec:
@@ -229,6 +236,7 @@ class EventType:
     ROUND_END = 'round_end'
     DONE = 'done'
     ERROR = 'error'
+    ABORTED = 'aborted'
     RETRY_RESET = 'retry_reset'
     MODEL_REQUEST_START = 'model_request_start'
     MODEL_REQUEST_COMPLETE = 'model_request_complete'
@@ -240,6 +248,7 @@ class EventType:
     TOOL_START = 'tool_start'
     TOOL_EFFECT = 'tool_effect'
     TOOL_PROGRESS = 'tool_progress'
+    WORKSPACE_ADMISSION_WAIT = 'workspace_admission_wait'
     TOOL_RESULT = 'tool_result'
     TOOL_COMPLETE = 'tool_complete'
     TOOL_SCHEMA_REJECTED = 'tool_schema_rejected'
@@ -267,6 +276,7 @@ class EventType:
     APPROVAL_REQUIRED = 'approval_required'
     STDIN_REQUEST = 'stdin_request'
     STDIN_RESOLVED = 'stdin_resolved'
+    CUSTOM_TOOL_CALL = 'custom_tool_call'
     # ── flow engine (Planner/Worker/Critic/VU graphs via FlowExecutor) ──
     # Renamed from endpoint_* when the endpoint chat mode was retired
     # (2026-08-27). No frontend reads the names; turns are the render
@@ -686,6 +696,30 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('content', 'str'),
                   FieldSpec('detail', 'dict'),
               )),
+    EventSpec(EventType.ABORTED, _C.LIFECYCLE,
+              'Terminal event of a task its owner aborted. TaskRuntime.finish '
+              'stamps it from the terminal status (task_terminal_event_type), '
+              'so it cannot disagree with task state; capability workers '
+              '(paper, research action, podcast, translation) add the partial '
+              'output a client may keep.',
+              terminal=True,
+              fields={'status': 'terminal task status (aborted)',
+                      'error': '(optional) error envelope',
+                      'partial': '(optional) output produced before the abort',
+                      'finishReason': '(optional) terminal finish reason',
+                      'workerActive': '(optional) whether a worker callback '
+                                      'was still running at settlement',
+                      'agentUsageV1': '(optional) capability agent usage snapshot',
+                      'action': '(optional) research action name'},
+              schema=(
+                  FieldSpec('status', 'str'),
+                  FieldSpec('error', 'dict'),
+                  FieldSpec('partial', 'str'),
+                  FieldSpec('finishReason', 'str'),
+                  FieldSpec('workerActive', 'bool'),
+                  FieldSpec('agentUsageV1', 'dict'),
+                  FieldSpec('action', 'str'),
+              )),
     EventSpec(EventType.RETRY_RESET, _C.LIFECYCLE,
               'A transient-error turn is being auto-re-run from scratch. The '
               'client MUST clear the live bubble\'s accumulated content / '
@@ -754,6 +788,11 @@ _SPECS: tuple[EventSpec, ...] = (
                       'streamState': '(optional) closed ProviderStreamState',
                       'durationMs': 'monotonic elapsed request duration in milliseconds',
                       'errorKind': '(failure only) typed exception/error kind',
+                      'envelopeKind': '(status=failed only) closed error-envelope '
+                                      'kind classified from the live failure; '
+                                      'unlike errorKind it names the user-facing '
+                                      'cause (a gateway 503 raised as '
+                                      'RateLimitError is upstream_error)',
                       'errorDetail': '(failure only) bounded safe detail',
                       'errorUrl': '(failure only) bounded, redacted request URL '
                                   'bound to the error (abort/endpoint diagnostics)',
@@ -784,6 +823,7 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('streamState', 'str'),
                   FieldSpec('durationMs', 'int', required=True),
                   FieldSpec('errorKind', 'str'),
+                  FieldSpec('envelopeKind', 'str'),
                   FieldSpec('errorDetail', 'str'),
                   FieldSpec('errorUrl', 'str'),
                   FieldSpec('statusCode', 'int'),
@@ -877,7 +917,11 @@ _SPECS: tuple[EventSpec, ...] = (
                       'attentionKind': '(optional) stable routine, important, '
                                        'or interactive semantic importance',
                       'status': "(optional) 'rejected' when the tool was a "
-                                'hallucination and never ran',
+                                "hallucination and never ran; 'queued' when "
+                                'the call was announced while the model '
+                                'streams but is not executing yet (a '
+                                "status='searching' tool_progress marks its "
+                                'handler entry)',
                       'llmRound': '(optional, swarm emissions) provider LLM '
                                   'round index when it differs from the task '
                                   'roundNum',
@@ -1035,7 +1079,13 @@ _SPECS: tuple[EventSpec, ...] = (
                                                'display-only frame published '
                                                'when run_command delegates a '
                                                'file grep to the runtime '
-                                               'grep_search engine',
+                                               'search_files engine',
+                      'status': "(optional) 'searching' on the one frame the "
+                                'dispatcher publishes when a call announced '
+                                "as 'queued' enters its handler; the client "
+                                'sets the row status. A status-bearing frame '
+                                'is a structural projection update, never '
+                                'coalesced',
                       **_TOOL_CLOCK_FIELDS},
               # tool_runtime/progress builds the frame EMPTY and mutates it
               # afterwards, so NOTHING here may be required (construction-time
@@ -1071,8 +1121,64 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('truncated', 'bool'),
                   FieldSpec('terminalReason', 'str'),
                   FieldSpec('grepSearchIntercepted', 'bool'),
+                  FieldSpec('status', 'str'),
                   FieldSpec('tStart', 'number'),
                   FieldSpec('emittedAt', 'number'),
+              )),
+    EventSpec(EventType.WORKSPACE_ADMISSION_WAIT, _C.TOOL,
+              'A workspace lease acquisition could not be admitted on its first '
+              'probe and waited; emitted once when the wait ends. Timing '
+              'evidence folded into the Turn Trace admission_wait span.',
+              fields={'roundNum': '(optional) round index of the waiting tool call',
+                      'toolCallId': '(optional) waiting tool-call id; absent when '
+                                    'no tool occurrence owns the admission',
+                      'toolName': '(optional) waiting tool name',
+                      'waitStartedAtMs': 'first blocked probe, on the task '
+                                         'execution clock (executionAtMs domain)',
+                      'waitEndedAtMs': 'admission, cancellation or refusal, on '
+                                       'the task execution clock',
+                      'waitedMs': 'waitEndedAtMs - waitStartedAtMs',
+                      'mode': "requested lease mode: 'write' | 'file-write' | 'read'",
+                      'lockDomain': "lock namespace: 'workspace' | 'tree' | "
+                                    "'git-metadata' | 'runtime-setup'",
+                      'lockRoot': 'basename of the lock root path (never a full path)',
+                      'outcome': "'admitted' | 'cancelled' | 'refused' | 'error'",
+                      'holderTool': '(optional) tool of the holder observed '
+                                    'blocking this wait longest',
+                      'holderTask': '(optional) task id of that holder',
+                      'holderConversation': '(optional) conversation id of that holder',
+                      'holderHeldMs': '(optional) how long that holder had held '
+                                      'the lease (or, for a queued request, had '
+                                      'been queued) when last observed blocking',
+                      'waiterClaims': '(optional) claims the waiting request named, '
+                                      "as 'scope:basename[rule]' labels",
+                      'holderMode': "(optional) the holder's mode on the contested "
+                                    "lock; 'queued-<mode>' for an earlier queued "
+                                    'request the waiter may not overtake',
+                      'holderClaims': '(optional) claims the holder named, as '
+                                      "'scope:basename[rule]' labels",
+                      'holderCommand': "(optional) bounded one-line summary of the "
+                                       "holder's command; only when the holder's "
+                                       "task has the waiter's owner"},
+              schema=(
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('toolCallId', 'str'),
+                  FieldSpec('toolName', 'str'),
+                  FieldSpec('waitStartedAtMs', 'int', required=True),
+                  FieldSpec('waitEndedAtMs', 'int', required=True),
+                  FieldSpec('waitedMs', 'int', required=True),
+                  FieldSpec('mode', 'str', required=True),
+                  FieldSpec('lockDomain', 'str', required=True),
+                  FieldSpec('lockRoot', 'str', required=True),
+                  FieldSpec('outcome', 'str', required=True),
+                  FieldSpec('holderTool', 'str'),
+                  FieldSpec('holderTask', 'str'),
+                  FieldSpec('holderConversation', 'str'),
+                  FieldSpec('holderHeldMs', 'int'),
+                  FieldSpec('waiterClaims', 'str'),
+                  FieldSpec('holderMode', 'str'),
+                  FieldSpec('holderClaims', 'str'),
+                  FieldSpec('holderCommand', 'str'),
               )),
     EventSpec(EventType.TOOL_RESULT, _C.TOOL,
               'A tool produced a (possibly partial) result payload.',
@@ -1278,6 +1384,8 @@ _SPECS: tuple[EventSpec, ...] = (
                       'schemaBudgetTokens': 'explicit cost target, zero=uncapped',
                       'budgetDroppedNames': 'names omitted by explicit budget',
                       'compactedNames': 'names annotation-compacted by budget',
+                      'toolNameBytes': '(optional) sum(len(name)+1) over sent names',
+                      'toolNameBudgetBytes': '(optional) route name budget, zero=none',
                       'executableToolCount': 'server-authorized catalog size',
                       'parentSpanId': 'owning model request span',
                       'dispatchSeq': 'provider dispatch ordinal within span'},
@@ -1293,6 +1401,8 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('schemaBudgetTokens', 'int', required=True),
                   FieldSpec('budgetDroppedNames', 'list', required=True),
                   FieldSpec('compactedNames', 'list', required=True),
+                  FieldSpec('toolNameBytes', 'int'),
+                  FieldSpec('toolNameBudgetBytes', 'int'),
                   FieldSpec('executableToolCount', 'int', required=True),
                   FieldSpec('parentSpanId', 'str', required=True),
                   FieldSpec('dispatchSeq', 'int'),
@@ -1721,6 +1831,22 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('roundNum', 'int', required=True),
                   FieldSpec('toolCallId', 'str', required=True),
                   FieldSpec('stdinId', 'str', required=True),
+              )),
+    EventSpec(EventType.CUSTOM_TOOL_CALL, _C.INTERACTION,
+              'A client-mode custom tool call waits for the request owner to '
+              'POST its result to /api/v4/tasks/{id}/tool_result.',
+              requires_response=True,
+              fields={'roundNum': 'round index',
+                      'toolCallId': 'model tool-call id of the waiting call',
+                      'callId': 'reply correlation id (echoed as call_id)',
+                      'toolName': 'custom__<ident> tool name',
+                      'arguments': 'tool arguments the model supplied'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('callId', 'str', required=True),
+                  FieldSpec('toolName', 'str', required=True),
+                  FieldSpec('arguments', 'dict', required=True),
               )),
     # ───────────────────────── flow ─────────────────────────
     EventSpec(EventType.FLOW_ITERATION, _C.FLOW,
@@ -2355,8 +2481,10 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
                                 'canned_greeting|turn)',
                       'backoff_s': '(optional) backoff before the retry',
                       'errorKind': '(optional) typed transient failure kind',
-                      'continuationMode': '(optional) assistant_prefill or '
-                                          'continuation_nudge',
+                      'continuationMode': '(optional, historical) '
+                                          'assistant_prefill or '
+                                          'continuation_nudge; partial_stream '
+                                          'retries now resend unchanged',
                       'statusCode': '(optional) HTTP status that triggered the cycle',
                       'model': '(optional) physical attempt model id',
                       'providerId': '(optional) physical attempt provider id',
@@ -2539,74 +2667,70 @@ class EventContractError(ValueError):
     """A wire event violated its declared field-level contract."""
 
 
-_FIELD_KIND_SCALARS: dict[str, type] = {
-    'str': str,
-    'bool': bool,
-    'dict': dict,
-    'list': list,
+_FIELD_KIND_TYPES: dict[str, tuple[type, ...]] = {
+    'str': (str,),
+    'bool': (bool,),
+    'dict': (dict,),
+    'list': (list,),
+    'int': (int,),
+    'number': (int, float),
+    'None': (type(None),),
 }
 
-#: The closed kind vocabulary (``None`` plus the entries above plus the
-#: numeric kinds). Exported for the conformance test / generators.
-FIELD_KINDS: frozenset[str] = frozenset(
-    tuple(_FIELD_KIND_SCALARS) + ('int', 'number', 'None'))
+#: The closed kind vocabulary, shared with conformance tests and generators.
+FIELD_KINDS: frozenset[str] = frozenset(_FIELD_KIND_TYPES)
 
 
-def _field_value_matches(value: Any, kind: str) -> bool:
-    """True if *value* satisfies one ``|``-separated alternative of *kind*.
+class _CompiledSchema:
+    """A spec-owned field index; frame values are always validated afresh.
 
-    ``bool`` is deliberately NOT an ``int``/``number`` (Python's isinstance
-    disagrees with the wire's JSON semantics), and unknown alternatives match
-    NOTHING — a typo'd kind fails closed, and the conformance test rejects it
-    at registry load.
+    FieldSpec and its enclosing schema tuple are immutable. Pure lazy
+    compilation may repeat on concurrent first reads; the resulting index
+    never changes and no frame or validation result is retained.
     """
-    for alternative in kind.split('|'):
-        alternative = alternative.strip()
-        if alternative == 'None':
-            if value is None:
-                return True
-        elif alternative == 'int':
-            if isinstance(value, int) and not isinstance(value, bool):
-                return True
-        elif alternative == 'number':
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return True
-        elif alternative in _FIELD_KIND_SCALARS:
-            if isinstance(value, _FIELD_KIND_SCALARS[alternative]):
-                return True
-    return False
 
+    def __init__(self, schema: tuple[FieldSpec, ...]):
+        self.fields = {}
+        self.required = tuple(f.name for f in schema if f.required)
+        for field_spec in schema:
+            types = _FIELD_KIND_TYPES.get(field_spec.kind)
+            if types is None:
+                types = tuple(
+                    value_type
+                    for kind in field_spec.kind.split('|')
+                    for value_type in _FIELD_KIND_TYPES.get(kind.strip(), ())
+                )
+            # bool is an int subclass in Python, but a distinct JSON kind.
+            reject_bool = (int in types or float in types) and bool not in types
+            self.fields[field_spec.name] = (field_spec.kind, types, reject_bool)
 
-def _schema_violations(
-        event: dict, schema: tuple[FieldSpec, ...], *,
-        undeclared_hint: str) -> tuple[str, ...]:
-    """Field-level check shared by stream events and push frames."""
-    declared = {f.name: f for f in schema}
-    violations: list[str] = []
-    for name, value in event.items():
-        if name == 'type':
-            continue
-        field_spec = declared.get(name)
-        if field_spec is None:
-            violations.append(
-                f'undeclared field {name!r} ({undeclared_hint})')
-        elif not _field_value_matches(value, field_spec.kind):
-            violations.append(
-                f'field {name!r} expects {field_spec.kind}, got '
-                f'{type(value).__name__}')
-    for field_spec in schema:
-        if field_spec.required and field_spec.name not in event:
-            violations.append(f'missing required field {field_spec.name!r}')
-    return tuple(violations)
+    def violations(self, event: dict, *, undeclared_hint: str) -> tuple[str, ...]:
+        violations: list[str] = []
+        for name, value in event.items():
+            if name == 'type':
+                continue
+            field = self.fields.get(name)
+            if field is None:
+                violations.append(
+                    f'undeclared field {name!r} ({undeclared_hint})')
+            elif (not isinstance(value, field[1])
+                  or (field[2] and isinstance(value, bool))):
+                violations.append(
+                    f'field {name!r} expects {field[0]}, got '
+                    f'{type(value).__name__}')
+        for name in self.required:
+            if name not in event:
+                violations.append(f'missing required field {name!r}')
+        return tuple(violations)
 
 
 def validate_event(event: Any) -> tuple[str, ...]:
     """Field-level contract check; return the violations (empty = conforming).
 
     Pure and side-effect free — callers decide enforcement.  Events whose
-    type is unregistered or has no schema return ``()`` (the wire stays
-    forward-compatible; registration is enforced by the drift test, field
-    contracts migrate event-by-event).
+    type is unregistered or has no schema return ``()`` (registration is
+    enforced by :func:`build_event`, :func:`require_registered_event` and the
+    drift test; field contracts migrate event-by-event).
     """
     if not isinstance(event, dict):
         return (f'event is {type(event).__name__}, not a dict',)
@@ -2614,8 +2738,8 @@ def validate_event(event: Any) -> tuple[str, ...]:
     spec = _BY_TYPE.get(type_) if isinstance(type_, str) else None
     if spec is None or spec.schema is None:
         return ()
-    return _schema_violations(
-        event, spec.schema,
+    return spec._compiled_schema.violations(
+        event,
         undeclared_hint='add it to the EventSpec schema + fields prose in '
                         'lib/agent_core/events.py')
 
@@ -2726,6 +2850,24 @@ def assert_registered_event_types(events: Any, *, consumer: str) -> None:
             f'{sorted(unknown)} from the durable task event log — written by '
             f'a newer runtime or corrupted; refusing to reconstruct from a '
             f'gutted log (register the type or restore from a snapshot)')
+
+
+def require_registered_event(event: Any) -> None:
+    """Required-on-write gate of the task-stream delivery seam.
+
+    :func:`build_event` refuses an unregistered type only at construction,
+    and a raw frame never constructs through it. The delivery seam writes the
+    durable task event log that :func:`assert_registered_event_types` refuses
+    to reconstruct from on an unknown type, so it refuses the same vocabulary
+    (and a frame without a type) before the frame is sequenced, independent
+    of ``TOFU_EVENT_SCHEMA``. Raises :class:`EventContractError`.
+    """
+    type_ = event.get('type') if isinstance(event, dict) else None
+    if not (isinstance(type_, str) and type_ in _BY_TYPE):
+        raise EventContractError(
+            f'unregistered event type {type_!r} refused at task-event '
+            f'delivery - add an EventSpec to lib/agent_core/events.py and '
+            f'construct the frame with build_event')
 
 
 def build_event(type_: str, **fields: Any) -> dict[str, Any]:
@@ -2842,6 +2984,10 @@ class PushFrameSpec:
     fields: dict[str, str] = field(default_factory=dict)
     schema: tuple[FieldSpec, ...] | None = None
     since: int = 1
+
+    @cached_property
+    def _compiled_schema(self) -> _CompiledSchema:
+        return _CompiledSchema(self.schema or ())
 
 
 PUSH_FRAME_SPECS: tuple[PushFrameSpec, ...] = (
@@ -2970,8 +3116,8 @@ def validate_push_frame(frame: Any) -> tuple[str, ...]:
     spec = _PUSH_BY_TYPE.get(type_) if isinstance(type_, str) else None
     if spec is None or spec.schema is None:
         return ()
-    return _schema_violations(
-        frame, spec.schema,
+    return spec._compiled_schema.violations(
+        frame,
         undeclared_hint='add it to the PushFrameSpec schema + fields prose '
                         'in lib/agent_core/events.py')
 
@@ -3186,6 +3332,7 @@ __all__ = [
     'get_push_frame_spec',
     'is_registered',
     'is_registered_phase',
+    'require_registered_event',
     'terminal_types',
     'interaction_types',
     'to_capabilities_dict',

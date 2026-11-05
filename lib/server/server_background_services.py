@@ -78,7 +78,7 @@ def start_background_services(
     every owner has either started or reported its best-effort failure.
 
     Only owners a request can observe within seconds of the gate stay on this
-    path: route-owned schedulers, proxy configuration, the first-boot key and
+    path: role-scoped schedulers, proxy configuration, the first-boot key and
     the integration worker. Best-effort resume sweeps and probes live in
     :func:`start_deferred_background_services`, which runs after the readiness
     gate — under storage-authority starvation each sweep re-pays the full
@@ -111,15 +111,13 @@ def start_background_services(
         process_role, CAPABILITY_TASK_WORKERS)
 
     try:
-        from routes import start_registered_background_services
-
         _timed(
             log,
-            'route-services',
+            'process-services',
             lambda: start_registered_background_services(
                 app, process_role=process_role))
     except Exception as exc:
-        log.warning('[Server] route background services failed: %s', exc)
+        log.warning('[Server] process background services failed: %s', exc)
 
     # Turn-search materialization is owned by the Storage Sidecar. Starting a
     # second web-process worker would put historical repair back on the
@@ -260,7 +258,327 @@ def start_deferred_background_services(
             log.warning('[Server] LAN discovery responder failed: %s', exc)
 
 
+def start_registered_background_services(app, *, process_role='all'):
+    """Start role-scoped schedulers/plugin workers once for a serving app.
+
+    Blueprint registration is intentionally import-safe.  Tests, desktop
+    smoke checks and WSGI/ASGI tooling all import ``server.app`` merely to
+    inspect routes; starting production workers in that import path caused
+    real network/DB work to outlive the importing process.  The real server
+    calls this only after database initialisation from its startup lifecycle.
+    ``app.extensions`` supplies a per-app idempotence latch so an embedder that
+    explicitly starts services twice cannot duplicate scheduler threads.
+    """
+    import logging
+    from lib.process_roles import (
+        CAPABILITY_REQUEST_SERVICES,
+        CAPABILITY_SCHEDULED_JOBS,
+        CAPABILITY_TASK_WORKERS,
+        normalize_process_role,
+        process_role_has,
+    )
+
+    _log = logging.getLogger(__name__)
+    process_role = normalize_process_role(process_role)
+    extensions = getattr(app, 'extensions', None)
+    if extensions is None:
+        extensions = {}
+        app.extensions = extensions
+    marker = 'tofu_registered_background_services'
+    if extensions.get(marker):
+        registered_role = extensions.get(
+            'tofu_registered_background_services_role', 'all')
+        if registered_role != process_role:
+            raise RuntimeError(
+                'background services already belong to process role '
+                f'{registered_role!r}, not {process_role!r}')
+        return 0
+    # Latch before invoking plugins: a hook can indirectly re-enter app setup.
+    extensions[marker] = True
+    extensions['tofu_registered_background_services_role'] = process_role
+    started = 0
+
+    if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
+        from lib.evolution.automation import start_terminal_checks
+        start_terminal_checks()  # Lazy: no thread until a committed bound task.
+
+    # ── Start the sole durable scheduler (including daily-report backfill) ──
+    if process_role_has(process_role, CAPABILITY_SCHEDULED_JOBS):
+        try:
+            from lib.scheduler.manager import start_scheduler_worker
+            from lib.identity import PERSONAL_USER_ID, PrincipalContext
+            from runtime_guards import load_deployment_configuration
+
+            deployment = load_deployment_configuration()
+            scheduler_principal = PrincipalContext.system(
+                subject_id='scheduler-worker',
+                owner_user_id=(
+                    PERSONAL_USER_ID
+                    if deployment.mode == 'personal'
+                    else None
+                ),
+                scopes={'scheduler:run'},
+            )
+            start_scheduler_worker(principal=scheduler_principal)
+            started += 1
+        except Exception as e:
+            _log.warning(
+                'Scheduler worker start deferred (DB unavailable): %s', e)
+
+    # ── Catalogue projections (OAuth reconcile + world model catalogue) ──
+    # Both syncs are idempotent, insert-or-prune projections consumed only by
+    # post-readiness request paths (model catalog UI, provider setup), so
+    # they no longer sit on the time-to-ready critical path: compiling every
+    # provider template bundle and re-evaluating pricing tags cost ~2s of
+    # every boot. They run once the readiness gate opens; without a serving
+    # gate (embedders, tests) they run inline exactly as before.
+    start_post_ready_catalog_sync(app, process_role=process_role)
+
+    # ── Refresh the authenticated Codex `/model` catalogue ──
+    if process_role_has(process_role, CAPABILITY_REQUEST_SERVICES):
+        try:
+            from lib.oauth.codex_catalog import start_codex_catalog_refresher
+            from runtime_guards import load_deployment_configuration
+
+            deployment = load_deployment_configuration()
+            if deployment.mode == 'personal':
+                if start_codex_catalog_refresher():
+                    started += 1
+            else:
+                # TODO(enterprise): enumerate account owners through an
+                # owner-scoped OAuth/catalog repository before enabling this
+                # personal-token worker in distributed deployments.
+                _log.info(
+                    'Codex model catalogue refresher disabled in distributed '
+                    'mode: no owner-scoped catalogue authority is configured')
+        except Exception as e:
+            _log.warning(
+                'Codex model catalogue refresher start deferred: %s', e)
+
+    # Resume only corpora whose durable owner settings explicitly opted in.
+    if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
+        try:
+            from lib.knowledge.enrichment import resume_visual_enrichment
+            from lib.identity import PrincipalContext
+
+            knowledge_principal = PrincipalContext.system(
+                subject_id='knowledge-enrichment-worker',
+                scopes={'knowledge:maintain'},
+            )
+            started += int(resume_visual_enrichment(
+                principal=knowledge_principal) or 0)
+        except Exception as e:
+            _log.warning('Knowledge visual enrichment start deferred: %s', e)
+
+    # ── Plugin startup hooks (tofu.startup entry-point group) ──
+    started += _run_or_schedule_plugin_startup_hooks(
+        app, process_role=process_role)
+    return started
+
+
+def _run_or_schedule_plugin_startup_hooks(app, *, process_role: str) -> int:
+    """Run ``tofu.startup`` plugin hooks; post-gate when a gate exists.
+
+    Plugin workers idle behind their own feature flag — nothing they do at
+    boot gates a request. Under storage-authority starvation their boot-time
+    state restores re-pay the full authority round trip (2026-09-22 boot:
+    two ``plugin.tofu.trading.list_rows`` calls cost ~60s of phase 7 while
+    the feature was OFF). With a production readiness gate the hooks run
+    once the gate opens; without one (embedders, tests) they run inline
+    exactly as before.
+    """
+    import logging
+
+    from lib.process_roles import (
+        CAPABILITY_TASK_WORKERS,
+        normalize_process_role,
+        process_role_has,
+    )
+
+    _log = logging.getLogger(__name__)
+    if not process_role_has(
+            normalize_process_role(process_role), CAPABILITY_TASK_WORKERS):
+        return 0
+    from lib.app.plugin_registry import run_startup_hooks
+
+    if _schedule_post_ready(
+            app, lambda: run_startup_hooks(app),
+            name='tofu-post-ready-plugin-startup-hooks'):
+        return 0
+    try:
+        return int(run_startup_hooks(app) or 0)
+    except Exception as exc:
+        _log.warning('Plugin startup hooks deferred: %s', exc)
+        return 0
+
+
+def _schedule_post_ready(app, callback: Callable[[], Any], *, name: str) -> bool:
+    """Schedule on the serving owner; callers retain explicit inline behavior."""
+    import asyncio
+
+    extensions = getattr(app, 'extensions', None) or {}
+    gate = extensions.get('tofu_production_startup_gate')
+    stop_event = extensions.get('tofu_shutdown_requested')
+    serving = extensions.get('tofu_serving_loop_lifecycle') or {}
+    runtime = serving.get('runtime')
+    if gate is None or runtime is None:
+        return False
+
+    async def run() -> None:
+        await gate.wait()
+        if stop_event is not None and stop_event.is_set():
+            return
+        try:
+            await asyncio.to_thread(callback)
+        except Exception as exc:
+            logging.getLogger(__name__).warning('%s failed: %s', name, exc)
+
+    runtime.create_task(run(), name=name)
+    return True
+
+
+def start_post_ready_catalog_sync(app, *, process_role='all') -> bool:
+    """Run the catalogue projections after the readiness gate opens.
+
+    Returns True when the work was scheduled on the serving loop; False when
+    it ran inline (no production gate — embedders and direct test calls keep
+    the historical synchronous semantics).
+    """
+    import logging
+    from lib.process_roles import (
+        CAPABILITY_REQUEST_SERVICES,
+        normalize_process_role,
+        process_role_has,
+    )
+
+    _log = logging.getLogger(__name__)
+    process_role = normalize_process_role(process_role)
+    if not process_role_has(process_role, CAPABILITY_REQUEST_SERVICES):
+        return False
+
+    def _run_sync() -> None:
+        from runtime_guards import load_deployment_configuration
+
+        deployment = load_deployment_configuration()
+        if deployment.mode != 'personal':
+            # TODO(enterprise): enumerate account owners through owner-scoped
+            # OAuth/model-routing repositories before reconciling personal
+            # catalogues in distributed deployments.
+            _log.info(
+                'Catalogue sync disabled in distributed mode: no '
+                'owner-scoped OAuth/model-routing authority is configured')
+            return
+        try:
+            # Template/spec updates (e.g. a newly shipped Claude model) must
+            # not wait for an OAuth page visit or re-login. Idempotent: an
+            # unchanged projection writes nothing; the codex side reads only
+            # the local catalogue cache here.
+            from lib.oauth.outbound import reconcile_oauth_providers
+            reconcile_oauth_providers()
+        except Exception as exc:
+            _log.warning('OAuth provider reconciliation deferred: %s', exc)
+        try:
+            # The Model catalog tab lists models that EXIST, not models a
+            # configured provider supplies: newly shipped models must not
+            # wait for a provider bundle to carry them. Idempotent and
+            # insert-only except for template-retired identities, which are
+            # pruned — an unchanged catalogue writes nothing.
+            from lib.model_routing.world_catalog import (
+                sync_world_model_catalog)
+            sync_world_model_catalog()
+        except Exception as exc:
+            _log.warning('World model catalogue sync deferred: %s', exc)
+
+    if _schedule_post_ready(
+            app, _run_sync, name='tofu-post-ready-catalog-sync'):
+        return True
+    _run_sync()
+    return False
+
+
+def stop_registered_background_services(app, *, timeout: float = 2.0) -> int:
+    """Stop process/plugin-owned workers with bounded, idempotent joins."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    extensions = getattr(app, 'extensions', {})
+    marker = 'tofu_registered_background_services'
+    if not extensions.get(marker):
+        return 0
+
+    from lib.process_roles import (
+        CAPABILITY_REQUEST_SERVICES,
+        CAPABILITY_SCHEDULED_JOBS,
+        CAPABILITY_TASK_WORKERS,
+        process_role_has,
+    )
+
+    process_role = extensions.get(
+        'tofu_registered_background_services_role', 'all')
+    stopped = 0
+    all_stopped = True
+    if process_role_has(process_role, CAPABILITY_TASK_WORKERS):
+        try:
+            # Plugins are started last and may depend on core owners, so their
+            # teardown runs first.
+            from lib.app.plugin_registry import run_shutdown_hooks
+            stopped += int(run_shutdown_hooks(app) or 0)
+        except Exception as exc:
+            all_stopped = False
+            log.warning('Plugin shutdown hooks failed: %s', exc)
+
+    owners = (
+        ('evolution terminal checks',
+         'lib.evolution.automation', 'stop_terminal_checks',
+         CAPABILITY_TASK_WORKERS),
+        ('knowledge visual enrichment',
+         'lib.knowledge.enrichment', 'stop_visual_enrichment',
+         CAPABILITY_TASK_WORKERS),
+        ('knowledge attachment OCR',
+         'lib.knowledge.image_ocr_jobs', 'stop_attachment_image_ocr',
+         CAPABILITY_TASK_WORKERS),
+        ('Codex model catalogue',
+         'lib.oauth.codex_catalog', 'stop_codex_catalog_refresher',
+         CAPABILITY_REQUEST_SERVICES),
+        ('proactive scheduler',
+         'lib.scheduler.manager', 'stop_scheduler_worker',
+         CAPABILITY_SCHEDULED_JOBS),
+        # After the scheduler: its tick is what restarts bridges.
+        ('channel bridges',
+         'lib.channels.dx.supervisor', 'stop_channel_bridges',
+         CAPABILITY_SCHEDULED_JOBS),
+        ('GitHub channel sessions',
+         'lib.channels.github.supervisor', 'stop_github_sessions',
+         CAPABILITY_SCHEDULED_JOBS),
+    )
+    import importlib
+    for label, module_name, stop_name, capability in owners:
+        if not process_role_has(process_role, capability):
+            continue
+        try:
+            module = importlib.import_module(module_name)
+            stop = getattr(module, stop_name)
+            if stop(timeout=timeout):
+                stopped += 1
+            else:
+                all_stopped = False
+                log.warning('%s did not stop within %.1fs', label, timeout)
+        except Exception as exc:
+            all_stopped = False
+            log.warning('%s shutdown failed: %s', label, exc)
+
+    # A timed-out owner remains live. Preserve the latch so a reused app cannot
+    # launch duplicate workers on top of it; a clean stop permits restart.
+    extensions[marker] = not all_stopped
+    if all_stopped:
+        extensions.pop('tofu_registered_background_services_role', None)
+    return stopped
+
+
 __all__ = [
+    'start_registered_background_services',
+    'stop_registered_background_services',
+    'start_post_ready_catalog_sync',
     'start_background_services',
     'start_deferred_background_services',
     'start_lan_discovery_responder',

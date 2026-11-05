@@ -36,10 +36,10 @@ removes the descriptor and retires that predecessor. It preserves the successor
 WAL, head/root, transaction buffer and unstaged byte accounting. An already
 prepared CONTROL publisher delays predecessor installation without fencing
 successor appends. Its completion reconciles the newer durable sequence and
-root before the retried predecessor installation publishes current CONTROL;
-predecessor encoding itself never raises a write fence. The successor's hard WAL
-ceiling still applies. A second handover is forbidden until the first prefix
-installation and previous retirement are complete.
+root before the retried predecessor installation publishes current CONTROL.
+Predecessor encoding and publication never raise a successor write fence. A
+second handover waits for the first prefix installation and retirement; active
+WAL appends continue during that wait without an aggregate byte quota.
 
 Exact reads use shared immutable covered batches until catalog installation
 succeeds. Point lookup checks exact sequence; suffix visits retain gap checks.
@@ -65,13 +65,102 @@ version 2; readers accept versions 1/2/3. An older binary can still reject a
 remaining version-3 alternate slot after completion. Direct binary downgrade
 is unsupported; use compatible export/restore.
 
-Physical residency can include two WALs, each subject to the existing active
-WAL byte ceiling. With the current 64 MiB ceiling their combined live upper
-bound is 128 MiB; it is not a new per-user capacity setting. Immutable history
-and retired files have their existing explicit lifecycles. The prefix and
-successor share bounded transaction ownership with readers; a slower encoder
-can still cause successor-ceiling backpressure. Resource and latency comparisons
-must measure this tradeoff, not assume that off-lock encoding eliminates work.
+Physical residency includes one active WAL and at most one CONTROL-owned sealed
+predecessor, plus the existing checkpoint-owned retired-file slot. Their bytes
+follow accepted durable work and maintenance lag, without a 64/128 MiB aggregate
+ceiling. Immutable history and retired files keep their existing lifecycles.
+Outstanding transaction/payload ownership and replay work still grow with the
+backlog; a bounded decoder buffer is not an aggregate memory or recovery-time
+bound. Resource and latency comparisons must measure these costs.
+
+## Foreground append independent of maintenance
+
+Problem: the predecessor/successor protocol allowed a few concurrent writes,
+but a 64 MiB active-file limit still required maintenance to finish before the
+next append. Moving history encoding outside the authority mutex and reducing
+its cost did not remove that dependency. Foreground single/group appends also
+prepared physical rotation themselves and rejected the triggering command.
+
+Decision: `activeWalRotation` in `contracts/tofudb_ir_v1.json` owns the admission
+and recovery policy. With the existing driver attached, the append path only
+notifies it at the ordinary rotation threshold. Preparation, history encoding
+and publication belong to that driver. An active or successor WAL can grow
+while a catalog publisher, predecessor encoder or retired-file cleanup is
+delayed. Checked u64 offsets, per-frame bounds, CRC/hash chains, generation
+witnesses and durability barriers remain mandatory. Offline engines without
+a driver retain their synchronous checkpoint trigger.
+
+Recovery uses 128 KiB read-ahead and at most one validated frame scratch buffer
+(8 MiB payload plus framing), then retains the decoded records needed by the
+existing replay owner. A malformed frame length is refused before allocation;
+I/O errors preserve evidence; only an unconfirmed tail can be truncated after
+the durable prefix is verified. Encrypted identity-changing copies also use a
+fixed buffer, so a large WAL never requires one whole-file allocation.
+
+No new durable authority, worker, queue or CONTROL/WAL codec is introduced.
+Older readers may refuse a backlog above their former 64 MiB recovery bound;
+binary downgrade while such a backlog exists is unsupported. Checkpoint and
+use compatible export/restore rather than deleting or truncating durable work.
+Maintenance progress, WAL backlog bytes, replay cost and eventual retirement
+must be observed together; accepted state is never evicted to meet a disk budget.
+
+Alternatives rejected: enlarging a finite WAL limit only delays the same
+failure; acknowledging before durability changes user-visible guarantees;
+adding a second write journal creates another recovery authority; multiple
+new WAL generations are unnecessary to remove the existing append dependency.
+
+Verification: `engine_wal_progress_tests.rs` crosses multiple rotation windows
+with maintenance parked, verifies exact reopen/readback, and requires catchup
+to retire the accumulated log. Real-process SIGKILL cases pause actual prefix
+or CONTROL fsync, append beyond the former file ceiling, and recover both
+predecessor and successor evidence in Strict and barrier-covered Normal modes.
+The existing generation/publication error, torn-write and lost-sync matrices
+remain required; these tests do not establish a production latency SLO.
+
+Measured backlog contract on 2026-10-27: with history publication deliberately
+held, 96 successive 2 MiB carried-payload commits produced 201,345,216 active-WAL
+bytes. All 96 payloads and transaction markers reopened exactly; the existing
+driver then checkpointed the complete prefix, reduced the active WAL to zero
+and removed the captured old WAL. The previous implementation refused a commit
+near its 64 MiB quota. This is a measurement of accepted durable growth and
+eventual retirement, not permission to evict uncheckpointed state.
+
+The recovery boundary also checks an 8 GiB sparse file with a forged u32 frame
+length. An impossible durable witness preserves the file, read-only scanning
+preserves it, and recovery truncates only the unconfirmed suffix. Every read
+in that fixture stays within 128 KiB. An encrypted identity-changing rename
+verifies all 65 MiB plus a partial final region after reopen. Four actual
+SIGKILL scenarios cover prefix encoding, CONTROL publication, barrier-covered
+Normal mode and Strict grouped commits; each recovers all 41 acknowledged
+records, including a successor larger than the former quota.
+
+Application workload observations use source-attested baseline `d141cd66f` and
+candidate `091a9d115`, the production application adapter, Strict durability,
+the system allocator and disposable authorities on the same FUSE volume. Four
+completed legs ran candidate/baseline/baseline/candidate. Each leg completed
+1,600 writes with eight writers and four readers, 128 unique 1 MiB Turn writes,
+and five real process kills recovering all 1,505 acknowledged Turns. The harness
+added zero retries and reported no workload errors.
+
+| Storage-operation observation | Baseline, two legs | Candidate, two legs |
+|---|---|---|
+| Concurrent-write P99 | 485.4 / 1,888.8 ms | 24.1 / 12.9 ms |
+| Concurrent aggregate writes/second | 112.2 / 49.8 | 937.5 / 1,608.5 |
+| 1 MiB Turn write median | 681.8 / 1,800.9 ms | 144.2 / 92.2 ms |
+| Process recovery median, five kills/leg | 24,690 / 26,373 ms | 306 / 613 ms |
+
+These are observed ranges while the host also ran independent verification and
+build activity; they do not isolate scheduling effects or certify a production
+latency SLO. Large-write and recovery samples are insufficient for P99 acceptance.
+Post-run filesystem accounting is incomplete for one baseline leg and process
+write-byte accounting is incomplete for both candidate legs, so this comparison
+makes no total disk-growth or write-amplification claim. Peak recovery RSS also
+varied across legs; the decoder buffer does not bound total replay residency.
+The first baseline attempt is excluded because its final source-inventory child
+hit the documented inspection deadline. Raw reports and their hashes are retained
+in `/tmp/tofu-wal-progress-artifacts/comparison-summary.json`; the controlled
+paused-publication regression above establishes removal of the write-admission
+dependency independently of these timings.
 
 ## Protocol verification and measured acceptance
 
@@ -392,8 +481,9 @@ raised the legacy write fence. Slow publication I/O then rejected every Turn
 event while the authority mutex and health probes remained responsive.
 Decision: park the encoded predecessor without fencing successor commits.
 The existing catalog completion rebase preserves their sequence and authority
-root; installation uses that current state. The successor WAL hard ceiling,
-publication-error restart fence and exact parked snapshot remain unchanged.
+root; installation uses that current state. The publication-error restart fence
+and exact parked snapshot remain unchanged; the append policy above also removes
+the former successor byte ceiling.
 Alternative rejected: extending Flow retries or RPC deadlines preserves the
 unnecessary serialization and postpones the same terminal failure. The legacy
 single-WAL install keeps its fence because it retires the window WAL.

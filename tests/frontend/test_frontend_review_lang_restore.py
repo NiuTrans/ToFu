@@ -80,8 +80,7 @@ const calls = { reportStart: 0, translateStart: 0 };
 global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [{ id: 'paper-1', title: 'P', paperHash: 'phash-1' }] }),
   // No running server task; the review is a warm DB-cache hit (English).
-  reportLookup: async () => ({ ok: false }),
-  reportCache:  async () => ({ ok: true, report: 'ENGLISH REVIEW BODY', paper_hash: 'phash-1' }),
+  reportResolve: async () => ({ ok: true, report: 'ENGLISH REVIEW BODY', paper_hash: 'phash-1' }),
   reportStart:  async (body) => { calls.reportStart++; return { ok: true, task_id: 'rpt_1', paper_hash: 'phash-1' }; },
   reportPoll:   async () => ({ ok: true, status: 'done', report: 'NEW', next_cursor: 0, events: [] }),
   reportAbort:  async () => ({ ok: true }),
@@ -204,8 +203,6 @@ def _run(nc: bool):
     return output
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_review_reading_lang_restored_on_reopen():
     output = _run(nc=False)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -215,8 +212,6 @@ def test_review_reading_lang_restored_on_reopen():
         assert expected in output, f'missing {expected!r} in:\n{output}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nc_neutered_restore_fails():
     """Neutering _restoreReviewReadingLang MUST break the restore assertions:
     the reopen stays English (no translate), proving the restore hook is what

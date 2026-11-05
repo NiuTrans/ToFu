@@ -9,8 +9,9 @@ import pytest
 
 from lib.project_mod import workspace_lease as lease_mod
 from lib.project_mod.workspace_lease import (
-    WorkspaceBusyError, WorkspaceLeaseCancelled, workspace_lease_fds,
-    workspace_read_lease, workspace_write_lease,
+    WorkspaceBusyError, WorkspaceLeaseCancelled,
+    workspace_lease_fds, workspace_read_lease,
+    workspace_write_lease,
 )
 
 pytestmark = pytest.mark.unit
@@ -462,31 +463,3 @@ class TestWorkspaceReadLease:
                 os.waitpid(child_pid, 0)
 
 
-def test_user_data_write_does_not_contend_with_source_lease_but_git_still_does(tmp_path, monkeypatch):
-    monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '0.05')
-    repo = _repo(tmp_path / 'repo')
-    from lib.project_mod.write_tools import _ops
-    import lib.project_mod.run_command as commands
-    data = repo / 'data'
-    data.mkdir()
-    ready, release = threading.Event(), threading.Event()
-    def source_writer():
-        with workspace_write_lease(repo):
-            ready.set()
-            assert release.wait(10)
-    thread = threading.Thread(target=source_writer)
-    thread.start()
-    try:
-        assert ready.wait(5)
-        result = _ops.tool_write_file(str(data), 'user.txt', 'durable user data\n')
-        assert result['ok'] is True
-        assert (data / 'user.txt').read_text() == 'durable user data\n'
-        result = commands.tool_run_command(str(data), 'cp user.txt copied.txt')
-        assert '[exit code: 0]' in result
-        for command in ('git add -- user.txt', 'GIT_PAGER=cat git add -- user.txt'):
-            result = commands.tool_run_command(str(data), command)
-            assert '[workspace-busy]' in result
-    finally:
-        release.set()
-        thread.join(5)
-    assert not thread.is_alive()

@@ -264,6 +264,47 @@ def test_cancel_is_durable_for_queued_and_running_jobs():
     assert cancelled['job']['status'] == 'cancelled'
 
 
+def _horizon(*task_kinds):
+    return _client().query(
+        'worker_job.claim_horizon', {'task_kinds': list(task_kinds)})['claimableInMs']
+
+
+def _writer_submissions():
+    return _client().metrics()['writer']['submitted']
+
+
+def test_claim_horizon_predicts_claims_without_a_write_transaction():
+    kind, other = 'horizon-' + uuid.uuid4().hex, 'horizon-other-' + uuid.uuid4().hex
+    writes = _writer_submissions()
+    assert _horizon(kind) is None
+    assert _writer_submissions() == writes
+
+    now = wall_ms()
+    _command('worker_job.enqueue', {
+        'task_id': f'{kind}:later', 'user_id': 41, 'tenant_id': 'tenant-a',
+        'task_kind': kind, 'idempotency_key': f'{kind}:later', 'payload': {},
+        'now_ms': now, 'available_at_ms': now + 3_600_000,
+    }, 'enqueue-later')
+    writes = _writer_submissions()
+    delay = _horizon(kind)
+    assert 3_590_000 < delay <= 3_600_000
+    assert _writer_submissions() == writes
+    assert _claim('replica-a/horizon', now_ms=now, task_kinds=[kind]) is None
+
+    _enqueue(f'{other}:due', task_kind=other, now_ms=wall_ms())
+    assert _horizon(other) == 0
+    assert _horizon(kind, other) == 0
+    claimed = _claim('replica-a/horizon', now_ms=wall_ms(), task_kinds=[kind, other])
+    assert claimed['taskId'] == f'{other}:due'
+    # Only the live lease remains for this kind; it bounds the next claim.
+    assert 0 < _horizon(other) <= 10_000
+    assert 0 < _horizon(kind, other) <= 10_000
+
+    with pytest.raises(StorageError) as raised:
+        _client().query('worker_job.claim_horizon', {})
+    assert raised.value.code == 'database_protocol_error'
+
+
 def test_concurrent_claimers_receive_distinct_jobs():
     for index in range(8):
         _enqueue(f'job-concurrent-{index}', now_ms=10_000)

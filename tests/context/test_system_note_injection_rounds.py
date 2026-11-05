@@ -30,7 +30,6 @@ Run::
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -41,7 +40,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 TR_JS = runtime_section_path('ui/tool_rounds.js')
 
-_HAS_NODE = shutil.which('node') is not None
 
 pytestmark = pytest.mark.unit
 
@@ -78,7 +76,12 @@ def _extract_timeline_fns() -> str:
         '.native/context-note-grouping.js',
         os.path.join(ROOT, 'frontend', 'src', 'conversation', 'presentation', 'context-note-grouping.ts'),
     ), encoding='utf-8').read()
-    return groups_native + '\n' + context_native + '\n' + chunk
+    note_rows_native = open(native_module_path(
+        '.native/context-note-presentation.js',
+        os.path.join(ROOT, 'frontend', 'src', 'conversation', 'presentation',
+                     'context-note-presentation.ts'),
+    ), encoding='utf-8').read()
+    return groups_native + '\n' + context_native + '\n' + note_rows_native + '\n' + chunk
 
 
 _STUBS = r"""
@@ -149,8 +152,11 @@ check('trailing_notes_after_round1',
       && idx('NOTE_STALL') > idx('NOTE_TODO'));
 check('deliverable_excluded', idx('ANSWER') === -1);
 // ── Per-kind labels (parity with the typed surface) ──
-check('label_session_context', idx('systemNote.sessionContextLabel') >= 0);
-check('label_context_injection', idx('systemNote.contextInjectionLabel') >= 0);
+// Context notes are titled by their registry reason, never by a repeated
+// generic kind title; a reason-less session witness reads as session context.
+check('label_session_context', idx('systemNote.reasonSessionContext') >= 0);
+check('label_context_injection', idx('systemNote.reasonRelevantMemories') >= 0
+      && idx('systemNote.contextInjectionLabel') === -1);
 check('label_system_intervention', idx('systemNote.interventionLabel') >= 0);
 check('label_todo_continuation', idx('systemNote.todoContinuationLabel') >= 0);
 check('label_intent_stall', idx('systemNote.intentStallLabel') >= 0);
@@ -169,7 +175,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_settled_timeline_renders_injection_rounds_with_kind_labels():
     out = _run_node(_HARNESS, {'FN_SRC': _extract_timeline_fns()})
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
@@ -209,7 +214,6 @@ console.log(out.join('\n'));
 """
 
 
-@pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_NC_kind_presentation_map_is_load_bearing():
     out = _run_node(_NC_HARNESS, {'FN_SRC': _extract_timeline_fns()})
     assert 'FAIL nc_pattern_matched' not in out, (

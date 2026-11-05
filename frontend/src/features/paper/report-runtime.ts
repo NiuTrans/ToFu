@@ -13,8 +13,14 @@ import { escapeHtml } from '../../html-safety';
 import { _i18nLang } from '../../i18n';
 import { BoundedMap } from '../../core/bounded-map';
 import { paperSourceRetryRequired } from './source-start';
+import {
+  paperAttachPush, paperDetachPush, paperIngestEvent, taskReplayIngestPage,
+} from './push-transport';
+import { makeReportStreamState, setReportBody, type ReportStreamState } from './report-events';
 import { destroyReportArticles } from './report-article';
 import { mountReportReader, renderReportReady, destroyReportReaders } from './report-reader';
+export { makeReportStreamState } from './report-events';
+
 type LooseObject = Record<string, any>;
 type ReportWindow = Window & Record<string, any>;
 type ReviewLanguage = 'en' | 'zh';
@@ -265,59 +271,6 @@ function reportLoadIsCurrent(generation: number, paperId: string): boolean {
     && String(globals()._activePaperId || '') === paperId;
 }
 
-async function resolveReportOpen(
-  paperHash: string,
-  langKey: string,
-  paperText: string,
-  allowLanguageFallback: boolean,
-): Promise<LooseObject | null> {
-  const api = paperApi();
-  if (!api) return null;
-  if (typeof api.reportResolve === 'function') {
-    return await api.reportResolve(paperHash, langKey, paperText);
-  }
-
-  // Rolling-cache compatibility only. Current clients use reportResolve and
-  // pay one HTTP request plus one preferred/fallback repository query.
-  if (paperHash && typeof api.reportLookup === 'function') {
-    try {
-      const running = await api.reportLookup(paperHash, langKey);
-      if (
-        running?.ok
-        && running.task_id
-        && (running.status === 'running' || running.status === 'pending')
-      ) {
-        return running;
-      }
-    } catch (error: unknown) {
-      console.warn('[Paper:Report] compatibility lookup failed:', error);
-    }
-  }
-  if (typeof api.reportCache !== 'function') return null;
-  try {
-    const active = await api.reportCache(paperHash
-      ? { paper_hash: paperHash, lang: langKey }
-      : { paper_text: paperText, lang: langKey });
-    if (active?.ok && active.report) return { ...active, lang: langKey };
-  } catch (error: unknown) {
-    console.warn('[Paper:Report] compatibility cache lookup failed:', error);
-  }
-  if (!allowLanguageFallback || !paperHash) return null;
-  const otherLang = langKey === 'zh' ? 'en' : 'zh';
-  try {
-    const fallback = await api.reportCache({
-      paper_hash: paperHash,
-      lang: otherLang,
-    });
-    return fallback?.ok && fallback.report
-      ? { ...fallback, lang: otherLang }
-      : null;
-  } catch (error: unknown) {
-    console.warn('[Paper:Report] compatibility fallback lookup failed:', error);
-    return null;
-  }
-}
-
 function applyResolvedReport(
   view: LooseObject,
   container: HTMLElement,
@@ -349,7 +302,8 @@ function applyResolvedReport(
   target._persistGeneratedReviewVenue?.(
     view, String(view.langKey?.() || resolvedLang), startPaperId,
   );
-  target._saveActivePaperState?.('metadata');
+  // The server owns report publication. Adopting it must not replay unrelated
+  // library fields from this browser's potentially older entry.
   if (data.resolvedTitle) {
     target._applyResolvedTitle?.(data.resolvedTitle, startPaperId);
   }
@@ -397,10 +351,11 @@ export async function loadOrGenerateReport(
 
   if (view.stream?.paperId === startPaperId) {
     target._paintReportFromState?.(view);
-    if (view.stream.status === 'running' && !view.stream.pollTimer) {
-      target._attachReportPush?.(view, view.stream);
+    if (reportNeedsObservation(view.stream) && !view.stream.pollTimer) {
+      attachReportPush(view, view.stream);
       void pollReportTask(view);
-    } else if (view.stream.status === 'done') {
+    }
+    if (view.stream.status === 'done') {
       restoreReviewReadingLanguage(view);
     }
     return;
@@ -440,12 +395,11 @@ export async function loadOrGenerateReport(
 
   let resolved: LooseObject | null = null;
   try {
-    resolved = await resolveReportOpen(
+    resolved = await paperApi()?.reportResolve(
       activePaperHash(),
       langKey,
       String(target._paperParsedText || ''),
-      view.kind === 'report',
-    );
+    ) ?? null;
   } catch (error: unknown) {
     console.warn('[Paper:Report] fused lookup failed:', error);
     if (options.readOnly) throw error;
@@ -466,7 +420,7 @@ export async function loadOrGenerateReport(
       startPaperId, reportLang, String(resolved.task_id), String(view.kind || 'report'),
     );
     target._syncReportToolbar?.(true, view);
-    target._attachReportPush?.(view, view.stream);
+    attachReportPush(view, view.stream);
     void pollReportTask(view);
     return;
   }
@@ -722,7 +676,7 @@ export async function generatePaperReport(
     );
     view.stream = stream;
     target._syncReportToolbar?.(true, view);
-    target._attachReportPush?.(view, stream);
+    attachReportPush(view, stream);
     void pollReportTask(view);
     if (stopWasPending) {
       console.warn(
@@ -1136,7 +1090,7 @@ export function resetReportLocalState(viewArg?: LooseObject | null): void {
   invalidateReportStart(view);
   const stream = view.stream as LooseObject | null | undefined;
   if (stream?.pollTimer) window.clearTimeout(stream.pollTimer);
-  if (stream) globals()._detachReportPush?.(stream);
+  if (stream) paperDetachPush(stream);
   view.stream = null;
   view.meta = null;
   if (view.kind === 'review') {
@@ -1160,44 +1114,42 @@ export function resetAllReportViews(): void {
   paperRebuttalInputText = '';
 }
 
-export function makeReportStreamState(
-  paperId = '',
-  lang = 'en',
-  taskId = '',
-  kind = 'report',
-): LooseObject {
-  return {
-    paperId,
-    lang,
-    kind,
-    taskId,
-    cursor: 0,
-    status: 'running',
-    pendingStop: false,
-    stopRequested: false,
-    fullText: '',
-    thinkingText: '',
-    toolRounds: [],
-    segments: [],
-    _segInferRound: 0,
-    contentStarted: false,
-    insightText: '',
-    _insightRunning: false,
-    _insightApplied: false,
-    termfillText: '',
-    _termfillApplied: false,
-    meta: null,
-    error: '',
-    pollTimer: null,
-    pollBusy: false,
-    _lastRenderedLen: -1,
-    _lastRenderedStatus: '',
-    _lastToolKey: '',
-  };
+function reportNeedsObservation(stream: LooseObject): boolean {
+  return stream.status === 'running' || stream.workerActive === true;
+}
+
+/** Primary completion renders immediately; entered postpasses keep the same
+ * push/replay observer until an authoritative page observes worker exit. */
+export function attachReportPush(view: LooseObject, stream: LooseObject): void {
+  if (!view || !stream?.taskId) return;
+  paperAttachPush(stream, stream.taskId, {
+    isCurrent: () => view.stream === stream,
+    isTerminal: () => !reportNeedsObservation(stream),
+    onEvent(event) {
+      let dirty = paperIngestEvent(stream, event, globals()._applyReportEventRaw);
+      if (dirty && (event.type === 'done' || event.type === 'error' || event.type === 'aborted')) {
+        stream.status = event.type;
+        stream.workerActive = event.workerActive === true;
+        if (event.type === 'done' && typeof event.report === 'string' && event.report) {
+          setReportBody(stream as ReportStreamState, event.report);
+        }
+        if (event.type === 'aborted' && typeof event.partial === 'string' && event.partial) {
+          stream.fullText = event.partial;
+          stream.contentStarted = true;
+        }
+        if (!reportNeedsObservation(stream)) paperDetachPush(stream);
+        void pollReportTask(view);
+        dirty = true;
+      }
+      if (dirty && stream.paperId === globals()._activePaperId) {
+        globals()._paintReportFromState?.(view);
+      }
+    },
+  });
 }
 
 function schedulePoll(view: LooseObject, stream: LooseObject, delay: number): void {
-  if (view.stream !== stream || stream.status !== 'running') return;
+  if (view.stream !== stream || !reportNeedsObservation(stream)) return;
   if (stream.pollTimer) window.clearTimeout(stream.pollTimer);
   stream.pollTimer = window.setTimeout(() => void pollReportTask(view), delay);
 }
@@ -1206,6 +1158,8 @@ export async function pollReportTask(viewArg?: LooseObject | null): Promise<void
   const view = viewArg || reportView('report');
   const stream = view?.stream as LooseObject | null | undefined;
   if (!view || !stream?.taskId || view.stream !== stream || stream.pollBusy) return;
+  if (stream.pollTimer) window.clearTimeout(stream.pollTimer);
+  stream.pollTimer = null;
   stream.pollBusy = true;
   try {
     const response = await paperApi()?.reportPoll(stream.taskId, stream.cursor);
@@ -1213,6 +1167,8 @@ export async function pollReportTask(viewArg?: LooseObject | null): Promise<void
     if (!response?.ok) {
       if (response?.status === 404) {
         stream.status = 'error';
+        stream.workerActive = false;
+        paperDetachPush(stream);
         stream.error = 'Task no longer available on server. Please regenerate.';
         globals()._paintReportFromState?.(view);
         return;
@@ -1223,48 +1179,54 @@ export async function pollReportTask(viewArg?: LooseObject | null): Promise<void
     if (view.stream !== stream) return;
     if (!data.ok) {
       stream.status = 'error';
+      stream.workerActive = false;
+      paperDetachPush(stream);
       stream.error = errorText(data.error, 'Poll failed');
       globals()._paintReportFromState?.(view);
       return;
     }
-    const replay = globals().taskReplayIngestPage?.(
+    const replay = taskReplayIngestPage(
       stream,
       data,
       globals()._applyReportEventRaw,
       stream.cursor,
-    ) ?? { nextCursor: stream.cursor };
+    );
     stream.cursor = replay.nextCursor;
+    // A push can advance the stream while this HTTP response is in flight.
+    // Its older activity/snapshot must not retire or overwrite that evidence.
+    const currentSnapshot = replay.cursorReset
+      || replay.nextCursor > (stream._seqSeen ?? -1);
+    if (currentSnapshot) stream.workerActive = data.workerActive === true;
 
     if (['done', 'aborted', 'error'].includes(String(data.status))) {
       clearReportRegenIntent(view.regenIntentKey);
     }
-    if (data.status === 'done') {
+    if (currentSnapshot && data.status === 'done') {
       stream.status = 'done';
       if (data.report) {
-        stream.fullText = data.report;
+        setReportBody(stream as ReportStreamState, data.report);
         if (stream.paperId === globals()._activePaperId) {
-          view.cache = data.report;
+          view.cache = stream.fullText;
           if (data.meta) {
             stream.meta = data.meta;
             view.meta = data.meta;
           }
-          globals()._rememberReportSnapshot?.(view, data.report, data.meta);
+          globals()._rememberReportSnapshot?.(view, stream.fullText, data.meta);
           globals()._persistGeneratedReviewVenue?.(
             view, view.langKey?.(), stream.paperId,
           );
-          globals()._saveActivePaperState?.('metadata');
         }
       }
       if (data.resolvedTitle) {
         globals()._applyResolvedTitle?.(data.resolvedTitle, stream.paperId);
       }
-    } else if (data.status === 'aborted') {
+    } else if (currentSnapshot && data.status === 'aborted') {
       stream.status = 'aborted';
       if (typeof data.partial === 'string' && data.partial) {
         stream.fullText = data.partial;
         stream.contentStarted = true;
       }
-    } else if (data.status === 'error') {
+    } else if (currentSnapshot && data.status === 'error') {
       stream.status = 'error';
       stream.error = errorText(data.error, stream.error || 'Report failed');
     }
@@ -1272,15 +1234,15 @@ export async function pollReportTask(viewArg?: LooseObject | null): Promise<void
     if (stream.paperId === globals()._activePaperId) {
       globals()._paintReportFromState?.(view);
     }
-    if (stream.status === 'running' && view.stream === stream) {
+    if (reportNeedsObservation(stream) && view.stream === stream) {
       schedulePoll(view, stream, Number(globals()._REPORT_POLL_MS) || 1200);
     } else {
       stream.pollTimer = null;
-      globals()._detachReportPush?.(stream);
+      paperDetachPush(stream);
     }
   } catch (error: unknown) {
     console.warn('[Paper:Report] Poll failed:', error);
-    if (stream.status === 'running' && view.stream === stream) {
+    if (reportNeedsObservation(stream) && view.stream === stream) {
       schedulePoll(view, stream, Number(globals()._REPORT_POLL_BACKOFF_MS) || 3000);
     }
   } finally {
@@ -1316,7 +1278,7 @@ export function stopPaperReport(viewArg?: LooseObject | null): void {
     stream.status = 'aborted';
     if (stream.pollTimer) window.clearTimeout(stream.pollTimer);
     stream.pollTimer = null;
-    globals()._detachReportPush?.(stream);
+    paperDetachPush(stream);
     if (stream.paperId === globals()._activePaperId) {
       globals()._paintReportFromState?.(view);
     }
@@ -1341,7 +1303,7 @@ export function destroyReportRuntime(): void {
     if (view) invalidateReportStart(view);
     const stream = view?.stream as LooseObject | null | undefined;
     if (stream?.pollTimer) window.clearTimeout(stream.pollTimer);
-    if (stream) globals()._detachReportPush?.(stream);
+    if (stream) paperDetachPush(stream);
     if (view) view.stream = null;
   }
 }

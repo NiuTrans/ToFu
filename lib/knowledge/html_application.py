@@ -8,7 +8,11 @@ cancellation only after cleanup settles. Imports never load a native library.
 """
 import asyncio
 
+from lib.log import get_logger
+
 from .native_html_service import HtmlProjectionClosed, LazyHtmlProjector
+
+logger = get_logger(__name__)
 
 
 class ApplicationHtmlProjector:
@@ -34,6 +38,7 @@ class ApplicationHtmlProjector:
         try:
             await asyncio.to_thread(self._service.close)
         except BaseException as error:
+            logger.debug('HTML projection close failure handled: %s', type(error).__name__)
             return error
         return None
 
@@ -56,9 +61,10 @@ class ApplicationHtmlProjector:
             except asyncio.CancelledError as error:
                 if interrupted is None:
                     interrupted = error
-            except BaseException:
+            except BaseException as error:
                 # Inspect the one completed task below, including a concurrent
                 # caller cancellation and a release failure.
+                logger.debug('HTML projection close wait ended: %s', type(error).__name__)
                 break
         try:
             failure = self._closing.result()

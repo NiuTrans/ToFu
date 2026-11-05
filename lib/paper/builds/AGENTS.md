@@ -56,6 +56,8 @@ Compiler memory/count samples are observations, not default admission or kill
 thresholds. Only an explicit positive operator memory override constrains RSS.
 `test_paper_build_process.py` verifies real allocations/child fan-out, exact
 cancellation/deadline behavior, parent death and joined process retirement.
+`pdf_validation_limits.py` also supplies standalone search's parent-lifetime
+guard; regenerate it with `scripts/gen_packaged_search_runtime.py` after edits.
 
 `process_worker.py` also supervises desktop shell commands through its separated
 stream mode. `workers.py` remains the source/frozen dispatch boundary; desktop

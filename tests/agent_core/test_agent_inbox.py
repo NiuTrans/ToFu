@@ -281,7 +281,7 @@ def test_durable_commit_precedes_inbox_visibility_and_tombstone_skips_commit():
 
 def test_format_swarm_update_basic_shape():
     payload = agent_inbox.format_swarm_update(
-        agent_id='a1', role='researcher', status='completed',
+        agent_id='a1', swarm_run_id='run-1', role='researcher', status='completed',
         elapsed_seconds=12.34, tokens=4567,
         result='Found 3 candidates: foo, bar, baz.',
         output_file='data/swarm/t1/a1.log',
@@ -290,6 +290,9 @@ def test_format_swarm_update_basic_shape():
     assert payload.startswith('<swarm-update>')
     assert payload.endswith('</swarm-update>')
     assert '<agent-id>a1</agent-id>' in payload
+    # The producing run is named, so the result stays re-readable by its
+    # stable (swarm_run_id, agent_id) handle after the session is gone.
+    assert '<swarm-run-id>run-1</swarm-run-id>' in payload
     assert '<role>researcher</role>' in payload
     assert '<status>completed</status>' in payload
     assert '<elapsed-seconds>12.3</elapsed-seconds>' in payload
@@ -302,7 +305,7 @@ def test_format_swarm_update_basic_shape():
 def test_format_swarm_update_carries_full_result():
     long_result = 'X' * 500
     payload = agent_inbox.format_swarm_update(
-        agent_id='a1', role='r', status='completed',
+        agent_id='a1', swarm_run_id='run-1', role='r', status='completed',
         elapsed_seconds=1.0, tokens=10,
         result=long_result,
     )
@@ -317,7 +320,7 @@ def test_format_swarm_update_carries_full_result():
 
 def test_format_swarm_update_xml_escapes_special_chars():
     payload = agent_inbox.format_swarm_update(
-        agent_id='a&1', role='r<x>', status='completed',
+        agent_id='a&1', swarm_run_id='run-1', role='r<x>', status='completed',
         elapsed_seconds=1.0, tokens=10,
         result='hello & <world>',
     )
@@ -328,7 +331,7 @@ def test_format_swarm_update_xml_escapes_special_chars():
 
 def test_format_swarm_update_with_error():
     payload = agent_inbox.format_swarm_update(
-        agent_id='a1', role='r', status='failed',
+        agent_id='a1', swarm_run_id='run-1', role='r', status='failed',
         elapsed_seconds=1.0, tokens=10, result='',
         error='ConnectionError: timed out after 30s',
     )

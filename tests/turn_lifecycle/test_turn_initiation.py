@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from lib.turn_initiation import (  # noqa: E402
     INITIATOR_AUTOPILOT, INITIATOR_BRAIN, INITIATOR_HUMAN, INITIATOR_OPERATOR,
     INITIATOR_PEER, INITIATOR_PROACTIVE, INITIATOR_SWARM, INITIATOR_TIMER,
-    is_auto_initiated, resolve_initiator, stamp_initiator)
+    INITIATOR_UNKNOWN, is_auto_initiated, resolve_initiator, resolve_turn_initiator,
+    stamp_initiator)
 
 pytestmark = pytest.mark.unit
 
@@ -74,6 +75,27 @@ def test_resolve_uses_only_explicit_initiator():
 ])
 def test_resolve_does_not_infer_identity_from_feature_flags(feature_flag):
     assert resolve_initiator(feature_flag) == INITIATOR_HUMAN
+
+
+# ──────────────────── resolve_turn_initiator (durable Turns) ───────────────────
+
+def test_persisted_origin_names_the_initiator_of_a_durable_turn():
+    # Persistence folds the transient ``_initiator`` into ``origin.initiator``
+    # and drops it, so a timer or channel input is stored as actor=human.
+    turn = {'actor': 'human', 'projection': {
+        'content': 'x', 'origin': {'blockId': 'origin', 'initiator': 'channel'}}}
+    assert resolve_initiator(turn['projection']) == INITIATOR_HUMAN
+    assert resolve_turn_initiator(turn) == 'channel'
+
+
+def test_turn_initiator_falls_back_to_legacy_marker_and_fails_closed():
+    assert resolve_turn_initiator({'projection': {'_initiator': INITIATOR_TIMER}}) == INITIATOR_TIMER
+    assert resolve_turn_initiator({'projection': {'content': 'hi'}}) == INITIATOR_HUMAN
+    assert resolve_turn_initiator({'actor': 'human'}) == INITIATOR_HUMAN
+    assert resolve_turn_initiator({'projection': 'bogus'}) == INITIATOR_UNKNOWN
+    assert resolve_turn_initiator({'projection': {'origin': {'initiator': 'bogus'}}}) == INITIATOR_UNKNOWN
+    assert resolve_turn_initiator({'projection': {'origin': 'bogus'}}) == INITIATOR_UNKNOWN
+    assert resolve_turn_initiator(None) == INITIATOR_UNKNOWN
 
 
 def test_is_auto_initiated():

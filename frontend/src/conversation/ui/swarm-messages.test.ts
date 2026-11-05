@@ -9,7 +9,7 @@ const receipt = (id: string, extra: Partial<SwarmMessageReceipt> = {}): SwarmMes
 });
 function setup(messages?: SwarmMessageReceipt[]) {
   const host = document.createElement('div'); document.body.append(host);
-  const snapshot: SwarmMessagesSnapshot = { swarm_id: 'run', messageReceipts: messages, messageReceiptsAvailable: true,
+  const snapshot: SwarmMessagesSnapshot = { swarm_id: 'run', messageReceipts: messages,
     messageParticipants: [{ id: 'worker', taskId: 'task-worker', label: 'Worker' }, { id: 'other', label: 'Other' }] };
   const handle = mountSwarmMessages(host, snapshot, translate);
   return { host, snapshot, handle };
@@ -129,19 +129,36 @@ describe('run messages', () => {
     expect(document.activeElement).toBe(filter); expect(filter.value).toBe('worker');
     expect(visibleIds(host)).toEqual(['1', '2']);
   });
-  it('distinguishes unavailable, empty and missing evidence without guessing sender or dates', () => {
+  it('hides without a disclaimer until a message exists, and never guesses sender or dates', () => {
     const { host, handle, snapshot } = setup();
-    expect(host.querySelector('p')?.textContent).toBe('swarm.messagesUnavailable');
+    const section = host.querySelector<HTMLElement>('.sw-messages')!;
+    expect(section.hidden).toBe(true); expect(handle.messageCount).toBe(0);
+    expect(host.querySelector('p')).toBeNull();
     handle.update({ ...snapshot, messageReceipts: [] });
-    expect(host.querySelector('p')?.textContent).toBe('swarm.messagesEmpty');
+    expect(section.hidden).toBe(true); expect(handle.messageCount).toBe(0);
     handle.update({ ...snapshot, messageReceipts: [receipt('1', { senderTaskId: 'unmapped-task', submittedAt: undefined, content: undefined, state: undefined })] });
+    expect(section.hidden).toBe(false); expect(handle.messageCount).toBe(1);
     expect(host.querySelector('.sw-messages-direction')?.textContent).toBe('swarm.messagesUnknownSender (unmapped-task) → Worker (worker)');
     expect(host.querySelector('.sw-messages-time')?.textContent).toBe('swarm.messagesTimeUnavailable');
     expect(host.querySelector('.sw-messages-body')?.textContent).toBe('tool.agentMessageUnavailable');
 
     expect(host.querySelector('.sw-messages-status')?.textContent).toBe('tool.agentMessageUnconfirmed');
-    handle.update({ ...snapshot, messageReceiptsAvailable: false, messageReceipts: [] });
-    expect(host.querySelector('p')?.textContent).toBe('swarm.messagesUnavailable');
+    handle.update({ ...snapshot, messageReceipts: [] });
+    expect(section.hidden).toBe(true); expect(handle.messageCount).toBe(0);
+  });
+  it('counts only the scoped participant, while a run filter never hides the run view', () => {
+    const host = document.createElement('div'); document.body.append(host);
+    const snapshot: SwarmMessagesSnapshot = { swarm_id: 'run', messageReceipts: [receipt('1', { agentId: 'other' })],
+      messageParticipants: [{ id: 'worker', taskId: 'task-worker', label: 'Worker' }, { id: 'other', label: 'Other' }] };
+    const scoped = mountSwarmMessages(host, snapshot, translate, { participantId: 'worker' });
+    expect(scoped.element.hidden).toBe(true); expect(scoped.messageCount).toBe(0);
+    scoped.update({ ...snapshot, messageReceipts: [...snapshot.messageReceipts!, receipt('2', { senderTaskId: 'task-worker', agentId: 'run' })] });
+    expect(scoped.element.hidden).toBe(false); expect(scoped.messageCount).toBe(1);
+    const run = mountSwarmMessages(host, snapshot, translate);
+    const filter = run.element.querySelector('select')!;
+    filter.value = 'worker'; filter.dispatchEvent(new Event('change'));
+    expect(visibleIds(run.element)).toEqual([]);
+    expect(run.element.hidden).toBe(false); expect(run.messageCount).toBe(1);
   });
   it('orders unknown submission times deterministically without using injection timestamps', () => {
     const { host } = setup([receipt('z', { submittedAt: undefined, inputInjectedAt: 1 }), receipt('a', { submittedAt: undefined, inputInjectedAt: 999 }), receipt('2')]);
@@ -169,10 +186,8 @@ describe('run messages', () => {
     expect(evidence.textContent).toContain('1970-01-01T00:00:03.000Z');
     expect(host.querySelector<HTMLElement>('.sw-messages-status')!.dataset.state).toBe('input_confirmed');
   });
-  it('treats absent completeness as unavailable and resolves resumed sender aliases exactly', () => {
+  it('resolves resumed sender aliases exactly', () => {
     const { host, handle, snapshot } = setup([]);
-    handle.update({ ...snapshot, messageReceiptsAvailable: undefined });
-    expect(host.querySelector('p')!.textContent).toBe('swarm.messagesUnavailable');
     handle.update({ ...snapshot, messageReceipts: [receipt('1', { senderTaskId: 'task-worker' })],
       messageParticipants: [...snapshot.messageParticipants!, { id: 'worker', taskId: 'resumed-task', label: 'Worker' }] });
     expect(host.querySelector('.sw-messages-direction')!.textContent).toBe('Worker (worker) → Worker (worker)');

@@ -34,9 +34,9 @@ def _stream(state, *, saw_done=False, usage=None):
 @pytest.fixture
 def recovery_events(monkeypatch):
     events = []
-    monkeypatch.setattr('lib.tasks_pkg.stream_handler._analyse.append_event',
+    monkeypatch.setattr('lib.tasks_pkg.round_retry.append_event',
                         lambda task, event: events.append(event))
-    monkeypatch.setattr('lib.tasks_pkg.stream_handler._analyse.emit_phase',
+    monkeypatch.setattr('lib.tasks_pkg.stream_handler._tool_recovery.emit_phase',
                         lambda task, phase, **fields: events.append(fields))
     monkeypatch.setattr(_budget, '_interruptible_sleep', lambda *args: None)
     return events

@@ -100,7 +100,7 @@ win.t = global.t = (k) => k;
 
 // Tiny server DB keyed by the COMPOSITE langKey, exactly like paper_reports.
 const db = {};                      // langKey -> report body
-const calls = { start: [], cache: [], lookup: [] };
+const calls = { start: [], resolve: [] };
 let lastStartLang = '';
 
 global.Api = win.Api = { paper: {
@@ -115,10 +115,8 @@ global.Api = win.Api = { paper: {
       { key: 'acl', name: 'ACL (ARR)' },
     ] };
   },
-  reportLookup: async (hash, lang) => { calls.lookup.push(lang || ''); return { ok: false }; },
-  reportCache:  async (body) => {
-    const lang = (body && body.lang) || '';
-    calls.cache.push(lang);
+  reportResolve: async (hash, lang) => {
+    calls.resolve.push(lang);
     if (db[lang]) return { ok: true, report: db[lang], paper_hash: 'phash-1', meta: null };
     return { ok: false };
   },
@@ -209,7 +207,7 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
   //    _paperReviewVenue / stream / cache / venue list), re-enter Review. The
   //    persisted venue (iclr) must be resolved so the lookup key matches the
   //    stored review:iclr:en row → cache HIT → report painted, NO Generate. ──
-  calls.start.length = 0; calls.cache.length = 0; calls.lookup.length = 0;
+  calls.start.length = 0; calls.resolve.length = 0;
   startPromptShown = 0; finalRenders = 0;
   _paperReviewVenue = '';
   _paperReviewVenues = [];
@@ -225,7 +223,7 @@ if (typeof toggleSidebar === 'undefined') { global.toggleSidebar = win.toggleSid
 
   check('reload_resolved_iclr', _paperReviewVenue === 'iclr');
   check('reload_cache_lookup_used_iclr',
-        calls.cache.length >= 1 && calls.cache.every(k => k === 'review:iclr:en'));
+        calls.resolve.length >= 1 && calls.resolve.every(k => k === 'review:iclr:en'));
   check('reload_cache_hit_rendered', finalRenders >= 1);
   // The decisive regression assertion: the finished review must NOT re-prompt.
   check('reload_no_generate_prompt', startPromptShown === 0);
@@ -268,8 +266,6 @@ def _run_harness(report_js_path: str, core_js: str = CORE_JS):
     return proc
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_generated_review_venue_persisted_so_reload_hits_cache():
     proc = _run_harness(REPORT_JS)
     out = proc.stdout.strip()
@@ -279,8 +275,6 @@ def test_generated_review_venue_persisted_so_reload_hits_cache():
     assert out.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{out}'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_source_level_negative_control_no_persist_reintroduces_skew():
     """Neuter _persistGeneratedReviewVenue to a no-op (pre-fix silent-no-persist)
     and prove the reload skew reappears. The real shipped file is never modified.

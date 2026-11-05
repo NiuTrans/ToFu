@@ -1,9 +1,23 @@
 // @ts-check
 /* Generated lazy retained runtime: settings-presenters. Do not edit directly. */
 import { featureRegistry as runtimeScope } from '../feature-registry';
-import { _i18nLang, _syncLangPicker, t } from '../i18n/index';
+import { _i18nLang, t } from '../i18n/index';
 import { escapeHtml, raw, safeHtml } from '../html-safety';
+import { createMcpCommands } from '../features/settings/mcp-commands';
+import { createMcpToolSelection } from '../features/settings/mcp-tool-selection';
+import { captureMcpSettingsReads, refreshMcpSettingsAfterWrite } from '../features/settings/mcp-settings-reads';
+import { captureOAuthPanel } from '../features/settings/oauth-panel-lifetime';
 import { renderCodexSharedLogin } from '../features/settings/codex-shared-login';
+import { catpawSettings } from '../features/settings/catpaw-settings';
+import { runModelRoutingMutation } from '../features/settings/model-routing-authority';
+import { createProviderMutations } from '../features/settings/provider-mutations';
+import { createProviderKeyEditor } from '../features/settings/provider-key-editor';
+import { createProviderKeyReveal, maskProviderCredentialSecret } from '../features/settings/provider-key-reveal';
+import { createProviderKeyStats } from '../features/settings/provider-key-stats';
+import { createProviderModelPicker } from '../features/settings/provider-model-picker';
+import { addProviderModels } from '../features/settings/provider-model-staging';
+import { resolveProviderFaceConnection, authorizeProviderConnection } from '../features/settings/provider-connection-staging';
+import { createProviderSettingsProjection, providerSupplyRows } from '../features/settings/provider-settings-projection';
 
 const Api = runtimeScope.Api;
 if (!Api || typeof Api !== 'object') throw new Error('settings-presenters runtime dependency is unavailable: Api');
@@ -199,13 +213,6 @@ Object.defineProperties(runtimeScope, {
     configurable: true,
     get: function () { return _stgPresets; },
     set: function (value) { _stgPresets = value || {}; },
-  },
-  // Declared with var in settings/other_tabs.js; the concatenated module
-  // hoists the binding, so this accessor stays live across both owners.
-  _searchLastPreset: {
-    configurable: true,
-    get: function () { return _searchLastPreset; },
-    set: function (value) { _searchLastPreset = value; },
   },
 });
 
@@ -562,7 +569,7 @@ function _modelRoutingHasProviderBundle(bundle) {
   });
 }
 
-async function _stageModelRoutingProviderBundle(bundle, apiKey) {
+async function _stageModelRoutingProviderBundle(bundle, apiKey, listing) {
   if (!_stgModelRouting || !bundle || !bundle.provider) return false;
   if (_modelRoutingHasProviderBundle(bundle)) {
     showAlert('该服务商或接入点已经存在，请直接编辑现有接入配置。');
@@ -601,12 +608,19 @@ async function _stageModelRoutingProviderBundle(bundle, apiKey) {
       return row.kind === 'local_identity';
     });
   }
-  var created = await Api.modelRouting.createProvider(
-    draft, _stgModelRoutingRevision);
-  if (!created || !created.provider) throw new Error('服务商接入未能保存');
-  _stgModelRoutingRevision = Number(created.revision || _stgModelRoutingRevision);
-  await _loadModelRoutingAuthority();
-  _renderModelRoutingTabs();
+  /* Never assign the receipt revision to the draft: the commit's wake hint has
+   * usually started a live-sync read already, and that read would then refuse
+   * the committed document, leaving the new card unrendered. */
+  var result = await runModelRoutingMutation(async function(revision) {
+    var created = await Api.modelRouting.createProvider(draft, revision);
+    if (!created || !created.provider) throw new Error('服务商接入未能保存');
+    return {revision: created.revision};
+  });
+  // An oversized listing was imported in part; say how to load the rest.
+  _notifyProviderMutation(result, listing && listing.listed > listing.imported
+    ? t('settings.providerModelsRetained', { imported: listing.imported, listed: listing.listed })
+    : t(apiKey ? 'providerCatalog.addedWithKey' : 'providerCatalog.addedWithoutKey'),
+    _renderModelRoutingTabs);
   var card = Array.from(document.querySelectorAll('.stg-provider-card-v2')).find(function(candidate) {
     return candidate.dataset.providerId === String(bundle.provider.provider_id);
   });
@@ -614,7 +628,6 @@ async function _stageModelRoutingProviderBundle(bundle, apiKey) {
     card.open = true;
     card.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
-  showToast(t(apiKey ? 'providerCatalog.addedWithKey' : 'providerCatalog.addedWithoutKey'));
   return true;
 }
 
@@ -649,76 +662,19 @@ async function addProvider() {
     if (!result || !result.provider_bundle) {
       throw new Error(result && (result.error || result.message) || '接入点探测失败');
     }
-    await _stageModelRoutingProviderBundle(result.provider_bundle, String(apiKey).trim());
+    await _stageModelRoutingProviderBundle(result.provider_bundle, String(apiKey).trim(), {
+      listed: Number(result.listed_model_count) || 0,
+      imported: Number(result.model_count) || 0,
+    });
   } catch (error) {
     showAlert('添加自定义服务商失败：' + String(error && error.message || error));
   }
 }
 
+// Retained event handlers need a fresh view of the live draft after each edit.
+// Remove this bridge when those handlers move to the typed Settings owners.
 function _modelRoutingProviderContext(providerId) {
-  if (!_stgModelRouting) return null;
-  var documentValue = _stgModelRouting;
-  var provider = (documentValue.providers || []).find(function(row) {
-    return row.provider_id === providerId;
-  });
-  var accessIndex = (documentValue.provider_accesses || []).findIndex(function(row) {
-    return row.provider_id === providerId;
-  });
-  var access = (documentValue.provider_accesses || [])[accessIndex];
-  if (!provider || !access) return null;
-  var accessId = access.provider_access_id;
-  var connections = (documentValue.connections || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return item.row.provider_access_id === accessId; });
-  var credentials = (documentValue.credentials || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return item.row.provider_access_id === accessId; });
-  var offerings = (documentValue.offerings || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return item.row.provider_access_id === accessId; });
-  var offeringIds = new Set(offerings.map(function(item) { return item.row.offering_id; }));
-  var deployments = (documentValue.deployments || []).map(function(row, index) {
-    return { row: row, index: index };
-  }).filter(function(item) { return offeringIds.has(item.row.offering_id); });
-  var modelNames = {};
-  (documentValue.models || []).forEach(function(model) {
-    modelNames[(model.creator_id || '') + '::' + (model.model_id || '')] =
-      model.display_name || model.model_id;
-  });
-  var modelReleaseDates = {};
-  (documentValue.models || []).forEach(function(model) {
-    if (model.release_date) {
-      modelReleaseDates[(model.creator_id || '') + '::' + (model.model_id || '')] =
-        model.release_date;
-    }
-  });
-  var modelListPricing = {};
-  (documentValue.models || []).forEach(function(model) {
-    if (model.list_pricing) {
-      modelListPricing[(model.creator_id || '') + '::' + (model.model_id || '')] =
-        model.list_pricing;
-    }
-  });
-  var modelLifecycles = {};
-  (documentValue.models || []).forEach(function(model) {
-    if (model.lifecycle) {
-      modelLifecycles[(model.creator_id || '') + '::' + (model.model_id || '')] =
-        model.lifecycle;
-    }
-  });
-  return {
-    provider: provider,
-    access: access,
-    accessIndex: accessIndex,
-    connections: connections,
-    credentials: credentials,
-    offerings: offerings,
-    deployments: deployments,
-    modelReleaseDates: modelReleaseDates,
-    modelListPricing: modelListPricing,
-    modelLifecycles: modelLifecycles,
-    modelNames: modelNames,
-  };
+  return createProviderSettingsProjection(_stgModelRouting, providerId).context(providerId);
 }
 
 function _modelRoutingProviderBrand(context) {
@@ -736,6 +692,8 @@ function _modelRoutingProviderBrand(context) {
 }
 
 function _renderModelRoutingProvidersTab(list) {
+  if (_providerCredentialReveals) _providerCredentialReveals.dispose();
+  if (_providerKeyEditor) _providerKeyEditor.dispose();
   if (!_stgModelRouting) {
     list.innerHTML = '<p class="stg-empty">' + escapeHtml(
       _stgModelRoutingLoadError
@@ -757,9 +715,10 @@ function _renderModelRoutingProvidersTab(list) {
       expandedIds.add(String(card.getAttribute('data-provider-id') || ''));
     });
   }
+  var projection = createProviderSettingsProjection(document);
   var html = '';
   providers.forEach(function(provider) {
-    var context = _modelRoutingProviderContext(provider.provider_id);
+    var context = projection.context(provider.provider_id);
     if (!context) return;
     var access = context.access;
     var modelCount = new Set(context.offerings.filter(function(item) {
@@ -815,7 +774,7 @@ function _renderModelRoutingProvidersTab(list) {
           escapeHtml(provider.provider_id) + '" ' +
           'data-tofu-action="_deleteModelRoutingProvider(this.dataset.providerId)">删除服务商</button>' +
       '</div></div>' +
-      '<div class="stg-models-section">' + _renderAccessMatrix(provider.provider_id) + '</div>' +
+      '<div class="stg-models-section">' + _renderAccessMatrix(provider.provider_id, context) + '</div>' +
       '</div>' +
       '</details>';
   });
@@ -918,17 +877,6 @@ function _v2KeyCardPendingSecret(credentialId) {
   return String(_stgPendingCredentialSecrets[credentialId] || '');
 }
 
-/* Client mirror of the server hint contract (first4 + masks + last4), used
- * only for staged values that the server has not hashed yet. */
-function _v2MaskedSecret(value) {
-  var normalized = String(value || '').trim();
-  if (!normalized) return '';
-  if (normalized.length <= 8) return '****';
-  var hidden = Math.min(normalized.length - 8, 40);
-  return normalized.slice(0, 4) + new Array(hidden + 1).join('*') +
-    normalized.slice(-4);
-}
-
 function _renderV2KeyCard(provider, item, order) {
   var row = item.row;
   var keyHint = String(row.key_hint || '').replace(/^…+/, '');
@@ -938,7 +886,7 @@ function _renderV2KeyCard(provider, item, order) {
     ? (keyHint || '••••••••')
     : (row.kind === 'local_identity' ? '本地身份（无需密钥）' : '订阅授权（OAuth）');
   var staged = isApiKey ? _v2KeyCardPendingSecret(credentialId) : '';
-  var display = staged ? _v2MaskedSecret(staged) : storedDisplay;
+  var display = staged ? maskProviderCredentialSecret(staged) : storedDisplay;
   return '<div class="stg-key-card ' + _v2KeyCardStateClass(provider.provider_id, item) +
     (staged ? ' stg-key-card--staged' : '') +
     '" data-credential-index="' + item.index + '"' +
@@ -967,96 +915,53 @@ function _renderV2KeyCard(provider, item, order) {
   '</div>';
 }
 
-function _v2KeyDisplaySecret(secret) {
-  /* Credentials carrying encrypted extra_headers store a
-   * tofu.credential-secret/v1 envelope; the key card reveals only the
-   * usable key, never the envelope JSON chrome. */
-  try {
-    var decoded = JSON.parse(secret);
-    if (decoded && decoded.format === 'tofu.credential-secret/v1') {
-      var apiKey = String(decoded.api_key || '').trim();
-      if (apiKey) return apiKey;
-    }
-  } catch (error) { /* raw key secrets are not JSON */ }
-  return secret;
-}
+var _providerCredentialReveals = null;
 
-function _markV2KeyCardStaged(card, staged) {
-  if (!card || !card.classList) return;
-  if (staged) card.classList.add('stg-key-card--staged');
-  else card.classList.remove('stg-key-card--staged');
-}
-
-function _showV2KeyPlaintext(button, card, input, plaintext) {
-  input.value = plaintext;
-  // A property, not a data attribute: an attribute would serialize the
-  // secret into every DOM snapshot/diagnostic dump.
-  input.__revealedSecret = plaintext;
-  input.readOnly = false;
-  input.title = '可直接编辑；保存后替换该密钥';
-  button.setAttribute('aria-pressed', 'true');
-  button.innerHTML = _V2_KEY_EYE_OFF;
-  input.focus();
-  if (typeof input.select === 'function') input.select();
-}
-
-function _onV2KeySecretEdit(input) {
-  if (!input || typeof input.closest !== 'function' || input.readOnly) return;
-  if (typeof _stgPendingCredentialSecrets === 'undefined' ||
-      !_stgPendingCredentialSecrets) return;
-  var card = input.closest('.stg-key-card');
-  if (!card) return;
-  var credentialId = card.getAttribute('data-credential-id') || '';
-  if (!credentialId) return;
-  var value = String(input.value || '');
-  var revealed = input.__revealedSecret || '';
-  var storedMask = input.getAttribute('data-stored') || '';
-  if (value.trim() && value !== revealed) {
-    _stgPendingCredentialSecrets[credentialId] = value;
-    input.setAttribute('data-masked', _v2MaskedSecret(value));
-    _markV2KeyCardStaged(card, true);
-  } else {
-    delete _stgPendingCredentialSecrets[credentialId];
-    input.setAttribute('data-masked', storedMask || '••••••••');
-    _markV2KeyCardStaged(card, false);
+function _getProviderCredentialReveals() {
+  if (!_providerCredentialReveals) {
+    _providerCredentialReveals = createProviderKeyReveal({
+      document: function() { return _stgModelRouting; },
+      credential: function(providerId, credentialId) {
+        var context = _modelRoutingProviderContext(providerId);
+        var item = context && context.credentials.find(function(candidate) {
+          return String(candidate.row.credential_id || '') === credentialId;
+        });
+        return item ? item.row : null;
+      },
+      pendingSecret: _v2KeyCardPendingSecret,
+      stageSecret: function(credentialId, value) {
+        if (value === null) delete _stgPendingCredentialSecrets[credentialId];
+        else _stgPendingCredentialSecrets[credentialId] = value;
+      },
+      reveal: function(credentialId) { return Api.modelRouting.revealCredentialSecret(credentialId); },
+      paint: function(binding, revealed) {
+        binding.input.title = revealed ? '可直接编辑；保存后替换该密钥' : '密文保存在服务端，默认只显示首尾识别位';
+        binding.button.setAttribute('aria-pressed', revealed ? 'true' : 'false');
+        binding.button.innerHTML = revealed ? _V2_KEY_EYE_OFF : _V2_KEY_EYE_OPEN;
+      },
+      failed: function() { showToast(t('settings.keyRevealFailed')); },
+    });
   }
+  return _providerCredentialReveals;
 }
 
 function _toggleV2KeyReveal(button) {
-  if (!button || typeof button.closest !== 'function') return;
-  var card = button.closest('.stg-key-card');
-  var input = card ? card.querySelector('.stg-keys-input') : null;
-  if (!input) return;
-  if (button.getAttribute('aria-pressed') === 'true') {
-    input.value = input.getAttribute('data-masked') || '';
-    input.readOnly = true;
-    delete input.__revealedSecret;
-    input.title = '密文保存在服务端，默认只显示首尾识别位';
-    button.setAttribute('aria-pressed', 'false');
-    button.innerHTML = _V2_KEY_EYE_OPEN;
-    return;
-  }
-  var credentialId = card.getAttribute('data-credential-id') || '';
-  if (!credentialId) return;
-  // A staged replacement is already in memory; show it without a round trip.
-  var staged = _v2KeyCardPendingSecret(credentialId);
-  if (staged) {
-    _showV2KeyPlaintext(button, card, input, staged);
-    return;
-  }
-  if (typeof Api === 'undefined' || !Api.modelRouting ||
-      !Api.modelRouting.revealCredentialSecret) return;
-  button.disabled = true;
-  Api.modelRouting.revealCredentialSecret(credentialId).then(function(data) {
-    button.disabled = false;
-    if (!data || typeof data.secret !== 'string' || !data.secret) {
-      showToast(t('settings.keyRevealFailed'));
-      return;
-    }
-    // The user may have typed while the request was in flight; never clobber it.
-    if (input.readOnly === false && input.value.trim()) return;
-    _showV2KeyPlaintext(button, card, input, _v2KeyDisplaySecret(data.secret));
-  });
+  return _getProviderCredentialReveals().toggle(button);
+}
+
+function _onV2KeySecretEdit(input) {
+  if (_providerCredentialReveals) _providerCredentialReveals.edit(input);
+}
+
+// Removed with this retained adapter when Provider cards become native modules.
+function _adoptProviderCredentialDraft(previous) {
+  if (_providerCredentialReveals) _providerCredentialReveals.adoptDocument(previous);
+}
+
+function _destroyProviderCredentialViews() {
+  if (_providerCredentialReveals) _providerCredentialReveals.dispose();
+  if (_providerKeyEditor) _providerKeyEditor.dispose();
+  if (_providerKeyStats) _providerKeyStats.dispose();
 }
 
 /* ── Per-key runtime stats (today) — classic two-row key card ──
@@ -1068,70 +973,28 @@ function _toggleV2KeyReveal(button) {
  * document field, because the dispatcher never mints a slot for it.
  */
 
-var _v2KeyStatsCache = null;
-var _v2KeyStatsLoading = false;
+var _providerKeyStats = null;
 
-function _loadV2KeyStats() {
-  if (_v2KeyStatsLoading || _v2KeyStatsCache) return;
-  if (typeof Api === 'undefined' || !Api.dispatch || !Api.dispatch.keyStats) return;
-  _v2KeyStatsLoading = true;
-  Api.dispatch.keyStats()
-    .then(function(data) {
-      _v2KeyStatsCache = (data && typeof data === 'object') ? data : { providers: {} };
-    })
-    .catch(function() {
-      _v2KeyStatsCache = { providers: {} };
-    })
-    .finally(function() {
-      _v2KeyStatsLoading = false;
-      _refreshV2KeyStatsDom();
+function _getProviderKeyStats() {
+  if (!_providerKeyStats) {
+    _providerKeyStats = createProviderKeyStats({
+      document: function() { return _stgModelRouting; },
+      read: function() { return Api.dispatch.keyStats(); },
+      write: function(body) { return Api.dispatch.keyOverride(body); },
+      refresh: _refreshV2KeyStatsDom,
+      failed: function() { showToast('密钥切换失败，请稍后重试。'); },
     });
+  }
+  return _providerKeyStats;
 }
 
-function _v2KeyStatsBucket(providerId, credentialId) {
-  var providers = (_v2KeyStatsCache && _v2KeyStatsCache.providers) || {};
-  var candidates = [];
-  if (providers[providerId]) candidates.push(providerId);
-  var suffix = ':' + providerId;
-  var names = Object.keys(providers);
-  for (var i = 0; i < names.length; i++) {
-    if (names[i] !== providerId && names[i].slice(-suffix.length) === suffix) {
-      candidates.push(names[i]);
-    }
-  }
-  /* A stale legacy bucket (e.g. persistent overrides recorded pre-v2 under
-   * the bare provider id) must not shadow the owner-scoped bucket that
-   * actually holds this credential's rows: resolve by content first. */
-  if (credentialId) {
-    for (var j = 0; j < candidates.length; j++) {
-      if (providers[candidates[j]][credentialId]) {
-        return { id: candidates[j], keys: providers[candidates[j]] };
-      }
-    }
-  }
-  return candidates.length
-    ? { id: candidates[0], keys: providers[candidates[0]] }
-    : null;
+function _loadV2KeyStats() {
+  if (typeof Api === 'undefined' || !Api.dispatch || !Api.dispatch.keyStats) return;
+  return _getProviderKeyStats().load();
 }
 
 function _v2KeyStatRow(providerId, credentialId) {
-  var bucket = _v2KeyStatsBucket(providerId, credentialId);
-  return bucket ? (bucket.keys[credentialId] || null) : null;
-}
-
-/* Namespace for override writes: the bucket already holding this
- * credential's rows always wins (it is the exact id the dispatcher
- * recorded under); otherwise compose from the server-reported
- * key_namespace (owner-scoped since routing v2). A legacy bucket with no
- * rows for the credential must never capture the write — the dispatcher
- * would never read an override recorded under it. */
-function _v2KeyNamespace(providerId, credentialId) {
-  var bucket = _v2KeyStatsBucket(providerId, credentialId);
-  if (bucket && credentialId && bucket.keys[credentialId]) return bucket.id;
-  var prefix = (_v2KeyStatsCache && _v2KeyStatsCache.key_namespace) || '';
-  if (prefix) return prefix + providerId;
-  if (bucket) return bucket.id;
-  return providerId;
+  return _getProviderKeyStats().row(providerId, credentialId);
 }
 
 function _v2KeyCardStateClass(providerId, item) {
@@ -1142,7 +1005,8 @@ function _v2KeyCardStateClass(providerId, item) {
   if (!row.enabled) return 'stg-keystat-disabled';
   if (row.auto_disabled) return 'stg-keystat-warn';
   if (row.success_rate == null) return 'stg-keystat-idle';
-  var minRate = (_v2KeyStatsCache && _v2KeyStatsCache.min_success_rate) || 0.5;
+  var snapshot = _getProviderKeyStats().snapshot;
+  var minRate = (snapshot && snapshot.min_success_rate) || 0.5;
   if (row.success_rate >= 0.9) return 'stg-keystat-good';
   if (row.success_rate >= minRate) return 'stg-keystat-ok';
   return 'stg-keystat-warn';
@@ -1151,7 +1015,8 @@ function _v2KeyCardStateClass(providerId, item) {
 function _renderV2KeyCardStats(providerId, item) {
   var credentialId = String(item.row.credential_id || '');
   var row = _v2KeyStatRow(providerId, credentialId);
-  var effectiveEnabled = !!item.row.enabled && (row ? !!row.enabled : true);
+  var pending = _getProviderKeyStats().pending(providerId, credentialId);
+  var effectiveEnabled = !!item.row.enabled && (typeof pending === 'boolean' ? pending : row ? !!row.enabled : true);
 
   var total = row ? (row.total || 0) : 0;
   var succ = row ? (row.success || 0) : 0;
@@ -1159,7 +1024,8 @@ function _renderV2KeyCardStats(providerId, item) {
   var rl429 = row ? (row.rate_limited || 0) : 0;
   var gw = row ? (row.gateway_errors || 0) : 0;
   var cons429 = row ? (row.consecutive_429 || 0) : 0;
-  var max429 = (_v2KeyStatsCache && _v2KeyStatsCache.max_consecutive_429) || 100;
+  var snapshot = _getProviderKeyStats().snapshot;
+  var max429 = (snapshot && snapshot.max_consecutive_429) || 100;
   var modelStops = row ? Object.keys(row.exhausted_models || {}) : [];
   var srTxt = row && row.success_rate != null
     ? Math.round(row.success_rate * 100) + '%' : '—';
@@ -1196,6 +1062,9 @@ function _renderV2KeyCardStats(providerId, item) {
       escapeHtml(t('settings.keyStatLastError')) + '</span>';
   }
 
+  var status = _getProviderKeyStats().status;
+  var emptyMessage = !row && status === 'loading' ? t('common.loading')
+    : !row && status === 'failed' ? t('settings.keyStatLoadFailed') : t('settings.keyStatNoCallsTip');
   var metrics = total > 0
     ? '<span class="stg-keystat-metrics">' +
       '<span class="stg-keystat-rate" title="' +
@@ -1210,11 +1079,11 @@ function _renderV2KeyCardStats(providerId, item) {
       (gw > 0 ? '<span class="stg-keystat-gateway" title="' + escapeHtml(t('settings.keyStatGatewayTip')) + '">' +
         escapeHtml(t('settings.keyStatGateway', { n: gw })) + '</span>' : '') +
       '</span>'
-    : '<span class="stg-keystat-none">' + escapeHtml(t('settings.keyStatNoCallsTip')) + '</span>';
+    : '<span class="stg-keystat-none">' + escapeHtml(emptyMessage) + '</span>';
 
   return metrics +
     badges +
-    '<span class="stg-keystat-actions">' +
+    '<span class="stg-keystat-actions" aria-busy="' + (pending !== undefined ? 'true' : 'false') + '">' +
       '<label class="stg-toggle stg-key-toggle" title="' + escapeHtml(t('settings.keyStatToggleTip')) + '">' +
         '<input type="checkbox"' + (effectiveEnabled ? ' checked' : '') +
           ' data-provider-id="' + escapeHtml(providerId) + '"' +
@@ -1245,44 +1114,37 @@ function _onV2KeyToggle(providerId, credentialId, enabled) {
     showToast('已重新启用 — 保存后生效。');
     return;
   }
-  _v2KeyOverride(providerId, credentialId, !!enabled);
+  return _v2KeyOverride(providerId, credentialId, !!enabled);
 }
 
 function _onV2KeyClearOverride(providerId, credentialId) {
-  _v2KeyOverride(providerId, credentialId, null);
+  return _v2KeyOverride(providerId, credentialId, null);
 }
 
 function _v2KeyOverride(providerId, credentialId, enabled) {
   if (typeof Api === 'undefined' || !Api.dispatch || !Api.dispatch.keyOverride) return;
-  var namespaced = _v2KeyNamespace(providerId, credentialId);
-  Api.dispatch.keyOverride({
-    provider_id: namespaced,
-    key_name: credentialId,
-    enabled: enabled,
-  }).then(function(data) {
-    if (data && data.row) {
-      if (!_v2KeyStatsCache) _v2KeyStatsCache = { providers: {} };
-      if (!_v2KeyStatsCache.providers) _v2KeyStatsCache.providers = {};
-      if (!_v2KeyStatsCache.providers[namespaced]) _v2KeyStatsCache.providers[namespaced] = {};
-      _v2KeyStatsCache.providers[namespaced][credentialId] = data.row;
-    } else {
-      showToast('密钥切换失败，请稍后重试。');
-    }
-    _refreshV2KeyStatsDom();
-  });
+  return _getProviderKeyStats().override(providerId, credentialId, enabled);
 }
 
 function _refreshV2KeyStatsDom() {
   if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
   var cards = document.querySelectorAll('.stg-key-card[data-credential-id]');
+  var projection = createProviderSettingsProjection(_stgModelRouting);
+  var credentialsByProvider = new Map();
   for (var i = 0; i < cards.length; i++) {
     var card = cards[i];
     var providerId = card.getAttribute('data-provider-id') || '';
     var credentialId = card.getAttribute('data-credential-id') || '';
-    var context = _modelRoutingProviderContext(providerId);
-    var item = context ? context.credentials.find(function(candidate) {
-      return String(candidate.row.credential_id || '') === credentialId;
-    }) : null;
+    if (!credentialsByProvider.has(providerId)) {
+      var context = projection.context(providerId);
+      var credentials = new Map();
+      (context ? context.credentials : []).forEach(function(candidate) {
+        var id = String(candidate.row.credential_id || '');
+        if (!credentials.has(id)) credentials.set(id, candidate);
+      });
+      credentialsByProvider.set(providerId, credentials);
+    }
+    var item = credentialsByProvider.get(providerId).get(credentialId);
     if (!item) continue;
     var classes = (card.className || '').split(/\s+/).filter(function(name) {
       return name && name.indexOf('stg-keystat-') !== 0;
@@ -1290,8 +1152,34 @@ function _refreshV2KeyStatsDom() {
     classes.push(_v2KeyCardStateClass(providerId, item));
     card.className = classes.join(' ');
     var statsEl = card.querySelector('.stg-key-card-stats');
-    if (statsEl) statsEl.innerHTML = _renderV2KeyCardStats(providerId, item);
+    if (statsEl) {
+      var active = document.activeElement;
+      var focused = statsEl.contains(active) ? active.getAttribute('data-tofu-action-change') || active.getAttribute('data-tofu-action') : null;
+      statsEl.innerHTML = _renderV2KeyCardStats(providerId, item);
+      if (focused) {
+        var control = Array.from(statsEl.querySelectorAll('[data-tofu-action-change], [data-tofu-action]')).find(function(node) {
+          return node.getAttribute('data-tofu-action-change') === focused || node.getAttribute('data-tofu-action') === focused;
+        });
+        if (control) control.focus();
+      }
+    }
   }
+}
+
+var _providerKeyEditor = null;
+
+function _getProviderKeyEditor() {
+  if (!_providerKeyEditor) {
+    _providerKeyEditor = createProviderKeyEditor({
+      document: function() { return _stgModelRouting; },
+      save: function(providerId, secret) {
+        var context = _modelRoutingProviderContext(providerId);
+        return _saveNewProviderCredential(context, secret, false).then(function(result) { return result.refreshed; });
+      },
+      refresh: function() { _notifyProviderMutation({refreshed: true}, '', _renderProvidersTab); },
+    });
+  }
+  return _providerKeyEditor;
 }
 
 function _startNewV2ApiKey(providerId) {
@@ -1318,61 +1206,33 @@ function _startNewV2ApiKey(providerId) {
       '</div>' +
     '</div>');
   var card = list.lastElementChild;
-  var input = card.querySelector('input');
-  card.querySelector('.stg-keys-btn').onclick = function() { card.remove(); };
-  input.addEventListener('keydown', function(event) {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void _commitNewV2ApiKey(providerId, card, input);
-    }
-  });
-  input.addEventListener('blur', function() {
-    if (input.value.trim()) void _commitNewV2ApiKey(providerId, card, input);
-  });
-  input.focus();
-}
-
-async function _commitNewV2ApiKey(providerId, card, input) {
-  var apiKey = input.value.trim();
-  if (!apiKey) { input.focus(); return; }
-  var context = _modelRoutingProviderContext(providerId);
-  if (!context) { card.remove(); return; }
-  input.disabled = true;
-  try {
-    await _saveNewProviderCredential(context, apiKey);
-  } catch (error) {
-    input.disabled = false;
-    input.focus();
-  }
+  _getProviderKeyEditor().mount(providerId, card);
 }
 
 async function _deleteV2Credential(providerId, credentialIndex) {
+  var document = _stgModelRouting;
   var context = _modelRoutingProviderContext(providerId);
   if (!context) return;
   var index = Number(credentialIndex);
   var row = Number.isInteger(index) ? (_stgModelRouting.credentials || [])[index] : null;
   if (!row || row.provider_access_id !== context.access.provider_access_id) return;
+  var credentialId = row.credential_id;
+  var accessId = context.access.provider_access_id;
   var order = context.credentials.findIndex(function(item) {
     return item.row.credential_id === row.credential_id;
   });
   if (!await showConfirm(
     '删除密钥 #' + (order + 1) + '？删除立即生效，使用该密钥的轮转会自动跳过它。',
     { danger: true })) return;
-  var bundle = _providerBundleForSave(context);
-  bundle.credentials = bundle.credentials.filter(function(candidate) {
-    return candidate.credential_id !== row.credential_id;
-  });
   try {
-    var saved = await Api.modelRouting.saveProvider(
-      context.provider.provider_id, bundle, _stgModelRoutingRevision);
-    if (!saved || !saved.provider) throw new Error('密钥未能删除');
-    if (typeof _stgPendingCredentialSecrets !== 'undefined' && _stgPendingCredentialSecrets) {
-      delete _stgPendingCredentialSecrets[row.credential_id];
+    if (_stgModelRouting !== document || _stgModelRouting.credentials[index] !== row ||
+        row.credential_id !== credentialId || row.provider_access_id !== accessId ||
+        context.access.provider_access_id !== accessId) {
+      throw new Error(t('settings.providerSelectionChanged'));
     }
-    _stgModelRoutingRevision = Number(saved.revision || _stgModelRoutingRevision);
-    await _loadModelRoutingAuthority();
-    _renderProvidersTab();
-    showToast('已删除密钥。');
+    var result = await _getProviderMutations().removeCredential(
+      providerId, accessId, credentialId);
+    _notifyProviderMutation(result, '已删除密钥。', _renderProvidersTab);
   } catch (error) {
     showAlert('删除密钥失败：' + String(error && error.message || error));
   }
@@ -1505,63 +1365,26 @@ function _removeV2Alias(deploymentIndex) {
  * enabled Connection" produced a row that could never answer — the reported
  * "added it several times, still fails". The face is a Connection property,
  * so every request name pointing at it shares one. */
-function _ensureV2FaceConnection(context, plan) {
-  if (!plan || !plan.base_url) return null;
-  var accessId = context.access.provider_access_id;
-  var url = String(plan.base_url).replace(/\/$/, '');
-  var existing = (_stgModelRouting.connections || []).find(function(row) {
-    if (row.provider_access_id !== accessId) return false;
-    if (String(row.base_url || '').replace(/\/$/, '') !== url) return false;
-    if (!plan.face) return true;
-    return !row.gateway_namespace || row.gateway_namespace === plan.face;
-  });
-  var connectionId;
-  if (existing) {
-    connectionId = existing.connection_id;
+function _providerDisabledConnectionError(row) {
+  return new Error(t('settings.requestNameConnectionDisabled', {
+    name: row.display_name || row.connection_id,
+  }));
+}
 
-    if (existing.enabled === false) throw new Error(t('settings.requestNameConnectionDisabled', { name: existing.display_name || existing.connection_id }));
-    // Fill only what the face declares and the row lacks: an owner-edited
-    // protocol/profile is a deliberate override, not a gap.
-    if (!existing.protocol && plan.protocol) existing.protocol = plan.protocol;
-    if (plan.face && !existing.gateway_namespace) existing.gateway_namespace = plan.face;
-    if (plan.responses_profile && !existing.responses_profile) {
-      existing.responses_profile = plan.responses_profile;
-    }
-    if (plan.inference_profile && !existing.inference_profile) {
-      existing.inference_profile = plan.inference_profile;
-    }
-    var headers = existing.extra_headers || {};
-    Object.keys(plan.extra_headers || {}).forEach(function(key) {
-      if (!(key in headers)) headers[key] = plan.extra_headers[key];
+function _ensureV2FaceConnection(context, plan) {
+  var result = resolveProviderFaceConnection(_stgModelRouting.connections || [],
+    context.access.provider_access_id, plan, {
+      newId: _newV2StagedId,
+      disabledConnection: _providerDisabledConnectionError,
     });
-    existing.extra_headers = headers;
-  } else {
-    connectionId = _newV2StagedId('conn');
-    var row = {
-      connection_id: connectionId,
-      provider_access_id: accessId,
-      base_url: url,
-      protocol: plan.protocol || 'openai',
-      enabled: true,
-      priority: 100,
-      extra_headers: Object.assign({}, plan.extra_headers || {}),
-    };
-    if (plan.face) row.gateway_namespace = plan.face;
-    if (plan.responses_profile) row.responses_profile = plan.responses_profile;
-    if (plan.inference_profile) row.inference_profile = plan.inference_profile;
-    _stgModelRouting.connections.push(row);
-  }
-  // Dispatch refuses a wire whose credential cannot use its Connection.
-  (context.credentials || []).forEach(function(item) {
-    var credential = item.row;
-    if (!credential.authorization) {
-      credential.authorization = { connection_ids: [], models: [] };
-    }
-    var ids = credential.authorization.connection_ids ||
-      (credential.authorization.connection_ids = []);
-    if (ids.indexOf(connectionId) < 0) ids.push(connectionId);
+  if (!result) return null;
+  if (result.previous) Object.assign(result.previous, result.connection);
+  else _stgModelRouting.connections.push(result.connection);
+  context.credentials.forEach(function(item) {
+    item.row.authorization = authorizeProviderConnection(
+      item.row.authorization, result.connection.connection_id);
   });
-  return connectionId;
+  return result.connection.connection_id;
 }
 
 async function _planV2RequestNameFaces(names, context) {
@@ -1677,169 +1500,35 @@ async function _removeV2Offering(providerId, offeringId) {
  * ungranted refs), appended here deduped; revoke in the matrix.
  */
 
-var _stgModelPickerProviderId = '';
-var _stgModelPickerQuery = '';
-var _stgModelPickerChecked = new Set();
+var _providerModelPicker = null;
 
 function _newV2StagedId(prefix) {
   return prefix + '-' + String(Date.now()).toString(36) + '-' +
     Math.random().toString(36).slice(2, 8);
 }
 
-function _providerWireModelIds(context) {
-  var ids = new Set();
-  (context.deployments || []).forEach(function(item) {
-    ids.add(String(item.row.wire_model_id || ''));
-  });
-  return ids;
-}
-
-function _providerAddableCatalogModels(context) {
-  var offered = new Set();
-  context.offerings.forEach(function(item) {
-    var row = item.row;
-    if (row.identity_state === 'confirmed' && row.model) {
-      offered.add((row.model.creator_id || '') + '::' + (row.model.model_id || ''));
-    }
-  });
-  return (_stgModelRouting.models || []).filter(function(model) {
-    if (model.lifecycle === 'retired') return false;
-    return !offered.has((model.creator_id || '') + '::' + (model.model_id || ''));
-  });
-}
-
 async function _stageV2AddModels(providerId, catalogModels, customWireIds) {
-  // A new browser bundle can be served before the backend restarts. Do not
-  // send optional fields until the current server advertises their contract.
-  var authorityCapabilities = await Api.modelRouting.get();
-  var supportsInheritance = authorityCapabilities.metadata_inheritance_supported === true;
-  var context = _modelRoutingProviderContext(providerId);
-  if (!context) return 0;
-  var connection = context.connections.find(function(item) {
-    return item.row.enabled !== false;
-  }) || context.connections[0];
-  if (!connection) {
-    showAlert('请先为该服务商配置 API 地址，再添加模型。');
-    return 0;
-  }
-  var stagedDocument = _stgModelRouting;
-  var requestNames = runtimeScope.planProviderRequestNames
-    ? await runtimeScope.planProviderRequestNames(catalogModels || [], context.connections.map(item => item.row.base_url)) : {};
-  if (_stgModelRouting !== stagedDocument) return 0;
-  context = _modelRoutingProviderContext(providerId);
-  if (!context) return 0;
-  connection = context.connections.find(item => item.row.connection_id === connection.row.connection_id);
-  if (!connection) return 0;
-  var wireIds = _providerWireModelIds(context);
-  var granted = new Set();
-  var added = 0;
-  // Every request name the picker is about to add, so one template lookup
-  // resolves the face each one must travel over.
-  var pendingWireIds = [];
-  (catalogModels || []).forEach(function(model) {
-    (requestNames[model.model_id] || [String(model.model_id || '')])
-      .forEach(function(id) { if (id && !wireIds.has(id)) pendingWireIds.push(id); });
+  return addProviderModels(providerId, catalogModels || [], customWireIds || [], {
+    document: function() { return _stgModelRouting; },
+    readCapabilities: function() { return Api.modelRouting.get(); },
+    planRequestNames: function(models, urls) {
+      return runtimeScope.planProviderRequestNames
+        ? runtimeScope.planProviderRequestNames(models, urls) : Promise.resolve({});
+    },
+    planFaces: function(names, urls) {
+      return typeof runtimeScope.planProviderRequestNameFaces === 'function'
+        ? runtimeScope.planProviderRequestNameFaces(names, urls) : Promise.resolve({});
+    },
+    newId: _newV2StagedId,
+    disabledConnection: _providerDisabledConnectionError,
+    missingConnection: function() { showAlert('请先为该服务商配置 API 地址，再添加模型。'); },
+    selectionChanged: function() { return new Error(t('settings.modelAddSelectionChanged')); },
+    render: function() { _renderProvidersTab(); },
+    persist: function() { return _persistModelRoutingNow(); },
   });
-  (customWireIds || []).forEach(function(rawId) {
-    var wireId = String(rawId || '').trim();
-    if (wireId && !wireIds.has(wireId)) pendingWireIds.push(wireId);
-  });
-  var facePlans = await _planV2RequestNameFaces(pendingWireIds, context);
-  if (_stgModelRouting !== stagedDocument) return 0;
-  // A face-pinned request name (aigc kunlun) must not inherit the card's
-  // default Connection: that endpoint rejects the id outright.
-  var connectionForWire = function(wireId) {
-    return _ensureV2FaceConnection(context, facePlans[wireId])
-      || connection.row.connection_id;
-  };
-  var pushDeployment = function(offeringId, wireId, confidence) {
-    _stgModelRouting.deployments.push({
-      deployment_id: _newV2StagedId('deployment'),
-      offering_id: offeringId,
-      connection_id: connectionForWire(wireId),
-      wire_model_id: wireId,
-      identity_confidence: confidence,
-      probe_status: 'unprobed',
-      priority: 100,
-    });
-    wireIds.add(wireId);
-  };
-  var grantModel = function(ref) {
-    var grantKey = ref.creator_id + '::' + ref.model_id;
-    if (granted.has(grantKey)) return;
-    granted.add(grantKey);
-    context.credentials.forEach(function(item) {
-      var credential = item.row;
-      if (!credential.authorization) {
-        credential.authorization = { connection_ids: [], models: [] };
-      }
-      var grants = credential.authorization.models || [];
-      var exists = grants.some(function(candidate) {
-        return String(candidate.creator_id || '') === String(ref.creator_id) &&
-          String(candidate.model_id || '') === String(ref.model_id);
-      });
-      if (!exists) grants.push({ creator_id: ref.creator_id, model_id: ref.model_id });
-      credential.authorization.models = grants;
-    });
-  };
-  (catalogModels || []).forEach(function(model) {
-    var names = (requestNames[model.model_id] || [String(model.model_id || '')]).filter(id => id && !wireIds.has(id));
-    if (!names.length) return;
-    var offeringId = _newV2StagedId('offering');
-    _stgModelRouting.offerings.push({
-      offering_id: offeringId,
-      provider_access_id: context.access.provider_access_id,
-      identity_state: 'confirmed',
-      model: { creator_id: model.creator_id, model_id: model.model_id },
-      enabled: true,
-      stale: false,
-      capabilities: (model.capabilities && model.capabilities.length
-        ? model.capabilities : ['text']).slice(),
-      context_window: model.context_window || 128000,
-      ...(supportsInheritance ? { inherited_model_fields: ['capabilities', 'context_window'] } : {}),
-      priority: 100,
-    });
-    names.forEach(wireId => pushDeployment(offeringId, wireId, 'high'));
-    grantModel({ creator_id: model.creator_id, model_id: model.model_id });
-    added++;
-  });
-  (customWireIds || []).forEach(function(rawId) {
-    var wireId = String(rawId || '').trim();
-    if (!wireId || wireId.length > 256 || /[\u0000-\u001f]/.test(wireId)) return;
-    if (wireIds.has(wireId)) return;
-    var offeringId = _newV2StagedId('offering');
-    _stgModelRouting.offerings.push({
-      offering_id: offeringId,
-      provider_access_id: context.access.provider_access_id,
-      identity_state: 'pending_identity',
-      pending_model_id: wireId,
-      enabled: true,
-      stale: false,
-      capabilities: ['text'],
-      context_window: 128000,
-      ...(supportsInheritance ? { inherited_model_fields: ['capabilities', 'context_window'] } : {}),
-      priority: 100,
-    });
-    pushDeployment(offeringId, wireId, 'pending');
-    added++;
-  });
-  if (added) {
-    _renderProvidersTab();
-    // Model adds commit immediately (like key/provider edits): the access
-    // matrix probes the SERVER document, so a staged-but-unsaved row would
-    // 400 with "no cells match the requested scope".
-    await _persistModelRoutingNow();
-  }
-  return added;
 }
 
-function _openProviderModelPicker(providerId) {
-  var context = _modelRoutingProviderContext(providerId);
-  if (!context) return;
-  _closeProviderModelPicker();
-  _stgModelPickerProviderId = String(providerId);
-  _stgModelPickerQuery = '';
-  _stgModelPickerChecked = new Set();
+function _createProviderModelPickerView(context) {
   var overlay = document.createElement('div');
   overlay.id = 'stgProviderModelPickerOverlay';
   overlay.className = 'stg-v2-manager-overlay stg-v2-picker-overlay';
@@ -1862,6 +1551,12 @@ function _openProviderModelPicker(providerId) {
           '<button type="button" class="stg-btn-add" data-tofu-action="_stageV2CustomModelFromPicker()">添加</button>' +
         '</div>' +
         '<p class="stg-v2-picker-hint">' + escapeHtml(t('settings.requestNamePendingIdentity')) + '</p></div>' +
+      '<div class="stg-v2-picker-custom"><label>' + escapeHtml(t('settings.listedModelsSection')) + '</label>' +
+        '<div class="stg-v2-picker-foot"><p class="stg-v2-picker-hint">' +
+          escapeHtml(t('settings.listedModelsHint')) + '</p>' +
+          '<button type="button" id="stgProviderListedImport" class="stg-btn-add" ' +
+            'data-tofu-action="_importListedProviderModels()">' +
+            escapeHtml(t('settings.listedModelsImport')) + '</button></div></div>' +
       '<div class="stg-v2-picker-catalog"><label>从模型目录选择</label>' +
         '<input class="stg-v2-picker-search" type="search" placeholder="搜索模型名称或 ID" ' +
           'data-tofu-action-input="_filterProviderModelPicker(this.value)">' +
@@ -1871,67 +1566,29 @@ function _openProviderModelPicker(providerId) {
       '</div>' +
     '</div>';
   overlay.appendChild(panel);
-  document.body.appendChild(overlay);
-  overlay.onclick = function(event) { if (event.target === overlay) _closeProviderModelPicker(); };
-  var customInput = panel.querySelector('#stgProviderModelCustomId');
-  if (customInput) {
-    customInput.addEventListener('keydown', function(event) {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        _stageV2CustomModelFromPicker();
-      }
-    });
-  }
-  _renderProviderModelPickerList();
+  return {
+    root: overlay,
+    customInput: panel.querySelector('#stgProviderModelCustomId'),
+    customSubmit: panel.querySelector('.stg-v2-picker-custom-row button'),
+    listedImport: panel.querySelector('#stgProviderListedImport'),
+    list: panel.querySelector('#stgProviderModelPickerList'),
+    count: panel.querySelector('#stgProviderModelPickerCount'),
+  };
 }
 
-function _closeProviderModelPicker() {
-  _stgModelPickerProviderId = '';
-  var overlay = document.getElementById('stgProviderModelPickerOverlay');
-  if (overlay) overlay.remove();
+function _renderProviderModelPickerCount(view, count) {
+  view.count.textContent = count ? '已选择 ' + count + ' 个模型' : '未选择模型';
 }
 
-function _filterProviderModelPicker(value) {
-  _stgModelPickerQuery = String(value || '');
-  _renderProviderModelPickerList();
-}
-
-function _toggleProviderModelPick(key, checked) {
-  key = String(key || '');
-  if (!key) return;
-  if (checked) _stgModelPickerChecked.add(key);
-  else _stgModelPickerChecked.delete(key);
-  _renderProviderModelPickerCount();
-}
-
-function _renderProviderModelPickerCount() {
-  var count = document.getElementById('stgProviderModelPickerCount');
-  if (count) {
-    count.textContent = _stgModelPickerChecked.size
-      ? '已选择 ' + _stgModelPickerChecked.size + ' 个模型'
-      : '未选择模型';
-  }
-}
-
-function _renderProviderModelPickerList() {
-  var list = document.getElementById('stgProviderModelPickerList');
-  var context = _modelRoutingProviderContext(_stgModelPickerProviderId);
-  if (!list || !context) return;
-  var query = _stgModelPickerQuery.trim().toLowerCase();
-  var rows = _providerAddableCatalogModels(context).filter(function(model) {
-    var haystack = [model.display_name, model.model_id, model.creator_id].join(' ').toLowerCase();
-    return !query || haystack.includes(query);
-  }).sort(function(left, right) {
-    return String(left.display_name || left.model_id).localeCompare(
-      String(right.display_name || right.model_id), undefined,
-      { numeric: true, sensitivity: 'base' });
-  });
-  var visible = rows.slice(0, 120);
-  list.innerHTML = visible.map(function(model) {
+function _renderProviderModelPickerRows(view, rows, checked, emptyReason) {
+  var list = view.list;
+  var active = list.ownerDocument.activeElement;
+  var focusedKey = active && list.contains(active) ? active.getAttribute('data-model-key') : null;
+  list.innerHTML = rows.map(function(model) {
     var key = (model.creator_id || '') + '::' + (model.model_id || '');
     return '<label class="stg-v2-picker-row">' +
       '<input type="checkbox" data-model-key="' + escapeHtml(key) + '"' +
-        (_stgModelPickerChecked.has(key) ? ' checked' : '') +
+        (checked.has(key) ? ' checked' : '') +
         ' data-tofu-action-change="_toggleProviderModelPick(this.dataset.modelKey,this.checked)">' +
       '<span class="stg-v2-picker-row-icon">' +
         _brandSvg(typeof _modelBrand === 'function'
@@ -1944,135 +1601,139 @@ function _renderProviderModelPickerList() {
         escapeHtml(model.list_pricing ? _modelRoutingPriceLabel(model.list_pricing) : '目录未挂牌') +
       '</span></label>';
   }).join('');
-  if (!visible.length) {
+  if (!rows.length) {
     list.innerHTML = '<p class="stg-v2-picker-empty">' +
-      (rows.length ? '没有匹配的模型。' : '目录中的模型都已添加。') + '</p>';
+      (emptyReason === 'filtered' ? '没有匹配的模型。' : '目录中的模型都已添加。') + '</p>';
   }
-  _renderProviderModelPickerCount();
+  if (focusedKey) {
+    var focused = Array.from(list.querySelectorAll('[data-model-key]')).find(function(node) {
+      return node.getAttribute('data-model-key') === focusedKey;
+    });
+    if (focused) focused.focus();
+  }
+}
+
+function _notifyProviderModelPicker(notice) {
+  switch (notice.kind) {
+    case 'empty-selection': showToast('请先勾选要添加的模型。'); break;
+    case 'invalid-wire': showAlert('模型 ID 无效。'); break;
+    case 'duplicate-wire': showAlert('该模型 ID 已存在于本服务商。'); break;
+    case 'save-error': showAlert('模型保存失败：' + String(notice.error && notice.error.message || notice.error)); break;
+    case 'custom-added': showToast('已添加自定义模型。'); break;
+    case 'catalog-added': showToast('已添加 ' + notice.count + ' 个模型。'); break;
+    case 'listed-imported':
+      _notifyProviderMutation(notice, notice.added
+        ? t('settings.listedModelsAdded', { added: notice.added, listed: notice.listed })
+        : t('settings.listedModelsUpToDate', { listed: notice.listed }), _renderModelRoutingTabs);
+      break;
+    case 'listed-error':
+      showAlert(t('settings.listedModelsFailed', {
+        error: String(notice.error && notice.error.message || notice.error) }));
+      break;
+  }
+}
+
+function _getProviderModelPicker() {
+  if (!_providerModelPicker) {
+    _providerModelPicker = createProviderModelPicker({
+      document: function() { return _stgModelRouting; },
+      addModels: function(providerId, models, wireIds) { return _stageV2AddModels(providerId, models, wireIds); },
+      importListed: function(providerId) {
+        var context = _modelRoutingProviderContext(providerId);
+        if (!context) return Promise.reject(new Error(t('settings.providerSelectionChanged')));
+        return _getProviderMutations().importListedModels(
+          providerId, context.access.provider_access_id);
+      },
+      createView: _createProviderModelPickerView,
+      renderRows: _renderProviderModelPickerRows,
+      renderCount: _renderProviderModelPickerCount,
+      notify: _notifyProviderModelPicker,
+    });
+  }
+  return _providerModelPicker;
+}
+
+function _openProviderModelPicker(providerId) {
+  _getProviderModelPicker().open(String(providerId));
+}
+
+function _closeProviderModelPicker() {
+  if (_providerModelPicker) _providerModelPicker.close();
+}
+
+function _filterProviderModelPicker(value) {
+  _getProviderModelPicker().filter(String(value || ''));
+}
+
+function _toggleProviderModelPick(key, checked) {
+  _getProviderModelPicker().toggle(String(key || ''), !!checked);
 }
 
 async function _stageV2CustomModelFromPicker() {
-  var input = document.getElementById('stgProviderModelCustomId');
-  var wireId = input ? input.value.trim() : '';
-  if (!wireId) { if (input) input.focus(); return; }
-  var context = _modelRoutingProviderContext(_stgModelPickerProviderId);
-  if (!context) return;
-  if (wireId.length > 256 || /[\u0000-\u001f]/.test(wireId)) {
-    showAlert('模型 ID 无效。');
-    return;
-  }
-  if (_providerWireModelIds(context).has(wireId)) {
-    showAlert('该模型 ID 已存在于本服务商。');
-    return;
-  }
-  try {
-    if (!await _stageV2AddModels(_stgModelPickerProviderId, [], [wireId])) return;
-  } catch (error) {
-    showAlert('模型保存失败：' + String(error && error.message || error));
-    return;
-  }
-  input.value = '';
-  input.focus();
-  _renderProviderModelPickerList();
-  showToast('已添加自定义模型。');
+  await _getProviderModelPicker().submitCustom();
 }
 
 async function _stageV2CheckedCatalogModels() {
-  if (!_stgModelPickerChecked.size) {
-    showToast('请先勾选要添加的模型。');
-    return;
-  }
-  var context = _modelRoutingProviderContext(_stgModelPickerProviderId);
-  if (!context) return;
-  var byKey = {};
-  _providerAddableCatalogModels(context).forEach(function(model) {
-    byKey[(model.creator_id || '') + '::' + (model.model_id || '')] = model;
-  });
-  var models = Array.from(_stgModelPickerChecked).map(function(key) {
-    return byKey[key];
-  }).filter(Boolean);
-  var added = 0;
-  try {
-    added = await _stageV2AddModels(_stgModelPickerProviderId, models, []);
-  } catch (error) {
-    showAlert('模型保存失败：' + String(error && error.message || error));
-  }
-  _stgModelPickerChecked = new Set();
-  _renderProviderModelPickerList();
-  if (added) showToast('已添加 ' + added + ' 个模型。');
+  await _getProviderModelPicker().submitCatalog();
 }
 
-function _providerBundleForSave(context) {
-  return {
-    provider: JSON.parse(JSON.stringify(context.provider)),
-    provider_access: JSON.parse(JSON.stringify(context.access)),
-    connections: context.connections.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    credentials: context.credentials.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    offerings: context.offerings.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    deployments: context.deployments.map(function(item) { return JSON.parse(JSON.stringify(item.row)); }),
-    creators: [],
-    models: [],
-  };
+async function _importListedProviderModels() {
+  await _getProviderModelPicker().importListed();
+}
+
+var _providerMutations = null;
+
+function _getProviderMutations() {
+  if (!_providerMutations) {
+    _providerMutations = createProviderMutations({
+      document: function() { return _stgModelRouting; },
+      mutate: runModelRoutingMutation,
+      save: function(providerId, bundle, revision) { return Api.modelRouting.saveProvider(providerId, bundle, revision); },
+      remove: function(providerId, revision) { return Api.modelRouting.deleteProvider(providerId, revision); },
+      importListed: function(providerId) { return Api.modelRouting.importListedModels(providerId); },
+      newId: function() { return _newV2StagedId('credential'); },
+      selectionChanged: function() { return new Error(t('settings.providerSelectionChanged')); },
+    });
+  }
+  return _providerMutations;
+}
+
+function _notifyProviderMutation(result, message, render) {
+  if (message) showToast(message);
+  var pending = !result.refreshed;
+  if (!pending && render) {
+    try { render(); }
+    catch (error) { pending = true; console.warn('[Settings] Provider view refresh failed', error); }
+  }
+  if (pending) showAlert(t('settings.providerSavedDraftKept'));
 }
 
 async function _deleteModelRoutingProvider(providerId) {
   var context = _modelRoutingProviderContext(providerId);
   if (!context) return;
+  var remove = _getProviderMutations().prepareRemoval(providerId);
   var name = context.access.display_name || context.provider.name || providerId;
   if (!await showConfirm('删除服务商「' + name + '」？其凭证、接入点与模型供给会一并移除。',
     { danger: true })) return;
   try {
-    var result = await Api.modelRouting.deleteProvider(providerId, _stgModelRoutingRevision);
-    if (result && result.revision != null) _stgModelRoutingRevision = Number(result.revision);
-    await _loadModelRoutingAuthority();
-    _renderModelRoutingTabs();
-    showToast('已删除服务商。');
+    var result = context.provider.brand === 'catpaw'
+      ? await catpawSettings.providerRemoval(remove) : await remove();
+    _notifyProviderMutation(result, '已删除服务商。', _renderModelRoutingTabs);
   } catch (error) {
     showAlert('删除服务商失败：' + String(error && error.message || error));
   }
 }
 
-async function _saveNewProviderCredential(context, apiKey) {
-  var credentialId = 'credential-' + String(Date.now()).toString(36) + '-' +
-    Math.random().toString(36).slice(2, 8);
-  var modelRefs = [];
-  var seen = new Set();
-  context.offerings.forEach(function(item) {
-    var row = item.row;
-    if (row.identity_state !== 'confirmed' || !row.model) return;
-    var key = row.model.creator_id + '::' + row.model.model_id;
-    if (seen.has(key)) return;
-    seen.add(key);
-    modelRefs.push(JSON.parse(JSON.stringify(row.model)));
-  });
-  var bundle = _providerBundleForSave(context);
-  bundle.credentials.push({
-    credential_id: credentialId,
-    provider_access_id: context.access.provider_access_id,
-    kind: 'api_key',
-    secret_reference: '',
-    key_hint: '',
-    enabled: true,
-    authorization: {
-      connection_ids: context.connections.map(function(item) { return item.row.connection_id; }),
-      models: modelRefs,
-    },
-    quota_policy: {},
-  });
-  bundle.credential_secrets = {};
-  bundle.credential_secrets[credentialId] = JSON.stringify({
-    format: 'tofu.credential-secret/v1', api_key: String(apiKey).trim(), oauth: '', extra_headers: {},
-  });
+async function _saveNewProviderCredential(context, apiKey, render) {
   try {
-    var saved = await Api.modelRouting.saveProvider(
-      context.provider.provider_id, bundle, _stgModelRoutingRevision);
-    if (!saved || !saved.provider) throw new Error('凭证未能保存');
-    _stgModelRoutingRevision = Number(saved.revision || _stgModelRoutingRevision);
-    await _loadModelRoutingAuthority();
-    _renderProvidersTab();
-    showToast('已添加凭证。');
+    if (!context) throw new Error(t('settings.providerSelectionChanged'));
+    var result = await _getProviderMutations().addCredential(
+      context.provider.provider_id, context.access.provider_access_id, apiKey);
+    _notifyProviderMutation(result, '已添加凭证。', render === false ? null : _renderProvidersTab);
+    return result;
   } catch (error) {
     showAlert('添加凭证失败：' + String(error && error.message || error));
+    throw error;
   }
 }
 
@@ -2089,7 +1750,7 @@ function _renderProvidersTab() {
 /* ═══════════════════════════════════════════════════════════════════
    settings/access matrix — per-(credential × wire id) capability grid.
 
-   Some gateways (e.g. Meituan AIGC) give each credential a *different*
+   Some gateways (e.g. YourProvider AIGC) give each credential a *different*
    quota and a *different* set of accessible models. The flat model list
    can't express that: the v2 authority stores the grant as
    ``credential.authorization.models`` (an allow-list of ModelRefs), which
@@ -2108,7 +1769,7 @@ function _renderProvidersTab() {
    keys from the owner-scoped secret store — the browser never sees them —
    and sends a tiny request to EVERY (credential × wire id) pair, granted
    or not: discovering reachable pairs the allow-list does not grant yet
-   is the matrix's whole point on gateways like Meituan. Progress is
+   is the matrix's whole point on gateways like YourProvider. Progress is
    persisted server-side under data/config/probe_cache/, so closing
    Settings (or restarting the server) never loses it — the UI re-attaches
    by provider id and keeps polling. Only "Retest" (force) discards the
@@ -2346,45 +2007,9 @@ function _matrixCredentials(context) {
  *  legacy enabled:false inputs. All inherit the Offering and ModelRef grants.
  *  ``deploymentByWire`` maps ids to GLOBAL deployment indices for deletion.
  *  An offering without deployments has no request names. */
+// Shared read owner; this bridge retires with the retained probe handlers.
 function _matrixModelRows(context) {
-  var out = [];
-  if (!context) return out;
-  context.offerings.forEach(function(item) {
-    var offering = item.row;
-    var pending = offering.identity_state === 'pending_identity' || !offering.model;
-    var canonical = pending
-      ? String(offering.pending_model_id || offering.offering_id || '').trim()
-      : String(offering.model.model_id || '').trim();
-    if (!canonical) return;
-    var wireIds = [], deploymentByWire = {};
-    context.deployments.forEach(function(dep) {
-      if (dep.row.offering_id !== offering.offering_id) return;
-      var wire = String(dep.row.wire_model_id || '').trim();
-      if (!wire) return;
-      if (wireIds.indexOf(wire) < 0) {
-        wireIds.push(wire);
-        deploymentByWire[wire] = dep.index;
-      }
-    });
-    var modelKey = pending
-      ? '' : (String(offering.model.creator_id || '') + '::' + canonical);
-    out.push({
-      offering: offering,
-      offeringIndex: item.index,
-      canonical: canonical,
-      pending: pending,
-      retired: !pending && context.modelLifecycles[modelKey] === 'retired',
-      releaseDate: pending ? '' : (context.modelReleaseDates[modelKey] || ''),
-      pricing: pending ? null
-        : (offering.actual_pricing || context.modelListPricing[modelKey] || null),
-      catalogPrice: !pending && !offering.actual_pricing &&
-        !!context.modelListPricing[modelKey],
-      wireIds: wireIds,
-      deploymentByWire: deploymentByWire,
-      capabilities: (offering.capabilities || []).slice(),
-    });
-  });
-  return out;
+  return providerSupplyRows(context);
 }
 
 /** Exclusive-bucket status filter + substring match over every id the
@@ -2504,8 +2129,8 @@ function _mxMetaHtml(entry) {
 /** Build the full access-matrix table for a provider — the provider's
  *  always-on model-supply manager: search + status buckets + add-model on
  *  the manage row, probe tools on the second toolbar row. */
-function _renderAccessMatrix(providerId) {
-  var context = _modelRoutingProviderContext(providerId);
+function _renderAccessMatrix(providerId, context) {
+  context = context || _modelRoutingProviderContext(providerId);
   if (!context) return '';
   var credentials = _matrixCredentials(context);
   var allRows = _matrixModelRows(context);
@@ -3494,70 +3119,16 @@ runtimeScope.ChipInput = (function () {
 //  Search / Advanced tabs
 // ══════════════════════════════════════════════════════
 
+// Search limits are fixed backend defaults; the tab edits only access
+// boundaries (blocked domains) and the optional search gateway.
 function _populateSearchTab(cfg) {
   var s = cfg.search || {};
-  var overrides = (s.overrides && typeof s.overrides === 'object') ? s.overrides : {};
-  _searchLastPreset = s.profile || 'balanced';
-  // Saved overrides ⇔ the select's 自定义 option — one source of truth.
-  _setVal('settingSearchProfile', Object.keys(overrides).length > 0 ? 'custom' : _searchLastPreset);
-  var cb = document.getElementById('settingLlmContentFilter');
-  if (cb) cb.checked = s.llm_content_filter !== false;  // default: on
-  _setVal('settingFetchTopN', s.fetch_top_n || 6);
-  _setVal('settingFetchTimeout', s.fetch_timeout || 15);
-  _setVal('settingMaxCharsSearch', s.max_chars_search || 60000);
-  _setVal('settingMaxCharsDirect', s.max_chars_direct || 200000);
-  _setVal('settingMaxCharsPdf', s.max_chars_pdf || 0);
-  var deepen = document.getElementById('settingSearchDeepen');
-  if (deepen) deepen.checked = s.deepen_enabled === true;
-  // Max download size is stored in BYTES but displayed in MB — humans do not
-  // think in 20971520. Save converts back (save_export.js).
-  _setVal('settingMaxBytesMB', _bytesToMB(s.max_bytes || 20971520));
   if (typeof runtimeScope.ChipInput !== 'undefined') runtimeScope.ChipInput.init('settingSkipDomains', s.skip_domains || []);
-  _wireSearchPipelinePreview();
-  _syncSearchOverrideControls();
   _renderSearchBrowserAccess();
   if (typeof _renderAuthSources === 'function') _renderAuthSources();
   if (typeof _renderPrivateHosts === 'function') _renderPrivateHosts();
   if (typeof runtimeScope._renderSitePacks === 'function') runtimeScope._renderSitePacks();
-}
-
-// Last real (non-custom) preset — the wire never carries profile='custom':
-// saving 自定义 sends this preset as the base plus the four-knob overrides.
-var _searchLastPreset = 'balanced';
-
-var _SEARCH_PROFILE_PRESETS = {
-  fast: { fetch_top_n: 3, max_chars_search: 30000,
-          llm_content_filter: false, deepen_enabled: false },
-  balanced: { fetch_top_n: 6, max_chars_search: 60000,
-              llm_content_filter: true, deepen_enabled: false },
-  deep: { fetch_top_n: 10, max_chars_search: 100000,
-          llm_content_filter: true, deepen_enabled: true }
-};
-
-function _searchProfileChanged() {
-  var profile = (document.getElementById('settingSearchProfile') || {}).value || 'balanced';
-  if (profile !== 'custom') {
-    _searchLastPreset = profile;
-    var p = _SEARCH_PROFILE_PRESETS[profile] || _SEARCH_PROFILE_PRESETS.balanced;
-    _setVal('settingFetchTopN', p.fetch_top_n);
-    _setVal('settingMaxCharsSearch', p.max_chars_search);
-    var filter = document.getElementById('settingLlmContentFilter');
-    var deepen = document.getElementById('settingSearchDeepen');
-    if (filter) filter.checked = p.llm_content_filter;
-    if (deepen) deepen.checked = p.deepen_enabled;
-  }
-  _syncSearchOverrideControls();
-  _refreshSearchPipelinePreview();
-}
-
-function _syncSearchOverrideControls() {
-  var sel = document.getElementById('settingSearchProfile');
-  // A legacy/embedded settings surface has no profile select — its concrete
-  // knobs stay live; only the new profile UI gates them on 自定义.
-  var custom = !sel || sel.value === 'custom';
-  document.querySelectorAll('.search-override-control input').forEach(function (el) {
-    el.disabled = !custom;
-  });
+  if (typeof runtimeScope._renderSearchGateway === 'function') runtimeScope._renderSearchGateway(s);
 }
 
 function _renderSearchBrowserAccess() {
@@ -3578,52 +3149,6 @@ async function _testSearchBrowser() {
 async function _browserAccessDenyRead() {
   var owner = runtimeScope._browserAccessDenyReadOwner;
   if (typeof owner === 'function') return owner();
-}
-
-/** bytes → MB for display (round to 1 decimal, trim trailing .0). */
-function _bytesToMB(bytes) {
-  var mb = (parseInt(bytes, 10) || 0) / 1048576;
-  var rounded = Math.round(mb * 10) / 10;
-  return (rounded === Math.floor(rounded)) ? Math.floor(rounded) : rounded;
-}
-
-/** The pipeline preview says in one sentence what the backend WILL DO with
- *  the current knob values — the frontend↔backend bridge. Live-updates as
- *  the user edits the inputs (wired once). */
-function _refreshSearchPipelinePreview() {
-  var el = document.getElementById('searchPipelinePreview');
-  if (!el) return;
-  var _v = function (id, dflt) {
-    var n = parseInt((document.getElementById(id) || {}).value, 10);
-    return (isNaN(n) ? dflt : n);
-  };
-  var n = _v('settingFetchTopN', 6);
-  var timeout = _v('settingFetchTimeout', 15);
-  var chars = _v('settingMaxCharsSearch', 60000);
-  var filterCb = document.getElementById('settingLlmContentFilter');
-  var filterOn = filterCb ? filterCb.checked : true;
-  var filterTxt = filterOn
-    ? (t('settings.searchFilterOnTpl') || 'LLM 过滤杂质')
-    : (t('settings.searchFilterOffTpl') || '跳过过滤（原文直送）');
-  el.textContent = (t('settings.searchPipelineTpl') ||
-    '搜索引擎返回结果 → 抓取前 {n} 个网页（每页 ≤{chars} 字符 · 超时 {timeout}s）→ {filter} → 注入对话')
-    .replace('{n}', n).replace('{chars}', (chars || 0).toLocaleString('en-US'))
-    .replace('{timeout}', timeout).replace('{filter}', filterTxt);
-  el.classList.toggle('filter-off', !filterOn);
-}
-
-function _wireSearchPipelinePreview() {
-  _refreshSearchPipelinePreview();
-  if (/** @type {any} */ (_wireSearchPipelinePreview)._done) return;
-  /** @type {any} */ (_wireSearchPipelinePreview)._done = true;
-  ['settingFetchTopN', 'settingFetchTimeout', 'settingMaxCharsSearch',
-   'settingLlmContentFilter'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) {
-      el.addEventListener('input', _refreshSearchPipelinePreview);
-      el.addEventListener('change', _refreshSearchPipelinePreview);
-    }
-  });
 }
 
 // ══════════════════════════════════════════════════════
@@ -4631,9 +4156,9 @@ function _clearConvCacheFromSettings() {
 
    OAuth flows: status/login/logout/manual-callback for Claude/Codex providers.
 
-   This file is concatenated by Vite's module graph — symbols share
-   the same window scope as every other frontend/src/runtime/*.js file. No
-   exports / imports needed.
+   Retained subscription markup and authorization policy. Presentation reads
+   and timers delegate to the typed OAuth panel lifetime imported by the
+   settings-presenters manifest. Delete these bridges as the presenter migrates.
    ═══════════════════════════════════════════════════════════════════ */
 
 // ══════════════════════════════════════════════════════
@@ -4671,15 +4196,18 @@ function _oauthRelayOrigins(provider, port) {
   return ['http://127.0.0.1:' + p, 'http://localhost:' + p];
 }
 
-function _oauthRecordPendingFlow(provider, port, state) {
+function _oauthRecordPendingFlow(provider, port, state, view) {
   _oauthPendingFlows[provider] = {
     state: state || '',
+    view: view || captureOAuthPanel(),
     origins: _oauthRelayOrigins(provider, port),
   };
 }
 
-function _oauthClearPendingFlow(provider) {
+function _oauthClearPendingFlow(provider, expected) {
+  if (arguments.length > 1 && _oauthPendingFlows[provider] !== expected) return;
   delete _oauthPendingFlows[provider];
+  delete _oauthExchangeParams[provider];
 }
 
 // origin === null marks the BroadcastChannel path: it is same-origin by
@@ -4742,8 +4270,8 @@ var _oauthExchangeParams = {};
 // token JSON on success, or rejects (so the caller falls back to the
 // server-side exchange). Anthropic/OpenAI token endpoints are CORS-open for
 // the public OAuth client, but if not, the fetch rejects and we fall back.
-function _browserExchange(provider, code, state) {
-  var ex = _oauthExchangeParams[provider];
+function _browserExchange(provider, code, state, exchange) {
+  var ex = arguments.length > 3 ? exchange : _oauthExchangeParams[provider];
   if (!ex || !ex.token_url || !ex.code_verifier) return Promise.reject(new Error('no-exchange-params'));
 
   var headers, bodyData;
@@ -4840,11 +4368,16 @@ function _completeLogin(provider, code, state, opts) {
   // manual: the user pasted the code/URL by hand — the only path allowed to
   // arrive without the flow's state (raw code paste has no state channel).
   var manual = !!(opts && opts.manual);
+  var flow = _oauthPendingFlows[provider];
+  var view = manual ? captureOAuthPanel() : (flow && flow.view) || captureOAuthPanel();
+  if (!view || (manual && !view.isCurrent())) return;
+  var exchange = _oauthExchangeParams[provider];
+  view.invalidateStatus();
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
-  _updateOAuthCard(provider, { status: 'exchanging' });
+  if (view.isCurrent()) _updateOAuthCard(provider, { status: 'exchanging' });
 
   function _onSuccess(data) {
-    _oauthClearPendingFlow(provider);
+    _oauthClearPendingFlow(provider, flow);
     // Exchange/store responses historically returned `{ok, email}` without
     // the status projection fields consumed by _updateOAuthCard. Passing that
     // object through made a successful login repaint as "not logged in".
@@ -4853,29 +4386,33 @@ function _completeLogin(provider, code, state, opts) {
     var success = Object.assign({}, data || {}, {
       status: 'success', authenticated: true,
     });
+    _autoConfigureOAuthProvider(provider, success, view);
+    if (!view.isCurrent()) return;
+    view.invalidateStatus();
     _updateOAuthCard(provider, success);
-    _autoConfigureOAuthProvider(provider, success);
     var manualDiv = document.getElementById('oauth' + capProvider + 'Manual');
     if (manualDiv) manualDiv.style.display = 'none';
     var manualInput = document.getElementById('oauth' + capProvider + 'ManualUrl');
     if (manualInput) manualInput.value = '';
   }
   function _onError(msg) {
-    _oauthClearPendingFlow(provider);
+    _oauthClearPendingFlow(provider, flow);
+    if (!view.isCurrent()) return;
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthAuthorizationFailed', { msg: msg }));
   }
 
   function _recoveryFailed(reason) {
-    _oauthClearPendingFlow(provider);
+    _oauthClearPendingFlow(provider, flow);
     console.error('[OAuth] Automatic recovery exhausted for %s: %s', provider, reason || 'unknown');
+    if (!view.isCurrent()) return;
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthAutomaticRecoveryFailed'));
   }
 
   function _tryBrowser(reason) {
     console.warn('[OAuth] Server exchange unavailable (%s) — trying browser exchange', reason);
-    _browserExchange(provider, code, state)
+    _browserExchange(provider, code, state, exchange)
       .then(function(tokenJson) {
         console.log('[OAuth] Browser-side exchange succeeded for', provider);
         return _storeBrowserToken(provider, tokenJson).then(function(data) {
@@ -4916,33 +4453,21 @@ function _handleOAuthCode(provider, code, state) {
 }
 
 function _loadOAuthStatus(fromRepoll) {
-  // Typed owner; remove this bridge when the subscription presenter migrates.
+  var view = captureOAuthPanel();
+  if (!view) return Promise.resolve();
+  // The typed owner retires presentation while accepted login writes settle.
   renderCodexSharedLogin(undefined, function(result) {
-    _updateOAuthCard('codex', result);
-    _autoConfigureOAuthProvider('codex', result);
+    if (view.isCurrent()) _updateOAuthCard('codex', result);
+  }, function(result) {
+    _autoConfigureOAuthProvider('codex', result, view);
   });
-  if (!fromRepoll) {
-    _oauthStatusRepollAttempts = 0;
-  }
-  Api.oauth.status()
-    .then(function(data) {
-      if (!data) return;
+  return view.loadStatus({
+    read: function(options) { return Api.oauth.status(options); },
+    publish: function(data) {
       _updateOAuthCard('claude', data.claude);
-      _updateOAuthCard('codex', data.codex);
-      _catpawLoadStatus();
-      // Egress and earned-reset reads both warm asynchronously. One bounded
-      // status re-poll chain observes either without duplicating timers.
-      var probing = [data.claude, data.codex].some(function(s) {
-        return s && s.egress && s.egress.state === 'unknown';
-      });
-      var resetRefreshing = !!(data.codex && data.codex.reset_offer &&
-        data.codex.reset_offer.refreshing);
-      if (resetRefreshing) _scheduleOAuthStatusRepoll();
-      if (!probing && !resetRefreshing) _oauthStatusRepollAttempts = 0;
-    })
-    .catch(function(e) {
-      console.warn('[OAuth] Failed to load status:', e);
-    });
+      if (view.isCurrent()) _updateOAuthCard('codex', data.codex);
+    },
+  }, !!fromRepoll);
 }
 
 function _oauthQuotaPct(value) {
@@ -4967,9 +4492,7 @@ function _oauthQuotaResetLabel(timestamp) {
   var when = new Date(seconds * 1000);
   if (!Number.isFinite(when.getTime())) return '';
   try {
-    var locale = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh')
-      ? 'zh-CN' : 'en-US';
-    return new Intl.DateTimeFormat(locale, {
+    return new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     }).format(when);
   } catch (_err) {
@@ -5038,9 +4561,7 @@ function _oauthResetExpiryLabel(timestamp) {
   var seconds = Number(timestamp || 0);
   if (!Number.isFinite(seconds) || seconds <= 0) return '';
   try {
-    var locale = (typeof _i18nLang !== 'undefined' && _i18nLang === 'zh')
-      ? 'zh-CN' : 'en';
-    return new Date(seconds * 1000).toLocaleString(locale, {
+    return new Date(seconds * 1000).toLocaleString(document.documentElement.lang || undefined, {
       dateStyle: 'medium', timeStyle: 'short',
     });
   } catch (_err) {
@@ -5096,24 +4617,11 @@ function _renderOAuthResetOffer(provider, offer, authenticated) {
 // The first status read therefore may be `unknown+refreshing`. Re-poll only
 // while Settings is open, with one timer and a hard attempt cap; ordinary
 // steady-state reads pay no polling cost.
-var _oauthStatusRepollTimer = null;
-var _oauthStatusRepollAttempts = 0;
-var _OAUTH_STATUS_REPOLL_MS = 2000;
-var _OAUTH_STATUS_REPOLL_MAX = 8;  // usage + optional details are each <= 5s
-
+// Narrow bridges; remove with the retained OAuth presenter. One typed owner
+// coalesces status/device reads and owns the existing bounded repoll policy.
 function _scheduleOAuthStatusRepoll() {
-  if (_oauthStatusRepollTimer) return;
-  if (_oauthStatusRepollAttempts >= _OAUTH_STATUS_REPOLL_MAX) return;
-  _oauthStatusRepollAttempts++;
-  _oauthStatusRepollTimer = setTimeout(function() {
-    _oauthStatusRepollTimer = null;
-    var modal = document.getElementById('settingsModal');
-    if (!modal || !modal.classList.contains('open')) {
-      _oauthStatusRepollAttempts = 0;
-      return;
-    }
-    _loadOAuthStatus(true);
-  }, _OAUTH_STATUS_REPOLL_MS);
+  var view = captureOAuthPanel();
+  if (view) view.scheduleRepoll();
 }
 
 // ── Desktop-egress status line + pin selector (S4) ──
@@ -5143,8 +4651,10 @@ function _renderEgressLine(provider, egress) {
       ((routeId === 'env' || routeId.indexOf('pool:') === 0) ? 'proxy' : 'direct');
     if (routeMode === 'proxy' || routeMode === 'env') {
       key = 'settings.egressViaProxy';
-      vars.route = egress.preferred_server_route_label || routeId ||
-        t('settings.egressConfiguredProxy');
+      // The server labels the environment route in English; name it in the
+      // UI language instead of echoing that wire label.
+      vars.route = routeId === 'env' ? t('settings.egressEnvProxy')
+        : egress.preferred_server_route_label || routeId || t('settings.egressConfiguredProxy');
     } else {
       key = 'settings.egressDirect';
     }
@@ -5192,6 +4702,7 @@ function _updateOAuthCard(provider, status) {
       (status.status === 'started' || status.status === 'waiting_callback');
     if (devWaiting && status.device) {
       _showDevicePanel(status.device.user_code, status.device.verification_url);
+      _startDeviceStatusPoll(provider);
     } else if (status.authenticated || !devWaiting) {
       _hideDevicePanel();
       _stopDeviceStatusPoll();
@@ -5274,6 +4785,9 @@ function _updateOAuthCard(provider, status) {
 }
 
 function _oauthCancelAndRetry(provider) {
+  var view = captureOAuthPanel();
+  if (!view) return;
+  view.invalidateStatus();
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   _oauthClearPendingFlow(provider);
   // Call logout to reset the server-side flow state
@@ -5342,6 +4856,10 @@ function _oauthUseConsoleFallback(provider) {
 }
 
 function _oauthLogin(provider, preferConsole) {
+  var view = captureOAuthPanel();
+  if (!view) return;
+  var flow = _oauthPendingFlows[provider];
+  view.invalidateStatus();
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   var loginBtn = document.getElementById('oauth' + capProvider + 'LoginBtn');
   if (loginBtn && loginBtn.disabled) return;
@@ -5369,19 +4887,19 @@ function _oauthLogin(provider, preferConsole) {
       return r.json();
     })
     .then(function(data) {
+      if (data.status === 'success') {
+        _oauthClearPendingFlow(provider, flow);
+        var reused = Object.assign({}, data, { authenticated: true });
+        _autoConfigureOAuthProvider(provider, reused, view);
+        if (view.isCurrent()) { view.invalidateStatus(); _updateOAuthCard(provider, reused); }
+        return;
+      }
+      if (!view.isCurrent()) return;
       if (data.error) {
         showAlert(t('settings.oauthLoginFailed', {
           error: errorEnvelopeMessage(data.error) || String(data.error),
         }));
         if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); }
-        return;
-      }
-
-      if (data.status === 'success') {
-        _oauthClearPendingFlow(provider);
-        var reused = Object.assign({}, data, { authenticated: true });
-        _updateOAuthCard(provider, reused);
-        _autoConfigureOAuthProvider(provider, reused);
         return;
       }
 
@@ -5394,7 +4912,7 @@ function _oauthLogin(provider, preferConsole) {
       // back: only our relay origin echoing this flow's state gets through.
       _oauthRecordPendingFlow(
         provider, data.callback_port,
-        (data.exchange && data.exchange.state) || '');
+        (data.exchange && data.exchange.state) || '', view);
 
       // Step 2: Open the auth URL in a popup window
       // For Claude: redirects to console.anthropic.com which shows code#state
@@ -5438,17 +4956,17 @@ function _oauthLogin(provider, preferConsole) {
 
       // ── Detect popup closed → auto-reset ONLY if manual box not used ──
       if (popup) {
-        var popupCheckInterval = setInterval(function() {
+        var popupCheckInterval = view.scope.interval(function() {
           /* Self-terminate once the login resolves (success / error / cancel):
            *   the old code only stopped on popup.closed, leaking a 1s interval
            *   for every Connect click that never closed its popup (). */
           var badgeNow = document.getElementById('oauth' + capProvider + 'Status');
           if (badgeNow && !badgeNow.classList.contains('pending')) {
-            clearInterval(popupCheckInterval);
+            view.scope.cancelInterval(popupCheckInterval);
             return;
           }
           if (!popup || popup.closed) {
-            clearInterval(popupCheckInterval);
+            view.scope.cancelInterval(popupCheckInterval);
             // Don't reset if manual paste box is visible (user may be pasting code)
             var manualInput = document.getElementById('oauth' + capProvider + 'ManualUrl');
             if (manualInput && manualInput.value.trim()) return;  // user is typing
@@ -5465,6 +4983,7 @@ function _oauthLogin(provider, preferConsole) {
                 loginBtn2.disabled = false;
                 loginBtn2.textContent = t('settings.oauthReopenPopup');
                 loginBtn2.onclick = function() {
+                  if (!view.isCurrent()) return;
                   // Re-open popup with same auth URL, don't create new flow
                   var w2 = 600, h2 = 700;
                   var left2 = (screen.width - w2) / 2, top2 = (screen.height - h2) / 2;
@@ -5480,6 +4999,7 @@ function _oauthLogin(provider, preferConsole) {
     })
     .catch(function(e) {
       console.error('[OAuth] Login error:', e);
+      if (!view.isCurrent()) return;
       showAlert(t('settings.oauthLoginReqFailed', { error: e.message }));
       if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); }
     });
@@ -5491,10 +5011,11 @@ function _oauthLogin(provider, preferConsole) {
 // redirect: the server mints a user code, the user enters it at the
 // verification URL in ANY browser (phone included), and the server's poll
 // thread completes the exchange — we just watch the status projection.
-var _oauthDevicePollTimer = null;
-
 function _oauthDeviceLogin(provider) {
   if (provider !== 'codex') return;
+  var view = captureOAuthPanel();
+  if (!view) return;
+  view.invalidateStatus();
   var deviceBtn = document.getElementById('oauthCodexDeviceBtn');
   if (deviceBtn && deviceBtn.disabled) return;
   if (deviceBtn) { deviceBtn.disabled = true; deviceBtn.textContent = t('settings.oauthPreparing'); }
@@ -5529,18 +5050,18 @@ function _oauthDeviceLogin(provider) {
       return r.json();
     })
     .then(function(data) {
+      if (data && data.status === 'success') {
+        var reused = Object.assign({}, data, { authenticated: true });
+        _autoConfigureOAuthProvider(provider, reused, view);
+        if (view.isCurrent()) { view.invalidateStatus(); _hideDevicePanel(); _updateOAuthCard(provider, reused); }
+        return;
+      }
+      if (!view.isCurrent()) return;
       if (deviceBtn) { deviceBtn.disabled = false; deviceBtn.textContent = t('settings.oauthDeviceLogin'); }
       if (!data || data.error) {
         showAlert(t('settings.oauthLoginFailed', {
           error: (data && errorEnvelopeMessage(data.error)) || 'unknown',
         }));
-        return;
-      }
-      if (data.status === 'success') {
-        _hideDevicePanel();
-        var reused = Object.assign({}, data, { authenticated: true });
-        _updateOAuthCard(provider, reused);
-        _autoConfigureOAuthProvider(provider, reused);
         return;
       }
       _showDevicePanel(data.user_code, data.verification_url);
@@ -5552,6 +5073,7 @@ function _oauthDeviceLogin(provider) {
     })
     .catch(function(e) {
       console.error('[OAuth] Device login error:', e);
+      if (!view.isCurrent()) return;
       if (deviceBtn) { deviceBtn.disabled = false; deviceBtn.textContent = t('settings.oauthDeviceLogin'); }
       if (e && (e._httpStatus === 503 || e._statusCode === 0)) {
         // Deviceauth must be minted by the server. When every server/agent
@@ -5559,8 +5081,8 @@ function _oauthDeviceLogin(provider) {
         // of ending on a raw HTTP 400/503. The remote callback-copy box makes
         // the fixed localhost redirect usable without any local listener.
         Promise.resolve(showAlert(t('settings.oauthDeviceFallback'))).then(
-          function() { _oauthLogin(provider); },
-          function() { _oauthLogin(provider); });
+          function() { if (view.isCurrent()) _oauthLogin(provider); },
+          function() { if (view.isCurrent()) _oauthLogin(provider); });
         return;
       }
       showAlert(t('settings.oauthLoginReqFailed', { error: e.message }));
@@ -5587,11 +5109,14 @@ function _hideDevicePanel() {
 }
 
 function _oauthCopyDeviceCode(button) {
+  var view = captureOAuthPanel();
+  if (!view) return;
   var codeEl = document.getElementById('oauthCodexDeviceCode');
   if (!codeEl || !codeEl.textContent) return;
   function _copied() {
+    if (!view.isCurrent()) return;
     button.textContent = t('settings.oauthCopied');
-    setTimeout(function() { button.textContent = t('settings.oauthCopyCode'); }, 1500);
+    view.scope.timeout(function() { button.textContent = t('settings.oauthCopyCode'); }, 1500);
   }
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(codeEl.textContent).then(_copied, function() {});
@@ -5606,34 +5131,26 @@ function _oauthCopyDeviceCode(button) {
 }
 
 function _startDeviceStatusPoll(provider) {
-  _stopDeviceStatusPoll();
-  _oauthDevicePollTimer = setInterval(function() {
-    Api.oauth.status()
-      .then(function(data) {
-        if (!data) return;
-        var s = data[provider];
-        _updateOAuthCard(provider, s);
-        var terminal = !s || s.authenticated ||
-          ['error', 'timeout', 'not_started'].indexOf(s.status) >= 0 ||
-          !s.device;
-        if (terminal) {
-          _stopDeviceStatusPoll();
-          if (s && s.authenticated) _autoConfigureOAuthProvider(provider, s);
-        }
-      })
-      .catch(function() {});
-  }, 3000);
+  var view = captureOAuthPanel();
+  if (!view) return;
+  view.startDevicePoll(provider, function() { _loadOAuthStatus(true); }, function(status) {
+    _autoConfigureOAuthProvider(provider, status, view);
+  });
 }
 
 function _stopDeviceStatusPoll() {
-  if (_oauthDevicePollTimer) {
-    clearInterval(_oauthDevicePollTimer);
-    _oauthDevicePollTimer = null;
-  }
+  var view = captureOAuthPanel();
+  if (view) view.stopDevicePoll();
 }
 
 async function _oauthLogout(provider) {
+  var view = captureOAuthPanel();
+  if (!view) return;
+  var flow = _oauthPendingFlows[provider];
   if (!await showConfirm(t('settings.oauthLogoutConfirm', { provider: (provider === 'codex' ? 'ChatGPT' : 'Claude') }))) return;
+
+  if (!view.isCurrent()) return;
+  view.invalidateStatus();
 
   // Try POST first; if proxy returns 405, fall back to GET with query params
   function _doLogoutRequest(useGet) {
@@ -5643,36 +5160,42 @@ async function _oauthLogout(provider) {
     }
     return Api.oauth.logoutPost(provider);
   }
-  _doLogoutRequest(false)
+  return _doLogoutRequest(false)
     .then(function(r) {
       if (r.status === 404 || r.status === 405) return _doLogoutRequest(true);
       return r;
     })
     .then(function(r) { return r.json(); })
     .then(function() {
-      _oauthClearPendingFlow(provider);
-      _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
+      _oauthClearPendingFlow(provider, flow);
+      if (view.isCurrent()) {
+        view.invalidateStatus();
+        _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
+      }
       if (typeof _refreshSubscriptionModelCatalog === 'function') {
-        return _refreshSubscriptionModelCatalog();
+        return _refreshSubscriptionModelCatalog(view.session);
       }
       return null;
     })
     .catch(function(e) {
+      if (!view.isCurrent()) return;
       showAlert(t('settings.oauthLogoutFailed', { error: e.message }));
     });
 }
 
 var _oauthResetConsumeInFlight = false;
 function _oauthConsumeReset() {
-  if (_oauthResetConsumeInFlight) return;
+  var view = captureOAuthPanel();
+  if (!view || _oauthResetConsumeInFlight) return;
+  _oauthResetConsumeInFlight = true;
   var confirmed = typeof showConfirm === 'function'
     ? showConfirm(t('settings.oauthResetRedeemConfirm'), {
         okText: t('settings.oauthResetRedeemButton'),
       })
     : Promise.resolve(true);
-  confirmed.then(function(ok) {
-    if (!ok) return;
-    _oauthResetConsumeInFlight = true;
+  return confirmed.then(function(ok) {
+    if (!ok || !view.isCurrent()) return;
+    view.invalidateStatus();
     return Api.oauth.resetOfferConsume()
       .then(function(resp) {
         if (resp && typeof resp.json === 'function') {
@@ -5681,6 +5204,7 @@ function _oauthConsumeReset() {
         return resp;
       })
       .then(function(body) {
+        if (!view.isCurrent()) return;
         if (body && body.ok) {
           showAlert(t('settings.oauthResetRedeemSuccess'));
           return;
@@ -5697,22 +5221,25 @@ function _oauthConsumeReset() {
       })
       .catch(function(e) {
         console.warn('[OAuth] reset consume failed:', e);
-        showAlert(t('settings.oauthResetRedeemFailed'));
+        if (view.isCurrent()) showAlert(t('settings.oauthResetRedeemFailed'));
       })
       .then(function() {
-        _oauthResetConsumeInFlight = false;
-        _loadOAuthStatus();
+        if (view.isCurrent()) { view.invalidateStatus(); _loadOAuthStatus(); }
       });
-  });
+  }).catch(function(error) {
+    console.warn('[OAuth] reset confirmation failed:', error);
+  }).finally(function() { _oauthResetConsumeInFlight = false; });
 }
 function _oauthCopyAuthLink(button, provider) {
+  var view = captureOAuthPanel();
+  if (!view) return;
   const capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   const input = document.getElementById('oauth' + capProvider + 'AuthUrl');
   if (!input) return;
   input.select();
   document.execCommand('copy');
   button.textContent = t('settings.oauthCopied');
-  setTimeout(function() {
+  view.scope.timeout(function() {
     button.textContent = t('settings.oauthCopyLink');
   }, 1500);
 }
@@ -5751,22 +5278,24 @@ function _oauthManualSubmit(provider) {
   _completeLogin(provider, code, state, { manual: true });
 }
 
-function _autoConfigureOAuthProvider(provider, status) {
+function _autoConfigureOAuthProvider(provider, status, view) {
+  view = view || captureOAuthPanel();
+  if (!view) return;
   var name = provider === 'codex' ? 'ChatGPT Plus' : 'Claude Pro';
   var el = document.getElementById('settingsStatusHint');
-  if (el) {
+  if (view.isCurrent() && el) {
     el.textContent = t('settings.oauthAutoConfigured', { name: name });
     el.style.color = '#28a745';
   }
   // The backend auto-provisions a managed provider on login; refresh the
   // providers list so the new models appear without a manual reload.
   if (typeof _refreshSubscriptionModelCatalog === 'function') {
-    _refreshSubscriptionModelCatalog().then(function(cfg) {
-      if (!cfg) return;
+    _refreshSubscriptionModelCatalog(view.session).then(function(cfg) {
+      if (!cfg || !view.isCurrent()) return;
       _loadOAuthStatus();
     }).catch(function(e) {
       console.warn('[OAuth] subscription catalogue refresh failed:', e);
-      showAlert(t('settings.oauthCatalogRepairFailed'));
+      if (view.isCurrent()) showAlert(t('settings.oauthCatalogRepairFailed'));
     });
   }
 }
@@ -5777,181 +5306,19 @@ function _autoConfigureOAuthProvider(provider, status) {
 // secret-free availability verdict and offers a one-click import; the token
 // itself never crosses the API. Roster/base_url come from the catpaw template.
 
-function _catpawRender(status) {
-  var badge = document.getElementById('oauthCatpawStatus');
-  var importBtn = document.getElementById('oauthCatpawImportBtn');
-  var disconnectBtn = document.getElementById('oauthCatpawDisconnectBtn');
-  var hint = document.getElementById('oauthCatpawHint');
-  if (!badge) return;
-  badge.title = '';
-  var connected = !!(status && status.connected);
-  var available = !!(status && status.available);
-  if (connected) {
-    _catpawAutoTried = false;  // ready for a future disconnect→reconnect cycle
-    badge.textContent = t('settings.oauthModelsReady', { n: status.model_count || 0 });
-    badge.className = 'oauth-status-badge authenticated';
-    if (importBtn) importBtn.style.display = 'none';
-    if (disconnectBtn) disconnectBtn.style.display = '';
-    if (hint) hint.style.display = 'none';
-  } else if (available) {
-    badge.textContent = t('settings.oauthCatpawReady');
-    badge.className = 'oauth-status-badge pending';
-    if (importBtn) { importBtn.style.display = ''; importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawImport'); }
-    if (disconnectBtn) disconnectBtn.style.display = 'none';
-    if (hint) hint.style.display = 'none';
-  } else {
-    // No credential: button now triggers the guided CLI login (not disabled).
-    badge.textContent = t('settings.oauthCatpawUnavailable');
-    badge.className = 'oauth-status-badge';
-    if (importBtn) { importBtn.style.display = ''; importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawLogin'); }
-    if (disconnectBtn) disconnectBtn.style.display = 'none';
-    if (hint) hint.style.display = '';
-  }
-}
-
-// Auto-import in flight / done flags so the poll + initial load don't double-fire.
-var _catpawAutoTried = false;
-var _catpawPollTimer = null;
-
-function _catpawLoadStatus() {
-  if (!document.getElementById('oauthCatpawCard')) return;
-  Api.oauth.catpawImportStatus()
-    .then(function(data) {
-      data = data || { available: false };
-      // Fully automatic path: credential on disk, not yet connected → import
-      // without any click. Explicitly authorized by the user.
-      if (data.available && !data.connected && !_catpawAutoTried) {
-        _catpawAutoTried = true;
-        _catpawDoImport(true);
-        return;
-      }
-      if (data.connected) _catpawStopPoll();
-      _catpawRender(data);
-    })
-    .catch(function() { _catpawRender({ available: false }); });
-}
-
-// silent=true suppresses failure alerts (auto path falls back to manual button).
-function _catpawDoImport(silent) {
-  var importBtn = document.getElementById('oauthCatpawImportBtn');
-  if (importBtn) { importBtn.disabled = true; importBtn.textContent = t('settings.oauthPreparing'); }
-  return Api.oauth.catpawImportApply()
-    .then(function(r) { return r && typeof r.json === 'function' ? r.json() : r; })
-    .then(function(data) {
-      if (importBtn) { importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawImport'); }
-      if (!data || data.error || data.ok === false) {
-        if (!silent) showAlert(t('settings.oauthCatpawImportFailed'));
-        _catpawLoadStatus();
-        return;
-      }
-      _catpawRender(data);
-      _loadOAuthStatus();
-    })
-    .catch(function() {
-      if (importBtn) { importBtn.disabled = false; importBtn.textContent = t('settings.oauthCatpawImport'); }
-      if (!silent) showAlert(t('settings.oauthCatpawImportFailed'));
-      _catpawLoadStatus();
-    });
-}
-
-function _catpawStopPoll() {
-  if (_catpawPollTimer) { clearInterval(_catpawPollTimer); _catpawPollTimer = null; }
-}
-
-// Poll while a CLI login is in progress; auto-import the instant the
-// credential lands. Bounded so we never poll forever.
-function _catpawStartPoll() {
-  _catpawStopPoll();
-  var attempts = 0;
-  _catpawPollTimer = setInterval(function() {
-    attempts += 1;
-    if (attempts > 60 || !document.getElementById('oauthCatpawCard')) { _catpawStopPoll(); return; }
-    Api.oauth.catpawImportStatus()
-      .then(function(data) {
-        data = data || {};
-        if (data.available && !data.connected) {
-          _catpawStopPoll();
-          _catpawAutoTried = true;
-          _catpawDoImport(true);
-        } else if (data.connected) {
-          _catpawStopPoll();
-          _catpawRender(data);
-        }
-      })
-      .catch(function() {});
-  }, 3000);
-}
-
-// One click when no credential: kick the CLI login, open its SSO link, poll.
-function _catpawLogin() {
-  var btn = document.getElementById('oauthCatpawImportBtn');
-  if (btn) { btn.disabled = true; btn.textContent = t('settings.oauthPreparing'); }
-  Api.oauth.catpawImportLogin()
-    .then(function(data) {
-      data = data || {};
-      if (data.login_url) {
-        try { window.open(data.login_url, '_blank', 'noopener'); } catch (e) {}
-        _catpawStartPoll();
-        var hint = document.getElementById('oauthCatpawHint');
-        if (hint) { hint.textContent = t('settings.oauthCatpawLoginWaiting'); hint.style.display = ''; }
-      } else {
-        // CLI missing or link not captured → show manual instructions.
-        _catpawRender({ available: false, installed: !!data.installed });
-      }
-      if (btn) { btn.disabled = false; btn.textContent = t('settings.oauthCatpawImport'); }
-    })
-    .catch(function() {
-      if (btn) { btn.disabled = false; btn.textContent = t('settings.oauthCatpawImport'); }
-      _catpawRender({ available: false });
-    });
-}
-
-function _catpawImport() {
-  // Manual click: if a credential is already on disk, import; otherwise treat
-  // the click as "get me logged in" and run the CLI login flow.
-  Api.oauth.catpawImportStatus()
-    .then(function(s) {
-      if (s && s.available) { _catpawDoImport(false); }
-      else { _catpawLogin(); }
-    })
-    .catch(function() { _catpawLogin(); });
-}
-
-async function _catpawDisconnect() {
-  if (!await showConfirm(t('settings.oauthCatpawDisconnectConfirm'))) return;
-  // The relay provider is a normal model-routing aggregate; deleting it is
-  // the disconnect. Find it by template brand and reuse the CAS delete.
-  Api.modelRouting.get()
-    .then(function(data) {
-      var doc = data && data.model_routing;
-      var revision = data && data.revision;
-      var row = ((doc && doc.providers) || []).find(function(p) {
-        return p && p.brand === 'catpaw';
-      });
-      if (!row) { _catpawLoadStatus(); return null; }
-      return Api.modelRouting.deleteProvider(row.provider_id, revision)
-        .then(function() {
-          if (typeof _loadModelRoutingAuthority === 'function') {
-            return _loadModelRoutingAuthority();
-          }
-          return null;
-        })
-        .then(function() { _catpawLoadStatus(); });
-    })
-    .catch(function(e) {
-      showAlert(t('settings.oauthLogoutFailed', { error: (e && e.message) || 'unknown' }));
-      _catpawLoadStatus();
-    });
-}
+// Action bridges remain until the subscription presenter migrates. Catpaw
+// status, connection intent and teardown are owned by the typed Settings module.
+function _catpawImport() { return catpawSettings.connect(); }
+function _catpawDisconnect() { return catpawSettings.disconnect(); }
 /* ===== migrated source: settings/mcp.js ===== */
 /* ═══════════════════════════════════════════════════════════════════
    settings/mcp — extracted from settings.js (split 2026-05-28)
 
    MCP catalog UI: render, install modal, save server, reconnect.
 
-   This file is concatenated by Vite's module graph — symbols share
-   the same window scope as every other frontend/src/runtime/*.js file. No
-   exports / imports needed.
+   Retained MCP markup and event bridges. Typed Settings owners handle reads,
+   command settlement, tool selection and view lifetime. Remove these ports
+   and action bridges when the remaining presenter migrates.
    ═══════════════════════════════════════════════════════════════════ */
 
 // ══════════════════════════════════════════════════════
@@ -5963,16 +5330,40 @@ var _mcpCatalog = [];
 var _mcpActiveCategory = 'all';
 var _mcpScope = 'all';         // 'all' | 'installed' | 'available'
 var _mcpSearchQuery = '';
-var _mcpInstallTarget = null;  // CatalogEntry being installed
-var _mcpInstallIsReinstall = false;  // true = editing existing (stored env will be honoured)
-var _mcpBreakerRefreshTimer = null;  // single-shot re-fetch while a breaker is counting down
-var _mcpBreakerTickTimer = null;     // 1s interval that ticks the live "retry in N" countdowns
 /* In-flight per-card operations (): serverId →
  *   'connecting' | 'uninstalling' | 'installing'. Consulted by
  *   _renderMcpCatalog, so the busy state SURVIVES any concurrent repopulate
  *   (the breaker-refresh timer fires _populateMcpTab mid-operation) — a
  *   one-off DOM patch would be silently reverted by that re-render. */
-var _mcpPending = {};
+// Typed command state is also the retained renderer's pending projection.
+var _mcpCommands = createMcpCommands({
+  get api() { return Api.mcp; },
+  catalog: function() { return _mcpCatalog; },
+  t: function(key, values) { return t(key, values); },
+  detail: function(error) { return _mcpErrDetail(error); },
+  alert: function(message) { return showAlert(message); },
+  confirm: function(message, options) { return showConfirm(message, options); },
+  log: function(message, level) { debugLog(message, level); },
+  render: function() { _renderMcpCatalog(); },
+  refresh: function() { return _mcpRefreshAfterWrite(); },
+  openInstall: function(server) { _mcpOpenInstallModal(server); },
+});
+var _mcpPending = _mcpCommands.pending;
+var _mcpToolSelection = createMcpToolSelection({
+  rows: function(server) { return _mcpToolsCache[server]; },
+  write: function(server, disabled) { return Api.mcp.serverToolsSet(server, disabled); },
+  acknowledge: function(server, disabled, summary) {
+    var entry = _mcpCatalog.find(function(row) { return row.id === server; });
+    if (entry) entry.disabled_tools = disabled;
+    if (summary && typeof runtimeScope.applyMcpToolSummary === 'function') runtimeScope.applyMcpToolSummary(summary);
+    _mcpUpdateToolCount();
+  },
+  view: function() { return _mcpCommands.views.capture(); },
+  render: function() { _renderMcpCatalog(); },
+  alert: function(message) { return showAlert(message); },
+  log: function(message, level) { debugLog(message, level); },
+  t: function(key, values) { return t(key, values); },
+});
 /* Per-tool toggle state (): which cards have their tool
  * list expanded, and the fetched per-server tool rows. Both survive the
  * full-grid re-render that every populate/breaker-refresh triggers, for the
@@ -5985,15 +5376,6 @@ var _mcpToolsCache = {};
  * per installed server). serverId → check_server_update dict; a card only
  * grows an update button once this lands and re-renders. */
 var _mcpUpdates = {};
-var _mcpUpdatesInFlight = false;
-
-function _mcpSetPending(serverId, kind) {
-  _mcpPending[serverId] = kind;
-  _renderMcpCatalog();
-}
-function _mcpClearPending(serverId, skipRender) {
-  if (delete _mcpPending[serverId] && !skipRender) _renderMcpCatalog();
-}
 
 
 function _mcpPendingLabel(pending) {
@@ -6003,52 +5385,57 @@ function _mcpPendingLabel(pending) {
     : t('mcp.uninstalling');
 }
 
-/**
- * Refresh the upstream-version sightings, then re-render so eligible cards
- * grow their update button. Fire-and-forget from _populateMcpTab — the
- * catalog render never waits on registry round-trips.
- */
-async function _mcpCheckUpdates() {
-  if (_mcpUpdatesInFlight) return;
-  _mcpUpdatesInFlight = true;
-  try {
-    var r = await Api.mcp.updatesCheck();
-    if (!r || !r.ok) return;
-    var data = await r.json();
-    _mcpUpdates = (data && data.updates) || {};
-    _renderMcpCatalog();
-  } catch (e) {
-    debugLog('[MCP] update check failed: ' + ((e && e.message) || e), 'warning');
-  } finally {
-    _mcpUpdatesInFlight = false;
-  }
+// Narrow ports into the typed read owner; no second request or timer state.
+function _mcpReadPorts() {
+  return {
+    catalog: function(options) { return Api.mcp.catalogList(options); },
+    updates: function(options) { return Api.mcp.updatesCheck(options); },
+    tools: function(server, options) { return Api.mcp.toolsListForServer(server, options); },
+    loading: function() {
+      var grid = document.getElementById('mcpCatalogGrid');
+      if (grid) grid.innerHTML = '<p class="stg-loading">' + escapeHtml(t('mcp.loading')) + '</p>';
+    },
+    catalogSummary: function(data) {
+      if (data.mcp_tool_summary && typeof runtimeScope.applyMcpToolSummary === 'function') {
+        runtimeScope.applyMcpToolSummary(data.mcp_tool_summary);
+      }
+    },
+    catalogLoaded: function(data) {
+      _mcpCatalog = data.catalog || [];
+      _renderMcpCategoryBar();
+      _renderMcpCatalog();
+      _renderMcpInstalled();
+      _mcpUpdateToolCount();
+      _mcpCatalog.forEach(function(entry) {
+        if (entry.connected && _mcpToolsOpen[entry.id] && !_mcpToolsCache[entry.id]) _mcpLoadTools(entry.id);
+      });
+    },
+    catalogFailed: function(error, display) {
+      var grid = display === false ? null : document.getElementById('mcpCatalogGrid');
+      if (grid) grid.innerHTML = '<p class="stg-empty">' + escapeHtml(t('mcp.loadFailed', { err: error.message })) + '</p>';
+      debugLog('[MCP] Failed to load catalog: ' + error.message, 'error');
+    },
+    updatesLoaded: function(data) { _mcpUpdates = data.updates || {}; _renderMcpCatalog(); },
+    updatesFailed: function(error) { debugLog('[MCP] update check failed: ' + String(error), 'warning'); },
+    toolsLoaded: function(server, data) {
+      _mcpToolsCache[server] = _mcpToolSelection.adopt(server, data.tools || []);
+      if (_mcpToolsOpen[server]) _renderMcpCatalog();
+    },
+    toolsFailed: function(server, error) {
+      debugLog('[MCP] Failed to load tools for ' + server + ': ' + error.message, 'error');
+      _mcpToolsCache[server] = [];
+      if (_mcpToolsOpen[server]) _renderMcpCatalog();
+    },
+    invalidateTools: function() { _mcpToolsCache = {}; },
+    entries: function() { return _mcpCatalog; },
+    tickBreakers: function() { _mcpTickBreakers(); },
+  };
 }
-
-/**
- * Load MCP tab data — fetch catalog with install/connect status.
- */
-async function _populateMcpTab() {
-  var grid = document.getElementById('mcpCatalogGrid');
-  if (grid) grid.innerHTML = '<p class="stg-loading">' + escapeHtml(t('mcp.loading')) + '</p>';
-  try {
-    var r = await Api.mcp.catalogList();
-    if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
-    var data = await r.json();
-    _mcpCatalog = data.catalog || [];
-    if (data.mcp_tool_summary
-        && typeof runtimeScope.applyMcpToolSummary === 'function') {
-      runtimeScope.applyMcpToolSummary(data.mcp_tool_summary);
-    }
-
-    _renderMcpCategoryBar();
-    _renderMcpCatalog();
-    _renderMcpInstalled();
-    _mcpUpdateToolCount();
-    _mcpCheckUpdates();   // async — cards gain update buttons on re-render
-  } catch (e) {
-    if (grid) grid.innerHTML = '<p class="stg-empty">' + escapeHtml(t('mcp.loadFailed', { err: e.message })) + '</p>';
-    debugLog('[MCP] Failed to load catalog: ' + e.message, 'error');
-  }
+function _mcpReadView() { return captureMcpSettingsReads(_mcpReadPorts()); }
+function _mcpRefreshAfterWrite() { return refreshMcpSettingsAfterWrite(_mcpReadPorts()); }
+function _populateMcpTab() {
+  var view = _mcpReadView();
+  return view ? view.populate() : Promise.resolve();
 }
 
 /** Update the tool count badge. */
@@ -6400,17 +5787,9 @@ function _mcpToggleToolsPanel(serverId) {
   _renderMcpCatalog();
 }
 
-async function _mcpLoadTools(serverId) {
-  try {
-    var r = await Api.mcp.toolsListForServer(serverId);
-    if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
-    var data = await r.json();
-    _mcpToolsCache[serverId] = data.tools || [];
-  } catch (e) {
-    debugLog('[MCP] Failed to load tools for ' + serverId + ': ' + e.message, 'error');
-    _mcpToolsCache[serverId] = [];
-  }
-  if (_mcpToolsOpen[serverId]) _renderMcpCatalog();
+function _mcpLoadTools(serverId) {
+  var view = _mcpReadView();
+  return view ? view.loadTools(serverId) : Promise.resolve();
 }
 
 function _renderMcpToolPanel(e) {
@@ -6453,54 +5832,12 @@ function _renderMcpToolPanel(e) {
 }
 
 /* Shared persist path for per-tool toggles and bulk enable/disable:
- * the mutation has already been applied optimistically to the cache; this
- * PUTs the FULL disabled list (full-replacement semantics) and rolls back
- * via the caller-supplied undo closure on failure. */
-async function _mcpSaveTools(serverId, undo) {
-  var rows = _mcpToolsCache[serverId];
-  var disabled = rows.filter(function(x) { return !x.enabled; })
-    .map(function(x) { return x.name; });
-  try {
-    var r = await Api.mcp.serverToolsSet(serverId, disabled);
-    if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
-    var data = typeof r.json === 'function'
-      ? await r.json().catch(function() { return {}; }) : {};
-    var entry = _mcpCatalog.filter(function(x) { return x.id === serverId; })[0];
-    if (entry) entry.disabled_tools = disabled;
-    if (data.mcp_tool_summary
-        && typeof runtimeScope.applyMcpToolSummary === 'function') {
-      runtimeScope.applyMcpToolSummary(data.mcp_tool_summary);
-    }
-    _renderMcpCatalog();
-    _mcpUpdateToolCount();
-  } catch (err) {
-    undo();
-    showAlert(t('mcp.toolsToggleFailed', { err: err.message }));
-    _renderMcpCatalog();
-  }
-}
+ * commands delegate ordered optimistic intent and settlement to the typed owner. */
 
-async function _mcpToggleTool(serverId, toolName, enabled) {
-  var rows = _mcpToolsCache[serverId];
-  if (!rows) return;
-  // Optimistic update; revert on failure.
-  rows.forEach(function(x) { if (x.name === toolName) x.enabled = enabled; });
-  debugLog('[MCP] ' + serverId + ': ' + (enabled ? 'enabled' : 'disabled') + ' tool ' + toolName, 'success');
-  await _mcpSaveTools(serverId, function() {
-    rows.forEach(function(x) { if (x.name === toolName) x.enabled = !enabled; });
-  });
-}
 
-async function _mcpSetAllTools(serverId, enabled) {
-  var rows = _mcpToolsCache[serverId];
-  if (!rows) return;
-  var prev = rows.map(function(x) { return x.enabled; });
-  rows.forEach(function(x) { x.enabled = enabled; });
-  debugLog('[MCP] ' + serverId + ': ' + (enabled ? 'enabled' : 'disabled') + ' ALL tools', 'success');
-  await _mcpSaveTools(serverId, function() {
-    rows.forEach(function(x, i) { x.enabled = prev[i]; });
-  });
-}
+function _mcpToggleTool(serverId, toolName, enabled) { return _mcpToolSelection.change(serverId, toolName, enabled); }
+
+function _mcpSetAllTools(serverId, enabled) { return _mcpToolSelection.change(serverId, null, enabled); }
 
 /**
  * While any installed-but-disconnected server has an active circuit
@@ -6511,36 +5848,8 @@ async function _mcpSetAllTools(serverId, enabled) {
  * (settings panel closed / tab switched).
  */
 function _mcpScheduleBreakerRefresh() {
-  if (_mcpBreakerRefreshTimer) {
-    clearTimeout(_mcpBreakerRefreshTimer);
-    _mcpBreakerRefreshTimer = null;
-  }
-  var active = _mcpCatalog.filter(function(e) {
-    return e.installed && !e.connected && e.breaker;
-  });
-  if (active.length === 0) { _mcpStopBreakerTick(); return; }
-
-  // Re-poll a bit after the soonest retry is due (so the next fetch sees
-  // the post-attempt state), clamped to [3s, 15s] to avoid hammering.
-  var soonest = Math.min.apply(null, active.map(function(e) {
-    return Math.max(0, e.breaker.retry_in || 0);
-  }));
-  var delayMs = Math.min(15000, Math.max(3000, (soonest + 1) * 1000));
-
-  _mcpBreakerRefreshTimer = setTimeout(function() {
-    _mcpBreakerRefreshTimer = null;
-    var grid = document.getElementById('mcpCatalogGrid');
-    // Bail if the MCP tab is no longer visible — no point polling a
-    // detached / hidden grid.
-    if (!grid || !grid.isConnected || grid.offsetParent === null) return;
-    _populateMcpTab();
-  }, delayMs);
-
-  // Start the per-second countdown ticker so the "retry in N" text
-  // decrements smoothly between server re-polls (a frozen number looks
-  // broken). The ticker only touches the small countdown spans, never
-  // re-renders the grid.
-  _mcpStartBreakerTick();
+  var view = _mcpReadView();
+  if (view) view.scheduleBreakerRefresh();
 }
 
 /**
@@ -6568,16 +5877,9 @@ function _mcpTickBreakers() {
   }
 }
 
-function _mcpStartBreakerTick() {
-  if (_mcpBreakerTickTimer) return;  // already ticking
-  _mcpBreakerTickTimer = setInterval(_mcpTickBreakers, 1000);
-}
-
 function _mcpStopBreakerTick() {
-  if (_mcpBreakerTickTimer) {
-    clearInterval(_mcpBreakerTickTimer);
-    _mcpBreakerTickTimer = null;
-  }
+  var view = _mcpReadView();
+  if (view) view.stopTick();
 }
 
 /** Update "installed" badge and "connect all" button in the header. */
@@ -6636,42 +5938,7 @@ function _mcpErrDetail(e) {
   return (e && e.message) || t('mcp.unknownErrorNoConn');
 }
 
-async function _mcpQuickInstall(serverId) {
-  var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
-  if (!entry) return;
-  /* INSTANT-UI (): the card shows 安装中… on the CLICK
-   *   frame — the old code only wrote to the debug panel and the card sat
-   *   static until the install + poll finished. */
-  _mcpSetPending(serverId, 'installing');
-  debugLog('[MCP] Quick-installing ' + serverId + ' (no required env)…', 'info');
-  try {
-    var data = await Api.mcp.catalogInstall(serverId, {});
-    if (data && data.ok && data.status === 'installing') {
-      debugLog('[MCP] ' + serverId + ' installing deps in background; polling…', 'info');
-      data = await _mcpPollInstall(serverId, null);
-    }
-    if (data && data.ok && data.status !== 'error') {
-      debugLog('[MCP] Installed ' + serverId + ': ' + (data.tools_count || 0) + ' tools', 'success');
-      _mcpClearPending(serverId, true);   // repopulate renders the fresh state
-      await _populateMcpTab();
-    } else {
-      // Installation failed — fall back to opening the modal so the user
-      // can inspect the default values and/or override them. This is the
-      // safety net for "hope binary not on PATH" kinds of errors.
-      _mcpClearPending(serverId);         // restore the card first
-      var _err = (data && data.error) || t('mcp.unknownErrorNoConn');
-      debugLog('[MCP] Quick install failed (' + _err + '); opening install modal for ' + serverId, 'warning');
-      showAlert(t('mcp.quickInstallFailed', { err: _err }));
-      _mcpOpenInstallModal(serverId);
-    }
-  } catch (e) {
-    _mcpClearPending(serverId);           // restore the card first
-    var _detail = _mcpErrDetail(e);
-    debugLog('[MCP] Quick install error for ' + serverId + ': ' + _detail, 'error');
-    showAlert(t('mcp.quickInstallFailed', { err: _detail }));
-    _mcpOpenInstallModal(serverId);
-  }
-}
+function _mcpQuickInstall(serverId) { return _mcpCommands.quickInstall(serverId); }
 
 /**
  * The placeholder for a credential input.
@@ -6741,11 +6008,10 @@ function _mcpSharedCredentialSources(key, selfId) {
 function _mcpOpenInstallModal(serverId, isReinstall) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   if (!entry) return;
-  _mcpInstallTarget = entry;
-  _mcpInstallIsReinstall = !!isReinstall;
+  if (!_mcpCommands.views.open('install', entry)) return;
 
   // Icon may be either an emoji (e.g. '🐙') OR an inline SVG string (e.g.
-  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like Meituan/Hope).
+  // '<svg viewBox="0 0 24 24">…</svg>' for brand logos like YourProvider/Hope).
   // Using .textContent would render the SVG source as literal text, which
   // is the "path d=…" garble users saw when opening brand-icon apps.
   // Catalog icons are server-owned (lib/mcp/registry.py), not user input,
@@ -6873,7 +6139,7 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
 
   var btn = document.getElementById('mcpInstallBtn');
   btn.disabled = false;
-  btn.textContent = _mcpInstallIsReinstall ? t('mcp.saveConnect') : t('mcp.installConnect');
+  btn.textContent = isReinstall ? t('mcp.saveConnect') : t('mcp.installConnect');
 
   document.getElementById('mcpInstallOverlay').style.display = 'flex';
 }
@@ -6917,164 +6183,22 @@ function _mcpEnvPresetChanged(sel) {
 
 function _mcpCloseInstallModal(evt) {
   if (evt && evt.target !== evt.currentTarget) return;
-  document.getElementById('mcpInstallOverlay').style.display = 'none';
-  _mcpInstallTarget = null;
+  _mcpCommands.views.close('install');
 }
 
-/**
- * Poll an async catalog install until it finishes (ready / error).
- * Returns the final parsed body ({ok, status, tools_count, error, stderr_tail}).
- * Bounded so a stuck install eventually surfaces an error rather than spinning
- * forever (cold pip is minutes, not hours).
- */
-async function _mcpPollInstall(serverId, statusEl) {
-  var DEADLINE_MS = 6 * 60 * 1000;   // 6 min hard cap
-  var INTERVAL_MS = 2500;
-  var t0 = Date.now();
-  while (Date.now() - t0 < DEADLINE_MS) {
-    await new Promise(function(r) { setTimeout(r, INTERVAL_MS); });
-    if (statusEl) {
-      var secs = Math.round((Date.now() - t0) / 1000);
-      statusEl.textContent = t('mcp.installingDeps', { n: secs });
-    }
-    var resp = await Api.mcp.catalogInstallStatus(serverId);
-    if (!resp) continue;                       // transient network blip — retry
-    var body = await resp.json().catch(function() { return null; });
-    if (!body) continue;
-    if (body.status === 'installing') continue;
-    // ready / error / unknown → return for the caller to render.
-    return body;
-  }
-  return { ok: false, status: 'error', error: t('mcp.installTimeout') };
-}
-
-async function _mcpDoInstall() {
-  if (!_mcpInstallTarget) return;
-  var btn = document.getElementById('mcpInstallBtn');
-  var status = document.getElementById('mcpInstallStatus');
-  btn.disabled = true;
-  btn.textContent = t('mcp.installing');
-  status.style.display = 'block';
-  status.className = 'mcp-install-status info';
-  status.textContent = t('mcp.startingFirstInstall', { name: _mcpInstallTarget.name });
-
-  // Collect env values
-  var env = {};
-  var inputs = document.querySelectorAll('#mcpInstallFields .mcp-env-input');
-  for (var i = 0; i < inputs.length; i++) {
-    var key = inputs[i].getAttribute('data-key');
-    var val = inputs[i].value.trim();
-    if (val) env[key] = val;
-  }
-
-  try {
-    var data = await Api.mcp.catalogInstall(_mcpInstallTarget.id, env);
-    // Async path: server kicked off a background pip install. Poll status.
-    if (data && data.ok && data.status === 'installing') {
-      status.textContent = t('mcp.installingDepsName', { name: _mcpInstallTarget.name });
-      data = await _mcpPollInstall(_mcpInstallTarget.id, status);
-    }
-    if (data && data.ok && data.status !== 'error') {
-      status.className = 'mcp-install-status success';
-      status.textContent = t('mcp.installedSuccess', { name: _mcpInstallTarget.name, n: (data.tools_count || 0) });
-      debugLog('[MCP] Installed ' + _mcpInstallTarget.id + ': ' + (data.tools_count || 0) + ' tools', 'success');
-      // Refresh catalog after a short delay so user sees the success
-      setTimeout(function() {
-        _mcpCloseInstallModal();
-        _populateMcpTab();
-      }, 1200);
-    } else {
-      var _msg = (data && data.error) || t('mcp.installFailedNoConn');
-      if (data && data.stderr_tail) _msg += '\n\n' + t('mcp.serverOutputLabel') + '\n' + data.stderr_tail;
-      status.className = 'mcp-install-status error';
-      status.textContent = '✕ ' + _msg;
-      btn.disabled = false;
-      btn.textContent = t('mcp.retry');
-    }
-  } catch (e) {
-    status.className = 'mcp-install-status error';
-    status.textContent = '✕ ' + _mcpErrDetail(e);
-    btn.disabled = false;
-    btn.textContent = t('mcp.retry');
-  }
-}
+function _mcpDoInstall() { return _mcpCommands.install(); }
 
 // ── Uninstall / Reconnect ──
 
 // Soft uninstall: disconnect + disable, but keep credentials for easy re-enable.
-async function _mcpUninstall(serverId) {
-  var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
-  var name = entry ? entry.name : serverId;
-  if (!await showConfirm(t('mcp.uninstallConfirm', { name: name }))) return;
-
-  /* INSTANT-UI (): the card shows 卸载中… the moment
-   *   the confirm closes — the old code sat static for the whole DELETE RTT. */
-  _mcpSetPending(serverId, 'uninstalling');
-  try {
-    var data = await Api.mcp.catalogUninstall(serverId, false);
-    if (!data || !data.ok) { _mcpClearPending(serverId); showAlert(t('mcp.uninstallFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
-    debugLog('[MCP] Uninstalled ' + serverId + (data.purged ? ' (purged)' : ' (soft, env kept)'), 'info');
-    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
-    await _populateMcpTab();
-  } catch (e) {
-    _mcpClearPending(serverId);
-    showAlert(t('mcp.uninstallFailed', { err: e.message }));
-  }
-}
+function _mcpUninstall(serverId) { return _mcpCommands.remove(serverId, false); }
 
 // Hard purge: remove config row entirely, forgetting stored credentials.
-async function _mcpPurge(serverId) {
-  var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
-  var name = entry ? entry.name : serverId;
-  if (!await showConfirm(t('mcp.purgeConfirm', { name: name }), { danger: true })) return;
+function _mcpPurge(serverId) { return _mcpCommands.remove(serverId, true); }
 
-  /* INSTANT-UI (): same pending shape as uninstall. */
-  _mcpSetPending(serverId, 'uninstalling');
-  try {
-    var data = await Api.mcp.catalogUninstall(serverId, true);
-    if (!data || !data.ok) { _mcpClearPending(serverId); showAlert(t('mcp.purgeFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
-    debugLog('[MCP] Purged ' + serverId, 'info');
-    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
-    await _populateMcpTab();
-  } catch (e) {
-    _mcpClearPending(serverId);
-    showAlert(t('mcp.purgeFailed', { err: e.message }));
-  }
-}
+function _mcpConnectAll() { return _mcpCommands.connectAll(); }
 
-async function _mcpConnectAll() {
-  var btn = document.getElementById('mcpConnectAllBtn');
-  if (btn) { btn.disabled = true; btn.textContent = t('mcp.connecting'); }
-  try {
-    var data = await Api.mcp.connectAll();
-    if (!data || !data.ok) { showAlert(t('mcp.connectFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
-    var total = data.total_tools || 0;
-    var count = Object.keys(data.servers || {}).length;
-    debugLog('[MCP] Connected all: ' + count + ' server(s), ' + total + ' tools', 'success');
-    await _populateMcpTab();
-  } catch (e) {
-    showAlert(t('mcp.connectFailed', { err: e.message }));
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = t('mcp.connectAll'); }
-  }
-}
-
-async function _mcpReconnect(serverId) {
-  /* INSTANT-UI (): the card shows 连接中… on the CLICK
-   *   frame — MCP cold start is measured at 27-55s (JOURNAL), the longest
-   *   dead window in the app. */
-  _mcpSetPending(serverId, 'connecting');
-  try {
-    var data = await Api.mcp.connectOne(serverId);
-    if (!data || !data.ok) { _mcpClearPending(serverId); showAlert(t('mcp.connectFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
-    debugLog('[MCP] Reconnected ' + serverId + ': ' + (data.tools_count || 0) + ' tools', 'success');
-    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
-    await _populateMcpTab();
-  } catch (e) {
-    _mcpClearPending(serverId);
-    showAlert(t('mcp.connectFailed', { err: e.message }));
-  }
-}
+function _mcpReconnect(serverId) { return _mcpCommands.reconnect(serverId); }
 
 
 /**
@@ -7097,33 +6221,13 @@ function _mcpUpdateButtonHtml(e) {
  * so the new code is what actually runs. Same instant-pending shape as
  * reconnect/uninstall ().
  */
-async function _mcpApplyUpdate(serverId) {
-  _mcpSetPending(serverId, 'updating');
-  try {
-    var data = await Api.mcp.updateApply(serverId);
-    if (!data || !data.ok) {
-      _mcpClearPending(serverId);
-      showAlert(t('mcp.updateFailed', { err: ((data && data.error) || t('mcp.unknownError')) }));
-      return;
-    }
-    if (!data.updated && data.already_latest) {
-      debugLog('[MCP] ' + serverId + ' already on latest v' + (data.version || '?'), 'info');
-    } else {
-      debugLog('[MCP] Updated ' + serverId + ' to v' + (data.version || '?') +
-        (data.reconnected ? ' — reconnected with ' + (data.tools_count || 0) + ' tools' : ''), 'success');
-    }
-    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
-    await _populateMcpTab();
-  } catch (e) {
-    _mcpClearPending(serverId);
-    showAlert(t('mcp.updateFailed', { err: _mcpErrDetail(e) }));
-  }
-}
+function _mcpApplyUpdate(serverId) { return _mcpCommands.update(serverId); }
 
 // ── Manual add (code-free custom server) ──
 
 /** Open the add-custom-server modal, resetting all fields. */
 function _mcpOpenAddModal() {
+  if (!_mcpCommands.views.open('add')) return;
   ['mcpNewName', 'mcpNewCommand', 'mcpNewArgs', 'mcpNewUrl', 'mcpNewEnv', 'mcpNewDesc'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.value = '';
@@ -7141,8 +6245,7 @@ function _mcpOpenAddModal() {
 
 function _mcpCloseAddModal(evt) {
   if (evt && evt.target !== evt.currentTarget) return;
-  var overlay = document.getElementById('mcpAddOverlay');
-  if (overlay) overlay.style.display = 'none';
+  _mcpCommands.views.close('add');
 }
 
 function _mcpTransportChanged() {
@@ -7153,79 +6256,7 @@ function _mcpTransportChanged() {
   if (sseFields) sseFields.style.display = transport === 'sse' ? '' : 'none';
 }
 
-async function _mcpSaveServer() {
-  var status = document.getElementById('mcpAddStatus');
-  var saveBtn = document.getElementById('mcpAddSaveBtn');
-  function _fail(msg) {
-    if (status) {
-      status.style.display = 'block';
-      status.className = 'mcp-install-status error';
-      status.textContent = '✕ ' + msg;
-    } else {
-      showAlert(msg);
-    }
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = t('mcp.saveConnect'); }
-  }
-
-  var name = (document.getElementById('mcpNewName') || {}).value || '';
-  name = name.trim();
-  if (!name) { _fail(t('mcp.needName')); return; }
-
-  var transport = (document.getElementById('mcpNewTransport') || {}).value || 'stdio';
-  var payload = { name: name, transport: transport, enabled: true };
-
-  if (transport === 'stdio') {
-    payload.command = (document.getElementById('mcpNewCommand') || {}).value || '';
-    var argsText = (document.getElementById('mcpNewArgs') || {}).value || '';
-    payload.args = argsText.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
-    if (!payload.command) { _fail(t('mcp.needCommand')); return; }
-  } else {
-    payload.url = (document.getElementById('mcpNewUrl') || {}).value || '';
-    if (!payload.url) { _fail(t('mcp.needUrl')); return; }
-  }
-
-  // Parse env vars
-  var envText = (document.getElementById('mcpNewEnv') || {}).value || '';
-  if (envText.trim()) {
-    payload.env = {};
-    envText.split('\n').forEach(function(line) {
-      var eq = line.indexOf('=');
-      if (eq > 0) {
-        payload.env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
-      }
-    });
-  }
-
-  var desc = (document.getElementById('mcpNewDesc') || {}).value || '';
-  if (desc.trim()) payload.description = desc.trim();
-
-  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = t('mcp.saving'); }
-  if (status) {
-    status.style.display = 'block';
-    status.className = 'mcp-install-status info';
-    status.textContent = t('mcp.startingName', { name: name });
-  }
-
-  try {
-    var data = await Api.mcp.serverCreate(payload);
-    if (!data || !data.ok) { _fail((data && data.error) || t('mcp.saveFailedNoConn')); return; }
-
-    // Auto-connect
-    await Api.mcp.connectOne(name);
-
-    debugLog('[MCP] Server "' + name + '" saved & connected', 'success');
-    if (status) {
-      status.className = 'mcp-install-status success';
-      status.textContent = t('mcp.savedConnected', { name: name });
-    }
-    setTimeout(function() {
-      _mcpCloseAddModal();
-      _populateMcpTab();
-    }, 900);
-  } catch (e) {
-    _fail(_mcpErrDetail(e));
-  }
-}
+function _mcpSaveServer() { return _mcpCommands.saveServer(); }
 
 function _applyDebugModeVisibility() {
   const visible = Boolean(runtimeScope._featureFlags?.debug_mode);
@@ -7291,6 +6322,8 @@ runtimeScope._populateNetworkTab = _populateNetworkTab;
 runtimeScope._populateSearchTab = _populateSearchTab;
 runtimeScope._renderMcpCatalog = _renderMcpCatalog;
 runtimeScope._renderProvidersTab = _renderProvidersTab;
+runtimeScope._destroyProviderCredentialViews = _destroyProviderCredentialViews;
+runtimeScope._adoptProviderCredentialDraft = _adoptProviderCredentialDraft;
 runtimeScope._stageModelRoutingProviderBundle = _stageModelRoutingProviderBundle;
 // END GENERATED LAZY RUNTIME PORTS
 // BEGIN GENERATED LAZY RUNTIME ACTIONS — settings-presenters
@@ -7307,6 +6340,7 @@ runtimeScope._deleteModelRoutingProvider = _deleteModelRoutingProvider;
 runtimeScope._deleteV2Credential = _deleteV2Credential;
 runtimeScope._deleteV2HeaderRow = _deleteV2HeaderRow;
 runtimeScope._filterProviderModelPicker = _filterProviderModelPicker;
+runtimeScope._importListedProviderModels = _importListedProviderModels;
 runtimeScope._mcpApplyUpdate = _mcpApplyUpdate;
 runtimeScope._mcpCloseAddModal = _mcpCloseAddModal;
 runtimeScope._mcpCloseInstallModal = _mcpCloseInstallModal;
@@ -7350,10 +6384,10 @@ runtimeScope._proxyPoolTest = _proxyPoolTest;
 runtimeScope._proxyPoolToggleEditor = _proxyPoolToggleEditor;
 runtimeScope._proxyPoolToggleUrlVisibility = _proxyPoolToggleUrlVisibility;
 runtimeScope._proxyPoolUrlChanged = _proxyPoolUrlChanged;
+runtimeScope._refreshCostExperimentReport = _refreshCostExperimentReport;
 runtimeScope._removeV2Alias = _removeV2Alias;
 runtimeScope._removeV2Offering = _removeV2Offering;
 runtimeScope._runMatrixProbe = _runMatrixProbe;
-runtimeScope._searchProfileChanged = _searchProfileChanged;
 runtimeScope._setMatrixAttempts = _setMatrixAttempts;
 runtimeScope._setMatrixFilter = _setMatrixFilter;
 runtimeScope._setMatrixQuery = _setMatrixQuery;
@@ -7363,6 +6397,7 @@ runtimeScope._stageV2CheckedCatalogModels = _stageV2CheckedCatalogModels;
 runtimeScope._stageV2CustomModelFromPicker = _stageV2CustomModelFromPicker;
 runtimeScope._startNewV2ApiKey = _startNewV2ApiKey;
 runtimeScope._switchMtProvider = _switchMtProvider;
+runtimeScope._syncCostExperimentUi = _syncCostExperimentUi;
 runtimeScope._syncResponsesExperimentUi = _syncResponsesExperimentUi;
 runtimeScope._testMtProvider = _testMtProvider;
 runtimeScope._testSearchBrowser = _testSearchBrowser;

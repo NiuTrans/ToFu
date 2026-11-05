@@ -684,8 +684,7 @@ fn create_contents(
     let count_key = count_key(transaction, &request.conversation_id, &request.archive_scope)?;
     let count = decode_count(database.entity_get(transaction, &count_key)?)?;
     if count >= MAX_COMPACTION_ARCHIVES_PER_CONVERSATION as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::capacity_quota(
             "compaction archive collection is full",
         ));
     }
@@ -797,8 +796,7 @@ pub(crate) fn list(
     let response = serde_json::to_vec(&json!({"archives": archives}))
         .map_err(|_| invalid_data("archive list response cannot be encoded"))?;
     if response.len() > MAX_LEGACY_DOCUMENT_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "archive list response exceeds 8 MiB",
         ));
     }
@@ -887,8 +885,7 @@ pub(crate) fn get(
     let encoded = serde_json::to_vec(&Value::Object(response))
         .map_err(|_| invalid_data("archive get response cannot be encoded"))?;
     if encoded.len() > MAX_COMPACTION_ARCHIVE_DOCUMENT_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "archive response exceeds 8 MiB",
         ));
     }

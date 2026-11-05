@@ -195,7 +195,7 @@ def test_hydrated_checkpoint_keeps_inherited_quote_executor_origin():
             task=fresh,counter_policy=state['shared_model_account']['counter_policy'])
         commit()
         assert fresh['apiRounds']==task['apiRounds']
-        from lib.billing.cost import native_task_cost
+        from lib.billing.native_cost import native_task_cost
         assert native_task_cost(fresh,model='alpha').micro==0
         assert delivery.calls==0
     asyncio.run(run())
@@ -300,7 +300,7 @@ def test_zero_fee_restore_still_requires_original_attempt_ordinal():
 
 
 async def tree_checkpoint_fixture(child_model="alpha",child_provider="provider-a"):
-    from lib.billing.cost import transfer_native_child_fees
+    from lib.billing.native_cost import transfer_native_child_fees
     task, consumer, policy, result = setup()
     state = checkpoint_state(task, result)
     await policy.settle(result)
@@ -325,7 +325,7 @@ async def tree_checkpoint_fixture(child_model="alpha",child_provider="provider-a
 @pytest.mark.parametrize("child_model,child_provider", [("alpha","provider-a"),("beta","provider-b")])
 def test_tree_fee_checkpoint_retains_child_rows_and_restores_one_wallet_coverage(child_model,child_provider):
     from lib.agent_core.execution_budget import ExecutionBudget
-    from lib.billing.cost import native_task_cost
+    from lib.billing.native_cost import native_task_cost
     async def run():
         task, policy, result, state = await tree_checkpoint_fixture(child_model,child_provider)
         original = copy.deepcopy(task['apiRounds'])
@@ -383,7 +383,7 @@ def test_invalid_tree_fee_checkpoint_refuses_before_account_or_projection_mutati
 
 def test_same_executor_recovery_bills_original_child_work_without_foreign_task_discount():
     from lib.agent_core.execution_budget import ExecutionBudget
-    from lib.billing.cost import native_task_cost
+    from lib.billing.native_cost import native_task_cost
     async def run():
         source, _, request, state = await tree_checkpoint_fixture()
         fresh, _, restored, _ = setup()
@@ -404,7 +404,7 @@ def test_same_executor_recovery_bills_original_child_work_without_foreign_task_d
 
 def test_same_executor_recovery_keeps_older_executor_prefix_paid_elsewhere():
     from lib.agent_core.execution_budget import ExecutionBudget
-    from lib.billing.cost import native_task_cost
+    from lib.billing.native_cost import native_task_cost
     from lib.cost import compute_api_rounds_cost
     async def run():
         source, _, result, state = await tree_checkpoint_fixture()

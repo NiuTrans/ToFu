@@ -511,36 +511,20 @@ function createBlock(msg, i) {
   block.appendChild(body);
   return block;
 }
-// Generate a fingerprint for a message to detect changes.
-// Includes a compaction marker so a tool_compacted patch (which only
-// mutates content + sets _compactionLayer) reliably triggers re-render
-// in the incremental update path.
-function msgFingerprint(msg) {
-  const role = msg.role || "";
-  let size = 0;
-  if (typeof msg.content === "string") size = msg.content.length;
-  else if (Array.isArray(msg.content)) size = msg.content.length;
-  const tcs = msg.tool_calls ? msg.tool_calls.length : 0;
-  const tcid = msg.tool_call_id || "";
-  const ci = _debugCompactionInfo(msg);
-  const cm = ci ? `c:${ci.layer}:${ci.from || 0}:${ci.to || 0}` : "";
-  return role + "|" + size + "|" + tcs + "|" + tcid + "|" + cm;
+/* Shared typed reconciliation; remove this port when the card renderer moves
+ * to native Diagnostics. Reads, view selection and scrolling remain here. */
+const _debugMessageRenderer = createDiagnosticsMessageReconciler({
+  create: createBlock,
+  identity: _debugMsgIdentity,
+  summarize: msgSummary,
+  open: _debugOpenBlock,
+});
+function reconcileDebugMessages(container, messages, options) {
+  _debugMessageRenderer.render(container, messages, options);
 }
-/* Shared full-render of message blocks into a container — the debug drawer's
- * full-render path AND the request-inspector inline state panel both render
- * through here. Wipes `p`, renders one block per message. Pure full render
- * only: the drawer's incremental path, open-state restore and scroll
- * handling stay in showMessagesInDebug; tools are synced separately via
- * updateDebugToolsBlock (the drawer updates them on the incremental path
- * too, outside any wipe). */
+/* Inline payload panels deliberately start a fresh view. */
 function renderDebugBlocksInto(p, messages, opts) {
-  p.innerHTML = "";
-  messages.forEach((msg, i) => {
-    const block = createBlock(msg, i);
-    block.dataset.fp = msgFingerprint(msg);
-    block._msgRef = msg;
-    p.appendChild(block);
-  });
+  reconcileDebugMessages(p, messages, { reuse: false });
 }
 /* Create the collapsible TOOLS block skeleton (header + lazy body). The body
  * renders from toolsBlock._toolsRef on first open. */
@@ -693,6 +677,11 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     });
   }
   const cid = forConvId || DebugShellState.activeConversationId;
+  // Seed the live delta chain from this full frame. Rendered history is
+  // chronological, so an older round cannot replace a newer chain state.
+  if (meta && typeof meta === "object") {
+    _rememberDebugSnapshot(cid, meta, messages, tools);
+  }
   // Cache for conversation switching
   if (cid) {
     DebugShellState.cache[cid] = { messages, label };
@@ -830,97 +819,9 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     }
   }
   if (isUpdate) {
-    const existing = p.querySelectorAll(
-      ".debug-msg-block:not(.debug-tools-block):not(.debug-context-block)");
-    const existingCount = existing.length;
-    const newCount = messages.length;
-    // Update existing blocks that changed (by fingerprint)
-    for (let i = 0; i < Math.min(existingCount, newCount); i++) {
-      const oldFp = existing[i].dataset.fp || "";
-      const newFp = msgFingerprint(messages[i]);
-      if (oldFp !== newFp) {
-        // Content changed - update role, summary, invalidate body if it was rendered
-        existing[i].dataset.fp = newFp;
-        // FIX: Update role label and class when role changes
-        const newRole = messages[i].role || "unknown";
-        const roleSpan = existing[i].querySelector(
-          ".debug-msg-header span:first-child",
-        );
-        if (roleSpan) {
-          const oldRole = roleSpan.textContent.toLowerCase();
-          if (oldRole !== newRole) {
-            roleSpan.className = "role-" + newRole;
-            roleSpan.textContent = newRole.toUpperCase();
-          }
-        }
-        // ── Compaction badge (re-sync with current state) ──
-        const newCompInfo = _debugCompactionInfo(messages[i]);
-        existing[i].classList.toggle("debug-msg-compacted", !!newCompInfo);
-        let badge = existing[i].querySelector(".debug-compact-badge");
-        if (newCompInfo) {
-          const fromKB = newCompInfo.from != null ? _fmtKB(newCompInfo.from) : "?";
-          const toKB = newCompInfo.to != null ? _fmtKB(newCompInfo.to) : "?";
-          const text = `${Icon('archive', 11)} ${escapeHtml(newCompInfo.layer)} ${fromKB}→${toKB}`;
-          if (!badge) {
-            badge = document.createElement("span");
-            badge.className = "debug-compact-badge";
-            // Insert AFTER role span, BEFORE summary span
-            const hdr = existing[i].querySelector(".debug-msg-header");
-            const sumEl = hdr.querySelector(".debug-msg-summary");
-            hdr.insertBefore(badge, sumEl);
-          }
-          badge.innerHTML = text;
-          badge.title = `Tool result compacted (${newCompInfo.layer}) — original ${fromKB}, now ${toKB}`;
-        } else if (badge) {
-          badge.remove();
-        }
-        const sum = existing[i].querySelector(".debug-msg-summary");
-        if (sum) sum.textContent = msgSummary(messages[i], i);
-        const body = existing[i].querySelector(".debug-msg-body");
-        if (body && body.dataset.rendered) {
-          body.dataset.rendered = "";
-          // Re-render if currently open
-          if (existing[i].classList.contains("open")) {
-            _debugRenderBody(body, messages[i]);
-          }
-        }
-        // Update stored msg ref for lazy render
-        existing[i]._msgRef = messages[i];
-        // Refresh identity so capture/restore keys track the new content.
-        existing[i].dataset.mid = _debugMsgIdentity(messages[i]);
-        // Update tool calls quick view
-        const oldTc = existing[i].querySelector(".debug-tool-calls");
-        if (messages[i].tool_calls && messages[i].tool_calls.length > 0) {
-          const tcText =
-            Icon('wrench', 12) + ' ' +
-            escapeHtml(messages[i].tool_calls
-              .map((tc) => (tc.function ? tc.function.name : "?"))
-              .join(", "));
-          if (oldTc) {
-            oldTc.innerHTML = tcText;
-          } else {
-            const tcDiv = document.createElement("div");
-            tcDiv.className = "debug-tool-calls";
-            tcDiv.innerHTML = tcText;
-            const body2 = existing[i].querySelector(".debug-msg-body");
-            existing[i].insertBefore(tcDiv, body2);
-          }
-        } else if (oldTc) {
-          oldTc.remove();
-        }
-      }
-    }
-    // Remove extra blocks
-    for (let i = existingCount - 1; i >= newCount; i--) {
-      existing[i].remove();
-    }
-    // Append new blocks (createBlock already binds lazy render on _msgRef)
-    for (let i = existingCount; i < newCount; i++) {
-      const block = createBlock(messages[i], i);
-      block.dataset.fp = msgFingerprint(messages[i]);
-      block._msgRef = messages[i];
-      p.appendChild(block);
-    }
+    const leading = Array.from(p.childNodes).filter((node) =>
+      node.nodeType === 1 && node.matches('.debug-tools-block, .debug-context-block'));
+    reconcileDebugMessages(p, messages, { reuse: 'position', leading });
   } else {
     // --- Full render path (initial) ---
     renderDebugBlocksInto(p, messages, opts);
@@ -1012,6 +913,63 @@ function copyDebugContent() {
   }
 }
 
+/* Live message snapshots above the inline cap arrive as the same shared
+ * prefix delta the durable event log stores. Keep one bounded chain per
+ * (conversation, task, turn) so the panel can rebuild them without a second
+ * full-frame transport. Cold history seeds the chain through
+ * showMessagesInDebug; a delta without a baseline is ignored until the next
+ * full frame. */
+const _DEBUG_SNAPSHOT_CHAIN_LIMIT = 8;
+const _debugSnapshotChains = new Map();
+
+function _debugSnapshotChainKey(conversationId, meta) {
+  return `${conversationId || ''}\u0000${(meta && meta.taskId) || ''}\u0000${(meta && meta.turn) || ''}`;
+}
+
+function _debugSnapshotOrder(meta) {
+  const round = Number(meta && meta.roundNum) || 0;
+  return round * 2 + (meta && meta.kind === 'state' ? 1 : 0);
+}
+
+function _rememberDebugSnapshot(conversationId, meta, messages, tools) {
+  if (!Array.isArray(messages) || !meta || !meta.taskId) return;
+  const key = _debugSnapshotChainKey(conversationId, meta);
+  const order = _debugSnapshotOrder(meta);
+  const previous = _debugSnapshotChains.get(key);
+  if (previous && order < previous.order) return;
+  _debugSnapshotChains.delete(key);
+  _debugSnapshotChains.set(key, {
+    messages,
+    tools: Array.isArray(tools) ? tools : (previous && previous.tools) || null,
+    order,
+  });
+  while (_debugSnapshotChains.size > _DEBUG_SNAPSHOT_CHAIN_LIMIT) {
+    _debugSnapshotChains.delete(_debugSnapshotChains.keys().next().value);
+  }
+}
+
+function _resolveDebugSnapshotFrame(conversationId, frame) {
+  if (!frame || frame.type !== 'messages_snapshot') return frame;
+  if (Array.isArray(frame.messages)) {
+    _rememberDebugSnapshot(conversationId, frame, frame.messages, frame.tools);
+    return frame;
+  }
+  if (frame.prefixLen === undefined) return frame;
+  const state = _debugSnapshotChains.get(
+    _debugSnapshotChainKey(conversationId, frame));
+  const prefixLen = Math.max(0, Number(frame.prefixLen) || 0);
+  if (!state && prefixLen > 0) return null;
+  const base = state ? state.messages : [];
+  // A prefix longer than the cached baseline means an intervening frame was
+  // missed; showing a clamped tail would silently corrupt the view.
+  if (prefixLen > base.length) return null;
+  const tail = Array.isArray(frame.newMessages) ? frame.newMessages : [];
+  const messages = base.slice(0, prefixLen).concat(tail);
+  const tools = Array.isArray(frame.tools) ? frame.tools : (state && state.tools);
+  _rememberDebugSnapshot(conversationId, frame, messages, tools);
+  return { ...frame, messages, tools: tools || undefined };
+}
+
 /* Optional lifecycle port. Retained conversation navigation consults it only
  * after this owner has loaded, so ordinary navigation never imports the chunk
  * or starts a diagnostics request. */
@@ -1024,16 +982,18 @@ const DebugPresentationState = Object.freeze({
    * Inspector round log. tool_compacted: patches the cached placeholder. */
   ingestEvidenceFrame(conversationId, frame) {
     if (!frame || typeof frame !== 'object') return;
-    if (frame.type === 'messages_snapshot'
-        && Array.isArray(frame.messages)) {
-      const label = frame.label || t('stream.roundMessages',
-        { round: frame.roundNum, n: frame.messageCount });
+    const resolved = _resolveDebugSnapshotFrame(conversationId, frame);
+    if (resolved && resolved.type === 'messages_snapshot'
+        && Array.isArray(resolved.messages)) {
+      const label = resolved.label || t('stream.roundMessages',
+        { round: resolved.roundNum, n: resolved.messageCount });
       showMessagesInDebug(
-        frame.messages, label, /* isUpdate */ true, conversationId,
-        frame.tools || undefined, /* approx */ false,
-        { kind: frame.kind, model: frame.model, params: frame.params,
-          roundNum: frame.roundNum, turn: frame.turn,
-          taskId: frame.taskId, contextManifest: frame.contextManifest },
+        resolved.messages, label, /* isUpdate */ true, conversationId,
+        resolved.tools || undefined, /* approx */ false,
+        { kind: resolved.kind, model: resolved.model, params: resolved.params,
+          roundNum: resolved.roundNum, turn: resolved.turn,
+          taskId: resolved.taskId,
+          contextManifest: resolved.contextManifest },
         { deferRender: (typeof _riFeedOwnsPane === 'function' &&
             _riFeedOwnsPane()) },
       );

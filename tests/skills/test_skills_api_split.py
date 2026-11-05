@@ -125,6 +125,90 @@ class SkillsApiSplitTest(unittest.TestCase):
 
     # ── list surfaces ────────────────────────────────────────────────
 
+    def test_no_project_context_does_not_discover_server_checkout(self):
+        async def go():
+            with patch('routes.api_v1.memory._PROJECT_ROOT', self.proj):
+                response = await self.app.test_client().get('/api/v1/skills')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual((await response.get_json())['skills'], [])
+        _run(go())
+
+    def test_library_keeps_duplicate_sources_and_mutates_exact_selection(self):
+        source_root = os.path.join(self.proj, '.agents', 'skills')
+        _write_pkg(source_root, 'mypkg', body='repository guide')
+
+        async def go():
+            client = self.app.test_client()
+            response = await client.get('/api/v1/skills' + self._q()
+                                        + '&include_shadowed=1')
+            rows = (await response.get_json())['skills']
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len({row['skill_ref'] for row in rows}), 2)
+            guide = next(row for row in rows if '.agents' in row['source_path'])
+            self.assertEqual(guide['project_path'], self.proj)
+            response = await client.post('/api/v1/skills/mypkg/toggle'
+                                         + self._q() + '&skill_ref='
+                                         + guide['skill_ref'], json={})
+            self.assertEqual(response.status_code, 200)
+            from lib.skills import get_skill
+            self.assertTrue(get_skill('mypkg', self.proj)['enabled'])
+            self.assertFalse(get_skill('mypkg', self.proj,
+                                       skill_ref=guide['skill_ref'])['enabled'])
+            response = await client.delete('/api/v1/skills/mypkg' + self._q()
+                                           + '&skill_ref=stale-reference')
+            self.assertEqual(response.status_code, 404)
+            self.assertTrue(os.path.isdir(os.path.join(source_root, 'mypkg')))
+        _run(go())
+
+    def test_move_to_project_requires_named_destination(self):
+        async def go():
+            response = await self.app.test_client().post(
+                '/api/v1/skills/mypkg/scope' + self._q(),
+                json={'scope': 'project'})
+            self.assertEqual(response.status_code, 400)
+            self.assertTrue(os.path.isdir(os.path.join(
+                self.proj, '.tofu', 'skills', 'mypkg')))
+        _run(go())
+
+    def test_move_between_projects_changes_files_not_just_visibility(self):
+        destination = os.path.join(self._tmp.name, 'autoharness')
+        os.makedirs(destination)
+
+        async def go():
+            response = await self.app.test_client().post(
+                '/api/v1/skills/mypkg/scope' + self._q(),
+                json={'scope': 'project', 'target_project_path': destination})
+            self.assertEqual(response.status_code, 200, await response.get_data())
+            self.assertFalse(os.path.exists(os.path.join(
+                self.proj, '.tofu', 'skills', 'mypkg')))
+            self.assertTrue(os.path.isfile(os.path.join(
+                destination, '.tofu', 'skills', 'mypkg', 'references', 'r.md')))
+        _run(go())
+
+    def test_move_collision_and_escaping_destination_preserve_source(self):
+        destination = os.path.join(self._tmp.name, 'destination')
+        _write_pkg(os.path.join(destination, '.tofu', 'skills'), 'mypkg',
+                   body='destination original')
+        outside = os.path.join(self._tmp.name, 'outside')
+        os.makedirs(outside)
+        escaping = os.path.join(self._tmp.name, 'escaping')
+        os.makedirs(escaping)
+        os.symlink(outside, os.path.join(escaping, '.tofu'))
+
+        async def go():
+            for target in (destination, escaping):
+                response = await self.app.test_client().post(
+                    '/api/v1/skills/mypkg/scope' + self._q(),
+                    json={'scope': 'project', 'target_project_path': target})
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(os.path.isfile(os.path.join(
+                    self.proj, '.tofu', 'skills', 'mypkg', 'SKILL.md')))
+            self.assertEqual(os.listdir(outside), [])
+            with open(os.path.join(destination, '.tofu', 'skills', 'mypkg',
+                                   'SKILL.md'), encoding='utf-8') as handle:
+                self.assertIn('destination original', handle.read())
+        _run(go())
+
     def test_skills_list_returns_only_packages(self):
         async def go():
             r = await self.app.test_client().get('/api/v1/skills' + self._q())
@@ -137,6 +221,7 @@ class SkillsApiSplitTest(unittest.TestCase):
             # Server-side absolute paths must not leak.
             self.assertNotIn('package_dir', body['skills'][0])
             self.assertNotIn('filepath', body['skills'][0])
+            self.assertNotIn('body', body['skills'][0])
         _run(go())
 
     def test_memory_list_excludes_packages_and_skills_key(self):

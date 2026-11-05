@@ -169,8 +169,8 @@ async def wait_for_event(task_id: str, *, timeout: float) -> bool:
 
     Clears the flag BEFORE returning control so the caller drains events,
     then re-arms for the next nudge. Returns True if woken by a signal,
-    False on timeout (used to drive SSE heartbeats). The clear-before-drain
-    discipline lives in the caller; here we just clear-then-wait.
+    False on timeout (used to drive SSE heartbeats). A nudge that lands
+    while the caller drains or sends frames stays set for the next wait.
     """
     with _waiters_lock:
         w = _waiters.get(task_id)
@@ -179,12 +179,12 @@ async def wait_for_event(task_id: str, *, timeout: float) -> bool:
         # short sleep so the caller still makes progress.
         await asyncio.sleep(min(timeout, 0.1))
         return False
-    w.event.clear()
     try:
         await asyncio.wait_for(w.event.wait(), timeout=timeout)
-        return True
     except asyncio.TimeoutError:
         return False
+    w.event.clear()
+    return True
 
 
 # ── Terminal-completion callbacks ───────────────────────────────────

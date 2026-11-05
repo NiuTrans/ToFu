@@ -18,6 +18,7 @@ import pytest
 from quart import Quart, Response, g, request
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
+from tests._jsdom import require_node_modules
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.visual
@@ -25,6 +26,7 @@ pytestmark = pytest.mark.visual
 
 @pytest.fixture(scope='module')
 def surface_server(tmp_path_factory):
+    require_node_modules('vite')
     from unittest.mock import patch
     from lib import response_surfaces as service
     from lib.response_surfaces import mcp
@@ -89,7 +91,7 @@ def surface_server(tmp_path_factory):
 
 @pytest.mark.parametrize('theme', ['tofu', 'dark', 'light'])
 @pytest.mark.parametrize('width', [1280, 320])
-def test_dynamic_resource_lifecycle_browser(browser, surface_server, theme, width):
+def test_dynamic_resource_lifecycle_browser(browser, surface_server, tmp_path, theme, width):
     base,state=surface_server;state.update(reads=0,available=8,failure=False)
     context=browser.new_context(viewport={'width':width,'height':900}, reduced_motion='reduce')
     context.add_cookies([{'name':'surface-owner','value':'7','url':base}])
@@ -99,14 +101,13 @@ def test_dynamic_resource_lifecycle_browser(browser, surface_server, theme, widt
         page.evaluate('(theme)=>{document.documentElement.dataset.theme=theme;document.body.dataset.theme=theme}',theme)
         assert page.locator('.rich-indicator-value').all_text_contents()[2]=='未知'
         assert state['reads']==0  # Hidden resource tabs must not acquire data.
-        output=ROOT/'designs/ui-gallery/previews';output.mkdir(exist_ok=True)
-        page.screenshot(path=str(output/f'dynamic-overview-{theme}-{width}.png'),full_page=True)
+        page.screenshot(path=str(tmp_path/f'dynamic-overview-{theme}-{width}.png'),full_page=True)
         page.get_by_role('tab',name='资源与队列').click()
         page.locator('.rich-resource-panel[data-state="ready"]').wait_for()
         assert state['reads']==1
         search=page.locator('[data-rich-control="resource-search"]');search.fill('training')
         assert page.locator('.rich-resource-panel tbody tr').count()==1
-        page.screenshot(path=str(output/f'dynamic-resources-{theme}-{width}.png'),full_page=True)
+        page.screenshot(path=str(tmp_path/f'dynamic-resources-{theme}-{width}.png'),full_page=True)
         state['available']=0
         page.get_by_role('button',name='刷新',exact=True).click()
         page.wait_for_function("document.querySelector('.rich-resource-panel tbody tr td:nth-child(5)')?.textContent === '0 张'")

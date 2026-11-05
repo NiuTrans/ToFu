@@ -272,8 +272,7 @@ fn encode(value: &Value) -> io::Result<Vec<u8>> {
     let encoded = serde_json::to_vec(value)
         .map_err(|_| invalid_data("tenant user response cannot be encoded"))?;
     if encoded.len() > MAX_TENANT_USER_RESPONSE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "tenant user response exceeds 8 MiB",
         ));
     }
@@ -583,8 +582,7 @@ pub(crate) fn list(
             .checked_add(value_bytes + usize::from(!values.is_empty()))
             .filter(|bytes| *bytes <= MAX_TENANT_USER_RESPONSE_BYTES)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::OutOfMemory,
+                crate::resource_exhaustion::domain_bound(
                     "tenant user list response exceeds 8 MiB",
                 )
             })?;

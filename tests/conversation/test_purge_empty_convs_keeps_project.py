@@ -41,8 +41,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 RUNTIME = runtime_section_path('main.js')
 
-# The keep-clause added by the fix (exact source text, reused by the poison).
-_KEEP_CLAUSE = '\n      || !!c.projectPath;'
+# The keep-term added by the fix (exact source text, reused by the poison).
+# Later keep-terms may follow it on the same line.
+_KEEP_CLAUSE = '|| !!c.projectPath'
 def _read(path: str) -> str:
     with open(path, encoding='utf-8') as f:
         return f.read()

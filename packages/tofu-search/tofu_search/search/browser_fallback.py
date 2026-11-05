@@ -15,12 +15,15 @@ Two integration modes, in order of preference:
      is unavailable / returns nothing.
 """
 
+from importlib import import_module
 from urllib.parse import quote_plus
 
 from tofu_search.log import get_logger
 from tofu_search.providers import get_browser_provider
-from tofu_search.search.engines.ddg import parse_ddg_html_text
 
+# A statement import could first load the absent engines package through
+# __import__, which waits for the tofu_search facade: see vertical/base.py.
+ddg = import_module('tofu_search.search.engines.ddg')
 logger = get_logger(__name__)
 
 __all__ = ['search_via_browser']
@@ -53,8 +56,8 @@ def search_via_browser(query, max_results=8):
             logger.warning('[Search] Browser fetch_html failed (%s) — trying host search()', e)
             html = None
         if html:
-            results = parse_ddg_html_text(html, max_results=max_results,
-                                          source='DuckDuckGo (via browser)')
+            results = ddg.parse_ddg_html_text(html, max_results=max_results,
+                                              source='DuckDuckGo (via browser)')
             logger.info('[Search] Browser fetch_html -> parsed %d results (%d HTML chars)',
                         len(results), len(html))
             if results:

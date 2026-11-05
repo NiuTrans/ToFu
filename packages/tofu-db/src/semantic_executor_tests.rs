@@ -1121,6 +1121,28 @@
         )
         .unwrap();
         let long_text = "界".repeat(1_201);
+        let author = json!({"actor": "human", "text": long_text});
+        assert_eq!(
+            execute(
+                &mut database,
+                &request(
+                    "turn.steer.commit",
+                    11,
+                    json!({
+                        "conversation_id":"steer-conversation",
+                        "attempt_id":attempt_id,
+                        "command_id":"malformed-author",
+                        "text":"author must be an object",
+                        "author":"human",
+                        "user_id":11
+                    }),
+                    Some("malformed-author-steer"),
+                ),
+                1_015,
+            )
+            .unwrap_err(),
+            SemanticExecutionError::InvalidPayload
+        );
         let steer_request = request(
             "turn.steer.commit",
             11,
@@ -1129,6 +1151,7 @@
                 "attempt_id":attempt_id,
                 "command_id":"operator-command",
                 "text":long_text,
+                "author":author,
                 "user_id":11
             }),
             Some("steer-receipt"),
@@ -1163,6 +1186,7 @@
             .unwrap();
         assert_eq!(preview.chars().count(), 1_200);
         assert!(preview.chars().all(|character| character == '界'));
+        assert_eq!(output["projection"]["_userSteerInjects"][0]["author"], author);
         assert_eq!(
             execute(&mut database, &steer_request, 1_022).unwrap(),
             steered
@@ -1178,6 +1202,7 @@
                     "attempt_id":attempt_id,
                     "command_id":"operator-command",
                     "text":"ignored duplicate text",
+                    "author":{"actor":"human", "text":"ignored duplicate text"},
                     "user_id":11
                 }),
                 Some("different-steer-receipt"),
@@ -1196,6 +1221,7 @@
                 .len(),
             1
         );
+        assert_eq!(output["projection"]["_userSteerInjects"][0]["author"], author);
         let changes = execute(
             &mut database,
             &request(
@@ -3090,6 +3116,48 @@
             "capture_hint_used": false,
             "capture_hint_matched": false
         })
+    }
+
+    #[test]
+    fn worker_job_claim_horizon_is_a_query_over_claim_eligibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.set_worker_lease_test_time(50_000);
+        database.set_worker_queue_test_time(1_000);
+        let horizon = |kinds: Value| {
+            request("worker_job.claim_horizon", 41, json!({"task_kinds": kinds, "user_id": 41}), None)
+        };
+        assert_eq!(
+            execute(&mut database, &horizon(json!(["horizon-kind"])), 1_000).unwrap(),
+            json!({"claimableInMs": null})
+        );
+        let enqueue = request(
+            "worker_job.enqueue",
+            41,
+            json!({
+                "task_id": "horizon-job", "user_id": 41, "tenant_id": "tenant-a",
+                "task_kind": "horizon-kind", "idempotency_key": "horizon-job",
+                "available_at_ms": 4_000, "now_ms": 1_000
+            }),
+            Some("horizon-enqueue"),
+        );
+        execute(&mut database, &enqueue, 1_000).unwrap();
+        assert_eq!(
+            execute(&mut database, &horizon(json!(["other", "horizon-kind", "other"])), 1_000).unwrap(),
+            json!({"claimableInMs": 3_000})
+        );
+        let too_many: Vec<String> = (0..=MAX_WORKER_JOB_CLAIM_KINDS).map(|i| format!("k{i}")).collect();
+        for invalid in [json!([]), json!([""]), json!("horizon-kind"), json!(too_many)] {
+            assert_eq!(
+                execute(&mut database, &horizon(invalid), 1_000).unwrap_err(),
+                SemanticExecutionError::InvalidPayload
+            );
+        }
+        database.set_worker_queue_test_time(4_000);
+        assert_eq!(
+            execute(&mut database, &horizon(json!(["horizon-kind"])), 4_000).unwrap(),
+            json!({"claimableInMs": 0})
+        );
     }
 
     fn browser_identity(owner_user_id: u64) -> Value {
@@ -5099,6 +5167,19 @@
     }
 
     #[test]
+    fn conversation_search_cursor_fence_is_a_client_payload_fault() {
+        let error = crate::semantic_executor::validation_fence(
+            "invalid conversation search cursor");
+        let mapped = map_storage_error(error);
+        assert_eq!(mapped, SemanticExecutionError::SearchCursorInvalidPayload);
+        assert_eq!(mapped.code(), "database_invalid_payload");
+        assert!(!mapped.retryable());
+        let other = map_storage_error(crate::semantic_executor::validation_fence(
+            "attempt event exceeds the conversation-sync document bound"));
+        assert_eq!(other.code(), "database_protocol_error");
+    }
+
+    #[test]
     fn project_brain_payload_limit_maps_to_the_legacy_non_retryable_error() {
         let error = io::Error::new(
             io::ErrorKind::OutOfMemory,
@@ -5604,6 +5685,53 @@
             execute(&mut reopened, &owner_count, 10_000).unwrap(),
             json!({"count": 1})
         );
+    }
+
+    #[test]
+    fn conversation_get_windows_around_a_main_lane_turn_anchor() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for index in 0..7_u64 {
+            let turn = format!("anchor-turn-{index}");
+            let actor = if index % 2 == 0 { "human" } else { "assistant" };
+            execute(&mut database, &request("turn.append_settled", 11, json!({
+                "conversation_id": "anchored", "user_id": 11, "actor": actor,
+                "command_id": format!("{turn}-command"), "turn_id": turn,
+                "projection": {"content": format!("message {index}")},
+                "conversation_defaults": {"allowCreate": true, "title": "Anchored"},
+                "now": 1_000 + index,
+            }), Some(&format!("anchor-turn-{index}-receipt"))), 1_000 + index).unwrap();
+        }
+        let mut read = |payload: Value| execute(&mut database, &request(
+            "conversation.get", 11,
+            json!({"conv_id": "anchored", "user_id": 11}).as_object().unwrap().clone()
+                .into_iter().chain(payload.as_object().unwrap().clone()).collect(),
+            None), 2_000);
+        for (anchor, window, expected_turns, page) in [
+            ("anchor-turn-3", 3, vec![2, 3, 4], json!({"total_count": 7, "start": 2, "end": 5, "anchor_sequence": 3})),
+            ("anchor-turn-6", 4, vec![3, 4, 5, 6], json!({"total_count": 7, "start": 3, "end": 7, "anchor_sequence": 6})),
+            ("anchor-turn-0", 5, vec![0, 1, 2], json!({"total_count": 7, "start": 0, "end": 3, "anchor_sequence": 0})),
+            ("missing-turn", 3, vec![], json!({"total_count": 7, "start": 0, "end": 0, "anchor_sequence": null})),
+        ] {
+            let document = read(json!({"message_window": window, "anchor_turn_id": anchor})).unwrap();
+            assert_eq!(document["message_page"], page, "{anchor}");
+            let turns: Vec<String> = document["messages"].as_array().unwrap().iter()
+                .map(|message| message["_turnId"].as_str().unwrap().to_owned()).collect();
+            let expected: Vec<String> = expected_turns.iter().map(|index| format!("anchor-turn-{index}")).collect();
+            assert_eq!(turns, expected, "{anchor}");
+        }
+        let plain = read(json!({"message_window": 2})).unwrap();
+        assert!(plain["message_page"].get("anchor_sequence").is_none());
+        for invalid in [
+            json!({"anchor_turn_id": "anchor-turn-1"}),
+            json!({"message_window": 2, "before_sequence": 4, "anchor_turn_id": "anchor-turn-1"}),
+            json!({"message_window": 2, "anchor_turn_id": ""}),
+            json!({"message_window": 2, "anchor_turn_id": "x".repeat(129)}),
+            json!({"message_window": 2, "anchor_turn_id": 7}),
+            json!({"message_window": 2, "derive_messages": false, "anchor_turn_id": "anchor-turn-1"}),
+        ] {
+            assert_eq!(read(invalid.clone()), Err(SemanticExecutionError::InvalidPayload), "{invalid}");
+        }
     }
 
     #[test]
@@ -6124,6 +6252,70 @@
         assert_eq!(
             execute(&mut database, &foreign, 2_050).unwrap(),
             json!({"cloned": false, "missing": true, "busy": false})
+        );
+    }
+
+    #[test]
+    fn conversation_clone_copies_a_transcript_larger_than_one_legacy_document() {
+        // A real long agent conversation serializes to tens of megabytes. The
+        // clone used to hold every Turn projection in memory behind the 8 MiB
+        // single-document ceiling, so a conversation that the authority had
+        // already stored could not be copied at all (2026-10-22 report).
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let create = request(
+            "conversation.create",
+            11,
+            json!({"conv_id": "large-source", "user_id": 11, "title": "Large"}),
+            Some("large-source-create"),
+        );
+        execute(&mut database, &create, 1_000).unwrap();
+        const TURNS: usize = 12;
+        let payload = "x".repeat(1024 * 1024);
+        for index in 0..TURNS {
+            let append = request(
+                "turn.append_settled",
+                11,
+                json!({
+                    "conversation_id": "large-source",
+                    "user_id": 11,
+                    "actor": if index % 2 == 0 { "human" } else { "assistant" },
+                    "command_id": format!("large-source-command-{index}"),
+                    "turn_id": format!("large-source-turn-{index}"),
+                    "projection": {"content": payload.clone()}
+                }),
+                Some(format!("large-source-receipt-{index}").leak()),
+            );
+            execute(&mut database, &append, 1_010 + index as u64).unwrap();
+        }
+        let clone = request(
+            "conversation.clone",
+            11,
+            json!({
+                "conv_id": "large-source",
+                "destination_conv_id": "large-destination",
+                "user_id": 11,
+                "title": "Large copy"
+            }),
+            Some("large-source-clone"),
+        );
+        let cloned = execute(&mut database, &clone, 2_000).unwrap();
+        assert_eq!(cloned["cloned"], true);
+        assert_eq!(cloned["turnCount"], TURNS as u64);
+        let snapshot = request(
+            "turn.sync.snapshot",
+            11,
+            json!({"conversation_id": "large-destination", "user_id": 11}),
+            None,
+        );
+        let snapshot = execute(&mut database, &snapshot, 2_010).unwrap();
+        assert_eq!(snapshot["turns"].as_array().unwrap().len(), TURNS);
+        assert_eq!(
+            snapshot["turns"][TURNS - 1]["projection"]["content"]
+                .as_str()
+                .unwrap()
+                .len(),
+            1024 * 1024
         );
     }
 
@@ -17523,6 +17715,102 @@
         assert_eq!(polls[0]["poll_id"], "timer-commit");
     }
 
+    fn timer_commit_request(timer_id: &str, poll_id: &str, command_id: &str) -> Request {
+        request(
+            "timer.poll.commit",
+            11,
+            json!({
+                "timer_id":timer_id, "user_id":11,
+                "poll_id":poll_id, "poll_time":"2026-11-03T02:00:00",
+                "decision":"wait", "reason":"Timer no longer active",
+                "check_output":"", "tokens_used":0, "model":"", "raw_output":"",
+                "tier":"llm", "predicate_matched":-1, "llm_agreed":-1
+            }),
+            Some(command_id),
+        )
+    }
+
+    #[test]
+    fn timer_poll_commit_after_settlement_keeps_the_receipt_and_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for (timer_id, created) in [("timer-triggered", "2026-11-01"), ("timer-cancelled", "2026-11-02")] {
+            execute(
+                &mut database,
+                &timer_create_request(11, timer_id, "conv-settled", created, &format!("{timer_id}-create")),
+                1_000,
+            )
+            .unwrap();
+        }
+        // A poll recorded while active keeps its idempotent identity.
+        let early = execute(
+            &mut database,
+            &timer_commit_request("timer-triggered", "timer-triggered.p1", "commit-early"),
+            1_001,
+        )
+        .unwrap();
+        assert_eq!(early["advanced"], true);
+        let settle = request(
+            "timer.update",
+            11,
+            json!({"timer_id":"timer-triggered","user_id":11,"status":"triggered",
+                   "last_poll_decision":"started","updated_at":"2026-11-03T01:59:00",
+                   "expected_status":"active"}),
+            Some("settle-triggered"),
+        );
+        assert_eq!(execute(&mut database, &settle, 1_002).unwrap()["changed"], true);
+        execute(
+            &mut database,
+            &request(
+                "timer.cancel",
+                11,
+                json!({"timer_id":"timer-cancelled","user_id":11,"now":"2026-11-03T01:59:00"}),
+                Some("settle-cancelled"),
+            ),
+            1_003,
+        )
+        .unwrap();
+
+        for (timer_id, status) in [("timer-triggered", "triggered"), ("timer-cancelled", "cancelled")] {
+            let late = timer_commit_request(timer_id, &format!("{timer_id}.p2"), &format!("{timer_id}-late"));
+            let refused = execute(&mut database, &late, 1_004).unwrap();
+            assert_eq!(
+                refused,
+                json!({"inserted":false,"id":null,"advanced":false,"status":status})
+            );
+            assert_eq!(execute(&mut database, &late, 1_005).unwrap(), refused);
+        }
+        // The replayed pre-settlement poll ID still answers with its own row.
+        let replayed = execute(
+            &mut database,
+            &timer_commit_request("timer-triggered", "timer-triggered.p1", "commit-replayed"),
+            1_006,
+        )
+        .unwrap();
+        assert_eq!(replayed, json!({"inserted":false,"id":early["id"],"advanced":false}));
+
+        let triggered = execute(
+            &mut database,
+            &request("timer.get", 11, json!({"timer_id":"timer-triggered","user_id":11}), None),
+            1_007,
+        )
+        .unwrap();
+        assert_eq!(triggered["last_poll_decision"], "started");
+        assert_eq!(triggered["poll_count"], 1);
+        let cancelled_polls = execute(
+            &mut database,
+            &request(
+                "timer.poll.log",
+                11,
+                json!({"timer_id":"timer-cancelled","user_id":11,"limit":20}),
+                None,
+            ),
+            1_008,
+        )
+        .unwrap();
+        assert_eq!(cancelled_polls, json!([]));
+    }
+
     #[test]
     fn conversation_delete_atomically_retires_queue_and_timer_executable_state() {
         let directory = tempfile::tempdir().unwrap();
@@ -23160,6 +23448,60 @@
         assert_eq!(execute(&mut database, &read(1, 1), 1000).unwrap(), json!([]));
     }
 
+
+    #[test]
+    fn event_list_selection_beyond_stream_read_bound_is_payload_size_not_protocol_error() {
+        // Every event stays inline (below MAX_STREAM_EVENT_BYTES); only the
+        // selected page's stored bytes exceed the stream point-read bound.
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let text = "x".repeat(crate::generated_tofudb_ir::MAX_STREAM_EVENT_BYTES / 2);
+        let count = crate::generated_tofudb_ir::MAX_STREAM_READ_BYTES / text.len() + 2;
+        for sequence in 0..count {
+            execute(&mut database, &request("event.append", 11, json!({
+                "task_id": "inline-inspector-page", "sequence": sequence,
+                "event": {"type": "messages_snapshot", "text": text},
+                "created_at_ms": 1000
+            }), Some(&format!("inline-page-seed-{sequence}"))), 1000).unwrap();
+        }
+        let read = |after: i64, limit: usize, filtered: bool| {
+            let mut payload = json!({
+                "task_id": "inline-inspector-page", "after_sequence": after, "limit": limit
+            });
+            if filtered {
+                payload["types"] = json!(["messages_snapshot"]);
+            }
+            request("event.list", 11, payload, None)
+        };
+        for filtered in [true, false] {
+            let error = execute(&mut database, &read(-1, 1000, filtered), 1000).unwrap_err();
+            assert_eq!(error.code(), "storage_payload_too_large");
+            assert!(!error.retryable());
+        }
+        // Halving at the same cursor (the Request Inspector's recovery) reads
+        // every row exactly once, in order, with its complete payload.
+        let (mut after, mut limit, mut seen) = (-1_i64, 1000_usize, 0_usize);
+        loop {
+            let rows = match execute(&mut database, &read(after, limit, true), 1000) {
+                Err(error) if error.code() == "storage_payload_too_large" && limit > 1 => {
+                    limit /= 2;
+                    continue;
+                }
+                result => result.unwrap(),
+            };
+            let rows = rows.as_array().unwrap();
+            for row in rows {
+                assert_eq!(row["sequence"], seen);
+                assert_eq!(row["event"]["text"].as_str().unwrap(), text);
+                seen += 1;
+            }
+            if rows.len() < limit {
+                break;
+            }
+            after = rows.last().unwrap()["sequence"].as_i64().unwrap();
+        }
+        assert_eq!(seen, count);
+    }
 #[test]
 fn timer_counts_and_recovery_feed_have_no_live_or_saved_row_admission_quota() {
     let directory = tempfile::tempdir().unwrap();

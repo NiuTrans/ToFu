@@ -1040,6 +1040,28 @@ def test_search_binary_fallback_surfaces_browser_to_server_receipt(
             pass
 
 
+@pytest.mark.parametrize('content_type,suffix,reader', [
+    ('video/mp4', '.mp4', 'inspect_video'),
+    ('audio/mpeg', '.mp3', 'inspect_video'),
+    ('Audio/Ogg; codecs=opus', '.ogg', 'inspect_video'),
+    ('application/pdf', '.pdf', 'read_files'),
+])
+def test_staged_asset_note_names_the_reader_for_its_media_type(
+        monkeypatch, content_type, suffix, reader):
+    import lib.search.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+
+    monkeypatch.setattr(search_bridge, 'claim_bound_browser_file', lambda _url: None)
+    monkeypatch.setattr(core, 'fetch_url_bytes',
+                        lambda _url: (b'\x00\x00\x00\x18ftypisom-binary', content_type))
+    result = core._stage_binary_asset(f'https://x.test/clip-{os.getpid()}{suffix}')
+    try:
+        assert result['is_asset'] is True
+        assert f'{reader}(path="{result["saved_path"]}")' in result['page_content']
+    finally:
+        os.unlink(result['saved_path'])
+
+
 def test_search_handoff_rejects_same_size_staging_corruption(monkeypatch):
     import lib.config_dir as config_dir
     import lib.search.search_bridge as search_bridge

@@ -25,6 +25,10 @@ def test_ordinary_storage_keeps_existing_short_startup_budgets(monkeypatch):
         '127.0.0.1', 8000, keep_alive_timeout=5, environ=environment)
     assert config.startup_timeout == 1860.0
 
+    # A deployment .env sets TOFU_STORAGE_STARTUP_TIMEOUT_S (900 on FUSE
+    # volumes) and pytest launched from a Tofu shell inherits it.
+    monkeypatch.delenv('TOFU_STORAGE_STARTUP_TIMEOUT_S', raising=False)
+    monkeypatch.delenv('TOFU_DB_FASTPATH_DIR', raising=False)
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
     assert StorageSupervisor()._startup_timeout == 30.0
 

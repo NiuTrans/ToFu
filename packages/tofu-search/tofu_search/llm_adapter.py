@@ -14,7 +14,17 @@ from tofu_search.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['call_llm']
+__all__ = ['call_llm', 'is_budget_timeout']
+
+
+def is_budget_timeout(error: BaseException) -> bool:
+    """Whether a call failed only because its ``timeout`` budget elapsed.
+
+    A custom ``llm_function`` reports budget expiry as the builtin
+    ``TimeoutError``; the built-in endpoint client raises ``requests.ReadTimeout``.
+    A connect timeout is an unreachable endpoint, not an elapsed budget.
+    """
+    return isinstance(error, (TimeoutError, requests.ReadTimeout))
 
 
 def call_llm(messages: list[dict], *, config=None, **kwargs) -> str:
@@ -45,7 +55,11 @@ def call_llm(messages: list[dict], *, config=None, **kwargs) -> str:
                 result = str(result)
             return result
         except Exception as e:
-            logger.error('[LLMAdapter] Custom function failed: %s', e, exc_info=True)
+            if is_budget_timeout(e):
+                # The caller owns the budget and reports the expiry once.
+                logger.debug('[LLMAdapter] Custom function exceeded its budget: %s', e)
+            else:
+                logger.error('[LLMAdapter] Custom function failed: %s', e, exc_info=True)
             raise
 
     # ── Option A: OpenAI-compatible API ──

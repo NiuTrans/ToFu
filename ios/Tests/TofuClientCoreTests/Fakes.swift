@@ -20,12 +20,15 @@ func makeResponse(
 actor FakeHTTPClient: HTTPClient {
     private var queue: [Result<HTTPResponse, Error>] = []
     private(set) var requests: [HTTPRequest] = []
+    private var hook: (@Sendable (HTTPRequest) async -> Void)?
+    func onSend(_ hook: @escaping @Sendable (HTTPRequest) async -> Void) { self.hook = hook }
 
     func enqueue(_ response: HTTPResponse) { queue.append(.success(response)) }
     func enqueueError(_ error: Error) { queue.append(.failure(error)) }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         requests.append(request)
+        if let hook { await hook(request) }
         guard !queue.isEmpty else { throw FakeError.unexpectedRequest(request.url) }
         return try queue.removeFirst().get()
     }
@@ -34,20 +37,33 @@ actor FakeHTTPClient: HTTPClient {
 actor FakeCookieSink: CookieSink {
     private(set) var injected: [(origin: String, cookies: [TofuCookie])] = []
     private(set) var purgedHosts: [String] = []
-    /// origin → Cookie: header value.
-    var jar: [String: String] = [:]
+    private(set) var purgedOrigins: [String] = []
+    private var entries: [(url: URL, cookie: TofuCookie)] = []
 
     func inject(origin: String, cookies: [TofuCookie]) async {
         injected.append((origin, cookies))
-        jar[origin] = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        guard let url = URL(string: origin) else { return }
+        for cookie in cookies {
+            entries.removeAll { $0.cookie.name == cookie.name && $0.cookie.path == cookie.path &&
+                ($0.cookie.domain ?? $0.url.host) == (cookie.domain ?? url.host) }
+            entries.append((url, cookie))
+        }
     }
 
-    func purgeHost(_ host: String) async {
-        purgedHosts.append(host)
-        jar["https://\(host)"] = nil
+    func purgeOrigin(_ origin: String, appURL: String) async {
+        guard let url = URL(string: appURL), let host = url.host else { return }
+        purgedHosts.append(host); purgedOrigins.append(origin)
+        entries.removeAll { CookieScope.belongsToProfile(domain: $0.cookie.domain ?? $0.url.host ?? "", path: $0.cookie.path, appURL: url) }
     }
-
-    func cookieHeader(_ origin: String) async -> String? { jar[origin] }
+    func cookieHeader(_ target: String) async -> String? {
+        guard let url = URL(string: target) else { return nil }
+        let matching = entries.filter { entry in
+            let c = entry.cookie
+            return CookieScope.matches(domain: c.domain ?? entry.url.host ?? "", hostOnly: c.domain == nil,
+                path: c.path, secure: c.secure, expires: c.expiresAtMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, url: url)
+        }.sorted { $0.cookie.path.count > $1.cookie.path.count }
+        return matching.isEmpty ? nil : matching.map { "\($0.cookie.name)=\($0.cookie.value)" }.joined(separator: "; ")
+    }
 }
 
 final class FakeSecretStore: SecretStore, @unchecked Sendable {
@@ -75,7 +91,6 @@ actor FakeProfileStore: ProfileStore {
     private var nextId: Int64 = 1
     private(set) var cookieHostWrites: [(id: Int64, host: String?)] = []
     private(set) var touchCalls: [(id: Int64, at: Int64)] = []
-    private(set) var authTypeWrites: [(id: Int64, authType: AuthType)] = []
 
     func seed(_ profile: Profile) { rows[profile.id] = profile }
 
@@ -100,15 +115,14 @@ actor FakeProfileStore: ProfileStore {
         rows[id]?.lastUsedAt = at
     }
 
-    func setAuthType(_ id: Int64, _ authType: AuthType) async {
-        authTypeWrites.append((id, authType))
-        rows[id]?.authType = authType
+    func setCookieHostIfCurrent(_ profile: Profile, _ host: String) async -> Bool {
+        guard let current = rows[profile.id], current.baseUrl == profile.baseUrl,
+              current.alias == profile.alias, current.authType == profile.authType else { return false }
+        if current.cookieHost != host { cookieHostWrites.append((profile.id, host)) }
+        rows[profile.id]?.cookieHost = host
+        return true
     }
 
-    func setCookieHost(_ id: Int64, _ host: String?) async {
-        cookieHostWrites.append((id, host))
-        rows[id]?.cookieHost = host
-    }
 }
 
 /// Records the backoff schedule instead of sleeping.

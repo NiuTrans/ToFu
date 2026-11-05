@@ -121,12 +121,28 @@ class _HealthyThenExitClient:
         return {'ready': True, 'backend': 'sqlite'}
 
 
+class _FlappingHealthClient:
+    """Fails ``fail_streak`` probes, then serves one, repeatedly."""
+
+    def __init__(self, fail_streak):
+        self.calls = 0
+        self._period = fail_streak + 1
+
+    def health(self, deadline=None):
+        self.calls += 1
+        if self.calls % self._period:
+            raise StorageError('database_unavailable', 'starved')
+        return {'ready': True, 'backend': 'tofudb'}
+
+
 def _wired_supervisor(*, interval=0.01, deadline=0.01, threshold=3,
-                      max_suppress=None, overload_cooldown=None):
+                      max_suppress=None, overload_cooldown=None, unresponsive=0.0):
     supervisor = StorageSupervisor()
     supervisor._liveness_interval_seconds = interval
     supervisor._liveness_probe_deadline_seconds = deadline
     supervisor._liveness_failure_threshold = threshold
+    # Count-threshold mechanics by default; budget specs pass their own.
+    supervisor._liveness_unresponsive_seconds = unresponsive
     if max_suppress is not None:
         supervisor._liveness_overload_max_suppress = max_suppress
     if overload_cooldown is not None:
@@ -312,6 +328,7 @@ def test_host_overload_detail_mem_and_load_signals(monkeypatch):
         return readings.get(paths[0])
 
     monkeypatch.setattr(supervisor_mod, '_read_cgroup_int', fake_read)
+    monkeypatch.setattr(supervisor_mod, '_read_cgroup_stat', lambda path, key: 0)
     monkeypatch.setattr(
         supervisor_mod.os, 'getloadavg', lambda: (1.0, 1.0, 1.0))
     monkeypatch.setattr(
@@ -450,6 +467,35 @@ def test_overloaded_host_forces_bounded_recycle_after_suppression_bound(
     assert supervisor._overload_recycle_not_before > 0.0
 
 
+def test_served_probe_ends_the_overload_suppression_streak(monkeypatch):
+    """The suppression bound counts consecutive failures, not a lifetime total.
+
+    A shared cgroup-v1 host can read overloaded for hours because page cache
+    counts toward usage. Short starvation episodes separated by served
+    probes must never add up to the bound and recycle a healthy child.
+    """
+    monkeypatch.setattr(
+        supervisor_mod, '_host_overload_detail',
+        lambda *args: 'synthetic overload')
+    supervisor = _wired_supervisor(max_suppress=5)
+    child = _FakeChild(exit_code=0, exit_delay=0.5)
+    client = _FlappingHealthClient(fail_streak=4)
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._process = child
+    supervisor._client = client
+
+    thread = _start_monitor(supervisor, child)
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    # Several whole episodes ran: their failures total well past the bound.
+    assert client.calls >= 3 * 5
+    assert child.terminate_calls == 0
+    assert child.kill_calls == 0
+    assert crashes == [0]
+
+
 def test_overload_recycle_backoff_escalates_then_caps():
     supervisor = _wired_supervisor(overload_cooldown=300.0)
     assert supervisor._overload_recycle_backoff == 0.0
@@ -524,3 +570,154 @@ def test_host_overload_sticky_disabled_when_window_zero(monkeypatch):
     assert supervisor._host_overload_sticky() == 'cgroup memory 94.4%'
     state['overloaded'] = False
     assert supervisor._host_overload_sticky() is None
+
+
+# ── Unresponsiveness budget and working-set overload (2026-10-27) ─────────
+
+
+def test_starved_child_on_a_healthy_host_survives_inside_the_budget():
+    """A live child that stops answering for seconds is starved, not dead.
+
+    2026-10-26 23:42 the managed engine failed 25 probes within 61 s and then
+    recovered on its own; a three-probe verdict would have killed it.
+    """
+    supervisor = _wired_supervisor(unresponsive=30.0)
+    child = _FakeChild(exit_code=0, exit_delay=0.6)
+    client = _FailingHealthClient()
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._process = child
+    supervisor._client = client
+
+    thread = _start_monitor(supervisor, child)
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert client.calls > supervisor._liveness_failure_threshold * 3
+    assert child.terminate_calls == 0
+    assert child.kill_calls == 0
+    assert crashes == [0]
+
+
+def test_wedged_child_is_recycled_once_the_budget_is_spent(monkeypatch, caplog):
+    import logging
+    import time
+
+    monkeypatch.setattr(supervisor_mod, '_LIVENESS_EOF_GRACE_SECONDS', 0.05)
+    supervisor = _wired_supervisor(unresponsive=0.3)
+    child = _FakeChild(die_on_eof=False, die_on_term=True, exit_code=-15)
+    client = _FailingHealthClient()
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._process = child
+    supervisor._client = client
+
+    started = time.monotonic()
+    with caplog.at_level(logging.INFO, logger='tofu.storage.supervisor'):
+        thread = _start_monitor(supervisor, child)
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert time.monotonic() - started >= 0.3
+    assert child.terminate_calls == 1
+    assert crashes == [-15]
+    assert any('unresponsive for' in record.getMessage()
+               for record in caplog.records if record.levelname == 'CRITICAL')
+
+
+class _AlternatingHealthClient:
+    """Fails every other probe: starved now and then, never wedged."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def health(self, deadline=None):
+        self.calls += 1
+        if self.calls % 2:
+            raise StorageError('database_unavailable', 'starved')
+        return {'ready': True, 'backend': 'tofudb'}
+
+
+def test_served_probes_reset_the_overload_suppression_count(monkeypatch):
+    """Suppression bounds CONSECUTIVE failures, not their lifetime total.
+
+    The count used to survive served probes (2026-10-26 23:42 to 2026-10-27
+    01:58 it rose to 27 across two hours of healthy probes), so a starved
+    but answering engine was force-recycled once the total reached the bound.
+    """
+    monkeypatch.setattr(supervisor_mod, '_LIVENESS_EOF_GRACE_SECONDS', 0.05)
+    monkeypatch.setattr(
+        supervisor_mod, '_host_overload_detail', lambda *args: 'synthetic overload')
+    supervisor = _wired_supervisor(max_suppress=3, overload_cooldown=1.0)
+    child = _FakeChild(exit_code=0, exit_delay=0.6)
+    client = _AlternatingHealthClient()
+    crashes = []
+    supervisor.add_crash_callback(crashes.append)
+    supervisor._process = child
+    supervisor._client = client
+
+    thread = _start_monitor(supervisor, child)
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert client.calls >= 8  # several times the bound of failed probes
+    assert child.terminate_calls == 0
+    assert crashes == [0]
+
+
+def test_page_cache_is_not_memory_overload(monkeypatch):
+    """Working set (usage minus inactive file cache) decides, like kubelet.
+
+    The 2026-10-27 reading: 213 GiB used of a 220 GiB limit, 139 GiB of it
+    inactive page cache and 45 GiB RSS. Raw usage reads 96.8%; the working
+    set is 33.6%, so a starved engine there is not excused by memory.
+    """
+    monkeypatch.setattr(
+        supervisor_mod, '_host_overload_detail', _REAL_HOST_OVERLOAD_DETAIL)
+    gib = 1 << 30
+    v1 = {
+        '/sys/fs/cgroup/memory/memory.usage_in_bytes': 213 * gib,
+        '/sys/fs/cgroup/memory/memory.limit_in_bytes': 220 * gib,
+    }
+    stats = {('/sys/fs/cgroup/memory/memory.stat', 'total_inactive_file'): 139 * gib}
+    monkeypatch.setattr(supervisor_mod, '_read_cgroup_int', lambda paths: v1.get(paths[0]))
+    monkeypatch.setattr(supervisor_mod, '_read_cgroup_stat',
+                        lambda path, key: stats.get((path, key), 0))
+    monkeypatch.setattr(supervisor_mod.os, 'getloadavg', lambda: (20.0, 20.0, 20.0))
+    monkeypatch.setattr(supervisor_mod.os, 'sched_getaffinity', lambda pid: set(range(63)))
+
+    assert supervisor_mod._cgroup_working_set_ratio() == pytest.approx(74 / 220)
+    assert supervisor_mod._host_overload_detail(0.92, 2.0) is None
+
+    # Anonymous memory near the limit still reads as overload.
+    stats[('/sys/fs/cgroup/memory/memory.stat', 'total_inactive_file')] = 2 * gib
+    detail = supervisor_mod._host_overload_detail(0.92, 2.0)
+    assert detail is not None and 'working set' in detail
+
+
+def test_cgroup_v2_working_set_subtracts_inactive_file(monkeypatch, tmp_path):
+    stat = tmp_path / 'memory.stat'
+    stat.write_text('anon 100\nfile 900\nactive_file 300\ninactive_file 600\n')
+    assert supervisor_mod._read_cgroup_stat(str(stat), 'inactive_file') == 600
+    assert supervisor_mod._read_cgroup_stat(str(stat), 'missing') == 0
+    assert supervisor_mod._read_cgroup_stat(str(tmp_path / 'absent'), 'inactive_file') == 0
+    readings = {'/sys/fs/cgroup/memory.current': 1000, '/sys/fs/cgroup/memory.max': 1000}
+    monkeypatch.setattr(supervisor_mod, '_read_cgroup_int', lambda paths: readings.get(paths[0]))
+    monkeypatch.setattr(supervisor_mod, '_CGROUP_MEMORY_FILES', (
+        ('/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.max',
+         str(stat), 'inactive_file'),))
+    assert supervisor_mod._cgroup_working_set_ratio() == pytest.approx(0.4)
+
+
+def test_liveness_unresponsive_budget_defaults_and_bounds():
+    from lib.storage.supervisor import _liveness_unresponsive_budget
+
+    assert _liveness_unresponsive_budget({}) == 120.0
+    assert _liveness_unresponsive_budget(
+        {'TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS': '300'}) == 300.0
+    assert _liveness_unresponsive_budget(
+        {'TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS': 'bogus'}) == 120.0
+    assert _liveness_unresponsive_budget(
+        {'TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS': '1'}) == 10.0
+    assert _liveness_unresponsive_budget(
+        {'TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS': '99999'}) == 3600.0

@@ -1,21 +1,27 @@
-"""HTTP probes do not own a workspace; explicit/hidden writes stay fenced."""
+"""HTTP probes and transfers run the complete prepared plan, never a replay.
+
+Execution-side preparation only: tool calls take no workspace lease
+(docs/runbooks/GIT_WORKSPACE_GUARD.md), so these plans no longer decide
+admission. Hidden curl/wget output configuration stays suppressed.
+"""
 import os
-import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from lib.project_mod import run_command as commands, tools
-from lib.project_mod.command_network_probe import prepare_network_probe
+from lib.project_mod.command_network_probe import CURL_FILE_ENV_PREFIX, prepare_network_probe
 from lib.project_mod.tool_admission import RecordedCommandSource, tool_admission_scope
-from lib.project_mod.workspace_lease import workspace_lease_fds, workspace_tree_write_lease
-from tests.project_mod.test_command_outer_writer_lease import _other_writer, repo as _repo_fixture
+from lib.project_mod.workspace_lease import workspace_lease_fds
+from tests.project_mod.test_command_execution_preparation import (
+    _internal_writer, repo as repo,
+)
 
 pytestmark = pytest.mark.unit
-repo = _repo_fixture
 
 PROBE = '''for p in agent/terminal_bench_pipeline_agent.py pipeline/terminal_bench_pipeline_agent.py agent/tb_pipeline_agent.py agent/terminal_bench_agent.py; do
   code=$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $DEV_SANKUAI_TOKEN" "https://dev.internal.example.com/rest/api/latest/projects/nlp/repos/llm-eval-premium/raw/$p?at=2e0b702f508460948eef8b58d455449b7d35d335")
@@ -65,11 +71,7 @@ UNSAFE = [
     'curl -o "$OUTPUT" https://example.invalid',
     'curl $OPTIONS https://example.invalid',
     'curl "${OPTIONS}" https://example.invalid',
-    'curl -X POST https://example.invalid',
     'curl -X "$METHOD" https://example.invalid',
-    'curl --data body https://example.invalid',
-    'curl -T source https://example.invalid',
-    'curl -F data=@source https://example.invalid',
     'curl https://example.invalid > target',
     'curl https://example.invalid; touch target',
     'curl https://example.invalid | tee target',
@@ -108,23 +110,79 @@ UNSAFE = [
 ]
 
 
+# Not probes (a request body, a non-GET method, or another program consuming
+# the response), yet hardened transfers that write no local file.
+LOCAL_NO_WRITE = [
+    'curl -s https://example.invalid | jq .',
+    "curl -sS -H 'A: b' https://example.invalid | python3 -c 'import sys; print(sys.stdin.read())'",
+    'curl -X POST -d @source https://example.invalid',
+    'curl -X POST https://example.invalid',
+    'curl --data body https://example.invalid',
+    'curl -T source https://example.invalid',
+    'curl -F data=@source https://example.invalid',
+    'curl --data-binary @source -b source --cacert source -k https://example.invalid | cat',
+    'curl -s https://example.invalid 2>/dev/null | jq .',
+    'curl -sS -D - -o /dev/null https://example.invalid | cat',
+    'for id in a b; do curl -s "https://example.invalid/$id" | jq .; done',
+    'code=$(curl -s -X POST https://example.invalid); echo "$code"',
+    'wget -qO- https://example.invalid | jq .',
+    'wget -q -O - https://example.invalid | cat',
+]
+
+
+@pytest.mark.parametrize('source', LOCAL_NO_WRITE)
+def test_transfers_writing_no_local_file_are_hardened_once(source):
+    assert prepare_network_probe(source) is None
+    executed = commands.command_execution_source(source)
+    assert CURL_FILE_ENV_PREFIX in executed
+    assert commands.command_execution_source(executed) == executed
+
+
+def test_transfer_inside_substitution_is_hardened_once():
+    source = 'x=$(curl -o out.json https://example.invalid); echo "$x"'
+    assert commands.command_execution_source(source) == (
+        'x=$(' + CURL_FILE_ENV_PREFIX + 'curl -q -o out.json https://example.invalid); echo "$x"')
+
+
+def test_composed_transfers_run_hardened_beside_an_internal_writer(repo, monkeypatch, tmp_path):
+    from lib.project_mod import network_command
+    monkeypatch.setattr(network_command, 'prepare_network_command', lambda *a, **kw: None)
+    binary = tmp_path / 'bin'
+    binary.mkdir()
+    for name, first in (('curl', '-q'), ('wget', '--no-config')):
+        program = binary / name
+        program.write_text(f'#!{sys.executable}\nimport os, sys\n'
+                           f'assert sys.argv[1] == {first!r}, sys.argv\n'
+                           'assert "SSLKEYLOGFILE" not in os.environ\n'
+                           'print("body")\n')
+        program.chmod(0o700)
+    environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'],
+                       SSLKEYLOGFILE=str(repo / 'keys'))
+    monkeypatch.setattr(commands, '_get_cmd_env', lambda *a, **kw: dict(environment))
+    source = ('curl -s -X POST -d @source https://example.invalid | cat; '
+              'wget -qO- https://example.invalid | cat')
+    with _internal_writer(repo):
+        result = commands.tool_run_command(str(repo), source)
+    assert '[exit code: 0]' in result, result
+    assert result.count('body') == 2
+    assert not (repo / 'keys').exists()
+
+
 @pytest.mark.parametrize('source', SAFE)
-def test_complete_probes_have_no_workspace_claim(repo, source):
-    assert commands.command_write_lease_claims(str(repo), source) == ()
+def test_complete_probes_get_a_stable_plan(source):
     planned = prepare_network_probe(source)
     assert planned is not None
     assert prepare_network_probe(planned) == planned
 
 
 @pytest.mark.parametrize('source', UNSAFE)
-def test_unknown_or_writing_commands_cannot_borrow_probe_exemption(repo, source):
+def test_unknown_or_writing_commands_get_no_probe_plan(source):
     assert prepare_network_probe(source) is None
-    assert commands.command_write_lease_claims(str(repo), source)
 
 
 @pytest.mark.parametrize('route', ['runner', 'dispatch', 'recorded'])
 @pytest.mark.parametrize('source', [PROBE, SAFE[1], SAFE[7]])
-def test_probe_runs_under_tree_writer_without_lease_or_source_rewrite(
+def test_probe_runs_beside_an_internal_writer_without_lease_or_source_rewrite(
         repo, monkeypatch, route, source):
     from lib.project_mod import network_command
     monkeypatch.setattr(network_command, 'prepare_network_command', lambda *a, **kw: None)
@@ -143,7 +201,7 @@ def test_probe_runs_under_tree_writer_without_lease_or_source_rewrite(
         return '$ original\n[exit code: 0]'
 
     monkeypatch.setattr(commands, '_run_command_simple', process)
-    with _other_writer(repo, factory=workspace_tree_write_lease):
+    with _internal_writer(repo):
         if route == 'runner':
             result = commands.tool_run_command(str(repo), source)
         elif route == 'dispatch':
@@ -158,43 +216,23 @@ def test_probe_runs_under_tree_writer_without_lease_or_source_rewrite(
     assert observed[0][0] == (wrapped if route == 'recorded' else source)
 
 
-@pytest.mark.parametrize('route', ['runner', 'dispatch'])
-@pytest.mark.parametrize('suffix', [
-    '; touch target', ' > target', ' | tee target',
-    '; code=$(touch target)', '; curl --cookie-jar target https://example.invalid',
-])
-def test_actual_writes_still_refuse_before_spawn(repo, monkeypatch, route, suffix):
-    def forbidden(*args, **kwargs):
-        pytest.fail('conflicting writer reached subprocess')
-    monkeypatch.setattr(commands, '_run_command_simple', forbidden)
-    with _other_writer(repo, factory=workspace_tree_write_lease):
-        source = SAFE[1] + suffix
-        if route == 'runner':
-            result = commands.tool_run_command(str(repo), source)
-        else:
-            result = tools.execute_tool('run_command', {'command': source}, str(repo))
-    assert '[workspace-busy]' in result
-    assert 'Command was not started' in result
-    assert (repo / 'target').read_text() == 'old\n'
-
-
-def test_prefix_and_recorded_wrapper_drift_never_borrow_exemption(repo, monkeypatch):
+def test_shell_prefix_and_recorded_wrapper_drift_get_no_probe_plan(repo, monkeypatch):
     source = SAFE[1]
     monkeypatch.setattr(commands, 'SHELL_PREFIX', 'touch target;')
-    assert commands.command_write_lease_claims(str(repo), source)
+    assert commands._network_probe_execution_source(source) is None
     monkeypatch.setattr(commands, 'SHELL_PREFIX', '')
     with tool_admission_scope(command_source=RecordedCommandSource(source, source)):
         with pytest.raises(ValueError, match='wrapper changed'):
-            commands.command_write_lease_claims(str(repo), source + '; touch target')
+            commands.tool_run_command(str(repo), source + '; touch target')
+    assert (repo / 'target').read_text() == 'old\n'
     wrapped = source + '; ' + source
     with tool_admission_scope(command_source=RecordedCommandSource(source, wrapped)):
-        assert commands.command_write_lease_claims(str(repo), wrapped)
+        assert commands._network_probe_execution_source(wrapped) is None
 
 
-def test_parser_bounds_keep_conservative_admission(repo):
+def test_parser_bounds_give_no_probe_plan():
     source = SAFE[1] + ' ' * 16_384
     assert prepare_network_probe(source) is None
-    assert commands.command_write_lease_claims(str(repo), source)
     assert prepare_network_probe('curl ' + ' '.join(['-s'] * 256) + ' https://example.invalid') is None
     nested = SAFE[1]
     for _ in range(10):
@@ -231,15 +269,15 @@ def test_real_curl_does_not_load_hidden_output_config_or_replay_probe(repo, tmp_
         assert planned is not None
         environment = {'PATH': os.path.dirname(curl) + os.pathsep + '/usr/bin:/bin',
                        'HOME': str(home), 'CURL_HOME': str(home)}
-        with _other_writer(repo, factory=workspace_tree_write_lease):
+        with _internal_writer(repo):
             result = subprocess.run(planned, shell=True, cwd=repo, env=environment,
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert result.stdout.splitlines() == ['a -> 204', 'b -> 204']
         assert requests == ['/a', '/b']
         assert not hidden.exists()
     finally:
         server.shutdown()
-        worker.join(5)
+        worker.join()
         server.server_close()
         assert not worker.is_alive()

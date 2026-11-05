@@ -209,6 +209,84 @@ fn delivery_page_stays_a_read_only_internal_query() {
     assert_eq!(page["hasMore"], false);
 }
 
+#[test]
+fn delivery_action_page_returns_only_rows_whose_receipt_asks_for_work() {
+    let (_vfs, mut database) = prepared();
+    let cases: [(&str, bool, Value, bool); 12] = [
+        ("no-receipt", true, json!({}), false),
+        ("working", false, json!({"delivery":{"state":"working"}}), true),
+        ("pending", false, json!({"delivery":{"state":"pending"}}), true),
+        ("blocked", false, json!({"delivery":{"state":"blocked"}}), true),
+        ("preserved", true, json!({"delivery":{"state":"preserved"}}), false),
+        ("inputs-changed", false, json!({"delivery":{"state":"failed",
+            "retry":{"condition":"validation_inputs_changed"}}}), true),
+        ("failed", false, json!({"delivery":{"state":"failed",
+            "retry":{"condition":"conflict_inputs_changed"}}}), false),
+        ("checkpoint-ack-missing", false, json!({"executionMode":"isolated-task",
+            "delivery":{"state":"delivered","taskOutcome":"completed",
+                "publicationMode":"working_tree"}}), true),
+        ("source-ack-missing", true, json!({"executionMode":"isolated-task",
+            "deliveryCheckpoint":null,"delivery":{"state":"delivered"}}), true),
+        ("acknowledged", true, json!({"executionMode":"isolated-task",
+            "deliveryCheckpoint":{"status":"disabled"},"sourceRetirement":"reclaimed",
+            "delivery":{"state":"delivered","taskOutcome":"completed",
+                "publicationMode":"working_tree"}}), false),
+        ("retained", true, json!({"executionMode":"isolated-task",
+            "deliveryCheckpoint":{"status":"disabled"},"sourceRetirement":"retained",
+            "delivery":{"state":"delivered"}}), false),
+        ("explicit-candidate", true, json!({"delivery":{"state":"delivered"}}), false),
+    ];
+    for (task, managed, origin, _) in &cases {
+        let mut input = registration(11, task, &format!("/checkout/{task}"));
+        input["managed"] = json!(managed);
+        input["origin_json"] = json!(origin.to_string());
+        call(&mut database, "register", input).unwrap();
+    }
+    let tasks = |page: &Value| -> Vec<String> {
+        page["rows"].as_array().unwrap().iter()
+            .map(|row| row["task_id"].as_str().unwrap().to_owned()).collect()
+    };
+    let expected: Vec<String> = cases.iter().filter(|case| case.3)
+        .map(|case| case.0.to_owned()).collect();
+    let request = request("delivery_action_page", json!({"after_id":0,"limit":128}));
+    assert!(!request.mutates_state());
+    let mut tx = database.begin_with_identity_claim_scopes(7, 12).unwrap();
+    let page: Value = serde_json::from_slice(&execute(&database, &mut tx, &request).unwrap().unwrap()).unwrap();
+    assert!(!tx.has_business_mutation());
+    assert_eq!(tasks(&page), expected);
+    assert_eq!((page["hasMore"].clone(), page["nextAfterId"].clone()), (json!(false), json!(0)));
+    let full = call(&mut database, "get", registration(11, "pending", "/checkout/pending")).unwrap();
+    assert_eq!(page["rows"][1], full, "a page row is the complete workspace projection");
+    let with_retained = call(&mut database, "delivery_action_page",
+        json!({"after_id":0,"limit":128,"retained":true})).unwrap();
+    let mut retained_expected = expected.clone();
+    retained_expected.push("retained".to_owned());
+    assert_eq!(tasks(&with_retained), retained_expected);
+    // The lookahead continues after the last returned row, skipping cold rows.
+    let first = call(&mut database, "delivery_action_page", json!({"after_id":0,"limit":2})).unwrap();
+    assert_eq!((tasks(&first), first["hasMore"].clone()), (expected[..2].to_vec(), json!(true)));
+    assert_eq!(first["nextAfterId"], first["rows"][1]["id"]);
+    let rest = call(&mut database, "delivery_action_page",
+        json!({"after_id":first["nextAfterId"],"limit":128})).unwrap();
+    assert_eq!(tasks(&rest), expected[2..].to_vec());
+    let tail = rest["rows"].as_array().unwrap().last().unwrap()["id"].clone();
+    assert_eq!(call(&mut database, "delivery_action_page", json!({"after_id":tail,"limit":1})).unwrap(),
+        json!({"rows":[],"hasMore":false,"nextAfterId":0}));
+}
+
+#[test]
+fn delivery_action_page_scans_past_many_cold_locator_pages() {
+    let (_vfs, mut database) = prepared();
+    seed_history(&mut database, 2100, true);
+    let mut input = registration(11, "task-2100", "/checkout/2100");
+    input["patch_json"] = json!(r#"{"delivery":{"state":"pending"}}"#);
+    call(&mut database, "set_meta", input).unwrap();
+    let page = call(&mut database, "delivery_action_page", json!({"after_id":0,"limit":1})).unwrap();
+    assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(page["rows"][0]["id"], 2100);
+    assert_eq!(page["hasMore"], false);
+}
+
 fn backfill_state(database: &AuthorityDatabase) -> (u64, u64) {
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
     let cursor = checkout_claims_cursor_key(&tx).unwrap();

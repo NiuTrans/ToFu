@@ -10,6 +10,7 @@ import json
 import time
 import uuid
 
+from lib.error_envelope import BadRequest
 from lib.storage import StorageError
 from .contract import contract
 from .dependencies import current_facts, project_dependencies, capture_bindings
@@ -90,7 +91,7 @@ def project_criteria(requirements, revision):
 def generate_requirements(command, previous):
     ids = [item['id'] for item in command['criteria']]
     if len(ids) != len(set(ids)) or any(not item['text'].strip() for item in command['criteria']):
-        raise ValueError('Requirements need unique IDs and nonempty text')
+        raise BadRequest('Requirements need unique IDs and nonempty text', field='criteria')
     old_items = {item['id']: item for item in previous.get('criteria', [])}
     criteria = []
     for item in command['criteria']:
@@ -129,13 +130,14 @@ def review_status(criteria, *, complete=True):
 def save_decision(review, command, criterion, evidence_fields, conversation_id):
     """Admit one owner judgment through the common evidence/CAS boundary."""
     if not command['note'].strip():
-        raise ValueError('A review note describing the evidence is required')
+        raise BadRequest('A review note describing the evidence is required', field='note')
     decisions, revision = review.read('decisions')
     if revision != command['decisionsRevision']:
         raise ReviewConflict('Decisions changed; reload before deciding')
     previous = decisions.get('items', {}).get(criterion['id'], {})
     if previous.get('factBindings') and 'factBindings' not in command:
-        raise ValueError('Explicit supporting fact bindings are required for this review')
+        raise BadRequest('Explicit supporting fact bindings are required for this review',
+                         field='factBindings')
     facts = capture_bindings(conversation_id, review.principal, command.get('factBindings', []))
     decisions.setdefault('items', {})[criterion['id']] = {
         **evidence_fields, 'criterionDigest': criterion['digest'], 'verdict': command['verdict'],

@@ -11,8 +11,6 @@ const compatibilityTarget = featureRegistry as Window & Record<string, unknown>;
 for (const name of [
   '_applyReportEventRaw',
   '_applyResolvedTitle',
-  '_attachReportPush',
-  '_detachReportPush',
   '_ensurePaperText',
   '_handlePaperKeyDown',
   '_loadOrGenerateReport',

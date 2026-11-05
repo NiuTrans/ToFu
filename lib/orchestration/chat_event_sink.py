@@ -1,15 +1,25 @@
-"""Project Flow-backed chat events onto the live task state.
+"""Publish Flow-backed chat events through the parent's Turn authority.
 
-The flow event adapter owns engine-event → chat-wire translation. This
-sink owns the next boundary: applying those wire events to the in-memory task
-snapshot used by reconnect/poll paths, then forwarding the unchanged event to
-the task event log. Execution and persistence orchestration stay outside.
+The flow event adapter owns engine-event → chat-wire translation. This sink
+owns the next boundary: phase admission, then forwarding each unchanged event
+to the task event log. Live output is never rebuilt from relayed events.
+
+A visible Turn has exactly one live output source: the running child task's
+own state, which is what an ordinary chat Turn renders from its task. The
+graph runner binds each child through the task's ``_flowLiveOutputPort``; the
+sink adopts the bound child's output before every publication and once more
+when it finishes. A concurrent sibling (parallel/fanout branch) is refused the
+binding, publishes nothing live, and reaches the conversation through its
+completed step. Execution and persistence orchestration stay outside.
 """
 
 from __future__ import annotations
 
 from contextlib import nullcontext, contextmanager
-from lib.agent_core.publication import publication_commit, check_publication
+import threading
+
+from lib.agent_core.publication import (
+    ChildPublicationRevoked, check_publication, publication_commit)
 from typing import Callable
 from lib.orchestration.graph import FlowEventDeliveryError
 
@@ -26,12 +36,6 @@ _FINAL_TURN_EVENTS = frozenset({
     'flow_critic_msg',
 })
 
-_TOOL_EVENTS = frozenset({
-    'tool_start', 'tool_progress', 'tool_result', 'tool_complete',
-    'tool_compacted',
-})
-
-
 class OrchestrationChatTaskEventSink:
     """Callable live-event port for one Flow-backed chat task."""
 
@@ -42,6 +46,9 @@ class OrchestrationChatTaskEventSink:
     ):
         self._task = task
         self._append_event = append_event
+        self._source: dict | None = None
+        self._bind_lock = threading.Lock()
+        task['_flowLiveOutputPort'] = self.bind_output_source
 
     @contextmanager
     def _content_lock(self):
@@ -54,92 +61,54 @@ class OrchestrationChatTaskEventSink:
             self._task['content'] = ''
             self._task['thinking'] = ''
 
-    def _append_delta(self, event: dict) -> None:
+    @contextmanager
+    def bind_output_source(self, child: dict):
+        """Bind ``child`` as the visible output; yields whether it won."""
+        with self._bind_lock:
+            bound = self._source is None
+            if bound:
+                self._source = child
+        try:
+            yield bound
+        finally:
+            if bound:
+                try:
+                    self._hand_off_final_output(child)
+                finally:
+                    with self._bind_lock:
+                        self._source = None
+
+    def _hand_off_final_output(self, child: dict) -> None:
+        # Settlement after the last relayed frame (final segment assembly)
+        # crosses once, under the child's own publication authority: a
+        # disposed child must never overwrite the next phase's output.
+        fence = child.get('_invocationPublicationFence')
+        if fence is None:
+            self._adopt_output()
+            return
+        try:
+            fence.deliver(lambda _event: self._adopt_output(), None)
+        except ChildPublicationRevoked:
+            pass
+
+    def _adopt_output(self) -> None:
+        child = self._source
+        if child is None:
+            return
+        with child.get('content_lock') or nullcontext():
+            content = child.get('content') or ''
+            thinking = child.get('thinking') or ''
+            # Rows are copied: concurrent tool threads mutate the child's.
+            rounds = [dict(row) for row in child.get('toolRounds') or ()
+                      if isinstance(row, dict)]
+            segments = child.get('segments')
+            segments = list(segments) if isinstance(segments, list) else None
         with self._content_lock():
-            content = event.get('content')
-            thinking = event.get('thinking')
-            if content:
-                self._task['content'] = (
-                    (self._task.get('content') or '') + str(content))
-            if thinking:
-                self._task['thinking'] = (
-                    (self._task.get('thinking') or '') + str(thinking))
-
-    @staticmethod
-    def _tool_identity(round_entry: dict) -> tuple[str, int]:
-        return (
-            str(round_entry.get('toolCallId') or ''),
-            int(round_entry.get('roundNum') or 0),
-        )
-
-    def _apply_tool_event(self, event: dict) -> None:
-        """Keep reconnect/poll snapshot parity with the emitted live frame."""
-        with self._content_lock():
-            rounds = [
-                dict(row) for row in self._task.get('toolRounds') or ()
-                if isinstance(row, dict)
-            ]
-            identity = self._tool_identity(event)
-            position = next((
-                index for index, row in enumerate(rounds)
-                if self._tool_identity(row) == identity
-            ), -1)
-            event_type = str(event.get('type') or '')
-            if event_type == 'tool_start':
-                candidate = {
-                    key: event[key]
-                    for key in (
-                        'roundNum', 'llmRound', 'agentId', 'toolCallId',
-                        'toolName', 'toolArgs', 'query', 'status',
-                        'attentionKind', 'parentToolCallId', 'tStart',
-                        'inspectorRef', 'assistantContent', 'thinking',
-                        'thinkingSignature', 'attemptId', 'taskId',
-                    )
-                    if event.get(key) is not None
-                }
-                # A relayed tool_start without a verdict is a RUNNING tool.
-                # The canonical dispatcher stamps ``status='searching'`` at
-                # announce time; without the same pending marker, every Turn
-                # projection fold mirrored the round as
-                # ``result: {content: None, status: None}`` — a shape the
-                # generated snapshot contract rejects, which 500'd the whole
-                # conversation on reload (2026-09-20, conv mu5p3vn9x32wcd).
-                candidate.setdefault('status', 'searching')
-                if position < 0:
-                    rounds.append(candidate)
-                else:
-                    rounds[position].update(candidate)
-            elif position >= 0:
-                target = rounds[position]
-
-                if isinstance(event.get('inspectorRef'), dict):
-                    target.setdefault('inspectorRef', dict(event['inspectorRef']))
-                if event_type == 'tool_result':
-                    target['results'] = event.get('results')
-                    target['status'] = event.get('status') or 'done'
-                elif event_type == 'tool_progress':
-                    for key in (
-                        'detail', 'chunk', 'seq', 'spooling', 'truncated',
-                        'terminalReason', 'execStartTs', 'deadlineTs',
-                        'execTimingAtMs', 'execElapsedMs', 'deadlineRemainingMs',
-                    ):
-                        if event.get(key) is not None:
-                            target[key] = event[key]
-                elif event_type == 'tool_complete':
-                    target['toolContent'] = event.get('toolContent')
-                    if event.get('toolModelContent') is not None:
-                        target['toolModelContent'] = event['toolModelContent']
-                    target['status'] = event.get('status') or (
-                        'error' if event.get('isError') else 'done')
-                elif event_type == 'tool_compacted':
-                    if event.get('compactedContent') is not None:
-                        target['toolContent'] = event['compactedContent']
-                        target.pop('toolModelContent', None)
-                    target['compactionLayer'] = (
-                        event.get('compactionLayer') or 'L1')
-                if event.get('tEnd') is not None:
-                    target['tEnd'] = event['tEnd']
-            self._task['toolRounds'] = rounds
+            self._task.update(content=content, thinking=thinking, toolRounds=rounds)
+            if segments is None:
+                self._task.pop('segments', None)
+            else:
+                self._task['segments'] = segments
 
     def _finalize_turn(self, event: dict) -> None:
         with self._content_lock():
@@ -192,26 +161,10 @@ class OrchestrationChatTaskEventSink:
             self._task['toolRounds'] = []
             self._task.pop('segments', None)
             self._reset_turn_content()
-        elif event_type == 'state':
-            # The invocation checkpoint is already canonical and ordered.
-            # Only output fields cross: a child cannot terminate the parent.
-            with self._content_lock():
-                for key in ('content', 'thinking', 'toolRounds', 'segments'):
-                    if key in event:
-                        self._task[key] = event[key]
-
-            # This is an in-process value handoff, not a replay frame. The
-            # following structural event/final checkpoint persists its patch
-            # once through Turn authority, without O(rounds²) state events.
-            return
-        elif event_type in {'delta_reset', 'retry_reset'}:
-            self._reset_turn_content()
-        elif event_type in _TOOL_EVENTS:
-            self._apply_tool_event(event)
-        elif event_type == 'delta':
-            self._append_delta(event)
         elif event_type in _FINAL_TURN_EVENTS:
             self._finalize_turn(event)
+        else:
+            self._adopt_output()
         check_publication()
         self._append_event(self._task, event)
 

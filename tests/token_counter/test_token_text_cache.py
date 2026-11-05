@@ -394,6 +394,57 @@ def test_failed_full_request_batch_publishes_no_cache_entry(monkeypatch):
     assert REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY not in measurement
 
 
+_BOUNDARY_TEXTS = [
+    '', ' ', 'trailing spaces   ', '\n\nleading newlines', 'tab\t\n',
+    "it's 3 o'clock", '12345678', 'Hello 世界', '🙂' * 3, 'café\u0301',
+    'spelled <|endoftext|> separator', '<|fim_prefix|>other special',
+    'lone \ud800 surrogate', '\udc00 leading low', 'pair \ud83d\ude42 halves',
+    'x' * 600, 'base64 ' + 'QUJDRA' * 120,
+]
+
+
+@pytest.mark.parametrize('encoding', ['cl100k_base', 'o200k_base'])
+def test_joined_batch_counts_equal_one_encode_per_text(encoding):
+    import tiktoken
+    encoder = tiktoken.get_encoding(encoding)
+
+    counts = counter._encode_batch_counts(encoder, list(_BOUNDARY_TEXTS))
+
+    assert counts == [len(encoder.encode(text, disallowed_special=()))
+                      for text in _BOUNDARY_TEXTS]
+
+
+class _CountingEncoding:
+    """A real tiktoken encoding that counts ``encode`` calls (each releases the GIL)."""
+
+    def __init__(self, encoding):
+        self._encoding = encoding
+        self.encode_calls = 0
+        self.eot_token = encoding.eot_token
+        self.special_tokens_set = encoding.special_tokens_set
+
+    def encode(self, text, **kwargs):
+        self.encode_calls += 1
+        return self._encoding.encode(text, **kwargs)
+
+    def encode_batch(self, texts, **kwargs):
+        raise AssertionError('thread-pool batch encoding is not used')
+
+
+def test_joined_batch_releases_the_gil_once_for_ordinary_texts():
+    """tiktoken gives the GIL away per encode call; a batch makes one call."""
+    import tiktoken
+
+    encoder = _CountingEncoding(tiktoken.get_encoding('cl100k_base'))
+    texts = [f'history text {index} ' * (index % 7 + 1) for index in range(300)]
+
+    counts = counter._encode_batch_counts(encoder, texts)
+
+    assert encoder.encode_calls == 1
+    assert counts == [len(encoder._encoding.encode(text, disallowed_special=()))
+                      for text in texts]
+
+
 @pytest.mark.parametrize('encoding,model',[('cl100k_base','gpt-4'),('o200k_base','gpt-4o')])
 @pytest.mark.parametrize('texts',[
     ['Hello 世界', '<|endoftext|>🙂 café'],
@@ -408,3 +459,246 @@ def test_request_cache_preserves_exact_special_and_unicode_counts(encoding,model
     result=counter._count_request_texts_with_cache(texts,model=model,encoder=encoder,selected_text_token_counts=selected)
     assert result==expected
     assert [selected[id(text)] for text in texts]==[len(encoder.encode(text,disallowed_special=())) for text in texts]
+
+
+def test_owner_memo_encodes_only_new_texts_on_each_round(monkeypatch):
+    encoder = _FakeEncoder()
+    monkeypatch.setattr(counter, '_get_encoder', lambda _name: encoder)
+    memo = counter.RequestTextCounts()
+    messages = [{'role': 'user', 'content': f'short history {index}'}
+                for index in range(40)]
+    token_counter = counter.TiktokenCounter()
+
+    first = token_counter.count(messages, model='kimi-k3', text_count_memo=memo)
+    assert len(encoder.encoded_texts) == 40
+    messages.append({'role': 'assistant', 'content': 'new short tail'})
+    encoder.encoded_texts.clear()
+    second = token_counter.count(messages, model='kimi-k3', text_count_memo=memo)
+
+    assert encoder.encoded_texts == ['new short tail']
+    assert second == token_counter.count(messages, model='kimi-k3')
+    assert second > first
+
+
+def test_owner_memo_holds_only_current_request_and_no_text(monkeypatch):
+    encoder = _FakeEncoder()
+    monkeypatch.setattr(counter, '_get_encoder', lambda _name: encoder)
+    memo = counter.RequestTextCounts()
+    dropped = 'private compacted-away evidence ' * 10
+    kept = 'private kept evidence'
+    token_counter = counter.TiktokenCounter()
+
+    token_counter.count([{'role': 'user', 'content': dropped},
+                         {'role': 'user', 'content': kept}],
+                        model='kimi-k3', text_count_memo=memo)
+    token_counter.count([{'role': 'user', 'content': kept}],
+                        model='kimi-k3', text_count_memo=memo)
+
+    assert list(memo.counts.values()) == [len(_FakeEncoder._tokens(kept))]
+    assert not any(isinstance(key, str) for key in memo.counts)
+    assert 'private' not in repr(memo.counts)
+
+
+class _CaseFoldedText(str):
+    """Distinct texts that share ``hash`` and claim equality, as a lookup sees them."""
+
+    def __eq__(self, other):
+        return isinstance(other, str) and self.lower() == other.lower()
+
+    def __hash__(self):
+        return hash(self.lower())
+
+
+def test_owner_memo_never_reuses_a_count_across_colliding_hashes():
+    tiktoken = pytest.importorskip('tiktoken')
+    encoder = tiktoken.get_encoding('cl100k_base')
+    lower, upper = _CaseFoldedText('remembered words'), _CaseFoldedText('REMEMBERED WORDS')
+    assert hash(lower) == hash(upper) and len(lower) == len(upper)
+    exact = [len(encoder.encode(str.__str__(text), disallowed_special=()))
+             for text in (lower, upper)]
+    assert exact[0] != exact[1]
+    memo = counter.RequestTextCounts()
+
+    counts = [counter._count_request_texts_with_cache(
+        [text], model='gpt-4', encoder=encoder, request_memo=memo)
+        for text in (lower, upper)]
+
+    assert counts == exact
+
+
+def test_owner_memo_tokenizes_a_round_of_new_texts_in_one_call():
+    """Memo misses share the one-call batch; per-text encodes each release the GIL."""
+    tiktoken = pytest.importorskip('tiktoken')
+    encoder = _CountingEncoding(tiktoken.get_encoding('cl100k_base'))
+    memo = counter.RequestTextCounts()
+    history = [f'history text {index} ' * (index % 7 + 1) for index in range(50)]
+    counter._count_request_texts_with_cache(
+        history, model='gpt-4', encoder=encoder, request_memo=memo)
+    encoder.encode_calls = 0
+    grown = history + ['new tool result ' * 40, 'new reasoning', 'x' * 700]
+
+    total = counter._count_request_texts_with_cache(
+        grown, model='gpt-4', encoder=encoder, request_memo=memo)
+
+    assert encoder.encode_calls == 1
+    assert total == sum(len(encoder._encoding.encode(text, disallowed_special=()))
+                        for text in grown)
+
+
+def test_owner_memo_is_encoding_scoped(monkeypatch):
+    encoder = _FakeEncoder()
+    monkeypatch.setattr(counter, '_get_encoder', lambda _name: encoder)
+    memo = counter.RequestTextCounts()
+    messages = [{'role': 'user', 'content': 'same text'}]
+
+    counter.TiktokenCounter().count(messages, model='kimi-k3', text_count_memo=memo)
+    counter.TiktokenCounter().count(messages, model='gpt-4o', text_count_memo=memo)
+
+    assert encoder.encoded_texts == ['same text', 'same text']
+    assert memo.encoding == 'o200k_base' and len(memo.counts) == 1
+
+
+def test_failed_memo_count_keeps_previous_memo(monkeypatch):
+    encoder = _FakeEncoder()
+    monkeypatch.setattr(counter, '_get_encoder', lambda _name: encoder)
+    memo = counter.RequestTextCounts()
+    counter.TiktokenCounter().count(
+        [{'role': 'user', 'content': 'kept'}], model='kimi-k3', text_count_memo=memo)
+    before = dict(memo.counts)
+    broken = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('broken'))  # noqa: E731
+    monkeypatch.setattr(encoder, 'encode', broken)
+    monkeypatch.setattr(encoder, 'encode_batch', broken)
+
+    result = counter.TiktokenCounter().count(
+        [{'role': 'user', 'content': 'kept'}, {'role': 'user', 'content': 'new'}],
+        model='kimi-k3', text_count_memo=memo)
+
+    assert result is None
+    assert memo.counts == before
+
+
+@pytest.mark.parametrize('encoding,model', [('cl100k_base', 'gpt-4'), ('o200k_base', 'gpt-4o')])
+def test_owner_memo_matches_uncached_exact_counts(encoding, model):
+    import tiktoken
+    encoder = tiktoken.get_encoding(encoding)
+    texts = ['Hello 世界', '<|endoftext|>🙂 café', 'a' * 513, '🙂' * 512, 'Hello 世界']
+    texts += [f'row {index} ' * (index % 7 + 1) for index in range(40)]
+    expected = sum(len(encoder.encode(text, disallowed_special=())) for text in texts)
+    memo = counter.RequestTextCounts()
+    selected = {id(text): None for text in texts}
+
+    first = counter._count_request_texts_with_cache(
+        texts, model=model, encoder=encoder, request_memo=memo,
+        selected_text_token_counts=selected)
+    second = counter._count_request_texts_with_cache(
+        texts, model=model, encoder=encoder, request_memo=memo)
+
+    assert first == second == expected
+    assert [selected[id(text)] for text in texts] == [
+        len(encoder.encode(text, disallowed_special=())) for text in texts]
+
+
+def test_compaction_count_reuses_task_owned_memo(monkeypatch):
+    from lib.tasks_pkg.compaction import _tokens
+
+    seen = []
+
+    def fake_count_tokens(messages, **kwargs):
+        seen.append(kwargs.get('text_count_memo'))
+        return {'tokens': 10, 'method': 'tiktoken'}
+
+    monkeypatch.setattr('lib.token_counter.count_tokens', fake_count_tokens)
+    task = {'id': 't', 'config': {'model': 'kimi-k3'}}
+    messages = [{'role': 'user', 'content': 'hi'}]
+    _tokens._count_tokens_authoritative(messages, task)
+    _tokens._count_tokens_authoritative(messages, task, tool_schema=[])
+
+    assert all(isinstance(view, counter.RequestTextCountView) for view in seen)
+    assert seen[0].memo is seen[1].memo is task['_requestTextCountMemo']
+    assert isinstance(task['_requestTextCountMemo'], counter.RequestTextCounts)
+    assert [view.label for view in seen] == ['request', 'admission']
+
+
+@pytest.mark.parametrize('model', ['gpt-4', 'gpt-4o'])
+def test_task_memo_gate_counts_equal_memo_less_counts_across_rounds(model):
+    """Growing, rewritten and trimmed rounds count exactly as without the memo."""
+    import json
+
+    tiktoken = pytest.importorskip('tiktoken')
+    from lib.tasks_pkg.compaction import _tokens
+    from lib.token_counter.base import iter_message_texts
+
+    tools = [{'type': 'function', 'function': {
+        'name': 'run', 'description': 'Run one shell command. ' * 40,
+        'parameters': {'type': 'object', 'properties': {'cmd': {'type': 'string'}}}}}]
+    remembered_task = {'id': 'memo-rounds', 'config': {'model': model}, '_tool_schema': tools}
+    stateless_task = {**remembered_task, '_requestTextCountMemo': None}
+    encoder = tiktoken.get_encoding(counter.encoding_for_model(model))
+    messages = [{'role': 'system', 'content': 'system rules ' * 300},
+                {'role': 'user', 'content': '整理上下文 and plan 🙂 café'}]
+    for round_index in range(6):
+        call_id = f'call_{round_index}'
+        messages.append({
+            'role': 'assistant', 'content': '',
+            'reasoning_content': f'thinking {round_index} ' * 40,
+            'tool_calls': [{'id': call_id, 'type': 'function', 'function': {
+                'name': 'run', 'arguments': json.dumps({'cmd': f'ls {round_index}'})}}]})
+        messages.append({'role': 'tool', 'tool_call_id': call_id,
+                         'content': f'out {round_index} <|endoftext|> ' * (60 * round_index + 1)})
+        if round_index == 3:
+            messages[3] = {**messages[3], 'content': 'rewritten in place'}
+        if round_index == 5:
+            del messages[2:4]
+        remembered_measurement, stateless_measurement = {}, {}
+
+        remembered = _tokens._count_tokens_authoritative(
+            messages, remembered_task, measurement_out=remembered_measurement)
+        stateless = _tokens._count_tokens_authoritative(
+            messages, stateless_task, measurement_out=stateless_measurement)
+
+        assert remembered == stateless
+        assert remembered_measurement == stateless_measurement
+        assert remembered[1].startswith('tiktoken')
+        assert remembered_measurement['raw_estimate_tokens'] == sum(
+            len(encoder.encode(text, disallowed_special=()))
+            for text in iter_message_texts(messages, None, tools)
+        ) + 4 * len(messages) + 400
+    memo = remembered_task['_requestTextCountMemo']
+    assert isinstance(memo, counter.RequestTextCounts)
+    assert len(memo.counts) == len(set(iter_message_texts(messages, None, tools)))
+
+
+def test_shared_owner_memo_stays_exact_under_concurrent_mixed_encoding_rounds():
+    import threading
+
+    pytest.importorskip('tiktoken')
+    memo = counter.RequestTextCounts()
+    base = [{'role': 'user', 'content': f'history row {index} ' * (index % 9 + 1)}
+            for index in range(60)]
+    token_counter = counter.TiktokenCounter()
+    expected = {}
+    for model in ('gpt-4', 'gpt-4o'):
+        for extra in range(8):
+            messages = base + [{'role': 'tool', 'content': f'tail {extra} ' * 30}]
+            expected[(model, extra)] = token_counter.count(messages, model=model)
+    mismatches = []
+    barrier = threading.Barrier(8)
+
+    def worker(model):
+        barrier.wait()
+        for _round in range(25):
+            for extra in range(8):
+                messages = base + [{'role': 'tool', 'content': f'tail {extra} ' * 30}]
+                got = token_counter.count(messages, model=model, text_count_memo=memo)
+                if got != expected[(model, extra)]:
+                    mismatches.append((model, extra, got))
+
+    threads = [threading.Thread(target=worker, args=(('gpt-4', 'gpt-4o')[index % 2],))
+               for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert mismatches == []
+    assert memo.encoding in {'cl100k_base', 'o200k_base'}

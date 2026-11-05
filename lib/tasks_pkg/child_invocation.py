@@ -12,7 +12,9 @@ import threading as threading
 from lib.agent_core.publication import (
     ChildPublicationFence, commit_child_publication,
 )
-from lib.tasks_pkg.invocation import InvocationPolicy, execute_invocation
+from lib.tasks_pkg.invocation import (
+    InvocationPolicy, execute_invocation, settle_invocation_evidence,
+)
 
 
 def close_child_ingress(child):
@@ -95,18 +97,30 @@ def delegated_tool_discovery_policy(parent: dict, tools: list) -> dict:
 def build_child_messages(*, objective: str, context: str = '', system_prompt: str = '',
                          role_policy: str = '', artifact_hint: str = '',
                          checkpoint_messages: list | None = None,
-                         swarm_message_binding: dict | None = None) -> list:
+                         swarm_message_binding: dict | None = None,
+                         output_contract: str = '') -> list:
     """Retain dialogue and exact current-run input, never stale mailbox authority.
 
     The scheduler must supply the same binding during both checkpoint rebuild
     and task allocation. Its liveness/scope is revalidated at provider dispatch.
+    ``output_contract`` extends only a fresh objective message; a checkpoint's
+    retained objective message already carries its Result contract section.
+    The binding's per-run identifiers end the role part of ``worker_policy``,
+    so concurrent same-role siblings never send byte-identical tools+system
+    prefixes; with identical prefixes the Sankuai Claude route spread their
+    rounds across upstream cache domains (docs/LLM_COST_OPTIMIZATION.md,
+    "Sibling cache affinity").
     """
     from lib.tasks_pkg.context_composer import append_injection
     fresh = []
     if system_prompt.strip():
         fresh.append({'role': 'system', 'content': system_prompt})
+    team = ''
+    if swarm_message_binding is not None:
+        from lib.swarm.team_messages import team_guidance
+        team = '\n' + team_guidance(swarm_message_binding)
     append_injection(fresh, 'worker_policy', (
-        f'{role_policy}\n\nWork only on the delegated objective. The supplied '
+        f'{role_policy}{team}\n\nWork only on the delegated objective. The supplied '
         'tool catalog is your authority; never emulate missing privileged tools. '
         'You share a workspace: preserve changes made by the user and other agents. '
         'You cannot ask the human or delegate further; report missing capabilities '
@@ -121,7 +135,9 @@ def build_child_messages(*, objective: str, context: str = '', system_prompt: st
             mailbox = RunMessageRepository(swarm_message_binding).key
         dialogue = []
         for message in copy.deepcopy(checkpoint_messages):
-            if message.get('_contextInjectionId') in {'worker_policy', 'worker_artifacts'}:
+            # worker_team carriers come from checkpoints written while the
+            # identity rode after the objective; worker_policy now holds it.
+            if message.get('_contextInjectionId') in {'worker_policy', 'worker_team', 'worker_artifacts'}:
                 continue
             if message.get('_projectMessageIds'):
                 continue  # A child never owns its parent's project mailbox.
@@ -139,7 +155,8 @@ def build_child_messages(*, objective: str, context: str = '', system_prompt: st
         fresh.extend(dialogue)
     else:
         fresh.append({'role': 'user', 'content': objective + (
-            '\n\n## Context\n' + context if context else '')})
+            '\n\n## Context\n' + context if context else '') + (
+            '\n\n## Result contract\n' + output_contract if output_contract else '')})
     if artifact_hint:
         append_injection(fresh, 'worker_artifacts', artifact_hint)
     return fresh
@@ -200,8 +217,11 @@ def resolve_child_config(parent: dict, *, model: str, project_path: str = '',
         # below carry ModelRef instead and must never archive a slot-group pin.
         cfg.setdefault('_pinned_provider_id', parent['_pinned_provider_id'])
     if parent_ref is not None:
-        parent_model = parent.get('model') or (parent.get('config') or {}).get('model')
-        if model != parent_model:
+        # ``model`` follows the live round, including a fallback swap, while
+        # config keeps the admitted selection; either names the parent route.
+        parent_models = {name for name in (
+            parent.get('model'), (parent.get('config') or {}).get('model')) if name}
+        if model not in parent_models:
             from lib.tasks_pkg.native_invocation import NativePreparedInvocation
             from lib.model_routing import ModelRoutingError
             from lib.tasks_pkg.native_parent import resolve_native_parent
@@ -261,6 +281,7 @@ def create_child_invocation(
     max_429_attempts: int | None = None,
     progress_beacon=None, progress_key: str = '',
     execution_limits: dict | None = None,
+    output_schema: dict | None = None,
 ) -> dict:
     """Allocate a task-local carrier; borrow authority, never parent lifecycle."""
     from lib.identity import PrincipalContext
@@ -324,10 +345,14 @@ def create_child_invocation(
                         '_swarmMessageIds', '_swarmMessageMailbox'):
                 message.pop(key, None)
     else:
+        output_contract = ''
+        if output_schema is not None:
+            from lib.swarm.spawn_contracts import output_contract_text
+            output_contract = output_contract_text(output_schema)
         messages = build_child_messages(
             objective=objective, context=context, system_prompt=system_prompt,
             role_policy=role_policy, artifact_hint=artifact_hint, checkpoint_messages=checkpoint_messages,
-            swarm_message_binding=swarm_message_binding)
+            swarm_message_binding=swarm_message_binding, output_contract=output_contract)
     conversation_tool_policy = None
     if conversation_messages is not None:
         conversation_tool_policy = (
@@ -373,6 +398,8 @@ def create_child_invocation(
     )
     if swarm_message_binding is not None:
         child['_swarmMessageBinding'] = copy.deepcopy(swarm_message_binding)
+    if output_schema is not None:
+        child['_invocationOutputSchema'] = copy.deepcopy(output_schema)
     if checkpoint_result:
         child['_checkpointUsage'] = {key: checkpoint_result.get(key, 0) for key in (
             'prompt_tokens', 'completion_tokens', 'total_tokens', 'cost_usd')}
@@ -461,6 +488,9 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
     child['_invocationProgressBeacon'] = beacon
     child['_invocationProgressKey'] = progress_key
     beacon.touch(progress_key, 'admitted')
+    # The swarm's view of this agent follows the same judge as its registry
+    # task (lib/tasks_pkg/liveness.py); the reaper delivers a stall verdict.
+    beacon.bind(progress_key, child)
     stop = threading.Event()
     def mirror():
         while not stop.wait(0.1):
@@ -488,15 +518,30 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
                 execute_invocation(child, policy=child['_invocationPolicy'])
 
         close_child_ingress(child)
+        # The result is never used before its accepted Inspector evidence is
+        # durable or its refusal is recorded below.
+        settle_invocation_evidence(child)
         failure = child.get('_invocationDeliveryError')
         if failure is not None:
             # A swallowed observer exception cannot become a successful leaf.
-            raise RuntimeError('Child invocation evidence delivery failed') from failure
+            from lib.agent_core.storage_errors import describe_storage_failure
+            message = 'Child invocation evidence delivery failed'
+            try:
+                message += ': ' + describe_storage_failure(failure)
+            except Exception as diagnostic_error:
+                # Optional diagnostics must never replace the original cause.
+                from lib.log import get_logger
+                get_logger(__name__).debug(
+                    'Child evidence delivery diagnostic unavailable: %s',
+                    type(diagnostic_error).__name__)
+            raise RuntimeError(message) from failure
         return child
     finally:
         stop.set()
+        beacon.unbind(progress_key, child)
 
         close_child_ingress(child)
+        settle_invocation_evidence(child)
         child.pop('_invocationEventSink', None)
         child.pop('_invocationAbortCheck', None)
         child.pop('_invocationCheckpointSink', None)

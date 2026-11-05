@@ -25,10 +25,15 @@ logger = get_logger(__name__)
 #   gen 6 = 6fe3f9ca tool-msg marker protocol gate (OpenAI wire vendor-400:
 #           tool message unmarkable off the Anthropic protocol).
 #   gen 7 = empty tool-call content key omit vs '' / null / [] prefix freeze.
-CACHE_FIX_GEN = 7
+#   gen 8 = OpenAI-wire tail-marker walk-back past tool loops + Claude-cloak
+#           system marker carried onto the rebuilt system[] (lib/oauth).
+#   gen 9 = selected-route cache-marker support and text-only content collapse.
+#   gen 10 = only an explicit OpenAI-wire chat_cache_breakpoints declaration
+#            skips markers; undeclared profiled routes keep them.
+CACHE_FIX_GEN = 10
 
 # ── Cache-marker capability matrix ──
-# Empirically probed on the sankuai gateway (2026-05-03).
+# Empirically probed on the example-corp gateway (2026-05-03).
 #   1. Needs markers       → claude, glm-5, qwen, deepseek
 #   2. Auto-caches         → minimax, doubao (markers harmful), kimi
 #   3. Unknown             → default NO markers
@@ -171,8 +176,22 @@ def _is_prefill_converted(msg) -> bool:
     return text.startswith(CLAUDE_PREFILL_SENTINEL)
 
 
-def _gateway_honors_cache_markers(model: str) -> bool:
-    """Return True if attaching cache_control markers helps this model."""
+def _gateway_honors_cache_markers(model: str, *, inference_profile=None,
+                                  protocol: str = 'openai') -> bool:
+    """Return True if the selected route accepts cache marker annotations.
+
+    ``chat_cache_breakpoints`` is an OpenAI wire feature: only an explicit
+    declaration other than ``supported`` on that wire skips the markers. A
+    missing declaration, or another wire, keeps the model-family policy.
+    ``route_feature`` cannot express that: it is closed-world and answers
+    False for an undeclared feature and for another wire's feature alike.
+    """
+    features = (inference_profile.get('features')
+                if isinstance(inference_profile, dict) else None)
+    declared = (features.get('chat_cache_breakpoints')
+                if isinstance(features, dict) else None)
+    if protocol == 'openai' and declared not in (None, 'supported'):
+        return False
     if is_claude(model):
         return True
     enabled = os.environ.get('TOFU_CACHE_MARKERS_NONCLAUDE', '1')
@@ -207,13 +226,20 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     verbatim and the gateway's OpenAI→Anthropic translation carries the
     marker INTO ``tool_result.content[*]``, which the vendor hard-rejects
     (HTTP 400 "cache_control may not be specified within
-    `tool_result.content`" — sankuai toio gateway, yuju-claude-opus-5,
+    `tool_result.content`" — example-corp toio gateway, yuju-claude-opus-5,
     2026-07-25; the masked variant surfaces as a generic「请求失败」400).
     So on non-Anthropic wires a ``tool`` message is UNMARKABLE and the
     tail/mid scans walk past it to the assistant/user turn.
+
+    Only ``body``'s own ``messages`` / ``tools`` entries are replaced: every
+    changed message, block list or tool is a new object, so a history shared
+    with the caller, another slot attempt or a settled row is never written.
     """
     model = body.get('model', '')
-    if not _gateway_honors_cache_markers(model):
+    from lib.llm.route_features import body_route_profile
+    if not _gateway_honors_cache_markers(
+            model, inference_profile=body_route_profile(body),
+            protocol=api_protocol):
         return
 
     # Anthropic rejects cache_control nested inside tool_result.content — see
@@ -250,7 +276,10 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
         _cc_stable = {'type': 'ephemeral'}
         _cc_tail   = {'type': 'ephemeral'}
 
-    messages = body.get('messages', [])
+    messages = list(body.get('messages', []))
+    tools = body.get('tools')
+    if isinstance(tools, list):
+        tools = list(tools)
 
     # Phase 0: Strip ALL existing cache_control. A marker-carrying message
     # needs the rebuild; a clean history skips the per-block dict copies.
@@ -265,7 +294,6 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
             if _any_marker:
                 break
     if not _any_marker:
-        tools = body.get('tools')
         if tools:
             for tool in tools:
                 if (isinstance(tool, dict)
@@ -276,11 +304,14 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     if _any_marker:
         for i, msg in enumerate(messages):
             content = msg.get('content')
-            if isinstance(content, list):
-                for j, block in enumerate(content):
-                    if isinstance(block, dict) and 'cache_control' in block:
-                        content[j] = {k: v for k, v in block.items() if k != 'cache_control'}
-        tools = body.get('tools')
+            if isinstance(content, list) and any(
+                    isinstance(block, dict) and 'cache_control' in block
+                    for block in content):
+                messages[i] = {**msg, 'content': [
+                    {k: v for k, v in block.items() if k != 'cache_control'}
+                    if isinstance(block, dict) and 'cache_control' in block
+                    else block
+                    for block in content]}
         if tools:
             for t_idx, tool in enumerate(tools):
                 # Non-dict entries are dropped at the prepare_request wire
@@ -381,7 +412,8 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
                         content is None
                         or (isinstance(content, str) and not content.strip())
                         or (isinstance(content, list) and not content))):
-                    msg.pop('content', None)
+                    msg = {k: v for k, v in msg.items() if k != 'content'}
+                    messages[i] = msg
                     content = None
                 if isinstance(content, str) and content:
                     messages[i] = {**msg, 'content': [{'type': 'text', 'text': content}]}
@@ -409,7 +441,7 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     _mid_armed = (_mid_mode != 'drop'
                   and _mid_target >= _head_floor + _MID_LOOKBACK)
     _reserve = 0
-    if body.get('tools'):
+    if tools:
         _reserve += _TOOL_RESERVED_BP
     if len(messages) >= 2:
         _reserve += _TAIL_RESERVED_BP
@@ -436,13 +468,16 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
             _text_idxs = [j for j, blk in enumerate(content)
                           if isinstance(blk, dict) and blk.get('type') == 'text']
             _slots = _system_bp_budget - bp
-            for blk_idx in _text_idxs[-_slots:] if _slots > 0 else []:
-                content[blk_idx] = {**content[blk_idx],
-                                    'cache_control': dict(_cc_stable)}
-                bp += 1
+            _chosen = _text_idxs[-_slots:] if _slots > 0 else []
+            if _chosen:
+                content = list(content)
+                for blk_idx in _chosen:
+                    content[blk_idx] = {**content[blk_idx],
+                                        'cache_control': dict(_cc_stable)}
+                    bp += 1
+                messages[i] = {**msg, 'content': content}
 
     # Cache last tool definition (stable, extended TTL)
-    tools = body.get('tools')
     if tools and bp < _MAX_CACHE_BP:
         fn = tools[-1].get('function')
         if fn:
@@ -484,7 +519,9 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
                 _placed_mid = True
                 break
             elif isinstance(content, list) and content and isinstance(content[-1], dict):
-                content[-1] = {**content[-1], 'cache_control': dict(_cc_stable)}
+                messages[i] = {**msg, 'content': [
+                    *content[:-1],
+                    {**content[-1], 'cache_control': dict(_cc_stable)}]}
                 bp += 1
                 _placed_mid = True
                 break
@@ -495,7 +532,13 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     # Cache conversation tail (volatile, short TTL)
     if len(messages) >= 2 and bp < _MAX_CACHE_BP:
         _bp4_placed = False
-        for _bp4_offset in range(1, min(6, len(messages))):
+        # The Anthropic wire can mark a tool result (the translator hoists the
+        # marker onto the tool_result block), so its tail is markable within
+        # reach and keeps the historical 5-message window. Other wires can mark
+        # neither tool results nor no-prose tool-call turns, so a tool loop
+        # buries the nearest markable turn arbitrarily deep: walk back to it.
+        _bp4_window = len(messages) if _skip_tool_marking else min(6, len(messages))
+        for _bp4_offset in range(1, _bp4_window):
             idx = len(messages) - _bp4_offset
             if idx <= 0:
                 break
@@ -524,13 +567,19 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
             elif isinstance(content, list) and content:
                 last = content[-1]
                 if isinstance(last, dict):
-                    content[-1] = {**last, 'cache_control': dict(_cc_tail)}
+                    messages[idx] = {**msg, 'content': [
+                        *content[:-1], {**last, 'cache_control': dict(_cc_tail)}]}
                     bp += 1
                     _bp4_placed = True
                     break
         if not _bp4_placed and log_prefix:
             logger.debug('%s Cache: BP4 tail breakpoint could not be placed '
                          '(no message with content near tail)', log_prefix)
+
+    if 'messages' in body:
+        body['messages'] = messages
+    if isinstance(tools, list):
+        body['tools'] = tools
 
     if bp > 0 and log_prefix:
         _ttl_info = ' (mixed TTL: BP1-3=1h, BP4=5m)' if use_extended_ttl else ''

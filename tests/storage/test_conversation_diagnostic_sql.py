@@ -792,6 +792,33 @@ def test_token_cannot_be_reused_for_identical_projection_at_another_turn(store):
 
 
 @pytest.mark.parametrize("checkpoint", [False, True])
+def test_unchanged_source_keeps_its_token_across_unrelated_revisions(store, checkpoint):
+    # Like native, the token binds the Turn's source generation, not the
+    # conversation revision: a reader may continue a source, or re-verify a
+    # complete copy, after unrelated writes; a changed Turn still conflicts.
+    store.projection_head({"content": "a" * 131072}, checkpoint=checkpoint)
+    before = store.query("turn", revision=42, index=0)
+    first = store.chunk(before, limit=65536)
+    store.write("UPDATE storage_conversations SET rev=43, updated_at_ms=130 WHERE id='conv'")
+    after = store.query("turn", revision=43, index=0)
+    assert after["source"] == before["source"] and after["patches"] == before["patches"]
+    joined, offset = bytearray(base64.b64decode(first["data"])), first["nextOffset"]
+    while offset is not None:
+        rest = store.query("chunk", revision=43, index=0, source_token=before["source"]["token"],
+                           offset=offset)
+        assert rest["revision"] == 43 and rest["sourceToken"] == before["source"]["token"]
+        joined.extend(base64.b64decode(rest["data"]))
+        offset = rest["nextOffset"]
+    assert orjson.loads(bytes(joined)) == {"content": "a" * 131072}
+    store.write("UPDATE storage_conversation_turns SET status='completed' WHERE turn_id='turn'")
+    store.write("UPDATE storage_conversations SET rev=44 WHERE id='conv'")
+    assert store.query("turn", revision=44, index=0)["source"]["token"] != before["source"]["token"]
+    with pytest.raises(StorageError) as failure:
+        store.query("chunk", revision=44, index=0, source_token=before["source"]["token"], offset=0)
+    assert failure.value.code == "database_conflict"
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
 @pytest.mark.parametrize("kind", ["turn", "chunk"])
 def test_postgres_same_revision_replacement_during_request_is_conflict(store, monkeypatch, checkpoint, kind):
     if store.session.backend != "postgres":

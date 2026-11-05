@@ -11,6 +11,7 @@
     {"model_id": "deepseek/deepseek-v4-pro-0813", "capabilities": ["text"]},
     {"model_id": "zai-org/glm-5.3", "capabilities": ["text", "thinking"]},
     {"model_id": "moonshotai/kimi-k3", "capabilities": ["text"]},
+    {"model_id": "moonshotai/kimi-k3.1-pro", "capabilities": ["text"]},
     {"model_id": "qwen/qwen3.6-27b", "capabilities": ["text"]}
   ]
 }

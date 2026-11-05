@@ -39,32 +39,125 @@ use crate::authority::AuthorityDatabase;
 // they are not a per-authority correlation or a health/admission decision.
 #[derive(Clone, Copy)]
 #[repr(u8)]
-enum HoldPhase { RotationPrepare, RotationInstall, PackPrepare, PackInstall,
+enum BackgroundHold { RotationPrepare, RotationInstall, PackPrepare, PackInstall,
     OverlayCapture, OverlayPublish, MaintenanceRound, HistoryInstall,
     SearchPrepare, SearchAcknowledge, SearchActivation, SearchBackfill, SearchDirtyList,
     ArchiveCapture, ArchivePublish, RotationPartial, RotationHandover, SearchActivationCapture }
-const HOLD_PHASES: [(HoldPhase, &str); 18] = [
-    (HoldPhase::RotationPrepare, "rotation.prepare"),
-    (HoldPhase::RotationInstall, "rotation.install"),
-    (HoldPhase::PackPrepare, "pack.prepare"),
-    (HoldPhase::PackInstall, "pack.install"),
-    (HoldPhase::OverlayCapture, "overlay.capture"),
-    (HoldPhase::OverlayPublish, "overlay.publish"),
-    (HoldPhase::MaintenanceRound, "maintenance.round"),
-    (HoldPhase::HistoryInstall, "history.install"),
-    (HoldPhase::SearchPrepare, "search.prepare"),
-    (HoldPhase::SearchAcknowledge, "search.acknowledge"),
-    (HoldPhase::SearchActivation, "search.activation"),
-    (HoldPhase::SearchBackfill, "search.backfill"),
-    (HoldPhase::SearchDirtyList, "search.dirty-list"),
-    (HoldPhase::ArchiveCapture, "archive.capture"),
-    (HoldPhase::ArchivePublish, "archive.publish"),
-    (HoldPhase::RotationPartial, "rotation.partial"),
-    (HoldPhase::RotationHandover, "rotation.handover"),
-    (HoldPhase::SearchActivationCapture, "search.activation-capture"),
+const BACKGROUND_HOLDS: [(BackgroundHold, &str); 18] = [
+    (BackgroundHold::RotationPrepare, "rotation.prepare"),
+    (BackgroundHold::RotationInstall, "rotation.install"),
+    (BackgroundHold::PackPrepare, "pack.prepare"),
+    (BackgroundHold::PackInstall, "pack.install"),
+    (BackgroundHold::OverlayCapture, "overlay.capture"),
+    (BackgroundHold::OverlayPublish, "overlay.publish"),
+    (BackgroundHold::MaintenanceRound, "maintenance.round"),
+    (BackgroundHold::HistoryInstall, "history.install"),
+    (BackgroundHold::SearchPrepare, "search.prepare"),
+    (BackgroundHold::SearchAcknowledge, "search.acknowledge"),
+    (BackgroundHold::SearchActivation, "search.activation"),
+    (BackgroundHold::SearchBackfill, "search.backfill"),
+    (BackgroundHold::SearchDirtyList, "search.dirty-list"),
+    (BackgroundHold::ArchiveCapture, "archive.capture"),
+    (BackgroundHold::ArchivePublish, "archive.publish"),
+    (BackgroundHold::RotationPartial, "rotation.partial"),
+    (BackgroundHold::RotationHandover, "rotation.handover"),
+    (BackgroundHold::SearchActivationCapture, "search.activation-capture"),
 ];
-fn hold_phase(operation: &str) -> Option<HoldPhase> {
-    HOLD_PHASES.iter().find_map(|(phase, name)| (*name == operation).then_some(*phase))
+fn background_hold(operation: &str) -> Option<BackgroundHold> {
+    BACKGROUND_HOLDS.iter().find_map(|(hold, name)| (*name == operation).then_some(*hold))
+}
+
+/// Fixed phase vocabulary of an attributed hold, in `HOLD_PHASE_NAMES` order.
+/// Each instrumented stage that runs inside the hold charges its exclusive
+/// time to one phase; time outside every instrumented stage is `Other`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum HoldPhase { Decode, Execute, Read, Stage, Validate, Journal, Sync, Apply,
+    Merge, Retention, Publish, Wait, Other }
+pub(crate) const HOLD_PHASE_NAMES: [&str; 13] = ["decode", "execute", "read", "stage",
+    "validate", "journal", "sync", "apply", "merge", "retention", "publish", "wait", "other"];
+
+/// The phase a stage charges, or None when it inherits its enclosing span's
+/// phase (generic writes, wrappers, counters). Physical reads, fsyncs and
+/// waits keep their own phase whatever their purpose.
+pub(crate) fn hold_phase_of_stage(stage: usize) -> Option<HoldPhase> {
+    use crate::fsync_stats::*;
+    use crate::request_profile as profile;
+    Some(match stage {
+        STAGE_SEMANTIC_TRANSACTION_COMPILE | STAGE_SEMANTIC_PAYLOAD_DECODE
+        | STAGE_PROTOCOL_FRAME_AFTER_PREFIX | STAGE_PROTOCOL_FRAME_DECODE
+        | STAGE_EMBEDDED_ENVELOPE_DECODE | STAGE_EMBEDDED_PAYLOAD_VALIDATE
+        | STAGE_EMBEDDED_NUMERIC_COMPATIBILITY | STAGE_EMBEDDED_VALUE_FALLBACK
+        | STAGE_EMBEDDED_PAYLOAD_PROOF | profile::PARALLEL_COMPILE => HoldPhase::Decode,
+        STAGE_SEMANTIC | STAGE_IR_STEPS | STAGE_COMMAND_EXECUTE | STAGE_PARALLEL_PREPARE
+        | STAGE_TURN_EVENT_LOAD | STAGE_TURN_EVENT_PROJECTION | STAGE_TURN_EVENT_STORE
+        | STAGE_TA_CLAIMS | STAGE_TA_HEADER | STAGE_TA_LANE_READS | STAGE_TA_PROJECTION
+        | STAGE_TA_DOCUMENT | STAGE_TA_INDEXES | STAGE_TA_DIRTY | STAGE_TA_SYNC
+        | STAGE_PROJECTION_HEAD_MATERIALIZE | STAGE_PROJECTION_HEAD_CHECKPOINT
+        | STAGE_PROJECTION_HEAD_PATCH_APPLY | STAGE_DOCUMENT_VALUE_MATERIALIZE
+        | STAGE_DOCUMENT_JSON_CANONICAL | STAGE_DOCUMENT_PROJECT_ENCODE
+        | STAGE_DOCUMENT_JSON_FALLBACK | profile::QUERY_EXECUTE | profile::TURN_PUBLIC
+        | profile::TURN_SNAPSHOT_ENCODE | profile::TURN_SNAPSHOT_WINDOW
+        | profile::TURN_SNAPSHOT_ATTEMPTS => HoldPhase::Execute,
+        STAGE_LOAD_NODE | STAGE_BLOCK_GET | STAGE_GET_PENDING | STAGE_GET_CACHE
+        | STAGE_GET_UNCACHED_OK | STAGE_GET_UNCACHED_MISS | STAGE_OVERLAY_POINT
+        | STAGE_OVERLAY_VIEW | STAGE_HISTORY_DECODE | STAGE_HISTORY_LOOKUP | STAGE_HISTORY_RANGE
+        | STAGE_PROJECTION_HEAD_PATCH_LOAD | STAGE_ENTITY_PAGE_SOURCE_READ
+        | STAGE_ENTITY_PAGE_DECODE | STAGE_BLOCK_SHARED_READ | STAGE_BLOCK_CACHE_ACCESS
+        | STAGE_BLOCK_HISTORY_RESOLVE | STAGE_BLOCK_HISTORY_SOURCE_OPEN
+        | STAGE_BLOCK_HISTORY_SOURCE_READ | STAGE_BLOCK_CONTENT_VERIFY
+        | STAGE_BLOCK_MATERIALIZED_RESOLVE | STAGE_BLOCK_LOOSE_READ | STAGE_BLOB_MANIFEST_OPEN
+        | STAGE_BLOB_CHUNK_SOURCE | STAGE_BLOB_CHUNK_DECODE | STAGE_BLOB_CHUNK_HASH
+        | STAGE_BLOB_CONTENT_HASH | STAGE_BLOB_BUFFER_COLLECT | STAGE_BLOB_CHUNK_CACHE_ACCESS
+        | STAGE_BLOB_WHOLE_PROOF_LOOKUP | STAGE_BLOB_WHOLE_PROOF_DEPENDENCIES
+        | STAGE_BLOB_WHOLE_PROOF_STORE | STAGE_PUBLISHED_READ_LOOKUP | STAGE_PUBLISHED_READ_PIN
+        | STAGE_PUBLISHED_READ_CLONE | STAGE_ENTITY_POINT_PREPARE | STAGE_ENTITY_POINT_RESOLVE
+        | STAGE_ENTITY_POINT_RETAIN | STAGE_PACK_FILTER | STAGE_PACK_FILTER_INCOMPLETE
+        | profile::VFS_OPEN | profile::VFS_READ | profile::VFS_METADATA | profile::VFS_DIRECTORY
+        | profile::DOCUMENT_MATERIALIZE => HoldPhase::Read,
+        STAGE_STORE_PAGE | STAGE_PUT_DEFERRED | STAGE_PUT_STAGE | STAGE_BLOB_ENCODE
+        | STAGE_BLOB_STAGE | STAGE_PREPARED_BLOB_PUBLISH
+        | STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH | STAGE_AUTHORITY_COMMIT_STREAM_PREPARE
+        | profile::BLOB_CODEC_COMPRESS | profile::STREAM_SEGMENT_ENCODE
+        | profile::STREAM_SEGMENT_FRESH_PUBLISH => HoldPhase::Stage,
+        STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE | STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS
+        | STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS
+        | STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES => HoldPhase::Validate,
+        STAGE_ENGINE_COMMIT | STAGE_BUILDER | STAGE_ENCODE | STAGE_CARRIED | STAGE_WAL
+        | STAGE_COMMIT_TAIL => HoldPhase::Journal,
+        STAGE_WAL_BARRIER_WAIT | STAGE_WAL_BARRIER_SYNC | STAGE_CK_WAIT
+        | profile::VFS_SYNC => HoldPhase::Sync,
+        STAGE_PREPARE | STAGE_APPLY | STAGE_TA_PREPARE_FAST => HoldPhase::Apply,
+        STAGE_APPLY_BATCH | STAGE_CHECKPOINT_IF | STAGE_DRAIN_STEP | STAGE_STEP_CHUNK
+        | STAGE_STEP_MANIFEST | STAGE_CK_MATERIALIZE | STAGE_CK_SEGMENTS | STAGE_CK_MANIFEST
+        | STAGE_CK_WAL | STAGE_CK_CONTROL | STAGE_FLUSH_DIRTY | STAGE_CK_DRAIN | STAGE_CK_CLEAR
+        | STAGE_CK_SWAP | STAGE_PACK_ADOPT | STAGE_HISTORY_STAGE | STAGE_CATALOG_PUBLISH
+        | STAGE_CATALOG_WRITE | STAGE_CATALOG_INSTALL | STAGE_CATALOG_CONTROL
+        | STAGE_TA_PREPARE_MERGE | STAGE_OVERLAY_REPLAY | STAGE_OVERLAY_SELECT
+        | STAGE_OVERLAY_CARRY_BUDGET | STAGE_OVERLAY_PUBLISH | STAGE_CHECKPOINT_TOTAL
+        | STAGE_OVERLAY_PREPARE_CAPTURE | STAGE_OVERLAY_PREPARE_ENCODE
+        | STAGE_OVERLAY_PREPARE_PUBLISH | STAGE_ROTATION_PREFIX_ENCODE
+        | STAGE_ROTATION_WINDOW_CAPTURE | STAGE_ROTATION_WINDOW_ENCODE
+        | STAGE_ROTATION_INSTALL_DIRTY_CONTROL | STAGE_ROTATION_INSTALL_WINDOW
+        | STAGE_ROTATION_INSTALL_MANIFEST | STAGE_ROTATION_INSTALL_WAL
+        | STAGE_ROTATION_INSTALL_CONTROL | STAGE_ROTATION_INSTALL_RELEASE
+        | STAGE_ROTATION_GENERATION_HANDOVER
+        | STAGE_ROTATION_PREDECESSOR_INSTALL => HoldPhase::Merge,
+        STAGE_CK_REMOVE | STAGE_PACK_RETIRE | STAGE_RETENTION_PRUNE => HoldPhase::Retention,
+        STAGE_TURN_EVENT_PUBLISH | STAGE_TA_RECEIPT | STAGE_TA_OUTBOX | STAGE_RECEIPT_ENCODE
+        | STAGE_RECEIPT_COMPRESS | STAGE_AUTHORITY_COMMIT_INDEXES
+        | STAGE_AUTHORITY_COMMIT_OUTBOX_CAPTURE | STAGE_IR_RESULT_EXTRACT
+        | STAGE_IR_RECEIPT_RESPONSE_POLICY | STAGE_SEMANTIC_RESPONSE_VALIDATE
+        | STAGE_EMBEDDED_RESPONSE_ENCODE | STAGE_EMBEDDED_ENVELOPE_BUILD
+        | STAGE_PUBLISHED_READ_PUBLISH => HoldPhase::Publish,
+        STAGE_AUTHORITY_WAIT | STAGE_ENTITY_PAGE_CACHE_READ_WAIT
+        | STAGE_ENTITY_PAGE_CACHE_WRITE_WAIT | STAGE_BLOCK_PENDING_WAIT | STAGE_BLOCK_CACHE_WAIT
+        | STAGE_BLOCK_HISTORY_SOURCE_WAIT | STAGE_PIN_REGISTRY_WAIT | STAGE_PARALLEL_SNAPSHOT_WAIT
+        | STAGE_OVERLAY_PREPARE_BUDGET_WAIT | STAGE_ROTATION_PARK | STAGE_ROTATION_PREPARE_WAIT
+        | STAGE_ROTATION_INSTALL_WAIT | STAGE_EMBEDDED_WAIT_RESPONSE | STAGE_EMBEDDED_QUEUE_WAIT
+        | profile::FIFO_WAIT | profile::MUTEX_WAIT | profile::BLOB_CODEC_WAIT => HoldPhase::Wait,
+        _ => return None,
+    })
 }
 struct HoldCounters { calls: AtomicU64, nanos: AtomicU64, maximum: AtomicU64 }
 impl HoldCounters {
@@ -75,11 +168,11 @@ impl HoldCounters {
         self.calls.fetch_add(1, Ordering::Relaxed);
     }
 }
-static HOLD_COUNTERS: [HoldCounters; HOLD_PHASES.len()] = [const { HoldCounters::new() }; HOLD_PHASES.len()];
+static HOLD_COUNTERS: [HoldCounters; BACKGROUND_HOLDS.len()] = [const { HoldCounters::new() }; BACKGROUND_HOLDS.len()];
 pub(crate) fn hold_profile() -> serde_json::Value {
     if !crate::request_profile::enabled() { return serde_json::json!({"enabled": false}); }
-    let phases: Vec<_> = HOLD_PHASES.iter().map(|(phase, name)| {
-        let counters = &HOLD_COUNTERS[*phase as usize];
+    let phases: Vec<_> = BACKGROUND_HOLDS.iter().map(|(hold, name)| {
+        let counters = &HOLD_COUNTERS[*hold as usize];
         serde_json::json!({"phase": name, "calls": counters.calls.load(Ordering::Relaxed),
             "totalNanos": counters.nanos.load(Ordering::Relaxed),
             "maximumNanos": counters.maximum.load(Ordering::Relaxed)})
@@ -93,25 +186,30 @@ pub(crate) fn hold_profile() -> serde_json::Value {
 /// A bounded-frequency diagnostic for completed slow authority holds. No user
 /// payloads are recorded. The threshold limits one holder to at most one line
 /// per second; a stuck holder remains visible through the independent watcher.
+/// A reporting hold attributes its own thread's instrumented spans, so the line
+/// names how its elapsed time split across the phases inside the hold.
 pub(crate) struct AuthorityHoldTimer<'a> {
     operation: &'a str,
     started: Option<Instant>,
     warn: bool,
-    phase: Option<HoldPhase>,
+    hold: Option<BackgroundHold>,
+    attribution: Option<crate::request_profile::HoldToken>,
 }
 
 impl<'a> AuthorityHoldTimer<'a> {
     pub(crate) fn start(operation: &'a str) -> Self {
+        let attribution = crate::request_profile::begin_hold();
         Self { operation, started: Some(Instant::now()), warn: true,
-            phase: if crate::request_profile::enabled() { hold_phase(operation) } else { None } }
+            hold: if crate::request_profile::enabled() { background_hold(operation) } else { None },
+            attribution }
     }
 }
 
 impl<'a> AuthorityHoldTimer<'a> {
     /// Counter-only observer: no clock read or extra warning when disabled.
     pub(crate) fn probe(operation: &'a str) -> Self {
-        let phase = if crate::request_profile::enabled() { hold_phase(operation) } else { None };
-        Self { operation, started: phase.map(|_| Instant::now()), warn: false, phase }
+        let hold = if crate::request_profile::enabled() { background_hold(operation) } else { None };
+        Self { operation, started: hold.map(|_| Instant::now()), warn: false, hold, attribution: None }
     }
 }
 
@@ -119,14 +217,45 @@ impl Drop for AuthorityHoldTimer<'_> {
     fn drop(&mut self) {
         let Some(started) = self.started else { return; };
         let elapsed = started.elapsed();
-        if let Some(phase) = self.phase {
-            HOLD_COUNTERS[phase as usize].record(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let reported = self.warn && elapsed >= Duration::from_secs(1);
+        let attribution = self.attribution.take()
+            .map(|token| crate::request_profile::finish_hold(token, nanos, reported));
+        if let Some(hold) = self.hold {
+            HOLD_COUNTERS[hold as usize].record(nanos);
         }
-        if self.warn && elapsed >= Duration::from_secs(1) {
-            crate::engine_log::warn("authority_hold", &format!(
-                "operation={} elapsed_ms={}", self.operation, elapsed.as_millis()));
+        if reported {
+            crate::engine_log::warn("authority_hold",
+                &hold_message(self.operation, elapsed, attribution.as_ref()));
         }
     }
+}
+
+fn milliseconds(nanos: u64) -> String { format!("{:.1}", nanos as f64 / 1e6) }
+
+/// `operation=<op> elapsed_ms=<n> phases=<phase>:<ms>,... stages=<stage>:<ms>,...`
+/// Both lists are exclusive milliseconds in descending order; `phases` sums to
+/// the elapsed time. A hold nested in another attributed hold on the same
+/// thread prints no lists: the outer hold's line carries its spans.
+fn hold_message(operation: &str, elapsed: Duration,
+    attribution: Option<&crate::request_profile::HoldReport>) -> String {
+    let mut message = format!("operation={operation} elapsed_ms={}", elapsed.as_millis());
+    let Some(report) = attribution else { return message; };
+    let mut phases: Vec<_> = HOLD_PHASE_NAMES.iter().zip(report.phases)
+        .filter(|(_, nanos)| *nanos != 0).collect();
+    phases.sort_by(|a, b| b.1.cmp(&a.1));
+    let list = |entries: &mut dyn Iterator<Item = (&str, u64)>| entries
+        .map(|(name, nanos)| format!("{name}:{}", milliseconds(nanos))).collect::<Vec<_>>().join(",");
+    message.push_str(" phases=");
+    message.push_str(&list(&mut phases.into_iter().map(|(name, nanos)| (*name, nanos))));
+    if !report.stages.is_empty() {
+        message.push_str(" stages=");
+        message.push_str(&list(&mut report.stages.iter().copied()));
+    }
+    if report.invalid_spans != 0 {
+        message.push_str(&format!(" invalid_spans={}", report.invalid_spans));
+    }
+    message
 }
 
 /// Probe cadence. Cheap enough that 40 probes fit the wedge threshold;
@@ -328,11 +457,73 @@ mod tests {
         assert_eq!(counters.calls.load(Ordering::Relaxed), 4000);
         assert_eq!(counters.nanos.load(Ordering::Relaxed), 10000);
         assert_eq!(counters.maximum.load(Ordering::Relaxed), 4);
-        assert!(hold_phase("turn.append_settled").is_none());
-        assert!(hold_phase("private owner/key/payload").is_none());
-        for (phase, name) in HOLD_PHASES { assert_eq!(hold_phase(name).unwrap() as u8, phase as u8); }
+        assert!(background_hold("turn.append_settled").is_none());
+        assert!(background_hold("private owner/key/payload").is_none());
+        for (hold, name) in BACKGROUND_HOLDS { assert_eq!(background_hold(name).unwrap() as u8, hold as u8); }
         eprintln!("authority_hold_resources: counters={} timer={}",
             std::mem::size_of_val(&HOLD_COUNTERS), std::mem::size_of::<AuthorityHoldTimer<'_>>());
+    }
+
+    #[test]
+    fn slow_hold_line_names_exclusive_phases_then_stages_in_descending_order() {
+        let mut phases = [0; HOLD_PHASE_NAMES.len()];
+        phases[HoldPhase::Read as usize] = 1_500_200_000;
+        phases[HoldPhase::Journal as usize] = 99_800_000;
+        phases[HoldPhase::Other as usize] = 400_000_000;
+        phases[HoldPhase::Sync as usize] = 400_000_000;
+        let report = crate::request_profile::HoldReport { phases,
+            stages: vec![("get_unc_ok", 1_400_000_000), ("wal", 99_800_000)], invalid_spans: 0 };
+        assert_eq!(hold_message("turn.event.record", Duration::from_millis(2_400), Some(&report)),
+            "operation=turn.event.record elapsed_ms=2400 phases=read:1500.2,sync:400.0,other:400.0,\
+             journal:99.8 stages=get_unc_ok:1400.0,wal:99.8");
+        assert_eq!(hold_message("rotation.install", Duration::from_millis(1_250), None),
+            "operation=rotation.install elapsed_ms=1250");
+        let crossing = crate::request_profile::HoldReport { phases: [0; HOLD_PHASE_NAMES.len()],
+            stages: Vec::new(), invalid_spans: 2 };
+        assert!(hold_message("x", Duration::from_secs(1), Some(&crossing)).ends_with(" invalid_spans=2"));
+    }
+
+    #[test]
+    fn reporting_holds_own_their_threads_attribution_and_probes_never_do() {
+        let stage = crate::fsync_stats::STAGE_WAL;
+        {
+            let _probe = AuthorityHoldTimer::probe("maintenance.round");
+            assert!(crate::request_profile::enter(stage).is_none());
+        }
+        {
+            let hold = AuthorityHoldTimer::start("turn.event.record");
+            assert!(hold.attribution.is_some());
+            let span = crate::request_profile::enter(stage);
+            assert!(span.is_some());
+            crate::request_profile::exit(span, 1);
+            let nested = AuthorityHoldTimer::start("overlay.publish");
+            assert!(nested.attribution.is_none());
+            drop(nested);
+            assert!(crate::request_profile::enter(stage).is_some(), "the outer hold still attributes");
+        }
+        assert!(crate::request_profile::enter(stage).is_none());
+        std::thread::spawn(move || assert!(crate::request_profile::enter(stage).is_none()))
+            .join().unwrap();
+    }
+
+    #[test]
+    fn every_stage_name_has_one_phase_or_inherits() {
+        // Phases come from the fixed vocabulary; reads, fsyncs and waits are
+        // physical and never inherit their caller's phase.
+        let names = crate::fsync_stats::STAGE_NAMES.len();
+        for stage in 0..names + 32 {
+            if let Some(phase) = hold_phase_of_stage(stage) {
+                assert!((phase as usize) < HOLD_PHASE_NAMES.len());
+                assert_ne!(phase, HoldPhase::Other, "Other is only the uncovered remainder");
+            }
+        }
+        for stage in [crate::request_profile::VFS_SYNC, crate::fsync_stats::STAGE_WAL_BARRIER_WAIT] {
+            assert_eq!(hold_phase_of_stage(stage), Some(HoldPhase::Sync));
+        }
+        assert_eq!(hold_phase_of_stage(crate::request_profile::VFS_READ), Some(HoldPhase::Read));
+        assert_eq!(hold_phase_of_stage(crate::fsync_stats::STAGE_RETENTION_PRUNE), Some(HoldPhase::Retention));
+        assert_eq!(hold_phase_of_stage(crate::request_profile::VFS_WRITE), None);
+        assert_eq!(hold_phase_of_stage(crate::fsync_stats::STAGE_IR_COMMIT), None);
     }
 
     #[test]

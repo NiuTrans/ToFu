@@ -98,10 +98,10 @@ def _silent_broad_handlers(source, path):
             for call in ast.walk(handler)
             if isinstance(call, ast.Call)
         )
-        reraises = any(
-            isinstance(item, ast.Raise) and item.exc is None
-            for item in ast.walk(handler)
-        )
+        # Both bare re-raises and explicit/chained raises propagate failure.
+        # Original exception identity and cleanup semantics have runtime specs;
+        # this guard detects absence of an error port, not exception policy.
+        reraises = any(isinstance(item, ast.Raise) for item in ast.walk(handler))
         # A Future is an explicit error port, not a swallowed exception.
         # The generated kernel also delegates initializer failure to its
         # one failed-Future owner, verified by the shared lifecycle suite.
@@ -132,6 +132,8 @@ def _silent_broad_handlers(source, path):
     ("return {'failure': None}", False),
     ('return lambda: error', False),
     ('raise', True),
+    ('raise error', True),
+    ('raise RuntimeError("context") from error', True),
     ('future.set_exception(error)', True),
     ('logger.exception("failed")', True),
 ])

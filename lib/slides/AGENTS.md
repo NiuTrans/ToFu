@@ -30,6 +30,9 @@ model-facing format contract is `guide/PPTD_CHEATSHEET.md`.
   pair after interruption. A candidate passes page layout and pixel review,
   then whole-deck coherence, before adoption; known major/blocker findings
   prevent export. Native export is atomic and requires `pptx_qa.py` package QA.
+  `review_context.py` projects the effective outline and cited excerpts for
+  shared visual QA; plan text is never evidence. Review/cache/repair use the
+  same context, including owner-approved outline revisions.
 - Conversational edits are bounded revisions over a FINISHED deck:
   deterministic field mutations belong in `patch.py` (zero-LLM, validated,
   layout-measured, rolled back on regression), deck-level token swaps belong
@@ -51,7 +54,11 @@ Run `tests/slides/test_slides.py` (format/export/QA contracts),
 `tests/slides/test_slides_batch_edit.py` (conversational revision),
 `tests/slides/test_slides_creative_foundation.py`,
 `tests/slides/test_slides_semantic_components.py`, and
-`tests/slides/test_slides_portability.py` (font embedding). Add
+`tests/slides/test_slides_portability.py` (font embedding). Use
+`tests/slides/test_chart_preview_portability.py` for chart geometry, CJK labels
+and chart-only embedding enforcement. Add
 production-substrate tests when shared stage semantics are affected.
 Use `test_slides_visual_repair.py`, `test_visual_repair_recovery.py`, and
 `test_pptx_package_qa.py` for adoption, interruption, and native-package gates.
+Use `test_slides_evidence_review.py`, `test_slide_evidence.py`, and
+`test_slides_audience_guidance.py` for evidence, cache identity and audience rules.

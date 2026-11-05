@@ -27,6 +27,7 @@ import os
 from quart import Blueprint, request
 
 from lib.quart_sync import request_json
+from lib.error_envelope import BadRequest
 
 from lib.api_response import (
     api_bad_request, api_conflict, api_created, api_error, api_forbidden,
@@ -150,7 +151,7 @@ def create_memory_v1():
             scope=data.get('scope', 'global'),
             project_path=_project_path(),
         )
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(e)
     logger.info('[Memory.v1] created %s', mem.get('id', '?'))
     mem.pop('filepath', None)
@@ -167,7 +168,7 @@ def update_memory_v1(memory_id):
         mem = update_memory(memory_id, data, project_path=_project_path())
     except MemoryRevisionConflict as e:
         return api_conflict(e)
-    except ValueError as e:
+    except BadRequest as e:
         # Payload bounds/package authority failures are actionable 400s.
         return api_bad_request(e)
     if not mem:
@@ -186,7 +187,7 @@ def delete_memory_v1(memory_id):
         ok = delete_memory(memory_id, project_path=_project_path())
     except MemoryRevisionConflict as e:
         return api_conflict(e)
-    except ValueError as e:
+    except BadRequest as e:
         # Package guard: uninstall skill packages via /api/v1/skills.
         return api_bad_request(e)
     if not ok:
@@ -219,7 +220,7 @@ def merge_memories_v1():
         )
     except MemoryRevisionConflict as e:
         return api_conflict(e)
-    except ValueError as e:
+    except BadRequest as e:
         logger.debug('[Memory.v1] merge validation error: %s', e)
         return api_bad_request(e)
     result['merged_memory'].pop('filepath', None)
@@ -238,7 +239,7 @@ def toggle_memory_v1(memory_id):
                             project_path=_project_path())
     except MemoryRevisionConflict as e:
         return api_conflict(e)
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(e)
     if not mem:
         return api_not_found('Memory not found')

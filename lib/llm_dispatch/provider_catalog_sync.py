@@ -22,8 +22,13 @@ Safety rails
   per-owner ``dismissed`` ledger and is never re-added.
 * **Bounded.** Aggregator-scale catalogs (more than ``_MAX_CATALOG_MODELS``
   rows, e.g. OpenRouter) are skipped wholesale: flooding the aggregate with
-  hundreds of relay identities is never correct. One pass adds at most
-  ``_MAX_ADDITIONS_PER_PROVIDER`` models to one provider access.
+  hundreds of relay identities is never correct as an automatic action. One
+  pass adds at most ``_MAX_ADDITIONS_PER_PROVIDER`` models to one provider
+  access.
+* **Explicit load-all.** :func:`import_listed_models` is the owner's request
+  for one provider's whole listing. It shares the add-only append and the
+  ledger, but neither automatic bound applies and it restores models the
+  sweep had dismissed.
 * **Fail-closed per provider.** One failing endpoint never masks the
   others; repeated failures of the same access log at DEBUG after the
   first WARNING so a dead key does not spam the log every pass.
@@ -55,6 +60,7 @@ from .discovery import discover_models, is_local_endpoint
 logger = get_logger(__name__)
 
 __all__ = [
+    'import_listed_models',
     'poll_if_due',
     'sweep_once',
     'start_provider_catalog_sync',
@@ -515,6 +521,84 @@ def sweep_once(discover=None, *, boundary: OwnerBoundary | None = None,
             logger.error('[CatalogSync] slot rebuild failed: %s', e,
                          exc_info=True)
     return stats
+
+
+def import_listed_models(boundary: OwnerBoundary, repository, provider_id: str,
+                         *, discover=None) -> dict:
+    """Import every model one provider's authenticated listing offers.
+
+    Raises ``ModelRoutingError`` with kind ``provider_not_found``,
+    ``provider_listing_unavailable`` (no enabled remote connection with a
+    saved API key) or ``provider_listing_empty``. ``discover(base_url,
+    api_key)`` is the injected seam shared with :func:`sweep_once`.
+    """
+    authority = repository.get(boundary)
+    document = authority.document
+    access_ids = {
+        row.get('provider_access_id')
+        for row in document.get('provider_accesses') or []
+        if isinstance(row, dict) and row.get('provider_id') == provider_id
+    }
+    if not access_ids:
+        raise ModelRoutingError(
+            'provider not found', kind='provider_not_found', field='provider_id')
+    targets = [target for target in _eligible_targets(document)
+               if target['access_id'] in access_ids]
+    if not targets:
+        raise ModelRoutingError(
+            'this provider has no enabled remote connection with a saved API '
+            'key to list models from', kind='provider_listing_unavailable')
+
+    state = _load_state(boundary)
+    listed: set[str] = set()
+    added: list[str] = []
+    revision = authority.revision
+    for target in targets:
+        access_id = target['access_id']
+        api_key = _resolve_api_key(
+            repository, boundary, target['secret_reference'])
+        if not api_key:
+            continue
+        models = (discover(target['base_url'], api_key) if discover else
+                  discover_models(target['base_url'], api_key,
+                                  timeout=_DISCOVER_TIMEOUT,
+                                  protocol=target['protocol'],
+                                  extra_headers=target['extra_headers']))
+        rows = [row for row in models or []
+                if isinstance(row, dict) and str(row.get('model_id') or '').strip()]
+        listed.update(str(row['model_id']).strip() for row in rows)
+        known = _known_model_ids(document, access_id)
+        new_models = [row for row in rows
+                      if str(row['model_id']).strip() not in known]
+        if not new_models:
+            continue
+        _count, revision = _append_synced_models(
+            repository, boundary, target, new_models)
+        added_ids = sorted({str(row['model_id']).strip() for row in new_models})
+        added.extend(added_ids)
+        ledger = state['added'].setdefault(access_id, [])
+        ledger.extend(mid for mid in added_ids if mid not in ledger)
+        if access_id in state['dismissed']:
+            state['dismissed'][access_id] = [
+                mid for mid in state['dismissed'][access_id]
+                if mid not in added_ids]
+        document = repository.get(boundary).document
+    if not listed:
+        raise ModelRoutingError(
+            'the provider listed no models; check its API key and endpoint',
+            kind='provider_listing_empty')
+    if added:
+        _save_state(boundary, state)
+        audit_log('provider_listed_models_imported',
+                  provider_id=provider_id,
+                  models=len(added),
+                  owner_user_id=boundary.owner_user_id,
+                  model_routing_revision=revision)
+    return {
+        'listed_model_count': len(listed),
+        'added_model_count': len(added),
+        'revision': revision,
+    }
 
 
 # ── Scheduling on the shared local-endpoint monitor ──────────────────────

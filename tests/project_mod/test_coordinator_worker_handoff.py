@@ -29,19 +29,18 @@ def next_human_attempt(r, *, new_input=False):
     r.task.update(id='resumed-task', _turnId='resumed-turn', _attemptId='resumed-attempt',
                   usage={}, abort_event=threading.Event())
     if previous.get('_coordinatorRequestBudget') is not None:
-        bind_source_account(r.task, repository=r.c.repo, settings={'revision': 5, 'settings': {
-            'maxTokens': 9999999, 'maxModelRequests': 999, 'maxToolCalls': 9999, 'durationSeconds': 9999}})
+        bind_source_account(r.task, repository=r.c.repo)
     return previous
 
 
 def test_same_human_resume_recovers_replays_reviews_and_finishes_original_workers(run):
     r = run
-    bind(r, maxTokens=10000, maxModelRequests=100, maxToolCalls=200)
-    r.args.update(max_tokens=100, max_model_requests=2, max_tool_calls=2)
+    bind(r)
     first = delegate(r)
     next_human_attempt(r)
     # Changing physical attempt defaults cannot rewrite the first issued policy.
-    capture_worker_policy(r.task, r.task['config'], [{'function': {'name': 'new_tool'}}], 'new-model')
+    capture_worker_policy(r.task, r.task['config'], [{'function': {'name': 'new_tool'}}], 'new-model',
+                          worker_model='new-model')
     page = r.call('get_project_workers')
     assert [item['assignment_id'] for item in page['workers']] == [first['id']], page
     assert page['source_attempt_id'] == 'coordinator-attempt'
@@ -70,14 +69,12 @@ def test_resume_before_first_worker_keeps_original_account_identity(run):
     assert r.call('get_project_workers')['workers'][0]['assignment_id'] == worker['id']
 
 
-@pytest.mark.parametrize('withdraw', ['capability', 'stop', 'deadline'])
+@pytest.mark.parametrize('withdraw', ['capability', 'stop'])
 def test_resumed_source_withdrawal_does_not_create_an_empty_worker(run, withdraw):
     r = run; bind(r); first = delegate(r)
     next_human_attempt(r)
     if withdraw == 'capability':
         r.task.pop('_coordinatorWorkerPolicy')
-    elif withdraw == 'deadline':
-        r.c.now[0] = first['request']['budget']['deadline'] + 1
     else:
         from lib.project_dispatch.repository import record_stop
         record_stop(7, 'coordinator', r.c.now[0] + 1, client=r.c.repo.client)

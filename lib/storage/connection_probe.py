@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# pyright: strict
+
 import os
 from pathlib import Path
 import sys

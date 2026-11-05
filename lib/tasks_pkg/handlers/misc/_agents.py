@@ -8,6 +8,7 @@ from lib.log import get_logger
 from lib.scheduler.executor import execute_scheduler_tool
 from lib.scheduler.tool_defs import SCHEDULER_TOOL_NAMES
 from lib.swarm.tools import SWARM_TOOL_NAMES
+from lib.tasks_pkg.delegate_mode import delegation_tool_catalog
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import simple_call
 from lib.tasks_pkg.manager import append_event
@@ -24,9 +25,19 @@ def _scheduler_post_build(meta, tool_content, _fn_args):
 @tool_registry.tool_set(SCHEDULER_TOOL_NAMES, category='scheduler',
                         description='Schedule reminders and recurring tasks')
 def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    from lib.tasks_pkg.conversation_delivery import (
+        completion_conversation_id, deferred_completion_refusal)
     from lib.tasks_pkg.manager._registry import task_user_id
 
-    fn_args['_source_conv_id'] = task.get('convId', '')
+    refusal = deferred_completion_refusal(task, fn_name, fn_args)
+    if refusal:
+        return simple_call(task, fn_name, fn_args, rn, round_entry, tc_id,
+                           executor=lambda *_args: refusal,
+                           source='Scheduler', module_tag='Scheduler')
+    # Only a conversation whose turn this task owns receives a watcher's
+    # continuation or a ``current`` job: never a headless job label, nor the
+    # parent conversation a child invocation runs under.
+    fn_args['_source_conv_id'] = completion_conversation_id(task)
     fn_args['_source_task_id'] = task.get('id', '')
     fn_args['_user_id'] = task_user_id(task)
     fn_args['_tool_call_id'] = tc_id
@@ -43,20 +54,25 @@ def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, c
     )
 
 
-def _run_desktop(fn_name, fn_args, user_id='', cancellation=None):
+def _run_desktop(fn_name, fn_args, user_id='', cancellation=None, task=None):
     """Desktop tool executor — wraps send_desktop_command + format_desktop_result.
 
     The wire cmd_type is the full tool name verbatim: the agent's dispatch
     table (lib/desktop_agent/_dispatch.COMMANDS) is keyed by it, prefix and
     all — never strip or rewrite it here. ``user_id`` (RWA P4a) scopes the
-    command to the caller's own agents on relay deployments.
+    command to the caller's own agents on relay deployments. ``task`` lets an
+    error name await_device while the owner's device is offline.
     """
     from lib.desktop import format_desktop_result, send_desktop_command
     wait_options = {} if cancellation is None else {'cancellation': cancellation}
     result, error = send_desktop_command(
         fn_name, fn_args, timeout=None, user_id=user_id, **wait_options)
     if error:
-        return f'Desktop Agent Error: {error}'
+        hint = ''
+        if task is not None:
+            from lib.desktop.device_waits import offline_hint
+            hint = offline_hint(task)
+        return f'Desktop Agent Error: {error}{hint}'
     return format_desktop_result(fn_name, result)
 
 
@@ -78,12 +94,32 @@ def _handle_desktop_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     def _exec_desktop(_fn_name, _fn_args):
         return _run_desktop(
             _fn_name, _fn_args, user_id=task.get('_userId', '') or '',
-            cancellation=Cancellation(task))
+            cancellation=Cancellation(task), task=task)
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_exec_desktop,
         source='Desktop Agent', module_tag='Desktop',
         post_build=_desktop_post_build,
+    )
+
+
+@tool_registry.handler('await_device', category='desktop',
+                       description='Wake this conversation when a device reconnects')
+def _handle_await_device(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    from lib.tasks_pkg.conversation_delivery import deferred_completion_refusal
+
+    # Only a conversation whose turn this task owns can be woken later.
+    refusal = deferred_completion_refusal(task, fn_name, fn_args)
+
+    def _exec_await(_fn_name, _fn_args):
+        if refusal:
+            return refusal
+        from lib.desktop.device_waits import await_device
+        return await_device(task, _fn_args)
+    return simple_call(
+        task, fn_name, fn_args, rn, round_entry, tc_id,
+        executor=_exec_await,
+        source='Desktop Agent', module_tag='DeviceWait',
     )
 
 
@@ -117,6 +153,13 @@ _SWARM_BADGE_VERB = {
 @tool_registry.tool_set(SWARM_TOOL_NAMES, category='swarm',
                         description='Spawn and manage parallel sub-agents (async)')
 def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    from lib.tasks_pkg.conversation_delivery import deferred_completion_refusal
+    refusal = deferred_completion_refusal(task, fn_name, fn_args)
+    if refusal:
+        return simple_call(task, fn_name, fn_args, rn, round_entry, tc_id,
+                           executor=lambda *_args: refusal,
+                           source='Swarm', module_tag='Swarm')
+
     # Custom executor closes over task/cfg/all_tools to preserve the full swarm API
     def _run_swarm(_fn_name, _fn_args):
         from lib.swarm.integration import execute_swarm_tool
@@ -136,10 +179,10 @@ def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
             search_mode=cfg.get('search_mode', 'multi'),
             cfg=cfg,
             # Wire visibility is a prompt projection. Delegation starts from
-            # the same task-owned authority used by direct/gateway execution;
-            # an explicit empty catalog must remain empty.
-            all_tools=(task['_executable_tool_catalog']
-                       if '_executable_tool_catalog' in task else all_tools or []),
+            # the same task-owned authority used by direct/gateway execution
+            # (the pre-narrowing view in Delegate Mode); an explicit empty
+            # catalog must remain empty.
+            all_tools=delegation_tool_catalog(task, fallback=all_tools),
         )
 
     verb = _SWARM_BADGE_VERB.get(fn_name, 'swarm')

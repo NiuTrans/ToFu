@@ -10,7 +10,7 @@ import pytest
 from jsonschema import ValidationError
 
 from lib.agent_core.native_process import RoundRequest, RoundSettlement
-from lib.billing.cost import native_task_cost, transfer_native_child_fees
+from lib.billing.native_cost import native_task_cost, transfer_native_child_fees
 from lib.billing.native_actor_fees import capture
 from lib.tasks_pkg.native_cost_projection import NativeTaskCostPolicy
 from tests.agent_core.test_native_task_terminal import principal

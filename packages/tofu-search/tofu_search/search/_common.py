@@ -115,9 +115,12 @@ class _EngineCircuit:
 
     Keyed by engine name (``'Bing'``, ``'Brave'`` …). A run of
     ``FAIL_THRESHOLD`` failures (timeout / network error / non-2xx) trips the
-    breaker; the engine is skipped for ``COOLDOWN`` seconds, then given another
-    chance. Any success resets the counter. This stops a hard-down or
-    IP-blocking engine from costing every query its full timeout budget.
+    breaker; the engine is skipped for ``COOLDOWN`` seconds. After the cooldown
+    it is half-open: calls go through as recovery probes, one failed probe
+    re-opens it for another cooldown and any success closes it. Orchestrators
+    run every engine whose most recent request failed (before or after a trip)
+    as a probe off the caller's critical path, so an unreachable engine costs
+    only the first query that discovers it.
     """
     FAIL_THRESHOLD = 3
     COOLDOWN = 120
@@ -126,24 +129,31 @@ class _EngineCircuit:
         self._lock = threading.Lock()
         self._state: dict[str, dict] = {}  # name -> {fails, tripped_at}
 
+    def _cooled_down(self, st) -> bool:
+        return time.time() - st['tripped_at'] > self.COOLDOWN
+
     def is_open(self, name: str) -> bool:
         with self._lock:
             st = self._state.get(name)
-            if not st or st['tripped_at'] is None:
-                return False
-            if time.time() - st['tripped_at'] > self.COOLDOWN:
-                del self._state[name]
-                return False
-            return True
+            return bool(st and st['tripped_at'] is not None and not self._cooled_down(st))
+
+    def last_call_failed(self, name: str) -> bool:
+        """The engine's most recent completed request failed (any success resets)."""
+        with self._lock:
+            return name in self._state
 
     def record_failure(self, name: str):
         with self._lock:
             st = self._state.setdefault(name, {'fails': 0, 'tripped_at': None})
             st['fails'] += 1
-            if st['fails'] >= self.FAIL_THRESHOLD and st['tripped_at'] is None:
+            if st['tripped_at'] is None and st['fails'] >= self.FAIL_THRESHOLD:
                 st['tripped_at'] = time.time()
                 logger.warning('[Search] Circuit OPEN for engine %s — %d consecutive '
                                'failures, cooling down %ds', name, st['fails'], self.COOLDOWN)
+            elif st['tripped_at'] is not None and self._cooled_down(st):
+                st['tripped_at'] = time.time()
+                logger.info('[Search] Circuit re-OPEN for engine %s — recovery probe '
+                            'failed, cooling down %ds', name, self.COOLDOWN)
 
     def record_success(self, name: str):
         with self._lock:

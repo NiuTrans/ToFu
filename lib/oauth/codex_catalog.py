@@ -537,6 +537,8 @@ def _worker_loop(*, force_initial: bool = False, boundary=None) -> None:
             if report.get('status') != 'busy':
                 next_research = time.monotonic() + CODEX_REGISTRATION_RETRY_INTERVAL_S
     try:
+        if _worker_stop.is_set():
+            return
         result = refresh_codex_model_catalog(force=force_initial)
         if result.get('skipped') == 'not_authenticated':
             return
@@ -565,12 +567,13 @@ def _worker_loop(*, force_initial: bool = False, boundary=None) -> None:
 def start_codex_catalog_refresher(*, force_initial: bool = False,
                                   owner_user_id: int | None = None,
                                   tenant_id: str | None = None) -> bool:
-    """Start the import-safe, process-wide daemon refresher once."""
-    global _worker_started, _worker_thread
-    from lib.oauth.token_store import load_token
+    """Arm one owned refresher; resolve optional shared login on that worker.
 
-    if not (load_token('codex') or {}).get('access_token'):
-        return False
+    Credential discovery may invoke the bounded local Codex command. The
+    worker's first refresh already checks authentication and exits when absent;
+    duplicating that probe here made an optional catalogue gate application boot.
+    """
+    global _worker_started, _worker_thread
     from lib.oauth.outbound import _oauth_owner_boundary
     boundary = _oauth_owner_boundary(owner_user_id, tenant_id)
     with _state_lock:
@@ -597,9 +600,9 @@ def forget_pending_codex_catalog() -> None:
 def stop_codex_catalog_refresher(timeout: float = 2.0) -> bool:
     """Wake, signal and bounded-join the Codex catalogue refresher."""
     global _worker_started, _worker_thread
-    _worker_stop.set()
-    _refresh_wake.set()
     with _state_lock:
+        _worker_stop.set()
+        _refresh_wake.set()
         thread = _worker_thread
     if thread is None:
         return True

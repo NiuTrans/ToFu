@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 import hashlib
 import json
+import uuid
 from typing import List, Optional
 
 from lib.config_dir import config_path
 from lib.json_store import read_json
 from lib.log import audit_log, get_logger
 from lib.storage import get_storage_client
+
+from .amounts import credit_micro, positive_decimal
 
 
 logger = get_logger(__name__)
@@ -25,19 +29,14 @@ def _payments_settings() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def credit_per_minor_unit() -> float:
+def credit_per_minor_unit() -> Decimal:
     settings = _payments_settings()
-    try:
-        return float(settings.get('credit_per_minor_unit')
-                     or _DEFAULT_CREDIT_PER_MINOR_UNIT)
-    except (TypeError, ValueError) as exc:
-        logger.debug(
-            '[Payments] Bad credit_per_minor_unit, using default: %s', exc)
-        return _DEFAULT_CREDIT_PER_MINOR_UNIT
+    return positive_decimal(settings.get('credit_per_minor_unit',
+                            _DEFAULT_CREDIT_PER_MINOR_UNIT), field='credit_per_minor_unit')
 
 
 def minor_to_micro(amount_minor: int) -> int:
-    return int(round(float(amount_minor) * credit_per_minor_unit() * 1_000_000))
+    return credit_micro(amount_minor, credit_per_minor_unit())
 
 
 @dataclass(frozen=True)
@@ -115,12 +114,27 @@ def record_payment(
 ) -> PaymentRecord:
     if not provider_id:
         raise ValueError('provider_id is required for an idempotent payment')
+    return _record_payment(payment_id=_stable_id('pay_', provider, provider_id),
+        user_id=user_id, provider=provider, provider_id=provider_id,
+        amount_minor=amount_minor, currency=currency, raw=raw, status=status)
+
+
+def prepare_payment(*, user_id: str, provider: str, amount_minor: int,
+                    currency: str) -> PaymentRecord:
+    """Freeze a quote before provider IO; its eventual identity binds once."""
+    return _record_payment(payment_id='pay_' + uuid.uuid4().hex,
+        user_id=user_id, provider=provider, provider_id='', amount_minor=amount_minor,
+        currency=currency, raw=None, status='pending')
+
+
+def _record_payment(*, payment_id: str, user_id: str, provider: str, provider_id: str,
+                    amount_minor: int, currency: str, raw: Optional[dict],
+                    status: str) -> PaymentRecord:
     if status not in {'pending', 'settled', 'failed'}:
         raise ValueError('invalid payment status')
     credit_micro = minor_to_micro(amount_minor)
-    identity = (provider, provider_id)
     payload = {
-        'id': _stable_id('pay_', *identity), 'user_id': user_id,
+        'id': payment_id, 'user_id': user_id,
         'provider': provider, 'provider_id': provider_id,
         'amount_minor': int(amount_minor), 'currency': currency,
         'credit_micro': credit_micro, 'status': status,
@@ -137,6 +151,19 @@ def record_payment(
             provider=provider, provider_id=provider_id,
             amount_minor=amount_minor, status=status)
     return payment
+
+
+def bind_payment(payment_id: str, *, user_id: str, provider: str, provider_id: str,
+                 amount_minor: int, currency: str,
+                 legacy_session_id: str = '') -> Optional[PaymentRecord]:
+    """Join authenticated facts to a frozen quote without repricing it."""
+    payload = dict(payment_id=payment_id, user_id=user_id, provider=provider,
+                   provider_id=provider_id, amount_minor=amount_minor, currency=currency)
+    if legacy_session_id:
+        payload['legacy_session_id'] = legacy_session_id
+    result = get_storage_client(write=True).command('billing.payment.bind', payload,
+        _command_id('billing.payment.bind', payload), deadline=5.0)
+    return PaymentRecord.from_row(result['payment']) if result['accepted'] else None
 
 
 def mark_payment_settled(payment_id: str, *, raw: Optional[dict] = None) -> None:
@@ -185,5 +212,5 @@ def list_payments(
 __all__ = [
     'PaymentRecord', '_payments_settings', 'credit_per_minor_unit',
     'find_by_provider_id', 'list_payments', 'mark_payment_settled',
-    'minor_to_micro', 'record_payment',
+    'minor_to_micro', 'record_payment', 'prepare_payment', 'bind_payment',
 ]

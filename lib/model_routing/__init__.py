@@ -63,6 +63,7 @@ from .local_provider import (
 from .discovered_provider import (
     build_discovered_provider_bundle,
     discovered_provider_id,
+    listed_model_count,
 )
 
 __all__ = [
@@ -103,6 +104,7 @@ __all__ = [
     "build_discovered_provider_bundle",
     "CapabilityRoute",
     "discovered_provider_id",
+    "listed_model_count",
     "delete_local_provider",
     "dispose_routed_slot_group",
     "execute_migration",

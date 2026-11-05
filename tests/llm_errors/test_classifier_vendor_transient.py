@@ -70,6 +70,21 @@ class TestTransient4xxReclassification:
             _classify_http_error(400, f'{{"error":{{"message":"{phrase}"}}}}', 'm', '[t]')
         assert ei.value.is_gateway is True
 
+    def test_gateway_heap_exhaustion_400_rotates(self):
+        """2026-10-31 task d9a651dc round 28: the AIGC gateway's own servlet
+        ran out of heap while validating a body it accepted on every other
+        attempt. As BadRequestError it excluded healthy pairs and forced the
+        request off the Deployment that held its encrypted state."""
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
+        body = ('{"status":400,"message":"Handler dispatch failed; nested '
+                'exception is java.lang.OutOfMemoryError: Java heap space",'
+                '"data":null,"ext":{"error":{"source":"AIGC",'
+                '"service":"aigc","stage":"validation"}}}')
+        with pytest.raises(RateLimitError) as ei:
+            _classify_http_error(400, body, 'kunlunbedrock.gpt-6.1-sol-m17', '[t]')
+        assert ei.value.is_gateway is True
+        assert ei.value.status_code == 400
+
 
 @pytest.mark.unit
 class TestDeterministic400Boundary:
@@ -87,6 +102,17 @@ class TestDeterministic400Boundary:
                         'it would rotate keys forever with a poisoned payload')
         except BadRequestError:
             pass  # the release-the-slot branch
+
+    def test_echoed_stack_trace_stays_a_payload_rejection(self):
+        """Only the servlet wrapper's phrasing marks a gateway heap fault; a
+        rejection that merely quotes a user's Java stack trace is not one."""
+        from lib.llm.llm_errors import BadRequestError, _classify_http_error
+        with pytest.raises(BadRequestError):
+            _classify_http_error(
+                400, '{"error":{"type":"invalid_request_error","message":'
+                     '"Invalid input[2].content: Exception in thread main '
+                     'java.lang.OutOfMemoryError: Java heap space"}}',
+                'm', '[t]')
 
     def test_bare_try_again_does_not_match_transient(self):
         """Pattern conservatism: 'try again' WITHOUT 'later' is not proof of
@@ -121,6 +147,18 @@ class TestStatusCodeStamps:
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(429, 'rate limit exceeded', 'm', '[t]')
         assert ei.value.status_code == 429
+        assert ei.value.is_gateway is False
+
+    def test_credential_billing_400_still_rotates_credentials(self):
+        """A dead balance is not a request-shape rejection, whatever the status."""
+        from lib.llm.llm_errors import BadRequestError, RateLimitError, _classify_http_error
+        with pytest.raises(RateLimitError) as ei:
+            _classify_http_error(
+                400, '{"error":{"code":"insufficient_quota","message":"x"}}',
+                'm', '[t]')
+        assert not isinstance(ei.value, BadRequestError)
+        assert ei.value.is_quota is True
+        assert ei.value.status_code == 400
         assert ei.value.is_gateway is False
 
     def test_quota_429_still_quota(self):

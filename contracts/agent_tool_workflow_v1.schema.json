@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fixed agent-tool workflow",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "version", "mode", "nodes"],
+  "properties": {
+    "schema_version": {"const": "tofu.agent-tool-workflow/v1"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$"},
+    "version": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["sequence", "independent"]},
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "execution", "output_schema", "gate", "retry", "resumable", "checkpoint_version"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "execution": {"enum": ["deterministic", "model", "human"]},
+          "output_schema": {"type": "object"},
+          "gate": {"type": "boolean"},
+          "retry": {"type": "integer", "minimum": 0},
+          "resumable": {"type": "boolean"},
+          "checkpoint_version": {"type": "string"},
+          "resume_ttl_s": {"type": ["number", "null"], "minimum": 0}
+        }
+      }
+    }
+  }
+}

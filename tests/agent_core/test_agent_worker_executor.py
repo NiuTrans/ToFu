@@ -34,6 +34,27 @@ def test_queue_wait_observer_failure_does_not_strand_job(monkeypatch):
         executor.shutdown(wait=True)
 
 
+def test_generic_job_ids_read_no_os_randomness_and_stay_unique(monkeypatch):
+    # uuid4 reads the OS random source, which releases the GIL on every submit.
+    import uuid
+    from tofu_workers.executor import DemandExecutor
+
+    def os_random_identity():
+        raise AssertionError('a generic job id must not read OS randomness')
+
+    monkeypatch.setattr(uuid, 'uuid4', os_random_identity)
+    executor = DemandExecutor(max_workers=8, queue_capacity=0, max_abandoned_workers=1)
+    release = threading.Event()
+    try:
+        # All eight stay registered at once, so a repeated id would be refused.
+        futures = [executor.submit(release.wait, 5) for _ in range(8)]
+        release.set()
+        assert [future.result(timeout=5) for future in futures] == [True] * 8
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
+
+
 def test_idle_carrier_releases_completed_payload_without_cycle_collection():
     class Payload:
         pass
@@ -204,10 +225,10 @@ def test_abandonment_rolls_back_when_replacement_thread_cannot_start(
             lambda: (started.set(), release.wait(timeout=5)),
         )
         assert started.wait(timeout=1)
-        ensure_workers = executor._reserve_workers_locked
-        monkeypatch.setattr(executor, '_reserve_workers_locked', lambda: ())
+        reserve_own = executor._reserve_own_workers_locked
+        monkeypatch.setattr(executor, '_reserve_own_workers_locked', lambda: ())
         queued = executor.submit_task('task-next', lambda: 'next')
-        monkeypatch.setattr(executor, '_reserve_workers_locked', ensure_workers)
+        monkeypatch.setattr(executor, '_reserve_own_workers_locked', reserve_own)
 
         def reject_thread_start(_thread):
             raise RuntimeError('thread budget exhausted')
@@ -268,7 +289,7 @@ def test_cancelled_agent_notifies_waiters_without_locking_callbacks(cancellation
     observers = []
     active = executor.submit_task('active', lambda: (started.set(), release.wait(5)))
     assert started.wait(1)
-    monkeypatch.setattr(executor, '_reserve_workers_locked', lambda: ())
+    monkeypatch.setattr(executor, '_reserve_own_workers_locked', lambda: ())
     pending = executor.submit_task('pending', lambda: pytest.fail('cancelled task ran'))
     def callback(_future):
         def inspect():
@@ -297,6 +318,66 @@ def test_cancelled_agent_notifies_waiters_without_locking_callbacks(cancellation
         for observer in observers:
             observer.join(timeout=2)
             assert not observer.is_alive()
+
+
+_EXECUTOR_GAUGES = ('workers', 'queued', 'active', 'resident_threads', 'abandoned')
+
+
+def _scraped_executor_gauges(pool):
+    from lib.observability import prometheus_lines
+    series = {f'tofu_executor_{key}{{pool="{pool}"}}': key for key in _EXECUTOR_GAUGES}
+    gauges = {}
+    for line in prometheus_lines():
+        name, _, value = line.rpartition(' ')
+        if name in series:
+            gauges[series[name]] = float(value)
+    return gauges
+
+
+def _await_one_parked_carrier(executor):
+    deadline = time.monotonic() + 5
+    while not (executor.idle_retirement_snapshot(1e-9)['due']
+               and executor.scheduling_snapshot()['residentThreads'] == 1):
+        assert time.monotonic() < deadline, 'executor did not settle to one parked carrier'
+        time.sleep(0.001)
+
+
+def test_jobs_publish_no_executor_state_and_scrapes_read_exact_gauges(monkeypatch):
+    from lib import observability
+    pool_name = 'scrape-exact-test'
+    published = []
+    publish = observability.publish_executor_state
+
+    def record(pool, **state):
+        if pool == pool_name:
+            published.append(state)
+        publish(pool, **state)
+
+    monkeypatch.setattr(observability, 'publish_executor_state', record)
+    executor = RecoverableAgentExecutor(
+        max_workers=1, queue_capacity=0, max_abandoned_workers=1,
+        thread_name_prefix=pool_name, metric_pool=pool_name)
+    release, started = threading.Event(), threading.Event()
+    try:
+        for _ in range(64):
+            assert executor.submit(int).result(timeout=2) == 0
+        assert published == [], 'accepted jobs published executor state'
+        _await_one_parked_carrier(executor)
+        assert _scraped_executor_gauges(pool_name) == {
+            'workers': 1, 'queued': 0, 'active': 0, 'resident_threads': 1, 'abandoned': 0}
+        running = executor.submit(lambda: (started.set(), release.wait(5)))
+        assert started.wait(2)
+        assert _scraped_executor_gauges(pool_name) == {
+            'workers': 1, 'queued': 0, 'active': 1, 'resident_threads': 1, 'abandoned': 0}
+        release.set()
+        running.result(timeout=2)
+        _await_one_parked_carrier(executor)
+        assert _scraped_executor_gauges(pool_name)['active'] == 0
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
+    # A stopped pool keeps no owner, so its series reports zero, not its idle hint.
+    assert _scraped_executor_gauges(pool_name) == dict.fromkeys(_EXECUTOR_GAUGES, 0)
 
 
 def test_completion_callback_can_submit_and_wait_without_occupying_idle_worker():

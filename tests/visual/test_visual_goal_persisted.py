@@ -119,7 +119,7 @@ def test_goal_persisted_history_and_inspector_http_reload(
     url = f'/api/v4/tasks/{quote(ref["taskId"], safe="")}/requests/1?kind=state&turn={quote(ref["turn"], safe="")}'
     response = page.request.get(urljoin(page.url, url))
     assert response.status == 200, response.text()
-    assert response.json()['messages'][0]['content'] == 'Exact durable tool evidence'
+    assert response.json()['data']['messages'][0]['content'] == 'Exact durable tool evidence'
     page.reload(wait_until='domcontentloaded')
     _dismiss_onboarding_modals(page)
     page.wait_for_function("typeof window.TofuModules?.resolveAction?.('loadConversation') === 'function'")

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from quart import Blueprint
 
+from lib.error_envelope import BadRequest
 from lib.api_response import api_bad_request, api_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -76,7 +77,7 @@ def upsert_private_host():
         return api_bad_request('host is required', field='host')
     try:
         row = upsert_host(host, label=data.get('label'), enabled=data.get('enabled'))
-    except ValueError as e:
+    except BadRequest as e:
         return api_bad_request(str(e), field='host')
     _resync()
     return api_ok({'host': row})

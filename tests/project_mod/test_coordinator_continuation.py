@@ -1,4 +1,4 @@
-"""Worker outcomes resume the original finite request through ordinary admission."""
+"""Worker outcomes, due decisions and backoff retries resume the request through ordinary admission."""
 from copy import deepcopy
 from types import SimpleNamespace
 import json
@@ -26,12 +26,30 @@ def run(runtime, monkeypatch):
     r.c.repo.workspace_get = lambda project, task, **kw: deepcopy(r.workspaces.get(task))
     r.command_lock = threading.Lock()
 
+    class PairClient:
+        def command(self, operation, payload, command_id):
+            assert operation == 'turn.create_pair'
+            return {'submittedTurn': {'turnId': 'input-' + command_id,
+                'conversationId': payload['conversation_id'], 'actor': payload['input_actor'],
+                'projection': deepcopy(payload['input_projection'])}}
+
+    monkeypatch.setattr('lib.turn_lifecycle._turn_client', lambda **kw: PairClient())
+
     class Commands:
         def create_turn(self, conv, owner, request, **kwargs):
             trusted = kwargs['trusted_dispatch']
             trusted.checked()
             assert kwargs['principal'].kind == 'system' and request['inputActor'] == 'virtual_user'
             assert request['inputTurn']['_initiator'] == 'brain'
+            from lib.turn_lifecycle import create_turn_pair
+            recorded = create_turn_pair(
+                conv, command_id=request['commandId'],
+                input_projection=request['inputTurn'],
+                config=trusted.capture(request['config'], owner, kwargs['principal'], conv),
+                user_id=owner, input_actor=request['inputActor'],
+                input_kind=request.get('inputKind', 'input'),
+                require_lane_idle=True, reject_if_human_queued=True)
+            request['inputTurn'] = recorded['submittedTurn']['projection']
             with r.command_lock:
                 row = r.c.repo.read(trusted.binding['assignmentId'])
                 if row['execution']:
@@ -42,6 +60,11 @@ def run(runtime, monkeypatch):
                 if any(a['conversationId'] == conv and a['status'] in ('pending', 'running') for a in r.attempts.values()):
                     raise LifecycleConflict('lane_busy', 'busy')
                 key = row['id']; turn, attempt, task = 'turn-' + key, 'attempt-' + key, 'task-' + key
+                if row['request']['profile']['mode'] == 'coordinator':
+                    snapshot = request['inputTurn']['contextSnapshot']['snapshot']
+                    assert snapshot['model'] == row['request']['model']
+                    assert snapshot['tools'] and snapshot['roots']
+                    assert request['inputTurn']['origin']['initiator'] == 'brain'
                 trusted.bind_execution(turn, attempt)
                 r.turns[turn] = {'turnId': turn, 'conversationId': conv, 'actor': 'assistant',
                     'projectionRevision': 1, 'projection': {'content': 'verified evidence'}, 'createdAt': 1_001_000}
@@ -50,8 +73,9 @@ def run(runtime, monkeypatch):
                 r.calls.append(conv)
             return SimpleNamespace(value={})
 
-        def abort_project_attempt(self, attempt, owner):
+        def abort_project_attempt(self, attempt, owner, *, provenance):
             assert owner == 7
+            r.cancel_provenance = provenance
             if r.attempts[attempt]['status'] in ('pending', 'running'):
                 r.attempts[attempt]['status'] = 'interrupted'
 
@@ -60,7 +84,8 @@ def run(runtime, monkeypatch):
     monkeypatch.setattr('lib.conversations.coordinator_workers.ProjectDispatchService', lambda repo: r.service)
     monkeypatch.setattr('lib.project_dispatch.service.ProjectDispatchService', lambda repo: r.service)
     names = CONTRACT['continuationTools'] + ['run_command', 'read_files', 'write_file']
-    capture_worker_policy(r.task, r.task['config'], [{'function': {'name': name}} for name in names], 'model-a')
+    capture_worker_policy(r.task, r.task['config'], [{'function': {'name': name}} for name in names], 'model-a',
+                          worker_model='model-a')
 
     class Reports:
         def publish(self, scope, args):
@@ -68,7 +93,9 @@ def run(runtime, monkeypatch):
                 r.reports.append(args)
             return {'turnId': 'report-limit'}
 
-    r.wake = lambda: continuation.recover_coordinator(r.c.repo, service=r.service, reports=Reports())
+    r.scheduled = []
+    r.wake = lambda: continuation.recover_coordinator(r.c.repo, service=r.service, reports=Reports(),
+                                                      schedule=r.scheduled.append)
     r.call = lambda name, **args: json.loads(execute_coordinator_tool(r.task, name, args))
     return r
 
@@ -86,6 +113,7 @@ def controls(r):
 def end(r, row, status='completed', delivered=True):
     attempt = r.attempts[row['execution']['attemptId']]
     attempt['status'] = status
+    attempt['settledAt'] = int(r.c.now[0] * 1000)
     if delivered:
         r.workspaces[attempt['taskId']] = {'task_id': attempt['taskId'], 'user_id': 7, 'project_root': '/project',
             'origin': {admission.KEY: r.c.repo.admission(row['id']), 'delivery': {'state': 'delivered'}}}
@@ -101,7 +129,8 @@ def activate(r):
         '_turnId': row['execution']['turnId'], '_attemptId': row['execution']['attemptId'],
         'status': 'running', 'abort_event': threading.Event(), 'usage': {}}
     admission.bind_account(r.task)
-    capture_worker_policy(r.task, config, [{'function': {'name': 'get_project_workers'}}], 'forged-model')
+    capture_worker_policy(r.task, config, [{'function': {'name': 'get_project_workers'}}], 'forged-model',
+                          worker_model='forged-model')
     return row
 
 
@@ -184,13 +213,18 @@ def test_deleted_first_worker_does_not_disable_request_continuation(run):
     assert r.wake() == ['accepted']
 
 
-def test_repeated_empty_turns_stop_once_with_unread_report_and_no_more_model_calls(run):
+def test_empty_turns_back_off_then_stop_once_with_unread_report(run):
     r = run; ready(r)
-    for _ in range(2):
+    limit = CONTRACT['delegationDefaults']['maxStalledTurns']
+    delays = CONTRACT['delegationDefaults']['stallRetrySeconds']
+    for stalled in range(1, limit):
         end(r, controls(r)[-1], delivered=False)
+        assert r.wake() == [] and r.scheduled, 'a stalled turn retries later instead of stopping'
+        assert r.scheduled[-1] >= r.c.now[0] + delays[min(stalled - 1, len(delays) - 1)] - 1
+        r.c.now[0] = r.scheduled[-1] + 1
         assert r.wake() == ['accepted']
     end(r, controls(r)[-1], delivered=False)
-    assert r.wake() == ['stopped'] and len(controls(r)) == 3 and len(r.reports) == 1
+    assert r.wake() == ['stopped'] and len(controls(r)) == limit and len(r.reports) == 1
     assert r.reports[0]['kind'] == 'blocked' and r.wake() == []
     value, _ = r.c.repo._load()
     assert value['coordinatorSettlements'][0]['reason'] == 'no_progress'
@@ -243,11 +277,13 @@ def test_cancel_failed_worker_then_finish_and_replay_is_safe(run):
     assert done['reason'] == 'complete'
 
 
-def test_deadline_exhaustion_is_reported_without_new_grants(run):
+def test_no_deadline_long_running_request_keeps_waking(run):
     r = run; worker = delegate(r); r.attempts['coordinator-attempt']['status'] = 'completed'
-    r.c.now[0] = worker['request']['budget']['deadline'] + 1
-    assert r.wake() == ['stopped'] and not controls(r) and len(r.reports) == 1
-    assert r.wake() == []
+    assert worker['request']['budget'] == {}
+    end(r, worker)
+    r.c.now[0] += 30 * 24 * 3600  # Far beyond the old two-hour request deadline.
+    assert r.wake() == ['accepted'] and not r.reports
+    assert controls(r)[0]['request']['budget'] == {}
 
 
 def test_settlement_receipts_are_immutable_and_per_source_unique(run):
@@ -294,7 +330,8 @@ def test_finish_rechecks_new_worker_inside_same_grant_cas(run, monkeypatch):
     assert not r.c.repo._load()[0].get('coordinatorSettlements')
 
 
-def test_unknown_paid_effects_keep_full_reservation_across_recovery(run, monkeypatch):
+def test_unconfirmed_worker_usage_does_not_stop_the_request(run, monkeypatch):
+    """Regression for coordinator-1a390889: unconfirmed usage exhausted the request."""
     from tests.project_mod.test_project_dispatch_repository import model_attempt
     r = run
     monkeypatch.setattr('runtime_guards.task_concurrency_hard_ceiling', lambda: 10)
@@ -303,8 +340,9 @@ def test_unknown_paid_effects_keep_full_reservation_across_recovery(run, monkeyp
     for row in workers:
         r.c.repo.mutate(row['id'], lambda value: value['modelAttempts'].append(model_attempt(value['id'])))
         end(r, row, 'interrupted', delivered=False)
-    assert r.wake() == ['stopped'] and not controls(r) and r.reports[0]['kind'] == 'blocked'
-    assert all(row['modelAttempts'][0]['phase'] == 'dispatch_intent' for row in r.c.repo.list())
+    assert r.wake() == ['accepted'] and not r.reports
+    activate(r)
+    assert delegate(r, 'retry-after-failures')['request']['budget'] == {}
 
 
 def test_cancel_active_worker_withdraws_grant_and_aborts_exact_attempt(run):
@@ -313,6 +351,9 @@ def test_cancel_active_worker_withdraws_grant_and_aborts_exact_attempt(run):
     assert r.wake() == ['accepted']; activate(r)
     cancelled = r.call('cancel_project_work', assignment_id=active['id'])
     assert cancelled['revoked'] and r.attempts[active['execution']['attemptId']]['status'] == 'interrupted'
+    # The Worker's stop names who revoked it, so its error is traceable.
+    assert 'cancel_project_work' in r.cancel_provenance and active['id'] in r.cancel_provenance
+    assert f"Coordinator conversation {r.task['convId']}" in r.cancel_provenance
     assert r.attempts[controls(r)[0]['execution']['attemptId']]['status'] == 'running'
     assert 'error' in r.call('cancel_project_work', assignment_id=controls(r)[0]['id'])
 
@@ -373,7 +414,8 @@ def test_issued_continuation_core_is_direct_with_exact_grant_ceiling(run, narrow
         # flag: promotion must not invent a missing messaging grant later.
         controls = set(CONTRACT['continuationTools']) - {'send_project_message', 'consider_project_message'}
         capture_worker_policy(r.task, r.task['config'], [
-            {'function': {'name': name}} for name in controls | {'run_command', 'read_files'}], 'model-a')
+            {'function': {'name': name}} for name in controls | {'run_command', 'read_files'}], 'model-a',
+            worker_model='model-a')
     ready(r)
     row = activate(r)
     tools = assemble(r.task)
@@ -387,3 +429,90 @@ def test_issued_continuation_core_is_direct_with_exact_grant_ceiling(run, narrow
         assert not names(body['tools']) - set(row['request']['profile']['tools'])
         assert body['_programmatic_tool_calling'] == 'off'
     assert r.task['_principalContext']['kind'] == 'system' and not r.task['_attended']
+
+
+def _decision_report(r, turn_id='decision-report', ordinal=10):
+    r.turns[turn_id] = {'turnId': turn_id, 'conversationId': 'coordinator', 'actor': 'assistant',
+        'kind': 'coordinator_report.decision', 'createdAt': 1_002_000, 'ordinal': ordinal,
+        'projection': {'content': 'Option A or B? I recommend A.', 'origin': {'initiator': 'brain'}}}
+    return turn_id
+
+
+def _turn_lister(r, human_after=()):
+    def list_turns(conversation_id, *, user_id, after_ordinal=None, light=False):
+        return {'turns': [{'actor': 'human', 'ordinal': ordinal} for ordinal in human_after
+                          if after_ordinal is None or ordinal > after_ordinal]}
+    r.c.repo.turn_lister = list_turns
+
+
+def _bound_request(r):
+    from lib.project_dispatch.request_budget import bind_source_account
+    r.task.update(status='running', usage={}, abort_event=threading.Event())
+    r.attempts['coordinator-attempt']['createdAt'] = int(r.c.now[0] * 1000)
+    return bind_source_account(r.task, repository=r.c.repo)
+
+
+def _pending(r):
+    value, _ = r.c.repo._load()
+    return value['requestBudgets'][0].get('pendingDecision')
+
+
+def test_unanswered_decision_resumes_with_the_recommendation(run, monkeypatch):
+    r = run; _bound_request(r); _turn_lister(r)
+    timers = []
+    monkeypatch.setattr(continuation, 'schedule_wake', lambda owner, project, due, **kw: timers.append(due))
+    active = delegate(r)
+    report_id = _decision_report(r)
+    result = r.call('request_user_decision', report_turn_id=report_id,
+                    recommendation='Use option A', wait_seconds=600)
+    assert 'error' not in result, result
+    due = result['pending_decision']['dueAt']
+    assert timers == [due] and due == pytest.approx(r.c.now[0] + 600)
+    assert r.call('request_user_decision', report_turn_id=report_id,
+                  recommendation='Use option A', wait_seconds=60)['pending_decision']['dueAt'] == due
+    r.attempts['coordinator-attempt']['status'] = 'completed'
+    assert r.wake() == [] and r.scheduled == [due], 'an active Worker keeps the request open until the decision is due'
+    r.c.now[0] = due + 1
+    assert r.wake() == ['accepted']
+    control = controls(r)[-1]['request']
+    assert control['coordinatorWake']['reason'] == 'decision_default'
+    assert 'Use option A' in control['brief'] and report_id in control['brief']
+    assert _pending(r)['resolved'] == 'default_applied'
+    assert r.attempts[active['execution']['attemptId']]['status'] == 'running'
+    assert r.wake() == [] and len(controls(r)) == 1
+
+
+def test_human_reply_cancels_the_decision_default(run, monkeypatch):
+    r = run; _bound_request(r); _turn_lister(r, human_after=[11])
+    monkeypatch.setattr(continuation, 'schedule_wake', lambda *a, **kw: None)
+    delegate(r)
+    assert 'error' not in r.call('request_user_decision', report_turn_id=_decision_report(r), recommendation='Use A')
+    r.attempts['coordinator-attempt']['status'] = 'completed'
+    r.c.now[0] += 10_000
+    assert r.wake() == [] and not controls(r)
+
+
+def test_decision_requires_a_published_decision_report(run):
+    r = run; _bound_request(r)
+    delegate(r)
+    report_id = _decision_report(r)
+    r.turns[report_id]['kind'] = 'coordinator_report.progress'
+    assert 'decision' in r.call('request_user_decision', report_turn_id=report_id, recommendation='Use A')['error']
+
+
+def test_timed_wake_keeps_one_timer_per_project_and_the_earliest_due_time(monkeypatch):
+    fired = []
+    monkeypatch.setattr(continuation, 'recover_coordinator', lambda repository: fired.append(repository))
+    class Repo:
+        def __init__(self, owner, project): self.owner, self.project = owner, project
+    monkeypatch.setattr('lib.project_dispatch.repository.ProjectDispatchRepository', Repo)
+    now = [1000.0]
+    continuation.schedule_wake(7, '/p', 5000, clock=lambda: now[0])
+    first = continuation._TIMED_WAKES[(7, '/p')][1]
+    continuation.schedule_wake(7, '/p', 9000, clock=lambda: now[0])
+    assert continuation._TIMED_WAKES[(7, '/p')][1] is first
+    continuation.schedule_wake(7, '/p', now[0] - 5, clock=lambda: now[0])
+    timer = continuation._TIMED_WAKES[(7, '/p')][1]
+    assert timer is not first and not first.is_alive()
+    timer.join(3)
+    assert len(fired) == 1 and (7, '/p') not in continuation._TIMED_WAKES

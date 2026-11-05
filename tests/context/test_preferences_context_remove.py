@@ -12,7 +12,6 @@ id) is spliced locally without any server call.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -20,14 +19,11 @@ from pathlib import Path
 import pytest
 
 from tests._runtime_sections import native_module_path
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _node_available() -> bool:
-    return bool(shutil.which("node") and (ROOT / "node_modules/jsdom").is_dir())
 
 
 _HARNESS = textwrap.dedent(
@@ -126,8 +122,7 @@ _HARNESS = textwrap.dedent(
 
 
 def _run_remove_scenarios() -> dict:
-    if not _node_available():
-        pytest.skip("node + jsdom dev dependencies are required")
+    require_node_modules('jsdom', 'vite')
     bundle = native_module_path(
         ".native/preferences.js",
         "frontend/src/features/memory/preferences.ts",

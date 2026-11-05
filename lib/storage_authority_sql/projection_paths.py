@@ -18,8 +18,12 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from lib.error_envelope import BadRequest
 from lib.json_store import locked_path, read_json
+from lib.log import get_logger
 from lib.storage_authority_sql.migration.generated_tofudb_migration import NATIVE_SEARCH_VOLUME_GUARD
+
+logger = get_logger(__name__)
 
 SEARCH_PROJECTION_CONFIG_KEY = 'tofudb_search_projection_dir'
 SEARCH_PROJECTION_ENV = 'TOFUDB_SEARCH_PROJECTION_DIR'
@@ -85,6 +89,16 @@ def _absolute_directory(value: Any, *, field: str) -> Path:
         raise ValueError(f'{field} cannot be resolved') from exc
 
 
+def namespace_identity(authority: Path) -> str:
+    """Name of one authority's search data under a shared or automatic base."""
+    return hashlib.sha256(os.fsencode(os.path.normcase(str(authority)))).hexdigest()
+
+
+def legacy_search_projection_directory(paths: SearchProjectionPaths) -> Path:
+    """The data-volume projection automatic placement falls back to."""
+    return paths.authority_directory.parent / 'projections' / 'tofudb-search'
+
+
 def _reject_authority_overlap(directory: Path, authority: Path) -> None:
     if directory.is_relative_to(authority) or authority.is_relative_to(directory):
         raise ValueError('searchProjection.directory must not overlap authority data')
@@ -105,8 +119,9 @@ def resolve_search_projection_paths(
 ) -> SearchProjectionPaths:
     """Resolve one stable base/effective selection without filesystem writes.
 
-    Keep the legacy default so existing deployments are never relocated
-    implicitly. A custom base never directly contains search data: namespace
+    An unset preference automatically places this reconstructible index on a
+    measured faster local volume. The durable authority is never relocated.
+    A custom base never directly contains search data: namespace
     it by the canonical authority identity so two installations selecting the
     same candidate cannot share an index. Canonical aliases of one authority
     intentionally resolve to the same namespace.
@@ -121,11 +136,20 @@ def resolve_search_projection_paths(
     if not isinstance(value, str):
         raise ValueError('searchProjection.directory must be a string')
     if value == '':
-        return SearchProjectionPaths(authority, '', default, default)
+        from serverctl_pkg.local_placement import index_cache_placement
+
+        placement = index_cache_placement(root, environ=environ)
+        if not placement.selected:
+            return SearchProjectionPaths(authority, '', default, default)
+        automatic = Path(placement.root) / 'tofudb-search' / namespace_identity(authority)
+        effective = validate_search_projection_directory(str(automatic), authority)
+        # Automatic placement is optional; do not follow an untrusted namespace.
+        if effective != automatic:
+            return SearchProjectionPaths(authority, '', default, default)
+        return SearchProjectionPaths(authority, '', effective, effective)
     base = _absolute_directory(value, field='searchProjection.directory')
     _reject_authority_overlap(base, authority)
-    identity = hashlib.sha256(os.fsencode(os.path.normcase(str(authority)))).hexdigest()
-    namespaced = base / 'tofudb-search' / identity
+    namespaced = base / 'tofudb-search' / namespace_identity(authority)
     effective = validate_search_projection_directory(str(namespaced), authority)
     # An existing namespace symlink must not collapse independent authorities
     # onto one index, even when it points somewhere outside authority data.
@@ -169,6 +193,60 @@ def _check_projection_capacity(probe_directory: Path) -> None:
                 f'searchProjection.directory filesystem has too little free {label} '
                 f'({available} free, need at least {reserve}); '
                 f'choose a base on a volume with more free {label}')
+
+
+def automatic_placement_decision(data_dir: Path, paths: SearchProjectionPaths, *,
+                                 launch: bool) -> dict | None:
+    """Capacity decision for an automatic local placement; ``None`` otherwise.
+
+    ``launch=True`` records the decision (``native_fastpath_auto`` owns the
+    capacity rules and their state); ``launch=False`` predicts it for status.
+    A governance failure is logged and leaves the placement policy's choice.
+    """
+    legacy = legacy_search_projection_directory(paths)
+    if paths.configured_directory or paths.directory == legacy:
+        return None
+    from lib.storage_authority_sql import native_fastpath_auto
+
+    try:
+        return native_fastpath_auto.search_projection_launch_decision(
+            Path(data_dir).resolve(), paths.directory, legacy, launch=launch)
+    except Exception:
+        logger.warning('Search projection capacity governance failed; keeping %s',
+                       paths.directory, exc_info=True)
+        return None
+
+
+def prepare_search_projection_paths(data_dir: Path, *,
+                                    environ: Mapping[str, str] | None = None) -> SearchProjectionPaths:
+    """Pin and prepare an automatic launch choice; explicit paths stay explicit.
+
+    Capacity/setup failure before a new cache exists falls back to the legacy
+    projection, and so does capacity governance: a new local copy needs room
+    for the measured data-volume projection, and an existing copy whose
+    volume is critical yields it. A copy under mere pressure still opens so
+    native GC can reclaim unreachable pages. Runtime readiness reports the
+    actual path. No authority path, settings file or projection is rewritten.
+    """
+    paths = resolve_search_projection_paths(data_dir, environ=environ)
+    legacy = legacy_search_projection_directory(paths)
+    if paths.configured_directory or paths.directory == legacy:
+        return paths
+    from serverctl_pkg.local_placement import ensure_private_directory
+
+    fallback = SearchProjectionPaths(paths.authority_directory, '', paths.default_directory, legacy)
+    try:
+        parent = paths.directory.parent
+        ensure_private_directory(parent.parent)
+        ensure_private_directory(parent)
+        if not paths.directory.exists():
+            _check_projection_capacity(parent)
+    except (OSError, ValueError):
+        return fallback
+    decision = automatic_placement_decision(data_dir, paths, launch=True)
+    if decision is not None and not decision['selected']:
+        return fallback
+    return paths
 
 
 def prepare_search_projection_directory(directory: Path, authority: Path) -> Path:
@@ -263,8 +341,14 @@ def save_search_projection_directory(
     if SEARCH_PROJECTION_ENV in env:
         raise SearchProjectionEnvironmentOverrideError(
             f'{SEARCH_PROJECTION_ENV} overrides saved settings; remove it before applying')
-    paths = resolve_search_projection_paths(data_dir, configured_directory=directory)
-    prepare_search_projection_directory(paths.directory, paths.authority_directory)
+    try:
+        paths = resolve_search_projection_paths(data_dir, configured_directory=directory)
+        prepare_search_projection_directory(paths.directory, paths.authority_directory)
+    except ValueError as exc:
+        # The automatic selection ('') validates only server-derived paths.
+        if directory == '':
+            raise
+        raise BadRequest(str(exc), field='searchProjection.directory') from exc
 
     _save_projection_setting(
         _settings_path(Path(data_dir).resolve()), paths.configured_directory)

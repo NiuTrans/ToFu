@@ -18,6 +18,7 @@ import tempfile
 import pytest
 
 from tests._runtime_sections import native_module_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -29,8 +30,7 @@ LOCALE_DIR = ROOT / 'frontend/src/i18n/locales'
 def _render(*, kind: str, lang: str = 'en') -> str:
     """Render one envelope through the public typed presentation factory."""
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not available for typed-owner evaluation')
+    require_node_modules('vite')
     owner_bundle = native_module_path(
         '.native/error-presentation-for-recovery.js', OWNER)
     envelope = {
@@ -97,8 +97,7 @@ process.stdout.write(presentation.renderErrorEnvelope(envelope));
 def _evaluate_owner(program: str) -> dict[str, object]:
     """Evaluate public pure helpers from the same bundled TypeScript owner."""
     node = shutil.which('node')
-    if not node:
-        pytest.skip('node not available for typed-owner evaluation')
+    require_node_modules('vite')
     owner_bundle = native_module_path(
         '.native/error-presentation-for-recovery.js', OWNER)
     harness = (

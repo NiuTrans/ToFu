@@ -113,6 +113,53 @@ class TestInternalErrorClassification:
 
 
 @pytest.mark.unit
+class TestHostThreadRefusal:
+    """Regression (2026-11-03, task 0de943ba): the container's pids limit made
+    ``Thread.start()`` raise ``RuntimeError("can't start new thread")`` as a
+    tool round started. The task-fatal envelope read "LLM call failed (model:
+    kimi-k3.1-pro)" with ``retryable: false``, blaming the model for a host
+    limit that a later retry can clear.
+    """
+
+    @staticmethod
+    def _refusal(shape):
+        from lib.llm.llm_errors import LocalRequestPreparationError
+        if shape == 'raw':
+            return RuntimeError("can't start new thread")
+        return LocalRequestPreparationError(
+            "llm-post-headers thread could not start: can't start new thread",
+            stage='thread_start')
+
+    @pytest.mark.parametrize('shape', ['raw', 'typed-transport'])
+    def test_thread_refusal_is_a_retryable_local_failure(self, shape):
+        from lib.error_envelope import from_exception
+
+        env = from_exception(self._refusal(shape), model='kimi-k3.1-pro',
+                             context='task-fatal', source='orchestrator')
+
+        assert env['kind'] == 'internal'
+        assert env['retryable'] is True
+        assert env['origin'] == 'local'
+        assert env['failureStage'] == 'thread_start'
+        assert env['model'] == ''
+        assert 'LLM call failed' not in env['message']
+        assert '模型调用失败' not in env['message']
+        assert 'thread' in env['message']
+        assert 'Keys / Providers' not in env['hint']
+
+    def test_other_local_preparation_failures_keep_their_policy(self):
+        from lib.error_envelope import from_exception
+        from lib.llm.llm_errors import LocalRequestPreparationError
+
+        env = from_exception(LocalRequestPreparationError('bad body'),
+                             model='kimi-k3', source='llm-stream')
+
+        assert env['kind'] == 'internal'
+        assert env['retryable'] is False
+        assert 'failureStage' not in env
+
+
+@pytest.mark.unit
 class TestVendorOutageClassification:
     """Regression: an upstream-VENDOR outage must surface as
     ``upstream_error`` (warning, retryable, 'not your keys') — never as
@@ -220,11 +267,59 @@ class TestStorageErrorClassification:
         assert _classify_exception(exc) == 'timeout'
 
     @pytest.mark.parametrize('code', ['database_busy', 'database_unavailable'])
-    def test_busy_unavailable_classify_server_busy(self, code):
+    def test_busy_unavailable_classify_storage_unavailable(self, code):
+        """Storage-layer failures must NOT classify as local capacity.
+
+        Regression (2026-10-22): `database_busy` / `database_unavailable`
+        classified as `server_busy`, whose hint blames concurrent-task slots
+        and memory headroom. The real failure was a fenced storage authority
+        whose only recovery is a server process restart, and the capacity
+        wording sent the operator into a retry loop for 9.5 hours.
+        """
         from lib.error_envelope._classify import _classify_exception
         from lib.storage.errors import StorageError
         assert _classify_exception(
-            StorageError(code, 'storage writer unavailable', True)) == 'server_busy'
+            StorageError(code, 'storage writer unavailable', True)) == 'storage_unavailable'
+
+    def test_retired_memory_pressure_name_does_not_restore_capacity_refusal(self):
+        """The deleted admission exception name has no classification authority."""
+        from lib.error_envelope._classify import _classify_exception
+
+        class MemoryPressureError(RuntimeError):
+            pass
+
+        assert _classify_exception(
+            MemoryPressureError('request memory admission refused')) == 'generic'
+
+    def test_storage_unavailable_hint_names_the_storage_layer(self):
+        """The new kind must not blame capacity or point at keys/models."""
+        from lib.error_envelope import make_envelope
+        env = make_envelope('storage_unavailable')
+        assert env['titleKey'] == 'err.k.storage_unavailable.title'
+        assert env['hintKey'] == 'err.k.storage_unavailable.hint'
+        assert 'capacity' not in env['hint']
+        assert 'memory headroom' not in env['hint']
+        assert 'Keys' not in env['hint']
+        # The degraded recovery (a process restart) is named, because the
+        # terminal fenced state has no in-process recovery.
+        assert 'restart' in env['hint']
+
+    def test_degraded_storage_error_is_not_retryable(self):
+        """A fenced authority must not advertise a futile Retry.
+
+        The runtime reports a degraded (fenced) authority with
+        ``retryable=False``; the envelope has to carry that through so the
+        UI stops offering a retry that cannot succeed.
+        """
+        from lib.error_envelope import from_exception
+        from lib.storage.errors import StorageError
+        env = from_exception(StorageError(
+            'database_unavailable',
+            'Storage runtime is degraded after repeated sidecar crashes; it '
+            'stays fenced until the server process is restarted',
+            False))
+        assert env['kind'] == 'storage_unavailable'
+        assert env['retryable'] is False
 
     def test_nontransient_storage_code_classifies_internal(self):
         from lib.error_envelope._classify import _classify_exception

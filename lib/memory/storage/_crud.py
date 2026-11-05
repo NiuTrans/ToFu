@@ -1,8 +1,8 @@
 """lib/memory/storage/_crud.py — List / query / CRUD operations.
 
-Top-level API layer. Uses the SHARED ``_lock`` / ``_migrated_roots`` from
-:mod:`_dirs` BY REFERENCE (imported as names bound to the same objects), the
-per-file helpers from :mod:`_files`, and the path helpers from :mod:`_dirs`.
+Top-level API layer. Uses the per-file helpers from :mod:`_files` and the path
+and one-time migration helpers from :mod:`_dirs`. Listings and ID probes hold
+no process-global lock; mutations serialize on per-record file-lock shards.
 """
 
 import os
@@ -10,8 +10,10 @@ import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from lib.json_store import locked_path
+from lib.error_envelope import BadRequest
 from lib.log import get_logger
 from lib.memory.contracts import (
     MEMORY_BODY_MAX_CHARS,
@@ -24,16 +26,17 @@ from lib.memory.contracts import (
     truncate_utf8,
     validate_memory_id,
 )
+from lib.memory.queued_read_coalescer import QueuedReadCoalescer
 
 from ._dirs import (
     MIN_DESCRIPTION_LENGTH,
     _ensure_dir,
     _iter_memory_store_dirs,
-    _lock,
     resolve_target_dir,
     run_storage_migrations,
 )
 from ._files import (
+    _iter_memories_in_dir,
     _list_memories_in_dir,
     _make_memory_id,
     _memory_file_fingerprint,
@@ -42,6 +45,7 @@ from ._files import (
     _validate_memory_record_view,
     _write_memory_file,
 )
+from ._frontmatter import _copy_metadata_value
 
 logger = get_logger(__name__)
 
@@ -91,6 +95,60 @@ def _memory_mutation_locks(record_paths):
         yield frozenset(lock_paths)
 
 
+class _MemoryListingRequest(NamedTuple):
+    """Every input of one corpus listing; also its coalescing key.
+
+    Eligibility is gated without an owner (``owner_user_id=None``) against
+    process-wide env/PATH/vault state read when the scan starts, which is
+    after every caller sharing that scan arrived. An owner-scoped listing
+    must add its owner here.
+    """
+
+    store_dirs: tuple[tuple[str, str], ...]
+    include_body: bool
+    record_view: str
+
+
+def _iter_unique_memories(store_dirs, read_dir, *, include_body, record_view):
+    """Yield records in store precedence order; the first record of an ID wins.
+
+    Every visible record, eligible or not (packages included), claims its ID,
+    so a lazy consumer sees exactly the prefix of the full listing.
+    """
+    seen_ids = set()
+    for directory, store_scope in store_dirs:
+        for mem in read_dir(
+                directory, scope=store_scope,
+                include_body=include_body,
+                record_view=record_view):
+            if mem['id'] in seen_ids:
+                continue
+            seen_ids.add(mem['id'])
+            yield mem
+
+
+def _scan_memory_listing(request):
+    return list(_iter_unique_memories(
+        request.store_dirs,
+        _list_memories_in_dir,
+        include_body=request.include_body,
+        record_view=request.record_view,
+    ))
+
+
+def _copy_memory_records(memories):
+    """Give one caller of a shared scan rows nobody else can mutate."""
+    return [
+        {key: _copy_metadata_value(value) for key, value in memory.items()}
+        for memory in memories
+    ]
+
+
+# Identical concurrent listings share one scan that started after all of
+# their callers arrived (at most one running plus one queued per request).
+_memory_listing_reads = QueuedReadCoalescer()
+
+
 def list_all_memories(project_path=None, extra_paths=None, *,
                       include_body=True, record_view='complete'):
     """List all global + project memories across the primary + extra roots.
@@ -99,29 +157,21 @@ def list_all_memories(project_path=None, extra_paths=None, *,
     ``project_path`` and every root in ``extra_paths`` (a multi-root
     session), de-duplicated by id with the primary root winning on a
     collision. With no ``extra_paths`` this is identical to the original
-    single-root behaviour.
+    single-root behaviour. Concurrent identical calls may share a scan, but
+    only one that started after the call, and each caller owns its rows.
     """
     _validate_memory_record_view(
         record_view, include_body=include_body)
-    memories = []
-    seen_ids = set()
-    with _lock:
-        # One-time idempotent storage migrations (legacy globals, pre-split
-        # flat memories, server-store packages) so the scans below see the
-        # post-split layout.
-        run_storage_migrations(project_path, extra_paths)
-
-        for directory, store_scope in _iter_memory_store_dirs(
-                project_path, extra_paths):
-            for mem in _list_memories_in_dir(
-                    directory, scope=store_scope,
-                    include_body=include_body,
-                    record_view=record_view):
-                if mem['id'] in seen_ids:
-                    continue
-                seen_ids.add(mem['id'])
-                memories.append(mem)
-    return memories
+    # One-time idempotent storage migrations (legacy globals, pre-split flat
+    # memories, server-store packages) so the scan sees the post-split layout.
+    run_storage_migrations(project_path, extra_paths)
+    request = _MemoryListingRequest(
+        tuple(_iter_memory_store_dirs(project_path, extra_paths)),
+        bool(include_body),
+        record_view,
+    )
+    return _memory_listing_reads.run(
+        request, _scan_memory_listing, copy=_copy_memory_records)
 
 
 def list_memories(project_path=None, scope='all', extra_paths=None, *,
@@ -141,23 +191,22 @@ def _find_memory_summaries(memory_ids, project_path=None, extra_paths=None):
     remaining_ids = list(dict.fromkeys(
         validate_memory_id(memory_id) for memory_id in memory_ids))
     found = {}
-    with _lock:
-        run_storage_migrations(project_path, extra_paths)
-        for directory, store_scope in _iter_memory_store_dirs(
-                project_path, extra_paths):
-            if not remaining_ids:
-                break
-            if not os.path.isdir(directory):
-                continue
-            unresolved = []
-            for memory_id in remaining_ids:
-                memory = _memory_summary_from_id_in_dir(
-                    directory, memory_id, scope=store_scope)
-                if memory is None:
-                    unresolved.append(memory_id)
-                else:
-                    found[memory_id] = memory
-            remaining_ids = unresolved
+    run_storage_migrations(project_path, extra_paths)
+    for directory, store_scope in _iter_memory_store_dirs(
+            project_path, extra_paths):
+        if not remaining_ids:
+            break
+        if not os.path.isdir(directory):
+            continue
+        unresolved = []
+        for memory_id in remaining_ids:
+            memory = _memory_summary_from_id_in_dir(
+                directory, memory_id, scope=store_scope)
+            if memory is None:
+                unresolved.append(memory_id)
+            else:
+                found[memory_id] = memory
+        remaining_ids = unresolved
     return found
 
 
@@ -330,18 +379,46 @@ def get_eligible_memories(project_path=None, extra_paths=None,
             include_body=include_body,
             record_view=record_view,
         )
-        if s.get('eligible', True)
-        and (include_packages or not s.get('is_package'))
+        if _is_eligible_memory(s, include_packages)
     ]
+
+
+def _is_eligible_memory(memory, include_packages):
+    return bool(
+        memory.get('enabled', True)
+        and memory.get('eligible', True)
+        and (include_packages or not memory.get('is_package'))
+    )
+
+
+def has_eligible_memories(project_path=None, extra_paths=None):
+    """Return ``bool(get_eligible_memories(project_path, extra_paths))``.
+
+    Reads metadata in store precedence order and stops at the first visible
+    eligible memory instead of materializing the corpus. Earlier same-ID
+    records, packages and disabled memories included, still shadow later ones
+    exactly as in the full listing.
+    """
+    run_storage_migrations(project_path, extra_paths)
+    store_dirs = tuple(_iter_memory_store_dirs(project_path, extra_paths))
+    return any(
+        _is_eligible_memory(memory, include_packages=False)
+        for memory in _iter_unique_memories(
+            store_dirs,
+            _iter_memories_in_dir,
+            include_body=False,
+            record_view='retrieval',
+        )
+    )
 
 
 def _validated_body_char_limit(body_char_limit):
     if (isinstance(body_char_limit, bool)
             or not isinstance(body_char_limit, int)
             or not 0 <= body_char_limit <= MEMORY_BODY_MAX_CHARS):
-        raise ValueError(
+        raise BadRequest(
             'body_char_limit must be an integer between 0 and '
-            f'{MEMORY_BODY_MAX_CHARS:,}')
+            f'{MEMORY_BODY_MAX_CHARS:,}', field='body_char_limit')
     return body_char_limit
 
 
@@ -378,7 +455,7 @@ def iter_eligible_memories(
     """
     body_char_limit = _validated_body_char_limit(body_char_limit)
     if scope not in (None, 'global', 'project'):
-        raise ValueError("scope must be 'global', 'project', or None")
+        raise BadRequest("scope must be 'global', 'project', or None", field='scope')
     summaries = get_eligible_memories(
         project_path,
         extra_paths=extra_paths,
@@ -404,10 +481,10 @@ def load_eligible_memories(
     """Load bounded bodies for at most 50 owner-visible memory IDs."""
     if (not isinstance(memory_ids, Sequence)
             or isinstance(memory_ids, (str, bytes, bytearray))):
-        raise ValueError('memory_ids must be an array of memory IDs')
+        raise BadRequest('memory_ids must be an array of memory IDs', field='memory_ids')
     if len(memory_ids) > MEMORY_SEARCH_TOP_K_MAX:
-        raise ValueError(
-            f'memory_ids accepts at most {MEMORY_SEARCH_TOP_K_MAX} IDs')
+        raise BadRequest(
+            f'memory_ids accepts at most {MEMORY_SEARCH_TOP_K_MAX} IDs', field='memory_ids')
     body_char_limit = _validated_body_char_limit(body_char_limit)
     requested_ids = []
     seen_ids = set()
@@ -454,10 +531,10 @@ def _guard_not_package(target, memory_id, op):
     (a skill is a different noun from a memory).
     """
     if target and target.get('is_package'):
-        raise ValueError(
+        raise BadRequest(
             f"Cannot {op} '{memory_id}': it is an installed skill package, "
             f"not a memory. Skill packages are managed by the user in the "
-            f"Settings → Skills tab; use load_skill to load one.")
+            f"Settings → Skills tab; use load_skill to load one.", field='memory_id')
 
 
 def _collision_memory_id(base_memory_id, counter):
@@ -744,7 +821,7 @@ def toggle_memory(memory_id, enabled=None, project_path=None, extra_paths=None):
     """
     memory_id = validate_memory_id(memory_id)
     if enabled is not None and not isinstance(enabled, bool):
-        raise ValueError('enabled must be a boolean or null')
+        raise BadRequest('enabled must be a boolean or null', field='enabled')
     with _locked_memory_revisions(
             [memory_id], project_path, extra_paths=extra_paths) as records:
         located = records.get(memory_id)

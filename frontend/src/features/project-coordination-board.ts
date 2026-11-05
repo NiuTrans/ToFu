@@ -1,21 +1,17 @@
-/** Project execution graph and decision cards. The graph helper owns bounded
+/** Project execution graph. The graph helper owns bounded
  * evidence projection/layout; this view adds accessible navigation, not execution.
  */
-import { createButton } from '../ui';
 import { createCoordinationWorkList, type CoordinationConversation } from './project-coordination-work-list';
 import { projectCoordinationGraph,
   type CoordinationGraphEdge, type CoordinationGraphNode, type CoordinationGraphOptions, type CoordinationGraphStatus } from './project-coordination-graph';
 import { t } from '../i18n';
 import { createCoordinationCanvas, type CoordinationCanvasState } from './project-coordination-canvas';
 import type { CoordinationWork } from './project-coordination';
-import type { ProjectDispatchView } from '../api/project-dispatch.generated';
 
 export interface CoordinationRenderHooks {
   /** Produces the one-line reading of a task node (e.g. an LLM-organized
    * digest). The default shows the recorded result summary instead. */
   summarizeTask?(node: CoordinationGraphNode): string;
-  /** Attention items shown above the graph; rendered separately by the owner. */
-  pendingDecisions?: number | null;
   /** The embedding surface already labels the section (e.g. a fold summary). */
   heading?: boolean;
   /** View-only preferences owned by the mounted project surface. */
@@ -24,38 +20,6 @@ export interface CoordinationRenderHooks {
   conversations?: readonly CoordinationConversation[];
   inspect?(id: string): void;
   manage?(): void;
-}
-
-interface CoordinationDecision { id: string; title: string; kind: 'dependency' | 'review' | 'delivery'; }
-
-export function coordinationDecisions(assignments: readonly ProjectDispatchView[]) {
-  return assignments.filter(item => !item.revoked && item.request.profile?.mode !== 'coordinator').flatMap<CoordinationDecision>(item => {
-    const execution = item.execution;
-    const reviewed = item.review && Number.isSafeInteger(execution?.resultRevision)
-      && execution!.resultRevision! > 0 && item.review.resultRevision === execution?.resultRevision;
-    const delivered = item.canonicalDelivery === true && item.delivery?.status === 'delivered';
-    const kind = item.dependencyStates?.some(dependency => dependency.status !== 'ready') ? 'dependency'
-      : execution?.status === 'completed' && (!reviewed || item.review?.decision === 'rework') ? 'review'
-      : execution?.status === 'completed' && reviewed && item.review?.decision === 'accept'
-        && (item.request.profile?.mode === 'files' || item.request.profile?.mode === 'project') && !delivered ? 'delivery' : null;
-    return kind ? [{ id: item.assignmentId, title: item.request.brief, kind }] : [];
-  }).slice(0, 128);
-}
-
-export function createCoordinationDecisions(decisions: readonly CoordinationDecision[], manage: () => void): HTMLElement {
-  const section = document.createElement('details'); section.className = 'coordination-decision-list';
-  section.dataset.coordinationDisclosure = 'decisions';
-  if (!decisions.length) { section.hidden = true; return section; }
-  section.append(coordinationText(`${t('projectCoordination.decisions')} · ${decisions.length}`, 'summary'));
-  for (const item of decisions) {
-    const card = document.createElement('article'); card.className = 'ui-card ui-stack ui-stack--tight';
-    card.append(coordinationText(item.title, 'strong'), coordinationText(t(`projectCoordination.decisionAction.${item.kind}`)));
-    const action = createButton({ label: t('projectCoordination.controls'), size: 'sm', onClick: manage });
-    action.dataset.coordinationFocus = JSON.stringify(['decision', item.id]);
-    card.append(action);
-    section.append(card);
-  }
-  return section;
 }
 
 export const coordinationText = (content: string, tag = 'p'): HTMLElement => {
@@ -104,8 +68,8 @@ export function coordinationTaskDigest(node: CoordinationGraphNode): string {
 /** Normal chat stays primary. A bounded work list provides direct actions;
  * topology is built only when its native disclosure is opened. */
 export function createCoordinationBoard(
-  groups: ReturnType<typeof projectCoordinationWorkGroups>, navigate: (id: string) => void, pendingDecisions: number | null = 0,
-  options: CoordinationGraphOptions = {}, hooks: CoordinationRenderHooks = { pendingDecisions },
+  groups: ReturnType<typeof projectCoordinationWorkGroups>, navigate: (id: string) => void,
+  options: CoordinationGraphOptions = {}, hooks: CoordinationRenderHooks = {},
 ): HTMLElement {
   const graph = projectCoordinationGraph(groups, options);
   const root = document.createElement('section'); root.className = 'coordination-task-graph';

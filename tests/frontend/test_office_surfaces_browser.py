@@ -6,6 +6,7 @@ import subprocess
 import time
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = [pytest.mark.visual, pytest.mark.slow]
 
@@ -21,6 +22,7 @@ def _free_port() -> int:
 
 
 def test_office_floor_proposals_budget_render_in_fixture_preview(page):
+    require_node_modules('vite')
     port = _free_port()
     server = subprocess.Popen(
         ['node', 'node_modules/vite/bin/vite.js', '--config',

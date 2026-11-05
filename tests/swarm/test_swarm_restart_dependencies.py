@@ -66,19 +66,35 @@ def recovery(monkeypatch):
         scheduler.shutdown(require_quiescence=True)
 
 
+_OPEN_WRITE = [{'role': 'user', 'content': 'external write'},
+               {'role': 'assistant', 'content': 'Write queued',
+                'tool_calls': [{'id': 'external-write', 'type': 'function',
+                                'function': {'name': 'external_write', 'arguments': '{}'}}]}]
+
+
+@pytest.fixture
+def no_surviving_commands(monkeypatch):
+    monkeypatch.setattr('lib.project_mod.foreground_command_records.surviving_foreground_commands',
+                        lambda **kw: [])
+
+
 @pytest.mark.parametrize('checkpoint, reason', [
+    # The phase claims tool calls that the transcript does not show.
     ({'result': {'checkpoint_phase': 'tools_in_flight'}},
-     'restart_tool_outcome_unknown'),
-    ({'messages': [{'role': 'assistant', 'content': 'Write queued',
-                   'tool_calls': [{'id': 'external-write', 'type': 'function',
-                                   'function': {'name': 'external_write',
-                                                'arguments': '{}'}}]}]},
-     'restart_tool_outcome_unknown'),
+     'restart_checkpoint_invalid'),
     ({'messages': [{'role': 'tool', 'tool_call_id': 'missing-intent',
                    'content': 'Unpaired receipt'}]},
      'restart_checkpoint_invalid'),
+    ({'messages': _OPEN_WRITE, 'surviving': True},
+     'restart_command_still_running'),
 ])
-def test_unsafe_checkpoint_blocks_out_of_order_closure_only(recovery, checkpoint, reason):
+def test_unsafe_checkpoint_blocks_out_of_order_closure_only(recovery, monkeypatch, checkpoint, reason):
+    checkpoint = dict(checkpoint)
+    surviving = checkpoint.pop('surviving', False)
+    monkeypatch.setattr(
+        'lib.project_mod.foreground_command_records.surviving_foreground_commands',
+        lambda **kw: [{'tool_call_id': 'external-write', 'pgid': 77,
+                       'command': 'deploy'}] if surviving else [])
     # Reverse dependency order prevents a single forward scan from sufficing.
     specs = [SubTaskSpec(id='leaf', objective='publish after review', depends_on=['review']),
              SubTaskSpec(id='review', objective='review external write', depends_on=['write']),
@@ -133,6 +149,31 @@ def test_unsafe_checkpoint_blocks_out_of_order_closure_only(recovery, checkpoint
     restored.driver.assert_called_once_with()
 
 
+def test_open_tool_round_resumes_its_agent_and_dependents_wait_for_it(recovery, no_surviving_commands):
+    specs = [SubTaskSpec(id='leaf', objective='publish after review', depends_on=['review']),
+             SubTaskSpec(id='review', objective='review external write', depends_on=['write']),
+             SubTaskSpec(id='write', objective='external write'),
+             SubTaskSpec(id='unrelated', objective='independent analysis')]
+    rows = [{'agent_id': 'write', 'status': 'running', 'messages': deepcopy(_OPEN_WRITE),
+             'rounds_used': 2,
+             'result': {'checkpoint_phase': 'tools_in_flight', 'recovery_reason': ''}}]
+    original_rows = deepcopy(rows)
+    restored = recovery(specs, rows)
+    master = restored.master
+    assert rows == original_rows
+    assert set(restored.workers) == {'write', 'review', 'leaf', 'unrelated'}
+    assert {child_id: master._results_by_id[child_id][1].status
+            for child_id in ('write', 'review', 'leaf', 'unrelated')} == dict.fromkeys(
+        ('write', 'review', 'leaf', 'unrelated'), 'completed')
+    resumed = master._resume_messages['write']
+    assert resumed[-1] == {'role': 'tool', 'tool_call_id': 'external-write',
+                           'content': resumed[-1]['content']}
+    assert 'before the result of this call was recorded' in resumed[-1]['content']
+    assert master._resume_rounds['write'] == 3
+    assert not any('reconcil' in str(master._results_by_id[child_id][1].error_message)
+                   for child_id in ('review', 'leaf'))
+
+
 def test_finished_results_and_delivery_flags_survive_unsafe_ancestry(recovery):
     specs = [SubTaskSpec(id='leaf', objective='new publication', depends_on=['bridge']),
              SubTaskSpec(id='bridge', objective='finished review', depends_on=['write']),
@@ -173,6 +214,7 @@ def test_finished_results_and_delivery_flags_survive_unsafe_ancestry(recovery):
 
 
 @pytest.mark.parametrize('reason', ['restart_tool_outcome_unknown',
+                                  'restart_command_still_running',
                                   'restart_dependency_reconciliation_required'])
 def test_persisted_restart_failure_blocks_new_descendant_without_replaying_it(recovery, reason):
     specs = [SubTaskSpec(id='descendant', objective='later dependent work', depends_on=['blocked']),
@@ -193,22 +235,32 @@ def test_persisted_restart_failure_blocks_new_descendant_without_replaying_it(re
 
 
 @pytest.mark.parametrize('status', ['failed', 'cancelled', 'completed'])
-def test_terminal_tool_intent_blocks_unfinished_descendants_without_rewriting_receipts(recovery, status):
+@pytest.mark.parametrize('transcript', [True, False])
+def test_terminal_tool_intent_fences_descendants_only_without_a_transcript(
+        recovery, status, transcript):
+    # A terminal agent's open tool round is ordinary terminal evidence, exactly
+    # as without a restart; only a phase the transcript cannot show is unsafe.
     specs = [SubTaskSpec(id='dependent', objective='publish after write', depends_on=['write']),
              SubTaskSpec(id='write', objective='prior mutation'),
              SubTaskSpec(id='unrelated', objective='independent work')]
     row = {'agent_id': 'write', 'status': status, 'delivered': True,
+           **({'messages': deepcopy(_OPEN_WRITE)} if transcript else {}),
            'result': {'status': status, 'checkpoint_phase': 'tools_in_flight',
                       'error_message': '' if status == 'completed' else 'ordinary dispatch exit',
                       'total_tokens': 23}}
     restored = recovery(specs, [row])
-    assert set(restored.workers) == {'unrelated'}
     assert restored.master._results_by_id['write'][1].to_dict() == SubAgentResult(**row['result']).to_dict()
-    assert restored.master._delivered_result_ids == {'write'}
+    assert restored.master._delivered_result_ids >= {'write'}
     dependent = restored.master._results_by_id['dependent'][1]
+    if transcript:
+        assert set(restored.workers) == {'dependent', 'unrelated'}
+        assert dependent.status == 'completed'
+        assert not restored.persisted.call_args_list
+        return
+    assert set(restored.workers) == {'unrelated'}
     assert dependent.status == 'failed'
     assert dependent.recovery_reason == 'restart_dependency_reconciliation_required'
-    assert 'restart_tool_outcome_unknown' in dependent.error_message
+    assert 'restart_checkpoint_invalid' in dependent.error_message
     assert {call.args[1] for call in restored.persisted.call_args_list} == {'dependent'}
 
 

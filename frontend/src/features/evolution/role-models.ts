@@ -1,5 +1,6 @@
-/** Role model inspector. Chat catalog only; live tasks retain their pinned model.
- * No polling or credential state. Late writes cannot repaint a different goal.
+/** Role model inspector inside the actor sheet. Chat catalog only; live tasks
+ * retain their pinned model. No polling or credential state. Late writes cannot
+ * repaint a different goal.
  */
 import { createButton, createField } from '../../ui/index';
 import type { EvolutionApi } from './controller';
@@ -8,11 +9,13 @@ import type { EvolutionModel, EvolutionRole, EvolutionRun, RoleModels } from '..
 export function mountRoleModels(host:HTMLElement, ports:{
   copy:(key:string)=>string;api:EvolutionApi;models:()=>Array<{model:EvolutionModel;label:string}>;
   ready:()=>boolean;current:()=>EvolutionRun|undefined;draft:()=>RoleModels;setDraft:(value:RoleModels)=>void;
-  refresh:()=>Promise<void>;openTask:(id:string)=>void;askHuman:()=>void;
+  refresh:()=>Promise<void>;openTask:(id:string)=>void;
+  /** Reopens the studio dialogue the role holds. */
+  askHuman:()=>void;
+  /** The dialogue the role holds: its pending question, its compute stall, or none. */
+  attention:(role:EvolutionRole)=>'answer'|'stall'|'';
 }) {
   let role:EvolutionRole='executor', runId='', disposed=false, saving=false;
-  const title=document.createElement('h2'), hint=document.createElement('p');
-  hint.textContent=ports.copy('roleModelHint');
   const select=document.createElement('select');select.dataset.roleModel='true';
   const field=createField({label:ports.copy('model'),control:select});
   const selectShell=document.createElement('div');selectShell.className='ui-select';
@@ -25,8 +28,13 @@ export function mountRoleModels(host:HTMLElement, ports:{
     const id=run.status===stage?run.task_id:[...run.receipts].reverse().find(r=>r.stage===stage)?.task_id;
     if(id)ports.openTask(id);
   }});
-  const human=createButton({label:ports.copy('askHuman'),onClick:ports.askHuman});
-  host.append(title,hint,field.el,save,status,task,human);
+  const human=createButton({label:ports.copy('primary_answer'),onClick:ports.askHuman});
+  host.append(field.el,save,status,task,human);
+  function syncActions(){
+    task.hidden=!runId||role==='coordinator';
+    const attention=runId?ports.attention(role):'';
+    human.hidden=!attention;if(attention)human.textContent=ports.copy('primary_'+attention);
+  }
   function refreshOptions(){
     if(disposed||saving)return;
     const run=ports.current();if((run?.run_id||'')!==runId)return;
@@ -53,10 +61,10 @@ export function mountRoleModels(host:HTMLElement, ports:{
     finally{saving=false;if(!disposed){save.disabled=false;select.disabled=false;}}
   }
   return {open(next:EvolutionRole){
-    role=next;runId=ports.current()?.run_id||'';title.textContent=ports.copy(role);status.textContent='';
-    task.hidden=!runId||role==='coordinator';human.hidden=!runId||role!=='executor';refreshOptions();
+    role=next;runId=ports.current()?.run_id||'';status.textContent='';
+    syncActions();refreshOptions();
   },refreshOptions,sync(){
-    if((ports.current()?.run_id||'')!==runId){runId=ports.current()?.run_id||'';status.textContent='';refreshOptions();
-      task.hidden=!runId||role==='coordinator';human.hidden=!runId||role!=='executor';}
-  },dispose(){disposed=true;}};
+    if((ports.current()?.run_id||'')!==runId){runId=ports.current()?.run_id||'';status.textContent='';refreshOptions();}
+    syncActions();
+  },role(){return role;},dispose(){disposed=true;}};
 }

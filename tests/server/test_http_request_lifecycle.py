@@ -116,6 +116,76 @@ def test_owned_http_parent_cancellation_joins_receiver_and_sender():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('cleanup_failure', ['closed_peer', 'receiver_failure', 'handler_reset'])
+def test_owned_http_cancelled_cleanup_logs_closed_peer_without_traceback(cleanup_failure, caplog):
+    from types import SimpleNamespace
+    from lib.app.app_lifecycle import owned_asgi_http_connection_class
+    from lib.hypercorn_runtime import _PeerDisconnected
+
+    unexpected = (ConnectionResetError('application reset') if cleanup_failure == 'handler_reset'
+                  else RuntimeError('receiver cleanup failed'))
+
+    async def scenario():
+        sending = asyncio.Event()
+        peer_closed = asyncio.Event()
+
+        class Connection(owned_asgi_http_connection_class()):
+            def _create_request_from_scope(self, send):
+                return None
+
+            async def handle_messages(self, request, receive):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    if cleanup_failure == 'receiver_failure':
+                        raise unexpected
+
+            async def handle_request(self, request, send):
+                try:
+                    await send({'type': 'http.response.body', 'body': b'chunk', 'more_body': True})
+                except asyncio.CancelledError:
+                    # A streaming body may end on cancellation and still send
+                    # its final frame after shutdown aborted the transport.
+                    if cleanup_failure == 'handler_reset':
+                        raise unexpected
+                    await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+
+        async def send(message):
+            if peer_closed.is_set():
+                raise _PeerDisconnected('peer transport is closed')
+            sending.set()
+            await asyncio.Event().wait()
+
+        connection = Connection(SimpleNamespace(logger=logging.getLogger('http-peer-test')), {})
+        before = asyncio.all_tasks()
+        owner = asyncio.create_task(connection(None, send))
+        await sending.wait()
+        peer_closed.set()
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        assert asyncio.all_tasks() == before
+
+    with caplog.at_level(logging.DEBUG, logger='http-peer-test'):
+        asyncio.run(scenario())
+    records = [record for record in caplog.records if record.name == 'http-peer-test']
+    alarms = [record for record in records if record.levelno >= logging.WARNING]
+    if cleanup_failure == 'closed_peer':
+        assert alarms == []
+    else:
+        assert [(record.levelno, record.getMessage()) for record in alarms] == [
+            (logging.ERROR, 'HTTP child cleanup failed')]
+        assert alarms[0].exc_info[1] is unexpected
+        assert alarms[0].exc_info[2] is not None
+    if cleanup_failure != 'handler_reset':
+        peer_records = [record for record in records
+                        if 'peer disconnected' in record.getMessage().lower()]
+        assert peer_records
+        assert all(record.levelno in (logging.DEBUG, logging.INFO)
+                   and not record.exc_info and not record.exc_text
+                   for record in peer_records)
+
+
 def test_execution_clock_includes_policy_delay_before_route_and_wall_jump(monkeypatch):
     from types import SimpleNamespace
     from quart import request

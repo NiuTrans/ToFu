@@ -6,11 +6,60 @@ This directory contains retained, executable measurement contracts. Local run
 outputs and candidate result payloads are reconstructible artifacts and remain
 untracked according to `.gitignore`.
 
+`owned_inventory_reads.py` measures real task-list and project-conversation
+aggregation with synthetic owned runtime/catalog/history read ports. Compare
+alternating fresh `--repository` trees; `--baseline` checks complete response and
+fixture digests. History counts are method calls, not storage RPCs, and clocks
+exclude the authority, HTTP encoding and imports. Verify
+`tests/meta/test_owned_inventory_measure.py` plus the owning pagination specs.
+
 `tool_result_projection.py` measures six fixed native receipts through production
 capture/budget/delivery, with an in-memory retention port. Exact canonical values
 and complete model views gate byte/token accounting. Verify
 `tests/meta/test_tool_result_projection_measure.py`, including deliberately lost
 evidence; the result is a component payload observation, never paid-task savings.
+
+`project_assignment_page_reads.py` builds Project assignment history pages over a
+disposable SQL Sidecar (or native TofuDB with `--backend tofudb` and `TOFUDB_BIN`),
+counting storage RPCs by operation, returned bytes and encoded page bytes per
+build, and checks each page against an oracle rebuilt from complete Turn reads.
+`--dependencies` pins every file row to the preceding accepted consult row, so each
+build also evaluates prerequisite evidence. Run each pinned tree in a fresh process
+with `--repository`; counts are the result, clocks are host observations. Reuse
+rules are specified in `tests/project_mod/test_project_dispatch_history_projection.py`.
+
+`catalog_origin_reads.py` admits `--admissions` delegated assignments through the
+real repository on the same disposable authorities, then reads sidebar catalog
+provenance through the tree's `project_catalog_origins`, composed like its
+provenance routes, counting storage RPCs by operation per read. Every read
+must equal an oracle of each Worker's oldest Coordinator; one more admission
+measures the incremental read, and `--writers N` keeps committing while each read
+starts after a fresh commit, reporting failed reads by error type. Run each pinned
+tree in a fresh process with `--repository` and a source-matched engine; counts
+and failures are the result, clocks are host observations. Verify
+`tests/meta/test_catalog_origin_reads_measure.py`.
+
+`project_dispatch_admission_reads.py` admits one live file grant through
+`scope.admit_tool` on the same disposable authorities, counting storage RPCs,
+repository validations and row rereads per admission; `--cpu-threads` adds busy
+Python threads so each RPC competes for the GIL. Conversations, binding and the
+human source Turn are in-memory fixture ports. Run each pinned tree in a fresh
+process with `--repository`; the decision parity it relies on is specified in
+`tests/project_mod/test_project_dispatch_executor_admission.py`.
+
+`tool_dispatch_overhead.py` drives the real tool pipeline one call at a time per
+tool on a managed-lane task against a disposable SQLite sidecar, emptying the
+result-reuse cache per turn, plus one-turn parallel probes. Synchronous
+non-event storage operations per call are load-independent; its clocks are
+component observations that this shared host varies by 2x, so compare
+alternating fresh runs. Verify `tests/meta/test_tool_dispatch_overhead_measure.py`.
+
+`round_prep_inputs.py` runs production `inject_messages` and admitted same-round
+target checks against a seeded swarm on a disposable `tofu-db serve`, counting
+storage operations per round. `--source-root` points at an exported pre-change
+tree so before/after share one engine binary and fixture; `--authority-parent`
+places the authority on a slow volume. Conversation-scope reads are stubbed.
+It is a component diagnostic for the `inputs.swarm_messages` round-prep step.
 
 `tofudb_context_progression.py` measures real append/read/checkpoint advancement
 with an independent public-header digest and exact suffix oracle. Keep initial
@@ -82,7 +131,159 @@ paths and settle the audit queue. Verify full-prefix bytes and failure behavior,
 output/fixture/source digests, PIDs, raw quantiles and residency. Larger targeted
 cohorts retain earlier failures; these fixtures exclude full context/inference.
 
+`round_prep_body.py` replays a growing 100-300 message history (seeded synthetic
+sizes, or a local Request Inspector payload via `--fixture`) through production
+compaction, prompt admission, `build_round_request` and snapshot projection,
+idle and beside CPU-bound GIL-contention threads. Per-round body, projected-row
+and measurement digests must match across passes and compared trees before clocks
+count. Verify `tests/meta/test_round_prep_body_measure.py`; storage commits,
+providers and the real serving thread mix are excluded.
+
+`model_request_cpu.py` replays a growing append-only tool loop sized by the local
+tokenizer (default 50k and 200k tokens) through production `build_body`,
+selected-slot adaptation without an admitted count and `prepare_request` for
+Chat, Anthropic and Responses wires, in calling-thread CPU and wall time, idle
+and beside CPU-bound GIL-contention threads; `--model` picks the logical model
+(Claude adds cache markers and Claude adaptation). Sealed payload, semantic and
+prefix identities, admitted tokens and both clamped budgets must match across
+passes and compared trees; copy one benchmark file into each compared tree and
+run them in fresh alternating processes. Verify
+`tests/meta/test_model_request_cpu_measure.py`; providers, storage and the
+serving thread mix are excluded.
+
+`round_token_count_cpu.py` replays a growing tool loop (default 50k and 200k
+tokens, 20 rounds, an OpenAI and an Anthropic route) through every production
+stage of a round that counts the request: compaction pipeline and gate, prompt
+admission, `build_round_request`, selected-slot adaptation and
+`prepare_request`, each round inside the loop's round scope when the tree has
+one. `counting` is calling-thread CPU inside the counting entry points
+(outermost call only); tokenizer texts and entropy scans per round are
+receipts. `--no-l1` keeps the request at the history's size; `--source-root`
+measures an exported tree. Gate/admission measurements, clamped budgets and
+sealed payloads must match across passes and trees before clocks count. Verify
+`tests/meta/test_round_token_count_cpu_measure.py`.
+
+
+`ocr_gil_ticks.py` runs a burst of synthetic Chinese/English screenshot OCR
+jobs through one tree's `lib.knowledge.assets._ocr_image`, one task thread per
+image beside CPU-bound GIL-contention threads, while the main thread ticks every
+millisecond. It reports tick-gap quantiles and stalled time; per-image output
+digests must match across compared trees before clocks count. Compare an
+exported pre-change `--source-root` with this tree in alternating fresh
+processes. Real Tesseract data is required; storage and providers are excluded.
+Verify `tests/meta/test_ocr_gil_ticks_measure.py`; the product spec is
+`tests/knowledge/test_knowledge_ocr_process.py`.
+
+`model_dispatch_barrier.py` compares the former awaited pre-request barrier with
+`checkpoint_model_dispatch` over the production event entry, snapshot emitter
+and checkpoints, with a slow authority stub and a simulated request. Both modes
+must commit the identical ordered log before clocks count; it reports the
+RoundPrepTiming `barrier` stall, the tool-barrier wait the deferral can shift
+and round wall time. `--lane child` measures a child invocation's Inspector
+evidence lane the same way: the paid call's pre-call stall is
+`build_bodyMs.snapshot` plus `barrier`, against an emulation of the former
+acknowledged append. Verify `tests/meta/test_model_dispatch_barrier_measure.py`;
+real storage engines, providers and concurrent tasks are excluded.
+
+`event_append_congestion.py` replays durable task events through production
+`wait_for_persistence`, `event_log.append_persistent_event`, the event batcher
+and the real `StorageV2Client` retry loop against an in-process FIFO authority
+that charges queue wait against each request deadline. Foreign writers share
+the client (and so the deadline policy's observations); CPU-bound threads add
+GIL pressure. It counts attempts and refusals per operation, row sends per
+durable row and concurrent duplicate sends, and every lane must commit its
+exact rows. `--compare` alternates fresh workers between an exported
+pre-change tree and this one. Authority service times are inputs; the real
+engine and the delivery coordinator are excluded. Verify
+`tests/meta/test_event_append_congestion_measure.py`.
+
+
+`turn_event_batch.py` persists one prepared FIFO run of K structural task
+events on a fresh attempt of a disposable SQL Sidecar or native `tofu-db`
+(`--backend tofudb`, `TOFUDB_BIN`) through K `record_task_event` calls and
+through one `record_task_events` (`turn.event.record_batch`) call, alternating
+modes. Clocks count only after both modes commit the identical projection, K
+revisions, K rows and K sync patches (one digest). `--writers` adds background
+producers on their own conversations (commit-queue congestion), `--gil-threads`
+CPU-bound threads (interpreter-lock pressure), `--authority-parent` a slow
+volume. Verify `tests/meta/test_turn_event_batch_measure.py`; this is the
+barrier persistence component, not delivery-coordinator or application latency.
+
+`swarm_checkpoint_rounds.py` replays a Swarm child's per-round checkpoints
+(`model_in_flight` write-ahead, `tools_in_flight`, `ready`) through production
+`SubAgent._save_checkpoint` against a disposable `tofu-db serve`, growing a
+transcript from real `lib/*.py` text (default 200 rounds, about 300K tokens).
+It reports sink latency per phase and the engine's written bytes
+(`/proc/<pid>/io` `wchar`), and refuses to report unless the durable agent row
+equals the replayed transcript and final usage. Compare an exported pre-change
+`--source-root` with its own source-matched engine (the schema handshake
+refuses a mismatched pair) and one shared `--corpus-root`; `fixtureSha256` must
+agree. `--authority-parent` places the authority on a slow volume. Models,
+tools and round preparation are excluded.
+
+`task_event_delivery_contention.py` drives `EventDeliveryCoordinator` from
+`--source-root` (an exported pre-change tree for before) with bursty producers
+on independent lanes, a simulated persist time and optional CPU-bound
+GIL-contention threads. Its counting state lock (installed while the
+coordinator is constructed), pump-job and notification counts are
+tree-agnostic; each sample proves exact per-lane commit-then-publish order
+before it reports. `--backlog 16,64,136` instead measures the durability
+barrier over N structural events queued behind one in-flight head, through the
+selected tree's production `append_event` and `turn_lifecycle` record code
+against a slow Turn authority stub at the storage client (`--authority-ms` per
+transaction); it reports only after every row committed once in order and
+every frame published after its commit. Compare alternating fresh processes and verify
+`tests/meta/test_task_event_delivery_contention_measure.py`; storage engines,
+push and whole-application throughput are excluded.
+
+
+`delivery_resume_reads.py` runs the real integration worker for whole minutes over
+a disposable SQL Sidecar (or native TofuDB with `--backend tofudb` and `TOFUDB_BIN`)
+holding `--history` acknowledged delivery rows and `--pending` held receipts, and
+counts integration storage RPCs by operation per minute from worker start. Held
+receipts go to a recorder that returns them unchanged, so counts are the resume
+loop's own reads, not Git or publication work. Run each pinned tree in a fresh
+process with `--repository`; the behavior is specified in
+`tests/project_mod/test_delivery_resume_demand.py`.
+
+`turn_projection_incremental.py` measures per-event Turn projection capture,
+projection and patch time for seeded 10/100/500-round tasks, idle and beside
+CPU-bound GIL-contention threads, one fresh worker per arm; `--source-root`
+names an exported pre-change tree. Every arm of one size must produce the same
+projection/patch digest before clocks count. `--entry append` instead drives
+the production `append_event` producer entry on a delivery lane and reports
+producer-thread CPU per frame and per capture; its digest covers every admitted
+charge and captured structure. Verify
+`tests/meta/test_turn_projection_incremental_measure.py`; storage, delivery
+queues and providers are excluded.
+
+`turn_event_persist_encode.py` measures calling-thread CPU and wall time per
+persisted turn event of a seeded long task (default 300 rounds): Request
+Inspector snapshots through `build_round_evidence`, the lane detach and the
+delta projector, structural and progress frames through `record_task_event`,
+and a non-conversation task's two partial checkpoints per round, idle and
+beside CPU-bound GIL-contention threads, one fresh worker per arm
+(`--source-root` names an exported pre-change tree). The storage stub encodes
+each request as the native client does. Arms must produce identical request
+bytes, carried rows and checkpoint texts before clocks count. Verify
+`tests/meta/test_turn_event_persist_encode_measure.py`; the authority, delivery
+coordinator and providers are excluded.
+
 ## Editing rules
+
+`model_routing_request.py` measures owner snapshot copying, primary/fallback
+compilation and real ephemeral Slot mint/disposal. Compare alternating frozen
+source roots with identical fixtures and receipt hashes. Authority/audit IO is
+in-memory; this is not inference or chat latency. Verify its meta self-check.
+
+`dispatch_contention.py` reproduces dispatcher-lock contention: about 1,600 live
+request-scoped slots minted through the real model-routing adapter, a configured
+pool, real `lib.key_stats` admission reads against a store in `--stats-dir`,
+CPU-bound GIL threads, pinned/unpinned pickers and one group minter. Latencies
+are wall clock around public calls, lock waits included; authority and audit are
+in-memory. Compare alternating fresh processes of frozen source roots and put
+`--stats-dir` on the volume class under study. Verify
+`tests/meta/test_dispatch_contention_measure.py`; never read it as chat latency.
 
 `token_cold_start.py` measures one encoding's first operation in each fresh
 process using token_ingress_measure --cold-only. Verify distinct PIDs, zero warm

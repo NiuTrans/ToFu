@@ -52,11 +52,7 @@ from lib.paper.podcast_prompts import PODCAST_MODES
 
 from lib.paper.podcast_runtime import (
     _podcast_index_get,
-    _podcast_index_register,
     _podcast_runtime,
-    _cleanup_stale_podcast_tasks,
-    _new_podcast_task,
-    _podcast_task_id,
 )
 
 
@@ -78,12 +74,6 @@ def podcast_audio_url(paper_hash, mode, lang, voice):
     """Resolve a published audio URL through the on-demand worker module."""
     from lib.paper.podcast_engine.worker import podcast_audio_url as implementation
     return implementation(paper_hash, mode, lang, voice)
-
-
-def run_podcast_task(task):
-    """Activate the report-to-script worker in the background task thread."""
-    from lib.paper.podcast_engine.worker import run_podcast_task as implementation
-    return implementation(task)
 
 
 @api_v1_paper_bp.route("/api/v1/paper/podcast/status", methods=["GET"])
@@ -166,66 +156,14 @@ async def start_podcast_task():
     """
     owner_user_id = int(request_user_id())
     data = await async_parse_body()
-    _cleanup_stale_podcast_tasks()
     phash, mode, lang, voice, model, force, err = _resolve_podcast_request(data)
     if err:
         return err
-    if not has_report(phash, user_id=owner_user_id):
-        return api_payload(
-            {
-                "ok": False,
-                "report_required": True,
-                "report_lang": lang,
-                "error": "a report is required before a podcast can be generated",
-            },
-            200,
-        )
-    from lib import tts as _tts
+    from lib.paper.podcast_engine.service import start_podcast
 
-    eff_voice = voice or _tts.default_voice()
-
-    tid = _podcast_index_get(
-        phash, mode, lang, eff_voice, model, user_id=owner_user_id)
-    if tid:
-        return api_ok({"task_id": tid, "reused": True})
-
-    cached = load_cached_podcast(
-        phash, mode, lang, eff_voice, user_id=owner_user_id)
-    # The cache row is ONE slot per (paper_hash, mode, lang, voice) — and
-    # the model that MADE it is part of its honest identity: asking for a
-    # different model and being served the previous model's audio would be
-    # the cache-key-skew family (label says X, key is generic). A requested
-    # model that differs from the row's model is a cache MISS (regenerate +
-    # overwrite the slot); a legacy caller sending no model accepts the
-    # row as-is, preserving pre-picker behaviour for API clients.
-    if cached and not force and not (model and (cached.get("model") or "") != model):
-        status = cached.get("status") or ""
-        return api_ok(
-            {
-                "cached": True,
-                "status": status,
-                "script": cached.get("script_json") or {},
-                "meta": cached.get("meta") or {},
-                "scriptOnly": status == "script_only",
-                "model": cached.get("model") or "",
-                "audioUrl": (
-                    podcast_audio_url(phash, mode, lang, eff_voice)
-                    if status == "done"
-                    else ""
-                ),
-                "durationSec": cached.get("duration_sec") or 0,
-            }
-        )
-
-    task_id = _podcast_task_id()
-    _podcast_index_register(
-        phash, mode, lang, eff_voice, model, task_id,
-        user_id=owner_user_id)
-    task = _new_podcast_task(
-        task_id, phash, mode, lang, eff_voice, model,
-        user_id=owner_user_id)
-    _podcast_runtime.spawn(task_id, run_podcast_task, task)
-    return api_ok({"task_id": task_id})
+    return api_payload(start_podcast(
+        phash, mode=mode, lang=lang, voice=voice, model=model, force=force,
+        user_id=owner_user_id))
 
 
 @api_v1_paper_bp.route("/api/v1/paper/video/start", methods=["POST"])

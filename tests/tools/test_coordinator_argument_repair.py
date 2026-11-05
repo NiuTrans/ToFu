@@ -1,4 +1,4 @@
-"""Coordinator input repair preserves exact revisions and delegated limits."""
+"""Coordinator input repair preserves exact revisions and refuses removed limits."""
 from copy import deepcopy
 import json
 
@@ -36,10 +36,12 @@ def ingest(name, arguments, documents):
      ('assignment_ids', 'stringified_json')),
     ('delegate_project_work',
      {'title': 'Check evidence', 'brief': 'Verify the source and return evidence.',
-      'idempotency_key': 'delegation-a', 'max_tokens': '1000'},
+      'idempotency_key': 'delegation-a',
+      'rework_of': '{"assignmentId": "worker-a", "grantRevision": 7, "resultRevision": 3}'},
      {'title': 'Check evidence', 'brief': 'Verify the source and return evidence.',
-      'idempotency_key': 'delegation-a', 'max_tokens': 1000},
-     ('max_tokens', 'stringified_primitive')),
+      'idempotency_key': 'delegation-a',
+      'rework_of': {'assignmentId': 'worker-a', 'grantRevision': 7, 'resultRevision': 3}},
+     ('rework_of', 'stringified_json')),
 ])
 def test_coordinator_repairs_types_before_authoritative_validation(
         name, arguments, expected, repair, documents):
@@ -76,10 +78,12 @@ _AUTHORITY_CASES = [
      '$.result_revision')
     for value in (0, -1)
 ] + [
-    ('delegate_project_work', {**_DELEGATE, field: value}, f'$.{field}')
-    for field, maximum in (('max_tokens', 2147483647),
-                           ('max_model_requests', 64), ('max_tool_calls', 512))
-    for value in (0, -1, maximum + 1)
+    # Workers have no spending ceiling (docs/PROJECT_COORDINATION.md, "No
+    # spending ceiling"): a stale allowance, even a formerly valid or
+    # stringified one, is an unknown argument, never coerced or dropped.
+    ('delegate_project_work', {**_DELEGATE, field: value}, '$')
+    for field in ('max_tokens', 'max_model_requests', 'max_tool_calls')
+    for value in (0, 1, '1000')
 ] + [
     ('delegate_project_work',
      {**_DELEGATE, container: ([{**_PIN, field: 0}] if container == 'dependencies'
@@ -100,6 +104,8 @@ def test_invalid_revision_or_allowance_is_rejected_without_semantic_repair(
     call = ingest(name, arguments, documents)
     assert call.contract_error is not None
     assert call.contract_error['path'] == path
+    assert call.contract_error['code'] == (
+        'unknown_arguments' if path == '$' else 'invalid_argument_value')
     assert 'NOT executed' in call.parse_error
     assert call.fn_args == original
     assert arguments == original

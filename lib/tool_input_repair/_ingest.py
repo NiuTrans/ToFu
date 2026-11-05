@@ -41,6 +41,43 @@ from lib.tools.contracts import (
 logger = get_logger(__name__)
 
 
+def contract_rejection_text(fn_name: str, exc: ToolContractError,
+                            fn_args: Any) -> str:
+    """Model-visible text for a call its contract refused before execution."""
+    # The bare code/path leaves weak models guessing the correct shape (conv
+    # mtdqz4bkuyitzj retried blindly); the hint names the expected keys so the
+    # recovery round can self-correct.
+    hint = schema_hint(fn_name)
+    # A blank per-edit path is reported by the contract as a LENGTH violation
+    # on one index. That names the symptom and hides the rule: every edit
+    # needs its own path. Name the cause and the offending indices so the
+    # recovery round does not retry blind.
+    gap = edit_batch_path_gap(fn_name, fn_args)
+    return (f'ERROR: Tool call `{fn_name}` was NOT executed. '
+            f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}'
+            + (f' {gap}' if gap else '')
+            + (f' {hint}' if hint else ''))
+
+
+# The retired insert tools documented ``position`` as optional (default
+# ``after``). Their emitted name is the only evidence of insert intent and is
+# known only here, so the default is applied before shape repair, which never
+# guesses an insertion for an anchored item without a position.
+_LEGACY_INSERT_TOOL_NAMES = frozenset({'insert', 'insert_content', 'insert_contents'})
+
+
+def _with_legacy_insert_position(fn_args: dict[str, Any]) -> dict[str, Any]:
+    def positioned(item):
+        if (isinstance(item, dict) and 'anchor' in item
+                and not item.get('operation') and 'position' not in item):
+            return {**item, 'position': 'after'}
+        return item
+
+    if isinstance(fn_args.get('edits'), list):
+        return {**fn_args, 'edits': [positioned(item) for item in fn_args['edits']]}
+    return positioned(fn_args)
+
+
 # Canary payloads of known UPSTREAM canned probes — fixed byte-identical
 # blobs the gateway / Anthropic-native layer injects into the tool-call
 # stream (measured: ``print('HELLO_CHECK')`` on Opus-5 wire ids, 2026-07,
@@ -386,6 +423,8 @@ def ingest_tool_call(
     # ── Stage 4: schema / param repair ──
     repair_log: RepairLog = []
     if parse_error is None:
+        if fn_name == 'edit_file' and raw_name.lower() in _LEGACY_INSERT_TOOL_NAMES:
+            fn_args = _with_legacy_insert_position(fn_args)
         try:
             fn_args, repair_log = validate_then_repair(fn_name, fn_args, model=model)
         except Exception as e:
@@ -427,20 +466,7 @@ def ingest_tool_call(
                     repair_log.append(('$', 'schema_default'))
         except ToolContractError as exc:
             contract_error = exc.to_dict()
-            # The bare code/path leaves weak models guessing the correct
-            # shape (conv mtdqz4bkuyitzj retried blindly); the hint names
-            # the expected keys so the recovery round can self-correct.
-            _hint = schema_hint(fn_name)
-            # A blank per-edit path is reported by the contract as a LENGTH
-            # violation on one index. That names the symptom and hides the
-            # rule: every edit needs its own path. Name the cause and the
-            # offending indices so the recovery round does not retry blind.
-            _gap = edit_batch_path_gap(fn_name, fn_args)
-            parse_error = (
-                f'ERROR: Tool call `{fn_name}` was NOT executed. '
-                f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}'
-                + (f' {_gap}' if _gap else '')
-                + (f' {_hint}' if _hint else ''))
+            parse_error = contract_rejection_text(fn_name, exc, fn_args)
             logger.warning(
                 '[ToolContract] rejected tool=%s code=%s path=%s model=%s '
                 'conv=%s', fn_name, exc.code, exc.path, model, conv_id)

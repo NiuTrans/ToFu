@@ -131,7 +131,8 @@ def test_master_keeps_first_and_followup_origins_without_live_registry(monkeypat
     master = MasterOrchestrator(
         task_id='run', conv_id='conv', user_id=9,
         specs=[SubTaskSpec(id='a', role='general', objective='work')],
-        parent_task={'_turnId': 'branch-a'},
+        parent_task={'id': 'parent-task', 'convId': 'conv', '_attemptId': 'attempt-a',
+                     '_turnId': 'branch-a', '_userId': 9},
     )
     master.register_followup_specs(
         [SubTaskSpec(id='b', role='general', objective='more')],

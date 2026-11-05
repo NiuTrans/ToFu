@@ -1,8 +1,8 @@
 /* ===== migrated source: knowledge.js ===== */
 /* ═══════════════════════════════════════════════════════════════
-   knowledge.js — standalone local knowledge workbench
+   knowledge.js — local knowledge workbench in Settings
 
-   This surface deliberately does not live in Settings → Tools.  It owns the
+   This surface owns the
    corpus lifecycle (upload, parse feedback, access gate, deletion) and an
    index-preview search so users can validate evidence before exposing the
    read-only search tool to a model.
@@ -60,8 +60,7 @@ function _knowledgeBytes(value) {
 
 function _knowledgeCount(value) {
   try {
-    return Number(value || 0).toLocaleString(
-      (typeof _i18nLang !== 'undefined' && _i18nLang === 'en') ? 'en-US' : 'zh-CN');
+    return Number(value || 0).toLocaleString(document.documentElement.lang || undefined);
   } catch (e) {
     return String(Number(value || 0));
   }
@@ -71,7 +70,7 @@ function _knowledgeDate(timestamp) {
   if (!timestamp) return '';
   try {
     return new Date(Number(timestamp) * 1000).toLocaleDateString(
-      (typeof _i18nLang !== 'undefined' && _i18nLang === 'en') ? 'en-US' : 'zh-CN',
+      document.documentElement.lang || undefined,
       { year: 'numeric', month: 'short', day: 'numeric' });
   } catch (e) {
     return '';
@@ -83,12 +82,9 @@ function openKnowledgeBase() {
   if (!modal) return;
   _knowledgeState.returnFocus = document.activeElement;
   modal.classList.add('open');
-  document.body.classList.add('kb-open');
   // Tell the full-page chat-drop handler to stand down so a file dropped onto
   // the knowledge dropzone is uploaded to the corpus, not attached to chat.
   runtimeScope._tofuKnowledgeModalOpen = true;
-  var button = document.getElementById('knowledgeTopbarBtn');
-  if (button) button.classList.add('active');
   _knowledgeRefresh();
   setTimeout(function () {
     var target = document.getElementById('knowledgeSearchInput');
@@ -99,14 +95,11 @@ function openKnowledgeBase() {
 function closeKnowledgeBase() {
   var modal = document.getElementById('knowledgeModal');
   if (modal) modal.classList.remove('open');
-  document.body.classList.remove('kb-open');
   runtimeScope._tofuKnowledgeModalOpen = false;
   if (_knowledgeState.refreshTimer) clearTimeout(_knowledgeState.refreshTimer);
   _knowledgeState.refreshTimer = null;
   if (_knowledgeState.catalogTimer) clearTimeout(_knowledgeState.catalogTimer);
   _knowledgeState.catalogTimer = null;
-  var button = document.getElementById('knowledgeTopbarBtn');
-  if (button) button.classList.remove('active');
   var previous = _knowledgeState.returnFocus;
   _knowledgeState.returnFocus = null;
   if (previous && typeof previous.focus === 'function') {
@@ -937,10 +930,4 @@ async function _knowledgeSearch(event) {
     _knowledgeRenderSearch();
   }
 }
-
-document.addEventListener('keydown', function (event) {
-  if (event.key !== 'Escape') return;
-  var modal = document.getElementById('knowledgeModal');
-  if (modal && modal.classList.contains('open')) closeKnowledgeBase();
-});
 

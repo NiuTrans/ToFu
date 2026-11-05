@@ -8,12 +8,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_recovered_click_stall_and_search_disclosures(browser, live_server):
+    require_node_modules('esbuild')
     from playwright.sync_api import expect
     from tests.conftest import _dismiss_onboarding_modals
 

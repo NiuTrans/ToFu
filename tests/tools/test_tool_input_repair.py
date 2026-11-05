@@ -46,7 +46,7 @@ def test_bare_string_wrap_to_array():
 def test_stringified_json_decoded_before_bare_wrap():
     """Ordering test: a JSON string must decode, NOT be wrapped as ['...']."""
     out, log = validate_then_repair(
-        'grep_search',
+        'search_files',
         {'searches': '[{"pattern": "foo"}, {"pattern": "bar"}]'},
     )
     assert out['searches'] == [{'pattern': 'foo'}, {'pattern': 'bar'}]
@@ -55,7 +55,7 @@ def test_stringified_json_decoded_before_bare_wrap():
 
 def test_stringified_int_coerced():
     out, log = validate_then_repair(
-        'grep_search',
+        'search_files',
         {'pattern': 'foo', 'max_results': '20', 'context_lines': '3'},
     )
     assert out['max_results'] == 20
@@ -66,7 +66,7 @@ def test_stringified_int_coerced():
 
 def test_stringified_bool_coerced():
     out, log = validate_then_repair(
-        'grep_search',
+        'search_files',
         {'pattern': 'x', 'count_only': 'true'},
     )
     assert out['count_only'] is True
@@ -75,7 +75,7 @@ def test_stringified_bool_coerced():
 
 def test_null_omission_drops_optional_key():
     out, log = validate_then_repair(
-        'grep_search',
+        'search_files',
         {'pattern': 'x', 'include': None},
     )
     assert 'include' not in out
@@ -197,7 +197,7 @@ def test_ingest_clamps_mcp_numeric_bounds_before_contract_rejection():
 def test_empty_placeholder_unwrap():
     """{'a': 'x', 'b': 'y'} where array expected → ['x', 'y']."""
     out, log = validate_then_repair(
-        'grep_search',
+        'search_files',
         {'pattern': 'x', 'searches': {'first': 'a', 'second': 'b'}},
     )
     assert out['searches'] == ['a', 'b']
@@ -220,7 +220,7 @@ def test_non_dict_args_passes_through():
 def test_multiple_repairs_in_one_call():
     """Real-world combo: bad reads, stringified max_results, null include."""
     out, log = validate_then_repair(
-        'grep_search',
+        'search_files',
         {
             'pattern': 'foo',
             'searches': '[{"pattern": "a"}]',
@@ -389,8 +389,8 @@ def test_param_alias_unknown_tool_no_table():
     args = {'file_path': 'a.py'}
     out, log = validate_then_repair('list_dir', {'path': 'x'})
     assert out == {'path': 'x'} and log == []
-    # grep_search has a table but only renames into declared keys
-    out2, log2 = validate_then_repair('grep_search', {'regex': 'foo'})
+    # search_files has a table but only renames into declared keys
+    out2, log2 = validate_then_repair('search_files', {'regex': 'foo'})
     assert out2 == {'pattern': 'foo'}
     assert ('pattern', 'param_alias') in log2
 
@@ -773,6 +773,54 @@ def test_edit_file_rejection_names_the_missing_item_key_and_item_shape():
     assert '$.edits[0]' in result.parse_error
     assert 'each item needs:' in result.parse_error
 
+def test_edit_item_without_operation_is_never_guessed_as_an_insertion():
+    """An anchored item naming no operation used to become insert_after, so
+    an intended replace silently duplicated the anchor's code. Nothing in the
+    item proves an insertion: the contract round must name the missing key."""
+    result = _ingest_edit_file({
+        'description': 'Fix it',
+        'edits': [{'path': 'a.py', 'anchor': 'old()', 'content': 'new()'}],
+    })
+    assert result.parse_error is not None
+    assert 'operation' in result.parse_error
+    assert 'operation' not in result.fn_args['edits'][0]
+    assert ('edit_file', 'structural_transform') not in result.repair_log
+
+
+@pytest.mark.parametrize(('position', 'operation'), [
+    ('after', 'insert_after'), ('before', 'insert_before')])
+def test_legacy_insert_position_still_names_its_operation(position, operation):
+    """The legacy insert_content(s) item carries an explicit position, which
+    is the only evidence that the edit is an insertion."""
+    out, log = validate_then_repair('edit_file', {'edits': [
+        {'path': 'a.py', 'anchor': 'A', 'content': 'B', 'position': position}]})
+    assert out['edits'] == [
+        {'path': 'a.py', 'operation': operation, 'anchor': 'A', 'content': 'B'}]
+    assert ('edit_file', 'structural_transform') in log
+
+
+@pytest.mark.parametrize(('name', 'args'), [
+    ('insert_content', {'path': 'a.py', 'anchor': 'A', 'content': 'B'}),
+    ('insert_contents', {'edits': [{'path': 'a.py', 'anchor': 'A', 'content': 'B'}]}),
+])
+def test_retired_insert_tool_name_keeps_its_documented_after_default(name, args):
+    """The retired insert tools documented ``position`` as optional (default
+    after); their emitted name is the evidence that an anchored item inserts."""
+    import json as _json
+    from lib.tool_input_repair import ingest_tool_call
+    from lib.tools.project import PROJECT_TOOL_EDIT_FILE
+
+    result = ingest_tool_call(
+        {'id': 'tc1', 'function': {'name': name, 'arguments': _json.dumps(args)}},
+        known_tools={'edit_file'}, emit_audit=False,
+        contract_documents_by_name={'edit_file': adapt_legacy_tool_contract(
+            PROJECT_TOOL_EDIT_FILE).search_document()})
+    assert result.fn_name == 'edit_file'
+    assert result.parse_error is None
+    assert result.fn_args['edits'] == [
+        {'path': 'a.py', 'operation': 'insert_after', 'anchor': 'A', 'content': 'B'}]
+
+
 def test_schema_hint_names_required_keys_of_array_items():
     """Top-level `edits(array)` left the recovery round guessing which item
     key was missing; the hint must name the item shape."""
@@ -798,7 +846,7 @@ def test_todo_write_contract_rejection_carries_schema_hint():
 # ═════════════════════════════════════════════════════
 
 _KNOWN = {
-    'read_files', 'grep_search', 'list_dir', 'find_files', 'write_file',
+    'read_files', 'search_files', 'list_dir', 'find_files', 'write_file',
     'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents',
     'run_command', 'web_search', 'fetch_url',
     'browser_download_url_to_server',
@@ -818,8 +866,9 @@ def test_resolve_static_aliases():
         'bash': 'run_command',
         'shell': 'run_command',
         'ls': 'list_dir',
-        'grep': 'grep_search',
-        'grep_file': 'grep_search',
+        'grep': 'search_files',
+        'grep_file': 'search_files',
+        'grep_search': 'search_files',
         'write_files': 'write_file',
         'create_file': 'write_file',
         'edit': 'apply_diff',
@@ -844,14 +893,40 @@ def test_tool_result_reader_alias_never_shadows_real_artifact_tool():
 
 def test_resolve_casefold_match():
     """Claude-Code CamelCase / stray capitalisation resolves case-insensitively."""
-    assert resolve_tool_name('Grep_Search', known=_KNOWN) == ('grep_search', 'casefold')
+    assert resolve_tool_name('Search_Files', known=_KNOWN) == ('search_files', 'casefold')
     assert resolve_tool_name('READ_FILES', known=_KNOWN) == ('read_files', 'casefold')
 
 
 def test_resolve_camelcase_via_alias():
     """'Read'/'Grep' hit the lowercase static alias before casefold."""
     assert resolve_tool_name('Read', known=_KNOWN) == ('read_files', 'alias')
-    assert resolve_tool_name('Grep', known=_KNOWN) == ('grep_search', 'alias')
+    assert resolve_tool_name('Grep', known=_KNOWN) == ('search_files', 'alias')
+
+
+def test_retired_grep_search_name_keeps_working():
+    """``grep_search`` was renamed to ``search_files``: a fresh call is
+    repaired to the live name, while a catalog that still declares the
+    retired name (a latched schema) dispatches it unchanged."""
+    assert resolve_tool_name('grep_search', known=_KNOWN) == ('search_files', 'alias')
+    assert resolve_tool_name(
+        'grep_search', known=_KNOWN | {'grep_search'}) == ('grep_search', None)
+    out, log = validate_then_repair(
+        'grep_search', {'query': 'foo', 'glob': '*.py', 'head_limit': 5})
+    assert out == {'pattern': 'foo', 'include': '*.py', 'max_results': 5}
+    assert ('pattern', 'param_alias') in log
+
+
+def test_search_files_is_never_aliased_to_filename_search():
+    """Cline/Roo ``search_files`` is a content search; its ``regex`` and
+    ``file_pattern`` keys map onto ours instead of routing to find_files."""
+    assert resolve_tool_name('search_files', known={'find_files', 'search_files'}) \
+        == ('search_files', None)
+    assert resolve_tool_name('search_files', known={'find_files'}) \
+        == ('search_files', None)
+    out, log = validate_then_repair(
+        'search_files', {'regex': 'foo', 'file_pattern': '*.py', 'path': 'src'})
+    assert out == {'pattern': 'foo', 'include': '*.py', 'path': 'src'}
+    assert ('include', 'param_alias') in log
 
 
 def test_resolve_claude_code_native_names():
@@ -1608,7 +1683,7 @@ def test_opencode_question_envelope_to_ask_human():
 
 def test_kimi_grep_glob_and_head_limit_param_aliases():
     out, log = validate_then_repair(
-        'grep_search', {'pattern': 'foo', 'glob': '*.py', 'head_limit': 5})
+        'search_files', {'pattern': 'foo', 'glob': '*.py', 'head_limit': 5})
     assert out['include'] == '*.py' and out['max_results'] == 5
     assert ('include', 'param_alias') in log
     assert ('max_results', 'param_alias') in log
@@ -1721,13 +1796,13 @@ def test_run_command_timeout_s_wins_over_legacy_timeout():
 def test_grep_output_mode_count_maps_to_count_only():
     for mode in ('count', 'count_matches'):
         out, _ = validate_then_repair(
-            'grep_search', {'pattern': 'TODO', 'output_mode': mode})
+            'search_files', {'pattern': 'TODO', 'output_mode': mode})
         assert out['count_only'] is True
 
 
 def test_grep_output_mode_content_stays_inert():
     args = {'pattern': 'TODO', 'output_mode': 'files_with_matches'}
-    out, log = validate_then_repair('grep_search', dict(args))
+    out, log = validate_then_repair('search_files', dict(args))
     assert 'count_only' not in out and log == []
 
 
@@ -1753,9 +1828,8 @@ def test_caption_backfill_multi_file_summary():
 
 
 def test_caption_backfill_never_fires_for_native_spelling():
-    """A native-schema payload missing description fails closed naming the
-    key — the backfill only fires on foreign key spellings, so the
-    native-payloads-untouched invariant holds even for broken native calls."""
+    """Native spellings never synthesize presentation text; edit_file and
+    write_file both accept an omitted caption."""
     out, log = validate_then_repair(
         'write_file', {'path': 'a.py', 'content': 'x'})
     assert 'description' not in out

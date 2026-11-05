@@ -4,7 +4,7 @@
 # Usage:
 #   ./install.sh                core dependencies only
 #   ./install.sh --playwright   core + Playwright, then install the chromium browser
-#   ./install.sh --pdf          core + PDF extraction (pymupdf / pymupdf4llm)
+#   ./install.sh --pdf          enhanced PDF layout (pymupdf / pymupdf4llm)
 #   ./install.sh --all          everything above
 #
 # Honors $PIP (default: "python3 -m pip"). Installs the package itself in

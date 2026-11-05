@@ -1,18 +1,27 @@
 """Durable declaration authority on the configured disposable storage process."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+from pathlib import Path
 import threading
+import time
 import uuid
 
 import pytest
 
 from lib.storage.mcp_declarations import (
     MAX_DECLARATION_BYTES, MCPDeclarationError, MCPDeclarationStore, SETTING_KEY,
+    start_legacy_slot_compaction, stop_legacy_slot_compaction,
 )
 from tests.storage.test_storage_application_contract import application_storage as application_storage
 from tests.storage.test_storage_application_contract import application_storage_owner_id as application_storage_owner_id
 
 pytestmark = pytest.mark.api
+
+NATIVE_INLINE_VALUE_BYTES = json.loads(
+    (Path(__file__).resolve().parents[2] / 'contracts' / 'tofudb_ir_v1.json').read_text()
+)['physicalBounds']['maximumEntityInlineValueBytes']
+# Allowance for the versioned-document envelope and logical key around a header.
+INLINE_HEADER_BUDGET = NATIVE_INLINE_VALUE_BYTES - 512
 
 
 def definition(name='read'):
@@ -22,6 +31,32 @@ def definition(name='read'):
         'parameters': {'type': 'object', 'properties': {'z': {'type': 'string'},
                        'a': {'type': 'integer'}}, 'required': ['z', 'a']},
         'description': 'ordered wire'}}
+
+
+def typical_wire(count=24):
+    """Ordinary MCP tool JSON, larger than one native inline entity value."""
+    return [{'type': 'function', 'function': {
+        'name': f'mcp__docs__tool_{index:02d}',
+        'description': (f'Search, read or update workspace documents (variant {index}). '
+                        'Returns identifiers, titles and the most relevant excerpt.'),
+        'parameters': {'type': 'object', 'properties': {
+            'query': {'type': 'string', 'description': 'Full-text query; quoted phrases match.'},
+            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+            'cursor': {'type': 'string', 'description': 'Opaque cursor from a previous call.'}},
+            'required': ['query'], 'additionalProperties': False}}} for index in range(count)]
+
+
+def wire_text(definitions):
+    return json.dumps(definitions, ensure_ascii=False, separators=(',', ':'))
+
+
+def header(client, conv):
+    return client.query('conversation.get', {'conv_id': conv, 'user_id': 1,
+                                             'derive_messages': False})['metadata']
+
+
+def encoded_bytes(value):
+    return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
 
 
 def create(client, conv='declarations', settings=None):
@@ -158,3 +193,93 @@ def test_corrupt_slot_requires_explicit_reset(application_storage):
     store.reset(user_id=1, conversation_id=conv)
     assert store.get(user_id=1, conversation_id=conv) is None
     assert store.freeze([], user_id=1, conversation_id=conv) == []
+
+
+def test_frozen_wire_keeps_conversation_header_inline(application_storage):
+    # Catalog pages, lists, gets and Turn settlement read the whole header;
+    # wire text inside it pushed ordinary headers out of line (a blob read each).
+    client = application_storage
+    conv = create(client)
+    wire = typical_wire()
+    assert len(wire_text(wire).encode('utf-8')) > NATIVE_INLINE_VALUE_BYTES
+    store = MCPDeclarationStore(client)
+    store.freeze(wire, user_id=1, conversation_id=conv)
+    assert wire_text(store.get(user_id=1, conversation_id=conv)) == wire_text(wire)
+    assert encoded_bytes(header(client, conv)) <= INLINE_HEADER_BUDGET
+
+
+def test_catalog_page_reads_no_header_blob_after_compaction(application_storage, request):
+    if request.node.callspec.params['application_storage'] == 'sqlite':
+        pytest.skip('blob materialization is a native-engine cost')
+    client = application_storage
+    text = wire_text(typical_wire())
+    for index in range(6):
+        conv = f'catalog-{index}'
+        create(client, conv, {'folderId': 'folder', SETTING_KEY: {
+            'version': 1, 'ownerUserId': 1, 'conversationId': conv, 'wireJson': text}})
+    MCPDeclarationStore(client).freeze(typical_wire(), user_id=1,
+                                       conversation_id=create(client, 'catalog-v2'))
+
+    def blob_reads():
+        cache = client.metrics()['decodedBlobChunkCache']
+        return cache['hits'] + cache['misses'] + cache['wholeBlob']['lookups']
+
+    def catalog(limit):
+        before = blob_reads()
+        page = client.query('conversation.list', {
+            'user_id': 1, 'catalog_page': True, 'include_messages': False,
+            'order_by': 'updated_at_desc', 'limit': limit, 'before_id': '',
+            'settings_keys': ['folderId', SETTING_KEY]})
+        assert len(page['items']) == 7
+        return page['items'], blob_reads() - before
+
+    _, legacy_reads = catalog(500)
+    assert legacy_reads >= 6
+    assert MCPDeclarationStore(client).compact_legacy_slots(user_id=1)['compacted'] == 6
+    items, compact_reads = catalog(499)
+    assert {item['metadata']['settings'][SETTING_KEY]['version'] for item in items} == {2}
+    assert compact_reads == 0
+
+
+def test_legacy_slots_compact_losslessly_without_reordering(application_storage):
+    client = application_storage
+    text = wire_text(typical_wire())
+    legacy = {'version': 1, 'ownerUserId': 1, 'conversationId': 'legacy-own', 'wireJson': text}
+    create(client, 'legacy-own', {SETTING_KEY: legacy, 'unrelated': 'preserve'})
+    create(client, 'legacy-copy', {SETTING_KEY: legacy})
+    create(client, 'legacy-corrupt', {SETTING_KEY: dict(legacy, ownerUserId='forged')})
+    store = MCPDeclarationStore(client)
+    assert wire_text(store.get(user_id=1, conversation_id='legacy-own')) == text
+    before = {conv: header(client, conv) for conv in ('legacy-own', 'legacy-copy')}
+    assert encoded_bytes(before['legacy-own']) > NATIVE_INLINE_VALUE_BYTES
+
+    assert store.compact_legacy_slots(user_id=1) == {'scanned': 3, 'compacted': 2, 'failed': 1}
+    assert wire_text(store.get(user_id=1, conversation_id='legacy-own')) == text
+    assert store.get(user_id=1, conversation_id='legacy-copy') is None
+    for conv, old in before.items():
+        new = header(client, conv)
+        assert (new['updated_at'], new['rev']) == (old['updated_at'], old['rev'])
+        assert new['settings'][SETTING_KEY]['conversationId'] == 'legacy-own'
+        assert encoded_bytes(new) <= INLINE_HEADER_BUDGET
+    assert header(client, 'legacy-own')['settings']['unrelated'] == 'preserve'
+    assert store.compact_legacy_slots(user_id=1) == {'scanned': 3, 'compacted': 0, 'failed': 1}
+
+
+def test_compaction_pass_is_single_and_stoppable():
+    entered = threading.Event()
+
+    class Store:
+        passes = 0
+
+        def compact_legacy_slots(self, *, user_id, should_stop):
+            Store.passes += 1
+            entered.set()
+            while not should_stop():
+                time.sleep(0.01)
+            return {}
+
+    thread = start_legacy_slot_compaction(user_id=1, store=Store())
+    assert entered.wait(5)
+    assert start_legacy_slot_compaction(user_id=1, store=Store()) is thread
+    stop_legacy_slot_compaction(timeout=5)
+    assert not thread.is_alive() and Store.passes == 1

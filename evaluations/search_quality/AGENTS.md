@@ -2,9 +2,13 @@
 
 `contracts.py` owns default public questions, budgets, citation-host policies
 and conservative evidence predicates, including the shared optional fetch-query
-schema. `runner.py` registers frozen task packs
+schema. Its `observed_sources` projection owns chronological URL discovery for
+dispatch, retrieved coverage and quote grading. Raw and visible-wording quote
+matches are distinct observations from those admitted pages; page links never grant evidence
+before the linked page is itself successfully fetched. `runner.py` registers frozen task packs
 and transports the native application API through the
-existing HTTPRuntime; `worker.py` executes disposable free retrieval operations.
+existing HTTPRuntime; `worker.py` executes disposable free retrieval operations
+and projects native related discovery within the shared result budget.
 Read `README.md` for scope, invocation, cost interpretation and evidence limits.
 
 Changing questions, predicates, adapters or budgets starts a new cohort.
@@ -17,6 +21,9 @@ the disposable workers for a separate model-free coverage probe. Read
 Verify `tests/evaluations/test_search_source_probe.py` for this entry point.
 
 Verify `tests/evaluations/test_search_quality.py`,
+`tests/evaluations/test_search_quote_projection.py`,
 `tests/evaluations/test_search_focused_reads.py`,
+`tests/evaluations/test_search_observed_navigation.py`,
+`tests/evaluations/test_search_terminal_errors.py`,
 `tests/evaluations/test_search_candidate_projection.py` and the native HTTP tests in
 `tests/evaluations/test_programmatic_pilot.py`; the default CLI is offline.

@@ -10,10 +10,8 @@ export function classifyTimelineRounds(rounds: readonly TimelineRound[], segment
   const hasStallNote = segments.some(segment => segment && segment.type === 'system_note' && segment.noteKind === 'intent-stall');
   const injections = new Map<number, TimelineRound[]>(), superseded = new Set<string>();
   const real: TimelineRound[] = [];
-  let hasInbox = false;
   for (const round of rounds) {
     if (!round) continue;
-    hasInbox ||= Boolean(round._inboxInject);
     if (round._userSteerInject || round._peerInject || round._inboxInject || round._bgCommandInject || round._stallNudge) {
       if (round._stallNudge && hasStallNote) continue;
       const consumed = round._userSteerInject ? round.steerRound : round._peerInject ? round.peerRound
@@ -25,5 +23,5 @@ export function classifyTimelineRounds(rounds: readonly TimelineRound[], segment
       if (round.toolCallId) superseded.add(String(round.toolCallId));
     } else real.push(round);
   }
-  return { real, injections, superseded, hasInbox };
+  return { real, injections, superseded };
 }

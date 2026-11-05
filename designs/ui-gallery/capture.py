@@ -3,8 +3,11 @@
 
 Serves the repository root over a local HTTP port (relative asset paths in
 index.html resolve against it), then screenshots the gallery in every
-theme x width combination, plus the open-dialog state. Also verifies the
-feedback text tokens clear WCAG 4.5:1 on their theme's --bg-primary.
+theme x width combination, plus the open-dialog state. Previews whose page
+needs a test-owned server are rendered by their visual tests into a temporary
+pytest root and copied here; the tests themselves never write this directory.
+Also verifies the feedback text tokens clear WCAG 4.5:1 on their theme's
+--bg-primary.
 
 Usage: python3 designs/ui-gallery/capture.py
 Requires: playwright (repo test dependency) + chromium.
@@ -12,8 +15,12 @@ Requires: playwright (repo test dependency) + chromium.
 
 import http.server
 import json
+import os
+import shutil
 import socketserver
+import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -28,6 +35,14 @@ PORT = 18923
 
 THEMES = ["tofu", "dark", "light"]
 WIDTHS = [(1440, 900, "desktop"), (320, 800, "mobile")]
+
+# Visual test -> previews it renders (authenticated assets, real Turn commands).
+TEST_PREVIEWS = {
+    "tests/visual/test_visual_rich_responses.py::test_real_asset_rich_cards_keyboard_reload_and_proxy":
+        "rich-components-*.png",
+    "tests/visual/test_visual_dynamic_surfaces.py::test_dynamic_resource_lifecycle_browser":
+        "dynamic-*.png",
+}
 
 # token -> (hex color, hex of theme --bg-primary) — mirrors 00-design-tokens.css
 CONTRAST_CASES = {
@@ -121,6 +136,29 @@ def ensure_bundle() -> None:
         check=True, capture_output=True,
     )
 
+def capture_test_previews() -> None:
+    """Run the visual tests that render previews and copy their screenshots."""
+    environment = dict(os.environ)
+    # Render from this checkout even when the caller's PYTHONPATH names another.
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT), environment.get("PYTHONPATH")]))
+    with tempfile.TemporaryDirectory() as scratch:
+        basetemp = Path(scratch) / "pytest"
+        subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             f"--basetemp={basetemp}", *TEST_PREVIEWS],
+            cwd=REPO_ROOT, env=environment, check=True,
+        )
+        produced = {pattern: sorted(basetemp.rglob(pattern)) for pattern in TEST_PREVIEWS.values()}
+        for pattern, paths in produced.items():
+            names = [path.name for path in paths]
+            if not names or len(set(names)) != len(names):
+                raise SystemExit(f"visual tests produced {names} for {pattern}")
+        for paths in produced.values():
+            for path in paths:
+                shutil.copyfile(path, OUT_DIR / path.name)
+
+
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -179,6 +217,7 @@ def main() -> None:
         server.shutdown()
         server.server_close()
 
+    capture_test_previews()
     report = run_contrast_check()
     (OUT_DIR / "contrast-report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"

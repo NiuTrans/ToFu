@@ -8,7 +8,6 @@
  */
 
 import './pdf-responsive';
-import './push-transport';
 import './reader-prefs';
 import './babel';
 import './notes';

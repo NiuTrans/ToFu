@@ -692,7 +692,7 @@ _LIFECYCLE_PATTERNS = (
     'restart_15000.sh',
     'serverctl.py restart',
     'supervisorctl restart',
-    '_perform_server_reexec',
+    'perform_server_reexec',
 )
 
 

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from lib.tasks_pkg.context_composer.registry import (
-    NOTE_TONES, note_presentations,
+    NOTE_TONES, note_display_policies, note_presentations,
 )
 
 pytestmark = pytest.mark.unit
@@ -43,6 +43,17 @@ def test_every_presentation_label_key_exists_in_both_locales():
         'registry presentation label_key(s) absent from a locale: '
         f'{missing}. Add the key to frontend/src/i18n/locales/{{en,zh}}.json.'
     )
+
+
+def test_every_displayable_reason_declares_a_presentation():
+    """A timeline row never falls back to a raw registry id for a reason the
+    registry itself can emit; the frontend glyph set is checked by
+    `context-note-presentation.test.ts`."""
+    presentations = note_presentations()
+    missing = sorted(set(note_display_policies()) - set(presentations))
+    assert not missing, (
+        f'displayable reason(s) without a NotePresentation: {missing}')
+    assert all(presentation.glyph for presentation in presentations.values())
 
 
 def test_presentation_tones_are_stylesheet_backed():

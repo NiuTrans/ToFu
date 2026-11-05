@@ -219,6 +219,16 @@ def test_new_target_parent_failure_stops_file_publication_and_retries(project, m
 
 
 @pytest.mark.parametrize('phase', ['prepared', 'replaced', 'journalled'])
+def test_metadata_history_recovers_before_listing(project, phase):
+    base, sessions = project
+    crash_tool(base, sessions, phase)
+    rows = mods.get_modifications(str(base), include_content=False)
+    assert [row['path'] for row in rows] == ([] if phase == 'prepared' else ['file.txt'])
+    with locked_intents(mods._get_session_dir(str(base))) as store:
+        assert store.read() == []
+
+
+@pytest.mark.parametrize('phase', ['prepared', 'replaced', 'journalled'])
 def test_task_path_projection_recovers_before_selection(project, phase):
     base, sessions = project
     crash_tool(base, sessions, phase)

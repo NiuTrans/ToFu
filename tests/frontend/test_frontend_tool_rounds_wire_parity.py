@@ -22,12 +22,12 @@ Skips cleanly when node is unavailable.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests._jsdom import require_node_modules
 from tests._runtime_sections import runtime_section_path
 
 HERE = Path(__file__).resolve().parent
@@ -45,8 +45,7 @@ pytestmark = pytest.mark.unit
 
 
 def _run_harness(rounds_path: Path = ROUNDS) -> list[dict]:
-    if shutil.which('node') is None:
-        pytest.skip('node is required for the tool_rounds wire-parity gate')
+    require_node_modules()
     proc = subprocess.run(
         ['node', str(HARNESS), str(TOOL_ROUNDS), str(rounds_path), str(TOOL_ROUNDS_RICH)],
         capture_output=True, text=True, timeout=60,

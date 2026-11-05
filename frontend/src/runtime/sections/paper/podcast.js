@@ -4,8 +4,8 @@
 
    Turns a paper report into a listenable solo podcast
    (docs/modules/ingest_media.md). Server owns the task
-   (/api/v4/paper/podcast/*); this module only renders + polls —
-   same transport shape as the report tab beside it.
+   (/api/v4/paper/podcast/*); this module only renders; the typed task observer owns
+   poll/push transport and timer cleanup.
 
    States rendered into #paperPodcastContent:
      idle / generating (progress) / done (player + transcript)
@@ -22,9 +22,6 @@ var _podcast = {
   model: '',           // the NEXT run's pick (persisted; see _pmSeedModel)
   artifactModel: '',   // what the DISPLAYED artifact was made with ('' = unknown)
   taskId: '',
-  cursor: 0,
-  pollTimer: null,
-  pollBusy: false,
   status: 'idle',          // idle|generating|done|script_only|report_required|lookup_failed|lost|interrupted|error
   data: null,              // {script, meta, audioUrl, durationSec, scriptOnly}
   errorText: '',
@@ -34,7 +31,6 @@ var _podcast = {
   sleepTimerId: 0,
   sleepDeadline: 0,
   // P-UX progress perception (docs/modules/ingest_media.md §3.4)
-  pollFails: 0,            // consecutive poll failures → 5 = lost state
   phases: [],              // server phase vocabulary (phase_started.phases)
   phaseIndex: 0,           // 1-based index of the current phase
   currentPhase: '',
@@ -44,7 +40,6 @@ var _podcast = {
   scriptCharTarget: 0,     // the char target the prompt actually instructed
   genStartedAt: 0,         // local stopwatch start
   lastEventAt: 0,          // last event/poll-success time (liveness)
-  tickTimer: null,         // 1s UI ticker for elapsed/last-active
   _segFirstTick: 0,        // wall-clock of the first segment_done (ETA)
   etaSec: 0,
 };
@@ -85,10 +80,6 @@ function _pcPickPersist(selId, value) {
   _pcPersistOptions();
 }
 
-// Poll cadence — a var (not const) so the JSDOM harness can shrink it.
-var _PODCAST_POLL_MS = 1200;
-// Consecutive poll failures before the honest 'lost' terminal state (拍板 A).
-var _PC_POLL_FAIL_LIMIT = 5;
 
 // Explicit retained presentation ports consumed by the lazy typed runtime.
 // These stay module-private: featureRegistry resolves them through runtimeScope.
@@ -116,14 +107,6 @@ function _pcEsc(s) {
     : String(s == null ? '' : s);
 }
 
-/* Stop the poll timer ONLY.
- *
- * The 1s activity ticker is deliberately NOT stopped here: _pcSchedulePoll()
- * calls this before arming the next poll, so folding the ticker in would kill
- * the elapsed/last-activity stopwatch on the FIRST poll and freeze the line
- * at 0:00 for the rest of the run — exactly the "looks stuck" symptom the
- * liveness line exists to prevent. Terminal states call _pcStopPolling()
- * instead, which stops both. */
 function _pcHeroIconSvg(kind) {
   if (kind === 'podcast') {
     return '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
@@ -394,7 +377,7 @@ function _pcRender() {
     host.innerHTML = h;
     _pcRenderProgress();
     _pcRenderActivity();
-    startPodcastTick();
+    podcastTaskObserver.startActivity();
     return;
   }
 

@@ -9,6 +9,9 @@ the request is byte-identical to before (one direct attempt, no
 ``proxies=`` kwarg).
 """
 
+from importlib import import_module
+from types import SimpleNamespace
+
 import pytest
 import requests
 
@@ -144,7 +147,9 @@ def test_body_deadline_raises_timeout_and_closes_responses(monkeypatch, decode_r
     responses = iter([original, retry])
     session = _use(monkeypatch, lambda proxies: next(responses))
     clock = [8.0]
-    monkeypatch.setattr(fetch_http.time, 'time', lambda: clock[0])
+    scoped_time = SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0])
+    monkeypatch.setattr(fetch_http, 'time', scoped_time)
+    monkeypatch.setattr(import_module('tofu_search.fetch.request_budget'), 'time', scoped_time)
     def delayed_content(_chunk):
         clock[0] = 10.0
         yield b'content'

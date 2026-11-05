@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import json
 
 import pytest
 from quart import Blueprint, jsonify
@@ -224,6 +225,27 @@ def test_embedded_definition_refs_preserve_recursive_resources():
     Draft202012Validator({**spec, '$ref': (
         '#/paths/~1api~1v4~1example~1{id}/post/requestBody/content/application~1json/schema'
     )}).validate({'next': {'next': {}}})
+
+
+def test_inlined_definitions_are_self_contained_and_refuse_unresolvable_refs():
+    from lib.openapi import inline_schema_definition
+
+    authority = {'$defs': {
+        'query': {'type': 'object', 'properties': {
+            'id': {'$ref': '#/$defs/id'}, 'tags': {'type': 'array', 'items': {'$ref': '#/$defs/id'}}}},
+        'id': {'type': 'string', 'minLength': 1},
+        'Node': {'type': 'object', 'properties': {'next': {'$ref': '#/$defs/Node'}}},
+        'remote': {'$ref': 'https://example.com/schema.json'},
+    }}
+    original = deepcopy(authority)
+    query = inline_schema_definition(authority, 'query')
+    assert query['properties']['id'] == {'type': 'string', 'minLength': 1}
+    assert query['properties']['tags']['items'] == {'type': 'string', 'minLength': 1}
+    assert '$ref' not in json.dumps(query)
+    assert authority == original
+    for name, problem in (('Node', 'Recursive'), ('remote', 'must stay local')):
+        with pytest.raises(ValueError, match=problem):
+            inline_schema_definition(authority, name)
 
 
 def test_reference_sibling_constraints_are_conjoined_after_projection():

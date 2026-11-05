@@ -10,6 +10,19 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# CPython's ``Thread.start()`` text when pthread_create fails with EAGAIN (a
+# container pids limit, ``ulimit -u`` or thread-stack memory).
+_CPYTHON_THREAD_START_REFUSAL = "can't start new thread"
+
+
+def is_host_thread_refusal(exc: BaseException) -> bool:
+    """True when the host refused a thread, raw or typed by the LLM transport."""
+    from lib.llm.llm_errors import LocalRequestPreparationError
+    if isinstance(exc, LocalRequestPreparationError):
+        return exc.stage == 'thread_start'
+    return (isinstance(exc, RuntimeError)
+            and str(exc) == _CPYTHON_THREAD_START_REFUSAL)
+
 
 def _classify_exception(exc: BaseException) -> str:
     """Map an exception to a `kind` string.
@@ -17,13 +30,18 @@ def _classify_exception(exc: BaseException) -> str:
     Recognizes both the typed exceptions in ``lib.llm.llm_errors`` and the
     string-shaped errors that bubble up from the dispatch layer.
     """
+    from lib.agent_core.context_errors import MessageInputScopeError, TurnRequirementsDeadlineError
+    if isinstance(exc, MessageInputScopeError):
+        return 'internal'
+    if isinstance(exc, TurnRequirementsDeadlineError):
+        return 'timeout'
     # Local durability failures must win before upstream timeout heuristics.
     # Match the class ancestry without importing the task coordinator here.
     delivery_types = {cls.__name__ for cls in type(exc).__mro__}
     if 'EventDeliveryCancelled' in delivery_types or 'EventDeliveryRevoked' in delivery_types:
         return 'aborted'
     if 'EventDeliveryError' in delivery_types:
-        return 'server_busy'
+        return 'event_delivery_failed'
     # First try the typed-exception path (preferred).
     try:
         from lib.llm import (
@@ -87,6 +105,10 @@ def _classify_exception(exc: BaseException) -> str:
             return 'not_found'
         return 'bad_request'
     if _BR is not None and isinstance(exc, _BR):
+        # A gateway's protocol-unsupported 404 is route-missing evidence for
+        # dispatch (ModelRouteMissingError), yet still an HTTP 404 upstream.
+        if getattr(exc, 'status_code', 0) == 404:
+            return 'not_found'
         return 'bad_request'
     if _Perm is not None and isinstance(exc, _Perm):
         return 'permission'
@@ -110,6 +132,15 @@ def _classify_exception(exc: BaseException) -> str:
         return 'stream_only'
     if _Mlim is not None and isinstance(exc, _Mlim):
         return 'model_limit'
+    # Type identity outranks the name/message heuristics below: a deadline
+    # stop such as TranslationDeadlineExhausted names neither "timeout" nor
+    # "timed out", and its last_err may quote an incidental "HTTP 429".
+    if isinstance(exc, TimeoutError):
+        return 'timeout'
+    # A local resource refusal, not an upstream failure: the message matches
+    # none of the provider heuristics below and used to read as 'generic'.
+    if is_host_thread_refusal(exc):
+        return 'internal'
 
     # Python programming-error builtins are OUR OWN code bugs (e.g. a
     # ``TypeError: __new__() missing 1 required positional argument`` from a
@@ -130,20 +161,22 @@ def _classify_exception(exc: BaseException) -> str:
     # a programming bug; its stable code carries the real taxonomy. Without
     # this branch a writer-starvation timeout surfaced as kind=generic —
     # titled "LLM call failed" — hiding the actual subsystem from the user.
-    # Import-free for the same reason as memorypressureerror below.
+    # Keep this import-free to avoid initializing the storage supervisor.
+    #
+    # `database_busy` / `database_unavailable` are STORAGE-layer failures, not
+    # local server capacity: they own the storage authority (sidecar down,
+    # fenced, saturated). They used to classify as `server_busy`, whose hint
+    # blames concurrent-task slots and memory headroom — a dead end for an
+    # operator whose real recovery is a server restart (2026-10-22). Event
+    # failures keep their own event-delivery classification.
     if 'storageerror' in tn:
         code = str(getattr(exc, 'code', '') or '')
         if code in ('database_busy', 'database_unavailable'):
-            return 'server_busy'
+            return 'storage_unavailable'
         if code == 'database_timeout':
             return 'timeout'
         return 'internal'
 
-    # Local request-memory admission is temporary server capacity pressure,
-    # not an upstream model/key failure. Keep this import-free to avoid making
-    # the error-envelope package depend on the cgroup implementation.
-    if 'memorypressureerror' in tn:
-        return 'server_busy'
     if 'all ' in msg and 'dispatch' in msg and 'attempts failed' in msg:
         return 'dispatch_exhausted'
     # OAuth-subscription session expired / logged out. These phrases carry no

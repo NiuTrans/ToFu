@@ -90,10 +90,6 @@ use crate::vfs::Vfs;
 pub const MAX_LOGICAL_OUTBOX_FETCH_RECORDS: usize = 64;
 pub const MAX_LOGICAL_OUTBOX_FETCH_BYTES: usize = 8 * 1024 * 1024;
 
-/// Headroom under the hard active-log ceiling at which the server layer
-/// starts parking appends for the rotation install window.
-pub(crate) const ROTATION_PARK_WAL_MARGIN_BYTES: u64 = 1024 * 1024;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConversationActivityBackfillProgress {
     pub processed_rows: usize,
@@ -147,9 +143,14 @@ pub struct AuthorityTransaction {
     has_business_mutation: bool,
     content_free_diagnostic_outbox_exemption: bool,
     internal_maintenance: bool,
+    search_invalidated: bool,
 }
 
 impl AuthorityTransaction {
+    pub(crate) fn note_search_invalidation(&mut self) {
+        self.search_invalidated = true;
+    }
+
     /// Coalesce content-free hints while their durable sync rows are staged.
     pub(crate) fn note_conversation_commit(&mut self, key: &str, sequence: u64) -> io::Result<()> {
         use crate::generated_storage_v2::{MAX_COMMIT_NOTICE_KEYS, MAX_COMMIT_NOTICE_KEY_BYTES};
@@ -159,8 +160,7 @@ impl AuthorityTransaction {
         if !self.conversation_notices.contains_key(key)
             && self.conversation_notices.len() >= MAX_COMMIT_NOTICE_KEYS
         {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
+            return Err(crate::resource_exhaustion::domain_bound(
                 "commit notice budget exceeded",
             ));
         }
@@ -257,6 +257,7 @@ pub struct AuthorityDatabase {
     backup_anchors: std::sync::Mutex<
         Vec<(u64, crate::online_backup::BackupAnchorProjection)>,
     >,
+    search_invalidations: std::sync::Mutex<Option<Arc<crate::search_dirty::SearchInvalidations>>>,
 }
 
 fn invalid_input(message: &str) -> io::Error {
@@ -316,6 +317,7 @@ impl AuthorityDatabase {
             timer_live_capacity: 0,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -335,6 +337,7 @@ impl AuthorityDatabase {
             timer_live_capacity: 0,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -362,6 +365,7 @@ impl AuthorityDatabase {
             timer_live_capacity: 0,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -386,6 +390,7 @@ impl AuthorityDatabase {
             timer_live_capacity: 0,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -405,6 +410,7 @@ impl AuthorityDatabase {
             timer_live_capacity: 0,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -431,6 +437,7 @@ impl AuthorityDatabase {
             timer_live_capacity: 0,
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -488,6 +495,7 @@ impl AuthorityDatabase {
             // Replicas serve queries only; the collector belongs to the writer.
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
+            search_invalidations: Default::default(),
         })
     }
 
@@ -574,7 +582,7 @@ impl AuthorityDatabase {
         &mut self,
         maximum_retained_segments: usize,
     ) -> io::Result<HistoryCompactionMetrics> {
-        if maximum_retained_segments == 0 || maximum_retained_segments > crate::history::MAX_HISTORY_SEGMENTS {
+        if maximum_retained_segments == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "history retained-segment bound is invalid"));
         }
         // Explicit maintenance may materialize pending deltas; automatic
@@ -592,7 +600,7 @@ impl AuthorityDatabase {
 
     pub(crate) fn try_prepare_history_compaction(&mut self, maximum: usize)
         -> io::Result<Option<crate::engine::PreparedHistoryCompaction>> {
-        if maximum == 0 || maximum > crate::history::MAX_HISTORY_SEGMENTS {
+        if maximum == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "history retained-segment bound is invalid"));
         }
         let first = self.entities.overlay_replay_first_sequence()?;
@@ -696,21 +704,16 @@ impl AuthorityDatabase {
         self.entities.writer_engine()?.require_write_admission()
     }
 
-    /// Whether an append risks rotation backpressure right now: a rotation
-    /// owns the lane, or the active log is close enough to the hard ceiling
-    /// that a typical append could cross it. The server layer parks command
-    /// dispatches while this holds instead of rejecting them; the margin
-    /// errs toward parking, and the in-mutex backpressure stays as the
-    /// fail-safe for appends larger than the margin.
+    /// Only a legacy non-generational install can close write admission.
+    /// Current predecessor encoding/publication and WAL backlog length never
+    /// park an otherwise valid append; their existing driver catches up.
     pub(crate) fn rotation_blocks_appends(&self) -> bool {
         // Cannot inspect the lane: leave rejection to the in-mutex
         // backpressure fail-safe rather than stalling writers.
         let Ok(engine) = self.entities.writer_engine() else {
             return false;
         };
-        engine.rotation_in_flight()
-            || engine.online_rotation_blocks_writes()
-            || engine.wal_len() >= crate::ACTIVE_LOG_MAX_BYTES - ROTATION_PARK_WAL_MARGIN_BYTES
+        engine.online_rotation_blocks_writes()
     }
 
     /// Attaches the daemon rotation driver: the soft-rotation path then
@@ -834,6 +837,35 @@ impl AuthorityDatabase {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
     }
 
+    /// Binds the search worker's commit sequence; the latest consumer wins.
+    pub(crate) fn attach_search_invalidations(
+        &self,
+        invalidations: &Arc<crate::search_dirty::SearchInvalidations>,
+    ) {
+        let mut attached = self
+            .search_invalidations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !attached
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, invalidations))
+        {
+            *attached = Some(Arc::clone(invalidations));
+        }
+    }
+
+    fn note_search_invalidation_commit(&self, tenant_id: u64, owner_user_id: u64) {
+        // Release the slot before ringing the worker's scheduler.
+        let attached = self
+            .search_invalidations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(invalidations) = attached {
+            invalidations.note_commit(tenant_id, owner_user_id);
+        }
+    }
+
     /// The daemon's online collector doorbell, when it runs. `system.reclaim`
     /// rings it; control operations read its metrics.
     pub fn online_garbage_collection(
@@ -874,6 +906,7 @@ impl AuthorityDatabase {
                 root: snapshot.authority_state_root,
                 history_manifest_block_id: snapshot.history_manifest_block_id,
                 history_segments: snapshot.history_segments.clone(),
+                history_payload_metadata_ids: snapshot.history_payload_metadata_ids,
             };
             (manifest, projection, engine.block_store_shared())
         };
@@ -934,7 +967,7 @@ impl AuthorityDatabase {
 
     /// Captures one online-GC epoch's mark inputs under the caller's
     /// authority-mutex hold and re-arms the relink fence in the same hold
-    /// (docs/TOFUDB_ONLINE_GC.md rules S2/S7). Never performs file I/O.
+    /// (docs/TOFUDB_ONLINE_GC.md rules S2/S7/S9). Never performs file I/O.
     pub(crate) fn online_gc_capture(&self, maximum_snapshot_bytes: u64) -> io::Result<OnlineGcCapture> {
         let engine = self.entities.writer_engine()?;
         let mut pinned_roots: Vec<crate::block::BlockId> = self
@@ -954,6 +987,8 @@ impl AuthorityDatabase {
             snapshot
                 .history_segments
                 .extend(anchor.history_segments.iter().cloned());
+            snapshot.history_payload_metadata_ids
+                .extend(anchor.history_payload_metadata_ids.iter().copied());
             if let Some(manifest_id) = anchor.history_manifest_block_id {
                 snapshot.committed_block_ids.push(manifest_id);
             }
@@ -969,52 +1004,94 @@ impl AuthorityDatabase {
         })
     }
 
-    /// Deletes one bounded batch of confirmed loose-block victims under the
-    /// caller's authority hold, filtering anything re-referenced since the
-    /// epoch's mark snapshot (relink fence, rule S7). `WouldBlock` when the
-    /// fence overflowed or the physical lane is busy: retry next epoch.
-    pub(crate) fn online_gc_delete_loose(
+    /// Deletes one confirmed loose-block victim under the caller's short
+    /// authority hold (docs/TOFUDB_ONLINE_GC.md, "One file per deletion
+    /// hold"). Keeps it when a write staged it (rule S10) or re-referenced it
+    /// since the epoch's mark snapshot (relink fence, rule S7); before the
+    /// unlink both CONTROL slots must name the current physical roots, decided
+    /// in this hold from the in-memory slot states (rule S8). `unlinked`
+    /// receives the victim when this hold removed, or may have removed, its
+    /// file (rule S10). The shard barrier is the caller's, off the mutex.
+    /// `WouldBlock` when no relink observation is open, the physical lane is
+    /// busy or the slots still disagree: stop deleting for this epoch.
+    pub(crate) fn online_gc_delete_loose_victim(
         &mut self,
-        confirmed: &[BlockId],
-    ) -> io::Result<crate::block::BlockRemovalMetrics> {
+        victim: BlockId,
+        unlinked: &mut Vec<BlockId>,
+    ) -> io::Result<crate::block::LooseRemoval> {
         let engine = self.entities.writer_engine_mut()?;
         engine.require_usable_authority()?;
         engine.require_physical_maintenance_available()?;
-        let fence = engine.block_store().relink_fence_snapshot();
-        if fence.overflow {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "relink fence overflow; defer the batch to the next epoch",
-            ));
-        }
-        let victims = confirmed
-            .iter()
-            .filter(|block_id| !fence.ids.contains(*block_id))
-            .copied()
-            .collect::<Vec<_>>();
+        let mut victims = vec![victim];
+        engine.block_store().retain_unstaged(&mut victims)?;
+        engine.block_store().retain_unrelinked(&mut victims)?;
         if victims.is_empty() {
-            return Ok(crate::block::BlockRemovalMetrics::default());
+            return Ok(crate::block::LooseRemoval::Kept);
         }
-        engine.block_store().remove_blocks(&victims)
+        engine.require_control_slots_name_only_current_roots()?;
+        engine.block_store().remove_block_noting_absent(victim, unlinked)
     }
 
-    /// Plans one orphan payload-segment file under the caller's hold; the
-    /// plan consults the background-pack unpublished set.
-    pub(crate) fn online_gc_plan_orphan(
-        &self,
-    ) -> io::Result<crate::payload_segment::PayloadSegmentOrphanPlan> {
-        self.entities.writer_engine()?.plan_payload_segment_orphan()
+    /// `online_gc_delete_loose_victim` for each of `confirmed` in one call,
+    /// then the shard barriers: what the collector's per-victim holds do, for
+    /// specifications that drive deletion without an epoch.
+    #[cfg(test)]
+    pub(crate) fn online_gc_delete_loose(
+        &mut self,
+        confirmed: &[BlockId],
+        unlinked: &mut Vec<BlockId>,
+    ) -> io::Result<crate::block::BlockRemovalMetrics> {
+        let mut metrics = crate::block::BlockRemovalMetrics::default();
+        let mut unsynced_shards = BTreeMap::new();
+        for victim in confirmed {
+            match self.online_gc_delete_loose_victim(*victim, unlinked)? {
+                crate::block::LooseRemoval::Kept => continue,
+                crate::block::LooseRemoval::Missing => {}
+                crate::block::LooseRemoval::Unlinked { bytes } => {
+                    metrics.bytes_removed += bytes;
+                    unsynced_shards.insert(victim.0[0], *victim);
+                }
+            }
+            metrics.blocks_removed += 1;
+        }
+        let blocks = self.block_store_shared();
+        for victim in unsynced_shards.values() {
+            blocks.sync_block_shard(*victim)?;
+        }
+        Ok(metrics)
     }
 
-    /// Deletes one two-epoch-confirmed orphan segment file under the
-    /// caller's hold; re-validates catalog/background membership internally.
-    pub(crate) fn online_gc_remove_orphan(
-        &self,
-        candidate: &crate::payload_segment::PayloadSegmentOrphanCandidate,
-    ) -> io::Result<u64> {
+    /// Removes the loose copy of a block that the catalogued `segment_id`
+    /// holds (one the collector just packed and published, or one its scan
+    /// found catalogued), under the caller's short hold; the shard barrier is
+    /// the caller's, off the mutex.
+    pub(crate) fn online_gc_remove_redundant_copy(
+        &mut self,
+        segment_id: Uuid,
+        block_id: BlockId,
+    ) -> io::Result<crate::block::LooseRemoval> {
         self.entities
-            .writer_engine()?
-            .remove_payload_segment_orphan(candidate)
+            .writer_engine_mut()?
+            .remove_redundant_loose_copy(segment_id, block_id)
+    }
+
+    /// In-memory orphan-observation inputs captured in the epoch snapshot
+    /// hold: referenced/protected segment IDs and the temporary-file guard.
+    pub(crate) fn online_gc_orphan_observation_inputs(
+        &self,
+    ) -> io::Result<(std::collections::BTreeSet<Uuid>, bool)> {
+        self.entities.writer_engine()?.online_orphan_observation_inputs()
+    }
+
+    /// Removes one twice-observed orphan segment file under the caller's
+    /// short hold; re-validates catalog, pack, retirement and CONTROL slots.
+    pub(crate) fn online_gc_remove_observed_orphan(
+        &mut self,
+        candidate: &crate::payload_segment::PayloadSegmentOrphanCandidate,
+    ) -> io::Result<Option<u64>> {
+        self.entities
+            .writer_engine_mut()?
+            .remove_observed_payload_segment_orphan(candidate)
     }
 
     /// Publishes one off-mutex-built segment rewrite under the caller's hold.
@@ -1047,7 +1124,8 @@ impl AuthorityDatabase {
     }
 
     /// Publishes one off-mutex-built loose-block compaction under the
-    /// caller's hold.
+    /// caller's hold. Its loose copies stay for
+    /// `online_gc_remove_redundant_copy`, one hold each.
     pub(crate) fn online_gc_finish_compaction(
         &mut self,
         sorted_ids: &[BlockId],
@@ -1446,6 +1524,7 @@ impl AuthorityDatabase {
             has_business_mutation: false,
             content_free_diagnostic_outbox_exemption: false,
             internal_maintenance: false,
+            search_invalidated: false,
         })
     }
 
@@ -1535,6 +1614,7 @@ impl AuthorityDatabase {
             has_business_mutation: false,
             content_free_diagnostic_outbox_exemption: false,
             internal_maintenance: false,
+            search_invalidated: false,
         }))
     }
 
@@ -1598,6 +1678,12 @@ impl AuthorityDatabase {
         self.entities.delete(&mut transaction.entity, key)?;
         transaction.has_business_mutation = true;
         Ok(())
+    }
+
+    /// Entity write bytes this transaction can still add and commit as one
+    /// rebaseable overlay delta rather than through the structural tree path.
+    pub(crate) fn entity_overlay_delta_room(&self, transaction: &AuthorityTransaction) -> usize {
+        transaction.entity.overlay_delta_room()
     }
 
     pub(crate) fn maintenance_entity_put(
@@ -2378,7 +2464,7 @@ impl AuthorityDatabase {
                 )?;
                 let mut response = Vec::new();
                 while let Some(chunk) = reader.next_chunk()? {
-                    response.try_reserve(chunk.len()).map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"receipt materialization allocation failed"))?;
+                    response.try_reserve(chunk.len()).map_err(|_| crate::resource_exhaustion::reservation_failure("receipt materialization allocation failed"))?;
                     response.extend_from_slice(&chunk);
                     if response.len() as u64 > reference.logical_bytes {
                         return Err(io::Error::new(
@@ -2672,7 +2758,7 @@ impl AuthorityDatabase {
         let mut private_blobs_published = false;
         if transaction.deferred_outbox_capture.is_some() || !transaction.deferred_indexes.is_empty() {
             {
-                let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                let _timer = crate::fsync_stats::StageTimer::new(
                     crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE);
                 self.require_write_admission()?;
                 // Validate business predicates before commit-owned index/counter
@@ -2685,19 +2771,19 @@ impl AuthorityDatabase {
                 // blob. Publication is safe now: validation succeeded and the
                 // exclusive sequencer excludes GC deletion through commit.
                 if let Some(blobs) = &transaction.prepared_blobs {
-                    let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                    let _timer = crate::fsync_stats::StageTimer::new(
                         crate::fsync_stats::STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH);
                     blobs.publish(self.entities.writer_engine()?)?;
                     private_blobs_published = true;
                 }
                 {
-                    let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                    let _timer = crate::fsync_stats::StageTimer::new(
                         crate::fsync_stats::STAGE_AUTHORITY_COMMIT_INDEXES);
                     self.flush_deferred_indexes(&mut transaction)?;
                 }
             }
             if let Some(capture) = transaction.deferred_outbox_capture.take() {
-                let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                let _timer = crate::fsync_stats::StageTimer::new(
                     crate::fsync_stats::STAGE_AUTHORITY_COMMIT_OUTBOX_CAPTURE);
                 self.logical_outbox_capture(&mut transaction, capture)?;
             }
@@ -2705,6 +2791,7 @@ impl AuthorityDatabase {
         let AuthorityTransaction {
             prepared_blobs,
             conversation_notices,
+            tenant_id,
             owner_user_id,
             authority_uuid,
             mut entity,
@@ -2715,6 +2802,7 @@ impl AuthorityDatabase {
             has_business_mutation,
             content_free_diagnostic_outbox_exemption,
             internal_maintenance,
+            search_invalidated,
             ..
         } = transaction;
         if authority_uuid != self.entities.authority_uuid() {
@@ -2752,10 +2840,8 @@ impl AuthorityDatabase {
                 "configured logical outbox requires atomic capture",
             ));
         }
-        let stream_timer = if stream_appends.is_empty() { None } else {
-            crate::fsync_stats::StageTimer::diagnostic(
-                crate::fsync_stats::STAGE_AUTHORITY_COMMIT_STREAM_PREPARE)
-        };
+        let stream_timer = (!stream_appends.is_empty()).then(|| crate::fsync_stats::StageTimer::new(
+            crate::fsync_stats::STAGE_AUTHORITY_COMMIT_STREAM_PREPARE));
         let mut prepared_streams: Vec<PreparedStreamAppend> = Vec::new();
         for append in stream_appends {
             let committed_event_count =
@@ -2778,7 +2864,7 @@ impl AuthorityDatabase {
 
         if !private_blobs_published {
             if let Some(blobs) = prepared_blobs {
-                let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                let _timer = crate::fsync_stats::StageTimer::new(
                     crate::fsync_stats::STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH);
                 blobs.publish(self.entities.writer_engine()?)?;
             }
@@ -2855,6 +2941,9 @@ impl AuthorityDatabase {
             .iter()
             .map(|prepared| prepared.committed_result(committed.sequence))
             .collect();
+        if search_invalidated {
+            self.note_search_invalidation_commit(tenant_id, owner_user_id);
+        }
         Ok(AuthorityCommitResult {
             conversation_notices: conversation_notices.into_iter()
                 .map(|(key, sequence)| ConversationCommitNotice {
@@ -4286,3 +4375,26 @@ mod shutdown_checkpoint_tests {
 #[cfg(test)]
 #[path = "authority_stream_staging_tests.rs"]
 mod stream_staging_tests;
+
+#[cfg(test)]
+mod history_retention_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn history_retention_accepts_multi_page_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut transaction = database.begin(7, 11).unwrap();
+        database.entity_put(&mut transaction,
+            crate::entity::EntityKey::new(7, 11, "conversation", b"k").unwrap(), b"v".to_vec()).unwrap();
+        database.commit(transaction).unwrap();
+        database.merge_entity_overlay_fully().unwrap();
+        database.checkpoint_wal_window().unwrap();
+        for retained in [crate::history::MAX_HISTORY_SEGMENTS + 1, usize::MAX] {
+            assert!(database.try_prepare_history_compaction(retained).unwrap().is_none());
+            assert_eq!(database.compact_history(retained).unwrap().retired_segments, 0);
+        }
+        assert!(database.try_prepare_history_compaction(0).is_err());
+        assert!(database.compact_history(0).is_err());
+    }
+}

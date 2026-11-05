@@ -13,70 +13,16 @@
 //  Search / Advanced tabs
 // ══════════════════════════════════════════════════════
 
+// Search limits are fixed backend defaults; the tab edits only access
+// boundaries (blocked domains) and the optional search gateway.
 function _populateSearchTab(cfg) {
   var s = cfg.search || {};
-  var overrides = (s.overrides && typeof s.overrides === 'object') ? s.overrides : {};
-  _searchLastPreset = s.profile || 'balanced';
-  // Saved overrides ⇔ the select's 自定义 option — one source of truth.
-  _setVal('settingSearchProfile', Object.keys(overrides).length > 0 ? 'custom' : _searchLastPreset);
-  var cb = document.getElementById('settingLlmContentFilter');
-  if (cb) cb.checked = s.llm_content_filter !== false;  // default: on
-  _setVal('settingFetchTopN', s.fetch_top_n || 6);
-  _setVal('settingFetchTimeout', s.fetch_timeout || 15);
-  _setVal('settingMaxCharsSearch', s.max_chars_search || 60000);
-  _setVal('settingMaxCharsDirect', s.max_chars_direct || 200000);
-  _setVal('settingMaxCharsPdf', s.max_chars_pdf || 0);
-  var deepen = document.getElementById('settingSearchDeepen');
-  if (deepen) deepen.checked = s.deepen_enabled === true;
-  // Max download size is stored in BYTES but displayed in MB — humans do not
-  // think in 20971520. Save converts back (save_export.js).
-  _setVal('settingMaxBytesMB', _bytesToMB(s.max_bytes || 20971520));
   if (typeof runtimeScope.ChipInput !== 'undefined') runtimeScope.ChipInput.init('settingSkipDomains', s.skip_domains || []);
-  _wireSearchPipelinePreview();
-  _syncSearchOverrideControls();
   _renderSearchBrowserAccess();
   if (typeof _renderAuthSources === 'function') _renderAuthSources();
   if (typeof _renderPrivateHosts === 'function') _renderPrivateHosts();
   if (typeof runtimeScope._renderSitePacks === 'function') runtimeScope._renderSitePacks();
-}
-
-// Last real (non-custom) preset — the wire never carries profile='custom':
-// saving 自定义 sends this preset as the base plus the four-knob overrides.
-var _searchLastPreset = 'balanced';
-
-var _SEARCH_PROFILE_PRESETS = {
-  fast: { fetch_top_n: 3, max_chars_search: 30000,
-          llm_content_filter: false, deepen_enabled: false },
-  balanced: { fetch_top_n: 6, max_chars_search: 60000,
-              llm_content_filter: true, deepen_enabled: false },
-  deep: { fetch_top_n: 10, max_chars_search: 100000,
-          llm_content_filter: true, deepen_enabled: true }
-};
-
-function _searchProfileChanged() {
-  var profile = (document.getElementById('settingSearchProfile') || {}).value || 'balanced';
-  if (profile !== 'custom') {
-    _searchLastPreset = profile;
-    var p = _SEARCH_PROFILE_PRESETS[profile] || _SEARCH_PROFILE_PRESETS.balanced;
-    _setVal('settingFetchTopN', p.fetch_top_n);
-    _setVal('settingMaxCharsSearch', p.max_chars_search);
-    var filter = document.getElementById('settingLlmContentFilter');
-    var deepen = document.getElementById('settingSearchDeepen');
-    if (filter) filter.checked = p.llm_content_filter;
-    if (deepen) deepen.checked = p.deepen_enabled;
-  }
-  _syncSearchOverrideControls();
-  _refreshSearchPipelinePreview();
-}
-
-function _syncSearchOverrideControls() {
-  var sel = document.getElementById('settingSearchProfile');
-  // A legacy/embedded settings surface has no profile select — its concrete
-  // knobs stay live; only the new profile UI gates them on 自定义.
-  var custom = !sel || sel.value === 'custom';
-  document.querySelectorAll('.search-override-control input').forEach(function (el) {
-    el.disabled = !custom;
-  });
+  if (typeof runtimeScope._renderSearchGateway === 'function') runtimeScope._renderSearchGateway(s);
 }
 
 function _renderSearchBrowserAccess() {
@@ -97,52 +43,6 @@ async function _testSearchBrowser() {
 async function _browserAccessDenyRead() {
   var owner = runtimeScope._browserAccessDenyReadOwner;
   if (typeof owner === 'function') return owner();
-}
-
-/** bytes → MB for display (round to 1 decimal, trim trailing .0). */
-function _bytesToMB(bytes) {
-  var mb = (parseInt(bytes, 10) || 0) / 1048576;
-  var rounded = Math.round(mb * 10) / 10;
-  return (rounded === Math.floor(rounded)) ? Math.floor(rounded) : rounded;
-}
-
-/** The pipeline preview says in one sentence what the backend WILL DO with
- *  the current knob values — the frontend↔backend bridge. Live-updates as
- *  the user edits the inputs (wired once). */
-function _refreshSearchPipelinePreview() {
-  var el = document.getElementById('searchPipelinePreview');
-  if (!el) return;
-  var _v = function (id, dflt) {
-    var n = parseInt((document.getElementById(id) || {}).value, 10);
-    return (isNaN(n) ? dflt : n);
-  };
-  var n = _v('settingFetchTopN', 6);
-  var timeout = _v('settingFetchTimeout', 15);
-  var chars = _v('settingMaxCharsSearch', 60000);
-  var filterCb = document.getElementById('settingLlmContentFilter');
-  var filterOn = filterCb ? filterCb.checked : true;
-  var filterTxt = filterOn
-    ? (t('settings.searchFilterOnTpl') || 'LLM 过滤杂质')
-    : (t('settings.searchFilterOffTpl') || '跳过过滤（原文直送）');
-  el.textContent = (t('settings.searchPipelineTpl') ||
-    '搜索引擎返回结果 → 抓取前 {n} 个网页（每页 ≤{chars} 字符 · 超时 {timeout}s）→ {filter} → 注入对话')
-    .replace('{n}', n).replace('{chars}', (chars || 0).toLocaleString('en-US'))
-    .replace('{timeout}', timeout).replace('{filter}', filterTxt);
-  el.classList.toggle('filter-off', !filterOn);
-}
-
-function _wireSearchPipelinePreview() {
-  _refreshSearchPipelinePreview();
-  if (/** @type {any} */ (_wireSearchPipelinePreview)._done) return;
-  /** @type {any} */ (_wireSearchPipelinePreview)._done = true;
-  ['settingFetchTopN', 'settingFetchTimeout', 'settingMaxCharsSearch',
-   'settingLlmContentFilter'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) {
-      el.addEventListener('input', _refreshSearchPipelinePreview);
-      el.addEventListener('change', _refreshSearchPipelinePreview);
-    }
-  });
 }
 
 // ══════════════════════════════════════════════════════

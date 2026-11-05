@@ -26,10 +26,6 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn resource_exhausted(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, message)
-}
-
 fn document_key(transaction: &AuthorityTransaction, date: &str) -> io::Result<EntityKey> {
     EntityKey::new(
         transaction.tenant_id(),
@@ -165,7 +161,7 @@ pub(crate) fn upsert(
     if is_new {
         let next = read_count(database, transaction)?
             .checked_add(1)
-            .ok_or_else(|| resource_exhausted("daily-cost count overflow"))?;
+            .ok_or_else(|| crate::resource_exhaustion::accounting_overflow("daily-cost count overflow"))?;
         write_count(database, transaction, next)?;
     }
     versioned_document::put_with_blob_owner_bounded(

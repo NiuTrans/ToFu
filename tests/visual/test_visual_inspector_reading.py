@@ -97,13 +97,26 @@ def test_inspector_reading_and_native_disclosure(page, assert_no_js_errors, tmp_
       });
     }''')
     assert contrasts and all(item['ratio'] >= 4.5 for item in contrasts), contrasts
-    # A real wire refresh retains disclosure state and keyboard focus.
+    # Keep the actual node, not a locator that could silently find a replacement.
+    # Selection and nested disclosure state must survive the real browser refresh.
+    header_node = header.element_handle()
+    selected = header.evaluate('''n => {
+      const block = n.closest('.debug-msg-block');
+      block.querySelector('.debug-raw').open = true;
+      const text = block.querySelector('.debug-text');
+      const range = document.createRange(); range.selectNodeContents(text);
+      const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      return selection.toString();
+    }''')
     identity = header.evaluate('(n) => n.parentElement.dataset.mid')
     _invoke_action(page, 'riRefreshTasks')
     current = page.locator('#debugContent .debug-msg-block.open')
     assert current.count() == 1
     assert current.get_attribute('data-mid') == identity
+    assert header_node.evaluate('(n) => n.isConnected')
     assert header.evaluate('(n) => document.activeElement === n')
+    assert page.evaluate('getSelection().toString()') == selected
+    assert current.locator('.debug-raw').evaluate('(n) => n.open')
     (tmp_path / f'inspector-{theme}-{width}.json').write_text(json.dumps(geometry, indent=2))
     page.screenshot(path=str(tmp_path / f'inspector-{theme}-{width}.png'))
     header.press('Space')

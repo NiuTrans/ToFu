@@ -60,7 +60,8 @@ from typing import Any
 import orjson
 from quart import Response, jsonify, request
 
-from lib.error_envelope import from_exception, make_envelope
+from lib.error_envelope import BadRequest, from_exception, make_envelope
+from lib.http_transport.json_response import owned_json_response
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -126,7 +127,7 @@ def _normalize_error(error: Any, *, default_kind: str = 'generic',
     * ``dict`` that's already an envelope → pass through unchanged
     * ``dict`` that's NOT an envelope → keep as-is (caller knows best)
     * ``BaseException`` → typed envelope via ``from_exception``.
-      Special case: ``lib.request_parser.BadRequest`` → string message
+      Special case: the typed client fault ``BadRequest`` → string message
       (matches the legacy frontend pattern that reads ``data.error`` as
       a human-readable string for missing/invalid fields).
     * ``str`` → preserve the string (most existing JS reads
@@ -139,14 +140,10 @@ def _normalize_error(error: Any, *, default_kind: str = 'generic',
     if error is None:
         return None
     if isinstance(error, BaseException):
-        # Special-case BadRequest from request_parser — emit as string
-        # so frontend ``data.error`` reads naturally
-        try:
-            from lib.request_parser import BadRequest as _BadReq
-            if isinstance(error, _BadReq):
-                return str(error)
-        except ImportError:
-            pass
+        # The typed client fault is emitted as a string so frontend
+        # ``data.error`` reads naturally.
+        if isinstance(error, BadRequest):
+            return str(error)
         return from_exception(error, context=context, source=source,
                               kind=default_kind if default_kind else None)
     if isinstance(error, dict):
@@ -300,7 +297,7 @@ def api_ok(data: Any = None, **extras):
         payload.update(data)
     if extras:
         payload.update(extras)
-    return jsonify(payload), 200
+    return owned_json_response(payload), 200
 
 
 def api_created(data: Any = None, **extras):
@@ -310,7 +307,7 @@ def api_created(data: Any = None, **extras):
         payload.update(data)
     if extras:
         payload.update(extras)
-    return jsonify(payload), 201
+    return owned_json_response(payload), 201
 
 
 def api_no_content():
@@ -345,7 +342,7 @@ def api_payload(payload: dict, status: int = 200, **extras):
       * every payload key survives top-level, byte-identical.
     """
     body = _passthrough_body(payload, status, extras)
-    return jsonify(body), status
+    return owned_json_response(body), status
 
 
 def api_prevalidated_payload(payload: dict, status: int = 200, **extras):
@@ -568,6 +565,9 @@ def api_internal_error(exc: BaseException | str | None = None, *,
 def safe_route(fn):
     """Decorator: catches uncaught exceptions and returns api_internal_error.
 
+    ``BadRequest`` becomes a 400; a ``StorageError`` propagates so the global
+    boundary applies its storage status mapping (503 + retry for outages).
+
     Usage
     -----
     @bp.route('/api/foo', methods=['POST'])
@@ -582,15 +582,17 @@ def safe_route(fn):
     import asyncio
     import functools
 
+    def _belongs_to_global_boundary(e):
+        # Storage failures carry their own HTTP taxonomy (503 + retryAfter
+        # for transient outages); the global boundary owns that mapping.
+        from lib.storage.errors import StorageError
+        return isinstance(e, StorageError)
+
     def _safe_route_error_response(e):
-        # Special-case BadRequest from request_parser → 400 with field info
-        try:
-            from lib.request_parser import BadRequest as _BadReq
-            if isinstance(e, _BadReq):
-                extras = {'field': e.field} if e.field else {}
-                return api_bad_request(str(e), **extras)
-        except ImportError:
-            pass
+        # The typed client fault → 400 with field info
+        if isinstance(e, BadRequest):
+            extras = {'field': e.field} if e.field else {}
+            return api_bad_request(str(e), **extras)
         return api_internal_error(
             e, context=fn.__module__, source=fn.__qualname__,
         )
@@ -604,6 +606,8 @@ def safe_route(fn):
             try:
                 return await fn(*args, **kwargs)
             except Exception as e:
+                if _belongs_to_global_boundary(e):
+                    raise
                 return _safe_route_error_response(e)
         return wrapper
 
@@ -612,6 +616,8 @@ def safe_route(fn):
         try:
             return fn(*args, **kwargs)
         except Exception as e:
+            if _belongs_to_global_boundary(e):
+                raise
             return _safe_route_error_response(e)
 
     return wrapper

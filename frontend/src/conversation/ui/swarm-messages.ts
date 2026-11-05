@@ -1,6 +1,7 @@
 /** Run-level mailbox presentation only. No fetching, dispatch, or durable state.
  * mountSwarmMessages owns keyed DOM disclosures; receipt status comes from the
- * shared evidence presenter. The caller owns snapshot projection and teardown.
+ * shared evidence presenter. A view with no messages in its scope hides itself.
+ * The caller owns snapshot projection and teardown.
  */
 import type { Translator } from '../../i18n';
 import { createButton, createField } from '../../ui';
@@ -21,7 +22,6 @@ export interface SwarmMessageReceipt {
 export interface SwarmMessagesSnapshot {
   swarm_id: string;
   messageReceipts?: readonly SwarmMessageReceipt[];
-  messageReceiptsAvailable?: boolean;
   messageParticipants?: readonly { id: string; taskId?: string; label: string }[];
 }
 export interface SwarmMessagesOptions {
@@ -30,6 +30,8 @@ export interface SwarmMessagesOptions {
 }
 export interface SwarmMessagesHandle {
   element: HTMLElement;
+  /** Messages in this view's scope: the participant's when scoped, else the whole run's. */
+  readonly messageCount: number;
   update(snapshot: SwarmMessagesSnapshot, translate?: Translator): void;
   dispose(): void;
 }
@@ -61,18 +63,18 @@ export function mountSwarmMessages(container: HTMLElement, initial: SwarmMessage
   const filter = field.control as HTMLSelectElement;
 
   field.el.hidden = !!config.participantId;
-  const notice = document.createElement('p'); notice.className = 'sw-messages-notice';
   const list = document.createElement('ol'); list.className = 'sw-messages-list';
   let visibleLimit = 3;
   let snapshot = initial;
   let translate = initialTranslate;
   let runId = initial.swarm_id;
   let disposed = false;
+  let messageCount = 0;
   let receipts = new Map<string, SwarmMessageReceipt>();
   const rows = new Map<string, MessageRow>();
   const earlier = createButton({ label: '', variant: 'ghost', size: 'sm', wrap: true,
     onClick: () => { visibleLimit = earlier.dataset.hasEarlier === 'true' ? visibleLimit + 20 : 3; render(); } }, document);
-  element.append(heading, field.el, notice, earlier, list);
+  element.append(heading, field.el, earlier, list);
   container.append(element);
 
   function participant(id: string, sender: boolean): { id: string; label: string } {
@@ -138,9 +140,9 @@ export function mountSwarmMessages(container: HTMLElement, initial: SwarmMessage
     earlier.dataset.hasEarlier = String(hasEarlier);
     text(earlier, translate(hasEarlier ? 'swarm.messagesEarlier' : 'swarm.messagesRecent'));
     earlier.setAttribute('aria-expanded', String(visibleLimit > 3));
-    notice.hidden = matching.length > 0 && snapshot.messageReceiptsAvailable === true;
-    text(notice, translate(snapshot.messageReceiptsAvailable !== true || snapshot.messageReceipts === undefined
-      ? 'swarm.messagesUnavailable' : 'swarm.messagesEmpty'));
+    // A reader-selected filter narrows the list, never the run-level view's presence.
+    messageCount = config.participantId ? matching.length : receipts.size;
+    element.hidden = messageCount === 0;
     const focused = document.activeElement as HTMLElement | null;
     let cursor = list.firstElementChild;
     for (const [id, receipt] of ordered) {
@@ -215,7 +217,7 @@ export function mountSwarmMessages(container: HTMLElement, initial: SwarmMessage
   }
   filter.addEventListener('change', render);
   update(initial);
-  return { element, update, dispose() {
+  return { element, get messageCount() { return messageCount; }, update, dispose() {
     disposed = true; filter.removeEventListener('change', render); rows.clear(); receipts.clear(); element.remove();
   } };
 }

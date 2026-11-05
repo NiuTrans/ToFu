@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from tests._runtime_sections import native_module_path, runtime_section_path
+from tests._jsdom import require_node_modules
 
 
 pytestmark = pytest.mark.unit
@@ -19,10 +19,6 @@ DIALOG_BUNDLE = native_module_path(
     ROOT / "frontend/src/dialog-controller.ts",
 )
 SEND_PIPELINE = runtime_section_path("main/main_send_pipeline.js")
-HAS_BROWSER_DEPS = bool(
-    shutil.which("node")
-    and (ROOT / "node_modules/jsdom/package.json").is_file()
-)
 
 
 _HARNESS = r"""
@@ -128,6 +124,23 @@ function key(value) {
   observed.withoutDialog = await _promptInjectMode('missing');
   showChoice = installedShowChoice;
 
+  runtimeScope.isCoordinatorConversation = (id) => id === 'coord-1';
+  conversations.splice(0, conversations.length,
+    {id: 'coord-1', activeTaskId: 'attempt-c'},
+    {id: 'c3', activeTaskId: 'attempt-3'});
+  let choiceCalls = 0;
+  showChoice = (options) => {
+    choiceCalls += 1;
+    return installedShowChoice(options);
+  };
+  observed.coordinatorMode = await _promptInjectMode('coord-1');
+  observed.coordinatorChoiceCalls = choiceCalls;
+  clickNewestChoice(1);
+  observed.otherConversationMode = await _promptInjectMode('c3');
+  observed.otherConversationChoiceCalls = choiceCalls;
+  showChoice = installedShowChoice;
+  delete runtimeScope.isCoordinatorConversation;
+
   appDialogController.destroy();
   observed.overlaysAfterDestroy = document.querySelectorAll(
     '.app-dialog-overlay',
@@ -142,8 +155,7 @@ function key(value) {
 
 @pytest.fixture(scope="module")
 def inject_mode_behavior() -> dict:
-    if not HAS_BROWSER_DEPS:
-        pytest.skip("node + jsdom dev dependencies are required")
+    require_node_modules('jsdom')
     result = subprocess.run(
         ["node", "-e", _HARNESS, DIALOG_BUNDLE, SEND_PIPELINE],
         cwd=ROOT,
@@ -173,6 +185,15 @@ def test_choice_keyboard_navigation_wraps(inject_mode_behavior: dict):
     assert inject_mode_behavior["downWraps"] is True
     assert inject_mode_behavior["upWraps"] is True
     assert inject_mode_behavior["navigationResult"] == "queue"
+
+
+def test_coordinator_conversation_steers_without_prompt(
+    inject_mode_behavior: dict,
+):
+    assert inject_mode_behavior["coordinatorMode"] == "steer"
+    assert inject_mode_behavior["coordinatorChoiceCalls"] == 0
+    assert inject_mode_behavior["otherConversationMode"] == "queue"
+    assert inject_mode_behavior["otherConversationChoiceCalls"] == 1
 
 
 def test_prompt_falls_back_without_dialog_service(inject_mode_behavior: dict):

@@ -37,7 +37,12 @@ pub(crate) const LANE_INDEX_NAMESPACE: &str = "model.continuation.v1.lanes";
 pub(crate) const MAX_CONTINUATION_LANES_PER_CONVERSATION: usize = 999;
 pub(crate) const MAX_PROJECTION_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_MESSAGES: usize = 16_384;
+/// Bounds only legacy per-Turn witness lists (no `historyProof`). A proof
+/// checkpoint carries one terminal witness whatever the lane length.
 pub(crate) const MAX_TURN_WITNESSES: usize = 4_096;
+/// Largest integer every JSON peer represents exactly (RFC 7493, I-JSON).
+/// A history-proof count is a plain counter; this is its only bound.
+pub(crate) const MAX_JSON_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 use crate::generated_model_context_projection::{
     DISPLAY_ONLY_FIELDS, ROUND_DISPLAY_ONLY_FIELDS,
@@ -119,8 +124,7 @@ pub(crate) fn delete_conversation(
         MAX_CONTINUATION_LANES_PER_CONVERSATION + 1,
     )?;
     if entries.len() == MAX_CONTINUATION_LANES_PER_CONVERSATION + 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
+        return Err(crate::resource_exhaustion::domain_bound(
             "model continuation lane directory exceeds its bound",
         ));
     }
@@ -169,24 +173,29 @@ pub(crate) fn encode_projection(projection: &Value) -> Option<Vec<u8>> {
                     .and_then(Value::as_str)
                     == Some("assistant")
         });
+    let proof = object.get("historyProof");
+    // A proof binds the whole prefix and carries only its terminal witness.
+    let witnesses_allowed = if proof.is_some() { 1 } else { MAX_TURN_WITNESSES };
     let turns_valid = object
         .get("turns")
         .and_then(Value::as_array)
         .is_some_and(|turns| {
             !turns.is_empty()
-                && turns.len() <= MAX_TURN_WITNESSES
+                && turns.len() <= witnesses_allowed
                 && turns.iter().all(valid_witness)
         });
-    if let Some(proof) = object.get("historyProof") {
+    if let Some(proof) = proof {
         let valid = proof.as_object().is_some_and(|proof| {
             proof.len() == 3
                 && matches!(proof.get("version").and_then(Value::as_u64), Some(1 | 2))
-                && proof.get("count").and_then(Value::as_u64).is_some_and(|count| count < 10000)
+                && proof
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count <= MAX_JSON_SAFE_INTEGER)
                 && proof.get("digest").and_then(Value::as_str).is_some_and(|digest| {
                     digest.len() == 64 && digest.bytes().all(|byte|
                         byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 })
-                && object.get("turns").and_then(Value::as_array).is_some_and(|turns| turns.len() == 1)
         });
         if !valid { return None; }
     }
@@ -689,6 +698,34 @@ mod tests {
         public["currentAttemptId"] = serde_json::json!("new-attempt");
         assert_ne!(settled_witness(stored.as_object().unwrap()),
                    settled_witness(public.as_object().unwrap()));
+    }
+
+    #[test]
+    fn history_proof_count_is_a_plain_json_safe_counter_and_needs_no_witness_list() {
+        let witness = || serde_json::json!(["turn", "0".repeat(64)]);
+        let projection = |count: Value, turns: Vec<Value>| serde_json::json!({
+            "messages": [{"role": "assistant", "content": "retained"}],
+            "turns": turns,
+            "historyProof": {"version": 2, "count": count, "digest": "a".repeat(64)}});
+        for count in [0, 9_999, 10_000, 20_000, 1 << 40, MAX_JSON_SAFE_INTEGER] {
+            assert!(encode_projection(&projection(count.into(), vec![witness()])).is_some());
+        }
+        for count in [
+            serde_json::json!(MAX_JSON_SAFE_INTEGER + 1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(-1),
+            serde_json::json!(1.0),
+            serde_json::json!(true),
+            serde_json::json!("1"),
+        ] {
+            assert!(encode_projection(&projection(count, vec![witness()])).is_none());
+        }
+        assert!(encode_projection(&projection(1.into(), vec![witness(), witness()])).is_none());
+        let legacy = |len| serde_json::json!({
+            "messages": [{"role": "assistant", "content": "retained"}],
+            "turns": vec![witness(); len]});
+        assert!(encode_projection(&legacy(MAX_TURN_WITNESSES)).is_some());
+        assert!(encode_projection(&legacy(MAX_TURN_WITNESSES + 1)).is_none());
     }
 
     #[test]

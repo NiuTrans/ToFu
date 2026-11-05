@@ -367,7 +367,9 @@ def test_vlm_batches_start_on_demand_and_settle_unstarted_failure(monkeypatch, f
         nonlocal starts
         if thread.name.startswith('vlm_'):
             starts += 1
-            if fail_start and starts == 2:
+            # The demand executor re-reserves a refused start once for the
+            # same Future. Refuse both starts so this batch stays unstarted.
+            if fail_start and starts in (2, 3):
                 raise RuntimeError('injected unstarted VLM batch')
         return original(thread)
 

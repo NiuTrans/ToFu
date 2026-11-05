@@ -2,6 +2,8 @@
 """Human-facing ``ask_human`` and structured-checklist handlers.
 
 This module owns the handler dependency bindings used by tests and runtime.
+A Project Router's question is also relayed to the owner's Global Router
+(``lib.router.relay.relay_project_question``, docs/ROUTER.md R3).
 """
 
 from __future__ import annotations
@@ -16,13 +18,154 @@ from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
 
+_NONBLOCKING_CONTENT = (
+    'Question shown to the user without waiting (id {guidance_id}). Keep working '
+    'on whatever does not depend on the answer; if you assume a default meanwhile, '
+    'say which. Their reply will arrive later as a normal user message quoting '
+    'this question.')
+_SUPERSEDED_CONTENT = (
+    'The user replied in chat instead of answering this question; their message '
+    'follows. Treat it as their answer or new direction.')
+
+
+def _requests_nonblocking(fn_args):
+    """Only an explicit false opts out of waiting; anything else keeps the default."""
+    value = fn_args.get('blocking')
+    return value is False or (isinstance(value, str) and value.strip().lower() == 'false')
+
+
+def _question_has_reader(task):
+    """Whether a person reads this task's questions.
+
+    Besides attended chat tasks, the currently bound project Coordinator's own
+    root task qualifies even when unattended (a result-driven continuation):
+    its conversation is the user's channel. A failed role lookup has no reader.
+    """
+    if not task.get('_attended'):
+        try:
+            from lib.tasks_pkg.coordinator_policy import coordinator_scope
+            return coordinator_scope(task) is not None
+        except Exception:
+            logger.warning('[Executor] ask_human: Coordinator role lookup failed; '
+                           'treating task=%s as unattended',
+                           task.get('id', '?')[:8], exc_info=True)
+            return False
+    return True
+
+
+def _is_human_author(author, owner):
+    if not isinstance(author, dict) or author.get('actor') != 'human':
+        return False
+    from lib.turn_initiation import require_human_turn, steer_author_turn
+    try:
+        require_human_turn(steer_author_turn(author), user_id=owner)
+    except ValueError:
+        return False
+    except Exception:
+        # An unreadable authority delays the answer to the next poll, like a receipt read.
+        logger.warning('[Executor] ask_human: steer author verification failed', exc_info=True)
+        return False
+    return True
+
+
+def _human_message_pending(task):
+    """Whether a human chat message waits in this turn's steer lane.
+
+    The lane also carries nonhuman input (channel events, relayed reports and
+    questions, forwarded context; docs/ROUTER.md). The steer seam records a
+    human author only for human input (``turn_initiation.steer_author``), and a
+    Global Router forward of the owner's message counts only once
+    ``require_human_turn`` verifies it (R2), so only the owner's own words can
+    answer or supersede a question.
+    """
+    from lib.agent_inbox import pending_items
+    from lib.tasks_pkg.manager import task_user_id
+    owner = task_user_id(task)
+    return any(_is_human_author(item.get('steerAuthor'), owner)
+               for item in pending_items(task['convId'], modes=['user-steer']))
+
+
+def _await_answer(task, guidance_id, publish_request):
+    """Wait for the card answer; a human chat message sent into this turn ends the wait.
+
+    Returns ``(response, superseded)``. The shared wait reads an accepted answer
+    before this check, so an answer that arrived first still wins; Stop keeps
+    its abort result because the caller checks ``aborted`` first.
+    """
+    from lib.tasks_pkg.human_guidance import request_human_guidance
+    conversation_id = task.get('convId')
+    if not conversation_id:
+        return request_human_guidance(
+            guidance_id, task=task, on_registered=publish_request), False
+    replied = False
+
+    def replied_in_chat():
+        nonlocal replied
+        replied = replied or _human_message_pending(task)
+        return replied
+
+    response = request_human_guidance(
+        guidance_id, task=task, on_registered=publish_request,
+        abort_check=replied_in_chat)
+    return response, response is None and replied
+
+
+def _relay_to_global_router(task, tc_id, round_entry, blocking):
+    """A Project Router's question also reaches the owner's Global Router (docs/ROUTER.md R3).
+
+    The notice points at this card; a relay failure never fails the question.
+    """
+    try:
+        from lib.tasks_pkg.coordinator_policy import coordinator_scope
+        scope = coordinator_scope(task)
+        if scope is None:
+            return
+        from lib.router.relay import relay_project_question
+        relay_project_question(scope['user_id'], {
+            'projectPath': scope['project_path'], 'coordinatorId': scope['conversation_id'],
+            'turnId': task['_turnId'], 'toolCallId': tc_id, 'guidanceId': round_entry['guidanceId'],
+            'blocking': blocking, 'question': round_entry['guidanceQuestion'],
+            'options': round_entry['guidanceOptions'],
+            'questions': round_entry.get('guidanceBatchQuestions') or []})
+    except Exception:
+        logger.warning('[Executor] ask_human: Global Router question relay failed: '
+                       'guidance_id=%s, task=%s', round_entry.get('guidanceId'),
+                       task.get('id', '?')[:8], exc_info=True)
+
+
+def _finalize_nonblocking(task, fn_name, rn, round_entry, title, extra):
+    """Settle a shown question at once; its reply arrives as a chat message."""
+    round_entry['guidanceBlocking'] = False
+    tool_content = _NONBLOCKING_CONTENT.format(guidance_id=extra['guidanceId'])
+    logger.info('[Executor] ask_human shown without waiting: guidance_id=%s, '
+                'task=%s', extra['guidanceId'], task.get('id', '?')[:8])
+    meta = _build_simple_meta(
+        fn_name, tool_content, source='HumanGuidance', title=title,
+        snippet='Asked without waiting for an answer', badge='asked',
+        extra={**extra, 'blocking': False})
+    _finalize_tool_round(task, rn, round_entry, [meta])
+    return tool_content
+
+
+def _finalize_superseded(task, fn_name, rn, round_entry, title, extra):
+    """Settle a waiting question the user answered with a chat message instead."""
+    round_entry['guidanceSuperseded'] = True
+    logger.info('[Executor] ask_human superseded by a chat message: '
+                'guidance_id=%s, task=%s', extra['guidanceId'],
+                task.get('id', '?')[:8])
+    meta = _build_simple_meta(
+        fn_name, _SUPERSEDED_CONTENT, source='HumanGuidance', title=title,
+        snippet='The user replied in chat instead', badge='superseded',
+        extra=extra)
+    _finalize_tool_round(task, rn, round_entry, [meta])
+    return _SUPERSEDED_CONTENT
+
 
 @tool_registry.handler('ask_human', category='human_guidance',
                        description='Ask the user a question and wait for their response')
 def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    """Handle ask_human tool — block indefinitely until user responds."""
+    """Handle ask_human tool — block until the user responds unless blocking=false."""
     from lib.ids import short_id
-    from lib.tasks_pkg.human_guidance import request_human_guidance
 
     # Batch mode: questions[] takes precedence over single-question fields.
     questions = fn_args.get('questions')
@@ -98,7 +241,7 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             'options': options,
         })
 
-    if not task.get('_attended'):
+    if not _question_has_reader(task):
         publish_request()
         # No interactive session can answer this. Only the three routes/chat.py
         # entry points stamp task['_attended']=True; every headless/autonomous
@@ -133,14 +276,23 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         )
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, tool_content, False
-    else:
-        logger.info('[Executor] ask_human blocking indefinitely for user '
-                    'response: guidance_id=%s, task=%s',
-                    guidance_id, task.get('id', '?')[:8])
-        user_response = request_human_guidance(
-            guidance_id, task=task, on_registered=publish_request)
+    guidance_meta = {
+        'guidanceId': guidance_id,
+        'question': question,
+        'responseType': response_type,
+    }
+    blocking = not _requests_nonblocking(fn_args)
+    _relay_to_global_router(task, tc_id, round_entry, blocking)
+    if not blocking:
+        tool_content = _finalize_nonblocking(
+            task, fn_name, rn, round_entry, question[:2000], guidance_meta)
+        return tc_id, tool_content, False
+    logger.info('[Executor] ask_human blocking indefinitely for user '
+                'response: guidance_id=%s, task=%s',
+                guidance_id, task.get('id', '?')[:8])
+    user_response, superseded = _await_answer(task, guidance_id, publish_request)
 
-    if task.get('aborted') or user_response is None:
+    if task.get('aborted') or (user_response is None and not superseded):
         logger.warning('[Executor] ask_human aborted/cancelled: '
                        'guidance_id=%s, task=%s, aborted=%s — round left '
                        'awaiting_human so the turn settlement keeps '
@@ -155,11 +307,14 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         # the settlement's missing_tool_result handling offers the
         # late-answer resume for exactly this shape.
         return tc_id, '[Task was aborted while waiting for human guidance]', False
-    else:
-        tool_content = f'Human response: {user_response}'
-        logger.info('[Executor] ask_human received response: '
-                    'guidance_id=%s, response_len=%d, task=%s',
-                    guidance_id, len(user_response), task.get('id', '?')[:8])
+    if superseded:
+        tool_content = _finalize_superseded(
+            task, fn_name, rn, round_entry, question[:2000], guidance_meta)
+        return tc_id, tool_content, False
+    tool_content = f'Human response: {user_response}'
+    logger.info('[Executor] ask_human received response: '
+                'guidance_id=%s, response_len=%d, task=%s',
+                guidance_id, len(user_response), task.get('id', '?')[:8])
 
     # No title/snippet truncation: the user specifically flagged that
     #   "incomplete displays are not allowed" — the original 80-char title
@@ -232,9 +387,8 @@ def _normalize_batch_questions(questions):
 def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
                             round_entry, cfg, project_path, project_enabled,
                             raw_questions):
-    """Handle ask_human batch mode — block until user answers all questions."""
+    """Handle ask_human batch mode — block until the user answers all questions."""
     from lib.ids import short_id
-    from lib.tasks_pkg.human_guidance import request_human_guidance
 
     questions = _normalize_batch_questions(raw_questions)
     if len(questions) < 2:
@@ -278,7 +432,7 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
             'options': [],
         })
 
-    if not task.get('_attended'):
+    if not _question_has_reader(task):
         publish_request()
         logger.warning('[Executor] ask_human batch in an unattended execution '
                        'mode — returning sentinel: guidance_id=%s, task=%s',
@@ -304,14 +458,24 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
         )
         _finalize_tool_round(task, rn, round_entry, [meta])
         return tc_id, tool_content, False
-    else:
-        logger.info('[Executor] ask_human batch blocking indefinitely for '
-                    'user response: guidance_id=%s, task=%s',
-                    guidance_id, task.get('id', '?')[:8])
-        user_response = request_human_guidance(
-            guidance_id, task=task, on_registered=publish_request)
+    guidance_meta = {
+        'guidanceId': guidance_id,
+        'question': summary,
+        'responseType': 'batch',
+        'batchQuestions': questions,
+    }
+    blocking = not _requests_nonblocking(fn_args)
+    _relay_to_global_router(task, tc_id, round_entry, blocking)
+    if not blocking:
+        tool_content = _finalize_nonblocking(
+            task, fn_name, rn, round_entry, summary[:200], guidance_meta)
+        return tc_id, tool_content, False
+    logger.info('[Executor] ask_human batch blocking indefinitely for '
+                'user response: guidance_id=%s, task=%s',
+                guidance_id, task.get('id', '?')[:8])
+    user_response, superseded = _await_answer(task, guidance_id, publish_request)
 
-    if task.get('aborted') or user_response is None:
+    if task.get('aborted') or (user_response is None and not superseded):
         logger.warning('[Executor] ask_human batch aborted/cancelled: '
                        'guidance_id=%s, task=%s, aborted=%s — round left '
                        'awaiting_human so the turn settlement keeps '
@@ -319,6 +483,10 @@ def _handle_ask_human_batch(task, tc, fn_name, tc_id, fn_args, rn,
                        guidance_id, task.get('id', '?')[:8],
                        task.get('aborted', False))
         return tc_id, '[Task was aborted while waiting for human guidance]', False
+    if superseded:
+        tool_content = _finalize_superseded(
+            task, fn_name, rn, round_entry, summary[:200], guidance_meta)
+        return tc_id, tool_content, False
 
     # Parse the batch response JSON.
     import json as _json

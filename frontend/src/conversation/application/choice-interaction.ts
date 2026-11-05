@@ -1,6 +1,9 @@
 /** ask_human -> native choices adapter. Conversation/turn identity is supplied by
  * the trusted mounted surface. Model content supplies only an opaque guidance ID.
  * Only the trusted fixed turn command port can submit; a waiter ACK is not proof.
+ * A non-blocking question (`guidanceBlocking: false`) has no waiting request: it
+ * stays answerable and its answer is an ordinary chat message quoting the
+ * question, delivered through the `replyInChat` port.
  */
 import { validGuidanceAnswer } from '../../rich-response/guidance-values';
 import type { ChoiceInteraction, ChoicePorts } from '../../rich-response/choices';
@@ -17,10 +20,35 @@ export interface ChoiceInteractionDependencies {
   createAttempt(conversationId: string, turnId: string, body: RecordValue, signal: AbortSignal): Promise<unknown>;
   commandId(): string;
   text?(key: string, fallback: string): string;
+  /** Sends (or drafts beside unsent composer work) a quoted chat reply. */
+  replyInChat?(request: { conversationId: string; guidanceId: string; quote: string; responseText: string }): Promise<'sent' | 'drafted'>;
+}
+
+/** The question as a chat quote; batch questions are numbered like their form. */
+function replyQuote(interaction: ChoiceInteraction): string {
+  return interaction.mode === 'batch' && interaction.questions?.length
+    ? interaction.questions.map((item, index) => `${index + 1}. ${item.question.trim()}`).join('\n\n')
+    : interaction.question.trim();
+}
+
+/** A chat message is read by people: batch answers become numbered lines. */
+function replyText(interaction: ChoiceInteraction, response: string): string {
+  if (interaction.mode !== 'batch') return response;
+  const answers = JSON.parse(response) as Array<{ index: number; answer: string }>;
+  return [...answers].sort((left, right) => left.index - right.index)
+    .map(({ index, answer }) => `${index + 1}. ${answer}`).join('\n');
 }
 
 export function createChoiceInteractionPorts(dependencies: ChoiceInteractionDependencies): ChoicePorts {
   const { conversationId, turnId } = dependencies;
+  const text = (key: string, fallback: string) => dependencies.text?.(key, fallback) ?? fallback;
+  // Answers sent from this mount; the chat transcript is the durable record.
+  const repliedInChat = new Map<string, string>();
+  const nonBlocking = (turn: RecordValue, interactionId: string) => {
+    const rounds = record(turn.projection).toolRounds;
+    return Array.isArray(rounds) && rounds.map(record)
+      .some(round => round.guidanceId === interactionId && round.guidanceBlocking === false);
+  };
 
   let attempted: { interactionId: string; response: string; commandId: string; body: RecordValue } | null = null;
   const read = async (interactionId: string, signal: AbortSignal) => {
@@ -56,6 +84,16 @@ export function createChoiceInteractionPorts(dependencies: ChoiceInteractionDepe
     const metadata = [round.results, round.toolMeta].flatMap(value => Array.isArray(value) ? value.map(record) : []);
     const answer = typeof round.guidanceResponse === 'string' ? round.guidanceResponse
       : metadata.find(meta => meta.guidanceId === interactionId && typeof meta.userResponse === 'string')?.userResponse;
+    if (round.guidanceBlocking === false) {
+      const replied = repliedInChat.get(interactionId);
+      return { interactionId, mode, questions, question: String(round.guidanceQuestion ?? ''), options,
+        descriptions: descriptions(round.guidanceOptions),
+        ...(replied === undefined
+          ? { state: 'pending' as const, note: text('toolHumanGuidance.nonBlockingHint',
+            'Work continues meanwhile; your reply is sent as a normal message.') }
+          : { state: 'answered' as const, response: replied,
+            note: text('toolHumanGuidance.repliedInChat', 'Replied in chat') }) };
+    }
     const settlement = record(turn.settlement);
     const resumeOptions = Array.isArray(settlement.resumeOptions) ? settlement.resumeOptions.map(record) : [];
     const eligible = ((turn.status === 'running' || turn.status === 'pending') && (round.status === 'pending' || round.status === 'awaiting_human'))
@@ -73,6 +111,18 @@ export function createChoiceInteractionPorts(dependencies: ChoiceInteractionDepe
     submit: async (interactionId, response, commandId, signal) => {
       const turn = await read(interactionId, signal);
       const current = project(turn, interactionId);
+      if (nonBlocking(turn, interactionId)) {
+        if (!dependencies.replyInChat) throw new Error('Chat reply unavailable');
+        if (!validGuidanceAnswer(current.mode, current.options, current.questions, response)) throw new Error('Choice is undeclared');
+        const outcome = await dependencies.replyInChat({ conversationId, guidanceId: interactionId,
+          quote: replyQuote(current), responseText: replyText(current, response) });
+        if (signal.aborted) throw new Error('Disposed interaction');
+        if (outcome !== 'sent') {
+          return { ...current, note: text('toolHumanGuidance.replyDrafted', 'Your reply is in the composer \u2014 send it when ready') };
+        }
+        repliedInChat.set(interactionId, response);
+        return project(turn, interactionId);
+      }
       if (current.state === 'answered') return current; // Durable replay, no second command.
       const retry = attempted?.interactionId === interactionId && attempted.response === response && attempted.commandId === commandId;
       if ((!retry && current.state !== 'pending') || !validGuidanceAnswer(current.mode,current.options,current.questions,response)) throw new Error('Question is stale or choice is undeclared');

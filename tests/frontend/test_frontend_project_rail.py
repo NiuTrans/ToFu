@@ -33,8 +33,8 @@ Skips cleanly without node/jsdom.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
+import tempfile
 
 import pytest
 from tests._runtime_sections import (
@@ -57,14 +57,6 @@ _SHELL = native_module_path(
 _PRESETS = native_module_path(
     '.native/folder-presets.js',
     os.path.join(REPO_ROOT, 'frontend/src/conversation/application/folder-presets.ts'))
-
-
-def _node_deps_available() -> bool:
-    if not shutil.which('node'):
-        return False
-    result = subprocess.run(['node', '-p', 'require.resolve("jsdom")'],
-                            cwd=REPO_ROOT, capture_output=True, timeout=10)
-    return result.returncode == 0
 
 
 _HARNESS = r"""
@@ -284,8 +276,8 @@ for (const collapsed of [false, true]) {
   settings.querySelector('svg').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const dialog = document.querySelector('dialog[open]');
   check('settings_dialog_' + collapsed, !!dialog && dialog.querySelector('input[type="text"]').value === 'cadtrans' &&
-    !!dialog.querySelector('select') && dialog.querySelector('.folder-settings-full-path').textContent === '/workspace/demo' &&
-    dialog.querySelector('.folder-settings-root input[type="checkbox"]').checked);
+    !!dialog.querySelector('select') && dialog.querySelector('.folder-settings-root-path').textContent === '/workspace/demo' &&
+    dialog.querySelector('.folder-settings-root [data-action="readonly"]').getAttribute('aria-pressed') === 'true');
   check('settings_no_switch_' + collapsed, _ACTIVE_FOLDER === before && _setActiveCalls.length === 0);
   [...dialog.querySelectorAll('button')].find(button => button.textContent === 'folder.cancel').click();
 }
@@ -310,8 +302,10 @@ console.log(out.join('\n'));
 
 
 def _run(conv_path, folders_path):
-    harness = os.path.join(HERE, '_project_rail_harness.js')
-    with open(harness, 'w', encoding='utf-8') as f:
+    # One harness file per call: xdist runs this module's tests concurrently,
+    # and a shared path is deleted under a sibling that is about to load it.
+    fd, harness = tempfile.mkstemp(prefix='_project_rail_harness.', suffix='.js', dir=HERE)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
@@ -350,8 +344,6 @@ _EXPECTED = (
 )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_project_rail_render_filter_drag():
     output = _run(_CONV, _FOLDERS)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -368,10 +360,12 @@ def _nc(target, anchor, replacement, must_fail, must_still_pass):
     assert anchor in original, f'NC anchor not found: {anchor[:70]!r}'
     patched = original.replace(anchor, replacement, 1)
     assert patched != original, 'NC replacement was a no-op'
-    # Suffix with THIS module's name so a sibling NC test that patches the SAME
-    # shipped source (test_frontend_folder_longpress also copies
-    # main_folders_mobile.js) can never collide under xdist.
-    copy_path = target + '.projrail.nc_copy.js'
+    # A unique copy per call: sibling NC tests (in this module and in
+    # test_frontend_folder_longpress) patch the SAME shipped source under xdist.
+    fd, copy_path = tempfile.mkstemp(
+        prefix=os.path.basename(target) + '.projrail.', suffix='.nc_copy.js',
+        dir=os.path.dirname(target))
+    os.close(fd)
     conv_p, folders_p = _CONV, _FOLDERS
     if target == _CONV:
         conv_p = copy_path
@@ -395,8 +389,6 @@ def _nc(target, anchor, replacement, must_fail, must_still_pass):
         assert f.read() == original, f'shipped {os.path.basename(target)} must be byte-identical'
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_vertical_render_is_load_bearing():
     """Neuter the rail row emission (drop the project-rail-list open tag) →
     the render checks FAIL while zero-folder degradation still PASSes."""
@@ -409,8 +401,6 @@ def test_NC_vertical_render_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_active_filter_is_load_bearing():
     """Neuter the active-folder filter (show all convs regardless) →
     filter_shows_only_f1 FAILs while the rail-render checks still PASS."""
@@ -423,8 +413,6 @@ def test_NC_active_filter_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_drag_assignment_is_load_bearing():
     """Neuter the drop-handler folder assignment → drag_assigns_folder FAILs
     while the render + collapse checks still PASS."""
@@ -437,8 +425,6 @@ def test_NC_drag_assignment_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_monogram_is_load_bearing():
     """Neuter _folderMonogram back to a lone first-letter → the two-char
     monogram checks FAIL while the rest of the render still PASSes."""
@@ -451,8 +437,6 @@ def test_NC_monogram_is_load_bearing():
     )
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_NC_folder_color_is_load_bearing():
     """Neuter _folderColor's uncolored fallback back to the shared
     var(--accent) → the distinct/hsl checks FAIL while an explicit color and

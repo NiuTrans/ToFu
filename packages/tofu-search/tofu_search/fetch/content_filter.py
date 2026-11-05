@@ -13,6 +13,10 @@ Two modes (config.filter_mode):
 
 Results are cached (config.filter_cache_ttl/max_size) keyed on
 (mode, url, query, user_question, raw_text).
+
+Filtering is best-effort: a budget too small for one call skips it (cached
+verdicts still apply), and an elapsed budget serves the raw text at WARNING.
+Unexpected failures also serve the raw text and stay ERROR.
 """
 
 import hashlib
@@ -30,6 +34,12 @@ logger = get_logger(__name__)
 
 _IRRELEVANT_STOP = '§§IRRELEVANT§§'
 IRRELEVANT_SENTINEL = '[IRRELEVANT]'
+
+# Smallest per-call budget that can hold one LLM verdict. Gate calls measured
+# 1.3 s fastest, 1.6 s p10 and 2.0 s median over 124 production verdicts
+# (2026-10-26); none of them fit the 1.09 s remainders that a nearly spent
+# search deadline produced. A smaller budget is skipped rather than spent.
+_MIN_CALL_BUDGET_SECS = 1.5
 
 # Cache value marker for a gate-mode USEFUL verdict — the cached entry carries
 # no page text (the caller already HAS the raw text), just the verdict.
@@ -172,7 +182,8 @@ def filter_web_content(raw_text: str, *, url: str = '', query: str = '',
     Returns:
         Filtered text (rewrite mode) or the ORIGINAL raw_text (gate mode,
         useful verdict), IRRELEVANT_SENTINEL if page is irrelevant, or
-        original raw_text if filtering fails/is disabled/no LLM configured.
+        original raw_text if filtering fails/is disabled/no LLM configured
+        or the budget cannot fit one call.
     """
     if config is None:
         config = get_config()
@@ -218,9 +229,13 @@ def filter_web_content(raw_text: str, *, url: str = '', query: str = '',
                          f'{len(hit):,}', url[:80])
             return hit
 
-    from tofu_search.llm_adapter import call_llm
+    from tofu_search.llm_adapter import call_llm, is_budget_timeout
 
     _timeout = timeout or config.filter_timeout
+    if _timeout < _MIN_CALL_BUDGET_SECS:
+        logger.info('[ContentFilter] SKIP (budget %.2fs < %.1fs needed for one call) url=%s',
+                    _timeout, _MIN_CALL_BUDGET_SECS, url[:80])
+        return raw_text
 
     if mode == 'gate':
         # Keep the opening (page identity / login wall) plus query-focused
@@ -240,7 +255,7 @@ def filter_web_content(raw_text: str, *, url: str = '', query: str = '',
         system_prompt = _SYSTEM_PROMPT
         content_header = f'--- Raw page content ({len(raw_text):,} chars) ---'
 
-    logger.info('[ContentFilter] START mode=%s url=%s raw_chars=%d sent_chars=%d query=%r timeout=%ds',
+    logger.info('[ContentFilter] START mode=%s url=%s raw_chars=%d sent_chars=%d query=%r timeout=%.1fs',
                 mode, url[:100], len(raw_text), len(page_input),
                 query[:80] if query else '', _timeout)
 
@@ -323,8 +338,12 @@ def filter_web_content(raw_text: str, *, url: str = '', query: str = '',
 
     except Exception as e:
         elapsed = time.time() - t0
-        logger.error('[ContentFilter] ERROR after %.1fs: %s  url=%s',
-                     elapsed, str(e)[:300], url[:100], exc_info=True)
+        if is_budget_timeout(e):
+            logger.warning('[ContentFilter] TIMEOUT after %.1fs (budget %.2fs), serving raw: %s  url=%s',
+                           elapsed, _timeout, str(e)[:300], url[:100])
+        else:
+            logger.error('[ContentFilter] ERROR after %.1fs: %s  url=%s',
+                         elapsed, str(e)[:300], url[:100], exc_info=True)
         return raw_text
 
 

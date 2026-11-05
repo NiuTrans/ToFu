@@ -248,39 +248,25 @@ pub fn schedule_owner_search_backfill(
     Ok(state.generation)
 }
 
+/// One explicit batch, never deferred for foreground pressure. Deferral needs
+/// the maintenance worker's long-lived sampler: a sampler created per call only
+/// spans this batch's own commits and unrelated process-wide activity.
 pub fn process_turn_search_batch(
     authority: &Arc<Mutex<AuthorityDatabase>>,
     projection: &Arc<Mutex<TurnSearchProjection>>,
     scope: crate::maintenance::MaintenanceScope,
 ) -> io::Result<TurnSearchWorkerMetrics> {
-    process_turn_search_batch_with_pressure(
-        authority,
-        projection,
-        scope,
-        &mut crate::fsync_stats::foreground_hotness_sampler(),
-    )
+    process_turn_search_batch_with_admission(authority, projection, scope, || false)
 }
 
-pub(crate) fn process_turn_search_batch_with_pressure(
+pub(crate) fn process_turn_search_batch_with_admission_and_stop(
     authority: &Arc<Mutex<AuthorityDatabase>>,
     projection: &Arc<Mutex<TurnSearchProjection>>,
     scope: crate::maintenance::MaintenanceScope,
-    hot_sample: &mut crate::fsync_stats::ForegroundSampler,
-) -> io::Result<TurnSearchWorkerMetrics> {
-    process_turn_search_batch_with_admission(authority, projection, scope, || {
-        crate::fsync_stats::defer_search_projection(hot_sample)
-    })
-}
-
-pub(crate) fn process_turn_search_batch_with_pressure_and_stop(
-    authority: &Arc<Mutex<AuthorityDatabase>>,
-    projection: &Arc<Mutex<TurnSearchProjection>>,
-    scope: crate::maintenance::MaintenanceScope,
-    hot_sample: &mut crate::fsync_stats::ForegroundSampler,
+    defer: impl FnMut() -> bool,
     should_stop: impl Fn() -> bool,
 ) -> io::Result<TurnSearchWorkerMetrics> {
-    process_turn_search_batch_with_control(authority, projection, scope,
-        || crate::fsync_stats::defer_search_projection(hot_sample),
+    process_turn_search_batch_with_control(authority, projection, scope, defer,
         wait_for_authority_durability, should_stop)
 }
 
@@ -332,6 +318,7 @@ fn process_turn_search_batch_with_control(
     let mut metrics = TurnSearchWorkerMetrics::default();
     if should_stop() { return Ok(metrics); }
     TurnSearchProjection::open_in_background(projection)?;
+    let invalidations = projection_lock(projection)?.search_invalidations();
     let Some(database) = try_authority(authority, &mut metrics)? else {
         return Ok(metrics);
     };
@@ -339,6 +326,11 @@ fn process_turn_search_batch_with_control(
     // Fail closed before touching either store if deferred WAL durability has
     // no healthy coordinator. Capture a fresh covering witness after commits.
     database.wal_durability_witness()?;
+    // Later commits are counted; earlier ones remain durable tokens that the
+    // listing below, which always follows this hold, observes.
+    if let Some(invalidations) = &invalidations {
+        database.attach_search_invalidations(invalidations);
+    }
     let source_uuid = database.authority_uuid();
     let mut activation_read = database.begin(scope.tenant_id, scope.owner_user_id)?;
     let authority_activation = crate::semantic_executor::search_backfill::load_activation(
@@ -402,6 +394,10 @@ fn process_turn_search_batch_with_control(
         let _hold = crate::authority_watch::AuthorityHoldTimer::probe("search.dirty-list");
         search_dirty::list(&database, scope.tenant_id, scope.owner_user_id)?
     };
+    // Counted commits are serialized with the listing by this same hold.
+    let observed = invalidations
+        .as_ref()
+        .and_then(|invalidations| invalidations.committed(scope.tenant_id, scope.owner_user_id));
     // consume_page returned the exact read/committed state. The writer hold
     // is uninterrupted and dirty-list is read-only, so another checkpoint
     // transaction adds no validation; the WAL publication fence stays below.
@@ -460,6 +456,9 @@ fn process_turn_search_batch_with_control(
     )?;
     if indexed {
         projection_lock(projection)?.mark_gram_index_ready(scope.tenant_id, scope.owner_user_id)?;
+        if let (Some(invalidations), Some(observed)) = (&invalidations, observed) {
+            invalidations.mark_consumed(scope.tenant_id, scope.owner_user_id, observed);
+        }
     }
     // Publish truthful coverage even when pressure defers the rebuild itself.
     // Report pending debt so maintenance does not mistake deferral for idleness.
@@ -692,6 +691,52 @@ mod tests {
                 Some(checkpoint)
             );
         }
+    }
+
+    #[test]
+    fn commit_racing_ready_publication_keeps_coverage_indexing_until_consumed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let authority = Arc::new(Mutex::new(AuthorityDatabase::initialize(source.path()).unwrap()));
+        let projection = Arc::new(Mutex::new(
+            TurnSearchProjection::initialize(target.path(), 16 * 1024 * 1024).unwrap(),
+        ));
+        let rings = Arc::new(AtomicUsize::new(0));
+        let rung = Arc::clone(&rings);
+        projection.lock().unwrap().install_search_invalidations(Arc::new(
+            crate::search_dirty::SearchInvalidations::new([(7, 11)], move |_| {
+                rung.fetch_add(1, Ordering::SeqCst);
+            }),
+        ));
+        let scope = crate::maintenance::MaintenanceScope::new(7, 11).unwrap();
+        // The empty listing is already captured when this acknowledged commit
+        // lands; the round must not publish READY on its behalf.
+        process_turn_search_batch_with_durability(&authority, &projection, scope, || false,
+            |witness| {
+                let mut database = authority.lock().unwrap();
+                let mut transaction = database.begin_with_identity_claim_scopes(7, 11)?;
+                crate::conversation_header::create(&database, &mut transaction, &CreateRequest {
+                    conversation_id: "raced".into(), title: "raceneedle".into(),
+                    settings_json: b"{}".to_vec(), created_at_ms: 100,
+                    updated_at_ms: 100, committed_at_ms: 100,
+                })?;
+                database.commit(transaction)?;
+                drop(database);
+                wait_for_authority_durability(witness)
+            }).unwrap();
+        assert_eq!(rings.load(Ordering::SeqCst), 1);
+        assert!(search(&projection, "raceneedle").is_empty());
+        assert!(projection.lock().unwrap().owner_indexing(7, 11).unwrap(),
+            "READY published for a listing that preceded an acknowledged commit");
+        assert_eq!(process_turn_search_batch(&authority, &projection, scope).unwrap()
+            .rebuilt_conversations, 1);
+        assert!(projection.lock().unwrap().owner_indexing(7, 11).unwrap());
+        process_turn_search_batch(&authority, &projection, scope).unwrap();
+        assert!(!projection.lock().unwrap().owner_indexing(7, 11).unwrap());
+        assert_eq!(search(&projection, "raceneedle").len(), 1);
+        assert_eq!(rings.load(Ordering::SeqCst), 1, "the worker's own ACK commits never ring");
     }
 
     #[test]
@@ -1157,6 +1202,39 @@ mod tests {
             &authority, &projection, scope, || true).unwrap();
         assert_eq!(drained.foreground_deferrals, 0);
         assert_eq!(drained.dirty_conversations, 0);
+    }
+
+    #[test]
+    fn explicit_batch_is_not_deferred_by_process_wide_foreground_pressure() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(source_dir.path()).unwrap();
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::conversation_header::create(&database, &mut transaction, &CreateRequest {
+            conversation_id: "conversation".into(), title: "needle".into(), settings_json: b"{}".to_vec(),
+            created_at_ms: 100, updated_at_ms: 100, committed_at_ms: 100,
+        }).unwrap();
+        database.commit(transaction).unwrap();
+        let authority = Arc::new(Mutex::new(database));
+        let projection = Arc::new(Mutex::new(
+            TurnSearchProjection::initialize(target_dir.path(), 16 * 1024 * 1024).unwrap()));
+        let scope = crate::maintenance::MaintenanceScope::new(7, 11).unwrap();
+        // The batch blocks on the held projection while an unrelated
+        // foreground admission wait spans its first 300 ms: process-wide
+        // write pressure that this caller never asked to yield to.
+        let held = projection.lock().unwrap();
+        let foreground_wait = crate::fsync_stats::ForegroundWait::start();
+        let batch = {
+            let (authority, projection) = (Arc::clone(&authority), Arc::clone(&projection));
+            std::thread::spawn(move || process_turn_search_batch(&authority, &projection, scope))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(foreground_wait);
+        drop(held);
+        let metrics = batch.join().unwrap().unwrap();
+        assert_eq!(metrics.foreground_deferrals, 0);
+        assert_eq!(metrics.rebuilt_conversations, 1);
+        assert!(search_dirty::list(&authority.lock().unwrap(), 7, 11).unwrap().is_empty());
     }
 
     #[test]

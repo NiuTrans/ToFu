@@ -94,6 +94,18 @@ def test_fresh_success_has_clean_header_and_intact_diff(render, tool, count, tok
     assert 'new_0 (7 edits)' not in _text(header)
 
 
+def test_edit_without_caption_keeps_path_header_and_success_badge(render):
+    args = {'path': 'src/a.py', 'edits': [
+        {'operation': 'replace', 'anchor': 'old', 'content': 'new'}]}
+    value = _round('edit_file', args,
+                   'Applied 1/1 edits\n'
+                   '[1] OK src/a.py [replace]: 1 lines changed (2L → 2L)')
+    header = _header(render(value))
+    assert _spans(header, 'ptool-text') == ['Edit src/a.py']
+    assert _spans(header, 'ptool-badge') == ['1/1']
+    assert 'ptool-badge-ok' in header
+
+
 @pytest.mark.parametrize('tool', BATCH_TOOLS)
 @pytest.mark.parametrize('failures', [0, 1, 2])
 def test_historical_generated_counts_removed_without_losing_author_text(render, tool, failures):

@@ -17,6 +17,10 @@ both ``no event/dispatch progress for 1846s``, both ``finish=aborted`` with the
 process group killed, ¥22.95 + ¥12.01 of completed rounds discarded. The user
 saw a bubble reading "内部错误 / Internal error — 请查看服务器日志".
 
+Since owner decision 2026-10-28 there is no serial lane: every call of a round
+starts on one concurrent lane under one round ticker. The faces below keep
+their historical names; Face 3 now enumerates call classes instead of lanes.
+
 Three properties are pinned here, each independently NEUTER-able:
 
 1. **Serial WRITE lane heartbeats** (``run_command``, ``write_file``, every
@@ -195,18 +199,13 @@ def _run(task, tcs, cfg=None):
 
 
 def _reap_verdict(task) -> bool:
-    """Apply the REAL reaper predicate to this task.
+    """Apply the REAL reaper judgement to this task.
 
     Imported from the production module rather than restated, so a change to
     the discriminator is reflected here instead of drifting.
     """
-    from lib.tasks_pkg.manager._maintenance import _stuck_task_max_silent_secs
-    max_silent = _stuck_task_max_silent_secs()
-    now = time.time()
-    created = task.get('created_at', now)
-    last_event = task.get('_t_last_event', created)
-    heartbeat = task.get('_dispatch_heartbeat', created)
-    return (now - last_event) >= max_silent and (now - heartbeat) >= max_silent
+    from lib.tasks_pkg.liveness import is_wedged
+    return is_wedged(task)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -394,58 +393,52 @@ def test_await_task_handler_still_has_no_heartbeat_of_its_own():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  Face 3 — every serial lane is covered (enumerate, don't hand-list)
+#  Face 3 — every call class is covered (enumerate, don't hand-list)
 # ═══════════════════════════════════════════════════════════════════
 
-def test_no_bare_execute_tool_one_call_survives_in_the_pipeline():
+def test_no_handler_runs_outside_the_heartbeat_covered_lane():
     """★ Enumerate rather than trust a list.
 
     The originating diagnosis named ONE uncovered lane (serial write); an AST
-    walk found a second (long-blocking serial). This asserts the structural
-    property directly: inside ``execute_tool_pipeline`` every
-    ``_execute_tool_one`` call must sit under a ``try`` whose ``finally``
-    stops a heartbeat — so a THIRD lane added later cannot quietly reintroduce
-    the defect.
+    walk found a second (long-blocking serial). Since owner decision
+    2026-10-28 every admitted call runs on the one concurrent lane whose
+    single ticker covers the whole round, so ``execute_tool_pipeline`` must
+    not call an executor itself: a lane added there later would run outside
+    that ticker and reintroduce the defect.
     """
     import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 
     src = textwrap.dedent(inspect.getsource(_pipeline.execute_tool_pipeline))
-    tree = ast.parse(src)
-    fn = tree.body[0]
-
-    parent = {}
-    for p in ast.walk(fn):
-        for c in ast.iter_child_nodes(p):
-            parent[c] = p
-
-    def _is_exec_call(node):
-        f = node.func
-        return isinstance(f, ast.Name) and f.id == '_execute_tool_one'
-
-    calls = [n for n in ast.walk(fn)
-             if isinstance(n, ast.Call) and _is_exec_call(n)]
-    assert calls, ('no _execute_tool_one call found — the pipeline was '
-                   'restructured; re-target this guard')
-
-    unguarded = []
-    for call in calls:
-        node, guarded = call, False
-        while node in parent:
-            node = parent[node]
-            if isinstance(node, ast.Try) and node.finalbody:
-                fin = ast.unparse(ast.Module(body=node.finalbody,
-                                             type_ignores=[]))
-                if '_hb_stop' in fin:
-                    guarded = True
-                    break
-        if not guarded:
-            unguarded.append(ast.unparse(call)[:80])
-
-    assert not unguarded, (
-        'these _execute_tool_one call sites run with NO heartbeat ticker '
-        'around them, so a tool blocking there goes silent on BOTH reaper '
+    direct = [
+        ast.unparse(node)[:80] for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in {'_execute_tool_one', '_execute_tool_one_in_pool'}
+    ]
+    assert not direct, (
+        'execute_tool_pipeline runs a handler outside the heartbeat-covered '
+        'concurrent lane, so a tool blocking there goes silent on BOTH reaper '
         'clocks and gets the whole task force-failed at '
-        'TOFU_STUCK_TASK_MAX_SILENT_SECS: %r' % (unguarded,))
+        'TOFU_STUCK_TASK_MAX_SILENT_SECS: %r' % (direct,))
+
+
+def test_every_call_class_beats_in_one_concurrent_round(rec, slow_tools):
+    """A write, a human wait and a read blocking together each beat on the wire."""
+    script, _observed = slow_tools
+    for name in ('run_command', 'await_task', 'web_search'):
+        script[name] = 5.0
+    task = _mk_task()
+
+    started = time.monotonic()
+    _run(task, [_mk_tc('tc-rc', 'run_command', 0),
+                _mk_tc('tc-aw', 'await_task', 1, args={'action': 'wait'}),
+                _mk_tc('tc-ws', 'web_search', 2, args={'query': 'tofu'})])
+    elapsed = time.monotonic() - started
+
+    for call_id in ('tc-rc', 'tc-aw', 'tc-ws'):
+        assert [event for event in rec.of_type('tool_progress')
+                if event.get('toolCallId') == call_id], (
+            '%s blocked for 5s without a single tool_progress tick' % call_id)
+    assert elapsed < 10, 'the three 5s calls ran one after another (%.1fs)' % elapsed
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -462,7 +455,7 @@ def test_reaper_envelope_is_worker_lost_and_retryable(monkeypatch):
     both i18n keys) and its hint names the one correct recovery.
     """
     import lib.tasks_pkg.manager._maintenance as _maintenance
-    from tests.support.chat_tasks import chat_task_registry
+    from tests.support.chat_tasks import chat_task_registry, isolated_reaper_registry
 
     now = time.time()
     stale = now - 4000
@@ -479,6 +472,7 @@ def test_reaper_envelope_is_worker_lost_and_retryable(monkeypatch):
     monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
                         lambda t: finalized.append(t))
     monkeypatch.setitem(chat_task_registry, task['id'], task)
+    isolated_reaper_registry(monkeypatch)[task['id']] = task
 
     n = _maintenance.reap_stuck_running_tasks()
     assert n == 1, 'the synthetic wedged task should have been reaped'

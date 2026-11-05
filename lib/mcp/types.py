@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+from collections.abc import Iterable
 from typing import Any, TypedDict
 
 # ── Namespace separator for MCP tool names ──
@@ -10,6 +13,14 @@ from typing import Any, TypedDict
 # Double-underscore avoids collision with single-underscore in tool names.
 MCP_TOOL_PREFIX = 'mcp__'
 MCP_TOOL_SEP = '__'
+
+# The strictest provider function-name contract (Anthropic and OpenAI):
+# ``^[a-zA-Z0-9_-]{1,64}$``. A namespaced name outside it 400s the whole
+# request, so the tool part is projected into it; the raw MCP name stays in
+# the bridge index for dispatch.
+PROVIDER_TOOL_NAME_MAX = 64
+_PROVIDER_UNSAFE_NAME_CHARS = re.compile(r'[^A-Za-z0-9_-]')
+_NAME_DIGEST_CHARS = 8
 
 # ── Config file path (relative to project data/config/) ──
 MCP_CONFIG_FILENAME = 'mcp_servers.json'
@@ -156,7 +167,8 @@ class MCPToolInfo(TypedDict):
     description: str
     input_schema: dict[str, Any]
     openai_def: dict[str, Any]  # ready-to-use OpenAI function-calling dict
-    read_only_hint: bool        # MCP annotations.readOnlyHint (default False)
+    read_only_hint: bool        # MCP annotations.readOnlyHint, or a catalog
+                                # reviewed read for this endpoint (default False)
     annotations: dict[str, bool]  # MCP Tool.annotations hints (camelCase keys)
     output_schema: dict[str, Any]  # MCP Tool.outputSchema (empty when absent)
     meta: dict[str, Any]        # private retrieval/workflow metadata (_meta)
@@ -164,19 +176,66 @@ class MCPToolInfo(TypedDict):
     catalog_version: str        # optional server catalogVersion
 
 
+def _name_digest(tool_name: str) -> str:
+    return hashlib.sha256(tool_name.encode('utf-8')).hexdigest()[:_NAME_DIGEST_CHARS]
+
+
+def _with_digest(head: str, tool_part: str, raw_tool_name: str) -> str:
+    """Append the raw name's digest, shortening the tool part to fit."""
+    room = PROVIDER_TOOL_NAME_MAX - len(head) - _NAME_DIGEST_CHARS - 1
+    return f'{head}{tool_part[:max(room, 1)]}_{_name_digest(raw_tool_name)}'
+
+
 def make_namespaced_name(server_name: str, tool_name: str) -> str:
-    """Build the namespaced tool name: ``mcp__{server}__{tool}``.
+    """Build the provider-safe namespaced tool name ``mcp__{server}__{tool}``.
 
     Deduping safety net: if ``tool_name`` starts with ``{server_name}_``
     (e.g. server ``hope`` exposes ``hope_login``) we strip the redundant
     prefix so the LLM sees ``mcp__hope__login`` instead of the stuttering
     ``mcp__hope__hope_login``. The MCP protocol already namespaces by
     server, so repeating the server name in the tool name is just noise.
+
+    Characters outside the provider contract become ``_`` (Kingsoft Docs'
+    ``sheet.get_range_data`` → ``mcp__kdocs__sheet_get_range_data``), and a
+    tool part too long for :data:`PROVIDER_TOOL_NAME_MAX` is shortened with a
+    digest of the raw name. Names already inside the contract are unchanged.
+    Only the tool part is projected: server ids are catalog/config keys.
     """
+    raw_tool_name = tool_name
     prefix = f'{server_name}_'
     if tool_name.startswith(prefix) and len(tool_name) > len(prefix):
         tool_name = tool_name[len(prefix):]
-    return f'{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEP}{tool_name}'
+    head = f'{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEP}'
+    tool_part = _PROVIDER_UNSAFE_NAME_CHARS.sub('_', tool_name)
+    if len(head) + len(tool_part) > PROVIDER_TOOL_NAME_MAX:
+        return _with_digest(head, tool_part, raw_tool_name)
+    return head + tool_part
+
+
+def namespaced_tool_names(server_name: str,
+                          tool_names: Iterable[str]) -> dict[str, str]:
+    """Map one server's raw tool names to distinct namespaced names.
+
+    Projection can make two raw names collide (``a.b`` and ``a_b``). A raw
+    name whose projection is exact keeps the plain name; every rewritten
+    member of the collision gets its raw-name digest, so the outcome does not
+    depend on the server's listing order.
+    """
+    names: dict[str, str] = {}
+    owners: dict[str, list[str]] = {}
+    for raw in tool_names:
+        if raw not in names:
+            names[raw] = make_namespaced_name(server_name, raw)
+            owners.setdefault(names[raw], []).append(raw)
+    head = f'{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEP}'
+    for namespaced, raws in owners.items():
+        if len(raws) < 2:
+            continue
+        for raw in raws:
+            if namespaced != f'{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEP}{raw}':
+                names[raw] = _with_digest(
+                    head, namespaced[len(head):], raw)
+    return names
 
 
 def parse_namespaced_name(namespaced: str) -> tuple[str, str] | None:

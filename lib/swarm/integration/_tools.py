@@ -29,7 +29,8 @@ from lib.swarm.integration._config import (
     swarm_key_for,
 )
 from lib.swarm.integration._logs import _resolve_output_dir
-from lib.swarm.integration._recovery import recover_agent_result
+from lib.tools.poll import POLL_WAIT_CAP_S
+from lib.swarm.integration._recovery import recover_agent_result, recover_run_result
 from lib.swarm.integration._state import (
     _cleanup_stale_sessions,
     _get_session,
@@ -38,6 +39,7 @@ from lib.swarm.integration._state import (
     _set_session,
     SwarmSessionConflict,
     add_session_alias,
+    retire_previous_run_rows,
 )
 from lib.swarm.master import MasterOrchestrator
 from lib.swarm.planner import AgentDependencyCycleError
@@ -45,6 +47,9 @@ from lib.swarm.protocol import SubTaskSpec
 from lib.swarm.resource_policy import (
     swarm_max_parallel,
     swarm_max_retries,
+)
+from lib.swarm.spawn_contracts import (
+    SpawnContractError, expand_agent_templates, validate_output_schema,
 )
 from lib.tasks_pkg.manager import task_user_id
 from lib.tools.result_envelope import ToolResultErrorV2
@@ -104,10 +109,165 @@ def _swarm_tool_error(code: str, *, retryable: bool, message: str = '',
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _message_recovery_action(fn_name: str, fn_args: dict, task: dict, *,
+                             code: str, submission_state: str) -> str:
+    """Project recovery from evidence first; never route, read or replay effects."""
+    from lib.swarm.team_messages import is_team_worker
+    worker = is_team_worker(task)
+    stable = 'retained_agent_id' in fn_args
+    sending = fn_name == 'send_agent_message'
+    worker_finish = (
+        ' If this was an optional progress message, continue your assigned work '
+        'and include the finding or blocker in your final result; ordinary final '
+        'delivery is automatic. Do not override Stop or your assignment authority.'
+        if worker else '')
+
+    # Scope/Stop/lookup faults after commit cannot turn saved or uncertain
+    # evidence into rejection, even when they share a precommit error code.
+    if submission_state != 'rejected':
+        evidence = ('The message is saved; later failure does not undo submission. '
+                    if submission_state == 'saved' else
+                    'Submission or execution may already be durable; the missing reply '
+                    'does not prove rejection or rollback. ')
+        no_replay = (
+            'Do not automatically replay the send, change its idempotency_key, '
+            'or launch a replacement. Reconciliation never wakes an ended exact '
+            'run, redirects a message or grants new work. ')
+        if worker and stable:
+            return (evidence + no_replay
+                + 'Workers cannot inspect or activate stable colleagues. Report the '
+                'original stable identity, scope, idempotency_key and uncertain '
+                'outcome to your coordinator or in your final result for an '
+                'authorized root to reconcile.' + worker_finish)
+        if stable:
+            lookup = (
+                'Inspect get_agent_messages with the original target/key: '
+                'retained_agent_id, the original idempotency_key and scope if '
+                'supplied. Inspect only that key\'s pinned assignment; omit '
+                'agent_id, swarm_run_id and message_id. Keep content, kind and '
+                'intent unchanged for any later explicitly authorized same-key retry. ')
+        else:
+            lookup = (
+                'Inspect get_agent_messages with the original target/key: agent_id '
+                'and swarm_run_id, plus the original message_id if available; '
+                'otherwise inspect that recipient\'s bounded history. Exact-run '
+                'reads omit idempotency_key and retained fields; preserve the '
+                'original send\'s idempotency_key, content and kind. ')
+        return (evidence + lookup + no_replay
+            + 'If the read is unavailable, keep the outcome unresolved rather '
+            'than repeat unchanged calls. Submission is not input confirmation '
+            'or completion.' + worker_finish)
+
+    rejected = ('This send was rejected; it created no new submission receipt. '
+                if sending else
+                'This lookup or its recorded message outcome is rejected; the '
+                'read starts no work and does not change any prior submission evidence. ')
+    unchanged = 'After rejection, do not repeat an unchanged call or invent a replacement target. '
+    if code == 'message_invalid_content':
+        return (rejected + 'Correct the content to nonempty valid UTF-8 text within '
+            'the tool\'s message limits before an authorized retry; keep the '
+            'intended target and message identity. ' + unchanged + worker_finish)
+    if code in {'message_invalid_arguments', 'message_invalid_identity'}:
+        action = 'Correct the arguments before retrying; this call was rejected. '
+        if worker:
+            action += (
+                'Use only agent_id and swarm_run_id from your original team; '
+                'remove retained_agent_id, scope and intent. ')
+        elif stable and not ({'agent_id', 'swarm_run_id'} & fn_args.keys()):
+            action += (
+                'Use retained_agent_id from manage_agents/list_agents and the '
+                'original idempotency_key; omit agent_id and swarm_run_id. ')
+        else:
+            action += (
+                'For a temporary spawn_agents child, keep agent_id and '
+                'swarm_run_id from its original launch handle; remove '
+                'retained_agent_id, scope and intent. ')
+            if stable:  # Mixed targets: only a root may choose either form.
+                action += (
+                    'For a persistent colleague instead, keep retained_agent_id '
+                    'from manage_agents/list_agents and remove agent_id and '
+                    'swarm_run_id. Never infer or redirect a target. ')
+        if sending:
+            action += 'Preserve the authored content, kind and idempotency_key. '
+        elif stable and not worker:
+            action += ('Stable reads require the original idempotency_key and omit '
+                       'message_id; exact-run reads omit idempotency_key and may '
+                       'use message_id. ')
+        else:
+            action += 'Exact-run reads omit idempotency_key and may use message_id. '
+        return rejected + action + unchanged + worker_finish
+
+    if code == 'message_forbidden':
+        action = 'Do not retry outside your permissions or infer identities. '
+        if worker:
+            action += (
+                'Workers may use only agent_id and swarm_run_id for their original '
+                'team; remove retained_agent_id, scope and intent. ')
+    elif code in {'message_run_not_found', 'message_not_found'}:
+        action = (
+            'Verify the original stable identity, scope and idempotency_key. '
+            if stable else 'Verify the exact run and recipient handles from the original launch. ')
+        action += 'Do not start work to repair a missing lookup or message history. '
+    elif code in {'message_target_not_active', 'message_run_ended', 'message_run_superseded'}:
+        if worker and sending and fn_args.get('agent_id') == fn_args.get('swarm_run_id'):
+            return rejected + _idle_coordinator_action(task) + unchanged
+        action = (
+            'The original target or run is inactive, stopped, settled or superseded. '
+            'Exact-run messaging cannot wake it, start a new turn or redirect '
+            'input to a successor. New work needs separate explicit authority, '
+            'not a recovery send. ')
+    elif code == 'message_caller_stopped':
+        action = 'The caller is stopped; neither sending nor recovery authorizes continuing work. '
+    elif code == 'message_resume_required' and stable and not worker:
+        action = (
+            'A cancelled colleague requires explicit intent=resume for a separately '
+            'authorized fresh turn. Do not add resume automatically or replay '
+            'interrupted work. ')
+    elif code == 'message_assignment_unavailable' and stable and not worker:
+        action = (
+            'The busy assignment is suspended, activating or ambiguous. Use its '
+            'existing status/Continue/reset controls only with explicit authority; '
+            'sending cannot replace that assignment. ')
+    elif code == 'message_identity_archived' and stable and not worker:
+        action = 'Restore the owned colleague only through an explicitly authorized identity action. '
+    elif code == 'message_idempotency_conflict':
+        action = (
+            'The original idempotency_key belongs to different authored input. '
+            'Do not change or overwrite that input; a genuinely new authorized '
+            'message needs its own key. ')
+    else:
+        action = 'Resolve the reported storage, scope or identity condition within your authority. '
+    return rejected + action + unchanged + worker_finish
+
+
+def _idle_coordinator_action(task: dict) -> str:
+    """What a worker does when its idle original root rejects a message.
+
+    The rejection stays by design: an exact-run message never wakes, restarts
+    or redirects the root (docs/AGENT_LIFECYCLE.md, "An idle root is reached
+    only by a final result").
+    """
+    from lib.swarm.routing import tool_schema_name
+    controls = {tool_schema_name(tool) for tool in task.get('_executable_tool_catalog') or ()
+                } & {'poll', 'kill'}
+    action = (
+        'Your coordinator (the original root) is not running a turn, so no message '
+        'reaches it and sending cannot wake it. Do not retry or pick another target. '
+        'If you are blocked, finish now with a final result that states the blocker, '
+        'your evidence and what you need: that result is delivered to the coordinator '
+        'automatically. Otherwise keep working and report in your final result. ')
+    if 'poll' in controls:
+        action += ('Manage your own background commands yourself: poll their bg_* ids '
+                   'with wait_s' + (', and kill one that runs away. '
+                                    if 'kill' in controls else '. '))
+    elif 'kill' in controls:
+        action += 'Stop a runaway background command of yours with kill on its bg_* id. '
+    return action
+
+
 def _uncertain_launch_error(error: Exception, session: MasterOrchestrator,
                            specs: list[SubTaskSpec]) -> str:
     """Preserve lookup handles when an admission/start response is ambiguous."""
-    logger.error('[Swarm:%s] launch outcome unconfirmed', session.task_id, exc_info=True)
     detail = f'{type(error).__name__}: {error}'
     return _swarm_tool_error('swarm_launch_unknown', retryable=False, message=detail,
         exception_type=type(error).__name__, submission_state='unknown', phase='dispatch',
@@ -264,49 +424,32 @@ def execute_swarm_tool(fn_name: str, fn_args: dict, task: dict | None = None,
                     result = message_service.send(task, fn_args, session, abort_check=abort_check)
                 else:
                     result = message_service.read(task, fn_args)
+                if isinstance(result, dict) and result.get('status') == 'error':
+                    # Stable reads can return an unresolved saved outcome instead
+                    # of raising. Preserve its pinned assignment/authored evidence
+                    # while projecting the same typed recovery as exception paths.
+                    code = result.get('code') or 'message_submission_unknown'
+                    state = result.get('submission_state') or 'unknown'
+                    evidence = {key: value for key, value in result.items() if key not in {
+                        'status', 'code', 'retryable', 'message', 'error',
+                        'next_action', 'submission_state'}}
+                    return _swarm_tool_error(code, retryable=False,
+                        message=result.get('message') or '', submission_state=state,
+                        next_action=_message_recovery_action(fn_name, fn_args, task,
+                            code=code, submission_state=state), **evidence)
                 return json.dumps(result, ensure_ascii=False)
             except RunMessageError as error:
-                next_action = (
-                    'Inspect get_agent_messages with the original target/key. '
-                    'A new message to a retained identity may start a new turn; '
-                    'exact-run steering never redirects.')
-                if error.code in {'message_invalid_arguments', 'message_invalid_identity'}:
-                    next_action = (
-                        'Correct the arguments before retrying; this call was rejected. '
-                        'For a temporary spawn_agents child, keep agent_id and '
-                        'swarm_run_id from its original launch handle; remove '
-                        'retained_agent_id, scope and intent. For a persistent '
-                        'colleague, keep retained_agent_id from manage_agents/list_agents '
-                        'and remove agent_id and swarm_run_id. Never infer or redirect '
-                        'a target. ')
-                    if fn_name == 'get_agent_messages':
-                        next_action += (
-                            'Stable reads require the original idempotency_key and '
-                            'omit message_id; exact-run reads omit idempotency_key '
-                            'and may use message_id.')
-                    else:
-                        next_action += 'Preserve the authored content, kind and idempotency_key.'
-                elif error.code in {'message_run_not_found', 'message_not_found'}:
-                    next_action = (
-                        'This lookup or submission has no matching original run, recipient or message. '
-                        'Verify the exact handles from the original launch; do not repeat an '
-                        'unchanged lookup, infer a replacement, or start work to repair history. '
-                        'A rejected send has no new receipt. Optional messaging does not block '
-                        'assigned work; final results use ordinary delivery.')
-                elif error.code == 'message_forbidden' and error.submission_state == 'rejected':
-                    next_action = (
-                        'This call was rejected before submission; there is no new receipt to inspect. '
-                        'Workers may use only agent_id and swarm_run_id for their original team; '
-                        'remove retained_agent_id, scope and intent. Do not invent identities or '
-                        'retry outside your permissions. If this was an optional progress message, '
-                        'continue your assigned work and include the finding in your final result.')
                 return _swarm_tool_error(error.code, retryable=False, message=str(error),
                     submission_state=error.submission_state,
-                    next_action=next_action)
+                    next_action=_message_recovery_action(fn_name, fn_args, task,
+                        code=error.code, submission_state=error.submission_state))
             except StorageError as error:
-                return _swarm_tool_error(error.code, retryable=error.retryable, message=str(error),
-                    submission_state='unknown',
-                    next_action='Query get_agent_messages; retry only with the same target, idempotency_key, content, kind and intent.')
+                # A retryable storage read/ACK is not permission to replay a write.
+                return _swarm_tool_error(error.code,
+                    retryable=error.retryable if fn_name == 'get_agent_messages' else False,
+                    message=str(error), submission_state='unknown',
+                    next_action=_message_recovery_action(fn_name, fn_args, task,
+                        code=error.code, submission_state='unknown'))
 
         if fn_name == 'await_agents':
             return _handle_await_agents(
@@ -324,6 +467,12 @@ def execute_swarm_tool(fn_name: str, fn_args: dict, task: dict | None = None,
     except Exception as e:
         logger.error('[Swarm:%s] Tool %s error: %s', task_id, fn_name, e, exc_info=True)
         detail = f'{type(e).__name__}: {e}'
+        if fn_name in {'send_agent_message', 'get_agent_messages'} and phase == 'dispatch':
+            return _swarm_tool_error('swarm_tool_failed', retryable=False,
+                message=detail, tool=fn_name, exception_type=type(e).__name__,
+                phase=phase, submission_state='unknown',
+                next_action=_message_recovery_action(fn_name, fn_args, task,
+                    code='swarm_tool_failed', submission_state='unknown'))
         return _swarm_tool_error('swarm_tool_failed', retryable=False,
             message=detail, summary=detail, tool=fn_name,
             exception_type=type(e).__name__, phase=phase,
@@ -364,6 +513,14 @@ def _handle_spawn_agents(fn_args: dict, *,
             'invalid_agents', retryable=True,
             message='agents must be an array.',
             next_action='Pass agents as an array of agent objects.')
+    try:
+        agents_data = expand_agent_templates(fn_args.get('templates'), agents_data)
+        for agent_def in agents_data:
+            if isinstance(agent_def, dict) and agent_def.get('output_schema') is not None:
+                validate_output_schema(agent_def['output_schema'])
+    except SpawnContractError as error:
+        return _swarm_tool_error(error.code, retryable=True, message=error.message,
+                                 next_action=error.next_action)
     parallel_ceiling = swarm_max_parallel()
     retry_ceiling = swarm_max_retries()
 
@@ -403,6 +560,11 @@ def _handle_spawn_agents(fn_args: dict, *,
             return _swarm_tool_error('invalid_agent', retryable=True,
                 message='required_for_completion must be boolean.',
                 next_action='Use true for required delivery or false for optional exploration.')
+        objective = agent_def.get('objective')
+        if not isinstance(objective, str) or not objective.strip():
+            return _swarm_tool_error('invalid_agent', retryable=True,
+                message='Every agent needs a non-empty objective or a template.',
+                next_action='Give each agent a self-contained objective, or reference a templates entry with template.')
         requested_retries = agent_def.get('max_retries', legacy_retry_override)
         try:
             requested_retries = (None if requested_retries is None else int(requested_retries))
@@ -416,7 +578,7 @@ def _handle_spawn_agents(fn_args: dict, *,
         spec = SubTaskSpec(
             required_for_completion=agent_def.get('required_for_completion', True),
             role=agent_def.get('role', 'general'),
-            objective=agent_def.get('objective', ''),
+            objective=objective,
             context=agent_def.get('context', ''),
             depends_on=agent_def.get('depends_on', []),
             # ``or``, NOT ``get('id', default)``. These ids come from the MODEL,
@@ -433,6 +595,7 @@ def _handle_spawn_agents(fn_args: dict, *,
             model_override=(agent_def.get('model_override')
                             or agent_def.get('model') or ''),
             tools=explicit_tools,
+            output_schema=agent_def.get('output_schema'),
         )
         specs.append(spec)
 
@@ -638,7 +801,8 @@ def _handle_spawn_agents(fn_args: dict, *,
         # Persist the authorized selection, never the parent's disposable pin.
         if task.get('_requestedModelRef'):
             parent_cfg['modelRef'] = copy.deepcopy(task['_requestedModelRef'])
-            parent_cfg['model'] = task['model']
+            # The admitted selection's model, not a fallback round's live model.
+            parent_cfg['model'] = (task.get('config') or {}).get('model') or task['model']
             for key in ('routing', 'preferredProviderId'):
                 if key in (task.get('config') or {}):
                     parent_cfg[key] = copy.deepcopy(task['config'][key])
@@ -690,6 +854,12 @@ def _handle_spawn_agents(fn_args: dict, *,
                     'Retry this conversation after its ongoing recovery '
                     'activation finishes.'))
 
+        # Registration excludes a concurrent recovery of this key, so rows an
+        # earlier run left behind are recorded and reclaimed before this run's
+        # session row replaces their header.
+        if not parent_cfg['_transientRuntime']:
+            retire_previous_run_rows(swarm_key, task_id)
+
         # Persist the session so a server restart can rehydrate + resume it.
         # ``config`` carries everything ``_rehydrate_one`` needs to rebuild the
         # sub-agent tool list and model. Best-effort — never blocks the spawn.
@@ -726,6 +896,7 @@ def _handle_spawn_agents(fn_args: dict, *,
                     'Re-issue spawn_agents without circular depends_on '
                     'entries.'))
         except Exception as error:
+            logger.error('[Swarm:%s] launch outcome unconfirmed', session.task_id, exc_info=True)
             return _uncertain_launch_error(error, session, specs)
         # On a fresh session, run_in_background's add_specs accepted everything
         # (no prior state to dedup against). ``specs`` is already correct.
@@ -748,6 +919,7 @@ def _handle_spawn_agents(fn_args: dict, *,
                     'Re-issue spawn_agents without circular depends_on '
                     'entries.'))
         except Exception as error:
+            logger.error('[Swarm:%s] launch outcome unconfirmed', session.task_id, exc_info=True)
             return _uncertain_launch_error(error, session, specs)
         if accepted_specs:
             # Track followup specs in MasterOrchestrator so ``get_status``
@@ -833,8 +1005,9 @@ def _handle_spawn_agents(fn_args: dict, *,
             f'Launched {len(specs)} agent(s) in the background. '
             'Continue with other work — completions arrive automatically '
             'as <swarm-update> user messages carrying the outcome. To wait, use '
-            'poll(ids=[<returned agent ids>], wait_s=30); wait_s is bounded '
-            'to 60 seconds. No-ID poll() is a snapshot, not a wait for all agents.'),
+            f'poll(ids=[<returned agent ids>], wait_s={POLL_WAIT_CAP_S}); it '
+            'returns as soon as an agent finishes. No-ID poll() is a snapshot, '
+            'not a wait for all agents.'),
     }
     if deduped_dropped:
         handle['deduplicated'] = [
@@ -884,7 +1057,9 @@ def _session_matches_task(session: MasterOrchestrator, task: dict | None,
 def _handle_await_agents(fn_args: dict, *, task_id: str,
                          task: dict | None = None,
                          abort_check: Callable | None = None,
-                         pending_input_check: Callable[[], bool] | None = None) -> str:
+                         pending_input_check: Callable[[], bool] | None = None,
+                         max_wait_s: float = AWAIT_AGENTS_HARD_CAP_SEC) -> str:
+    # The retired await_agents tool keeps its 60-second cap; poll passes its own.
     # Resolve the conversation-scoped session (Option A): a "continue" turn
     # has a fresh task_id but the live swarm lives under the conv key.
     swarm_key = swarm_key_for(task) if task is not None else task_id
@@ -909,7 +1084,7 @@ def _handle_await_agents(fn_args: dict, *, task_id: str,
             next_action=(
                 'Check the returned agent handles and conversation before '
                 'launching replacement work. For a background command, call poll with its '
-                'explicit id and wait_s between 0 and 60. No-ID poll() '
+                f'explicit id and wait_s between 0 and {POLL_WAIT_CAP_S}. No-ID poll() '
                 'is only a snapshot.'))
 
     ids_in = fn_args.get('ids') or []
@@ -923,8 +1098,8 @@ def _handle_await_agents(fn_args: dict, *, task_id: str,
         logger.debug('[Swarm] Bad await timeout %r, defaulting to 60s: %s', timeout, e)
         timeout = 60.0
     _requested_timeout = timeout
-    timeout = max(1.0, min(timeout, AWAIT_AGENTS_HARD_CAP_SEC))
-    if _requested_timeout > AWAIT_AGENTS_HARD_CAP_SEC:
+    timeout = max(1.0, min(timeout, max_wait_s))
+    if _requested_timeout > max_wait_s:
         # The model asked to block longer than we allow in a single call.
         # This is the silent trap behind "await always times out": a sub-agent
         # whose runtime exceeds the cap can never be awaited to completion in
@@ -933,8 +1108,8 @@ def _handle_await_agents(fn_args: dict, *, task_id: str,
             '[Swarm:%s] await_agents requested timeout=%.0fs CLAMPED to hard '
             'cap %ss — a single await cannot block longer. If agents run '
             'longer than this, the call will time out (agents keep running); '
-            'call poll with explicit agent ids and wait_s <= 60.',
-            task_id, _requested_timeout, AWAIT_AGENTS_HARD_CAP_SEC)
+            'call poll with explicit agent ids and wait_s <= %s.',
+            task_id, _requested_timeout, max_wait_s, POLL_WAIT_CAP_S)
 
     from lib.swarm.delivery import stage_tool_results
     result = session.await_agents(
@@ -999,6 +1174,17 @@ def _await_from_disk(task_id: str, fn_args: dict, *,
 
 def _handle_get_agent_result(fn_args: dict, *, task_id: str,
                              task: dict | None = None) -> str:
+    # ``swarm_run_id`` names the run explicitly: results of an ended, evicted
+    # or replaced wave stay readable from their durable run records.
+    raw_run_id = fn_args.get('swarm_run_id')
+    if raw_run_id is not None and (not isinstance(raw_run_id, str)
+                                   or not raw_run_id.strip()):
+        return _swarm_tool_error(
+            'invalid_swarm_run_id', retryable=True,
+            message='swarm_run_id must be a non-empty string',
+            next_action=('Pass the swarm_run_id from the spawn_agents handle or '
+                         'a <swarm-update>, or omit it for the current swarm.'))
+    swarm_run_id = (raw_run_id or '').strip()
     # Batch mode: an ``agent_ids`` array fetches several agents' full bodies
     # in one call (mirrors read_files/web_search/fetch_url batching). Each id
     # is resolved independently — a running/unknown agent produces its own
@@ -1010,7 +1196,8 @@ def _handle_get_agent_result(fn_args: dict, *, task_id: str,
             sid = str(raw_id or '').strip()
             if not sid:
                 continue
-            results.append(_resolve_one_agent_result(sid, task_id=task_id, task=task))
+            results.append(_resolve_one_agent_result(
+                sid, task_id=task_id, task=task, swarm_run_id=swarm_run_id))
         if not results:
             return _swarm_tool_error(
                 'invalid_agent_id', retryable=True,
@@ -1028,17 +1215,21 @@ def _handle_get_agent_result(fn_args: dict, *, task_id: str,
             message='agent_id (or agent_ids) is required',
             next_action='Provide the agent_id (or agent_ids) to fetch.')
     return json.dumps(
-        _resolve_one_agent_result(agent_id, task_id=task_id, task=task),
+        _resolve_one_agent_result(agent_id, task_id=task_id, task=task,
+                                  swarm_run_id=swarm_run_id),
         ensure_ascii=False)
 
 
 def _resolve_one_agent_result(agent_id: str, *, task_id: str,
-                              task: dict | None = None) -> dict:
+                              task: dict | None = None,
+                              swarm_run_id: str = '') -> dict:
     """Resolve one outcome (live session → scoped durable recovery evidence).
 
-    Returns the payload dict (with its own ``status`` field) — the caller
-    JSON-encodes it, either standalone (single mode) or inside ``results``
-    (batch mode).
+    A named ``swarm_run_id`` admits only that run: the live session when it is
+    that run, else its durable session rows, else its durable run record
+    (after TTL eviction or new-wave replacement). Returns the payload dict
+    (with its own ``status`` field) — the caller JSON-encodes it, either
+    standalone (single mode) or inside ``results`` (batch mode).
     """
     swarm_key = swarm_key_for(task) if task is not None else task_id
     session = _get_session(swarm_key) or _get_session(task_id)
@@ -1049,6 +1240,8 @@ def _resolve_one_agent_result(agent_id: str, *, task_id: str,
             next_action='Use a handle returned in the current conversation.'))
     if session is not None:
         add_session_alias(task_id, swarm_key)
+    if session is not None and swarm_run_id and session.task_id != swarm_run_id:
+        session = None  # The live session is a later wave, not the named run.
     if session is not None:
         from lib.swarm.delivery import stage_tool_results
         payload = session.get_agent_result(agent_id,
@@ -1056,21 +1249,42 @@ def _resolve_one_agent_result(agent_id: str, *, task_id: str,
         if payload.get('found'):
             payload['agent_status'] = payload.get('status', 'unknown')
             payload['status'] = 'ok'
+            payload['swarm_run_id'] = session.task_id
             return payload
         # The live session does not know this id (e.g. recycled session).
         # Consult authorized durable evidence, never unrelated task logs.
 
-    recovered = recover_agent_result(agent_id, task_id=task_id, task=task)
+    recovered = recover_agent_result(agent_id, task_id=task_id, task=task,
+                                     swarm_run_id=swarm_run_id)
     if recovered is not None:
         return recovered
+    if swarm_run_id:
+        from lib.storage.errors import StorageError
+        try:
+            recorded = recover_run_result(agent_id, swarm_run_id=swarm_run_id,
+                                          task_id=task_id, task=task)
+        except StorageError as error:
+            return json.loads(_swarm_tool_error(
+                'swarm_result_unavailable', retryable=bool(error.retryable),
+                found=False, agent_id=agent_id, swarm_run_id=swarm_run_id,
+                message=f'The durable run result could not be read: {error.code}.',
+                next_action=('Retry get_agent_result with the same swarm_run_id '
+                             'and agent_id later. Do not infer the outcome or '
+                             'relaunch the agent.')))
+        if recorded is not None:
+            return recorded
 
     if session is None:
         return json.loads(_swarm_tool_error(
             'swarm_not_found', retryable=False, found=False, agent_id=agent_id,
+            **({'swarm_run_id': swarm_run_id} if swarm_run_id else {}),
             message=('No accessible live result or recovery evidence for '
                      f'agent {agent_id!r}. Its outcome is not verified.'),
-            next_action=('Check the returned agent handle and conversation. '
-                         'Do not infer success or duplicate an unverified run.')))
+            next_action=('Check the returned agent handle and conversation. A '
+                         'result of an ended, evicted or earlier wave is read '
+                         'with the swarm_run_id from its spawn_agents handle '
+                         'or <swarm-update>. Do not infer success or duplicate '
+                         'an unverified run.')))
     # Session live but agent genuinely unknown and no log on disk.
     payload = session.get_agent_result(agent_id)
     payload['status'] = 'ok' if payload.get('found') else 'error'

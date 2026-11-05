@@ -32,6 +32,7 @@ from lib.storage_authority_sql.operations_pkg._turns_core import (
     _stored_object,
     _turn_identity,
     _turn_public,
+    _turn_public_metadata,
     _upsert_turn_search_row,
 )
 from lib.storage_authority_sql.operations_pkg._turns_events import _insert_attempt_event, _turn_event_append
@@ -43,13 +44,22 @@ _CONVERSATION_CHANGE_DELETE_KEY_CHUNK = 256
 def _turn_get(session: Session, payload: Mapping[str, Any]) -> Any:
     conv_id, user_id = _turn_identity(payload)
     turn_id = _required_text(payload, "turn_id", 128)
+    include_projection = payload.get('include_projection', True)
+    if type(include_projection) is not bool:
+        raise StorageError('database_protocol_error', 'Invalid Turn projection flag')
+    columns = '*' if include_projection else (
+        'turn_id,presentation_id,conversation_id,lane_id,parent_turn_id,ordinal,'
+        'actor,kind,run_id,status,current_attempt_id,projection_revision,'
+        'model_context_display_offset,settlement_json,created_at,updated_at'
+    )
     row = session.fetch_one(
-        "SELECT * FROM storage_conversation_turns WHERE conversation_id=? AND user_id=? AND turn_id=?",
+        f"SELECT {columns} FROM storage_conversation_turns "
+        "WHERE conversation_id=? AND user_id=? AND turn_id=?",
         (conv_id, user_id, turn_id),
     )
     if row is None:
         return None
-    return _turn_public(session, row)
+    return _turn_public(session, row) if include_projection else _turn_public_metadata(row)
 
 
 def _turn_timing_trace_get(session: Session, payload: Mapping[str, Any]) -> Any:

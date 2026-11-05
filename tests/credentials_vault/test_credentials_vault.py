@@ -360,6 +360,16 @@ def test_build_vault_index_lists_names_and_env_vars_only(_isolated_vault):
     assert '…' not in block.split('<credential_vault>')[0]
 
 
+def test_build_vault_index_never_puts_a_credential_in_command_arguments(_isolated_vault):
+    # A shell expands "$VAR" before exec, so a credential written as an argument
+    # is readable by every local user through ps; guidance must route it via stdin.
+    v = _isolated_vault
+    v.set_entry('github_token', _SECRET)
+    block = v.build_vault_index()
+    assert 'Bearer $VAR"' not in block
+    assert '"$VAR" | curl -H @-' in block
+
+
 def test_build_vault_index_excludes_skill_entries(_isolated_vault):
     v = _isolated_vault
     v.set_entry('skill.flyai.some_api_key', _SECRET)

@@ -11,7 +11,7 @@ pub(crate) enum RotationPublication {
 
 pub(crate) struct PreparedRotationPublication {
     manifest: HistoryManifest,
-    manifest_bytes: Vec<u8>,
+    manifest_pages: Vec<Vec<u8>>,
     manifest_id: BlockId,
     catchup: Option<ControlState>,
     next: ControlState,
@@ -57,14 +57,15 @@ impl Engine {
             let mut outcome = outcome?;
             let mut segments = snapshot.history_manifest_segments;
             segments.append(&mut outcome.new_references);
-            let manifest = HistoryManifest {
+            let mut manifest = HistoryManifest {
+                manifest_page_ids: Vec::new(),
                 checkpoint_sequence: sealed.terminal_sequence,
                 checkpoint_hash: sealed.terminal_hash,
                 payload_index_root_id: outcome.payload_index_root_id,
                 segments,
             };
-            let manifest_bytes = manifest.encode()?;
-            let manifest_id = BlockId::for_payload(&manifest_bytes);
+            let manifest_pages = manifest.encode_pages()?;
+            let manifest_id = BlockId::for_payload(manifest_pages.last().unwrap());
             let mut generation = self.state.generation;
             let catchup = if self.control_dirty {
                 generation = generation.checked_add(1)
@@ -84,7 +85,7 @@ impl Engine {
             // This includes Strict's in-flight group-barrier acknowledgements.
             let wal_cover = self.wal.publication_cover(Arc::clone(&self.vfs))?;
             let prepared = PreparedRotationPublication {
-                manifest, manifest_bytes, manifest_id, catchup, next, outcome,
+                manifest, manifest_pages, manifest_id, catchup, next, outcome,
                 blocks: Arc::clone(&self.blocks), control: Arc::clone(&self.control),
                 wal_cover, restart_required: Arc::clone(&self.restart_required), completed: false,
             };
@@ -120,6 +121,7 @@ impl Engine {
             self.blocks.release_history_carried_payloads(&prepared.outcome.indexed_payload_ids)?;
             self.blocks.restore_rotation_pending()?;
             self.history_manifest = Some(prepared.manifest.clone());
+            self.close_rotation_gc_window();
             self.wal_retirement.retire(prepared.next.active_log_generation - 1)?;
             self.blocks.wake_background_packer()?;
             self.blocks.finish_background_drain();
@@ -148,7 +150,7 @@ pub(crate) fn publish_rotation_publication(prepared: &PreparedRotationPublicatio
     if let Some(catchup) = &prepared.catchup { control.publish(catchup)?; }
     {
         let _timer = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ROTATION_INSTALL_MANIFEST);
-        prepared.blocks.put_loose(&prepared.manifest_bytes)?;
+        HistoryManifest::publish_pages(&prepared.manifest_pages, &prepared.blocks)?;
     }
     let _timer = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ROTATION_INSTALL_CONTROL);
     control.publish(&prepared.next)

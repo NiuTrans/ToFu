@@ -159,7 +159,7 @@ def test_every_api_blueprint_carries_the_gate(flag):
     status = getattr(resp, "status_code", None)
     if status is None:                      # Quart returns a coroutine
         import asyncio
-        status = asyncio.get_event_loop().run_until_complete(resp).status_code
+        status = asyncio.run(resp).status_code
     assert status == 404, (
         "trading API served a request while the feature was switched off"
     )
@@ -175,7 +175,8 @@ def test_page_routes_are_gated(flag):
     import tofu_trading.web as web
     flag(False)
     with pytest.raises(Exception) as exc:   # werkzeug NotFound
-        web.trading_page()
+        import asyncio
+        asyncio.run(web.trading_page())
     assert "404" in str(exc.value) or "Not Found" in str(exc.value)
 
 

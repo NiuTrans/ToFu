@@ -575,7 +575,7 @@
 }
 .settings-panel input:focus,
 .settings-panel select:focus {
-  background: #fff;
+  background-color: #fff;
   border-color: var(--s-gold);
   box-shadow: 0 0 0 3px var(--s-gold-glow);
 }

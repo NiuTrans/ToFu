@@ -1,7 +1,7 @@
 """Regression test: zero-byte gateway anomaly on round 0 must auto-retry.
 
 Prior behaviour: ``_is_anomaly_empty`` had a ``round_num > 0`` guard, so
-a sankuai-gateway zero-byte close on the FIRST round of a task surfaced
+a example-corp-gateway zero-byte close on the FIRST round of a task surfaced
 as a fatal "API流异常终止" error with NO retry. We split the predicate
 so the zero-byte signature (no content + anomaly + tiny thinking + fast
 elapsed) admits round 0, while the looser ``stream_anomaly + empty``
@@ -23,6 +23,8 @@ from lib.tasks_pkg.stream_handler.api import analyse_stream_result  # noqa: E402
 from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
+    _PREMATURE_RETRY_MAX_ZERO_BYTE_STALLED,
+    _ZERO_BYTE_STALL_THRESHOLD_MS,
 )
 from lib.tasks_pkg.stream_handler._terminal_recovery import (  # noqa: E402
     ABNORMAL_TERMINAL_RECOVERY_MAX,
@@ -227,6 +229,91 @@ def test_phase_event_fields_for_zero_byte_round0():
     assert ev['phase'] == 'retrying'
     assert ev['bucket'] == 'zero_byte'
     assert ev['attempt'] == 1
+    assert ev['max'] == _PREMATURE_RETRY_MAX_ZERO_BYTE
+
+
+def _stalled_zero_byte_usage(elapsed_ms: int = 308_800):
+    # Production projects the real SSE count; 0 chunks at an elapsed time past
+    # the stall threshold is the 2026-10-23 claude-opus-5.5 idle-timeout shape.
+    return {**_zero_byte_usage(elapsed_ms), '_chunks_received': 0}
+
+
+def test_stalled_zero_byte_uses_small_retry_budget():
+    """A zero-byte attempt that consumed the idle window is an upstream stall.
+
+    The fast-close budget (16) assumes each retry costs seconds. A 5-minute
+    silent attempt must not be replayed 16 times: it gets two alternate-slot
+    attempts and stops unattended replay.
+    """
+    task = _fresh_task()
+    with registered_chat_task(task):
+        decision = analyse_stream_result(
+            assistant_msg={'role': 'assistant', 'content': '',
+                           'reasoning_content': ''},
+            last_finish_reason='stop',
+            task=task,
+            tid='test',
+            model='kunlunbedrock.claude-opus-5.5-m17',
+            round_num=33,
+            _premature_retry_count=1,
+            messages=[],
+            usage=_stalled_zero_byte_usage(),
+        )
+    assert decision['action'] == 'continue'
+    assert decision['premature_retry_count'] == 2
+    phase_events = [e for e in task['events'] if e.get('type') == 'phase']
+    ev = phase_events[-1]
+    assert ev['bucket'] == 'zero_byte_stalled'
+    assert ev['max'] == _PREMATURE_RETRY_MAX_ZERO_BYTE_STALLED
+
+
+def test_stalled_zero_byte_exhausts_without_whole_turn_replay():
+    task = _fresh_task()
+    decision = analyse_stream_result(
+        assistant_msg={'role': 'assistant', 'content': '',
+                       'reasoning_content': ''},
+        last_finish_reason='stop',
+        task=task,
+        tid='test',
+        model='kunlunbedrock.claude-opus-5.5-m17',
+        round_num=33,
+        _premature_retry_count=_PREMATURE_RETRY_MAX_ZERO_BYTE_STALLED,
+        messages=[],
+        usage=_stalled_zero_byte_usage(),
+    )
+    assert decision['action'] == 'break'
+    assert decision['last_finish_reason'] == 'abnormal_stop'
+    error = task['error']
+    assert error['kind'] == 'abnormal_stop'
+    assert error['autoRetryExhausted'] is True
+    assert 'bucket=zero_byte_stalled' in error['detail']
+    assert 'retry_budget=phase=2/2' in error['raw']
+    from lib.tasks_pkg.turn_retry import should_auto_retry_turn
+    assert should_auto_retry_turn(error, 0) == (False, 0.0)
+
+
+def test_zero_byte_below_stall_threshold_keeps_fast_budget():
+    """A fast zero-byte close still gets the historical recovery budget."""
+    task = _fresh_task()
+    with registered_chat_task(task):
+        decision = analyse_stream_result(
+            assistant_msg={'role': 'assistant', 'content': '',
+                           'reasoning_content': ''},
+            last_finish_reason='stop',
+            task=task,
+            tid='test',
+            model='aws.claude-opus-4.7',
+            round_num=0,
+            _premature_retry_count=_PREMATURE_RETRY_MAX_ZERO_BYTE - 1,
+            messages=[],
+            usage={**_zero_byte_usage(_ZERO_BYTE_STALL_THRESHOLD_MS - 1),
+                   '_chunks_received': 0},
+        )
+    assert decision['action'] == 'continue'
+    assert decision['premature_retry_count'] == _PREMATURE_RETRY_MAX_ZERO_BYTE
+    phase_events = [e for e in task['events'] if e.get('type') == 'phase']
+    ev = phase_events[-1]
+    assert ev['bucket'] == 'zero_byte'
     assert ev['max'] == _PREMATURE_RETRY_MAX_ZERO_BYTE
 
 

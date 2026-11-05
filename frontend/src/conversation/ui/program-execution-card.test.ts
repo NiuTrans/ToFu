@@ -98,7 +98,7 @@ it('renders native JavaScript and legacy absent measurements without estimates',
   node.innerHTML = programExecutionCardHtml({ programStatus: 'completed', programBackend: 'native_openai', programCode: 'return rows', programResult: { answer: 'done' } });
   expect(node.querySelector('.ptc-code code')?.className).toBe('language-javascript');
   expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
-  expect(node.querySelector<HTMLDetailsElement>('.ptc-result')?.open).toBe(false);
+  expect(node.querySelector<HTMLDetailsElement>('.ptc-result')?.open).toBe(true);
   expect(node.querySelector<HTMLDetailsElement>('.ptc-code')?.open).toBe(false);
   expect(node.querySelector('.ptc-measurements,.ptc-observation')).toBeNull();
   expect(node.textContent).not.toMatch(/native_openai|saved|saving/i);
@@ -124,6 +124,64 @@ it('explains missing program results as a handoff instead of successful null', (
 });
 
 
+describe('program progress before settlement', () => {
+  it.each(['pending', 'queued', 'executing', 'running', 'searching'])(
+    'treats a %s execute_program call as running, not as an incomplete null result', status => {
+      const node = document.createElement('div');
+      node.innerHTML = programExecutionCardHtml({ toolName: 'execute_program', toolCallId: 'call', status,
+        toolArgs: { code: 'return await tools.web_search({query: "q"});' } });
+      expect(node.querySelector('.ptc-status')?.textContent).toBe('Executing program');
+      expect(node.querySelector('.ptc-card')?.getAttribute('data-program-attention')).toBe('running');
+      expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
+      expect(node.querySelector('.ptc-result')).toBeNull();
+      expect(node.textContent).not.toMatch(/Incomplete|not recorded|Result: null/);
+    });
+
+  it('names a program failure without dumping its error object into the header', () => {
+    const node = document.createElement('div');
+    node.innerHTML = programExecutionCardHtml({ _programSynthetic: true, status: 'error',
+      programStatus: 'error', programCode: 'return rows.items.length',
+      programResult: { code: 'javascript_error', message: "TypeError: cannot read property 'length' of undefined",
+        retry_hint: 'Do not repeat completed child operations' } });
+    const header = node.querySelector('.ptc-head')!.textContent!;
+    expect(header).toContain("javascript_error: TypeError: cannot read property 'length' of undefined");
+    expect(header).not.toMatch(/[{}]|retry_hint/);
+    expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(true);
+    expect(JSON.parse(node.querySelector('.ptc-result pre')!.textContent!).retry_hint).toBeTruthy();
+  });
+
+  it('reports settled children instead of missing counters while running', () => {
+    const node = document.createElement('div');
+    node.innerHTML = programExecutionCardHtml({ _programSynthetic: true, status: 'searching',
+      programStatus: 'running', programCode: 'return 1', childCallIds: ['a', 'b', 'c'],
+      childToolNames: ['web_search'] });
+    const header = node.querySelector('.ptc-head')!.textContent!;
+    expect(header).toContain('3 child tool calls');
+    expect(header).toContain('web_search');
+    expect(header).not.toContain('not recorded');
+  });
+
+  it('never renders an in-flight placeholder as the program result', () => {
+    const node = document.createElement('div');
+    node.innerHTML = programExecutionCardHtml({ toolName: 'execute_program', toolCallId: 'call',
+      status: 'searching', toolContent: 'null', toolArgs: { code: 'return 1' } });
+    expect(node.querySelector('.ptc-result')).toBeNull();
+    expect(node.textContent).not.toContain('null');
+  });
+
+  it.each([['running', 'Executing program'], ['pending', 'Executing program'], ['completed', 'Incomplete']])(
+    'labels a call announced before its round by the %s turn lifecycle', (turnStatus, label) => {
+      const node = document.createElement('div');
+      renderToolBlock(node, { kind: 'tool', blockId: 'gateway', name: 'execute_program', toolCallId: 'call',
+        input: { code: 'const rows = await tools.web_search({query: "q"});' } } as unknown as Extract<ConversationBlockViewModel, { kind: 'tool' }>,
+      { status: turnStatus } as unknown as ConversationTurnViewModel, {} as Parameters<typeof renderToolBlock>[3]);
+      expect(node.querySelector('.ptc-status')?.textContent).toBe(label);
+      expect(node.querySelector('.ptc-result')).toBeNull();
+      expect(node.querySelector('.ptc-code code')?.textContent).toContain('tools.web_search');
+    });
+});
+
+
 describe('program call outcome counts', () => {
   it('shows zero successful calls alongside the rejected attempt', () => {
     const html = programExecutionCardHtml({ programStatus: 'completed',
@@ -141,13 +199,15 @@ describe('program call outcome counts', () => {
 
 
 describe.each(Object.entries(surfaces))('%s compact program disclosure', (_name, render) => {
-  it('keeps arbitrary result previews in evidence while preserving the recorded return value', () => {
+  it('keeps arbitrary results out of the header and shows them first when expanded', () => {
     const node = document.createElement('div');
     const result = { rows: ['<script>unsafe()</script>'], opaque_metadata: 1234 };
     render(node, { ...block(), round: { programStatus: 'completed', programResult: result,
-      programStats: { tool_calls: 2, successful_tool_calls: 2 } } });
+      childToolNames: ['web_search'], programStats: { tool_calls: 2, successful_tool_calls: 2 } } });
     expect(node.querySelector('.ptc-head')?.textContent).not.toContain('opaque_metadata');
-    expect(node.querySelector('.ptc-preview')?.textContent).toContain('opaque_metadata');
+    expect(node.querySelector('.ptc-head')?.textContent).toContain('web_search');
+    expect(node.querySelector('.ptc-preview,.ptc-tools,.ptc-tool-chip')).toBeNull();
+    expect(node.querySelector<HTMLDetailsElement>('.ptc-result')?.open).toBe(true);
     expect(JSON.parse(node.querySelector('.ptc-result pre')!.textContent!)).toEqual(result);
     expect(node.querySelector('script')).toBeNull();
     expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
@@ -161,7 +221,7 @@ describe.each(Object.entries(surfaces))('%s compact program disclosure', (_name,
     expect(node.querySelector('.ptc-head')?.textContent).toContain('Saved results read 2 times');
     expect(node.querySelector('.ptc-head')?.textContent).not.toMatch(/successful|bytes|child tool|No source tools/);
     expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
-    expect(node.querySelector<HTMLDetailsElement>('.ptc-result')?.open).toBe(false);
+    expect(node.querySelector<HTMLDetailsElement>('.ptc-result')?.open).toBe(true);
     expect(node.querySelector<HTMLDetailsElement>('.ptc-technical')?.open).toBe(false);
     expect(node.querySelector('.ptc-measurements')?.textContent).toContain('1 MiB (1,048,576 bytes)');
     expect(node.querySelector('.ptc-measurements')?.textContent).toContain('2 KiB (2,048 bytes)');

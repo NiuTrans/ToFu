@@ -8,12 +8,14 @@ import threading
 
 import pytest
 from tests._runtime_sections import ROOT
+from tests._jsdom import require_node_modules
 
 pytestmark = pytest.mark.visual
 
 
 @pytest.fixture(scope='module')
 def article_origin(tmp_path_factory):
+    require_node_modules('vite')
     directory = tmp_path_factory.mktemp('report-article-browser')
     entry = directory / 'entry.ts'
     entry.write_text('import * as owner from ' + json.dumps(str(ROOT / 'frontend/src/features/paper/report-article/index.ts')) + ';\n' + r"""

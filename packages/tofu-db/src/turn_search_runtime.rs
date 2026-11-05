@@ -1,4 +1,5 @@
-//! Search-index runtime: capacity admission, deferred open and shared GC ports.
+//! Search-index runtime: capacity admission, deferred open, read-your-writes
+//! coverage and shared GC ports.
 //! The index remains disposable; its errors never select another source authority.
 use crate::authority::AuthorityDatabase;
 use crate::authority_gc_online::{OnlineGarbageCollectionHandle, OnlineGcDatabase};
@@ -21,6 +22,7 @@ pub struct TurnSearchProjection {
     gc: Option<OnlineGarbageCollectionHandle>,
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     opening: bool,
+    search_invalidations: Option<Arc<crate::search_dirty::SearchInvalidations>>,
 }
 
 impl TurnSearchProjection {
@@ -40,6 +42,7 @@ impl TurnSearchProjection {
             gc: None,
             stop: None,
             opening: false,
+            search_invalidations: None,
         }
     }
     pub fn initialize(directory: &Path, maximum_logical_bytes_per_owner: u64) -> io::Result<Self> {
@@ -146,6 +149,7 @@ impl TurnSearchProjection {
             gc: None,
             stop: None,
             opening: false,
+            search_invalidations: None,
         };
         Ok(runtime)
     }
@@ -224,7 +228,7 @@ impl TurnSearchProjection {
             Self { opened: None, directory: index.directory.clone(), vfs: Arc::clone(&index.vfs),
                 maximum_logical_bytes_per_owner: index.maximum_logical_bytes_per_owner,
                 source: index.source, recover_real_filesystem: index.recover_real_filesystem,
-                gc: None, stop: index.stop.clone(), opening: false }
+                gc: None, stop: index.stop.clone(), opening: false, search_invalidations: None }
         };
         let result = crate::engine_log::lifecycle_step(
             "background_timing", "search_projection_open", || candidate.ensure_open());
@@ -242,6 +246,15 @@ impl TurnSearchProjection {
     pub(crate) fn install_stop(&mut self, stop: Arc<std::sync::atomic::AtomicBool>) {
         if let Some(opened) = &mut self.opened { opened.install_stop(Arc::clone(&stop)); }
         self.stop = Some(stop);
+    }
+    pub(crate) fn install_search_invalidations(
+        &mut self,
+        invalidations: Arc<crate::search_dirty::SearchInvalidations>,
+    ) {
+        self.search_invalidations = Some(invalidations);
+    }
+    pub(crate) fn search_invalidations(&self) -> Option<Arc<crate::search_dirty::SearchInvalidations>> {
+        self.search_invalidations.clone()
     }
     pub(crate) fn available(&self) -> bool {
         self.opened.is_some()
@@ -302,8 +315,14 @@ impl TurnSearchProjection {
         }
     }
 
+    /// Coverage is READY only after the worker consumed every invalidation
+    /// committed for this owner before the query.
     pub(crate) fn owner_indexing(&self, tenant: u64, owner: u64) -> io::Result<bool> {
-        self.opened()?.owner_indexing(tenant, owner)
+        Ok(self.opened()?.owner_indexing(tenant, owner)?
+            || self
+                .search_invalidations
+                .as_ref()
+                .is_some_and(|invalidations| invalidations.pending(tenant, owner)))
     }
     pub(crate) fn set_owner_indexing(
         &mut self,

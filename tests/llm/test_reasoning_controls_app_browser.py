@@ -83,6 +83,12 @@ def test_reasoning_controls_real_app(browser, live_server, tmp_path):
         page.wait_for_selector('#presetDropdownList [data-value="synthetic-depth"]', state='attached')
         page.locator('#obSkip').click()
         open_picker()
+        # A new chat paints the configured default provisionally and catalog
+        # arrival never converts it into the stored modelRef (FRONTEND_ARCHITECTURE
+        # "Chat picker startup recovery"), so choose the stored route like a user.
+        creator_a = page.locator('#presetDropdownList [data-route-key="auto::Creator A::::synthetic-depth"]').first
+        creator_a.click()
+        open_picker()
         slider = page.locator('#thinkingDepthRange')
         expect(slider).to_have_attribute('max', '1')
         expect(slider).to_have_value('0')
@@ -108,11 +114,12 @@ def test_reasoning_controls_real_app(browser, live_server, tmp_path):
         page.keyboard.press('End')
         page.keyboard.press('Home')
         assert saved()['thinkingDepth'] == 'lowest'
-        creator_a = page.locator('#presetDropdownList [data-route-key="auto::Creator A::::synthetic-depth"]').first
         creator_a.locator('.ps-dd-provider-chip').click()
         page.locator('#psProviderMenu').get_by_text('Provider B', exact=True).click()
         open_picker()
-        expect(slider).to_have_attribute('max', '1')
+        # The server restoration table maps 'lowest' onto Provider B's lightest
+        # (only) rung, so the thumb parks there instead of an appended rung.
+        expect(slider).to_have_attribute('max', '0')
         expect(slider).to_be_disabled()
         expect(slider).to_have_attribute('aria-valuetext', __import__('re').compile('Unavailable|不可用'))
         assert saved()['thinkingDepth'] == 'lowest'
@@ -264,6 +271,10 @@ def test_missing_reasoning_controls_are_explained_in_real_app(browser, live_serv
         if page.locator('#obSkip').is_visible():
             page.locator('#obSkip').click()
         page.locator('#presetToggle').click()
+        # The stored model is chosen explicitly, as in the test above.
+        page.locator('#presetDropdownList [data-value="alpha"]').first.click()
+        if not page.locator('#thinkingDepthRange').is_visible():
+            page.locator('#presetToggle').click()
         slider=page.locator('#thinkingDepthRange')
         expect(slider).to_be_visible()
         note=page.locator('#thinkingDepthSection [data-depth-notice]')

@@ -10,21 +10,49 @@ import pytest
 from tofu_agent.models import AgentResult, AgentTimeoutError
 
 
+class _FakeExecution:
+    def __init__(self, runtime):
+        self._runtime = runtime
+        self.aborted = False
+
+    @property
+    def done(self):
+        return self.aborted and self._runtime.settled_after_abort is not None
+
+    def result(self, timeout_s=None):
+        if self.done:
+            return self._runtime.settled_after_abort
+        if self._runtime._exc is not None:
+            raise self._runtime._exc
+        return self._runtime._result
+
+
 class _FakeRuntime:
-    def __init__(self, result=None, exc=None):
+    def __init__(self, result=None, exc=None, settled_after_abort=None,
+                 teardown_error=None):
         self._result = result
         self._exc = exc
+        self.settled_after_abort = settled_after_abort
+        self.teardown_error = teardown_error
         self.calls = []
-        self.closed = False
+        self.closes = []
+        self.execution = None
 
-    def run(self, messages, **kwargs):
+    @property
+    def closed(self):
+        return bool(self.closes)
+
+    def start(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
-        if self._exc is not None:
-            raise self._exc
-        return self._result
+        self.execution = _FakeExecution(self)
+        return self.execution
 
     def close(self, *, abort=True, timeout_s=5.0):
-        self.closed = True
+        self.closes.append(abort)
+        if abort and self.execution is not None:
+            self.execution.aborted = True
+            if self.teardown_error is not None:
+                raise self.teardown_error
 
 
 def _result(status='done', **overrides):
@@ -204,6 +232,119 @@ def test_run_timeout_maps_to_exit_3(runtime_slot, tmp_path, capsys):
     assert document['ok'] is False
     assert document['status'] == 'timeout'
     assert 'kind=timeout' in captured.err
+
+
+def test_run_timeout_keeps_the_settled_trajectory(runtime_slot, tmp_path, capsys):
+    from tofu_agent.cli import main
+
+    _slot, install = runtime_slot
+    steps = [{'source': 'user'}, {'source': 'agent'}]
+    fake = _FakeRuntime(
+        exc=AgentTimeoutError('too slow'),
+        settled_after_abort=_result(
+            status='aborted', content='partial', n_tool_rounds=7,
+            trajectory_format='atif', trajectory={'steps': steps}))
+    install(fake)
+    rc = main(['--env-file', str(tmp_path / 'absent.env'),
+               'run', '--task', 'x', '--timeout-s', '5'])
+    assert rc == 3
+    document = json.loads(capsys.readouterr().out)
+    assert document['ok'] is False
+    assert document['status'] == 'timeout'
+    assert document['error']['kind'] == 'timeout'
+    assert document['content'] == 'partial'
+    assert document['n_tool_rounds'] == 7
+    assert document['trajectory_format'] == 'atif'
+    assert document['trajectory'] == {'steps': steps}
+    assert fake.closes[0] is True
+
+
+def test_run_timeout_without_joined_teardown_still_reports(
+        runtime_slot, tmp_path, capsys):
+    from tofu_agent.cli import main
+
+    _slot, install = runtime_slot
+    install(_FakeRuntime(exc=AgentTimeoutError('too slow'),
+                         teardown_error=AgentTimeoutError('not joined')))
+    rc = main(['--env-file', str(tmp_path / 'absent.env'),
+               'run', '--task', 'x', '--timeout-s', '5'])
+    assert rc == 3
+    document = json.loads(capsys.readouterr().out)
+    assert document['status'] == 'timeout'
+    assert 'trajectory' not in document
+
+
+@pytest.mark.parametrize('command,remote_principal', [
+    (['run', '--task', 'x'], False),
+    (['serve'], True),
+])
+def test_only_the_run_subcommand_is_the_local_operator(
+        monkeypatch, command, remote_principal):
+    import tofu_agent.cli as cli
+
+    created = []
+
+    class _Store:
+        def load(self):
+            return None
+
+    class _Runtime:
+        @classmethod
+        def local(cls, **kwargs):
+            created.append(kwargs)
+            return _FakeRuntime(result=_result())
+
+    monkeypatch.setattr(cli, 'ModelRoutingSettingsStore', _Store)
+    monkeypatch.setattr(cli, 'AgentRuntime', _Runtime)
+    args = cli._parser().parse_args(command)
+    if args.command == 'run':
+        cli._runtime(args)
+    else:
+        cli._runtime_and_setup(args)
+    assert created[0]['remote_principal'] is remote_principal
+
+
+def test_run_delegate_mode_flag_sets_config(runtime_slot, tmp_path, capsys):
+    from tofu_agent.cli import main
+
+    _slot, install = runtime_slot
+    fake = _FakeRuntime(result=_result())
+    install(fake)
+
+    rc = main(['--env-file', str(tmp_path / 'absent.env'),
+               'run', '--task', 'x', '--delegate-mode'])
+    assert rc == 0
+    _messages, kwargs = fake.calls[0]
+    assert kwargs['config']['delegateMode'] is True
+
+
+def test_run_delegate_mode_env_sets_config(runtime_slot, tmp_path, monkeypatch):
+    from tofu_agent.cli import main
+
+    monkeypatch.setenv('TOFU_AGENT_RUN_DELEGATE_MODE', '1')
+    _slot, install = runtime_slot
+    fake = _FakeRuntime(result=_result())
+    install(fake)
+
+    rc = main(['--env-file', str(tmp_path / 'absent.env'),
+               'run', '--task', 'x'])
+    assert rc == 0
+    _messages, kwargs = fake.calls[0]
+    assert kwargs['config']['delegateMode'] is True
+
+
+def test_run_delegate_mode_off_by_default(runtime_slot, tmp_path):
+    from tofu_agent.cli import main
+
+    _slot, install = runtime_slot
+    fake = _FakeRuntime(result=_result())
+    install(fake)
+
+    rc = main(['--env-file', str(tmp_path / 'absent.env'),
+               'run', '--task', 'x'])
+    assert rc == 0
+    _messages, kwargs = fake.calls[0]
+    assert 'delegateMode' not in kwargs['config']
 
 
 def test_run_env_overrides_defaults(runtime_slot, tmp_path, monkeypatch):

@@ -59,6 +59,22 @@ def test_successful_nonstream_response_uses_sealed_mapping(monkeypatch, protocol
     assert usage['_request_identity']['semantic_request_id']
 
 
+@pytest.mark.parametrize('controls, expected', [
+    ({'effort': 'max', 'thinking': {'type': 'adaptive'}}, 'max'),
+    ({'output_config': {'effort': 'high'}}, 'high'),
+    ({'reasoning': {'effort': 'low'}}, 'low'),
+    ({'reasoning_effort': 'xhigh'}, 'xhigh'),
+    ({'effort': 'high', 'reasoning_effort': 'low'}, None),
+    ({'effort': 'turbo'}, None),
+])
+def test_receipt_records_effort_under_every_native_spelling(controls, expected):
+    body = {'messages': [{'role': 'user', 'content': 'hi'}], **controls}
+    admitted = seal_request(body, model='test-model', input_tokens=1,
+                            semantic_id='test')
+    assert request_parameter_receipt(body)['reasoning_effort'] == expected
+    assert request_parameter_receipt(admitted)['reasoning_effort'] == expected
+
+
 def test_receipt_reads_only_controls_without_decoding_large_prompt(monkeypatch):
     body = {'messages': [{'role': 'user', 'content': 'private' * 200000}],
             'max_tokens': 128, 'temperature': 0, 'top_p': 0.9}

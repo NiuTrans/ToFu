@@ -1,4 +1,11 @@
-"""Executable contract for timer continuation dispatch outcomes."""
+"""Executable contract for timer continuation dispatch outcomes.
+
+A readiness watcher never owns its target lane: the conversation is very often
+still working when the condition becomes true. The delivery layer therefore
+steers the continuation into the live attempt (with the durable queue as
+fallback) instead of reporting the busy lane as a failure that burns the
+one-shot obligation.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,17 @@ from lib.scheduler.timer import _loop
 pytestmark = pytest.mark.unit
 
 
+class _FakeClient:
+    """Records the settle command so the receipt fields are assertable."""
+
+    def __init__(self):
+        self.payload: dict = {}
+
+    def command(self, _operation, payload, _command_id):
+        self.payload.update(payload)
+        return {'changed': True}
+
+
 def _timer() -> dict:
     return {
         "id": "tmr_dispatch", "status": "active",
@@ -21,15 +39,28 @@ def _timer() -> dict:
     }
 
 
-def _install_dispatch(monkeypatch, result) -> None:
+def _install_dispatch(monkeypatch, result) -> dict:
     monkeypatch.setattr(_loop, "_get_timer_row", lambda *a, **k: _timer())
     import lib.scheduler.conversation_dispatch as dispatch_module
 
-    monkeypatch.setattr(
-        dispatch_module,
-        "dispatch_scheduled_turn",
-        lambda **_kwargs: result,
-    )
+    seen: dict = {}
+
+    def dispatch(**kwargs):
+        seen.update(kwargs)
+        return result
+
+    monkeypatch.setattr(dispatch_module, "dispatch_scheduled_turn", dispatch)
+    return seen
+
+
+def test_dispatch_asks_for_the_steer_lane(monkeypatch):
+    """A busy lane is expected, so the scheduler must not use the bare
+    ``lane_busy`` contract that drops the continuation."""
+    seen = _install_dispatch(monkeypatch, ScheduledTurnDispatch("started", "task-1"))
+    monkeypatch.setattr(_loop, "_timer_client", lambda **kw: _FakeClient())
+    monkeypatch.setattr(_loop, "remove_live_watcher", lambda *a: None)
+    assert _loop._execute_continuation(_timer()).kind == "started"
+    assert seen["inject_mode"] == "steer"
 
 
 def test_lane_contention_stays_retryable(monkeypatch):
@@ -41,7 +72,9 @@ def test_lane_contention_stays_retryable(monkeypatch):
         lambda _timer_record, reason: retired.append(reason),
     )
 
-    assert _loop._execute_continuation(_timer()) is None
+    outcome = _loop._execute_continuation(_timer())
+    assert outcome.kind == "retry"
+    assert not outcome.accepted
     assert retired == []
 
 
@@ -55,8 +88,41 @@ def test_permanent_dispatch_failure_retires_watcher(monkeypatch, disposition):
         lambda _timer_record, reason: retired.append(reason),
     )
 
-    assert _loop._execute_continuation(_timer()) is None
+    assert _loop._execute_continuation(_timer()).kind == "closed"
     assert len(retired) == 1
+
+
+@pytest.mark.parametrize(
+    ("disposition", "task_id", "queue_id"),
+    [("steered", "", ""), ("queued", "", "queue-1"), ("started", "task-1", "")],
+)
+def test_accepted_delivery_settles_the_obligation(monkeypatch, disposition,
+                                                  task_id, queue_id):
+    """Steer and queue are real deliveries: the watcher must retire and the row
+    must record HOW the continuation reached the conversation."""
+    _install_dispatch(
+        monkeypatch,
+        ScheduledTurnDispatch(disposition, task_id=task_id, queue_id=queue_id),
+    )
+    client = _FakeClient()
+    removed, notifications = [], []
+    monkeypatch.setattr(_loop, "_timer_client", lambda **kw: client)
+    monkeypatch.setattr(_loop, "remove_live_watcher", removed.append)
+    from lib.scheduler.timer import _notify
+    monkeypatch.setattr(_notify, "notify_timer_changed",
+                        lambda change, **kw: notifications.append(change))
+
+    outcome = _loop._execute_continuation(_timer())
+    assert outcome.kind == disposition
+    assert outcome.accepted
+    assert outcome.task_id == task_id
+    assert outcome.queue_id == queue_id
+    assert client.payload["status"] == "triggered"
+    assert client.payload["last_poll_decision"] == disposition
+    if task_id:
+        assert client.payload["execution_task_id"] == task_id
+    assert removed == ["tmr_dispatch"]
+    assert notifications == ["triggered"]
 
 
 def test_infrastructure_failure_stays_retryable(monkeypatch):
@@ -74,7 +140,7 @@ def test_infrastructure_failure_stays_retryable(monkeypatch):
         lambda _timer_record, reason: retired.append(reason),
     )
 
-    assert _loop._execute_continuation(_timer()) is None
+    assert _loop._execute_continuation(_timer()).kind == "retry"
     assert retired == []
 
 
@@ -100,17 +166,19 @@ def test_started_continuation_keeps_watcher_until_trigger_receipt_commits(monkey
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError('trigger receipt unavailable')
-            row.update(status=payload['status'], execution_task_id=payload['execution_task_id'])
+            row.update(status=payload['status'],
+                       execution_task_id=payload['execution_task_id'])
             return {'changed': True}
 
     client = Client()
     monkeypatch.setattr(_loop, '_timer_client', lambda **kw: client)
     monkeypatch.setattr(dispatch_module, 'dispatch_scheduled_turn', dispatch)
 
-    assert _loop._execute_continuation(row) is None
+    assert _loop._execute_continuation(row).kind == 'retry'
     assert row['status'] == 'active'
     assert removed == [] and notifications == []
-    assert _loop._execute_continuation(row) == 'task-once'
+    outcome = _loop._execute_continuation(row)
+    assert outcome.kind == 'started' and outcome.task_id == 'task-once'
     assert commands == ['timer:tmr_dispatch', 'timer:tmr_dispatch']
     assert row['status'] == 'triggered'
     assert removed == ['tmr_dispatch'] and notifications == ['triggered']
@@ -119,7 +187,7 @@ def test_started_continuation_keeps_watcher_until_trigger_receipt_commits(monkey
 def test_lost_active_status_never_announces_trigger_success(monkeypatch):
     from lib.scheduler.timer import _notify
 
-    _install_dispatch(monkeypatch, ScheduledTurnDispatch('started', 'task-once'))
+    _install_dispatch(monkeypatch, ScheduledTurnDispatch('queued', queue_id='q-1'))
     notifications = []
 
     class Client:
@@ -130,5 +198,5 @@ def test_lost_active_status_never_announces_trigger_success(monkeypatch):
     monkeypatch.setattr(_notify, 'notify_timer_changed',
                         lambda change, **kw: notifications.append(change))
     monkeypatch.setattr(_loop, 'remove_live_watcher', lambda *a: None)
-    assert _loop._execute_continuation(_timer()) is None
+    assert _loop._execute_continuation(_timer()).kind == 'closed'
     assert notifications == []

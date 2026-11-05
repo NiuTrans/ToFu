@@ -110,8 +110,9 @@ def _apply_reconcile_poll(timer: dict, predicate_result, llm_ready,
         fields.update({'condition_kind': outcome.new_kind,
                        'promotion_streak': outcome.new_streak})
     if len(fields) > 3:
+        # A poll in flight while the watcher settles must not rewrite it.
         _timer_client(write=True).command(
-            'timer.update', fields,
+            'timer.update', {**fields, 'expected_status': 'active'},
             f'timer.reconcile:{timer_id}:{uuid.uuid4().hex}')
     if outcome.promoted:
         audit_log('timer_predicate_promoted', timer_id=timer_id,

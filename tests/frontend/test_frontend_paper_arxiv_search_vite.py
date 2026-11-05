@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 
 import pytest
@@ -100,11 +99,6 @@ const viewer = document.getElementById('paperPdfViewer');
 """
 
 
-@pytest.mark.skipif(
-    not shutil.which('node') or not os.path.isfile(ESBUILD)
-    or not os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom')),
-    reason='node/jsdom/esbuild dev dependencies required',
-)
 def test_compiled_arxiv_search_owner_preserves_browser_contract(tmp_path):
     built = tmp_path / 'arxiv-search.js'
     compiled = compile_feature_owner(ESBUILD, SOURCE, built, tmp_path)

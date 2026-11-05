@@ -137,7 +137,7 @@ def test_stage_registered_between_design_and_author():
 def test_outline_gate_real_wait_accepts_immediate_answer(monkeypatch):
     from lib.tasks_pkg import human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     def emit(event):
         if event['type'] == 'outline_gate':
@@ -151,7 +151,7 @@ def test_outline_gate_stop_reaches_shared_wait_and_never_approves(monkeypatch):
     from lib.tasks_pkg import human_guidance
     from lib.tasks_pkg.human_gate_registry import OwnedHumanGateRegistry
     from lib.production.stages import StageAborted
-    registry = OwnedHumanGateRegistry(capacity=1)
+    registry = OwnedHumanGateRegistry()
     monkeypatch.setattr(human_guidance, 'human_gate_registry', registry)
     stopped = []
     with pytest.raises(StageAborted):

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.parametrize('model_id,effort', [('kimi-k3', 'max'), ('grok-4.6', 'xhigh')])
 def test_mainstream_templates_share_model_profile_and_presets(model_id, effort):
-    providers = ('catpaw', 'meituan') if model_id == 'kimi-k3' else ('xai', 'meituan')
+    providers = ('catpaw', 'yourprovider') if model_id == 'kimi-k3' else ('xai', 'yourprovider')
     bundles = [compile_provider_template_bundle(key, selected_model_ids=[model_id])
                for key in providers]
     assert bundles[0]['models'] == bundles[1]['models']
@@ -250,8 +250,9 @@ def test_world_sync_repairs_existing_identity_and_profile_once(monkeypatch):
     doc = pending_document()
     model = copy.deepcopy(doc['models'][0])
     apply_model_defaults(model)
-    monkeypatch.setattr(world_catalog, '_world_catalog_rows', lambda: (doc['creators'], [model]))
-    monkeypatch.setattr(world_catalog, '_retired_model_keys', lambda: set())
+    monkeypatch.setattr(world_catalog, '_world_catalog_rows',
+                        lambda templates: (doc['creators'], [model]))
+    monkeypatch.setattr(world_catalog, '_retired_model_keys', lambda templates: set())
     repository, owner = InMemoryModelRoutingRepository(), OwnerBoundary.create(331)
     repository.compare_and_swap(owner, doc, expected_revision=0)
     result = world_catalog.sync_world_model_catalog(boundary=owner, repository=repository)
@@ -267,3 +268,56 @@ def test_world_sync_repairs_existing_identity_and_profile_once(monkeypatch):
     assert 'max' not in scoped['depths']
     again = world_catalog.sync_world_model_catalog(boundary=owner, repository=repository)
     assert again['revision'] == result['revision']
+
+
+def test_normalization_reads_the_defaults_revision_once_per_aggregate(monkeypatch, tmp_path):
+    """One defaults stat per normalization, never one per Model row.
+
+    Each stat releases the GIL; under a busy interpreter every reacquisition
+    waits a full switch interval, which made routing reads take seconds.
+    """
+    from lib.model_routing import model_defaults
+
+    doc = pending_document()
+    grok = next(row for row in doc['models'] if row['model_id'] == 'grok-4.6')
+    for index in range(40):
+        doc['models'].append({**copy.deepcopy(grok), 'model_id': f'grok-4.6-lab-{index}',
+                              'display_name': f'Lab build {index}'})
+
+    data = json.loads(model_defaults._PATH.read_text())
+    defaults_copy = tmp_path / 'defaults.json'
+    defaults_copy.write_text(json.dumps(data))
+    stats = []
+
+    class CountingPath(type(model_defaults._PATH)):
+        def stat(self, *args, **kwargs):
+            stats.append(1)
+            return super().stat(*args, **kwargs)
+
+    monkeypatch.setattr(model_defaults, '_PATH', CountingPath(defaults_copy))
+
+    def grok_profile(normalized):
+        return next(row for row in normalized['models']
+                    if (row['creator_id'], row['model_id']) == ('xai', 'grok-4.6'))['inference_profile']
+
+    normalized = normalize_document(doc)
+    assert len(stats) == 1
+    assert grok_profile(normalized)
+
+    # A changed revision on disk is still observed by the next normalization.
+    group = next(g for g in data['groups']
+                 if g['creator_id'] == 'xai' and 'grok-4.6' in g['model_ids'])
+    group['inference_profile'] = {**group['inference_profile'], 'source': 'official-revised'}
+    defaults_copy.write_text(json.dumps(data, indent=2))
+    assert grok_profile(normalize_document(doc))['source'] == 'official-revised'
+
+
+def test_model_defaults_snapshot_matches_per_call_lookup():
+    from lib.model_routing.model_defaults import current_model_defaults
+
+    for creator, model_id in (('moonshot', 'kimi-k3'), ('xai', 'grok-4.6'), ('moonshot', 'unknown-model')):
+        implicit = {'creator_id': creator, 'model_id': model_id}
+        explicit = copy.deepcopy(implicit)
+        assert apply_model_defaults(implicit) == apply_model_defaults(
+            explicit, profiles=current_model_defaults())
+        assert implicit == explicit

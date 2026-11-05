@@ -1,4 +1,10 @@
 """Local delivery identity survives model recovery and fatal settlement."""
+
+import lib.tasks_pkg.llm_fallback._recovery as _fallback_recovery
+import lib.tasks_pkg.llm_fallback._retry as _fallback_retry
+import lib.tasks_pkg.llm_fallback._state as _fallback_state
+import lib.tasks_pkg.llm_fallback._transport as _fallback_transport
+import lib.tasks_pkg.manager._events as _fallback_events
 import threading
 
 import pytest
@@ -24,9 +30,9 @@ def test_delivery_error_bypasses_all_model_recovery(monkeypatch, failure_attempt
     task = _task()
     error = EventDeliveryError('local delivery timeout HTTP 401 429')
     calls = []
-    monkeypatch.setattr(call, '_get_fallback_model', lambda task: 'fallback')
-    monkeypatch.setattr(call, '_get_pool_rescue_model', lambda failed: 'rescue')
-    monkeypatch.setattr(call, 'append_event', lambda *a: None)
+    monkeypatch.setattr(_fallback_retry, '_get_fallback_model', lambda task: 'fallback')
+    monkeypatch.setattr(_fallback_retry, '_get_pool_rescue_model', lambda failed: 'rescue')
+    monkeypatch.setattr(_fallback_events, 'append_event', lambda *a: None)
     class Gate:
         def has_capable_slots(self, *a, **kw):
             return True
@@ -38,7 +44,7 @@ def test_delivery_error_bypasses_all_model_recovery(monkeypatch, failure_attempt
             raise error
         raise PermissionError_('HTTP 401 provider failure')
 
-    monkeypatch.setattr(call, 'stream_llm_response', stream)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
     with pytest.raises(EventDeliveryError) as raised:
         call._llm_call_with_fallback(
             task, {'model': 'primary'}, 'primary', 0, 512, False, None,
@@ -75,13 +81,13 @@ def test_fatal_delivery_keeps_original_envelope_over_secondary_failure(monkeypat
     assert post.handle_task_fatal(task, first) is False
     envelope = task['error']
     assert persisted == [envelope]
-    assert envelope['kind'] == 'server_busy'
+    assert envelope['kind'] == 'event_delivery_failed'
     assert envelope['source'] == 'task-event-delivery'
     assert envelope['model'] == ''
     assert 'original disk fault' in envelope['raw']
     assert 'secondary' not in envelope['raw']
     assert 'LLM call failed' not in envelope['message']
-    assert envelope['hintKey'] == 'err.k.server_busy.hint'
+    assert envelope['hintKey'] == 'err.k.event_delivery_failed.hint'
     assert task['status'] == task['finishReason'] == 'error'
 
 
@@ -123,20 +129,20 @@ def test_reactive_retry_propagates_delivery_error(monkeypatch):
 
     task = _task()
     error = EventDeliveryError('reactive stream durable write failed')
-    monkeypatch.setattr(call, '_learn_context_limit_from_overflow', lambda *a: None)
-    monkeypatch.setattr(call, '_prepare_reactive_retry_body', lambda *a, **kw: {'model': 'primary'})
+    monkeypatch.setattr(_fallback_recovery, '_learn_context_limit_from_overflow', lambda *a: None)
+    monkeypatch.setattr(_fallback_recovery, '_prepare_reactive_retry_body', lambda *a, **kw: {'model': 'primary'})
     def stream(*a, **kw):
         raise error
-    monkeypatch.setattr(call, 'stream_llm_response', stream)
-    call._reactive_compact_attempts.pop(task['id'], None)
+    monkeypatch.setattr(_fallback_transport, 'stream_llm_response', stream)
+    _fallback_state._reactive_compact_attempts.pop(task['id'], None)
     try:
         with pytest.raises(EventDeliveryError) as raised:
-            call._attempt_request_payload_recovery(
+            _fallback_recovery._attempt_request_payload_recovery(
                 task, {'model': 'primary'}, 'primary', 0, None, [],
                 'low', False, {}, [], None, RuntimeError('context limit'))
         assert raised.value is error
     finally:
-        call._reactive_compact_attempts.pop(task['id'], None)
+        _fallback_state._reactive_compact_attempts.pop(task['id'], None)
 
 
 @pytest.mark.parametrize('marker', ['EventDeliveryCancelled', 'EventDeliveryRevoked'])

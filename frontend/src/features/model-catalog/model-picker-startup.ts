@@ -10,6 +10,7 @@ export interface ModelPickerStartupPorts<Config, Routing> {
   loadRouting(signal: AbortSignal): Promise<Routing>;
   applyConfig(config: Config): void;
   applyRouting(routing: Routing): void;
+  routingRevision?(routing: Routing): number | undefined;
   showFailure(error: unknown): void;
   onBootReady(callback: () => void): () => void;
   isActive?(): boolean;
@@ -39,6 +40,7 @@ export function createModelPickerStartup<Config, Routing>(
 ): {
   load(): Promise<void>;
   refreshConfig(): Promise<void>;
+  adoptRouting(routing: Routing): boolean;
   recover(): void;
   destroy(): void;
 } {
@@ -54,9 +56,61 @@ export function createModelPickerStartup<Config, Routing>(
   let retryTimer: unknown = null;
   let bootProbeUsed = false;
   let refreshController: AbortController | null = null;
+  let routingGeneration = 0;
+  let acceptedRevision: number | undefined;
+  let configApplied = false;
+  let pendingRouting: { value: Routing } | null = null;
+  let configGeneration = 0;
+  let latestConfigRead: { generation: number; promise: Promise<void> } | null = null;
   const isActive = () => ports.isActive?.() !== false;
   const schedule = ports.scheduleRetry ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   const cancel = ports.cancelRetry ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>));
+
+  const read = <T>(loader: (signal: AbortSignal) => Promise<T>, signal: AbortSignal): Promise<T> => {
+    try { return loader(signal); } catch (error) { return Promise.reject(error); }
+  };
+
+  function projectAcceptedRouting(): void {
+    if (disposed || !configApplied || !pendingRouting) return;
+    const pending = pendingRouting;
+    pendingRouting = null;
+    ports.applyRouting(pending.value);
+  }
+
+  function readConfig(signal: AbortSignal) {
+    const generation = ++configGeneration;
+    const promise = read(ports.loadConfig, signal).then(value => {
+      if (disposed || generation !== configGeneration) return;
+      ports.applyConfig(value);
+      if (disposed || generation !== configGeneration) return;
+      configApplied = true;
+      projectAcceptedRouting();
+      // Coordination needs settlement, not a retained config response.
+    });
+    const request = { generation, promise };
+    if (generation === configGeneration) latestConfigRead = request;
+    return request;
+  }
+
+  function revisionOf(routing: Routing): number | undefined {
+    const revision = ports.routingRevision?.(routing);
+    return typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+      ? revision : undefined;
+  }
+
+  // Settings reads and commits enter the same projection as startup. A
+  // committed response supersedes older in-flight reads, including errors;
+  // equal revisions may still carry fresh availability/health controls.
+  function adoptRouting(routing: Routing): boolean {
+    if (disposed) return false;
+    const revision = revisionOf(routing);
+    if (revision !== undefined && acceptedRevision !== undefined && revision < acceptedRevision) return false;
+    routingGeneration++;
+    if (revision !== undefined) acceptedRevision = revision;
+    pendingRouting = { value: routing };
+    projectAcceptedRouting();
+    return true;
+  }
 
   function cancelScheduledRetry(): void {
     if (retryTimer === null) return;
@@ -99,21 +153,31 @@ export function createModelPickerStartup<Config, Routing>(
     waitingForBootReady = false;
     controller = new AbortController();
     const signal = controller.signal;
-    const read = <T>(loader: (signal: AbortSignal) => Promise<T>): Promise<T> => {
-      try { return loader(signal); } catch (error) { return Promise.reject(error); }
-    };
-    const config = read(ports.loadConfig).then(value => {
-      if (!disposed) ports.applyConfig(value);
-      return value;
-    });
-    inFlight = Promise.allSettled([config, read(ports.loadRouting)]).then(results => {
+    const routingAtStart = routingGeneration;
+    const initialConfig = readConfig(signal);
+    inFlight = Promise.allSettled([initialConfig.promise, read(ports.loadRouting, signal)]).then(async results => {
+      // A post-save config refresh can supersede startup while its routing
+      // read is pending. Join the current policy before painting that catalog.
+      let configRead = initialConfig;
+      let configResult = results[0];
+      while (!disposed && latestConfigRead && configRead !== latestConfigRead) {
+        configRead = latestConfigRead;
+        [configResult] = await Promise.allSettled([configRead.promise]);
+      }
       if (disposed) return;
-      const failed = results.filter(result => result.status === 'rejected');
+      const routing = results[1];
+      const currentRoutingRead = routingAtStart === routingGeneration;
+      const failed = [configResult, ...(currentRoutingRead ? [routing] : [])]
+        .filter(result => result.status === 'rejected');
       if (failed.length) {
         const failure = failed.find(result => [401, 403].includes(result.reason?.status))
           ?? failed.find(result => !isTransient(result.reason)) ?? failed[0];
         waitingForBootReady = failure.reason?.code === 'server_boot_failed';
         waitingForRecovery = isTransient(failure.reason);
+        if (!waitingForRecovery) pendingRouting = null;
+        if (configResult.status === 'rejected' && [401, 403].includes(configResult.reason?.status)) {
+          configApplied = false;
+        }
         // Only explicit boot readiness can revive a latched boot failure.
         // Remember it even if the old failed response finishes afterward.
         if (waitingForBootReady && bootReadyDuringRequest) {
@@ -131,13 +195,19 @@ export function createModelPickerStartup<Config, Routing>(
         }
         return;
       }
-      const routing = results[1];
-      if (routing.status === 'fulfilled') ports.applyRouting(routing.value);
+      if (routing.status === 'fulfilled') {
+        const revision = revisionOf(routing.value);
+        if (currentRoutingRead || (revision !== undefined
+            && acceptedRevision !== undefined && revision > acceptedRevision)) {
+          adoptRouting(routing.value);
+        }
+      }
       waitingForRecovery = false;
       loaded = true;
       retryAttempt = 0;
       bootProbeUsed = false;
     }).catch(error => {
+      pendingRouting = null;
       waitingForRecovery = false;
       waitingForBootReady = false;
       loaded = false;
@@ -165,31 +235,32 @@ export function createModelPickerStartup<Config, Routing>(
    * a round trip plus main-thread parse cost to the save the user is watching.
    * A failed refresh falls back to the full startup pass so the established
    * retry/readiness ladder keeps owning recovery. */
-  function refreshConfig(): Promise<void> {
-    if (disposed) return Promise.resolve();
+  async function refreshConfig(): Promise<void> {
+    if (disposed) return;
     refreshController?.abort();
     refreshController = new AbortController();
     const current = refreshController;
-    return Promise.resolve()
-      .then(() => ports.loadConfig(current.signal))
-      .then(config => {
-        if (!disposed && refreshController === current) ports.applyConfig(config);
-      })
-      .catch(error => {
-        if (!disposed) void load();
-        throw error;
-      })
-      .finally(() => {
-        if (refreshController === current) refreshController = null;
-      });
+    const request = readConfig(current.signal);
+    try {
+      await request.promise;
+    } catch (error) {
+      if (!disposed && refreshController === current && request.generation === configGeneration) void load();
+      throw error;
+    } finally {
+      if (refreshController === current) refreshController = null;
+    }
   }
 
   return {
     load,
     refreshConfig,
+    adoptRouting,
     recover,
     destroy() {
+      if (disposed) return;
       disposed = true;
+      latestConfigRead = null;
+      pendingRouting = null;
       controller?.abort();
       refreshController?.abort();
       cancelScheduledRetry();

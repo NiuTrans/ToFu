@@ -1,6 +1,8 @@
 """Real repository tool results, project attribution and terminal settlement."""
 import pytest
 
+from tests.tasks_pkg.test_tool_outcome_finality import observations as observations, task_for
+
 pytestmark = pytest.mark.unit
 
 
@@ -34,8 +36,8 @@ def test_multilingual_tool_uses_attached_root_and_is_read_only(tmp_path, monkeyp
         (attached / name).write_bytes(content)
     (sibling / 'private.js').write_text('function siblingPrivate() {}')
     result, (metadata, status) = drive(monkeypatch, attached)
-    call_id, text, failed = result
-    assert call_id == 'repo-map-call' and not failed and status == 'done'
+    call_id, text, is_search = result
+    assert call_id == 'repo-map-call' and is_search is False and status == 'done'
     assert 'attachedJavascript' in text and 'attachedRust' in text
     assert 'siblingPrivate' not in text
     assert metadata[0]['stats']['files_shown'] == metadata[0]['stats']['files_total'] == 2
@@ -54,7 +56,9 @@ def test_tool_path_filter_keeps_result_and_metadata_consistent(tmp_path, monkeyp
 
 def test_unattached_tool_settles_as_error(tmp_path, monkeypatch):
     result, (_, status) = drive(monkeypatch, None)
-    assert result[2] and status == 'error'
+    # The third slot is search evidence, never a failure flag: failure is the
+    # settled status.
+    assert result[2] is False and status == 'error'
     assert 'requires an attached project root' in result[1]
 
 
@@ -83,8 +87,36 @@ def test_scanner_denial_uses_existing_single_error_settlement(tmp_path, monkeypa
         calls.append(root)
         raise PermissionError('foreign repository scope')
     result, (_, status) = drive(monkeypatch, tmp_path, scanner=denied)
-    assert result[2] and status == 'error' and calls == [str(tmp_path)]
+    assert result[2] is False and status == 'error' and calls == [str(tmp_path)]
     assert 'foreign repository scope' in result[1]
+
+
+def test_failed_tool_text_never_becomes_turn_search_evidence(monkeypatch, observations):
+    """The no-prose fallback presents search evidence as fetched contents."""
+    from lib.tasks_pkg.handlers import project
+    from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
+    from lib.tasks_pkg.tool_display import _build_tool_round_entry
+
+    def unattached(task, call, name, call_id, arguments, number, row, *rest):
+        return project._handle_project_tool(
+            task, call, name, call_id, arguments, number, row, None, '', True)
+
+    task = task_for(unattached, name='repo_map')
+    _, row, _ = _build_tool_round_entry('repo_map', {}, 'repo-map-call', '{}', 1, False)
+    row['llmRound'] = 0
+    task['toolRounds'] = [row]
+    call = {'id': 'repo-map-call', 'type': 'function',
+            'function': {'name': 'repo_map', 'arguments': '{}'}}
+    messages, search_evidence = [], []
+    execute_tool_pipeline(
+        task, [(call, 'repo_map', 'repo-map-call', {}, row['roundNum'], row, None)],
+        cfg={'autoApply': True}, project_path=None, project_enabled=False,
+        tool_list=[], messages=messages, all_search_results_text=search_evidence,
+        round_num=0, model='test-model')
+
+    assert row['status'] == 'error'
+    assert 'requires an attached project root' in messages[-1]['content']
+    assert search_evidence == []
 
 
 def test_tool_returns_all_scoped_files_and_definitions_for_shared_l0(tmp_path, monkeypatch):

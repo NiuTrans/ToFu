@@ -12,7 +12,9 @@
    and `desktopEnabled` stay separate on the wire. They gate different tool
    families with genuinely different risk tiers (reading a tab vs running a
    shell command), and `lib/tools/registry/_build.py` builds them from two
-   independent ToolContext fields. Only the SURFACE is merged.
+   independent ToolContext fields. Only the SURFACE is merged. The browser
+   flag has no switch: it is always on (its tools need a connected extension
+   and stay Tool-Search deferred), so only the desktop row carries one.
 
    ── The one rule this file exists to enforce ──
    Each capability row shows exactly ONE next action, chosen by DETECTED
@@ -910,8 +912,6 @@ function _lcLocalBrowserClientId(clients) {
   }
 
   _lcReach.browser = connected;
-  _lcSetSwitch('lcBrowserSwitch',
-    LocalControlShellState.browserEnabled, connected);
   _lcUpdateBadge();
   _lcSetAbout('lcBrowserAbout', _lcT('local.browserAbout',
     '读取你已打开的标签页内容，并代你点击、填表单、切换页面。'));
@@ -1357,21 +1357,8 @@ function _lcDownloadLinks(d, kind, suppressPage) {
 }
 
 // ══════════════════════════════════════════════════════
-//  Switches — flip the REAL wire flags, one per capability
+//  Desktop switch — flips the REAL wire flag (the browser has none)
 // ══════════════════════════════════════════════════════
-
-function toggleBrowserFromLocalModal() {
-  var sw = document.getElementById('lcBrowserSwitch');
-  if (sw && sw.disabled) return;   // not connected — turning it on grants nothing
-  if (typeof _applyBrowserUI === 'function') {
-    _applyBrowserUI(!LocalControlShellState.browserEnabled);
-  }
-  if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
-  if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-  _lcSetSwitch('lcBrowserSwitch', LocalControlShellState.browserEnabled,
-    _lcReach.browser !== false);
-  _lcUpdateBadge();
-}
 
 function toggleDesktopFromLocalModal() {
   var sw = document.getElementById('lcDesktopSwitch');

@@ -257,7 +257,7 @@ def test_compact_receipt_size_independent_of_prompt_and_timing_payload():
 
 
 def test_finalizer_preserves_snapshots_and_price_failures_do_not_lose_usage(monkeypatch):
-    from lib.tasks_pkg.orchestrator._finalize import _stamp_child_round_costs
+    from lib.tasks_pkg.round_costs import stamp_round_costs
     import lib.cost as costs
     frozen = {'costUsd': 9, 'pricingSource': 'historical-snapshot'}
     rows = [{'usage': {'prompt_tokens': 1}, 'cost': frozen},
@@ -272,10 +272,35 @@ def test_finalizer_preserves_snapshots_and_price_failures_do_not_lose_usage(monk
         raise RuntimeError('price unavailable')
 
     monkeypatch.setattr(costs, 'compute_cost', unavailable)
-    _stamp_child_round_costs({}, rows, model='m')
+    stamp_round_costs({}, rows, model='m')
     assert rows[0]['cost'] is frozen
     assert len(calls) == 1 and rows[1]['usage'] == {'prompt_tokens': 2}
     assert 'cost' not in rows[1]
+
+
+def test_native_unpriced_rounds_never_consult_current_python_prices(monkeypatch):
+    """A frozen native quote can be absent; absence is not repricing authority."""
+    from lib.tasks_pkg.round_costs import stamp_round_costs
+    import lib.cost as costs
+
+    rows = [
+        {'usage': {'prompt_tokens': 2}, 'cost': None},
+        {'usage': {'prompt_tokens': 3}},
+        {'usage': {'prompt_tokens': 4}, 'cost': {}},
+    ]
+    before = deepcopy(rows)
+    priced = []
+
+    def current_price(usage, **route):
+        priced.append((usage, route))
+        return {'costUsd': 0.25}
+
+    monkeypatch.setattr(costs, 'compute_cost', current_price)
+    stamp_round_costs(
+        {'_nativeFrozenCostProjection': True}, rows, model='native-model')
+
+    assert priced == []
+    assert rows == before
 
 
 def test_no_implicit_currency_conversion_or_missing_amount_zero():
@@ -288,7 +313,7 @@ def test_no_implicit_currency_conversion_or_missing_amount_zero():
 
 
 def test_finalizer_uses_request_provider_not_terminal_task_provider(monkeypatch):
-    from lib.tasks_pkg.orchestrator._finalize import _stamp_child_round_costs
+    from lib.tasks_pkg.round_costs import stamp_round_costs
     import lib.cost as costs
     observed = []
 
@@ -300,7 +325,7 @@ def test_finalizer_uses_request_provider_not_terminal_task_provider(monkeypatch)
     rows = [{'usage': {'prompt_tokens': 0, 'completion_tokens': 0,
                        '_dispatch': {'model': 'request-model', 'provider_id': 'request-provider'}}},
             {'model': 'unscoped', 'usage': {'prompt_tokens': 1}}]
-    _stamp_child_round_costs({'provider_id': 'terminal-provider'}, rows, model='terminal-model')
+    stamp_round_costs({'provider_id': 'terminal-provider'}, rows, model='terminal-model')
     assert observed == [('request-model', 'request-provider'), ('unscoped', None)]
     assert rows[0]['cost']['costUsd'] == 0
 
@@ -318,3 +343,23 @@ def test_verifier_replay_uses_canonical_not_rendered_content():
     changed['status'] = 'failed'
     with pytest.raises(FlowEventDeliveryError, match='Conflicting'):
         adapter.on_event(changed)
+
+
+def test_round_cost_projection_keeps_one_hour_cache_write_evidence():
+    """A stamped round cost stays recomputable after projection."""
+    from lib.cost import compute_cost
+    usage = {'input_tokens': 1_000, 'output_tokens': 200, 'cache_creation_input_tokens': 4_000,
+             'cache_creation': {'ephemeral_5m_input_tokens': 1_000,
+                                'ephemeral_1h_input_tokens': 3_000}}
+    stamped = compute_cost(usage, 'fixture-model', 'fixture-provider', pricing_override={
+        'input': 3., 'output': 15., 'cacheWrite1hMul': 2., '_pricingSource': 'fixture_snapshot'})
+
+    cost = _receipt(usage=usage, cost=stamped)['apiRounds'][0]['cost']
+
+    rates = cost['pricingSnapshot']['rates']
+    assert (cost['cacheWrite1hTokens'], rates['cacheWrite1hMul']) == (3_000, 2.)
+    five_minute = cost['cacheWriteTokens'] - cost['cacheWrite1hTokens']
+    recomputed = rates['input'] * (five_minute * rates['cacheWriteMul']
+                                   + cost['cacheWrite1hTokens'] * rates['cacheWrite1hMul']) / 1e6
+    assert cost['cacheWriteCostUsd'] == pytest.approx(recomputed)
+    assert recomputed == pytest.approx(.02175), 'the 1h share pays 2x, not the 1.25x write rate'

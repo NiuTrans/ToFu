@@ -1,13 +1,16 @@
 /**
  * Origin and context fold/rail DOM projections. Reads typed metadata and
- * injected safe fragments; no durable state.
+ * injected safe fragments; no durable state. The context facts themselves
+ * are rendered by the single rail owner, ../turn-context-rail.
  * Entry points: renderOriginBlock, renderContextBlock, renderContextRail.
- * Dependencies: conversation-view-model, ports, localized-copy, turn-chrome.
+ * Dependencies: conversation-view-model, ports, localized-copy, turn-chrome,
+ * turn-context-rail.
  */
 import type { ConversationBlockViewModel } from '../../presentation/conversation-view-model';
 import type { ClassicConversationRendererPorts } from './ports';
 import { textFor } from './localized-copy';
 import { initiatorRoleLabel } from './turn-chrome';
+import { renderTurnContextRailHtml } from '../turn-context-rail';
 
 export function renderOriginBlock(
   node: HTMLElement,
@@ -108,201 +111,20 @@ export function renderOriginBlock(
   }
 }
 
-function buildContextNodes(
-  document: Document,
-  block: Extract<ConversationBlockViewModel, { kind: 'context' }>,
+type ContextBlock = Extract<ConversationBlockViewModel, { kind: 'context' }>;
+
+/* The retained host adds catalog-aware services (model names, brand marks,
+ * the live branch) through renderTurnContextParts; without it the same typed
+ * renderer paints every persisted fact with the injected copy. */
+function contextParts(
+  block: ContextBlock,
   ports: ClassicConversationRendererPorts,
-): { fold: HTMLElement; rail: HTMLElement } {
-  const snapshot = block.value.snapshot;
-  const roots = Array.isArray(snapshot.roots) ? snapshot.roots : [];
-  const tools = Array.isArray(snapshot.tools) ? snapshot.tools : [];
-  const modes = Array.isArray(snapshot.modes) ? snapshot.modes : [];
-  const model = typeof snapshot.model === 'string' ? snapshot.model : '';
-  const depth = typeof snapshot.depth === 'string' ? snapshot.depth : '';
-  const git = (snapshot.git && typeof snapshot.git === 'object')
-    ? snapshot.git as Record<string, unknown> : null;
-  const todos = Array.isArray(snapshot.todos) ? snapshot.todos : [];
-  const doneCount = todos.filter((x) => (
-    x && typeof x === 'object' && (x as Record<string, unknown>).status === 'completed'
-  )).length;
-  const bits = [model, depth, ...modes.flatMap((item) => (
-    item && typeof item === 'object' && typeof item.label === 'string'
-      ? [item.label] : []
-  )), tools.length
-    ? textFor(ports, 'turnCtx.toolCount', '{count} tools', { count: tools.length })
-    : '',
-  roots.length
-    ? textFor(ports, 'turnCtx.workspaceCount', '{count} workspaces', { count: roots.length })
-    : '',
-  git && typeof git.branch === 'string' && git.branch ? `⑂ ${git.branch}` : '',
-  todos.length
-    ? textFor(ports, 'turnCtx.todoCount', '{done}/{total} todos', { done: doneCount, total: todos.length })
-    : ''].filter(Boolean);
-  const fold = document.createElement('div');
-  fold.className = 'tctx-fold';
-  const dot = document.createElement('span');
-  dot.className = 'tctx-fold-dot';
-  const foldText = document.createElement('span');
-  const foldLine = bits.join(' · ');
-  foldText.textContent = foldLine;
-  /* The fold truncates with ellipsis on tight panes; the title keeps the
-   * full line one hover away. */
-  fold.title = foldLine;
-  fold.append(dot, foldText);
-  const rail = document.createElement('aside');
-  rail.className = 'turn-ctx';
-  const head = document.createElement('div');
-  head.className = 'tctx-head';
-  for (const value of [model, depth]) {
-    if (!value) continue;
-    const chip = document.createElement('span');
-    chip.className = value === model ? 'tctx-model' : 'tctx-depth';
-    chip.textContent = value;
-    head.appendChild(chip);
-  }
-  for (const mode of modes) {
-    if (!mode || typeof mode !== 'object' || typeof mode.label !== 'string') continue;
-    const chip = document.createElement('span');
-    chip.className = 'tctx-mode-badge';
-    chip.textContent = mode.label;
-    head.appendChild(chip);
-  }
-  if (head.childElementCount) rail.appendChild(head);
-  const appendRows = (
-    labelText: string, values: ReadonlyArray<unknown>, className: string,
-  ): void => {
-    if (!values.length) return;
-    const row = document.createElement('div');
-    row.className = 'tctx-row';
-    const label = document.createElement('span');
-    label.className = 'tctx-row-h';
-    label.textContent = labelText;
-    const valuesNode = document.createElement('div');
-    valuesNode.className = className;
-    for (const value of values) {
-      if (!value || typeof value !== 'object') continue;
-      const record = value as Record<string, unknown>;
-      const item = document.createElement('span');
-      item.className = className === 'tctx-paths' ? 'tctx-path' : 'tctx-chip';
-      item.textContent = String(record.label || record.short || record.path || '');
-      if (record.path) item.title = String(record.path);
-      valuesNode.appendChild(item);
-    }
-    row.append(label, valuesNode);
-    rail.appendChild(row);
-  };
-  appendRows(textFor(ports, 'turnCtx.toolsLabel', 'Tools'), tools, 'tctx-chips');
-  appendRows(textFor(ports, 'turnCtx.workspaceLabel', 'Workspace'), roots, 'tctx-paths');
-  /* Git branch row — one chip per root branch (multi-root workspaces can
-   * straddle repos on different branches; label each chip with its root). */
-  if (git && typeof git.branch === 'string' && git.branch) {
-    const branchRows = Array.isArray(git.branches) && git.branches.length
-      ? git.branches as ReadonlyArray<Record<string, unknown>>
-      : [{ path: '', short: '', branch: git.branch }];
-    const row = document.createElement('div');
-    row.className = 'tctx-row tctx-git-row';
-    /* The live patch path (info-rail.js _patchLiveCtxRails) locates this row
-     * by [data-tctx-git] to rebuild it in place on a mid-turn branch switch.
-     * Without the key it misses a rail rendered through THIS path and
-     * appends a SECOND branch row — the duplicate-branch bug. */
-    row.setAttribute('data-tctx-git', '1');
-    const label = document.createElement('span');
-    label.className = 'tctx-row-h';
-    label.textContent = textFor(ports, 'turnCtx.branchLabel', 'Branch');
-    const chips = document.createElement('div');
-    chips.className = 'tctx-chips';
-    const multi = branchRows.length > 1;
-    for (const entry of branchRows) {
-      const branch = String(entry.branch || '').trim();
-      if (!branch) continue;
-      const chip = document.createElement('span');
-      chip.className = 'tctx-chip tctx-tone-git';
-      chip.textContent = branch;
-      if (entry.path) chip.title = `${entry.path} ← ${branch}`;
-      if (multi && entry.short) {
-        const rootTag = document.createElement('span');
-        rootTag.className = 'tctx-branch-root';
-        rootTag.textContent = String(entry.short);
-        chip.appendChild(rootTag);
-      }
-      chips.appendChild(chip);
-    }
-    if (chips.childElementCount) {
-      row.append(label, chips);
-      rail.appendChild(row);
-    }
-  }
-  /* Checklist row — ONE integrated unit inside the rail: a count chip, the
-   * always-on in-flight line, and the full list behind the same "+N" toggle
-   * the tools and workspace rows use. Mirrors the retained info-rail renderer
-   * so both paint the same structure; the live patch path owns updates. */
-  if (todos.length) {
-    const norm: Array<{ st: string; text: string }> = [];
-    for (const item of todos.slice(0, 24)) {
-      if (!item || typeof item !== 'object') continue;
-      const rec = item as Record<string, unknown>;
-      const st = (rec.status === 'completed' || rec.status === 'in_progress'
-        || rec.status === 'blocked') ? String(rec.status) : 'pending';
-      const text = String(rec.content || '').trim();
-      if (!text) continue;
-      norm.push({ st, text });
-    }
-    if (norm.length) {
-      /* The in-flight line the rail surfaces inline AND keeps in the list —
-       * never buried in the chip's hover title (the "missing in-progress row"). */
-      const current = norm.find((x) => x.st === 'in_progress')
-        || norm.find((x) => x.st !== 'completed')
-        || norm[norm.length - 1];
-      const rest = norm.filter((x) => x !== current);
-      const row = document.createElement('div');
-      row.className = 'tctx-row tctx-todo-row';
-      /* Same live-patch key as the git row — _patchLiveCtxRails rebuilds the
-       * checklist via [data-tctx-todo]; missing it duplicates the row. */
-      row.setAttribute('data-tctx-todo', '1');
-      const wrap = document.createElement('div');
-      wrap.className = 'tctx-todos';
-      /* ONE chip: count + status glyph. The in-flight item renders as a
-       * visible line right after it, matching info-rail byte-for-byte. */
-      const count = document.createElement('span');
-      count.className = 'tctx-chip tctx-tone-todo tctx-todo-count'
-        + (doneCount === norm.length ? ' is-done' : '');
-      count.title = `${textFor(ports, 'turnCtx.todoLabel', 'Todos')} ${doneCount}/${norm.length}`;
-      count.textContent = `${doneCount}/${norm.length}`;
-      wrap.append(count);
-      /* The always-visible in-flight line (the row the old design hid). */
-      const currentLine = document.createElement('span');
-      currentLine.className = `tctx-todo-item tctx-todo-${current.st} tctx-todo-current`;
-      currentLine.title = current.text;
-      const currentMark = document.createElement('span');
-      currentMark.className = 'tctx-todo-mark';
-      const currentBody = document.createElement('span');
-      currentBody.className = 'tctx-todo-text';
-      currentBody.textContent = current.text;
-      currentLine.append(currentMark, currentBody);
-      wrap.append(currentLine);
-      if (rest.length) {
-        /* Full list rendered inline — no "+N" collapse. */
-        const list = document.createElement('span');
-        list.className = 'tctx-todo-list';
-        for (const entry of rest) {
-          const line = document.createElement('div');
-          line.className = `tctx-todo-item tctx-todo-${entry.st}`;
-          const mark = document.createElement('span');
-          mark.className = 'tctx-todo-mark';
-          const body = document.createElement('span');
-          body.className = 'tctx-todo-text';
-          body.textContent = entry.text;
-          body.title = entry.text;
-          line.append(mark, body);
-          list.appendChild(line);
-        }
-        wrap.append(list);
-      }
-      row.append(wrap);
-      rail.appendChild(row);
-    }
-  }
-  return { fold, rail };
+): { fold: string; rail: string } | null {
+  const rendered = ports.renderTurnContextParts?.(block);
+  if (rendered !== undefined) return rendered;
+  return renderTurnContextRailHtml(block.value.snapshot, {
+    text: (key, fallback, values) => textFor(ports, key, fallback, values),
+  });
 }
 
 function trustedPartInnerHtml(
@@ -320,23 +142,17 @@ function trustedPartInnerHtml(
 
 export function renderContextBlock(
   node: HTMLElement,
-  block: Extract<ConversationBlockViewModel, { kind: 'context' }>,
+  block: ContextBlock,
   ports: ClassicConversationRendererPorts,
 ): void {
   node.className = 'conversation-block conversation-block--context';
-  const rendered = ports.renderTurnContextParts?.(block);
-  if (rendered !== undefined) {
-    node.innerHTML = rendered?.fold ?? '';
-    node.hidden = !node.childElementCount && !node.textContent?.trim();
-    return;
-  }
-  node.replaceChildren(buildContextNodes(node.ownerDocument, block, ports).fold);
-  node.hidden = false;
+  node.innerHTML = contextParts(block, ports)?.fold ?? '';
+  node.hidden = !node.childElementCount && !node.textContent?.trim();
 }
 
 export function renderContextRail(
   node: HTMLElement,
-  block: Extract<ConversationBlockViewModel, { kind: 'context' }> | null,
+  block: ContextBlock | null,
   ports: ClassicConversationRendererPorts,
 ): void {
   node.className = 'conversation-turn-context-rail turn-ctx';
@@ -345,14 +161,8 @@ export function renderContextRail(
     node.hidden = true;
     return;
   }
-  const rendered = ports.renderTurnContextParts?.(block);
-  if (rendered !== undefined) {
-    node.innerHTML = trustedPartInnerHtml(
-      node.ownerDocument, rendered?.rail ?? '', 'turn-ctx',
-    );
-  } else {
-    const rail = buildContextNodes(node.ownerDocument, block, ports).rail;
-    while (rail.firstChild) node.appendChild(rail.firstChild);
-  }
+  node.innerHTML = trustedPartInnerHtml(
+    node.ownerDocument, contextParts(block, ports)?.rail ?? '', 'turn-ctx',
+  );
   node.hidden = !node.childElementCount && !node.textContent?.trim();
 }

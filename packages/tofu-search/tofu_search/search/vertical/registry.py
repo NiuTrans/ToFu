@@ -9,23 +9,24 @@ and provides the three public entry points used by the package façade.
 import re
 import time
 from concurrent.futures import as_completed
+from importlib import import_module
 
 from tofu_search._worker_executor import DemandThreadPoolExecutor as ThreadPoolExecutor
 from tofu_search.log import get_logger
-from tofu_search.search.vertical import (
-    arxiv,
-    cve,
-    doi,
-    github,
-    hf_papers,
-    ip,
-    npm,
-    pypi,
-    semantic_scholar,
-    stock,
-    travel_flight,
-    travel_hotel,
-)
+
+# Leaf imports, not via the package: see base.py.
+arxiv = import_module('tofu_search.search.vertical.arxiv')
+cve = import_module('tofu_search.search.vertical.cve')
+doi = import_module('tofu_search.search.vertical.doi')
+github = import_module('tofu_search.search.vertical.github')
+hf_papers = import_module('tofu_search.search.vertical.hf_papers')
+ip = import_module('tofu_search.search.vertical.ip')
+npm = import_module('tofu_search.search.vertical.npm')
+pypi = import_module('tofu_search.search.vertical.pypi')
+semantic_scholar = import_module('tofu_search.search.vertical.semantic_scholar')
+stock = import_module('tofu_search.search.vertical.stock')
+travel_flight = import_module('tofu_search.search.vertical.travel_flight')
+travel_hotel = import_module('tofu_search.search.vertical.travel_hotel')
 
 logger = get_logger(__name__)
 

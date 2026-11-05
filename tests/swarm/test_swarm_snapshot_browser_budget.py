@@ -66,6 +66,144 @@ def test_historical_swarm_timeline_is_bounded_honest_and_non_mutating():
     assert len(orjson.dumps(projected)) < len(orjson.dumps(source)) * 0.20
 
 
+def _wide_snapshot(*, settled: bool, agents: int = 13) -> dict:
+    return {
+        "agents": [{
+            "id": f"agent-{agent}",
+            "status": "done",
+            "preview": f"final answer {agent}",
+            "toolCalls": [{
+                "toolName": "read_files",
+                "callId": f"occurrence-{agent}-{index}",
+                "argsBrief": f"file-{index}.py",
+                "status": "done",
+                "preview": "x" * 1_500,
+                "error": "",
+            } for index in range(30)],
+        } for agent in range(agents)],
+        "settled": settled,
+        "version": (100000 if settled else 0) + agents,
+    }
+
+
+def _timeline_bytes(calls) -> int:
+    return len(json.dumps(calls, ensure_ascii=True, separators=(",", ":")))
+
+
+def test_settled_wide_swarm_shares_one_timeline_budget_across_agents():
+    from lib.swarm.presentation_budget import (
+        SWARM_SETTLED_SNAPSHOT_TIMELINE_JSON_BYTES,
+        SWARM_TOOL_TIMELINE_JSON_BYTES,
+        swarm_snapshot_for_browser,
+    )
+
+    source = _wide_snapshot(settled=True)
+    before = deepcopy(source)
+    projected = swarm_snapshot_for_browser(source)
+
+    assert source == before
+    per_agent = SWARM_SETTLED_SNAPSHOT_TIMELINE_JSON_BYTES // 13
+    timelines = [agent["toolCalls"] for agent in projected["agents"]]
+    assert all(_timeline_bytes(calls) <= per_agent for calls in timelines)
+    assert sum(map(_timeline_bytes, timelines)) <= SWARM_SETTLED_SNAPSHOT_TIMELINE_JSON_BYTES
+    for index, (agent, calls) in enumerate(zip(projected["agents"], timelines)):
+        # Final answers stay complete; recent evidence wins and every elision
+        # is explicit.
+        assert agent["preview"] == before["agents"][index]["preview"]
+        assert calls[-1]["preview"] == "x" * 1_500
+        assert calls[-1]["callId"] == f"occurrence-{index}-29"
+        stripped = [call for call in calls if call["preview"] == ""]
+        assert stripped and all(
+            call["previewTruncated"] is True and call["previewFullChars"] == 1_500
+            for call in stripped
+        )
+        assert len(calls) + agent.get("toolCallsOmitted", 0) == 30
+
+    # A narrow settled swarm keeps the per-agent ceiling, and an unsettled
+    # one can still receive durable progress, so it is never re-budgeted.
+    narrow = swarm_snapshot_for_browser(_wide_snapshot(settled=True, agents=2))
+    unsettled = swarm_snapshot_for_browser(_wide_snapshot(settled=False))
+    for snapshot in (narrow, unsettled):
+        for agent in snapshot["agents"]:
+            assert _timeline_bytes(agent["toolCalls"]) <= SWARM_TOOL_TIMELINE_JSON_BYTES
+            assert _timeline_bytes(agent["toolCalls"]) > per_agent
+
+
+def _oracle_fit(calls, omitted, budget):
+    """The documented elision order, re-encoding the whole list at every step."""
+    for call in calls:
+        for field in ("preview", "error", "argsBrief"):
+            if _timeline_bytes(calls) <= budget:
+                return calls, omitted
+            text = call.get(field)
+            if text:
+                full_key = f"{field}FullChars"
+                call[full_key] = max(call.get(full_key) or 0, len(text))
+                call[f"{field}Truncated"] = True
+                call[field] = ""
+    while calls and _timeline_bytes(calls) > budget:
+        calls.pop(0)
+        omitted += 1
+    return calls, omitted
+
+
+def test_timeline_fitting_matches_the_naive_sequential_oracle(monkeypatch):
+    """Both fitting paths return exactly what re-encoding at every step returns.
+
+    Short arguments make a strip grow the list, so sizes are not monotonic;
+    budgets near the fully stripped size exercise the bulk path's fallback.
+    """
+    import random
+
+    from lib.swarm import presentation_budget as budget_module
+
+    fully_stripped = budget_module._fully_stripped
+    paths = []
+    for name in ("_fully_stripped", "_strip_detail"):
+        original = getattr(budget_module, name)
+
+        def counted(*args, _name=name, _original=original):
+            paths[-1].add(_name)
+            return _original(*args)
+
+        monkeypatch.setattr(budget_module, name, counted)
+    rng = random.Random("swarm-timeline-oracle")
+    texts = ("", "x", "ok", "工具" * 40, "🧪" * 700, "line\n\"q\"\\" * 90, "a" * 2_500)
+    for _ in range(400):
+        rows = []
+        for index in range(rng.randint(0, 30)):
+            source = {
+                "toolName": rng.choice(("read_files", "run_command", "名" * 9)),
+                "argsBrief": rng.choice(texts[:4]),
+                "status": rng.choice(("done", "failed")),
+                "preview": rng.choice(texts),
+                "error": rng.choice(("", "", "boom" * rng.randint(1, 300))),
+                "callId": f"call-{index}",
+            }
+            if rng.random() < 0.3:
+                source["previewFullChars"] = rng.randint(0, 9_000)
+            if rng.random() < 0.3:
+                source["elapsed"] = rng.random() * 100
+            if rng.random() < 0.2:
+                source["inspectorRef"] = {"taskId": "task", "turn": "t", "roundNum": 2}
+            rows.append(budget_module._bounded_browser_tool_call(source))
+        omitted = rng.randint(0, 3)
+        stripped_size = _timeline_bytes(fully_stripped(deepcopy(rows))[0])
+        budget = rng.choice((
+            64, 512, 4_096, 9_000, 32_768,
+            max(2, stripped_size + rng.randint(-120, 120)),
+        ))
+        paths.append(set())
+        expected = _oracle_fit(deepcopy(rows), omitted, budget)
+        assert budget_module._fit_timeline_byte_budget(
+            deepcopy(rows), omitted, budget,
+        ) == expected
+    exercised = {frozenset(path) for path in paths}
+    assert frozenset({"_fully_stripped"}) in exercised
+    assert frozenset({"_fully_stripped", "_strip_detail"}) in exercised
+    assert frozenset({"_strip_detail"}) in exercised
+
+
 def test_current_bounded_swarm_snapshot_keeps_object_identity():
     from lib.swarm.presentation_budget import swarm_snapshot_for_browser
 

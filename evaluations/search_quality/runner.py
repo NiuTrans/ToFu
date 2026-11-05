@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+from importlib import metadata
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,7 @@ from lib.project_mod.process_group import ProcessGroupRetirementError, retire_pr
 from .contracts import (
     ARMS, ARTIFACT_BYTES, CONTRACT, DDGS_VERSION, MAX_CALLS, PAGE_CHARS, QUERY_CHARS, RESULTS,
     SNIPPET_CHARS, SYSTEM, TASK_SECONDS, TOOL_SECONDS, agent_config, canonical, digest, score,
-    URL_CHARS, python_tree_digest, task_prompt, tasks, tool_schemas, url_key,
+    URL_CHARS, observed_sources, python_tree_digest, task_prompt, tasks, tool_schemas, url_key,
 )
 
 
@@ -55,6 +56,8 @@ def manifest(root, model, provider, trials, timeout, *, task_pack=None):
             'model': model, 'provider': provider, 'agent_config': agent_config(),
             'system': SYSTEM, 'tools': tool_schemas(timeout), 'trials': trials,
             'timeout_seconds': timeout, 'infrastructure_retries': 0,
+            'terminal_error_policy': 'budget exhaustion is a failed comparable outcome; other task errors invalidate '
+                                     'comparison; explicit non-retryable account errors stop later dispatch',
             'limits': {'tool_calls': MAX_CALLS, 'tool_seconds': TOOL_SECONDS,
                        'results': RESULTS, 'snippet_chars': SNIPPET_CHARS,
                        'page_chars': PAGE_CHARS, 'query_chars': QUERY_CHARS,
@@ -64,13 +67,21 @@ def manifest(root, model, provider, trials, timeout, *, task_pack=None):
                      'ddgs': {'version': DDGS_VERSION, 'backend': 'auto',
                               'request_timeout': 10, 'region': 'task language',
                               'safesearch': 'moderate'}},
-            'common_fetch': 'current tofu-search, search-discovered URLs only; optional query '
+            'common_fetch': 'current tofu-search, URLs observed in search or successful page links; optional query '
                             'uses the same local passage selector in both arms',
+            'navigation': {'discovery': 'accepted successful search rows and previously observed fetched-page links',
+                           'parser': {'distribution': 'markdown-it-py',
+                                      'version': metadata.version('markdown-it-py')},
+                           'targets': 'absolute CommonMark links/autolinks and complete standalone prose URL lines'},
             'network': 'one explicit proxy; TLS verified; no direct-path racing',
             'order': 'alternate arm order by task and repetition; sequential fresh workers',
             'seed': 20261021,
             'acceptance': 'all exact fact values, declared citation-host policies, observed quotations and '
                           'reference predicates; native task/model/tool provenance required',
+            'quote_policy': {'raw': 'Contiguous delivered Markdown with whitespace/NFKC normalization',
+                             'visible': 'Literal CommonMark inline wording within one block; no paraphrase, '
+                                        'cross-block stitching, image substitution or nested code interpretation',
+                             'reporting': 'raw and rendered matches separate; either establishes quote observation'},
             'limitations': [f'{len(task_pack)} diagnostic tasks; no population or leadership inference.',
                            'Retrieval comparison with common fetch, not two complete search products.',
                            'Reference predicates are not a semantic entailment judge.',
@@ -164,13 +175,10 @@ def execute_tool(workers, arm, task, name, arguments, calls, remaining):
             not isinstance(arguments['query'], str) or len(arguments['query']) > QUERY_CHARS):
         return {'error': 'invalid_arguments'}
     if field == 'url':
-        discovered = {url_key(r.get('url', '')) for call in calls
-                      if call['name'] == 'custom__search' and call.get('accepted')
-                      and not call.get('is_error')
-                      for r in call['output'].get('results', [])}
+        discovered, _ = observed_sources(calls)
         key = url_key(arguments['url'])
         if not key or key not in discovered:
-            return {'error': 'url_not_returned_by_search'}
+            return {'error': 'url_not_observed'}
     if remaining <= 0:
         raise TimeoutError('Task deadline before tool dispatch')
     return workers.call(arm, 'search' if field == 'query' else 'fetch', arguments,
@@ -197,7 +205,7 @@ async def run_one(runtime, workers, task, arm, trial, directory, timeout):
     execution = None
     started = time.monotonic()
     report = {'task': task['id'], 'arm': arm, 'trial': trial, 'status': 'not_admitted',
-              'failure': None, 'cleanup_failure': None, 'calls': calls}
+              'failure': None, 'cleanup_failure': None, 'terminal_error': False, 'calls': calls}
     try:
         execution = runtime.start(
             [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': task_prompt(task)}],
@@ -244,8 +252,11 @@ async def run_one(runtime, workers, task, arm, trial, directory, timeout):
                 report['cleanup_failure'] = execution.cleanup_failure or 'unsettled'
             report['status'] = execution.status
             report['task_id'] = execution.task_id
-            report['task_error'] = {k: v for k, v in (execution.state.get('error') or {}).items()
-                                    if k in {'kind', 'failureStage', 'providerReached', 'authIssue'}}
+            error = execution.state.get('error')
+            report['terminal_error'] = bool(error)
+            report['task_error'] = {k: v for k, v in error.items()
+                                    if k in {'kind', 'failureStage', 'providerReached', 'authIssue',
+                                             'retryable', 'statusCode'}} if isinstance(error, dict) else {}
             report['rounds'] = public_rounds(execution.state)
             report['usage'] = {k: v for k, v in (execution.state.get('usage') or {}).items()
                                if not k.startswith('_')}
@@ -254,15 +265,38 @@ async def run_one(runtime, workers, task, arm, trial, directory, timeout):
         rounds = report.get('rounds', [])
         report['provenance_valid'] = bool(
             report['status'] == 'done' and not report['failure'] and not report['cleanup_failure']
+            and not _invalidates_comparison(report)
             and rounds and all(row['model'] == runtime.model['model_id']
                                and row['provider_id'] == runtime.provider_id for row in rounds)
             and report.get('schema_fingerprints')
             and all(call['accepted'] for call in calls))
         report['score'] = score(task, report.get('content', ''), calls)
-        report['passed'] = report['provenance_valid'] and report['score']['passed']
+        report['passed'] = (report['provenance_valid'] and report['score']['passed']
+                            and not _has_terminal_error(report))
         artifacts.write('events.json', events)
         artifacts.write('record.json', report)
     return report
+
+
+def _has_terminal_error(record):
+    """Honor both the explicit presence flag and retained safe error facts."""
+    return bool(record.get('terminal_error') or record.get('task_error'))
+
+
+def _budget_exhausted(record):
+    """The runtime's declared execution budget is an unsolved task outcome."""
+    return record.get('task_error', {}).get('kind') == 'budget_exceeded'
+
+
+def _invalidates_comparison(record):
+    return _has_terminal_error(record) and not _budget_exhausted(record)
+
+
+def _stops_cohort(record):
+    # Retryability describes the same request, not unrelated later questions.
+    # Only authoritative account failures establish a cross-task blocker here.
+    error = record.get('task_error', {})
+    return error.get('kind') in {'quota', 'permission', 'oauth_reauth'} and error.get('retryable') is False
 
 
 def summarize(records, expected):
@@ -271,16 +305,20 @@ def summarize(records, expected):
     for task_id, trial in sorted(identities):
         rows = [r for r in records if (r['task'], r['trial']) == (task_id, trial)]
         comparable = (len(rows) == 2 and {r['arm'] for r in rows} == set(ARMS)
-                      and all(r['provenance_valid'] for r in rows)
+                      and all(r['provenance_valid'] and not _invalidates_comparison(r) for r in rows)
                       and rows[0]['schema_fingerprints'] == rows[1]['schema_fingerprints'])
         pairs.append({'task': task_id, 'trial': trial, 'comparable': comparable,
-                      'passes': {r['arm']: r['passed'] for r in rows}})
+                      'passes': {r['arm']: r['passed'] and not _has_terminal_error(r) for r in rows}})
     return {'diagnostic_only': True, 'leadership_claim': False,
             'complete': len(records) == expected and len({
                 (r['task'], r['trial'], r['arm']) for r in records}) == expected,
             'pairs': pairs,
-            'arms': {arm: {'attempts': len(rows), 'passes': sum(r['passed'] for r in rows),
-                           'provenance_valid': sum(r['provenance_valid'] for r in rows),
+            'arms': {arm: {'attempts': len(rows),
+                           'passes': sum(r['passed'] and not _has_terminal_error(r) for r in rows),
+                           'provenance_valid': sum(r['provenance_valid'] and not _invalidates_comparison(r)
+                                                   for r in rows),
+                           'terminal_errors': sum(_has_terminal_error(r) for r in rows),
+                           'budget_exhaustions': sum(_budget_exhausted(r) for r in rows),
                            'primary_page_fetched': sum(
                                r.get('score', {}).get('retrieval', {}).get('primary_page_fetched', False)
                                for r in rows),
@@ -309,7 +347,7 @@ async def live(args, root, registration, workers):
                     'proxy_sha256': hashlib.sha256(workers.proxy.encode()).hexdigest(),
                     'capabilities_sha256': digest(api.call('/api/v4/capabilities'))}
     output.write('manifest.json', registration)
-    records = []
+    records, stop_reason = [], None
     try:
         for trial in range(args.trials):
             for index, task in enumerate(registered_tasks):
@@ -321,11 +359,16 @@ async def live(args, root, registration, workers):
                                      ('task', 'arm', 'passed', 'provenance_valid', 'seconds', 'failure')}), flush=True)
                     if runtime.in_flight or record['cleanup_failure']:
                         raise RuntimeError('Owned work not settled; stopping cohort')
+                    if _stops_cohort(record):
+                        stop_reason = {'kind': 'non_retryable_task_error', 'task': record['task'],
+                                       'arm': arm, 'task_error': record['task_error']}
+                        raise RuntimeError('Non-retryable task error; stopping cohort')
     finally:
         try:
             runtime.close()
         finally:
             summary = summarize(records, len(registered_tasks) * 2 * args.trials)
+            summary['stop_reason'] = stop_reason
             summary['source_unchanged'] = source_fingerprint(root) == registration['source_sha256']
             if not summary['source_unchanged']:
                 for pair in summary['pairs']:

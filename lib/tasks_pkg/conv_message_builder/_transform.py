@@ -83,13 +83,16 @@ def _transform_messages(
     # The frontend's buildApiMessages did: conv.messages.slice(0, -1)
     # But here we get the FULL DB state. The frontend pushed the empty assistant msg
     # and then sliced it off. Since the empty assistant is persisted after the task starts,
-    # we should exclude trailing empty assistant messages.
+    # we should exclude trailing empty assistant messages. Native replay
+    # sidecars are meaningful even when there is no visible content or tool.
     if not exclude_last and src:
         last = src[-1]
         if (last.get('role') == 'assistant'
                 and not last.get('content')
                 and not last.get('toolSummary')
-                and not last.get('toolRounds')):
+                and not last.get('toolRounds')
+                and not last.get('_responsesItems')
+                and not last.get('_anthropicContentBlocks')):
             src = src[:-1]
 
     # ── Pre-process: drop duplicate user rows (same logical message) ──
@@ -155,6 +158,13 @@ def _transform_messages(
         # as a defensive guard so old conversations don't replay the report.
         if msg.get('_isAutopilotSummary'):
             continue
+        # Coordinator report Turns (lib.conversations.coordinator_reports) are
+        # human-facing delivery records, not model output: a report_to_user
+        # report reaches the model as the publishing reply's own tool
+        # call/result, and the stall-stop notice was never a model turn.
+        # Replaying them would add a second assistant message after that reply.
+        if str(msg.get('_turnKind') or '').startswith('coordinator_report.'):
+            continue
 
         role = msg.get('role', '')
 
@@ -199,7 +209,12 @@ def _transform_messages(
         elif role == 'assistant':
             # May expand to multiple messages: assistant(tool_calls) +
             # tool(result) per round — see _build_assistant_messages.
-            built_asst = _build_assistant_messages(msg)
+            built_asst = _build_assistant_messages(msg, model=model)
+            if (not built_asst and len(messages) > retained_count
+                    and messages[-1].get('role') == 'user'):
+                # The dropped reply leaves this request adjacent to the next
+                # user message; the wire merge is the designed seam for it.
+                messages[-1]['_replyDropped'] = True
             for _m in built_asst:
                 preserve_source(msg, _m)
                 # Only the settled Turn authority can make old thinking
@@ -545,7 +560,7 @@ def _build_user_message(msg: dict, *, model: str = '',
         return result
 
 
-def _build_assistant_messages(msg: dict) -> list[dict]:
+def _build_assistant_messages(msg: dict, *, model: str = '') -> list[dict]:
     """Build assistant message(s) for the API from a stored conversation row.
 
     Returns a *list* because a single stored assistant message with tool
@@ -572,6 +587,14 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     final_content = raw_content if isinstance(raw_content, str) else ''
     raw_thinking = msg.get('thinking')
     final_thinking = raw_thinking if isinstance(raw_thinking, str) else ''
+    final_reasoning = {}
+    if final_thinking:
+        from lib.model_info import model_requires_reasoning_content_replay
+        if model_requires_reasoning_content_replay(model or msg.get('model') or ''):
+            # Stored `thinking` is the terminal round's projection; tool-round
+            # thinking has its own per-round owner. Keep both when required by
+            # the destination, including a final answer with no tool calls.
+            final_reasoning['reasoning_content'] = final_thinking
     raw_responses_items = msg.get('_responsesItems')
     final_responses_items = (
         [item for item in raw_responses_items if isinstance(item, dict)]
@@ -584,7 +607,7 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     # ── Short-circuit: no tool rounds → single plain assistant message ──
     if not rounds:
         if final_content or final_responses_items or final_anthropic_blocks:
-            built = {'role': 'assistant', 'content': final_content}
+            built = {'role': 'assistant', 'content': final_content, **final_reasoning}
             if final_responses_items:
                 built['_responses_items'] = final_responses_items
             if final_anthropic_blocks:
@@ -601,9 +624,9 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
         # strict providers HARD-400 the whole request on it (Kimi/Moonshot:
         # "the message at position N with role 'assistant' must not be empty"
         # — 3 production convs became unretryable on this 2026-07-25).
-        # Thinking-only rows land here too: stored `thinking` is never
-        # replayed as wire `reasoning_content` for plain turns, so they would
-        # serialize as the same empty ghost. Drop the row — adjacent user
+        # Thinking alone is not evidence of a completed assistant answer.
+        # Without content or native continuation state, keep the existing
+        # failed/empty-row omission. Drop the row — adjacent user
         # neighbours are merged downstream by _merge_consecutive_same_role.
         logger.info('[MsgBuilder] Dropping empty assistant row from wire '
                     '(error=%s thinking=%dchars) — strict providers 400 on it',
@@ -636,7 +659,7 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
     if structured is not None:
         # Append the final assistant text (if any) as a trailing message.
         if final_content:
-            final_msg = {'role': 'assistant', 'content': final_content}
+            final_msg = {'role': 'assistant', 'content': final_content, **final_reasoning}
             if final_responses_items:
                 final_msg['_responses_items'] = final_responses_items
             if final_anthropic_blocks:
@@ -681,4 +704,5 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
             tool_ctx = str(calls)
 
     content = final_content or tool_ctx
-    return [{'role': 'assistant', 'content': content}]
+    return [{'role': 'assistant', 'content': content,
+             **(final_reasoning if final_content else {})}]

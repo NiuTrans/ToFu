@@ -70,11 +70,9 @@ def test_conversation_reading_hierarchy_and_disclosure(frontend_visual_page, tmp
       window.surface=createConversationSurface(document.getElementById('surface'),createClassicConversationRenderers(ports));
       window.render=()=>surface.render(selectConversationViewModel(state));render();
     }""")
-    # Settled reasoning is demand-mounted inside the shared historical process.
-    # Enter it through the same keyboard disclosure that readers use.
-    process = frame.locator('.conversation-history-process > summary')
-    process.focus()
-    process.press('Enter')
+    # Settled reasoning has its own disclosure ahead of the closed tool panel.
+    assert frame.locator('.conversation-tool-panel__toggle').get_attribute('aria-expanded') == 'false'
+    assert frame.locator('[data-block-id="tool"]').count() == 0
     thinking = frame.locator('.thinking-header')
     thinking.focus()
     thinking.press('Enter')

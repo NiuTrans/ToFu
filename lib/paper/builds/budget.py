@@ -42,8 +42,8 @@ def validation_memory_bytes(environment: Mapping[str, str] | None = None) -> int
 
 @dataclass(frozen=True)
 class BuildBudget:
-    workers: int
-    queue_capacity: int  # Legacy configuration, never an admission ceiling.
+    workers: int  # Idle thread reuse only; every admitted build starts.
+    queue_capacity: int  # Always 0: the demand executor has no waiting quota.
     cache_bytes: int
     cache_records: int
 
@@ -52,6 +52,6 @@ def build_budget(environment: Mapping[str, str] | None = None) -> BuildBudget:
     def read(name, maximum):
         return resolve_resource_budget('TOFU_PAPER_BUILD_' + name, environment,
                                        minimum=1, maximum=maximum)
-    return BuildBudget(read('WORKERS', 4), read('QUEUE_CAPACITY', 16),
+    return BuildBudget(read('WORKERS', 4), 0,
                        read('CACHE_MAX_MIB', 2048) * 1024 * 1024,
                        read('CACHE_RECORDS', 128))
