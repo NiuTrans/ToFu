@@ -38,6 +38,9 @@ from tests._registered_chat_task import registered_chat_task
 
 pytestmark = pytest.mark.unit
 
+# Read-coverage fixtures name a synthetic tool-argument path, not a repo file.
+_AUDIT_SYNTHETIC_REPO_PATHS = {'lib/x.py'}
+
 
 def _task(conv='convtest'):
     return {'id': 'abcdef1234567890', 'convId': conv, 'toolRounds': [],
