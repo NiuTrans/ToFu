@@ -65,6 +65,7 @@ def test_official_template_registers_complete_first_party_facts():
     assert reasoning['supported_efforts'] == ['no_think', 'high']
     assert reasoning['default_effort'] == 'high'
     assert reasoning['disabled_effort'] == 'no_think'
+    assert reasoning['preserve_history'] == 'replay'
     assert registration_missing_fields(model) == []
 
 
