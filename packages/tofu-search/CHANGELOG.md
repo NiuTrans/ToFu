@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Overlay/navigation cleanup matches component class names only: the
+  bracketed part of a class token (Tailwind arbitrary values such as
+  `pt-[calc(10rem+var(--banner-height))]`) is a CSS value, not a name. The
+  old match removed Mintlify's whole content wrapper as a "banner", left
+  `<main>` empty and classified server-rendered docs as application shells.
 - A received HTML page that yields no content (application shell, empty
   extract, raw or extracted bot/JS wall) now reads the text representation it
   declares: the first same-origin `<link rel="alternate">` or HTTP `Link`
