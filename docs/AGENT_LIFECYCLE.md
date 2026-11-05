@@ -190,7 +190,10 @@ from a successful process restart.
   earlier run left there. `get_agent_result(swarm_run_id, agent_id|agent_ids)`
   admits only the named run: the live session when it is that run, then that
   run's durable rows, then its record, which must match the caller's owner
-  (record key and value), conversation and tenant.
+  (record key and value), conversation and tenant. Tenants compare through
+  [`tenant_scope`](IDENTITY.md#absent-tenant-scope): rows and records that
+  hold no tenant, or the startup-recovered parent's `None`, stay readable by
+  the same personal owner's registered turns.
 - Alternatives rejected: never deleting the rows (agent IDs collide across
   waves under one key, and restart recovery would resurrect expired
   sessions); re-keying the rows by run (every recovery, status and messaging
@@ -201,7 +204,8 @@ from a successful process restart.
 - Growth and retention: [STORAGE_OPERATIONS.md](STORAGE_OPERATIONS.md#swarm-run-result-retention).
   Tests: `tests/swarm/test_swarm_run_results.py` (TTL eviction, new-wave
   replacement, cross-wave fetch, owner and conversation isolation, retained
-  rows on a failed record).
+  rows on a failed record) and `tests/swarm/test_swarm_absent_tenant_scope.py`
+  (restart recovery and pre-tenant rows for a personal owner).
 
 ### Swarm continuation is result-driven
 

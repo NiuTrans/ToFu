@@ -42,6 +42,17 @@ def require_user_id(value: Any, *, context: str = "operation") -> int:
     return user_id
 
 
+def tenant_scope(tenant_id: str | None) -> str:
+    """Return the comparable tenant scope of a principal or identity carrier.
+
+    ``PrincipalContext`` represents an absent tenant as ``None``; task
+    registration and durable records may carry the same absence as ``""``.
+    Both name one scope. Named tenants are returned unchanged, so they still
+    compare exactly.
+    """
+    return "" if tenant_id is None else tenant_id
+
+
 def _normalized_identifier(value: Any, *, field: str) -> str:
     identifier = str(value or "").strip()
     if not identifier or len(identifier) > 256:
@@ -195,4 +206,5 @@ __all__ = [
     "PrincipalKind",
     "principal_from_auth_context",
     "require_user_id",
+    "tenant_scope",
 ]

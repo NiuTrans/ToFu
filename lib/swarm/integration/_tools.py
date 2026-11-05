@@ -22,6 +22,7 @@ from collections.abc import Callable
 
 from typing import Any
 from lib import agent_inbox
+from lib.identity import tenant_scope
 from lib.log import get_logger
 from lib.swarm.integration._config import (
     AWAIT_AGENTS_HARD_CAP_SEC,
@@ -1047,7 +1048,7 @@ def _session_matches_task(session: MasterOrchestrator, task: dict | None,
     if not conv_id and session.task_id != task_id:
         return False
     tenant_id = task.get('_tenant_id', (task.get('config') or {}).get('_tenant_id'))
-    return session._parent_task_proxy.get('_tenant_id') == tenant_id
+    return tenant_scope(session._parent_task_proxy.get('_tenant_id')) == tenant_scope(tenant_id)
 
 
 # ═══════════════════════════════════════════════════════════

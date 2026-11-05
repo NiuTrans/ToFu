@@ -41,6 +41,34 @@ in each caller permits drift; parsing through a float changes large exact IDs.
 Verify `tests/identity/test_owner_id_boundary.py` and the neighboring request,
 task, credential, repository and native ownership contracts.
 
+### Absent tenant scope
+
+Problem: `PrincipalContext` represents an absent tenant as `None`, while task
+registration stores the same personal scope as `''`. Durable carriers hold
+whichever representation produced them: startup swarm recovery rebuilds its
+parent from the principal (`None`) and records results with it, and swarm rows
+saved before task birth carried a tenant have none. Literal comparisons between
+those carriers refused a personal owner's own later turns: compaction summary
+routing, then live result/wait/poll reads of a restart-recovered swarm and
+recovery of its persisted rows and run records.
+
+Decision: `lib.identity.tenant_scope` is the common comparison boundary for
+tenant identity. It maps `None` to `''` and returns every other value
+unchanged, so the two absent representations are one scope while named tenants
+still match exactly. Carrier comparisons (summary routing, the swarm session
+scope check, swarm row and run-record recovery) compare `tenant_scope` values.
+The public `PrincipalContext` representation and persisted values are
+unchanged; no migration is needed.
+
+Alternatives rejected: changing `PrincipalContext` to `''` alters every payload
+and repository that keys on it; rewriting the registry or recovery carriers to
+one representation leaves already-persisted rows and records unreadable;
+dropping the tenant check removes a real isolation fence; stripping or
+case-folding named tenants would widen the fence beyond absence. Verify
+`tests/identity/test_principal_context.py`,
+`tests/swarm/test_swarm_absent_tenant_scope.py` and
+`tests/compaction/test_summary_routing.py`.
+
 ## Request flow
 
 ```text

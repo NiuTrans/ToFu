@@ -2,7 +2,7 @@
 
 import pytest
 
-from lib.identity import PrincipalContext, principal_from_auth_context
+from lib.identity import PrincipalContext, principal_from_auth_context, tenant_scope
 
 
 pytestmark = pytest.mark.unit
@@ -20,6 +20,17 @@ def test_user_principal_round_trip_and_scope_enforcement():
     restored.require_scope('tasks')
     with pytest.raises(PermissionError, match='lacks scope'):
         restored.require_scope('admin')
+
+
+def test_absent_tenant_is_one_scope_and_named_tenants_match_exactly():
+    personal = PrincipalContext.user(subject_id='key-7', owner_user_id=7, tenant_id='')
+    assert personal.tenant_id is None
+    assert PrincipalContext.from_payload(personal.to_payload()).tenant_id is None
+    # Task registration carries the same absence as ''.
+    assert tenant_scope(personal.tenant_id) == tenant_scope('') == ''
+    assert tenant_scope('tenant-a') == 'tenant-a'
+    for other in (None, '', 'tenant-b', 'Tenant-A', ' tenant-a'):
+        assert tenant_scope(other) != tenant_scope('tenant-a')
 
 
 def test_system_principal_is_restricted_and_has_no_implicit_owner():

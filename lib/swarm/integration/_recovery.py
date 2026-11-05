@@ -10,7 +10,7 @@ worker restart occurs on a result read.
 
 from __future__ import annotations
 
-from lib.identity import require_user_id
+from lib.identity import require_user_id, tenant_scope
 from lib.log import get_logger
 from lib.swarm.integration._config import swarm_key_for
 from lib.swarm.integration._logs import _read_agent_log
@@ -69,7 +69,7 @@ def recover_agent_result(agent_id: str, *, task_id: str,
         parent_cfg = config.get('parent_cfg') or {}
         tenant_id = task.get('_tenant_id', (task.get('config') or {}).get('_tenant_id'))
         if not isinstance(parent_cfg, dict) or (
-                parent_cfg.get('_tenant_id') != tenant_id):
+                tenant_scope(parent_cfg.get('_tenant_id')) != tenant_scope(tenant_id)):
             return None
         if swarm_run_id and row.get('task_id') != swarm_run_id:
             row = None  # The conversation's current rows belong to another run.
@@ -156,7 +156,7 @@ def recover_run_result(agent_id: str, *, swarm_run_id: str, task_id: str,
             not conv_id and record.get('swarmKey') != task_id):
         return None
     tenant_id = task.get('_tenant_id', (task.get('config') or {}).get('_tenant_id'))
-    if record.get('tenantId') != tenant_id:
+    if tenant_scope(record.get('tenantId')) != tenant_scope(tenant_id):
         return None
     result = record['result']
     outcome = _checkpoint_outcome({'status': record.get('status'), 'result': result})
