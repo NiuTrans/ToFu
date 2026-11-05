@@ -18,6 +18,7 @@ from lib.tools.execution_timing import timing_phase
 logger = get_logger(__name__)
 
 COORDINATOR_TOOLS = frozenset({
+    'get_conversation_status', 'control_conversation',
     'ask_human', 'todo_write', 'list_conversations', 'get_conversation',
     'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
     'delegate_project_work', 'await_project_workers', 'review_project_work',

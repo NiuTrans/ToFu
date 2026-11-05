@@ -596,6 +596,13 @@ setting (event-driven model turns the owner did not choose).
 
 ## Interfaces
 
+Session execution control uses the common Coordinator tools
+`get_conversation_status` and `control_conversation`. The Global Router can
+operate any conversation of its owner; project Coordinators remain scoped to
+their project. Continue and Stop reuse the browser command service and preserve
+target execution authority. See
+[session execution control](PROJECT_COORDINATION.md#session-execution-control).
+
 - `lib/router/home.py` — `router_home_path(user_id) -> str` creates (idempotently)
   and returns the owner's router home Git repository; `router_home_location`
   and `is_router_home` compute the identity without effects.

@@ -27,6 +27,12 @@ in `lib/integration_control.py`. Read
 
 ## Coordination message owners
 
+`session_control.py` adapts Coordinator session status and Continue/Stop to the
+ordinary conversation command/query owners. Preserve target accepted config,
+exact Attempt identity, dispatch grants and uncertain-ACK replay. Verify the
+session-control suites in `tests/project_mod/` and `tests/conversation/`; policy
+and scope live in `docs/PROJECT_COORDINATION.md#session-execution-control`.
+
 `compaction_policy.py` reads owned coordinator/source protections for the default
 ConversationStore's manual admission and commit recheck. The reusable engine
 uses that store port; policy and verification live in `docs/CONTEXT_COMPACTION.md`.

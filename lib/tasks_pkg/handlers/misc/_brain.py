@@ -53,7 +53,8 @@ def _handle_conv_ref_tool(
 
 
 @tool_registry.tool_set(
-    frozenset({'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
+    frozenset({'get_conversation_status', 'control_conversation',
+               'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
                'update_task_progress', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request', 'request_user_decision',
                'route_to_project', 'get_router_projects', 'router_instruction_create', 'router_instruction_list', 'router_instruction_cancel',
                'watchdog_snapshot', 'watchdog_resolve_signals', 'watchdog_schedule_recheck', 'watchdog_message',
