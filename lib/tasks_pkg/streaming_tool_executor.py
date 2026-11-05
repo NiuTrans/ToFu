@@ -893,9 +893,13 @@ class StreamingToolAccumulator:
                 #   clobber — see lib/project_mod/config.py::set_conv_roots).
                 from lib.tasks_pkg.workspace_delivery import (
                     ensure_execution_roots, execution_root_key, route_project_tool_args)
-                ensure_execution_roots(self._task)
-                _conv_id = execution_root_key(self._task)
-                fn_args = route_project_tool_args(self._task, fn_name, fn_args)
+                # The handler's admission phases, so a slow prefetched call
+                # attributes the same steps as ordinary dispatch.
+                from lib.tools.execution_timing import timing_phase
+                with timing_phase('project_admission'):
+                    ensure_execution_roots(self._task)
+                    _conv_id = execution_root_key(self._task)
+                    fn_args = route_project_tool_args(self._task, fn_name, fn_args)
                 # This pre-exec path bypasses _handle_project_tool (its result
                 #   is served as a prefetch hit), so it acquires the call's
                 #   applicable project rules itself, as the handler does: after
@@ -904,7 +908,8 @@ class StreamingToolAccumulator:
                 #   rather than serve it without its rules.
                 if file_scope is None:
                     from lib.tasks_pkg.project_guidance import check_project_guidance
-                    check_project_guidance(self._task, fn_name, fn_args)
+                    with timing_phase('project_admission'):
+                        check_project_guidance(self._task, fn_name, fn_args)
                 _base = self._project_path or '.'
                 _projection_items = [] if fn_name == 'read_files' else None
 

@@ -24,6 +24,7 @@ from lib.project_mod.config import (
 from lib.project_mod.scanner import (
     _fmt_size,
 )
+from lib.tools.execution_timing import timing_phase
 
 logger = get_logger(__name__)
 
@@ -376,7 +377,8 @@ def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
     result_projection_items = kwargs.get('result_projection_items')
 
     def _rb(bp_arg, rp_arg):
-        return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
+        with timing_phase('path_resolution'):
+            return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
     # Compatibility shim: some models (e.g. DeepSeek) flatten the
     #   "reads" array into top-level {"path": "..."} instead of
@@ -560,7 +562,8 @@ def _exec_inspect_video(fn_args, base_path, conv_id, task_id, kwargs):
 
 def _exec_search_files(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
-        return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
+        with timing_phase('path_resolution'):
+            return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
     task = kwargs.get('task') or {}
     owner_user_id = task.get('_userId') if isinstance(task, dict) else None
@@ -606,7 +609,8 @@ def _exec_search_files(fn_args, base_path, conv_id, task_id, kwargs):
 
 def _exec_find_files(fn_args, base_path, conv_id, task_id, kwargs):
     def _rb(bp_arg, rp_arg):
-        return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
+        with timing_phase('path_resolution'):
+            return _resolve_base(bp_arg, rp_arg, conv_id=conv_id)
 
     # Batch mode: if 'searches' array is present, run all finds
     searches = fn_args.get('searches')

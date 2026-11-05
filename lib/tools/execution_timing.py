@@ -16,7 +16,9 @@ from lib.turn_trace_contract import TOOL_EXECUTION_BUDGETS_MS
 
 logger = get_logger(__name__)
 _current = ContextVar('tool_execution_timing', default=None)
-_MAX_PHASES = 16
+# The owner-defined names one timed call can reach (docs/LOGGING.md); a new
+# anchor reachable from a write call raises it instead of displacing a phase.
+_MAX_PHASES = 18
 
 
 @contextmanager

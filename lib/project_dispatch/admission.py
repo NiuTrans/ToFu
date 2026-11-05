@@ -15,6 +15,7 @@ import time
 from lib.identity import PrincipalContext
 from lib.llm.llm_errors import AbortedError, ToolAdmissionRefused
 from lib.log import get_logger
+from lib.tools.execution_timing import timing_phase
 
 KEY = '_projectDispatchAdmission'
 WORKSPACE_TASK_KEY = '_projectDispatchWorkspaceTaskId'
@@ -149,7 +150,8 @@ def owned_workspace(task, binding=None):
     # physical root; compare it with the captured binding so retargeted aliases
     # cannot adopt another checkout.
     project_root = str(Path(binding['projectPath']).expanduser().resolve())
-    row = find_workspace(project_root, str(task.get('id') or ''), user_id=binding['owner'])
+    with timing_phase('dispatch_authority'):
+        row = find_workspace(project_root, str(task.get('id') or ''), user_id=binding['owner'])
     cfg = task.get('config') or {}
     if (not isinstance(row, dict) or row.get('user_id') != binding['owner']
             or row.get('task_id') != task.get('id') or row.get('project_root') != project_root
@@ -375,9 +377,10 @@ def validated_dispatch(task, *, require_account=True):
         return None
     from lib.tasks_pkg.persistence_wait import wait_for_persistence
     try:
-        return wait_for_persistence(task,
-            lambda: _validated_binding(task, require_account=require_account),
-            label='project dispatch authority', effect_free=True)
+        with timing_phase('dispatch_authority'):
+            return wait_for_persistence(task,
+                lambda: _validated_binding(task, require_account=require_account),
+                label='project dispatch authority', effect_free=True)
     except AbortedError as error:
         stop_on_authority_failure(task, error)
         raise
