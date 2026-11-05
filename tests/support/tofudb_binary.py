@@ -9,7 +9,10 @@ for the whole lifetime: a replaced copy keeps the old inode alive for
 already-running daemons.
 
 Entry point: ensure_engine_binary. Returns None when no binary can be
-resolved; the caller decides skip-vs-fail policy.
+resolved; the caller decides skip-vs-fail policy. A failed source build is
+remembered for the process and raised to every later caller; an interrupted
+build is retried. The build runs outside the calling test's per-test deadline
+(docs/TESTING_STRATEGY.md, "Source-built test engines").
 """
 from __future__ import annotations
 
@@ -29,7 +32,30 @@ _CARGO_CANDIDATES = (
 
 _RESOLVED: Path | None = None
 _RESOLUTION_ATTEMPTED = False
+_FAILURE: str | None = None
 _CARGO_BUILD_TIMEOUT_SECONDS = 1800
+
+
+def _outside_test_deadline(build):
+    """Run ``build`` with the caller's per-test deadline paused.
+
+    pytest-timeout's signal method arms ITIMER_REAL for a test's setup, call
+    and teardown. A cold engine build outlasts that hang guard, erroring the
+    first dependent test and every test queued behind the build lock. The
+    build keeps its own deadline (_CARGO_BUILD_TIMEOUT_SECONDS); the test's
+    remaining time is re-armed afterwards, whatever the outcome.
+    """
+    import signal
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return build()
+    remaining, interval = signal.setitimer(signal.ITIMER_REAL, 0)
+    try:
+        return build()
+    finally:
+        if remaining > 0:
+            signal.setitimer(signal.ITIMER_REAL, remaining, interval)
 
 
 def _digest(path: Path) -> str:
@@ -141,19 +167,27 @@ def ensure_engine_binary(project_root: Path) -> Path | None:
     cargo, falls back to the stable copy (if a previous run produced one) or
     the prebuilt debug engine. Returns None when nothing is executable.
     """
-    global _RESOLVED, _RESOLUTION_ATTEMPTED
+    global _RESOLVED, _RESOLUTION_ATTEMPTED, _FAILURE
+    if _FAILURE is not None:
+        raise RuntimeError(_FAILURE)
     if _RESOLUTION_ATTEMPTED:
         return _RESOLVED
-    _RESOLUTION_ATTEMPTED = True
     override = os.environ.get('TOFUDB_DIFFERENTIAL_BIN', '').strip()
     if override:
+        _RESOLUTION_ATTEMPTED = True
         binary = Path(override)
         _RESOLVED = binary if binary.is_file() and os.access(binary, os.X_OK) else None
         return _RESOLVED
     cargo = next((path for path in _CARGO_CANDIDATES if path.is_file()), None)
     if cargo is not None:
-        _RESOLVED = _cargo_build(project_root, cargo)
+        try:
+            built = _outside_test_deadline(lambda: _cargo_build(project_root, cargo))
+        except RuntimeError as exc:
+            _FAILURE = str(exc)
+            raise
+        _RESOLVED, _RESOLUTION_ATTEMPTED = built, True
         return _RESOLVED
+    _RESOLUTION_ATTEMPTED = True
     for candidate in (
         project_root / 'packages/tofu-db/target-differential/stable/tofu-db',
         project_root / 'packages/tofu-db/target/debug/tofu-db',
