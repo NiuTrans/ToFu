@@ -105,6 +105,10 @@ reject only that call. The root contract lives in PROJECT_COORDINATION.md.
 Authority failures stop the task through `stop_on_authority_failure`, naming
 `dispatch_grant_revoked` or `dispatch_authority_lost`; an earlier Stop keeps its
 cause. Verify `test_project_dispatch_abort_cause.py` and its settlement specs.
+`scope.granted_tools` is the one admitted-name set of `admit_tool`, the tool
+ledger and `_check_record`; never test `profile['tools']` directly in a new gate.
+A swarm child's `RunArtifactTools` port is the only `_tool_env` admission
+accepts, and only while it inherits none (`test_project_dispatch_executor_admission.py`).
 `publication.py` stamps initial origin and guards all existing publication paths;
 `service.publish` pins the checkpoint. `recovery.py` retries existing versioned
 grants at settlement/startup and withdraws authority through real Stop entry points.

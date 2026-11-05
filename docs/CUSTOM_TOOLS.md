@@ -70,10 +70,12 @@ The existing universal try/except safety net then wraps whichever handler was
 found, so a misbehaving custom tool returns an error to the LLM instead of
 aborting the task — identical to built-in tools.
 
-The **swarm inherits this for free**: `SubAgent._dispatch_tool` threads
-`'_tool_env': self.parent_task.get('_tool_env')` onto its `task_proxy`, so a
-spawned sub-agent resolves the same per-request tools (subject to its
-role-scoped schema allow-list).
+The **swarm inherits this for free**: `SubAgent` gives its child a
+`RunArtifactTools` port that serves the run's artifact tools and resolves every
+other name through the parent's `_tool_env`, so a spawned sub-agent resolves
+the same per-request tools (subject to its role-scoped schema allow-list). A
+project-dispatch task refuses every custom environment, including one a
+sub-agent inherits.
 
 ---
 
@@ -259,7 +261,7 @@ POST /api/v4/tasks/{task_id}/tool_result
 | `lib/tools/registry/_build.py` | `ToolSpec('custom', _build_custom, …)` registered last |
 | `lib/tasks_pkg/executor/_execute.py` | per-task resolver consulted before global lookup in `_execute_tool_one` |
 | `lib/tasks_pkg/tool_dispatch/_flags.py` | `_task_partitions(task)` — per-task write/idempotent union |
-| `lib/swarm/agent.py` | thread `_tool_env` onto the sub-agent `task_proxy` |
+| `lib/swarm/agent.py` | `RunArtifactTools`: the run's artifact tools in front of the parent's `_tool_env` |
 | `routes/api_v1/agent_run.py` | parse `tools`, mint env, attach to task, dispose on terminal + every error path |
 | `routes/api_v1/tasks.py` | `POST /api/v4/tasks/{id}/tool_result` callback |
 | `tests/tools/test_custom_tool_isolation.py` | Isolation guards |
