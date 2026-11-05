@@ -7080,5 +7080,7 @@
   "toolHumanGuidance.repliedInChat": "Ответ дан в чате",
   "toolHumanGuidance.replyDrafted": "Ответ добавлен в поле ввода — отправьте, когда будете готовы",
   "toolHumanGuidance.supersededRow": "Без ответа · вы ответили в чате",
-  "toolsInv.tool.update_task_progress": "Обновление списка задач, который пользователь видит над чатом координатора."
+  "toolsInv.tool.update_task_progress": "Обновление списка задач, который пользователь видит над чатом координатора.",
+  "toolsInv.tool.get_conversation_status": "Просмотреть состояние выполнения чата и доступные действия для продолжения.",
+  "toolsInv.tool.control_conversation": "Продолжить, повторить или остановить работу в чате, на управление которым уже выдано разрешение, используя его текущий контекст."
 }
