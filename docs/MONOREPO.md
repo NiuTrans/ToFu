@@ -228,6 +228,19 @@ inheritance. Alternatives rejected: deleting ancestor manifests can affect
 unowned files; rewriting only the staged manifest breaks source attestation.
 Real Cargo workspace-discovery regressions cover clean and legacy cache layouts
 in `tests/server/test_native_engine_root_inputs.py`.
+Problem: Cargo assigns a crate to the nearest ancestor `[workspace]` that does
+not exclude it, so the root manifest claimed third-party crates that uv builds
+from sdists under the launcher cache (`data/mcp-cache/uv/sdists-*`, e.g.
+pydantic-core via maturin); `cargo metadata` refused them and the MCP server
+exited before its handshake. Worktrees under `.tofu/` were captured the same
+way for every crate their own root excludes. Decision: the root workspace
+excludes the runtime trees `data` and `.tofu` (Cargo's exclusion is a path
+prefix). Alternatives rejected: an empty `[workspace]` per sdist would edit
+third-party sources inside a reconstructible cache; moving launcher caches out
+of `data/` would change the writable-cache contract that MCP and commands
+share; per-launcher Cargo environment overrides would leave command builds
+captured. `tests/mcp_protocol/test_mcp_launcher_cargo_workspace.py` runs real
+`cargo metadata` over the actual root manifest for both layouts.
 The runtime foundation is a development artifact; its [guide](../packages/tofu-runtime/README.md)
 names the implemented physical executor and remaining domain integrations.
 

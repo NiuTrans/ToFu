@@ -2,7 +2,9 @@
 resolver = "2"
 members = ["packages/tofu-runtime", "packages/tofu-runtime/vendor/rayon-core"]
 # Existing engines/prototypes retain their independent lock/build authorities.
-exclude = ["packages/vendor/reqwest", "packages/tofu-db", "benchmarks/native_event", "benchmarks/context_compiler/native_json"]
+# Runtime trees are never members: launcher caches build third-party sdists
+# under data/, and .tofu/ holds nested worktrees with their own roots.
+exclude = ["packages/vendor/reqwest", "packages/tofu-db", "benchmarks/native_event", "benchmarks/context_compiler/native_json", "data", ".tofu"]
 
 [workspace.package]
 edition = "2021"
