@@ -17,6 +17,9 @@ def test_execution_timestamp_survives_delayed_storage_and_selective_replay(backe
                        'event_type, event_kind, event_json, created_at_ms, UNIQUE(task_id, sequence))')
     connection.execute('CREATE TABLE storage_event_read_guards(task_id PRIMARY KEY, '
                        'source_id, append_version, prune_version)')
+    # Appends resolve durable-descendant ancestry from task birth records.
+    connection.execute('CREATE TABLE storage_records(namespace, record_key, value_json, '
+                       'version, updated_at_ms, UNIQUE(namespace, record_key))')
     class Session:
         def execute(self, sql, params):
             return connection.execute(sql, params).rowcount

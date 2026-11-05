@@ -139,8 +139,14 @@ def test_complete_root_loop_settles_a_notice_silently_or_recovers_a_human_answer
         loop_exit_reason=state.exit_reason, abort_detected_phase=state.abort_phase)
     assert task['status'] == 'done' and task['content'] == expected_content
     assert task.get('_silentTurn', False) is (initiator == 'channel')
-    assert any(note['kind'] == 'deliberate-silence'
-               for note in task.get('_injected_notes', [])) is (initiator == 'channel')
+    # After the terminal ACK the committed Turn owns accepted notes; the live
+    # task's duplicate note list is released (docs/TASK_EVENT_DELIVERY.md).
+    from lib.turn_lifecycle import get_turn
+    segments = get_turn(binding['conversationId'], pair['turn']['turnId'],
+                        user_id=1)['projection'].get('segments') or []
+    assert any(segment.get('type') == 'system_note'
+               and segment.get('noteKind') == 'deliberate-silence'
+               for segment in segments) is (initiator == 'channel')
     assert len(calls) == expected_calls
 
 
