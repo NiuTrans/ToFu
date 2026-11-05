@@ -1433,6 +1433,49 @@ ignored by default because it writes more than 1 GiB): 512 full runs, that is
 33,488,896-insert cap, spill into one file and read back exact per shard in
 25.7 s on local disk with a peak RSS of 23.9 MB.
 
+## Staging names the collectors accept (2026-11-05)
+
+Problem. Both loose-block writers (`put_loose`, `write_loose_synced`) stage a
+file as `.new-<uuid>` with the UUID's default, hyphenated spelling, while
+`validate_temporary_block_path` accepted only the 32-digit simple spelling
+that the test fixtures wrote. A staging file left by an interrupted write
+therefore failed `plan_temporary_file` with `temporary block filename is
+malformed`, and since the temporary scan runs right after the mark, every
+online epoch and every offline round failed there. Once marks completed
+again ("Mark spill sized by its inserts" above), the search-index collector
+logged `step=mark_built` and then this error every epoch and never
+`step=epoch_complete`; it was first logged on 2026-11-02 and again after each
+restart (a repeated epoch error logs once per process). At-rest encryption's
+`rename_reencrypt` stages its own `.new-ren-<uuid>` beside the destination,
+a block shard or the payload-segment directory, and neither collector
+accepted that name, so an encrypted store failed the same way after any
+interrupted publication.
+
+Decision. One grammar mints and recognizes staging names:
+`vfs::hyphenated_temporary_name` writes a prefix and the canonical lowercase
+hyphenated UUID, and `vfs::is_hyphenated_temporary_name` accepts exactly
+that. Both loose writers mint through `block::temporary_block_file_name`;
+`at_rest::is_reencrypt_temporary_name` recognizes the at-rest prefix. A block
+shard accepts the writer's name and the at-rest name; the payload-segment
+directory keeps its writer's simple `.new-<uuid>` and also accepts the
+at-rest name. Every other `.new-*` entry, other UUID spellings included,
+still fails closed, and the test fixtures mint through the same function.
+
+Alternatives rejected. Switching the writers to the simple spelling: staging
+files already on disk keep the hyphenated name, so the validator would need
+it anyway. Accepting any UUID spelling: wider than any writer produces.
+Skipping an unrecognized `.new-*` entry: collects around a file of unknown
+origin, which failing closed exists to prevent. Removing the live leftovers
+by hand: repairs one volume and leaves the next interrupted write fatal.
+
+Verification (`block::tests`). `staging_files_left_by_the_loose_writers_are_collected`
+and `staging_files_left_by_the_at_rest_rename_are_collected` fail each
+writer's rename and then its cleanup unlink, so the real staging file stays,
+and require the temporary scan to plan and remove it;
+`malformed_temporary_block_names_fail_closed` covers the near-miss spellings;
+`payload_segment::tests::orphan_plan_treats_at_rest_rename_staging_files_as_temporaries`
+covers the segment directory.
+
 ## Shard-ranged spill reads (2026-10-31)
 
 Problem. `SpillMarkSet::live_for_shard` read and decoded every spill run in

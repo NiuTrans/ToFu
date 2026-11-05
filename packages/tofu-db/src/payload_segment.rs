@@ -1754,7 +1754,11 @@ fn parse_temporary_segment_name(file_name: &str) -> io::Result<bool> {
     let Some(identifier) = file_name.strip_prefix(".new-") else {
         return Ok(false);
     };
-    if parse_simple_uuid(identifier).is_none() {
+    // The segment writer's own staging file, or an at-rest re-encryption
+    // rename's staging file for a segment publication.
+    if parse_simple_uuid(identifier).is_none()
+        && !crate::at_rest::is_reencrypt_temporary_name(file_name)
+    {
         return Err(invalid_data(
             "payload segment temporary filename is malformed",
         ));
@@ -2502,6 +2506,54 @@ mod tests {
         assert_eq!(
             store.plan_orphan_file(&BTreeSet::new(), false).unwrap_err().kind(),
             io::ErrorKind::InvalidData
+        );
+    }
+
+    /// At-rest encryption publishes each segment through a re-encryption
+    /// staging file beside it (`.new-ren-<hyphenated uuid>`). An interrupted
+    /// one is an engine-owned temporary like the segment writer's own; a
+    /// near-miss spelling still fails closed.
+    #[test]
+    fn orphan_plan_treats_at_rest_rename_staging_files_as_temporaries() {
+        let create = |vfs: &DeterministicVfs, path: &Path| {
+            let mut file = vfs
+                .open(
+                    path,
+                    OpenRequest {
+                        write: true,
+                        create_new: true,
+                        ..OpenRequest::default()
+                    },
+                )
+                .unwrap();
+            file.write_all_at(0, b"partial-segment").unwrap();
+        };
+        let identifier = Uuid::from_bytes([4; 16]);
+        let vfs = DeterministicVfs::new(None);
+        let store = simulated_store(&vfs);
+        let staging_name = format!(".new-ren-{}", identifier.hyphenated());
+        create(&vfs, &store.root.join(&staging_name));
+
+        let active = store.plan_orphan_file(&BTreeSet::new(), true).unwrap();
+        assert!(active.candidate.is_none());
+        assert!(active.more_candidates);
+        let candidate = store
+            .plan_orphan_file(&BTreeSet::new(), false)
+            .unwrap()
+            .candidate
+            .unwrap();
+        assert_eq!(candidate.file_name, staging_name);
+        assert_eq!(candidate.segment_id, None);
+        assert_eq!(store.remove_orphan_file(&candidate).unwrap(), 15);
+
+        create(&vfs, &store.root.join(format!(".new-ren-{}", identifier.simple())));
+        let error = store.plan_orphan_file(&BTreeSet::new(), false).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.to_string()),
+            (
+                io::ErrorKind::InvalidData,
+                "payload segment temporary filename is malformed".to_owned()
+            )
         );
     }
 
