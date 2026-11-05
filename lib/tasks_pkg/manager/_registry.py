@@ -292,6 +292,13 @@ def _create_chat_task(
         except BaseException:
             chat_task_runtime.discard(task_id)
             raise
+    if prepared_task_id is not None and not transient:
+        from lib.tasks_pkg.manager._events import seed_reused_identity_event_cursor
+        try:
+            seed_reused_identity_event_cursor(task)
+        except BaseException:
+            chat_task_runtime.discard(task_id)
+            raise
     mark_task(task, execution_profile)
     # Turn-native browser commands carry the same structured model reference
     # as the native API. Bind one owner-scoped v2 candidate group before any

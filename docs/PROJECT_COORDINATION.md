@@ -1561,6 +1561,8 @@ an older assignment without that field inherits its interrupted attempt's actual
 workspace task. Every physical attempt uses that identity, so the existing
 isolated checkout, its uncommitted bytes,
 checkpoint lineage and delivery receipt continue instead of being recreated.
+Its task event stream likewise continues after the predecessor's durable cursor
+([Task event delivery](TASK_EVENT_DELIVERY.md#reused-task-identities-continue-their-durable-stream)).
 A trusted continuation revalidates the live grant, requires an exact settled,
 unreviewed predecessor and its accepted successor, then advances the association
 to that successor. The accepted `_resumeSource` of a restart Continue also restores

@@ -242,6 +242,31 @@ def snapshot_task_text(task):
         )
 
 
+def _durable_next_seq(task_id):
+    """One past the task's highest durable event sequence (0 for an empty stream)."""
+    from lib.storage import get_storage_client
+    row = get_storage_client().query(
+        'event.latest', {'task_id': task_id, 'metadata_only': True})
+    return int(row['sequence']) + 1 if row else 0
+
+
+def seed_reused_identity_event_cursor(task):
+    """Start a carrier whose identity a predecessor may own after its durable rows.
+
+    A resumed project-dispatch Worker keeps its predecessor's workspace task id,
+    whose stream already holds that attempt's sequences; minting from zero is a
+    permanent ``conflicting payload`` refusal. Runs before the carrier can emit.
+    Transient unavailability waits under the task's own controls; a permanent
+    refusal raises to the caller, which settles the attempt start.
+    """
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    seeded = wait_for_persistence(task, lambda: _durable_next_seq(task['id']),
+                                  label='task event cursor', effect_free=True)
+    with task['events_lock']:
+        task['_eventBaseSeq'] = seeded
+        task['_eventNextSeq'] = seeded
+
+
 def _probe_durable_next_seq(task_id):
     """One past the task's highest durable event sequence, or None on failure.
 
@@ -256,10 +281,7 @@ def _probe_durable_next_seq(task_id):
     caller withholds this frame and retries adoption on the next one.
     """
     try:
-        from lib.storage import get_storage_client
-        row = get_storage_client().query(
-            'event.latest', {'task_id': task_id})
-        return int(row['sequence']) + 1 if row else 0
+        return _durable_next_seq(task_id)
     except Exception as e:
         logger.debug('[Manager] durable seq probe failed task=%s: %s',
                      (task_id or '?')[:8], e)
