@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests._jsdom import _SHARED_HARNESS, require_node_modules, ROOT, run_harness
+from tests._paper_vite import compiled_typescript
 from tests._runtime_sections import native_module_path
 
 pytestmark = pytest.mark.unit
@@ -31,8 +32,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 DEVICES_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings/devices.ts'
 SETTINGS_TS = Path(PROJECT_ROOT) / 'frontend/src/features/settings.ts'
 ESBUILD = Path(PROJECT_ROOT) / 'scripts' / 'vite_test_bundle.mjs'
-CORE_PANEL = Path(PROJECT_ROOT) / 'frontend/src/features/settings/core-panel.ts'
-DESKTOP_ENDPOINTS = Path(PROJECT_ROOT) / 'frontend/src/api/endpoint-registry/desktop.ts'
 
 
 def _read(path):
@@ -68,17 +67,90 @@ def test_devices_js_in_bundle_list():
         '原生 settings/devices.ts 未接入 Vite settings 入口')
 
 
+_SCOPED_HOOK_BODY = r"""
+(async () => {
+const { setup } = require(process.env.JSDOM_HARNESS);
+const { check, report } = setup({
+  root: process.argv[3],
+  html: '<!DOCTYPE html><body>' +
+    '<button class="settings-tab" data-tab="general"></button>' +
+    '<button class="settings-tab" data-tab="devices"></button>' +
+    '<div class="settings-tab-panel" id="settingsTab_general"></div>' +
+    '<div class="settings-tab-panel" id="settingsTab_devices"></div></body>',
+  targets: [process.argv[2]],
+  globals: {
+    t: (k) => k, escapeHtml: (s) => String(s),
+    _fitMatrixPanelWidth: () => {},
+    Api: { desktop: { devices: async () => ({ agents: [], tokens: [] }) } },
+  },
+});
+let populated = 0;
+window._populateDevicesTab = global._populateDevicesTab = () => { populated += 1; };
+switchSettingsTab('general');
+for (let _i = 0; _i < 6; _i++) await Promise.resolve();
+check('other_tab_skips_devices_hook', populated === 0);
+check('other_tab_panel_active',
+      document.getElementById('settingsTab_general').classList.contains('active'));
+switchSettingsTab('devices');
+for (let _i = 0; _i < 6; _i++) await Promise.resolve();
+check('devices_tab_runs_hook_once', populated === 1);
+check('devices_panel_active',
+      document.getElementById('settingsTab_devices').classList.contains('active'));
+report();
+process.exit(0);
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
 def test_switch_hook_delegates():
-    src = _read(CORE_PANEL)
-    assert "tabId === 'devices'" in src and 'bridge._populateDevicesTab();' in src, (
-        'core-panel.switchSettingsTab 缺 devices 填充钩子 —— 切到页签白屏')
+    """Only activating the Devices tab runs its populate hook (切到页签不白屏)."""
+    owner = native_module_path(
+        'settings-core-panel-devices.js',
+        ROOT + '/frontend/src/features/settings/core-panel.ts')
+    run_harness(target_js=owner, body_js=_SCOPED_HOOK_BODY, expect_pass=4,
+                label='devices hook scope')
+
+
+_DESKTOP_ENDPOINTS_BODY = r"""
+const fs = require('fs');
+const assert = require('node:assert/strict');
+global.window = globalThis;
+global.location = { pathname: '/' };
+global.document = { getElementById: () => null };
+global.sessionStorage = { getItem: () => null, setItem() {} };
+(new Function(fs.readFileSync(process.argv[1], 'utf8')))();
+const { createEndpointRegistry, apiTransport } = globalThis.desktopRegistryTest;
+const api = createEndpointRegistry(apiTransport, () => 'en');
+const requests = [];
+global.fetch = async (url, options = {}) => {
+  requests.push([String(options.method || 'GET').toUpperCase(),
+                 new URL(String(url), 'http://localhost').pathname]);
+  return new Response(JSON.stringify({ data: { agents: [], tokens: [] }, meta: {} }),
+                      { headers: { 'content-type': 'application/json' } });
+};
+(async () => {
+  await api.desktop.devices();
+  await api.desktop.revokeToken('key/1');
+  assert.deepEqual(requests, [
+    ['GET', '/api/v4/desktop/devices'],
+    ['DELETE', '/api/v4/desktop/token/key%2F1'],
+  ]);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
 
 
 def test_api_domain_keeps_inventory_and_revoke_endpoints():
-    src = _read(DESKTOP_ENDPOINTS)
-    assert "get('/api/v4/desktop/devices'" in src
-    assert '/api/v4/desktop/token/${encodeURIComponent(keyId)}' in src, (
-        'Api.desktop 缺授权撤销端点')
+    """Api.desktop lists devices and revokes one encoded key (授权撤销端点)."""
+    entry = """
+import { createEndpointRegistry } from './index';
+import { apiTransport } from '../transport';
+(window as any).desktopRegistryTest = { createEndpointRegistry, apiTransport };
+"""
+    registry = Path(PROJECT_ROOT) / 'frontend/src/api/endpoint-registry/index.ts'
+    with compiled_typescript(registry, contents=entry) as bundle:
+        proc = subprocess.run(['node', '-e', _DESKTOP_ENDPOINTS_BODY, bundle],
+                              capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_i18n_keys_present_both_langs():

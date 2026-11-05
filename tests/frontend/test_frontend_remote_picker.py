@@ -62,12 +62,10 @@ def test_browse_modal_has_remote_section_container():
 
 
 def test_project_js_has_remote_seams():
+    # The typed controller seam (createConversationProjectController applying
+    # projectConversationWorkspace) is executed, not text-matched, by
+    # test_remote_picker_behaviour_jsdom and its NEUTER below.
     state_src = _read(_PROJECT_STATE_JS)
-    controller = _read(os.path.join(
-        PROJECT_ROOT, 'frontend', 'src', 'conversation', 'application',
-        'conversation-project.ts'))
-    assert 'projectConversationWorkspace' in controller
-    assert 'createConversationProjectController' in controller
     panel_src = _read(_PROJECT_JS)
     assert '_renderRemoteDevicesSection' in panel_src, '缺远程分组渲染函数'
     # 打开弹窗必须触发分组渲染(每次打开都新鲜);分组作为共享浏览器的 prelude 挂入
