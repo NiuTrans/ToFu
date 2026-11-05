@@ -72,20 +72,20 @@ def authority(backend: str, parent: Path | None = None):
             install_runtime_for_test(None)
 
 
-def live_task(name: str) -> dict[str, Any]:
+def live_task(name: str, *, user_id: int = 1) -> dict[str, Any]:
     """A bound, started attempt whose producer caches its committed baseline."""
     from lib import turn_lifecycle
     from lib.identity import PrincipalContext
     created = turn_lifecycle.create_turn_pair(
         f'{name}-conv', command_id=f'{name}-pair', input_projection={'content': 'q'},
-        config={'model': 'bench'}, user_id=1,
+        config={'model': 'bench'}, user_id=user_id,
         conversation_defaults={'allowCreate': True, 'title': name, 'settings': {}})
     attempt_id = created['attempt']['attemptId']
-    turn_lifecycle.bind_task(attempt_id, name, user_id=1)
+    turn_lifecycle.bind_task(attempt_id, name, user_id=user_id)
     task = {
-        '_attemptId': attempt_id, 'id': name, 'status': 'running', '_userId': 1,
+        '_attemptId': attempt_id, 'id': name, 'status': 'running', '_userId': user_id,
         '_principalContext': PrincipalContext.user(
-            subject_id='bench-user:1', owner_user_id=1).to_payload(),
+            subject_id=f'bench-user:{user_id}', owner_user_id=user_id).to_payload(),
         'content': '', 'thinking': '', 'toolRounds': [], 'model': 'bench',
         'config': {'model': 'bench'}, 'convId': f'{name}-conv',
         '_turnId': created['turn']['turnId'],

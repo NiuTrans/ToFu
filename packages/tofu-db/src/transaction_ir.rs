@@ -6085,6 +6085,7 @@ fn prepare_transaction_ir_mode(
         .filter(|step| matches!(step, TransactionIrStep::TurnEventRecord { .. }))
         .nth(1).is_some();
     let mut turn_event_applied = None;
+    let mut adjacent_turn_projection = None;
     // Carried payload after the previous step when it was an applied batched
     // Turn event record, and the most one such record added by itself.
     let mut carried_after_turn_event = None;
@@ -6103,6 +6104,9 @@ fn prepare_transaction_ir_mode(
         }
     };
     for step in steps {
+        if !matches!(step, TransactionIrStep::TurnEventRecord { .. }) {
+            adjacent_turn_projection = None;
+        }
         let carried_after_previous_step = carried_after_turn_event.take();
         match step {
             TransactionIrStep::Queue { request, slot } => {
@@ -7505,7 +7509,12 @@ fn prepare_transaction_ir_mode(
                     None if batched_turn_events => database.carried_payload_bytes(&transaction)?,
                     None => 0,
                 };
-                let response = crate::turn::event_record(database, &mut transaction, request)?;
+                let response = if batched_turn_events {
+                    crate::turn::event_record_adjacent(database, &mut transaction, request,
+                        &mut adjacent_turn_projection)?
+                } else {
+                    crate::turn::event_record(database, &mut transaction, request)?
+                };
                 if batched_turn_events {
                     let applied = serde_json::from_slice::<serde_json::Value>(&response)
                         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
@@ -8766,6 +8775,7 @@ fn prepare_transaction_ir_mode(
             }
         }
     }
+    drop(adjacent_turn_projection);
     drop(_steps_timer);
     let mut response = result_bytes(&ir.result, &mut slots)?;
     // This completion witness alone grants no cache eligibility. The semantic

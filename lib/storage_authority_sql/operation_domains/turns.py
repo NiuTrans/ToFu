@@ -73,7 +73,8 @@ OPERATIONS = {
     'turn.attempt.start': ops.OperationSpec(
         'command', False, ops._turn_attempt_start, ops._turn_change_capture),
     'turn.event.record': ops.OperationSpec(
-        'command', False, ops._turn_event_record, ops._turn_change_capture),
+        'command', False, ops._turn_event_record, ops._turn_change_capture,
+        receipt_when_true='terminal'),
     # K ordinary records in one transaction. Receipt-free like its steps: a
     # repeated committed batch fails each projection CAS, and the producer
     # reconciles unknown outcomes from the exact durable task-event rows.

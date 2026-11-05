@@ -6,6 +6,14 @@ This directory contains retained, executable measurement contracts. Local run
 outputs and candidate result payloads are reconstructible artifacts and remain
 untracked according to `.gitignore`.
 
+`storage_history_cohort.py` continues complete private Turn exports through the
+production capture/FIFO/commit owners on disposable authorities. Frozen inputs,
+all event rows, final projection digests, SIGKILL/reopen and offline integrity
+gate comparisons. Metadata, mixed work and terminal clocks remain separate;
+neither these controlled continuations nor slow-log selections are live-user
+latency distributions. Verify `tests/meta/test_storage_history_cohort.py`;
+method and measurements live in `docs/TASK_EVENT_DELIVERY.md`.
+
 `owned_inventory_reads.py` measures real task-list and project-conversation
 aggregation with synthetic owned runtime/catalog/history read ports. Compare
 alternating fresh `--repository` trees; `--baseline` checks complete response and

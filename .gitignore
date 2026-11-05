@@ -130,6 +130,7 @@ __pycache__/
 !/benchmarks/wire_fingerprint_compare.py
 !/benchmarks/tool_call_identity_compare.py
 !/benchmarks/turn_trace_compare.py
+!/benchmarks/storage_history_cohort.py
 !/benchmarks/compaction_compare.py
 !/benchmarks/round_token_count_cpu.py
 !/benchmarks/tool_result_projection.py

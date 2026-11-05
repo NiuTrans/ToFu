@@ -413,6 +413,31 @@ require a command receipt written in that same transaction.
 - a read-only refusal or empty lease claim is not receipt-cached;
 - maintenance commands use the low-priority writer lane and bounded batches.
 
+`turn.event.record` requires a command receipt when its typed `terminal` field
+is `true`. The operation-domain declaration `receipt_when_true='terminal'`
+projects to `receiptWhenTrue` in the JSON catalog and the native metadata;
+SQL and native execution select the same ordinary atomic receipt boundary.
+Missing, false or non-boolean flags do not select it; receipt selection does
+not coerce input types.
+
+Problem: a terminal commit settles the Attempt. Re-executing after losing its
+ACK previously returned `applied: false`, so a successful completion became a
+stale-attempt failure. Decision: replay the exact committed response for the
+same command identity and canonical payload, including the carried event and
+model-continuation result. A different payload still conflicts; rollback and
+owner fences remain shared with other receipted commands. This covers transport
+retries of the same command, not an unrelated later command with a new identity.
+Alternatives rejected: assuming every settled attempt proves this request
+committed accepts foreign/changed completion evidence; receipting every stream
+frame adds unnecessary retained writes. Nonterminal events and their batches
+retain their current CAS and durable-row reconciliation.
+
+The lost-ACK regression runs through both application authorities; native tests
+also verify reopen, unchanged WAL on replay and changed-payload/owner refusal.
+Retention cost is one ordinary command receipt per accepted terminal intent,
+under the existing receipt lifecycle; see
+[storage operations](STORAGE_OPERATIONS.md#terminal-event-receipts).
+
 Knowledge source/asset files precede metadata publication. `KnowledgePublicationAttempt`
 records storage-client entry monotonically across same-receipt retries; failure afterward
 may follow a commit. Only failure before every entry permits candidate deletion.

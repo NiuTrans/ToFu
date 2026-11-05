@@ -2,6 +2,41 @@
 
 const TURN_EVENT_BATCH_TASK: &str = "batch-task";
 
+#[test]
+fn turn_terminal_retry_replays_the_committed_result_after_lost_ack_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let (attempt_id, turn_id, revision) = turn_event_batch_fixture(&mut database, "terminal-retry");
+    let mut payload = turn_event_batch_entries(&attempt_id, revision, 0).remove(0);
+    payload["terminal"] = json!(true);
+    payload["status"] = json!("completed");
+    payload["task_event"]["event"] = json!({"type":"done", "finishReason":"stop"});
+    let original = request("turn.event.record", 11, payload.clone(), Some("terminal-retry-command"));
+    let committed = execute(&mut database, &original, 3_000).unwrap();
+    assert_eq!(committed["applied"], true);
+    let mut transaction = database.begin(7, 11).unwrap();
+    let key = crate::receipt::command_receipt_entity_key(7, 11, "terminal-retry-command").unwrap();
+    let stored = database.entity_get(&mut transaction, &key).unwrap().unwrap();
+    println!("TERMINAL_RECEIPT response_bytes={} entity_value_bytes={}",
+        serde_json::to_vec(&committed).unwrap().len(), stored.len());
+    drop(transaction);
+    let state = turn_event_batch_state(&mut database, "terminal-retry", &turn_id, &attempt_id);
+    let wal = database.wal_len().unwrap();
+    assert_eq!(execute(&mut database, &original, 4_000).unwrap(), committed,
+        "a lost terminal ACK must replay success instead of rejecting a now-settled attempt");
+    assert_eq!(database.wal_len().unwrap(), wal);
+    drop(database);
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    assert_eq!(execute(&mut database, &original, 5_000).unwrap(), committed);
+    assert_eq!(turn_event_batch_state(&mut database, "terminal-retry", &turn_id, &attempt_id), state);
+    payload["task_event"]["event"]["finishReason"] = json!("different");
+    assert!(execute(&mut database, &request("turn.event.record", 11, payload,
+        Some("terminal-retry-command")), 6_000).is_err());
+    let mut foreign = original.clone();
+    foreign.owner_id = 12;
+    assert_ne!(execute(&mut database, &foreign, 7_000).ok().as_ref(), Some(&committed));
+}
+
 fn turn_event_batch_fixture(database: &mut AuthorityDatabase, conversation: &str) -> (String, String, u64) {
     let turn_id = format!("{conversation}-turn");
     execute(database, &request("conversation.create", 11, json!({

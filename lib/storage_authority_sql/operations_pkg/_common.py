@@ -155,8 +155,20 @@ class OperationSpec:
     # maintenance-style commands may declare a larger watchdog window without
     # weakening every interactive write in the process.
     transaction_timeout_s: float | None = None
+    # Some streaming commands need a durable reply only at settlement. The
+    # declarative flag is also projected into the native operation catalog.
+    receipt_when_true: str | None = None
+
+    def requires_receipt(self, payload: Mapping[str, Any]) -> bool:
+        return self.receipt_required or (
+            self.receipt_when_true is not None
+            and payload.get(self.receipt_when_true) is True)
 
     def __post_init__(self) -> None:
+        if self.receipt_when_true is not None and (
+                self.kind != 'command' or not isinstance(self.receipt_when_true, str)
+                or not self.receipt_when_true):
+            raise ValueError('Conditional receipts require a command and a nonempty payload field')
         if self.transaction_timeout_s is not None and self.kind != "command":
             raise ValueError(
                 "only command operations may override the transaction timeout"
