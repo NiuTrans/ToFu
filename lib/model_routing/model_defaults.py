@@ -3,7 +3,8 @@
 Entry points: apply_model_defaults and official_model_directory. These run at
 catalog/install and authority normalization boundaries. Dispatch consumes the
 normalized owner Model aggregate; there is no request-time name guessing.
-Package data is bounded and cached by file revision, with one cached revision.
+Package data is generated Python source, pinned with the server's schema and
+compiler. One validated snapshot is cached; checkout edits take effect at restart.
 
 Maintained lookups resolve one Creator/Model identity: the exact spelling
 first, else the single entry of the same creator sharing its spelling key —
@@ -22,13 +23,12 @@ import copy
 from dataclasses import dataclass
 from functools import lru_cache
 import json
-from pathlib import Path
 import re
 
 from .domain import ModelRef
+from .generated_inference_defaults import DEFAULTS_JSON
 from .inference import profile_from_metadata, resolve_inference_profile, validate_inference_profile
 
-_PATH = Path(__file__).parents[1] / 'model_info' / 'model_inference_defaults.json'
 _SPELLING_SEPARATORS = re.compile(r'[\s._-]+')
 # Developer facts a respelling borrows from its one catalog entry.
 OFFICIAL_MODEL_FACTS = (
@@ -74,7 +74,7 @@ def unique_spelling_row(index: Mapping, creator_id: str | None, model_id: str) -
 
 @dataclass(frozen=True, slots=True)
 class ModelDefaults:
-    """Validated defaults of one file revision.
+    """Validated defaults of one imported source revision.
 
     ``exact`` maps each declared identity to its (profile, superseded
     profiles); ``spelling`` indexes those identities by spelling identity.
@@ -92,10 +92,10 @@ class ModelDefaults:
 
 
 @lru_cache(maxsize=1)
-def _profiles(mtime_ns: int, size: int) -> ModelDefaults:
-    if size > 262144:
+def _profiles(source: str) -> ModelDefaults:
+    if len(source.encode('utf-8')) > 262144:
         raise ValueError('model inference defaults exceed 256 KiB')
-    data = json.loads(_PATH.read_text(encoding='utf-8'))
+    data = json.loads(source)
     if data.get('contract_version') != 'tofu.model-inference-defaults/v1':
         raise ValueError('invalid model inference defaults version')
     groups = data.get('groups', [])
@@ -124,15 +124,13 @@ def _profiles(mtime_ns: int, size: int) -> ModelDefaults:
 
 
 def current_model_defaults() -> ModelDefaults:
-    """Return the validated defaults for the file revision on disk now.
+    """Return defaults belonging to this process's imported schema/compiler.
 
-    One stat per call. A caller applying defaults to many Models passes this
-    snapshot as ``profiles`` so a whole-aggregate normalization stats once,
-    not once per Model: each stat is a GIL-releasing syscall, and under a busy
-    interpreter every one of them waits a full switch interval to reacquire.
+    The generated source participates in boot import pinning, including when
+    first used after a merge. No filesystem read or stat can pair a changed
+    catalogue with the running process's older inference vocabulary.
     """
-    stat = _PATH.stat()
-    return _profiles(stat.st_mtime_ns, stat.st_size)
+    return _profiles(DEFAULTS_JSON)
 
 
 def has_exact_model_defaults(model: dict) -> bool:

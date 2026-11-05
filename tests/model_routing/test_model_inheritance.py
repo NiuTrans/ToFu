@@ -102,7 +102,7 @@ def test_existing_owner_profile_is_preserved_and_defaults_are_idempotent():
 
 def test_corrected_shipped_profile_replaces_only_exact_previous_defaults():
     from lib.model_routing import model_defaults
-    data = json.loads(model_defaults._PATH.read_text())
+    data = json.loads(model_defaults.DEFAULTS_JSON)
     group = next(g for g in data['groups'] if 'claude-haiku-4.5' in g['model_ids'])
     previous = copy.deepcopy(group['previous_profiles'][0])
     model = {'creator_id': 'anthropic', 'model_id': 'claude-haiku-4.5', 'inference_profile': previous}
@@ -143,11 +143,9 @@ def test_provider_can_narrow_ladder_without_repeating_public_default():
     assert 'default_effort' not in profile['reasoning']
 
 
-def test_catalog_default_input_cannot_exceed_its_memory_budget(monkeypatch, tmp_path):
+def test_catalog_default_input_cannot_exceed_its_memory_budget(monkeypatch):
     from lib.model_routing import model_defaults
-    oversized = tmp_path / 'oversized.json'
-    oversized.write_bytes(b' ' * (262144 + 1))
-    monkeypatch.setattr(model_defaults, '_PATH', oversized)
+    monkeypatch.setattr(model_defaults, 'DEFAULTS_JSON', ' ' * (262144 + 1))
     with pytest.raises(ValueError, match='256 KiB'):
         model_defaults.apply_model_defaults({'creator_id': 'xai', 'model_id': 'grok-4.6'})
 
@@ -270,12 +268,8 @@ def test_world_sync_repairs_existing_identity_and_profile_once(monkeypatch):
     assert again['revision'] == result['revision']
 
 
-def test_normalization_reads_the_defaults_revision_once_per_aggregate(monkeypatch, tmp_path):
-    """One defaults stat per normalization, never one per Model row.
-
-    Each stat releases the GIL; under a busy interpreter every reacquisition
-    waits a full switch interval, which made routing reads take seconds.
-    """
+def test_normalization_reuses_the_imported_defaults_snapshot(monkeypatch):
+    """Every Model in an aggregate shares one already validated snapshot."""
     from lib.model_routing import model_defaults
 
     doc = pending_document()
@@ -284,32 +278,23 @@ def test_normalization_reads_the_defaults_revision_once_per_aggregate(monkeypatc
         doc['models'].append({**copy.deepcopy(grok), 'model_id': f'grok-4.6-lab-{index}',
                               'display_name': f'Lab build {index}'})
 
-    data = json.loads(model_defaults._PATH.read_text())
-    defaults_copy = tmp_path / 'defaults.json'
-    defaults_copy.write_text(json.dumps(data))
-    stats = []
+    snapshot = model_defaults.current_model_defaults()
+    reads = []
 
-    class CountingPath(type(model_defaults._PATH)):
-        def stat(self, *args, **kwargs):
-            stats.append(1)
-            return super().stat(*args, **kwargs)
+    def read_defaults():
+        reads.append(1)
+        return snapshot
 
-    monkeypatch.setattr(model_defaults, '_PATH', CountingPath(defaults_copy))
+    monkeypatch.setattr(model_defaults, 'current_model_defaults', read_defaults)
 
     def grok_profile(normalized):
         return next(row for row in normalized['models']
                     if (row['creator_id'], row['model_id']) == ('xai', 'grok-4.6'))['inference_profile']
 
     normalized = normalize_document(doc)
-    assert len(stats) == 1
+    assert len(reads) == 1
     assert grok_profile(normalized)
-
-    # A changed revision on disk is still observed by the next normalization.
-    group = next(g for g in data['groups']
-                 if g['creator_id'] == 'xai' and 'grok-4.6' in g['model_ids'])
-    group['inference_profile'] = {**group['inference_profile'], 'source': 'official-revised'}
-    defaults_copy.write_text(json.dumps(data, indent=2))
-    assert grok_profile(normalize_document(doc))['source'] == 'official-revised'
+    assert grok_profile(normalize_document(doc)) == grok_profile(normalized)
 
 
 def test_model_defaults_snapshot_matches_per_call_lookup():
