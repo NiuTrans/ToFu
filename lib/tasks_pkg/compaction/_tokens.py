@@ -25,7 +25,6 @@ from lib.tasks_pkg.compaction._constants import (
     _COMPACTION_RESERVE,
     _cooldown_lock,
     _DEFAULT_CONTEXT_LIMIT,
-    _DEFAULT_WORKING_SET_TOKENS,
     _IMAGE_TOKENS_DEFAULT,
     _IMAGE_TOKENS_LOW,
     _OUTPUT_RESERVE,
@@ -37,7 +36,6 @@ from lib.tasks_pkg.compaction._constants import (
 
 logger = get_logger(__name__)
 
-_WORKING_SET_AUDITED: set[int] = set()
 _TASK_TOOL_SCHEMA = object()
 _SETTLED_MESSAGE_ESTIMATE_KEY = ('compaction.message-estimate',)
 
@@ -769,38 +767,9 @@ def build_context_policy() -> dict:
         'output_reserve': _OUTPUT_RESERVE,
         'compaction_reserve': _COMPACTION_RESERVE,
         'summary_trigger_ratio': _SUMMARY_TRIGGER_RATIO,
-        'working_set_tokens': _working_set_token_limit(None),
+        'working_set_tokens': 0,  # Read-only wire compatibility; no economic setting.
         'min_usable_ratio': _MIN_USABLE_RATIO,
     }
-
-
-def _working_set_token_limit(task: dict | None = None) -> int:
-    """Resolve the economic prompt working-set ceiling.
-
-    A per-request ``config.compaction.workingSetTokens`` override wins over
-    ``TOFU_WORKING_CONTEXT_TOKENS``.  Zero disables the economic ceiling.
-    Without an explicit override, only the route's context-window safety
-    threshold can trigger automatic compaction. Pricing does not implicitly
-    authorize an earlier lossy rewrite. Positive values are clamped so a
-    typo cannot cause constant tiny-context compactions or remove all bounds.
-    """
-    import os
-
-    comp_cfg = ((task or {}).get('config', {}) or {}).get('compaction')
-    raw = comp_cfg.get('workingSetTokens') if isinstance(comp_cfg, dict) else None
-    if raw is None and 'TOFU_WORKING_CONTEXT_TOKENS' in os.environ:
-        raw = os.environ.get('TOFU_WORKING_CONTEXT_TOKENS')
-    if raw is None:
-        return _DEFAULT_WORKING_SET_TOKENS
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as e:
-        logger.debug('[Compact] invalid workingSetTokens=%r (%s) — using %d',
-                     raw, e, _DEFAULT_WORKING_SET_TOKENS)
-        value = _DEFAULT_WORKING_SET_TOKENS
-    if value <= 0:
-        return 0
-    return max(32_000, min(2_000_000, value))
 
 
 def _record_compaction_cadence(
@@ -908,29 +877,8 @@ def _compaction_trigger_threshold(
         context_limit = _get_context_limit(task)
     usable = _usable_context(context_limit)
     window_threshold = int(usable * _SUMMARY_TRIGGER_RATIO)
-    working_set = _working_set_token_limit(task)
-    effective = (min(window_threshold, working_set)
-                 if working_set > 0 else window_threshold)
-    return effective, window_threshold, working_set
-
-
-def _audit_working_set_once(working_set: int) -> None:
-    """Record each effective working-set tuning value once per process."""
-    if working_set <= 0 or working_set in _WORKING_SET_AUDITED:
-        return
-    _WORKING_SET_AUDITED.add(working_set)
-    try:
-        from lib.log import audit_log
-        audit_log(
-            'config_change',
-            change='economic_context_working_set',
-            working_set_tokens=working_set,
-            previous='context-window-only',
-            reason='bound repeated agent-loop input cost and latency',
-            approved_by='user',
-        )
-    except Exception as e:
-        logger.debug('[Compact] working-set config audit skipped: %s', e)
+    # Preserve the existing budget/receipt tuple; automatic L2 has one trigger.
+    return window_threshold, window_threshold, 0
 
 
 def _should_force_compact(
@@ -943,8 +891,8 @@ def _should_force_compact(
 ) -> bool:
     """Decide whether force-compact should fire.
 
-    Returns True when estimated token count exceeds the lower of the model's
-    context-safety threshold and the economic working-set ceiling.
+    Returns True only when the complete prompt exceeds route-window safety.
+    Positive rewrite ROI is not evidence that now beats delaying the rewrite.
     """
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task)
@@ -962,8 +910,6 @@ def _should_force_compact(
     usable = _usable_context(context_limit)
     trigger_threshold, window_threshold, working_set = (
         _compaction_trigger_threshold(task, context_limit=context_limit))
-    if working_set > 0 and trigger_threshold < window_threshold:
-        _audit_working_set_once(working_set)
 
     calibration_measurement = measurement_out if isinstance(measurement_out, dict) else {}
     total_tokens, method = _count_tokens_authoritative(
@@ -988,74 +934,6 @@ def _should_force_compact(
         except Exception as _cal_exc:
             logger.debug('[Compact] token calibration sample failed: %s',
                          _cal_exc)
-
-    # A proactive candidate that was recently declined as low-yield or
-    # cache-negative records a message-token retry floor. Do not reconsider
-    # the identical hot tail every round; wait for meaningful prompt growth.
-    # Window safety always wins, so a request approaching the actual context
-    # ceiling bypasses this economic hysteresis immediately.
-    retry_after = int((task or {}).get('_autoCompactRetryAfterTokens') or 0)
-    if retry_after > 0 and total_tokens < window_threshold:
-        message_tokens = int(
-            (measurement_out or {}).get('message_tokens') or 0)
-        if message_tokens <= 0:
-            # Compatibility fallback for tests/extensions that replace the
-            # authoritative counter without honoring its optional out-param.
-            message_tokens = _estimate_total_tokens(messages)
-        retry_witness_invalidated = False
-        witness = (task or {}).get('_autoCompactRetryWitness')
-        if (message_tokens < retry_after and isinstance(witness, dict)
-                and witness.get('reason') == 'cache_negative'):
-            try:
-                witnessed_payback_limit = float(
-                    witness.get('paybackLimitRounds')
-                    or _AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
-            except (TypeError, ValueError, OverflowError):
-                witnessed_payback_limit = float(
-                    _AUTO_COMPACT_MIN_PAYBACK_ROUNDS)
-            current_payback_limit = (
-                _observed_compaction_cadence_payback_horizon(
-                    task,
-                    current_round,
-                    remaining_api_rounds=remaining_api_rounds,
-                )
-            )
-            if current_payback_limit > witnessed_payback_limit:
-                retry_witness_invalidated = True
-                logger.debug(
-                    '[Compact] conv=%s payback horizon advanced: %.1f > %.1f; '
-                    'reconsidering before retry token floor',
-                    log_id, current_payback_limit,
-                    witnessed_payback_limit)
-            witnessed_warm_prefix = int(
-                witness.get('warmPrefixTokens') or 0)
-            if (not retry_witness_invalidated
-                    and witnessed_warm_prefix > 0 and conv_id):
-                try:
-                    from lib.tasks_pkg.compaction._cache_evidence import current_warm_prefix_tokens
-                    current_warm_prefix = current_warm_prefix_tokens(task)
-                    retry_witness_invalidated = (
-                        current_warm_prefix < witnessed_warm_prefix)
-                    if retry_witness_invalidated:
-                        logger.debug(
-                            '[Compact] conv=%s cache witness cooled: %d < %d; '
-                            'reconsidering before retry token floor',
-                            log_id, current_warm_prefix,
-                            witnessed_warm_prefix)
-                except Exception as exc:
-                    logger.debug(
-                        '[Compact] conv=%s retry cache witness unavailable: %s',
-                        log_id, exc)
-        if message_tokens < retry_after and not retry_witness_invalidated:
-            logger.debug(
-                '[Compact] conv=%s proactive retry deferred: messages=%d '
-                '< retry_after=%d (authoritative=%d, window=%d)',
-                log_id, message_tokens, retry_after, total_tokens,
-                window_threshold)
-            return False
-        if task is not None:
-            task.pop('_autoCompactRetryAfterTokens', None)
-            task.pop('_autoCompactRetryWitness', None)
 
     logger.debug('[Compact] conv=%s  tokens=%d (via %s)  threshold=%d  '
                  'window_threshold=%d working_set=%d limit=%d usable=%d',

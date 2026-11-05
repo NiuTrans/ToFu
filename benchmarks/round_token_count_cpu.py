@@ -16,8 +16,8 @@ through every production stage of a model round that counts the request:
 ``counting`` is the calling-thread CPU spent inside the token-counting entry
 points those stages call (outermost call only, nested counts are not added
 twice). ``tokenizedTexts``/``entropyScans`` count texts handed to the tokenizer
-and to the entropy estimator per round. The economic working set is disabled so
-no summary compaction runs; ``--no-l1`` also disables default L1 compaction so
+and to the entropy estimator per round. The default fixtures stay below the
+shared window-safety trigger; ``--no-l1`` also disables default L1 compaction so
 the counted request keeps the history's size (L1 otherwise shrinks cold tool
 results and old reasoning every round). Storage, providers and the serving
 thread mix are excluded.
@@ -238,7 +238,7 @@ def _slot(model: str, protocol: str, window: int) -> SimpleNamespace:
 def _task(task_id: str, model: str, *, l1: bool) -> dict:
     return {'id': task_id, 'convId': '', '_userId': 1,
             'config': {'model': model, 'compaction': {
-                'workingSetTokens': 0, 'disableDefaultL1': not l1}},
+                'disableDefaultL1': not l1}},
             'abort_event': threading.Event(), 'aborted': False}
 
 

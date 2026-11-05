@@ -173,25 +173,22 @@ are retained when replay-safe. Unknown event/item types are logged instead of
 being silently discarded. Multi-agent mode omits explicit server compaction,
 which the beta API does not support.
 
-## Server compaction and local fallback
+## Shared local compaction and provider replay
 
-For a public GPT-5.6 `responses_profile=openai` route, the economic working-set
-threshold is emitted as Responses `context_management` and server compaction is
-the primary L2 mechanism. This is the only layer that can trigger from the
-provider's complete rendered token count, including opaque persisted reasoning.
-Returned compaction items are stored and replayed; history before the newest
-item is omitted while current developer instructions remain.
+Application requests use the shared local compactor on public and subscription
+Responses routes. Provider capability does not enable a second automatic L2
+policy or an economic `context_management` threshold. Automatic semantic
+compaction follows route-window safety with output/recovery reserves; retired
+fixed working-set settings cannot move it earlier. The timing authority is
+[context budgets](../CONTEXT_BUDGET_POLICY.md).
 
-Local L1 continues every round. Local L2, manual `/compact`, pre-compaction
-archives and the reactive prompt-too-long path are not removed: automatic local
-L2 simply waits for the hard model-window threshold while a verified native
-route owns the 128K economic trigger. A mixed/unknown provider pool stays local.
-Native Multi-agent rounds also stay local because that beta rejects explicit
-server compaction.
+Local L1, manual `/compact`, pre-compaction archives and reactive prompt-too-long
+recovery retain their existing owners. Historical provider compaction items
+remain replayable; history before the newest item is omitted while current
+developer instructions remain.
 
-The Codex subscription profile never receives public `context_management`.
-Its local L2 remains primary. For both public and subscription Responses,
-provider `reasoning_tokens` are carried once into the next local count only when
+For both public and subscription Responses, provider `reasoning_tokens` are
+carried once into the next local count only when
 the returned encrypted reasoning item is actually replayed; the small displayed
 reasoning summary is not treated as the complete hidden reasoning state.
 

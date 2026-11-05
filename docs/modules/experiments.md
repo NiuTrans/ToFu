@@ -27,6 +27,13 @@ authored definition
   -> decision (promotion defaults to deny)
 ```
 
+The maintained context-cost plugin v2 compares inline versus on-demand MCP
+exposure under one shared route-window compaction policy. It no longer injects
+fixed working-set thresholds. Existing persisted specs retain their immutable
+version and digest; the adapter's existing drift check requires a new experiment
+ID rather than relabeling historical fixed-target results. The offline context
+benchmark also rejects retired working-set arms and cannot promote their knobs.
+
 ## Boundaries
 
 | Owner | Owns | Must not own |

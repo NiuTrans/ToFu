@@ -99,10 +99,10 @@ def test_force_compact_triggers_on_calibrated_count(monkeypatch):
         token_counter, 'count_tokens',
         lambda *a, **k: {'tokens': 100_000, 'method': 'tiktoken'})
     monkeypatch.setattr(token_mod, '_estimate_total_tokens', lambda _m: 10)
-    monkeypatch.setattr(token_mod, '_get_context_limit', lambda _t: 1_000_000)
+    monkeypatch.setattr(token_mod, '_get_context_limit', lambda _t: 200_000)
 
     base_task = {
-        'config': {'model': 'm1', 'compaction': {'workingSetTokens': 128_000}},
+        'config': {'model': 'm1'},
         'convId': 'cal-trigger',
     }
     messages = [{'role': 'user', 'content': 'hello'}]
