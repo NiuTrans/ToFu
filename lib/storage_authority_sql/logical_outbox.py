@@ -154,6 +154,11 @@ class LogicalMutationRecordingSession:
         return self._session.worker_lease_clock
 
     @property
+    def worker_hints(self):
+        # Staged on the adapter's own session, which publishes them at COMMIT.
+        return self._session.worker_hints
+
+    @property
     def turn_projection_cache(self):
         return self._session.turn_projection_cache
 
