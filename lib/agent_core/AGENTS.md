@@ -78,6 +78,8 @@ changes.
 `ExecutionBudget.restore_model_account` restores model totals/attempt ordinals
 into pristine accounts once; it grants no execution authority. Verify
 `test_model_account_restore.py` before changing recovered admission semantics.
+`restore_tool_account` likewise continues tool occurrence/reservation ordinals of
+observed uncapped accounts once, restoring no slots; verify `test_tool_account_restore.py`.
 `budget_snapshot.py` validates cumulative Flow receipt observations;
 `account_frontier.py` freezes whole budget cuts at effect/membership boundaries;
 its packaged schema derives from `gen_execution_account_frontier.py`. Verify

@@ -1560,9 +1560,27 @@ isolated checkout, its uncommitted bytes,
 checkpoint lineage and delivery receipt continue instead of being recreated.
 A trusted continuation revalidates the live grant, requires an exact settled,
 unreviewed predecessor and its accepted successor, then advances the association
-to that successor. The accepted `_resumeSource` also restores the assignment's
-conserved model account: its last ordinal, cumulative usage and original nonce
-continue once, never restart at one or fabricate another occurrence account.
+to that successor. The accepted `_resumeSource` of a restart Continue also restores
+the assignment's conserved model and tool accounts: the last model ordinal,
+cumulative usage and original nonce, the last tool-occurrence ordinal and the
+shared-request tool-reservation counter continue once, never restart at one or
+fabricate another occurrence account.
+Problem: `bind_account` proposed a zero reservation counter for every generation
+and refused any stored counter that differed, so every restarted Worker that had
+reserved a tool failed to start (`Worker tool reservations cannot be
+replenished`); with only that changed, its first tool still collided with stored
+tool-occurrence ordinal one. Decision: a validated
+restart Continue whose stored counter names the same root task and nonce keeps
+that counter, and `ExecutionBudget.restore_tool_account` continues both tool
+sequences without restoring spent slots (a finite tool cap refuses, as for the
+model account). A fresh start, another root or nonce, or a predecessor that is
+not `interrupted` still refuses. Alternatives rejected: resetting the counter
+erases the request's recorded tool usage and is the replenishment the fence
+exists to stop; a fresh nonce per generation forks the one durable account; and
+accepting reservation ordinals beyond `count + 1` would hide lost or forged
+reservations. Specs: `tests/project_mod/test_coordinator_request_budget.py::test_restart_resumed_worker_continues_its_tool_reservation_counter`,
+`::test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter`
+and `tests/agent_core/test_tool_account_restore.py`.
 A background-command completion for an eligible unfinished execution uses this
 same Continue path; its receipts stay durable and are replayed into the resumed
 Worker turn. The
