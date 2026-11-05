@@ -496,7 +496,7 @@ class DxAdapter:
             self._threads.append(thread)
 
     def alive(self) -> bool:
-        return self._bridge is not None and self._bridge.alive()
+        return not self._stopping.is_set() and self._bridge is not None and self._bridge.alive()
 
     def outcome(self) -> tuple[str, str]:
         """``(state, detail)`` after the bridge exited (supervisor restart policy)."""
@@ -511,14 +511,19 @@ class DxAdapter:
 
     def stop(self, timeout: float) -> bool:
         self._stopping.set()
+        self._connected.clear()
         from lib.channels import outbox
         outbox.register_executor(self.owner, None, channel='dx')
         self.wake_executor()
+        if self._bridge is not None:
+            self._bridge.events.put(None)
         stopped = self._bridge.close(timeout) if self._bridge else True
         for thread in self._threads:
             thread.join(timeout)
+        if not stopped or any(thread.is_alive() for thread in self._threads):
+            return False
         self.checkpoint()
-        return stopped and not any(thread.is_alive() for thread in self._threads)
+        return True
 
     def tick(self) -> None:
         """Called from the supervisor's existing maintenance tick."""
@@ -547,9 +552,9 @@ class DxAdapter:
         from lib.channels.ingress import ingest
         bridge = self._bridge
         try:
-            while True:
+            while not self._stopping.is_set():
                 item = bridge.events.get()
-                if item is None:
+                if item is None or self._stopping.is_set():
                     return
                 kind = item.get('type')
                 if kind == 'status':
@@ -567,9 +572,15 @@ class DxAdapter:
             code = getattr(error, 'code', type(error).__name__)
             logger.warning('[Channels] dx session failed owner=%s: %s', self.owner, code, exc_info=True)
             self._failure = f'ingest failed: {code}'
-            self.store.set_status('dx', 'error', self._failure)
-            # Halting before the watermark moves makes the next session replay the gap.
-            bridge.terminate()
+            self._connected.clear()
+            try:
+                self.store.set_status('dx', 'error', self._failure)
+            except Exception:
+                # Diagnostics may depend on the storage operation that just failed.
+                logger.warning('[Channels] dx failure status unavailable owner=%s', self.owner, exc_info=True)
+            finally:
+                # Halt even when status persistence fails; replay resumes at the watermark.
+                bridge.terminate()
 
     def _on_status(self, item: dict[str, Any]) -> None:
         status = item.get('status')

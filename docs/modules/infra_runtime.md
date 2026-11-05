@@ -42,6 +42,14 @@ that owner. Catalog and plugin startup share the same readiness scheduling
 boundary; inline embedder behavior and shutdown-before-ready suppression are
 preserved. Plugin entry-point groups remain unchanged.
 
+The 大象 supervisor's lifecycle is opened before the scheduled-jobs worker
+starts. After that worker stops, channel shutdown fences new sessions and joins
+identity/configuration threads as well as adapters; incomplete joins retain the
+background-service latch and prevent storage release. A reused application opens
+the supervisor again only after the previous lifecycle joined. See
+[Channels C6](../CHANNELS.md#c6-大象-adapter) and
+`tests/channels/test_dx_shutdown.py`.
+
 HTTP-approved restarts and the idle auto-restart watcher call the same
 `server_reexec.perform_server_reexec()` service. HTTP authorization, cooldown
 and response flushing remain in the request boundary; frontend preparation,

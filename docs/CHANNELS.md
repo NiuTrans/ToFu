@@ -278,6 +278,30 @@ independent async queue (reorders replies and can retry different bytes).
   Each tick of this and of the GitHub supervisor (C8) also reports an
   unhealthy enabled account to the Router Watchdog: one fault signal per state
   since the last connection ([ROUTER.md](ROUTER.md) R7).
+- **Shutdown:** the process lifecycle opens the supervisor before starting the
+  scheduler and stops it after the scheduler joins. Stop closes admission for
+  ticks, configuration notifications and identity completions before joining
+  adapters and all supervisor-owned threads. A timed-out or failed stop keeps
+  ownership for the next stop attempt; a replacement session and a new hosting
+  lifecycle cannot start before that ownership is released. Production shutdown
+  keeps storage live while this join is incomplete. Pending identity probes keep
+  their existing provider deadline; their late result cannot write account state
+  or start a session after Stop. Ingress wakes immediately on Stop and leaves
+  queued events for catch-up from the committed watermarks. An in-flight ingest
+  or outbox operation must finish before the final frontier checkpoint and a
+  successful stop receipt.
+
+  **Problem:** clearing the adapter registry before joining lost cleanup debt,
+  and untracked identity/configuration callbacks could start a new bridge after
+  shutdown had passed the channel owner. Ingest failure diagnostics then tried
+  the same unavailable storage and skipped bridge termination. **Decision:**
+  retain physical worker ownership, fence new work under the supervisor lock,
+  and always terminate a failed ingest bridge even if its error status cannot
+  be persisted. The original failure remains available through `outcome()` and
+  logs; no failed event advances its watermark. **Alternatives rejected:**
+  swallowing storage errors alone leaves the producer alive; draining the queue
+  after Stop prolongs shutdown unnecessarily; forgetting a timed-out join falsely
+  permits storage release. No retry timer or capacity limit is added.
 - **Identity:** the supervisor confirms it with `whoami` logged in as the login
   MIS before a session starts; an event whose sender equals that uid is
   owner-authored. The account reports `authorizing` while the adapter says the
