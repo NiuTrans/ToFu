@@ -1,4 +1,4 @@
-"""Active text pages and reconnect frames survive the public backup/restore CLI.
+"""Active pages and terminal histories survive the public backup/restore CLI.
 
 Entry point: pytest with TOFUDB_BIN pointing at the matched native artifact.
 Dependencies: disposable benchmark daemon and the production Turn facade.
@@ -84,6 +84,65 @@ def test_active_text_backup_restores_replay_and_remains_appendable(tmp_path, mon
             task.update(status='done', finishReason='stop')
             assert turns.record_task_event(task, {'type': 'done', 'finishReason': 'stop'})
             assert turns.get_turn(conv, turn, user_id=_OWNER_ID)['projection']['content'] == task['content']
+    finally:
+        if restored_engine is not None:
+            restored_engine.stop()
+        if engine._process is not None and engine._process.poll() is None:
+            engine.stop()
+        for directory in directories:
+            shutil.rmtree(directory)
+
+
+def test_terminal_structural_history_survives_backup_and_restore(tmp_path):
+    configured = os.environ.get('TOFUDB_BIN')
+    if not configured:
+        pytest.skip('Set TOFUDB_BIN to the matched native artifact for backup verification')
+    binary = Path(configured).resolve()
+    engine = TofuDbEngine(binary, authority_dir_parent=tmp_path)
+    restored_engine = None
+    engine.start()
+    directories = list(engine._dirs)
+    conversation = 'terminal-backup-' + uuid.uuid4().hex
+    task_id = conversation + '-task'
+    try:
+        with patch('lib.storage.get_storage_client', lambda **kwargs: engine._client):
+            pair = turns.create_turn_pair(
+                conversation, command_id=conversation, user_id=_OWNER_ID,
+                input_projection={'content': 'backup'}, config={},
+                conversation_defaults={'allowCreate': True, 'settings': {}})
+            attempt, turn = pair['attempt']['attemptId'], pair['turn']['turnId']
+            turns.bind_task(attempt, task_id, user_id=_OWNER_ID)
+            task = {'id': task_id, 'convId': conversation, '_attemptId': attempt,
+                    '_userId': _OWNER_ID, 'status': 'running', 'content': '汉😀x' * 65536,
+                    'thinking': '', 'segments': [], 'toolRounds': [], 'config': {}}
+            assert turns.record_task_event(task, {'type': 'phase', 'phase': 'persisting'})
+            task.update(status='done', finishReason='stop')
+            terminal = {'type': 'done', 'finishReason': 'stop'}
+            assert turns.record_task_event(task, terminal, task_event={
+                'task_id': task_id, 'sequence': 1, 'event': terminal}) == 'carried'
+            expected = turns.get_turn(conversation, turn, user_id=_OWNER_ID)
+            assert expected['status'] == 'completed'
+            assert expected['projection']['content'] == task['content']
+        source = engine._data_dir
+        engine._dirs = []
+        engine.stop()
+        backup, restored = tmp_path / 'terminal-backup', tmp_path / 'terminal-restored'
+        for command in (
+                ['backup', '--data-dir', str(source), '--backup-dir', str(backup)],
+                ['restore', '--backup-dir', str(backup), '--data-dir', str(restored)]):
+            subprocess.run([str(binary), *command], check=True, capture_output=True,
+                           text=True, timeout=120)
+        restored_engine = TofuDbEngine(binary, authority_dir_parent=tmp_path)
+        restored_engine._data_dir = restored
+        restored_engine._projection_dir = tmp_path / 'terminal-restored-projection'
+        restored_engine._launch_serve()
+        with patch('lib.storage.get_storage_client', lambda **kwargs: restored_engine._client):
+            assert turns.get_turn(conversation, turn, user_id=_OWNER_ID) == expected
+            rows = restored_engine._client.query('event.list', {
+                'task_id': task_id, 'after_sequence': 0, 'limit': 100})
+            assert len(rows) == 1
+            assert rows[0]['sequence'] == 1
+            assert rows[0]['event']['type'] == 'done'
     finally:
         if restored_engine is not None:
             restored_engine.stop()

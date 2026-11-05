@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from lib.llm_dispatch.slot import Slot
+from lib.llm_dispatch.provider_pin import get_pinned_provider
 from lib.model_profiles import configured_model_profiles
 from lib.tasks_pkg.compaction._summary_routing import select_summary_route
 
@@ -454,10 +455,83 @@ def test_worst_reachable_offering_not_cheapest_profile_controls_cost(routes):
     assert _select(routes)['modelId'] == 'main'
 
 
-def test_conflicting_tenant_identity_cannot_route(routes):
-    routes.task['_tenant_id'] = 'other-tenant'
+@pytest.mark.parametrize('tenant', [None, 'tenant-a'])
+def test_task_registration_tenant_representation_keeps_owned_summary_route(routes, tenant):
+    from lib.identity import PrincipalContext
+
+    principal = PrincipalContext.user(
+        subject_id='user:41', owner_user_id=41, tenant_id=tenant)
+    routes.task['_principalContext'] = principal.to_payload()
+    routes.task['_tenant_id'] = principal.tenant_id or ''
+    for profile in routes.profiles:
+        profile['provenance']['tenantId'] = principal.tenant_id
+    original = deepcopy(routes.task)
+
+    result = _select(routes)
+
+    assert result['modelId'] == 'cheap'
+    assert result['providerId'] == routes.task['_pinned_provider_id']
+    assert routes.seen == [{'owner_user_id': 41, 'tenant_id': tenant}]
+    assert routes.task == original
+
+
+@pytest.mark.parametrize('principal_tenant, task_tenant', [
+    ('tenant-a', 'other-tenant'), ('tenant-a', ''), (None, 'other-tenant'),
+])
+def test_conflicting_tenant_identity_cannot_route(routes, principal_tenant, task_tenant):
+    routes.task['_principalContext']['tenant_id'] = principal_tenant
+    routes.task['_tenant_id'] = task_tenant
     assert _select(routes)['reason'] == 'conflicting_tenant_identity'
     assert routes.seen == []
+
+
+@pytest.mark.parametrize('with_delta', [False, True])
+def test_personal_task_summary_dispatches_on_owned_route(routes, monkeypatch, with_delta):
+    import lib.llm_dispatch as dispatch
+    from lib.identity import PrincipalContext
+    from lib.llm.stream_result import ProviderStreamResult
+    from lib.llm_dispatch.provider_pin import provider_pin
+    from lib.tasks_pkg.compaction._layer2 import _summary as summary
+
+    principal = PrincipalContext.user(subject_id='user:41', owner_user_id=41)
+    routes.task.update(id='summary-task', convId='summary-conversation', aborted=False,
+                       _principalContext=principal.to_payload(), _tenant_id='')
+    routes.task['config']['compaction']['summaryPolicy'] = 'main'
+    for profile in routes.profiles:
+        profile['provenance']['tenantId'] = principal.tenant_id
+    monkeypatch.setattr('lib.llm_dispatch.provider_pin.get_pinned_provider', get_pinned_provider)
+    monkeypatch.setattr(summary, '_codex_subscription_provider', lambda task: '')
+    monkeypatch.setattr(summary, '_archived_prior_receipt', lambda task: '')
+    monkeypatch.setattr(summary, '_summary_input_char_budget', lambda task: 12000)
+    source = [{'role': 'user', 'content': 'Preserve the original objective.'}]
+    original = deepcopy(source)
+    calls = []
+    content = '### Objective\nPreserve the original objective.'
+
+    def complete(*args, **kwargs):
+        assert get_pinned_provider() == routes.task['_pinned_provider_id']
+        calls.append(kwargs)
+        usage = {'prompt_tokens': 100, 'completion_tokens': 20, 'finish_reason': 'stop'}
+        return ProviderStreamResult.from_legacy(
+            {'role': 'assistant', 'content': content}, 'stop', usage)
+
+    monkeypatch.setattr(dispatch, 'dispatch_chat',
+                        lambda *a, **kw: pytest.fail('Live summaries must remain cancellable.'))
+    monkeypatch.setattr(dispatch, 'dispatch_stream', complete)
+    usage = {}
+    with provider_pin(routes.task['_pinned_provider_id']):
+        result = summary._generate_query_aware_summary(
+            source, 'continue', task=routes.task, usage_out=usage,
+            on_delta=(lambda chunk: None) if with_delta else None,
+            output_budget_tokens=8000)
+
+    assert result == content
+    assert len(calls) == 1
+    assert calls[0]['prefer_model'] == 'main'
+    assert calls[0]['strict_model'] is True
+    assert usage['_summaryRoute']['providerId'] == routes.task['_pinned_provider_id']
+    assert usage['_summaryRoute']['reason'] == 'main_explicit'
+    assert source == original
 
 
 @pytest.mark.parametrize('reverse', [False, True])

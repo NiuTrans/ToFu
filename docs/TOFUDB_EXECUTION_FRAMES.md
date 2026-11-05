@@ -63,11 +63,11 @@ updates it from verified delta facts or replaces it after materialization.
 ordinary events and the test-only prototype. Small frames no longer force an
 early checkpoint. Public revisions, exact replay patches, raw task events, sync
 references and header revisions remain unchanged. Outbox capture retains the
-original operation/payload atomically. The production catalog deliberately sets
-`turn.event.record.receiptRequired=false`: repeating a committed patch returns
-the existing typed stale-revision error, with no extra WAL write; application
-reconciliation remains its owner. Explicit receipt-enabled IR tests separately
-retain receipt/retry/fault coverage. Tests decrypt original outbox captures and
+original operation/payload atomically. The production catalog selects a receipt
+only when the request contains the typed boolean `terminal: true`; a lost
+terminal ACK replays its original success. Repeating an ordinary committed patch
+retains its typed stale-revision error and adds no receipt/WAL write. Tests
+retain receipt/retry/fault coverage, decrypt original outbox captures and
 reexecute them through the same production compiler, compare complete state and
 check reopen/commit faults. This is not certification of a generic authenticated
 native passive replay target; that pre-existing product gap remains.
@@ -211,6 +211,40 @@ three nested events read one checkpoint instead of three; invoke it with
 `--ignored --test-threads=1` because its counters are process-wide. Complete
 producer measurements and their limitations belong to
 [task event delivery](TASK_EVENT_DELIVERY.md#complete-history-delivery-measurements).
+
+### Terminal reconstruction and ownership (2026-11-05)
+
+Problem: terminal event execution had already reconstructed and verified its
+current Turn, but updating the Attempt's lane liveness loaded that same Turn
+again just to read `laneId`. Storing the terminal document then deep-cloned the
+entire projection while retaining the original for publication.
+
+Decision: the event owner passes its same-transaction verified lane to the
+shared Attempt writer. All other callers keep the original current-Turn loader;
+no cross-transaction cache or header-only replacement for integrity validation
+is introduced. Inline/terminal storage takes ownership of the projection and
+publication borrows it from that Turn. Live heads retain their one owned body
+for the existing adjacent-event handoff. Attempt serialization also borrows
+its map instead of cloning it into a temporary JSON Value. The physical codecs,
+checkpoint retirement, bytes admitted, event payloads and durability barrier
+remain unchanged.
+
+The isolated `terminal_record_reuses_the_already_verified_turn` specification
+observed 524,782 checkpoint bytes reconstructed before the change and 262,391
+after, exactly one verified read of its 256-KiB-history fixture. Run with
+`--ignored --test-threads=1`; these counters are process-wide. Large terminal
+receipt/outbox tests inject each commit write/sync fault and reopen its durable
+image. The public backup/restore test retains a complete terminal history.
+
+Alternative measured and rejected: sealing a terminal head onto its checkpoint
+and patch chain avoided a terminal blob rewrite but introduced a new durable
+format. In two alternating 25-history concurrent pairs (625 events per process),
+cohort windows changed 32.778→34.034 seconds and 31.781→25.020 seconds;
+terminal P95 changed 11.953→15.033 seconds and 15.856→6.317 seconds.
+Checkpoint reconstruction input increased from 7,087,560,454→8,115,415,502 bytes
+and 6,763,243,349→7,735,815,750 bytes. Complete results and SIGKILL recovery agreed,
+but the inconsistent latency and increased read work did not justify a format
+rollout. The sealed-head prototype is not in the production implementation.
 
 ### Final production-owner timing
 

@@ -7080,5 +7080,7 @@
   "toolHumanGuidance.repliedInChat": "채팅으로 답변함",
   "toolHumanGuidance.replyDrafted": "답변을 입력창에 넣었습니다. 준비되면 보내세요",
   "toolHumanGuidance.supersededRow": "답변 안 함 · 채팅으로 직접 답했습니다",
-  "toolsInv.tool.update_task_progress": "코디네이터 대화 위에 사용자에게 표시되는 작업 진행 상황을 업데이트합니다."
+  "toolsInv.tool.update_task_progress": "코디네이터 대화 위에 사용자에게 표시되는 작업 진행 상황을 업데이트합니다.",
+  "toolsInv.tool.get_conversation_status": "대화의 실행 상태와 사용 가능한 이어가기 작업을 확인합니다.",
+  "toolsInv.tool.control_conversation": "기존 컨텍스트를 유지하면서 승인된 대화의 생성을 계속하거나, 다시 시도하거나, 중지합니다."
 }
