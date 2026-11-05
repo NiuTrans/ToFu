@@ -1705,6 +1705,112 @@ class TestVisibleEvidenceBinding:
         assert call_ids[-1] in sources
 
 
+class TestMixedObservationCycles:
+    """Changing tool/order is not new evidence; changed results still are."""
+
+    @staticmethod
+    def observe(task, messages, rn, index, *, changed=False):
+        if index == 0:
+            return _bound_read(task, messages, rn, 1, 20)
+        if index == 1:
+            return _single_tool_message_round(
+                task, messages, rn, name='search_files',
+                args='{"searches":[{"path":"src","pattern":"deadline"}]}',
+                content='src/worker.py:10: deadline')
+        return _single_tool_message_round(
+            task, messages, rn,
+            args=json.dumps({
+                'command': 'cd /repo && git status --short',
+                'description': f'Check the worktree again, round {rn}',
+            }),
+            content=(' M src/changed.py' if changed else ' M src/worker.py')
+                    + '\n[exit code: 0]')
+
+    def test_interleaved_reads_searches_and_git_checks_warn_then_stop(self):
+        task, rs, messages = _task(), _rs(), []
+        fired = []
+        for rn, index in enumerate((0, 1, 2, 1, 0, 2, 1)):
+            self.observe(task, messages, rn, index)
+            fired.append(_breaker(task, rs, messages, rn))
+        assert fired == [False] * 6 + [True]
+        assert _nudge_reasons(task) == ['redundant_reads']
+        assert 'still visible' in task['_toolLoopNudges'][0]['prompt']
+        assert rs.exit_reason == 'semantic_redundant_read_loop'
+
+    @pytest.mark.parametrize('interruption', [
+        'changed_result', 'compaction', 'mutation', 'opaque_action',
+        'new_search', 'operator_steer',
+    ])
+    def test_recovery_retires_a_mixed_cycle_warning(self, interruption):
+        from lib.tasks_pkg.orchestrator._tool_loop_breaker import reset_tool_loop_guard
+        task, rs, messages = _task(), _rs(), []
+        calls = []
+        for rn, index in enumerate((0, 1, 2, 1, 0, 2)):
+            calls.append(self.observe(task, messages, rn, index))
+            assert _breaker(task, rs, messages, rn) is False
+        assert _nudge_reasons(task) == ['redundant_reads']
+        if interruption == 'compaction':
+            _compact(messages, *calls)
+            self.observe(task, messages, 6, 0)
+        elif interruption == 'changed_result':
+            self.observe(task, messages, 6, 2, changed=True)
+        elif interruption == 'operator_steer':
+            assert reset_tool_loop_guard(task)
+            self.observe(task, messages, 6, 1)
+        else:
+            name, args, content = {
+                'mutation': ('write_file', '{"path":"src/worker.py","content":"fixed"}',
+                             'File updated: src/worker.py'),
+                'opaque_action': ('run_command', '{"command":"python repair.py"}',
+                                  'done\n[exit code: 0]'),
+                'new_search': ('search_files', '{"pattern":"new evidence"}',
+                               'src/fresh.py:30: new evidence'),
+            }[interruption]
+            _single_tool_message_round(
+                task, messages, 6, name=name, args=args, content=content)
+        assert _breaker(task, rs, messages, 6) is False
+        assert task['_tool_loop_guard']['read_warning_round'] == -1
+        assert not task.get('error')
+
+    def test_changing_observations_have_no_round_budget(self):
+        task, rs, messages = _task(), _rs(), []
+        for rn in range(30):
+            _single_tool_message_round(
+                task, messages, rn,
+                args='{"command":"git log -1 --oneline"}',
+                content=f'commit-{rn}: completed another change\n[exit code: 0]')
+            assert _breaker(task, rs, messages, rn) is False
+        assert not task.get('_toolLoopNudges')
+
+    def test_different_tools_with_equal_arguments_and_text_are_new_evidence(self):
+        task, rs, messages = _task(), _rs(), []
+        for rn, name in enumerate(('search_files', 'find_files')):
+            _single_tool_message_round(
+                task, messages, rn, name=name, args='{"path":"src"}', content='[]')
+            assert _breaker(task, rs, messages, rn) is False
+            assert task['_tool_loop_guard']['redundant_read_streak'] == 0
+
+    def test_reordering_and_regrouping_known_results_is_still_redundant(self):
+        task, rs, messages = _task(), _rs(), []
+        fired = []
+        for rn, batch in enumerate(((0, 1, 2), (2, 0), (1,), (0, 2, 1), (2, 1))):
+            for index in batch:
+                self.observe(task, messages, rn, index)
+            fired.append(_breaker(task, rs, messages, rn))
+        assert fired == [False, False, False, False, True]
+        assert _nudge_reasons(task) == ['redundant_reads']
+
+    def test_unfinished_observer_does_not_authorize_a_stop(self):
+        task, rs, messages = _task(), _rs(), []
+        for rn in range(8):
+            _single_tool_message_round(
+                task, messages, rn, name='search_files',
+                args=json.dumps({'query': f'query-{rn % 2}'}),
+                content='waiting for an external result', status='running')
+            assert _breaker(task, rs, messages, rn) is False
+        assert not task.get('_toolLoopNudges')
+
+
 class TestCorrectionScope:
     """A stop needs a matching correction delivered in an earlier round."""
 
@@ -1932,6 +2038,20 @@ class TestShellObservationClassifier:
         'python -c "print(1)"',
         'ls > /tmp/listing.txt',
         'make build 2>&1 | tail -3',
+        'find . -name "*.tmp" -delete',
+        'find . -exec touch {} \\;',
+        'env python repair.py',
+        'sort -o result.txt input.txt',
+        'uniq input.txt output.txt',
+        'rg --pre ./rewrite.py pattern src',
+        'git -c core.pager=./rewrite.py log',
+        'git -ccore.pager=./rewrite.py log',
+        'git log --output=changes.txt',
+        'git grep -O./rewrite.py pattern',
+        'tree -o listing.txt',
+        'echo "$(python repair.py)"',
+        'cat <(python repair.py)',
+        'cat a.txt\npython repair.py',
     ])
     def test_potential_mutations(self, command):
         assert _shell_command_is_observation(command) is False

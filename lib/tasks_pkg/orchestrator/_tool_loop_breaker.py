@@ -17,9 +17,9 @@ Classification is structural, never based on the model's prose:
 
 * an entire shell command that is exactly ``true``, ``:``, or ``exit 0`` is
   an explicit sacrificial no-op;
-* a successful ``read_files`` range wholly covered by earlier reads that are
-  still visible in the model context is redundant unless the same request
-  now returned changed content;
+* read-only operations that return evidence already visible in the model
+  context are redundant even when the model alternates tools or batches;
+  ``read_files`` additionally recognizes wholly covered line ranges;
 * a real state-changing tool clears the semantic episode and read coverage.
 
 Evidence is credited only while the model can see it. Read observations,
@@ -33,7 +33,7 @@ message lane keep the historical permanent credit.
 
 A redundant-read stop requires a warning against re-reading visible evidence
 that the model received in an earlier round of the current redundant streak;
-whatever resets the streak (new evidence, another tool, a write, an operator
+whatever resets the streak (new evidence, a possible write, an operator
 steer) also retires its warning. An unresolved-artifact stop needs its own
 artifact-specific warning for that source. Only the explicit-noop guard keeps
 the turn-wide "any earlier correction" rule, because changed reads were used
@@ -125,12 +125,12 @@ _WINDOW_ARGUMENT_KEYS = frozenset({
 # verdict merely resets a streak, which is the safe direction.
 _OBSERVATION_PROGRAMS = frozenset({
     'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'find',
-    'ls', 'tree', 'file', 'stat', 'du', 'df', 'pwd', 'echo', 'printf',
-    'jq', 'yq', 'sort', 'uniq', 'tr', 'cut', 'comm', 'column', 'diff',
-    'which', 'type', 'uname', 'id', 'date', 'ps', 'env', 'printenv',
-    'hostname', 'test', '[', 'readlink', 'realpath', 'basename', 'dirname',
+    'ls', 'tree', 'stat', 'du', 'df', 'pwd', 'cd', 'echo', 'printf',
+    'jq', 'tr', 'cut', 'comm', 'column', 'diff',
+    'which', 'type', 'uname', 'id', 'ps', 'printenv',
+    'test', '[', 'readlink', 'realpath', 'basename', 'dirname',
     'md5sum', 'sha1sum', 'sha256sum', 'nproc', 'free', 'uptime', 'lscpu',
-    'xxd', 'od', 'strings', 'less', 'more', 'true', ':',
+    'od', 'strings', 'true', ':',
 })
 _GIT_OBSERVATION_SUBCOMMANDS = frozenset({
     'status', 'log', 'diff', 'show', 'blame', 'grep', 'ls-files', 'ls-tree',
@@ -456,8 +456,8 @@ def _round_action_kind(
     under that display name after execution.  A shell command is deliberately
     NOT promoted to ``confirmed_write`` merely because the dispatcher's
     concurrency partition treats all run_command calls as writes: ``pwd`` and
-    test commands must not erase a prior no-op warning.  They can still make
-    old file observations stale, so the caller clears read coverage for them.
+    test commands must not erase a prior no-op warning. Unknown commands can
+    still make old file observations stale; proven observations cannot.
     """
     try:
         from lib.tasks_pkg.tool_dispatch._flags import _task_partitions
@@ -470,8 +470,12 @@ def _round_action_kind(
         name = str(row.get('toolName') or '')
         if _is_explicit_noop_row(row, task):
             continue
-        if _shell_command_argument(task, name):
-            saw_opaque_action = True
+        command_arg = _shell_command_argument(task, name)
+        if command_arg:
+            command = _parse_args(row).get(command_arg)
+            if not (isinstance(command, str)
+                    and _shell_command_is_observation(command)):
+                saw_opaque_action = True
             continue
         if name in write_tools:
             if _row_has_confirmed_write(row):
@@ -767,11 +771,22 @@ def _previous_round_still_visible(
 def _read_observation(
     row: dict[str, Any], visible: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Pure identity, proven spans and visibility binding of one read row."""
+    """Operation/result identity and visible coverage of one observation."""
     outcome_text = _outcome_text(row)
     envelope = _tool_result_v2(row)
     failed = _row_failed(row)
-    specs = [] if failed else _effective_read_specs(row, _read_specs(row))
+    name = str(row.get('toolName') or '')
+    specs = (_effective_read_specs(row, _read_specs(row))
+             if not failed and name == _READ_TOOL else [])
+    args = _canonical_args(row)
+    if name in _SHELL_TOOL_NAMES:
+        # The shell's display description is narration, not an executed
+        # argument. Command, working directory and execution options remain.
+        parsed = _parse_args(row)
+        if 'description' in parsed:
+            parsed = {key: value for key, value in parsed.items()
+                      if key != 'description'}
+            args = _canonical_args({'toolArgs': parsed})
     message_id = _row_message_id(row, visible)
     # Only a receipt the model actually sees is evidence it holds: a program's
     # return value or a budgeted projection in the carrying message may omit
@@ -784,7 +799,7 @@ def _read_observation(
                 or f'row:{row.get("llmRound")}:{row.get("roundNum")}'),
         'messageId': message_id,
         'request': hashlib.sha256(
-            _canonical_args(row).encode('utf-8', 'replace')).hexdigest(),
+            (name + '\x00' + args).encode('utf-8', 'replace')).hexdigest(),
         'outcome': hashlib.sha256(
             (str(row.get('status') or '') + '\x00' + outcome_text)
             .encode('utf-8', 'replace')).hexdigest(),
@@ -819,6 +834,8 @@ def _observation_adds_evidence(
     observation: dict[str, Any], live_sources: list[dict[str, Any]],
     coverage: dict[str, list[list[int]]], evidence_ids: set[str],
 ) -> bool:
+    if not observation['seen']:
+        return True  # Missing model-visible evidence cannot prove a loop.
     same_request = [source for source in live_sources
                     if source.get('request') == observation['request']]
     previous_outcome = same_request[-1].get('outcome') if same_request else None
@@ -1018,9 +1035,10 @@ def _nudge_text(task: dict[str, Any], reason: str) -> str:
         )
     else:
         observation = (
-            'The recent read_files calls only re-read file lines already '
-            'returned and still visible in your context, and no intervening '
-            'state change made them stale.'
+            'The recent read-only calls repeat evidence already returned and '
+            'still visible in your context, with no new result or intervening '
+            'state change. Alternating tools or changing a description does '
+            'not add evidence.'
         )
     return (
         '[SYSTEM: TOOL ROUND MADE NO SEMANTIC PROGRESS]\n'
@@ -1214,6 +1232,10 @@ def _shell_command_is_observation(command: str) -> bool:
         return False
     if _EXPLICIT_NOOP_RE.fullmatch(text):
         return True
+    # A program-name allowlist cannot prove substitutions, nested shells,
+    # environment overrides or multi-line scripts side-effect free.
+    if any(char in text for char in ('$', '`', '(', ')', '\n', '\r')):
+        return False
     if _has_output_redirection(text):
         return False
     try:
@@ -1230,13 +1252,34 @@ def _shell_command_is_observation(command: str) -> bool:
             segments[-1].append(token)
     saw_program = False
     for segment in segments:
+        if any(_ENV_ASSIGN_RE.match(token) for token in segment):
+            return False
         program = _segment_program(segment)
         if program is None:
             continue
         saw_program = True
+        if program == 'find' and any(
+                token.startswith(('-exec', '-ok', '-delete', '-fls',
+                                  '-fprint', '-fprintf'))
+                for token in segment[1:]):
+            return False
+        if program == 'rg' and any(
+                token.startswith(('--pre', '--hostname-bin'))
+                for token in segment[1:]):
+            return False
+        if program == 'tree' and any(
+                token.startswith('-o') for token in segment[1:]):
+            return False
+        if any(token.startswith('--output') for token in segment[1:]):
+            return False
         if program in _OBSERVATION_PROGRAMS:
             continue
         if program == 'git':
+            if any(token.startswith((
+                    '-c', '-O', '--config-env', '--exec-path', '--ext-diff',
+                    '--textconv', '--open-files-in-pager', '--paginate'))
+                   for token in segment[1:]):
+                return False
             if _git_subcommand(segment) in _GIT_OBSERVATION_SUBCOMMANDS:
                 continue
             return False
@@ -1987,11 +2030,13 @@ def _handle_semantic_stall(
         )
         return False
 
+    kinds = _classify_round_rows(task, rows)
     is_read_only = all(
-        str(row.get('toolName') or '') == _READ_TOOL for row in rows
-    )
+        kind in {'observation', 'shell_obs'}
+        and str(row.get('status') or 'done') == 'done'
+        for row, kind in zip(rows, kinds))
     if not is_read_only:
-        _end_redundant_read_stretch(state)
+        _forget_read_coverage(state)
         return False
 
     added_evidence, dropped = _read_round_added_evidence(
@@ -2028,10 +2073,10 @@ def _handle_semantic_stall(
         task, rs, round_num=round_num, tid=tid,
         reason='semantic_redundant_read_loop',
         detail=(
-            'The model kept calling read_files only for line ranges whose '
-            'earlier results were still visible in its context, after a '
-            'corrective instruction and with no new evidence or state change '
-            'since. The task was stopped instead of spending more requests.'
+            'The model kept repeating read-only operations whose earlier '
+            'results were still visible in its context, after a corrective '
+            'instruction and with no new evidence or state change since. '
+            'The task was stopped instead of spending more requests.'
         ),
         raw=(f'redundant_read_streak={streak};'
              f'warned_round={warned_round + 1};'
