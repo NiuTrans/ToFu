@@ -50,6 +50,26 @@ def test_model_prose_cannot_remove_observed_failure_or_checklist(narrative):
     assert messages == frozen
 
 
+def test_oversized_continuity_has_a_bounded_archive_narrative():
+    from lib.tasks_pkg.compaction._layer2._summary_acceptance import accept_summary
+    from lib.tasks_pkg.compaction._continuity import OPEN, read_continuity
+    from lib.tasks_pkg.compaction._handoff import make_compaction_handoff
+    messages = []
+    for index in range(324):
+        messages += execution(f'test-{index}', f'pytest tests/example.py::{index}',
+                              f'1 failed; invocation {index} ' + 'evidence ' * 80)
+    accepted = accept_summary(
+        'Model narrative', messages, {}, fallback=False,
+        recent_files_block='', turn_diff_block='', turn_diff_included=False,
+        result_meta={}, log_prefix='', recovery_max_chars=22_000)
+    assert len(accepted.text) > 200_000
+    assert len(accepted.archive_text) <= 200_000
+    assert accepted.archive_text.startswith('Model narrative')
+    assert OPEN not in accepted.archive_text
+    handoff = make_compaction_handoff(
+        accepted.text, phase='mid_turn', continuity_digest=accepted.continuity_digest)
+    assert len(read_continuity([handoff])['observations']) == 324
+
 def test_same_observation_survives_100_generations_without_accumulating_copies():
     from lib.tasks_pkg.compaction._continuity import attach_continuity, read_continuity
     from lib.tasks_pkg.compaction._handoff import make_compaction_handoff

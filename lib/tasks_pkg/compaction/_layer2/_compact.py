@@ -373,6 +373,16 @@ def _persist_compaction_candidate(messages, task, meta):
     """Commit the accepted bounded model view before adopting a durable Turn candidate."""
     archive_id = meta.get('archive_id')
     summary_text = meta.get('summary_text') or ''
+    archive_summary_text = meta.get('archive_summary_text')
+    if archive_summary_text is None:
+        archive_summary_text = summary_text
+        if meta.get('continuityDigest'):
+            from lib.tasks_pkg.compaction._continuity import narrative_without_continuity
+            handoff = next((message for message in reversed(messages)
+                            if is_compaction_handoff(message)), None)
+            if handoff is not None:
+                archive_summary_text = narrative_without_continuity(
+                    handoff, handoff['content'])
     tokens_after = _estimate_total_tokens(messages)
     msgs_after = len(messages)
     from lib.tasks_pkg.compaction._continuity import read_continuity
@@ -437,7 +447,7 @@ def _persist_compaction_candidate(messages, task, meta):
                     logger.debug('[Compact] resume witness unavailable: %s', type(exc).__name__)
             from lib.agent_core.store import get_conversation_store
             get_conversation_store().update_archive_summary(
-                archive_id, summary_text, tokens_after, msgs_after,
+                archive_id, archive_summary_text, tokens_after, msgs_after,
                 user_id=_task_owner(task), receipt=receipt,
                 archive_scope=(task or {}).get('_archiveScope', ''),
                 post_messages=deepcopy(messages))

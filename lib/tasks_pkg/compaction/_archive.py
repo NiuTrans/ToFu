@@ -96,6 +96,8 @@ def fail_compaction_archive(task, archive_id, meta, cause=None):
         tokensAfter=int(meta.get('tokens_before') or 0), tokenCountKind='estimated',
         msgsBefore=int(meta.get('msgs_before') or 0),
         msgsAfter=int(meta.get('msgs_before') or 0), reductionPct=0.0, receipt=receipt))
+    if isinstance(cause, StorageError):
+        raise cause
     raise StorageError('database_unavailable',
         'Could not save compacted context; original context retained. Retry to continue.',
         retryable=True, operation_id='compaction_archive.commit') from cause
