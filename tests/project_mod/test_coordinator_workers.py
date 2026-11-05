@@ -284,6 +284,54 @@ def test_background_completion_continues_same_assignment_and_moves_result_to_new
     assert sum(row['reported_tokens'] for row in attempts) == 22
 
 
+@pytest.mark.parametrize('reviewed', [False, True])
+def test_completed_worker_background_completion_attaches_once_without_resume(
+        runtime, monkeypatch, reviewed):
+    from lib import message_queue, agent_inbox
+    from lib.tasks_pkg import background_commands
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.project_dispatch.admission import TrustedDispatch
+    from lib.conversation_sync.runtime import conversation_turn_commands
+
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    assignment = r.c.repo.read(worker['assignment_id'])
+    execution = assignment['execution']
+    trusted = TrustedDispatch(r.c.repo.admission(assignment['id']))
+    config = trusted.capture({}, 7, trusted.principal, worker['conversation_id'])
+    r.attempts[execution['attemptId']]['status'] = 'completed'
+    turn = r.turns[execution['turnId']]
+    turn.update(status='completed', settlement={'cause': 'provider_finished',
+                'resumeOptions': [{'operation': 'regenerate', 'anchor': {}}]})
+    if reviewed:
+        r.c.repo.record_review(assignment['id'], 'accept', 'Verified', 1, 1)
+    before = deepcopy(r.c.repo.read(assignment['id']))
+    receipts = [{'queueId': 'late-result', 'timestamp': 1, 'config': config,
+                 'payload': {'text': 'late command output', '_backgroundCommand': 'bg_late'}}]
+    monkeypatch.setattr(message_queue, '_background_receipts', lambda *a, **kw: receipts)
+    monkeypatch.setattr(message_queue, 'next_dispatchable_turn', lambda *a, **kw: None)
+    monkeypatch.setattr(background_commands, 'conversation_results_complete', lambda **kw: True)
+    monkeypatch.setattr(chat_task_runtime, 'snapshot_owned', lambda **kw: [])
+    monkeypatch.setattr(conversation_turn_commands, 'resume_turn',
+                        lambda *a, **kw: pytest.fail('completed execution cannot Continue'))
+    attached, consumed = [], []
+
+    def attach(conv, turn_id, *, projection, expected_projection_revision, user_id, **kw):
+        assert (conv, turn_id, user_id) == (worker['conversation_id'], execution['turnId'], 7)
+        assert expected_projection_revision == turn['projectionRevision']
+        attached.append(projection)
+        turn.update(projection=projection, projectionRevision=expected_projection_revision + 1)
+    monkeypatch.setattr('lib.turn_lifecycle.update_turn_projection', attach)
+    monkeypatch.setattr(agent_inbox, 'consume_peer', lambda *args: consumed.append(args))
+    for _ in range(2):
+        assert message_queue.dispatch_completed_background_batch(
+            worker['conversation_id'], user_id=7) is None
+    assert len(attached) == 1
+    assert attached[0]['_bgCommandInjects'][0]['previews'][0]['text'] == 'late command output'
+    assert consumed == [(worker['conversation_id'], ['late-result'])]
+    assert r.c.repo.read(assignment['id']) == before
+
+
 def test_cancelled_worker_background_completion_preserves_evidence_without_model_turn(
         runtime, monkeypatch, tmp_path):
     from lib import message_queue
@@ -415,7 +463,7 @@ def test_unbound_worker_completion_after_cancel_preserves_evidence_without_model
         runtime, monkeypatch):
     """A turn that ran without the Worker's binding cannot keep waking it after cancel."""
     from lib import message_queue
-    from lib.background_command_delivery import settle_revoked_dispatch_completion
+    from lib.background_command_delivery import settle_closed_dispatch_completion
     from lib.tasks_pkg import background_commands
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
 
@@ -438,9 +486,9 @@ def test_unbound_worker_completion_after_cancel_preserves_evidence_without_model
         'backgroundCommand': {'commandId': 'bg_unbound', 'resultPreview': 'unbound-turn-result'},
     }]
     # A live grant and an ordinary conversation keep the ordinary wake.
-    assert settle_revoked_dispatch_completion(
+    assert settle_closed_dispatch_completion(
         unbound, receipts, conv_id=conversation, user_id=7) is False
-    assert settle_revoked_dispatch_completion(
+    assert settle_closed_dispatch_completion(
         unbound, receipts, conv_id='coordinator', user_id=7) is False
 
     queued, model_starts, retired = [], [], []

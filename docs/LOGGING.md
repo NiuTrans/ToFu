@@ -646,6 +646,11 @@ storage/contract adapter use the existing `tofu_no_coalesce` bypass, so equal
 failures on different requests retain individual correlation. Aggregate counts
 alone were rejected because they retain only a representative request ID.
 The bounded queue, record ceiling and rotating retention remain authoritative.
+Background batch-drain failures retain the full conversation ID and exception
+traceback. Problem: eight-character Worker prefixes collided, while the generic
+`database_conflict` message hid the rejecting operation. Decision: preserve exact
+correlation and the original stack in the existing warning; increasing log volume
+or guessing the Worker from its prefix is not a diagnostic substitute.
 Root invocation retires both its copied execution context and outer worker
 correlation, including rejected admission and failed kickoff; child invocation
 restores its parent's context. Clearing only inside `copy_context` was rejected

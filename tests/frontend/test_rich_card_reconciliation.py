@@ -233,6 +233,42 @@ def rich_card_http_server(round_card_stability_bundle):
 
 @pytest.mark.visual
 @pytest.mark.parametrize('fallback_move', [False, True])
+def test_retained_native_move_preserves_reader_state_without_scroll_scan(
+        browser, rich_card_http_server, fallback_move):
+    origin, _ = rich_card_http_server
+    page = browser.new_page()
+    try:
+        page.goto(origin, wait_until='load')
+        result = page.evaluate(r"""fallback => {
+          const root=document.getElementById('root');
+          root.innerHTML='<aside>other</aside><section><button>focus</button><p>selected output</p><pre style="height:40px;width:80px;overflow:scroll">'+('wide output '.repeat(30)+'\n').repeat(50)+'</pre></section>';
+          const node=root.lastChild, button=node.querySelector('button');
+          const box=node.querySelector('pre'), text=node.querySelector('p').firstChild;
+          if(fallback) Object.defineProperty(root,'moveBefore',{value:undefined});
+          else if(typeof root.moveBefore!=='function') throw new Error('native move unavailable');
+          button.focus(); box.scrollTop=110; box.scrollLeft=40;
+          const top=box.scrollTop, left=box.scrollLeft;
+          const selection=document.getSelection(); selection.setBaseAndExtent(text,2,text,9);
+          const descriptor=Object.getOwnPropertyDescriptor(Element.prototype,'scrollTop');
+          let reads=0;
+          Object.defineProperty(Element.prototype,'scrollTop',{
+            ...descriptor,get(){reads++;return descriptor.get.call(this);},
+          });
+          try { roundCardStability.moveRetainedNodeBefore(root,node,root.firstChild); }
+          finally { Object.defineProperty(Element.prototype,'scrollTop',descriptor); }
+          return {reads,moved:root.firstChild===node,focused:document.activeElement===button,
+            scrolled:box.scrollTop===top&&box.scrollLeft===left,
+            selected:selection.anchorNode===text&&selection.focusNode===text
+              &&selection.anchorOffset===2&&selection.focusOffset===9};
+        }""", fallback_move)
+        assert all(result[key] for key in ('moved', 'focused', 'scrolled', 'selected')), result
+        assert (result['reads'] > 0) if fallback_move else result['reads'] == 0, result
+    finally:
+        page.close()
+
+
+@pytest.mark.visual
+@pytest.mark.parametrize('fallback_move', [False, True])
 def test_rich_card_browser_reader_state_and_images(browser, rich_card_http_server, fallback_move):
     origin, image_requests = rich_card_http_server
     page = browser.new_page()

@@ -5243,7 +5243,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         ]
       },
       "signature": {
-        "description": "Opaque provider signature of this reasoning. Never rendered; refs views of completed Turns omit it.",
+        "description": "Opaque provider signature of this reasoning. Never rendered; refs views of terminal Turns omit it.",
         "type": "string"
       },
       "taskId": {
@@ -6058,7 +6058,7 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "type": "string"
       },
       "thinkingSignature": {
-        "description": "Opaque provider replay evidence. Model requests read it from storage; refs views of completed Turns omit it.",
+        "description": "Opaque provider replay evidence. Model requests read it from storage; refs views of terminal Turns omit it.",
         "type": "string"
       },
       "toolArgs": {},

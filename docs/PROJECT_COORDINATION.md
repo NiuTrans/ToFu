@@ -1521,11 +1521,20 @@ unreviewed predecessor and its accepted successor, then advances the association
 to that successor. The accepted `_resumeSource` also restores the assignment's
 conserved model account: its last ordinal, cumulative usage and original nonce
 continue once, never restart at one or fabricate another occurrence account.
-A background-command completion uses this same Continue path;
-its receipts stay durable and are replayed into the resumed Worker turn. The
+A background-command completion for an eligible unfinished execution uses this
+same Continue path; its receipts stay durable and are replayed into the resumed
+Worker turn. The
 ordinary settlement hook now observes the successor's status, result and delivery,
 and wakes the Coordinator. A completed/reviewed execution never resumes; exact
-command replay is read-only. Stop, a live predecessor, changed source or lost
+command replay is read-only. Late background evidence for a completed or reviewed
+execution attaches once to its exact settled Turn with a CAS fence, then
+acknowledges the inbox receipt; it neither starts a model nor changes the review.
+Problem: treating that evidence as Continue caused a permanent `database_conflict`
+retry loop because the settled execution correctly disallowed continuation.
+Decision: use the existing closed-execution evidence settlement path, including
+revoked assignments. Alternative rejected: allowing Continue on a reviewed or
+completed assignment would reopen accepted work. Stop, a live predecessor,
+changed source or lost
 workspace/lineage evidence refuses recovery rather than starting a second writer.
 
 `blocked: task_background_commands_running` means that durable publication was

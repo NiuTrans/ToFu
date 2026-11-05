@@ -824,21 +824,21 @@ no browser consumer. Completed `apiRounds` keep the browser's closed-world
 token facts, exact CNY round total, cache-break, dispatch identity,
 subscription quota, and trace facts, but omit unused USD/itemized cost fields,
 stream counters, route/cache diagnostics, and pricing snapshots that are
-server evidence only. Running, interrupted, truncated,
-failed, or ambiguous segments and every ordered replay event remain full. The
+server evidence only. Running or ambiguous tool segments, unfinished tool rounds
+in non-completed Turns, and every ordered replay event remain full. The
 coordinator resolves each reference and attaches the same round/input/result
 objects before publishing the snapshot to TurnStore; an invalid reference is a
 protocol error, never an empty tool card. The reference view is request-local
 and does not mutate the shared authoritative snapshot or create another stored
 format.
 
-**Completed browser view diet.** Problem: one long completed agent Turn sent
+**Terminal browser view diet.** Problem: one long completed agent Turn sent
 the browser about 2 MiB per snapshot or history page, most of it never
 rendered: thinking signatures twice (each `thinking` segment's `signature` and
 the round's `thinkingSignature`, 793 KiB of 2,064 KiB in a 2026-10-28 live
 sample), task-trace spans and status history, and the cost popover's
 unrendered admission/recache detail. Signatures are incompressible, so Brotli
-kept 577 KiB on the wire. Decision: the completed-Turn `refs` view also omits
+kept 577 KiB on the wire. Decision: the terminal-Turn `refs` view also omits
 both signature fields (with the provider replay bodies above), keeps only the
 `writeBreakdown` allocation terms (`write`, `prevOutput`, `toolResults`,
 `contextWrite`, `recacheBody`, `envelope`, `readDrop`, `capped`) and the
@@ -857,8 +857,11 @@ CAS-fenced stored revision (`projection_with_restored_browser_evidence`), but
 only where the client left it absent or equal to the browser view; replay
 evidence also requires the signed thinking to be unchanged. The same repair
 closes the pre-existing loss of provider replay, apiRound diagnostics and
-budgeted swarm timelines on edits. Pending/running/resumable/failed Turns and
-the SSE stream are unchanged: live projections and replay patches remain the
+budgeted swarm timelines on edits. Completed, interrupted, truncated and failed
+Turns share this view: Continue always reads complete evidence from storage.
+Missing or duplicate tool call IDs keep replay evidence inline because an edit
+cannot unambiguously restore it. Pending/running Turns and the SSE stream are
+unchanged: live projections and replay patches remain the
 exact committed revision, which positional patches require. The browser's
 thinking view model no longer carries `signature`, so a live-settled Turn and
 its later slim snapshot present identical reasoning blocks; a tool card still
@@ -879,7 +882,16 @@ the service read fell from 11.3 to 8.6 ms and 9.0 to 6.6 ms; adding orjson
 encoding and the live Brotli quality, per-request server CPU fell from 23.1
 to 19.6 ms and 18.4 to 15.0 ms. Smaller bodies under 1 MiB move from Brotli
 quality 2 to 4, which keeps compression CPU nearly flat (11.1 to 10.6 ms)
-while wire bytes fall 69%. Specs: `test_completed_browser_view_omits_replay_signatures_and_unrendered_detail`,
+while wire bytes fall 69%. Extending this same view to all terminal statuses
+(2026-11-05, one actual four-Turn snapshot with 2,243 tool rounds in an interrupted
+Turn) reduces JSON from 57,162,940 to 20,367,437 bytes (64.4%); the interrupted
+Turn alone falls from 51,402,197 to 14,606,694 bytes. Five paired Chromium parses
+on the same host give median 176.7 ms before and 61.2 ms after. Stored replay
+fields round-trip exactly and the running Turn stays byte-identical. This is a
+reduction in snapshot parsing work, not a claim that all rendering stalls are
+eliminated. Moving the same JSON to a worker was rejected: structured cloning
+retained main-thread cost and increased total elapsed time in the paired probe.
+Specs: `test_terminal_browser_view_omits_replay_signatures_and_unrendered_detail`,
 `test_client_edit_of_browser_view_restores_omitted_server_evidence`, and the
 HTTP round trip `test_refs_view_edit_round_trip_keeps_server_only_evidence`.
 

@@ -141,6 +141,16 @@ Problem: treating sealed request bytes as a mapping raises after a successful pr
 
 ### Common request preparation and replay boundaries
 
+**Problem:** cold-history reconstruction used display-trimmed thinking with a
+signature over the original native bytes, so checked Chat conversion rejected
+otherwise valid history as `mandatory_continuity_unrepresentable`.
+**Decision:** the common assistant tool-call assembler derives public reasoning
+from the exact native thinking blocks. Empty, redacted and multiple blocks keep
+their ordered `reasoning_details`; the native Messages sidecar stays unchanged.
+**Alternative rejected:** weakening the conversion check would accept genuinely
+mismatched signatures. The signed-thinking replay specs cover whitespace, empty
+and multiple blocks through history reconstruction and both protocol adapters.
+
 **Problem:** content-only merges could discard the second assistant's reasoning
 or bind new prose to the first assistant's opaque replay state. Chat Completions
 also had separate final projections: non-stream calls could leak native history
