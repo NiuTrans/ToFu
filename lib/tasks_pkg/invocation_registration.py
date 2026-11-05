@@ -33,6 +33,8 @@ def register_child_invocation(child: dict, parent: dict, *, discard_on_failure=T
             'parent_task_id': parent['id'],
             'child_task_id': child['id'],
         }
+        from lib.tasks_pkg.worker_binding import publication_arguments
+        payload.update(publication_arguments(parent))
         identity = wait_for_persistence(child, lambda: get_storage_client(write=True).command(
             'invocation.register_child', payload, f'invocation-register:{child["id"]}'),
             label='invocation registration')

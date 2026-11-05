@@ -145,6 +145,8 @@ class RegisteredInvocationCompletion:
             value[FIELD] = candidate
             payload = dict(key=child['id'], value=value, expected_version=record['version'],
                 guard_contract=TASK_RESULT_CHECKPOINT_GUARD_CONTRACT, require_parent=True)
+            from lib.tasks_pkg.worker_binding import publication_arguments
+            payload.update(publication_arguments(child, terminal=True))
             ack = wait_for_persistence(child, lambda: client.command(
                 'task_results.checkpoint', payload, None),
                 label='Flow child completion', cancellable=False)

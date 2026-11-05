@@ -1382,6 +1382,15 @@
       "taskResultMaximumCostExperimentScanRows": 256,
       "taskResultCheckpointGuardContract": "tofu.task-results.checkpoint.guard/v1",
       "taskResultCacheSettingsContract": "tofu.task-results.checkpoint.cache-settings/v1",
+      "taskResultToolEffectAdmission": {
+        "requestField": "tool_effect_intent",
+        "responseField": "tool_effect_intent",
+        "type": "string",
+        "minLength": 1,
+        "requiresGuardedParent": true,
+        "workerScope": "registered-descendant",
+        "revalidateOnReplay": true
+      },
       "taskResultCacheFactMaximum": 2147483647,
       "lifecycle": "durable-user-state",
       "constraints": [
@@ -1391,6 +1400,7 @@
         "owner-local covering summaries make bounded replay/list/abort paths independent of payload size and prevent cross-owner scans",
         "task-result cachePrefixHWM candidates are integers in 1..2147483647; lastTurnCacheRead candidates are integers in 0..2147483647, with omission meaning unobserved rather than zero",
         "guarded checkpoints merge cache facts atomically with the task result; ambiguous replay repairs only absent lastTurnCacheRead, never a present valid zero",
+        "tool_effect_intent selects one exact entered invocation receipt; every replay revalidates uncancelled root execution authority before echoing that occurrence in an owned acknowledgement",
         "summary scans retain at most 10000 compact rows through snapshot-consistent pages of at most 1000 rows and return at most 1000 rows",
         "values overflow from the 8192-byte entity envelope into an atomically referenced owner-bound blob"
       ],

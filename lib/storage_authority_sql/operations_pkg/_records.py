@@ -731,6 +731,11 @@ def _record_put_owned(session: Session, payload: Mapping[str, Any]) -> Any:
     value = payload.get("value")
     if namespace == "task_results":
         value = _project_task_result_experiment(value)
+        from ._invocations import worker_root_for_task
+        if worker_root_for_task(session, key,
+                user_id=value.get('user_id') if isinstance(value, Mapping) else None) is not None:
+            raise StorageError('database_protocol_error',
+                               'Durable invocation writes require task_results.checkpoint')
     encoded = (
         _encoded_task_result_document(value)
         if namespace == "task_results"
@@ -790,6 +795,11 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
         )
     guarded = guard_contract == TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
     require_parent = payload.get("require_parent", False)
+    tool_effect_intent = payload.get('tool_effect_intent')
+    if 'tool_effect_intent' in payload and (
+            not guarded or require_parent is not True
+            or not isinstance(tool_effect_intent, str) or not tool_effect_intent):
+        raise StorageError('database_protocol_error', 'Invalid child tool effect admission')
     if guarded and not isinstance(require_parent, bool):
         raise StorageError(
             "database_protocol_error",
@@ -812,14 +822,6 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
             "database_protocol_error", "Invalid projected task result"
         )
     checkpoint_value = dict(checkpoint_value)
-    if key.startswith('conversation-attempt:') or payload.get('worker_claim') is not None:
-        from ._worker_jobs import _require_conversation_publication_claim
-        _require_conversation_publication_claim(
-            session, attempt_id=key.removeprefix('conversation-attempt:'), task_id=key,
-            user_id=_integer(checkpoint_value, 'user_id', minimum=1),
-            proof=payload.get('worker_claim'),
-            terminal=checkpoint_value.get('status') in ('done', 'error', 'aborted', 'interrupted'),
-            drain_entered=True)
 
     cache_settings_contract = payload.get("cache_settings_contract")
     cache_prefix_hwm_present = (
@@ -888,6 +890,8 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
             "owned": owned,
             "guard_contract": TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
         }
+        if owned and tool_effect_intent is not None:
+            result['tool_effect_intent'] = tool_effect_intent
         if cache_settings_requested:
             result.update({
                 "cache_settings_contract": (
@@ -954,6 +958,20 @@ def _task_results_checkpoint(session: Session, payload: Mapping[str, Any]) -> An
     # Match task_results.abort's per-key lock so concurrent checkpoint CAS
     # writers serialize before reading the witnessed version (PostgreSQL).
     # SQLite treats lock_key as a no-op: its single writer already serializes.
+    from ._invocations import worker_root_for_task, starts_new_tool_effect
+    worker_root = worker_root_for_task(session, key, user_id=checkpoint_value.get('user_id'))
+    if tool_effect_intent is not None and (worker_root is None or worker_root == key):
+        raise StorageError('database_protocol_error', 'Tool admission requires a durable worker descendant')
+    if worker_root is not None or payload.get('worker_claim') is not None:
+        from ._worker_jobs import _require_conversation_publication_claim
+        new_effect = (starts_new_tool_effect(session, key, checkpoint_value, intent=tool_effect_intent)
+                      if worker_root is not None and worker_root != key else False)
+        _require_conversation_publication_claim(
+            session, attempt_id=(worker_root or key).removeprefix('conversation-attempt:'),
+            task_id=worker_root or key, user_id=_integer(checkpoint_value, 'user_id', minimum=1),
+            proof=payload.get('worker_claim'),
+            terminal=(not new_effect and checkpoint_value.get('status') in (
+                'done', 'error', 'aborted', 'interrupted')), drain_entered=not new_effect)
     session.lock_key("task_result", key)
     current = session.fetch_one(
         "SELECT value_json, version, updated_at_ms FROM storage_records "
@@ -1306,8 +1324,12 @@ def _record_delete_owned(session: Session, payload: Mapping[str, Any]) -> Any:
     namespace = _required_text(payload, "namespace", 128)
 
     if namespace == 'task_results':
-        from ._invocations import guard_child_record
-        guard_child_record(session, _required_text(payload, 'key'), None)
+        from ._invocations import guard_child_record, worker_root_for_task
+        key = _required_text(payload, 'key')
+        if worker_root_for_task(session, key) is not None:
+            raise StorageError('database_protocol_error',
+                               'Durable invocation deletion requires its domain owner')
+        guard_child_record(session, key, None)
     if namespace == 'tool_result_private' or namespace in _NATIVE_CHECKPOINT_NAMESPACES:
         raise StorageError('database_protocol_error', 'Reserved storage namespace')
     key = _required_text(payload, "key")
@@ -1398,19 +1420,18 @@ def _append_event_row(
         str(event.get("kind") or "")[:128]
         if isinstance(event, Mapping) else ""
     )
-    if not turn_publication_checked and (
-            task_id.startswith('conversation-attempt:') or payload.get('worker_claim') is not None):
+    if not turn_publication_checked:
+        from ._invocations import worker_root_for_task
         from ._worker_jobs import _require_conversation_publication_claim, _starts_tool_effect
-        attempt_id = task_id.removeprefix('conversation-attempt:')
-        owner = (_integer(payload, 'user_id', minimum=1)
-                 if payload.get('worker_claim') is not None and task_id.startswith('conversation-attempt:') else 0)
         try:
-            _require_conversation_publication_claim(
-                session, attempt_id=attempt_id, task_id=task_id,
-                user_id=owner,
-                proof=payload.get('worker_claim'),
-                terminal=event_type in ('done', 'error', 'aborted'),
-                drain_entered=not _starts_tool_effect(event))
+            worker_root = worker_root_for_task(session, task_id, user_id=payload.get('user_id'))
+            if worker_root is not None or payload.get('worker_claim') is not None:
+                owner = _integer(payload, 'user_id', minimum=1) if payload.get('worker_claim') is not None else 0
+                _require_conversation_publication_claim(
+                    session, attempt_id=(worker_root or task_id).removeprefix('conversation-attempt:'),
+                    task_id=worker_root or task_id, user_id=owner, proof=payload.get('worker_claim'),
+                    terminal=event_type in ('done', 'error', 'aborted'),
+                    drain_entered=not _starts_tool_effect(event))
         except StorageError as error:
             if error.code != 'database_conflict':
                 raise
