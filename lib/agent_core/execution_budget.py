@@ -102,6 +102,7 @@ class ExecutionBudget:
         self._tool_attempts = {}
         self._tool_reservation_observer = None
         self._tool_reservation_ordinal = 0
+        self._tool_account_restored = False
         self._model_allowance_provider = None
         self._replayed_account = None
         self._replayed_actor_frontier: Any = None
@@ -306,7 +307,8 @@ class ExecutionBudget:
         with self._lock:
             if (self._model_ordinal or self._tool_calls or self._model_leases or self._tool_attempts
                     or self._child_ordinal or set(self._active) != {self.root_id}
-                    or self._model_account_restored or self._replayed_account or self._settled_tokens
+                    or self._model_account_restored or self._tool_account_restored
+                    or self._replayed_account or self._settled_tokens
                     or any(self._model_tokens.values()) or self._unknown_usage or self._account_frontier_observer):
                 raise ValueError('Execution ceilings must be composed before effects')
             self.limits = {key: min(values) if values else None for key in self.limits
@@ -364,6 +366,29 @@ class ExecutionBudget:
             self._model_account_restored = True
             if not usage_complete:
                 self._mark_observation_incomplete(self._active[self.root_id])
+
+    def restore_tool_account(self, *, root_task_id, last_tool_ordinal, last_reservation_ordinal):
+        """Continue durable tool occurrence/reservation ordinals once, before tool admission.
+
+        The durable composition validates resume lineage and binds the observers
+        whose sequences these ordinals continue before calling this port; a model
+        restore, which requires tool-pristine state, precedes it. Spent slots are
+        not restored, so a finite tool cap refuses: no slot, effect replay or
+        execution authority is granted.
+        """
+        if (root_task_id != self.root_id or any(type(value) is not int or value < 0
+                for value in (last_tool_ordinal, last_reservation_ordinal))):
+            raise ValueError('invalid tool account recovery values')
+        with self._lock:
+            if (self._tool_account_restored or self._tool_ordinal or self._tool_reservation_ordinal
+                    or self._tool_calls or self._tool_attempts or set(self._active) != {self.root_id}
+                    or self.limits['max_tool_calls'] is not None
+                    or last_tool_ordinal and not callable(self._tool_observer)
+                    or last_reservation_ordinal and self._tool_reservation_observer is None):
+                raise ValueError('tool account recovery requires a pristine observed uncapped account')
+            self._tool_ordinal = last_tool_ordinal
+            self._tool_reservation_ordinal = last_reservation_ordinal
+            self._tool_account_restored = True
 
     def capture_shared_account(self, *, owner: int, task: dict, counter_policy: dict) -> dict:
         """Capture one quiescent invocation root, never another active tree."""

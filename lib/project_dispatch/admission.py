@@ -453,6 +453,20 @@ def bind_account(task):
         account_nonce = uuid.uuid4().hex
     shared_id = assigned['request'].get('delegation', {}).get('policy', {}).get('requestBudgetId')
     limited = not unbounded_dispatch(assigned)
+    # An admitted restart Continue of this same root continues its stored ordinals.
+    execution = assigned.get('execution') or {}
+    restarted = ((task.get('config') or {}).get('_turnOperation') in (
+                     'continue', 'checkpoint_resume', 'answer_guidance')
+                 and resume.get('cause') == 'server_restart'
+                 and bool(resume.get('attemptId'))
+                 and resume.get('attemptId') != execution.get('attemptId'))
+    if restarted:
+        predecessor = repository_for(binding).get_attempt(resume['attemptId'])
+        if (not isinstance(predecessor, Mapping)
+                or predecessor.get('turnId') != execution.get('turnId')
+                or predecessor.get('conversationId') != assigned['request']['recipientId']
+                or predecessor.get('status') != 'interrupted'):
+            raise AbortedError('Project dispatch resume source is not its interrupted predecessor')
 
     def observe_reservation(event):
         validate_task(task)
@@ -467,15 +481,19 @@ def bind_account(task):
             label='project dispatch tool reservation')
         validate_task(task)
 
+    reservations = 0
     if shared_id:
         def register_counter(row):
             counter = {'rootTaskId': task['id'], 'accountNonce': account_nonce, 'count': 0}
-            if row.get('toolReservations') is not None and row['toolReservations'] != counter:
+            stored = row.get('toolReservations')
+            if stored is None:
+                row['toolReservations'] = counter
+            elif stored != counter and not (restarted and {**stored, 'count': 0} == counter):
                 raise AbortedError('Worker tool reservations cannot be replenished')
-            row['toolReservations'] = counter
-        wait_for_persistence(task,
+        registered = wait_for_persistence(task,
             lambda: repository_for(binding).mutate(binding['assignmentId'], register_counter),
             label='project dispatch reservation account')
+        reservations = registered['toolReservations']['count']
     def observe(event):
 
         event = {**event, 'account_nonce': account_nonce}
@@ -574,22 +592,15 @@ def bind_account(task):
             active_tools.add(event['tool_ordinal'])
     budget.bind_model_attempt_observer(observe, tool_observer=observe_tool,
         tool_reservation_observer=observe_reservation if shared_id else None)
-    resume = (task.get('config') or {}).get('_resumeSource') or {}
-    execution = assigned.get('execution') or {}
-    if ((task.get('config') or {}).get('_turnOperation') in ('continue', 'checkpoint_resume', 'answer_guidance')
-            and resume.get('cause') == 'server_restart'
-            and resume.get('attemptId')
-            and resume.get('attemptId') != execution.get('attemptId')):
-        predecessor = repository_for(binding).get_attempt(resume['attemptId'])
-        if (not isinstance(predecessor, Mapping)
-                or predecessor.get('turnId') != execution.get('turnId')
-                or predecessor.get('conversationId') != assigned['request']['recipientId']
-                or predecessor.get('status') != 'interrupted'):
-            raise AbortedError('Project dispatch resume source is not its interrupted predecessor')
+    if restarted:
         tokens, _, complete = holder_consumption(assigned)
         ordinal = max([0, *[row['attempt_ordinal'] for row in assigned.get('modelAttempts', [])],
                        *assigned.get('settledModelUsage', {}).get('watermarks', {}).values()])
         budget.restore_model_account(
             root_task_id=task['id'], consumed_tokens=tokens,
             last_attempt_ordinal=ordinal, usage_complete=complete)
+        tool_ordinal = max([0, *[row['tool_ordinal'] for row in assigned.get('toolAttempts', [])],
+                            *assigned.get('settledToolUsage', {}).get('watermarks', {}).values()])
+        budget.restore_tool_account(root_task_id=task['id'], last_tool_ordinal=tool_ordinal,
+                                    last_reservation_ordinal=reservations)
     task['_projectDispatchAccountId'] = id(budget)
