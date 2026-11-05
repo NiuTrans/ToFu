@@ -45,6 +45,19 @@ def test_activity_covers_waiting_leased_and_suspended_work_without_terminal_hist
     assert activity() == []
 
 
+def test_activity_projects_conversation_id_as_a_string(semantic_authority):
+    """Producer payload JSON is untyped; the projection field never is."""
+    factory, owner, _ = semantic_authority
+    kind = 'activity-' + uuid.uuid4().hex
+    for index, value in enumerate((None, 7, {'nested': 'conversation'}, 'conversation')):
+        command(factory, 'worker_job.enqueue', {
+            'task_id': f'{kind}-{index}', 'user_id': owner, 'task_kind': kind,
+            'idempotency_key': f'{kind}-{index}', 'payload': {'conversationId': value},
+            'now_ms': 1})
+    rows = factory().query('worker_job.active.list', {'user_id': owner, 'task_kinds': [kind]})
+    assert [row['conversationId'] for row in rows] == ['', '', '', 'conversation']
+
+
 @pytest.mark.parametrize('payload', [
     {'task_kinds': ['kind']}, {'user_id': True, 'task_kinds': ['kind']},
     {'user_id': 0, 'task_kinds': ['kind']}, {'user_id': None, 'task_kinds': []},

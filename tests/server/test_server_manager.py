@@ -2815,6 +2815,10 @@ def test_live_generation_without_the_instance_lock_is_never_replaced(
 @pytest.mark.parametrize("entry", ["serverctl.py", "server-entry.py"])
 def test_serverctl_process_roundtrip(tmp_path, entry):
     """Exercise the real CLI → detached manager → worker control chain."""
+    from tests._jsdom import require_shipped_graph
+
+    # Startup preflight validates this checkout's built graph (borrowed below).
+    require_shipped_graph()
     root = Path(__file__).parents[2]
     project = tmp_path / 'cli-project'
     project.mkdir()

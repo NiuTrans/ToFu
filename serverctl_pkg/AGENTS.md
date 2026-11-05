@@ -36,6 +36,11 @@ retention, terminal crash budgets and drained upgrades. The full contract and
 real-process verification are in `docs/NATIVE_STORAGE_LIFECYCLE.md` and
 `tests/server/test_native_storage_service.py`.
 
+Every module the manager imports unconditionally belongs to
+`supervisor_protocol.SUPERVISOR_SOURCE_FILES`, its generation identity;
+otherwise an update to it never reloads the manager. The real re-exec test in
+`tests/server/test_supervisor.py` starts the manager from exactly that closure.
+
 `execution_service.py` / `execution_host.py` own the resident headless
 application process. `execution_lifespan.py` awaits the existing BootRunner
 and application shutdown; it never runs an agent loop. Both resident hosts

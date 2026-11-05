@@ -220,11 +220,17 @@ def _worker_job_active_list(session: Session, payload: Mapping[str, Any]) -> Any
         'FROM storage_worker_jobs WHERE status IN (\'queued\',\'running\',\'suspended\') '
         f'AND task_kind IN ({placeholders}){owner_clause} '
         'ORDER BY created_at_ms,task_id', parameters)
-    return [{
-        'taskId': row['task_id'], 'userId': row['user_id'], 'taskKind': row['task_kind'],
-        'conversationId': _load(row['payload_json']).get('conversationId', ''),
-        'status': row['status'], 'createdAtMs': row['created_at_ms'],
-    } for row in rows]
+    projected = []
+    for row in rows:
+        # Producer payload JSON is untyped; the projection field is always a
+        # string, '' when absent or not a string (as on the native engine).
+        conversation_id = (_load(row['payload_json']) or {}).get('conversationId')
+        projected.append({
+            'taskId': row['task_id'], 'userId': row['user_id'], 'taskKind': row['task_kind'],
+            'conversationId': conversation_id if isinstance(conversation_id, str) else '',
+            'status': row['status'], 'createdAtMs': row['created_at_ms'],
+        })
+    return projected
 
 
 def _worker_job_enqueue(session: Session, payload: Mapping[str, Any]) -> Any:
