@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from urllib.parse import urlsplit
 
@@ -243,6 +244,14 @@ def _ensure_writable_caches(env: dict[str, str], *, prepare_directories=True) ->
         # uv wants an RFC3339 instant; npm's --before takes a plain date.
         env.setdefault('UV_EXCLUDE_NEWER', cutoff)
         env.setdefault('npm_config_before', cutoff.split('T', 1)[0])
+        # Unrequested, uv picks the NEWEST interpreter in the managed store,
+        # which run_command children install into as well. A minor released
+        # after the cutoff has no wheels for the cutoff's compiled deps, so
+        # every cold env builds them from source (measured 2026-11-06: CPython
+        # 3.15.1 built pydantic-core 2.46.4 for ~124 s; 'initialize' timed out
+        # at 42 s). Pin the server's own minor: Tofu's own dependency tree
+        # already resolves wheels for that ABI.
+        env.setdefault('UV_PYTHON', f'{sys.version_info.major}.{sys.version_info.minor}')
         # NOTE: npx-cache reconciliation deliberately does NOT happen here.
         # This function runs INSIDE the readiness timer (the owner task builds
         # its env just before spawning), so an eviction here forces the cold
