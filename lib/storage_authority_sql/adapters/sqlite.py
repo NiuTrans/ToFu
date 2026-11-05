@@ -300,7 +300,7 @@ class _FairWriter:
     ) -> None:
         self._event_read_epoch = event_read_epoch
         self._worker_lease_clock = worker_lease_clock
-        self.worker_control = None
+        self.worker_control: WorkerControl | None = None
         self._connection = connection
         self._transaction_timeout_s = transaction_timeout_s
         self._stall_grace_s = max(0.05, float(stall_grace_s))
