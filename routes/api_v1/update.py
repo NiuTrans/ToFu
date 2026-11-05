@@ -35,7 +35,7 @@ from lib.server import server_reexec
 from lib.runtime.runtime_paths import data_root
 from lib.api_response import (
     api_conflict, api_error, api_forbidden, api_internal_error, api_not_found,
-    api_ok,
+    api_ok, api_typed_error,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -446,9 +446,11 @@ def update_restart():
     except Exception as e:
         logger.warning('[Update] Could not check running tasks before restart: %s', e)
         if not force:
-            return api_error(
-                'Active execution could not be verified; retry when storage is available.',
-                status=503)
+            return api_typed_error(
+                'storage_unavailable', status=503,
+                message='Active execution could not be verified; retry when storage is available.',
+                context='restart-preflight', source='api_v1.update.restart',
+                retryable=True)
 
     if not approval_id:
         return _approval_required(
