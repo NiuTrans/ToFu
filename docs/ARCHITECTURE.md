@@ -261,7 +261,13 @@ The delivery dependencies and completion evidence are:
    entry now atomically freezes its process incarnation and original claim in
    private Attempt configuration. Client configuration cannot supply this
    witness; running attempts cannot replace or backfill it. A missing witness
-   grants no death proof or replay. Qualify
+   grants no death proof or replay. Existing task-result metadata now carries
+   a fixed-shape exit receipt bound to that entry. Joined common cleanup permits
+   completion replay after carrier eviction. Local process death preserves
+   outputs and known accounting but records uncertain effects/required completion
+   as unknown; neither missing/foreign evidence nor an outstanding local
+   persistence debt may be declared complete. Recovery never enters preparation,
+   a model or a tool. Qualify
    provider calls, tools, terminal accounting, never-entered cancellation and
    unknown acknowledgements with crash injection before registering the kind.
    An uncertain external effect

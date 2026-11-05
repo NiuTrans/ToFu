@@ -40,13 +40,17 @@ def claimed(semantic_authority, monkeypatch):
     chat_task_runtime.discard(context.claim.task_id)
 
 
-def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(claimed, monkeypatch):
+@pytest.mark.parametrize('process_available', [True, False])
+def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(
+        claimed, monkeypatch, process_available):
     from lib import turn_lifecycle as turns
     from lib.conversation_sync import task_start
     from lib.conversation_sync.worker_execution import execute_claimed_attempt
     from lib.tasks_pkg.manager import append_event, persist_task_result, stamp_chat_task_terminal
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
     context, pair, factory, owner = claimed
+    if not process_available:
+        monkeypatch.setattr('lib.process_owner.process_owner', lambda: None)
     caller = threading.get_ident()
     entered = []
     monkeypatch.setattr(task_start, '_throttled_cleanup_old_tasks', lambda: None)
@@ -80,7 +84,8 @@ def test_claim_rebuilds_and_joins_common_chat_before_returning_outcome(claimed, 
     assert entered == [context.claim.task_id]
     assert turns.get_turn(pair['turn']['conversationId'], pair['turn']['turnId'],
                           user_id=owner)['status'] == 'completed'
-    # A lost transport completion only rereads settlement. It never reruns work.
+    # Completion loss survives carrier eviction/process replacement as well.
+    chat_task_runtime.discard(context.claim.task_id)
     assert execute_claimed_attempt(context, context.claim.payload) == outcome
     assert entered == [context.claim.task_id]
 
@@ -171,7 +176,9 @@ def test_claim_reaches_flow_completion_and_nested_tool_admission(claimed, monkey
     assert 'flow_invocation_completion' in record['value']
 
 
-def test_preparation_effects_follow_durable_entry_and_failure_is_not_replayed(claimed, monkeypatch):
+@pytest.mark.parametrize('partial_carrier', [False, True])
+def test_preparation_effects_follow_durable_entry_and_failure_is_not_replayed(
+        claimed, monkeypatch, partial_carrier):
     from lib import turn_lifecycle as turns
     from lib.conversation_sync.worker_execution import execute_claimed_attempt
     context, pair, _factory, owner = claimed
@@ -180,13 +187,15 @@ def test_preparation_effects_follow_durable_entry_and_failure_is_not_replayed(cl
     def fail(*args, **kw):
         assert turns.get_attempt(pair['attempt']['attemptId'], user_id=owner)['status'] == 'running'
         entered.append('preparation')
+        if partial_carrier:
+            from lib.tasks_pkg.manager.runtime import chat_task_runtime
+            chat_task_runtime.create(principal=context.principal, task_id=context.claim.task_id)
         raise RuntimeError('unknown preparation outcome')
 
     monkeypatch.setattr('lib.conversation_sync.task_start.start_conversation_attempt_executor', fail)
     with pytest.raises(RuntimeError, match='unknown preparation'):
         execute_claimed_attempt(context, context.claim.payload)
-    with pytest.raises(WorkerDomainSettlementUnknown, match='recovery'):
-        execute_claimed_attempt(context, context.claim.payload)
+    assert execute_claimed_attempt(context, context.claim.payload).status == 'failed'
     assert entered == ['preparation']
 
 
