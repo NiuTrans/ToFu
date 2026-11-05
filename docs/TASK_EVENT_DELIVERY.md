@@ -149,6 +149,24 @@ barriers weakens recovery and consumption ordering.
 
 `scripts/gen_task_event_delivery_contract.py` derives shared Python/Rust bounds.
 
+## Reused task identities continue their durable stream
+
+Problem: a resumed project-dispatch Worker keeps its predecessor's workspace
+task id (`project-worker:<assignmentId>`), whose `storage_events` rows the
+interrupted attempt already owns. Its new carrier minted sequence 0, which the
+authority refused permanently (`event sequence has a conflicting payload`).
+Every later frame then failed as "Earlier task event is not durable", the
+Worker aborted before its first round and terminal maintenance retried the
+same refused head forever. Decision: registration of a prepared identity reads
+the stream's durable cursor (`event.latest`, metadata only) before the carrier
+can emit and starts after it; the runtime remains the only sequence authority.
+Transient unavailability waits under the task's own controls; a permanent
+refusal fails the attempt start with its typed envelope and leaves no carrier.
+Freshly minted ids pay no read. Alternatives rejected: a per-attempt task id
+breaks the Worker's owned checkout and receipts; letting storage overwrite or
+skip an owned sequence corrupts cold replay. Spec:
+`tests/tasks_pkg/test_reused_task_event_cursor.py`.
+
 ## Large-backlog persistence and publication
 
 Problem: a large entry could force a batch down to one event, and that count
