@@ -159,7 +159,9 @@ def test_timeout_returns_without_draining_noncooperative_owner(monkeypatch, rec,
         assert not thread.is_alive(), 'timeout must not drain arbitrary threads/callbacks'
         assert not errors
         assert not exited.is_set()
-        assert not callback_called.is_set()
+        # An expired occurrence requests its own runtime cancellation
+        # (docs/contracts/TOOL_EXECUTION_POLICY.md) without waiting on it.
+        assert not blocking_callback or callback_called.wait(2)
         assert task.get('_activeToolContexts'), 'timeout does not kill the resource owner'
         assert item[5]['status'] == 'error'
         assert 'timed out' in item[5]['toolContent']
@@ -169,6 +171,40 @@ def test_timeout_returns_without_draining_noncooperative_owner(monkeypatch, rec,
         thread.join(5)
         assert exited.wait(2)
     assert item[5]['lateWrite'] is True
+
+
+def test_refused_expiry_canceller_requests_cancellation_on_the_collector(monkeypatch, rec):
+    task = _mk_task()
+    item = _mk_tc('refused', 'get_conversation', 1)
+    cancelled = threading.Event()
+    original = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith('tool-expiry-cancel-'):
+            raise RuntimeError('injected physical thread failure')
+        return original(thread)
+
+    def execute(task, tc, name, call_id, args, rn, row, *rest, **kwargs):
+        context = context_for_task(task, round_num=rn, tool_call_id=call_id,
+                                   tool_name=name, round_entry=row)
+        context.register_cancel_callback(cancelled.set)
+        try:
+            cancelled.wait(5)
+            return call_id, 'too late', False
+        finally:
+            unregister_context(context)
+
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    monkeypatch.setattr(_pipeline, '_execute_tool_one_in_pool', execute)
+    monkeypatch.setenv('TOOL_PARALLEL_TIMEOUT', '1')
+    try:
+        _run_pipeline(task, [item])
+        assert cancelled.is_set(), 'a refused canceller thread still requests cancellation'
+        assert item[5]['status'] == 'error'
+        assert 'timed out' in item[5]['toolContent']
+        assert rec.count('refused', 'tool_complete') == 1
+    finally:
+        cancelled.set()
 
 
 def test_noncooperative_worker_retains_ownership_until_cleanup(monkeypatch, rec):
