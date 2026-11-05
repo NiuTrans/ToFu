@@ -252,8 +252,12 @@ The delivery dependencies and completion evidence are:
    and requires its echoed admission. Lost-ACK retries revalidate Stop before
    granting execution; previously entered observations can still drain while
    the claim remains valid. No second lineage store or journal is added.
-   Provider admission still needs the same root authority before production
-   qualification. Qualify
+   The shared `ExecutionBudget` model dispatch boundary now revalidates the
+   already-entered root through the same transaction after domain observers,
+   before either Python or native transport may send. Rejected authority never
+   selects credential rotation or model fallback; already-dispatched usage
+   still settles through its original account. Root task birth also preserves
+   the principal's tenant for nested requirement/ownership checks. Qualify
    provider calls, tools, terminal accounting, never-entered cancellation and
    unknown acknowledgements with crash injection before registering the kind.
    An uncertain external effect
