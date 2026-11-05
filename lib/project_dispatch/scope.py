@@ -1,6 +1,6 @@
 """Live file-grant admission and descriptor confinement for project dispatch.
 
-Exports: profile_for, validate_profile, admit_tool and tool_scope. Admission owns
+Exports: profile_for, validate_profile, granted_tools, admit_tool and tool_scope. Admission owns
 identity/workspace lookup; this module owns relative-prefix policy and anchored
 regular-file I/O. Ordinary tasks have no scope. No shell, ref, remote, plugin or
 workspace-registration authority can be borrowed from a file grant.
@@ -69,6 +69,20 @@ def validate_profile(request):
 
 def profile_for(assignment):
     return validate_profile(assignment['request'])
+
+
+def granted_tools(profile):
+    """The exact tool names a dispatch profile admits.
+
+    A profile holding ``spawn_agents`` also holds the artifact tools its swarm
+    runs give their children (``lib.swarm.tools.ARTIFACT_TOOL_NAMES``): they are
+    contextual, never catalog entries, and touch only that run's in-process store.
+    """
+    tools = frozenset(profile['tools'])
+    if 'spawn_agents' not in tools:
+        return tools
+    from lib.swarm.tools import ARTIFACT_TOOL_NAMES
+    return tools | ARTIFACT_TOOL_NAMES
 
 
 def _exact_fields(value, allowed):
@@ -331,16 +345,21 @@ def admit_tool(task, name, args, project_path=None):
         stop_on_authority_failure(task, error)
         raise ToolAdmissionRefused(f'Project dispatch authority is unavailable: {error}',
                                    tool_name=name) from error
-    if task.get('_tool_env') is not None:
-        raise ToolAdmissionRefused('Project dispatch authority cannot be shadowed by a custom tool environment',
-                                   tool_name=name)
+    environment = task.get('_tool_env')
+    if environment is not None:
+        # A swarm worker's port to its own run's artifact store shadows no
+        # admitted tool; everything else, or anything it inherits, could.
+        from lib.swarm.agent import RunArtifactTools
+        if type(environment) is not RunArtifactTools or environment.inherited is not None:
+            raise ToolAdmissionRefused('Project dispatch authority cannot be shadowed by a custom tool environment',
+                                       tool_name=name)
     if profile['mode'] == 'coordinator':
-        if (name not in profile['tools']
+        if (name not in granted_tools(profile)
                 or project_path is not None and project_path != binding['projectPath']):
             raise ToolAdmissionRefused('Coordinator call exceeds its original continuation policy', tool_name=name)
         return None
     if profile['mode'] == 'project':
-        if name not in profile['tools']:
+        if name not in granted_tools(profile):
             raise ToolAdmissionRefused('Worker tool is outside its original Coordinator capability ceiling', tool_name=name)
         row = owned_workspace(task, binding)
         if project_path is not None and project_path != row['workspace_path']:
@@ -350,7 +369,7 @@ def admit_tool(task, name, args, project_path=None):
         # Ordinary project, command, browser and MCP owners keep their own
         # admission/approval/teardown. This profile is not a file sandbox claim.
         return None
-    if profile['mode'] != 'files' or name not in profile['tools'] or name not in FILE_TOOLS:
+    if profile['mode'] != 'files' or name not in granted_tools(profile) or name not in FILE_TOOLS:
         raise ToolAdmissionRefused('Project dispatch has no authority for this exact tool', tool_name=name)
     cfg = task.get('config') or {}
     if any(cfg.get(key) for key in ('remoteWorktree', 'remoteWorktreeBinding', 'remoteWorkspace',

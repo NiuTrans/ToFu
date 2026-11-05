@@ -90,7 +90,10 @@ process-local reference to the live Worker task; every admission and workspace
 resolution revalidates that root, so the children use the Worker's isolated
 workspace and stop with its Stop, revocation or settlement. Alternative
 rejected: copying the grant carrier into each child, which would let a child
-outlive or diverge from the Worker's authority.
+outlive or diverge from the Worker's authority. A child's artifact port
+(`RunArtifactTools`) is first-party, not a custom tool environment, and a
+Worker grant holding `spawn_agents` admits the artifact tools its runs give
+children ([Project-dispatch execution admission](contracts/TOOL_EXECUTION_POLICY.md#project-dispatch-execution-admission)).
 
 Problem: the per-call role refusal (`Coordinator policy unavailable`, fail
 closed) converted every lookup exception, so a project-dispatch task whose

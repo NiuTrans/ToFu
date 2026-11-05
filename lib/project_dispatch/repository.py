@@ -318,8 +318,11 @@ class ProjectDispatchRepository:
             tool_limit = profile.get('maxToolCalls') if profile is not None else 0
             if tool_limit is not None and len(tools) > tool_limit:
                 raise ProjectDispatchError('Dispatch tool-attempt capacity exceeded')
-            if any(item['tool_name'] not in assignment['request'].get('profile', {}).get('tools', []) for item in tools):
-                raise ProjectDispatchError('Dispatch tool occurrence exceeds its granted profile')
+            if tools:
+                from .scope import granted_tools
+                granted = granted_tools(profile) if profile is not None else frozenset()
+                if any(item['tool_name'] not in granted for item in tools):
+                    raise ProjectDispatchError('Dispatch tool occurrence exceeds its granted profile')
             if len({(row['root_task_id'], row['tool_ordinal']) for row in tools}) != len(tools):
                 raise ProjectDispatchError('Duplicate dispatch tool occurrence')
             grant = assignment.get('grant')

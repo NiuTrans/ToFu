@@ -14,7 +14,6 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from types import SimpleNamespace
 
 from lib.image_mime import sniff_image_mime
 from lib.log import get_logger
@@ -28,7 +27,7 @@ from lib.swarm.presentation_budget import (
 )
 from lib.swarm.protocol import ArtifactStore, SubAgentResult, SubAgentStatus, SubTaskSpec, SwarmEvent
 from lib.swarm.registry import get_role_model_hint, get_role_system_suffix, resolve_model_for_tier, scope_tools_for_spec
-from lib.swarm.tools import ARTIFACT_TOOLS
+from lib.swarm.tools import ARTIFACT_TOOL_NAMES, ARTIFACT_TOOLS
 from lib.utils import fast_deepcopy
 
 logger = get_logger(__name__)
@@ -221,6 +220,30 @@ SWARM_OUTPUT_LOG_BYTES = 2 * 1024 * 1024
 SWARM_OUTPUT_LOG_BUFFER_BYTES = 16 * 1024
 
 
+class RunArtifactTools:
+    """A worker's task-local tool port: its run's artifact handlers first.
+
+    First-party, unlike a custom tool environment: it serves only
+    ``ARTIFACT_TOOL_NAMES`` from the run's in-process ``ArtifactStore`` and
+    resolves every other name through ``inherited``, the parent's own
+    task-local tools. Project dispatch admits it only while ``inherited`` is
+    None (``project_dispatch.scope.admit_tool``).
+    """
+    __slots__ = ('_handlers', 'inherited')
+
+    def __init__(self, handlers: dict, inherited):
+        if not set(handlers) <= ARTIFACT_TOOL_NAMES:
+            raise ValueError('A run artifact port serves only the artifact tools')
+        self._handlers = handlers
+        self.inherited = inherited
+
+    def resolve(self, name):
+        handler = self._handlers.get(name)
+        if handler is not None:
+            return handler
+        return self.inherited.resolve(name) if self.inherited is not None else None
+
+
 class SubAgent:
     """Runnable scheduler leaf; the shared invocation is its only executor."""
 
@@ -357,21 +380,20 @@ class SubAgent:
 
     def _artifact_environment(self):
         """Expose artifact handlers through the ordinary task-local tool port."""
-        original = self.parent_task.get('_tool_env')
-        handlers = {'store_artifact': self._handle_store_artifact,
-                    'read_artifact': self._handle_read_artifact,
-                    'list_artifacts': self._handle_list_artifacts}
-        def resolve(name):
-            if self.artifact_store is not None and name in handlers:
-                def execute(task, tc, fn_name, tc_id, args, rn, row, *rest):
-                    from lib.tasks_pkg.executor._finalize import _finalize_tool_round
-                    content = handlers[name](args)
-                    _finalize_tool_round(task, rn, row, [{'title': name, 'output': content}],
-                                         status='error' if content.startswith('Error') else 'done')
-                    return tc_id, content, False
-                return execute
-            return original.resolve(name) if original is not None else None
-        return SimpleNamespace(resolve=resolve)
+        def executor(name, handle):
+            def execute(task, tc, fn_name, tc_id, args, rn, row, *rest):
+                from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+                content = handle(args)
+                _finalize_tool_round(task, rn, row, [{'title': name, 'output': content}],
+                                     status='error' if content.startswith('Error') else 'done')
+                return tc_id, content, False
+            return execute
+        handlers = {} if self.artifact_store is None else {
+            name: executor(name, handle) for name, handle in (
+                ('store_artifact', self._handle_store_artifact),
+                ('read_artifact', self._handle_read_artifact),
+                ('list_artifacts', self._handle_list_artifacts))}
+        return RunArtifactTools(handlers, self.parent_task.get('_tool_env'))
 
     def _write_stream_log(self, chunk: str) -> None:
         if not self.output_file or not chunk or self._log_bytes >= SWARM_OUTPUT_LOG_BYTES:

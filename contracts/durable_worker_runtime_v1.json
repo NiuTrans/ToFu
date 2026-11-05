@@ -1,5 +1,5 @@
 {
-  "contract": "tofu.automation-runtime/v1",
+  "contract": "tofu.durable-worker-runtime/v1",
   "capacityResource": "TOFU_AGENT_WORKERS",
   "processCapability": "task_workers",
   "controlScope": "automations:work",
@@ -17,10 +17,11 @@
     "turn.attempt.start",
     "worker_job.defer",
     "worker_job.enqueue",
-    "worker_job.request_cancel"
+    "worker_job.request_cancel",
+    "turn.attempt.dispatch_worker"
   ],
-  "extensionKey": "tofu_automation_workers",
-  "threadNamePrefix": "tofu-automation",
+  "extensionKey": "tofu_durable_workers",
+  "threadNamePrefix": "tofu-durable",
   "queueReceipts": "no-idle-claim-receipts",
   "shutdown": "revoke-dispatch-await-effects-then-defer-owned-claim"
 }

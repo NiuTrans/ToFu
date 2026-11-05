@@ -231,8 +231,8 @@ The delivery dependencies and completion evidence are:
    publication. The current implementation fences these commands on SQL and
    native TofuDB, including standalone replay, Flow phases, task checkpoints,
    cancellation drainage and batch rollback. An omitted proof
-   cannot fall back to the legacy path. This is publication authority only;
-   `conversation-attempt` is still not a production-qualified worker kind.
+   cannot fall back to the legacy path. The common worker composition now
+   registers `conversation-attempt`; ordinary admission cutover remains below.
 2. **Reconstructible invocation and effect authority.** Reconstruct the existing
    executor from accepted configuration and durable references. Carry principal,
    lineage, execution account and cancellation through the same kernel.
@@ -298,7 +298,9 @@ The delivery dependencies and completion evidence are:
    replace execution. The selected SQL Sidecar now shares the resident storage
    lifetime through its existing v1 handoff. Inbound bot connections belong to
    task workers, so API composition does not duplicate them. Manager execution
-   composition and qualified default admission remain the next cutover boundary.
+   composition now prepares and supervises the execution host, preserving it
+   across API-only restarts. Host recovery shares the manager failure budget;
+   default admission and whole-system qualification remain the next boundary.
 4. **Execution facts and read projections.** Keep committed execution facts and
    their accounting authoritative while projection/delivery can drain and
    reconstruct independently. Browser observation, reconnect and transcript

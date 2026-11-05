@@ -135,6 +135,7 @@ LIST_ARTIFACTS_TOOL = {
 }
 
 ARTIFACT_TOOLS = [STORE_ARTIFACT_TOOL, READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL]
+ARTIFACT_TOOL_NAMES = frozenset(tool['function']['name'] for tool in ARTIFACT_TOOLS)
 
 
 # ═══════════════════════════════════════════════════════════

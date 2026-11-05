@@ -9,6 +9,7 @@
   "executionClockId": "s",
   "executionOriginAtMs": 1,
   "flowProjection": "s",
+  "model": "s",
   "phase": "s",
   "preview": "s",
   "requestId": "s",

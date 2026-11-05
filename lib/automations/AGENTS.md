@@ -18,7 +18,7 @@ step transitions. Start at `docs/modules/scheduling_ops.md` and the executable
   and shutdown before storage closure. Claims are event-driven: a read-only
   `worker_job.claim_horizon` precedes every exclusive claim, and a new producer
   of claimable jobs must be listed in `claimWakeOperations`; never add an idle poll.
-  `contracts/automation_runtime_v1.json` owns timings; no per-rule resident timer.
+  `contracts/durable_worker_runtime_v1.json` owns timings; no per-rule resident timer.
   Publication deletes obsolete pure clock transport, retaining accepted runs and
   the latest bounded failure. Generic enqueue rejects reserved automation kinds.
 - `events.py` owns frozen task-start envelopes and bounded subscription prefixes;
