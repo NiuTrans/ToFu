@@ -12,6 +12,12 @@ response/cache, 4096 inspected rows and 256 recipes/source. Reads never block
 on HTTP; last-good data survives partial failures, expires from use after
 7 days, and failed attempts back off for 5 minutes. No secrets, arbitrary
 URLs, paid probes, persistent worker pools, or user-authority writes here.
+
+Each source also keeps its seeds' upstream listing times (``listed_at``:
+wire ID to ``created`` epoch seconds) beside the recipes, never inside them:
+recipes compile into owner bundles, while a listing time is catalogue
+evidence for the model release watch. The map is optional, so caches written
+without it stay readable; merged templates surface it in ``catalog_feed``.
 """
 from __future__ import annotations
 
@@ -100,6 +106,24 @@ def _amount(value):
         return amount if math.isfinite(amount) and amount >= 0 else None
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _seed_times(times, seeds: list[dict]) -> dict[str, float]:
+    """Valid listing times of exactly these seeds; a missing, zero or invalid time is unknown."""
+    times = times if isinstance(times, dict) else {}
+    valid = {seed['model_id']: _timestamp(times.get(seed['model_id'])) for seed in seeds}
+    return {model_id: value for model_id, value in valid.items() if value}
+
+
+def _listing_times(rows: list, seeds: list[dict]) -> dict[str, float]:
+    """Each projected seed's ``created``; a duplicated ID keeps its newest time."""
+    newest: dict[str, float] = {}
+    for row in rows[:_MAX_SOURCE_ROWS]:
+        model_id = row.get('id') if isinstance(row, dict) else None
+        if isinstance(model_id, str):
+            model_id = model_id.strip()
+            newest[model_id] = max(newest.get(model_id, 0.0), _timestamp(row.get('created')))
+    return _seed_times(newest, seeds)
 
 
 def _unique_logical_seeds(rows: list[dict]) -> list[dict]:
@@ -222,7 +246,8 @@ def load_cached_feed() -> dict | None:
                 continue
         if valid:
             cleaned[key] = _unique_logical_seeds(valid)
-            metadata[key] = {'url': spec['url'], 'fetched_at': _timestamp(source['fetched_at'])}
+            metadata[key] = {'url': spec['url'], 'fetched_at': _timestamp(source['fetched_at']),
+                             'listed_at': _seed_times(source.get('listed_at'), cleaned[key])}
     if not cleaned:
         return None
     return {'version': _CACHE_VERSION, 'templates': cleaned, 'sources': metadata}
@@ -264,7 +289,8 @@ async def _refresh_sources(stream, cached, deadline):
                 if not recipes:
                     raise ValueError('catalog has no usable chat rows')
                 cached['templates'][key] = recipes
-                cached['sources'][key] = {'url': spec['url'], 'fetched_at': time.time()}
+                cached['sources'][key] = {'url': spec['url'], 'fetched_at': time.time(),
+                                          'listed_at': _listing_times(rows, recipes)}
                 results[key] = 'ok'
             except Exception as exc:
                 logger.warning('[TemplateFeed] %s refresh failed (%s)', key, type(exc).__name__)
@@ -343,6 +369,7 @@ def merge_feed_recipes(templates, feed, *, now=None, excluded_keys=()):
     When a complete public catalog is usable, disappeared seeds are not kept
     indefinitely. Existing per-provider rpm/capability hints survive only for
     exact IDs the source still lists. The feed's own prices/context win.
+    Listing times of the merged seeds go only to ``catalog_feed``.
     """
     if _disabled() or not isinstance(feed, dict) or feed.get('version') != _CACHE_VERSION:
         return templates
@@ -378,7 +405,8 @@ def merge_feed_recipes(templates, feed, *, now=None, excluded_keys=()):
         out = copy.deepcopy(template)
         out['offering_recipes'] = recipes
         out['catalog_feed'] = {'url': spec['url'], 'fetched_at': source['fetched_at'],
-                               'stale': current - source['fetched_at'] >= _ttl_seconds()}
+                               'stale': current - source['fetched_at'] >= _ttl_seconds(),
+                               'listed_at': _seed_times(source.get('listed_at'), recipes)}
         merged.append(out)
     return merged
 
