@@ -272,6 +272,41 @@ atomic groups or scheduler interleavings are identical. Successful trials all
 passed SIGKILL recovery and offline integrity, but these results **do not
 qualify concurrent progress latency or release performance readiness**.
 
+The final source-matched build (`4722b73fddbd…`) also includes the shared
+ordinary-commit batch admission fix (`ab74fa922`): exempt the largest single
+record's carried payload when deciding whether its smaller followers fit, while
+retaining the ordinary commit boundary for their combined work. It was measured
+against the same `b2773bd711b4…` control using the merged application sources.
+These are **combined-version results**, not an isolated attribution to projection
+reuse. Four fresh processes ran candidate/control/control/candidate on the same
+25 histories, 625 events per process, without this task's regression/build
+commands overlapping their clocks. The host remains shared with other writers.
+
+| Concurrent queued metric | Candidate then control: control → candidate | Control then candidate: control → candidate |
+|---|---:|---:|
+| Cohort completion | 40.19 → 34.68 s | 40.51 → 36.96 s |
+| Event median | 0.824 → 0.739 s | 0.848 → 0.895 s |
+| Event P95 | 24.80 → 6.60 s | 13.48 → 16.32 s |
+| Terminal-event P95 | 5.15 → 14.12 s | 8.15 → 10.32 s |
+| Reconstructed checkpoint inputs | 12.42 → 6.56 GiB | 11.95 → 6.47 GiB |
+| Producer delivery runs | 218 → 215 | 217 → 191 |
+
+All four arms passed exact durable-work comparison, SIGKILL/reopen, ordered
+publication and offline integrity. The stable observations are 45.9–47.2% less
+checkpoint reconstruction and 8.7–13.7% shorter cohort completion. Pooling the
+1,250 events per arm gives P95 21.52→13.21 s, but the reversed pair's P95 and
+both terminal-event tails worsened. The pooled gain therefore does not establish
+stable per-event tail latency or release-wide performance readiness. Retain both
+pairs; do not publish the first pair's 73% P95 reduction as a general guarantee.
+
+Merged-source verification passed 35 native event/batch/worker-fence/fault tests,
+one isolated checkpoint-work counter test, 17 native application delivery tests
+with no skips, and 48 Python harness/resource/SQL checks. The broad native run
+before the merge reported 2,335 passes and four failures: three old retry-result
+assertions were updated for durable terminal receipts, and a control-fsync test
+hit its test-only timing guard under load. All four passed their focused rerun;
+this is not a claim of an unchanged, fully green post-merge suite.
+
 Alternative rejected after measurement: a producer segment-normalization memo
 made a warm 51 MiB metadata microprofile substantially faster, but whole-cohort
 wait changed by −0.4% and +4.3% in the two paired runs. The extra cache and its
