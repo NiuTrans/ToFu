@@ -361,7 +361,8 @@ and `no_think`, so `no_think` is the in-ladder `disabled_effort` and every
 enabled depth resolves to `high`. The
 [tool-call guide](https://intl.cloud.tencent.com/zh/document/product/1300/80638)
 asks callers to return `reasoning_content` within a tool-call loop and accepts
-only `auto` and `none` for `tool_choice`. `hy4` is a substring of
+only `auto` and `none` for `tool_choice`, so the profile declares
+`preserve_history: replay` (see "Declared inference profiles"). `hy4` is a substring of
 `hy4-preview`, so the Hy4 release and context needles follow the preview's;
 the preview's own reasoning profile stays unregistered. OpenRouter's public
 catalogue lists `tencent/hy4`, and the dynamic feed carries that wire.
@@ -700,6 +701,26 @@ efforts, default effort, disable capability and request representation).
 Provider settings can stage differing reasoning fields on an Offering or
 restore Model inheritance; other profile sections and providers remain intact.
 Both forms edit the existing Settings draft and use its owner CAS save.
+
+Reasoning history (checked 2026-11-05). `reasoning.preserve_history` declares
+whether a destination needs an assistant turn's `reasoning_content` passed
+back on later requests: `replay` sends it back verbatim (DeepSeek V4 thinking
+mode rejects a blanked trace with HTTP 400; Tencent Hy4's tool-call guide
+requires it within a tool loop), `clear_thinking_false` and `keep_all` replay
+it plus the GLM or Kimi retention flag the request compiler sends, and `none`
+lets callers drop it. `lib.model_info.model_requires_reasoning_content_replay`
+reads the selected route's profile, then the Model's maintained defaults;
+DeepSeek's family rule applies only when neither declares the fact (gateway
+spellings outside maintained identities). Compaction `strip_thinking`,
+history reconstruction and request repair all use that predicate. Problem:
+the predicate was `is_deepseek(model)`, so compaction blanked Hy4's tool-loop
+reasoning and ignored the GLM-5.2/5.3 and Kimi K2.7 Code profiles that already
+declared preserved thinking. Decision: the declared profile is the authority,
+and intake records the fact for every reasoning model. Alternatives rejected:
+extending a model-name list (a second place every registration must
+remember), and replaying every trace (it keeps tokens no vendor asked for in
+every request). Specification:
+`tests/model_routing/test_reasoning_history_replay.py`.
 
 DeepSeek V4 Pro on the Baidu wire (checked 2026-11-03): the creator's
 [thinking-mode guide](https://api-docs.deepseek.com/guides/thinking_mode/)
@@ -1330,7 +1351,8 @@ target conversation refuses the turn; the candidate stays new for the next run.
 2. Take facts only from the creator's official pages (model, pricing,
    reasoning guide, changelog or news): API availability date, list prices per
    million with cache rates and tiers, context, maximum output, modalities,
-   reasoning support/wire/efforts/default/disable behavior and sampling
+   reasoning support/wire/efforts/default/disable behavior, whether prior
+   reasoning must be passed back (`preserve_history`) and sampling
    restrictions. Feed and relay values are leads; never copy a sibling's facts.
 3. If a required fact or a public API is missing, record `deferred` with the
    gap and the checked URLs.

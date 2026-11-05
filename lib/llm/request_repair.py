@@ -578,9 +578,11 @@ def _withdraw_thinking(body: dict, withdrawn):
         return 0, []
     preserve_plain_reasoning = False
     if withdrawn is not None:
+        from lib.llm.route_features import body_route_profile
         from lib.model_info import model_requires_reasoning_content_replay
         preserve_plain_reasoning = model_requires_reasoning_content_replay(
-            body.get('_admission_logical_model') or body.get('model') or '')
+            body.get('_admission_logical_model') or body.get('model') or '',
+            inference_profile=body_route_profile(body))
     replaced = None
     changed = 0
     digests = []
