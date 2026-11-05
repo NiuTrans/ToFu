@@ -438,6 +438,98 @@ def append_event(task, event):
         return _append_event_ordered(task, event, lane=current_lane)
 
 
+def _advance_phase_snapshot(task, event, observed_at) -> bool:
+    """Apply one raw frame to the live ``task['phase']`` snapshot.
+
+    Returns True when the frame installs a new phase snapshot, which the
+    caller stamps with the frame's authoritative sequence.
+    """
+    installs_phase_snapshot = False
+    if event.get('type') == 'phase':
+        p = {
+            'phase': event['phase'],
+            'detail': event.get('detail', ''),
+            # Server wall clock for the browser's transport/render receipt.
+            # It lives on the v3 phase snapshot, not on every raw delta.
+            'emittedAt': observed_at,
+        }
+        # i18n plumb: forward the stable detailKey (+ optional detailArgs) so
+        #   the poll-fallback consumer localizes the label the same way the
+        #   live SSE consumer does. Empty/absent keys fall back to `detail`.
+        if event.get('detailKey'):
+            p['detailKey'] = event['detailKey']
+        if event.get('detailArgs'):
+            p['detailArgs'] = event['detailArgs']
+        if event.get('model'):
+            p['model'] = event['model']
+        if isinstance(event.get('modelRoute'), dict):
+            # Flow role routing is user-visible execution policy. Preserve it
+            # on the v3 live-phase snapshot so reconnect/poll consumers see
+            # the same selected→resolved disclosure as the raw phase frame.
+            p['modelRoute'] = dict(event['modelRoute'])
+        if event.get('toolContext'): p['toolContext'] = event['toolContext']
+        if event.get('toolContextTools'):
+            p['toolContextTools'] = event['toolContextTools']
+        if event.get('tools'): p['tools'] = event['tools']
+        # The tool call a preparing phase announces; its tool_start folds it.
+        if event.get('toolCallId'): p['toolCallId'] = event['toolCallId']
+        # The PHASE wire event now carries the unified canonical `roundNum`
+        # (Phase 3 §5); the poll-fallback phase dict keeps its local `round`
+        # key (what the frontend phase render reads as buf.phase.round).
+        if event.get('roundNum'): p['round'] = event['roundNum']
+        current = task.get('phase')
+        if p['phase'] == 'compacting':
+            # Compaction runs inside another activity (preparing a round, a
+            # reactive retry, the compact tool). Keep that activity so the
+            # compaction's own terminal resumes it instead of blanking the row.
+            if not (isinstance(current, dict)
+                    and current.get('phase') == 'compacting'):
+                task['_phaseInterruptedByCompaction'] = current
+        else:
+            task.pop('_phaseInterruptedByCompaction', None)
+        task['phase'] = p
+        installs_phase_snapshot = True
+    elif event.get('type') == 'delta':
+        task['phase'] = None  # Clear phase when LLM starts producing tokens
+        task.pop('_phaseInterruptedByCompaction', None)
+    elif event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
+        # Terminal events retire the phase snapshot. Previously ONLY deltas
+        #   cleared it, so a task that ended while its last phase was still up
+        #   (killed mid-compaction-summary, error right after a retrying beat)
+        #   kept serving that live-looking phase to cold replay
+        #   FOREVER — the multi-hour stale "compressing context…" HUD
+        #   (measured 2026-08-01: 20:10's compacting phase still on a bubble
+        #   at 22:22, ). A finished task has no current phase.
+        task['phase'] = None
+        task.pop('_phaseInterruptedByCompaction', None)
+    elif (event.get('type') == 'compaction_done'
+          and isinstance(task.get('phase'), dict)
+          and task['phase'].get('phase') == 'compacting'):
+        # The compacting phase's OWN terminal: retire it the moment the
+        # compaction lands rather than leaving it up until the next round's
+        # phase event (or forever, if the task dies in between), and resume
+        # the activity it interrupted. Clearing to None instead blanked the
+        # status row until that activity's next phase arrived. Only a phase
+        # that IS compacting is retired — never an unrelated live phase.
+        interrupted = task.pop('_phaseInterruptedByCompaction', None)
+        if isinstance(interrupted, dict):
+            resumed = {key: value for key, value in interrupted.items()
+                       if key != 'seq'}
+            resumed['emittedAt'] = observed_at
+            task['phase'] = resumed
+            installs_phase_snapshot = True
+        else:
+            task['phase'] = None
+    elif (event.get('type') == 'tool_start'
+          and isinstance(task.get('phase'), dict)
+          and task['phase'].get('toolCallId')
+          and task['phase']['toolCallId'] == event.get('toolCallId')):
+        # The announced call's arguments are complete and its own tool row now
+        # names the work: the preparing phase's terminal.
+        task['phase'] = None
+    return installs_phase_snapshot
+
+
 def _append_event_ordered(task, event, *, lane=None):
     """Append an event to the task's event log (chat-specific behaviour).
 
@@ -569,89 +661,7 @@ def _append_event_ordered(task, event, *, lane=None):
     #   no stream phase text at all — the projection never carried it).
     # True when this frame installs a new phase snapshot; the persist/enqueue
     # closures below stamp it with this frame's authoritative sequence.
-    _installs_phase_snapshot = False
-    if event.get('type') == 'phase':
-        p = {
-            'phase': event['phase'],
-            'detail': event.get('detail', ''),
-            # Server wall clock for the browser's transport/render receipt.
-            # It lives on the v3 phase snapshot, not on every raw delta.
-            'emittedAt': _trace_observed_at,
-        }
-        # i18n plumb: forward the stable detailKey (+ optional detailArgs) so
-        #   the poll-fallback consumer localizes the label the same way the
-        #   live SSE consumer does. Empty/absent keys fall back to `detail`.
-        if event.get('detailKey'):
-            p['detailKey'] = event['detailKey']
-        if event.get('detailArgs'):
-            p['detailArgs'] = event['detailArgs']
-        if event.get('model'):
-            p['model'] = event['model']
-        if isinstance(event.get('modelRoute'), dict):
-            # Flow role routing is user-visible execution policy. Preserve it
-            # on the v3 live-phase snapshot so reconnect/poll consumers see
-            # the same selected→resolved disclosure as the raw phase frame.
-            p['modelRoute'] = dict(event['modelRoute'])
-        if event.get('toolContext'): p['toolContext'] = event['toolContext']
-        if event.get('toolContextTools'):
-            p['toolContextTools'] = event['toolContextTools']
-        if event.get('tools'): p['tools'] = event['tools']
-        # The tool call a preparing phase announces; its tool_start folds it.
-        if event.get('toolCallId'): p['toolCallId'] = event['toolCallId']
-        # The PHASE wire event now carries the unified canonical `roundNum`
-        # (Phase 3 §5); the poll-fallback phase dict keeps its local `round`
-        # key (what the frontend phase render reads as buf.phase.round).
-        if event.get('roundNum'): p['round'] = event['roundNum']
-        current = task.get('phase')
-        if p['phase'] == 'compacting':
-            # Compaction runs inside another activity (preparing a round, a
-            # reactive retry, the compact tool). Keep that activity so the
-            # compaction's own terminal resumes it instead of blanking the row.
-            if not (isinstance(current, dict)
-                    and current.get('phase') == 'compacting'):
-                task['_phaseInterruptedByCompaction'] = current
-        else:
-            task.pop('_phaseInterruptedByCompaction', None)
-        task['phase'] = p
-        _installs_phase_snapshot = True
-    elif event.get('type') == 'delta':
-        task['phase'] = None  # Clear phase when LLM starts producing tokens
-        task.pop('_phaseInterruptedByCompaction', None)
-    elif event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
-        # Terminal events retire the phase snapshot. Previously ONLY deltas
-        #   cleared it, so a task that ended while its last phase was still up
-        #   (killed mid-compaction-summary, error right after a retrying beat)
-        #   kept serving that live-looking phase to cold replay
-        #   FOREVER — the multi-hour stale "compressing context…" HUD
-        #   (measured 2026-08-01: 20:10's compacting phase still on a bubble
-        #   at 22:22, ). A finished task has no current phase.
-        task['phase'] = None
-        task.pop('_phaseInterruptedByCompaction', None)
-    elif (event.get('type') == 'compaction_done'
-          and isinstance(task.get('phase'), dict)
-          and task['phase'].get('phase') == 'compacting'):
-        # The compacting phase's OWN terminal: retire it the moment the
-        # compaction lands rather than leaving it up until the next round's
-        # phase event (or forever, if the task dies in between), and resume
-        # the activity it interrupted. Clearing to None instead blanked the
-        # status row until that activity's next phase arrived. Only a phase
-        # that IS compacting is retired — never an unrelated live phase.
-        interrupted = task.pop('_phaseInterruptedByCompaction', None)
-        if isinstance(interrupted, dict):
-            resumed = {key: value for key, value in interrupted.items()
-                       if key != 'seq'}
-            resumed['emittedAt'] = _trace_observed_at
-            task['phase'] = resumed
-            _installs_phase_snapshot = True
-        else:
-            task['phase'] = None
-    elif (event.get('type') == 'tool_start'
-          and isinstance(task.get('phase'), dict)
-          and task['phase'].get('toolCallId')
-          and task['phase']['toolCallId'] == event.get('toolCallId')):
-        # The announced call's arguments are complete and its own tool row now
-        # names the work: the preparing phase's terminal.
-        task['phase'] = None
+    _installs_phase_snapshot = _advance_phase_snapshot(task, event, _trace_observed_at)
 
     if _wire is not None:
         for _clock_key in ('executionAtMs', 'executionOriginAtMs', 'executionClockId'):

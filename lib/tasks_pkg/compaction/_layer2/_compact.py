@@ -575,6 +575,27 @@ def _compaction_handoff(compact_result: str, phase, task, messages, summary_inpu
         scheduled_request_id=scheduled_request, continuity_digest=digest)
 
 
+def _plan_l2_sources(messages, task, *, unverified_pricing_deferral, cancelled, **planning):
+    """Plan summary sources over the detached L1-prepared candidate.
+
+    A deferred attempt builds no continuation, so it plans over the original
+    view. Returns the planned sources or the decline/cancellation text.
+    """
+    planning_messages = (messages if unverified_pricing_deferral
+                         else prepare_l2_projection(messages, task))
+    if cancelled():
+        return 'Context compaction cancelled — messages preserved as-is.'
+    return plan_compaction_sources(
+        messages, task, **planning,
+        ports=SourcePlanningPorts(
+            plan_tail=_plan_cross_turn_tail, anchor_index=_objective_anchor_index,
+            retained_projection=lambda *args: _retained_projection(*args, task=task),
+            restoration_reserve=lambda *args: _with_restoration_reserve(*args, task=task),
+        ),
+        planning_messages=planning_messages,
+    )
+
+
 def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> str:
     """Build and adopt one local continuation projection at a closed boundary.
 
@@ -690,21 +711,12 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
             logger.debug('%s [Compact] turn-diff block failed: %s', pfx, e)
 
 
-    planning_messages = (messages if _unverified_pricing_deferral
-                         else prepare_l2_projection(messages, task))
-    if cancelled():
-        return 'Context compaction cancelled — messages preserved as-is.'
-    sources = plan_compaction_sources(
+    sources = _plan_l2_sources(
         messages, task, budget_tokens=budget_tokens, max_turns=max_turns,
         handoff_phase=_handoff_phase, recent_files_block=_recent_files_block,
         turn_diff_block=_diff_block, options=kwargs, result_meta=_result_meta,
-        tokens_before=tokens_before, log_prefix=pfx,
-        ports=SourcePlanningPorts(
-            plan_tail=_plan_cross_turn_tail, anchor_index=_objective_anchor_index,
-            retained_projection=lambda *args: _retained_projection(*args, task=task),
-            restoration_reserve=lambda *args: _with_restoration_reserve(*args, task=task),
-        ),
-        planning_messages=planning_messages,
+        tokens_before=tokens_before, log_prefix=pfx, cancelled=cancelled,
+        unverified_pricing_deferral=_unverified_pricing_deferral,
     )
     if isinstance(sources, str):
         return sources

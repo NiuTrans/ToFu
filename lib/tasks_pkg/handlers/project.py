@@ -388,6 +388,20 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
     return _finish(format_desktop_result(cmd_type, result))
 
 
+def _admit_project_guidance(task, fn_name, fn_args):
+    """Freeze a command's directory, then check scoped project guidance.
+
+    Both steps are project admission and share its timing phase. Returns the
+    admitted arguments and the guidance refusal text, if any.
+    """
+    from lib.tasks_pkg.project_guidance import check_project_guidance, freeze_project_command_cwd
+    from lib.tools.execution_timing import timing_phase
+    with timing_phase('project_admission'):
+        if fn_name == 'run_command':
+            fn_args = freeze_project_command_cwd(task, fn_args)
+        return fn_args, check_project_guidance(task, fn_name, fn_args)
+
+
 
 # Register read_files independently — it's a global tool that works with or
 # without a project path (absolute paths route to lib.file_reader.read_local_file
@@ -494,11 +508,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             task, fn_name, tc_id, fn_args, rn, round_entry, _remote)
 
 
-    from lib.tasks_pkg.project_guidance import check_project_guidance, freeze_project_command_cwd
-    with timing_phase('project_admission'):
-        if fn_name == 'run_command':
-            fn_args = freeze_project_command_cwd(task, fn_args)
-        guidance_refusal = check_project_guidance(task, fn_name, fn_args)
+    fn_args, guidance_refusal = _admit_project_guidance(task, fn_name, fn_args)
     if guidance_refusal:
         meta = build_project_tool_meta(fn_name, fn_args, guidance_refusal)
         meta.update(notRun=True, badge='review project guidance')

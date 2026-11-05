@@ -291,6 +291,35 @@ def _maybe_preserve_accumulated_on_suspicion(task, last_finish_reason,
     return True
 
 
+def _settle_completion_suspicion(task, *, deliberate_silence, last_finish_reason,
+                                 loop_exit_reason, tool_call_happened, round_num,
+                                 model, assistant_msg, messages) -> list:
+    """Flag a suspicious completion, then act on it; return the reasons.
+
+    A declared deliberate silence is an explicit empty outcome, so it is
+    neither flagged nor refilled from accumulated narration.
+    """
+    if deliberate_silence:
+        return []
+    reasons = _check_suspicious_completion(
+        task, last_finish_reason, loop_exit_reason,
+        tool_call_happened, round_num, model,
+        assistant_msg=assistant_msg,
+    )
+    # ── ACT on the suspicious-short shape, not just warn (2026-07-28 canned
+    #    greeting incident). When the terminal stop body is blank or a confirmed
+    #    incongruent canned greeting
+    #    after real tool work, recover the accumulated narration BEFORE the
+    #    pre-emit conv sync and the done event read task['content'] — so the
+    #    committed message and the client both get the real work back, not
+    #    the 29-char residue.  Must run after the fallback/synthesis paths
+    #    (which can legitimately fill empty content) and after the
+    #    detector has logged its shape.
+    _maybe_preserve_accumulated_on_suspicion(
+        task, last_finish_reason, tool_call_happened, messages)
+    return reasons
+
+
 def _emit_tool_round_phase(task, assistant_msg, round_num):
     """Emit a 'phase' event describing the current tool round for the frontend.
 
@@ -1474,25 +1503,12 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         abort_detected_phase=_abort_detected_phase,
     )
 
-    # ── Flag suspicious completions ──
-    _suspicion_reasons = [] if deliberate_silence else _check_suspicious_completion(
-        task, last_finish_reason, _loop_exit_reason,
-        tool_call_happened, round_num, model,
-        assistant_msg=assistant_msg,
-    )
-
-    # ── ACT on the suspicious-short shape, not just warn (2026-07-28 canned
-    #    greeting incident). When the terminal stop body is blank or a confirmed
-    #    incongruent canned greeting
-    #    after real tool work, recover the accumulated narration BEFORE the
-    #    pre-emit conv sync and the done event read task['content'] — so the
-    #    committed message and the client both get the real work back, not
-    #    the 29-char residue.  Must run after the fallback/synthesis paths
-    #    above (which can legitimately fill empty content) and after the
-    #    detector has logged its shape.
-    if not deliberate_silence:
-        _maybe_preserve_accumulated_on_suspicion(
-            task, last_finish_reason, tool_call_happened, messages)
+    # ── Flag suspicious completions and recover accumulated narration ──
+    _suspicion_reasons = _settle_completion_suspicion(
+        task, deliberate_silence=deliberate_silence,
+        last_finish_reason=last_finish_reason, loop_exit_reason=_loop_exit_reason,
+        tool_call_happened=tool_call_happened, round_num=round_num, model=model,
+        assistant_msg=assistant_msg, messages=messages)
 
     done_evt = build_done_event(
         task,
