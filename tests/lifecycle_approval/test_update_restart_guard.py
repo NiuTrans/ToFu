@@ -172,6 +172,9 @@ class UpdateRestartGuardTest(unittest.TestCase):
              patch('lib.lifecycle_approval.consume_restart', wraps=la.consume_restart) as consume:
             response = self._post({'approvalId': token})
         assert response.status_code == 503
+        error = _run(response.get_json())['error']
+        assert error['kind'] == 'storage_unavailable'
+        assert error['retryable'] is True
         reexec.assert_not_called()
         consume.assert_not_called()
 
