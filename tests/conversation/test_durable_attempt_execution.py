@@ -92,6 +92,64 @@ def test_entered_attempt_is_never_replayed_from_lease_ownership_alone(claimed, m
         execute_claimed_attempt(context, context.claim.payload)
 
 
+def test_claim_reaches_flow_completion_and_nested_tool_admission(claimed, monkeypatch):
+    import json
+    from lib import turn_lifecycle as turns
+    from lib.conversation_sync import task_start
+    from lib.conversation_sync.worker_execution import execute_claimed_attempt
+    from lib.orchestration.engine import FlowExecutor
+    from lib.orchestration.execution_journal import ExecutionJournal
+    from lib.tasks_pkg import child_invocation as children
+    from lib.tasks_pkg.invocation_effects import persist_child_effect
+    from lib.tasks_pkg.manager import append_event, discard_task, persist_task_result, stamp_chat_task_terminal
+    from tests.orchestration.test_orchestration_execution_recovery import graph, role
+    context, pair, factory, owner = claimed
+    seen, events = [], []
+    monkeypatch.setattr(task_start, '_throttled_cleanup_old_tasks', lambda: None)
+    monkeypatch.setattr(turns, 'build_api_messages',
+                        lambda *a, **kw: [{'role': 'user', 'content': 'accepted input'}])
+
+    def execute(child, *, policy):
+        assert child['_conversationWorkerContext'] is context
+        seen.append(child['id'])
+        nested = children.create_child_invocation(child, model='controlled', tools=[],
+            objective='nested', event_sink=lambda event: None, abort_check=lambda: False)
+        try:
+            assert nested['_conversationWorkerContext'] is context
+            effect = {'operationId': uuid.uuid4().hex, 'scope': 'invocation',
+                      'state': 'entered', 'recovery': 'reconcile'}
+            row = {'toolName': 'controlled', 'toolCallId': 'call', 'roundNum': 1,
+                   'executionEffect': effect}
+            persist_child_effect(nested, row)
+            effect['state'] = 'returned'
+            persist_child_effect(nested, row)
+            record = factory().query('record.get', {
+                'namespace': 'task_results', 'key': nested['id'], 'user_id': owner})
+            assert json.loads(record['value']['tool_rounds'])[0]['executionEffect']['state'] == 'returned'
+        finally:
+            discard_task(nested['id'])
+        child.update(status='done', content='child complete', finishReason='stop')
+
+    def run(task):
+        definition = graph(role('worker'))
+        journal = ExecutionJournal(events.append)
+        journal.begin(definition, 'input')
+        FlowExecutor(definition, parent_task=task, model='controlled',
+            model_routing_policy='selected', execution_journal=journal).run(initial_context='input')
+        task['content'] = 'complete'
+        stamp_chat_task_terminal(task, status='done', finish_reason='stop')
+        append_event(task, {'type': 'done', 'finishReason': 'stop'})
+        assert persist_task_result(task)
+
+    monkeypatch.setattr(children, 'execute_invocation', execute)
+    monkeypatch.setattr('lib.tasks_pkg.orchestrator.api.run_task', run)
+    assert execute_claimed_attempt(context, context.claim.payload).status == 'succeeded'
+    assert len(seen) == 1
+    assert any(event['type'] == 'execution_effect_completed' for event in events)
+    record = factory().query('record.get', {'namespace': 'task_results', 'key': seen[0], 'user_id': owner})
+    assert 'flow_invocation_completion' in record['value']
+
+
 def test_preparation_effects_follow_durable_entry_and_failure_is_not_replayed(claimed, monkeypatch):
     from lib import turn_lifecycle as turns
     from lib.conversation_sync.worker_execution import execute_claimed_attempt

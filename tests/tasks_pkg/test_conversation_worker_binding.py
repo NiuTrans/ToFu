@@ -84,6 +84,40 @@ def test_binding_cannot_replace_existing_invocation_control():
     assert '_conversationWorkerContext' not in carrier
 
 
+def test_child_inherits_claim_without_replacing_its_cancellation_scope():
+    from lib.tasks_pkg.worker_binding import (
+        bind_conversation_worker, inherit_conversation_worker, publication_arguments)
+    parent, owned = task(), context()
+    bind_conversation_worker(parent, owned)
+    scope = lambda: False
+    child = {**task(), 'id': 'child', '_parentTaskId': parent['id'],
+             '_invocationAbortCheck': scope}
+    inherit_conversation_worker(parent, child)
+    assert child['_invocationAbortCheck'] is scope
+    assert publication_arguments(child) == publication_arguments(parent)
+    grandchild = {**task(), 'id': 'grandchild', '_parentTaskId': 'child'}
+    inherit_conversation_worker(child, grandchild)
+    owned.mark_authority_lost()
+    for carrier in (child, grandchild):
+        with pytest.raises(WorkerLeaseLost):
+            publication_arguments(carrier, terminal=True)
+
+
+def test_child_binding_refuses_wrong_lineage_and_cancelled_admission():
+    from lib.durable_worker import WorkerCancellationRequested
+    from lib.tasks_pkg.worker_binding import bind_conversation_worker, inherit_conversation_worker
+    parent, owned = task(), context()
+    bind_conversation_worker(parent, owned)
+    child = {**task(), 'id': 'child', '_parentTaskId': 'other'}
+    with pytest.raises(ValueError):
+        inherit_conversation_worker(parent, child)
+    child['_parentTaskId'] = parent['id']
+    owned.observe_claim_state({'ok': True, 'cancelSequence': 1, 'cancelReason': 'Stop'})
+    with pytest.raises(WorkerCancellationRequested):
+        inherit_conversation_worker(parent, child)
+    assert '_conversationWorkerContext' not in child
+
+
 def test_revocation_during_registration_does_not_leak_a_task(monkeypatch):
     from lib.tasks_pkg.manager import create_task
     from lib.tasks_pkg.manager.runtime import chat_task_runtime
@@ -127,3 +161,52 @@ def test_replay_fallback_preserves_claim_and_explicit_owner(monkeypatch):
     assert len(captured) == 2
     assert all(row['worker_claim'] == {'worker_id': 'worker', 'fencing_token': 3}
                and row['user_id'] == 7 for row in captured)
+
+
+@pytest.mark.parametrize('echo', [None, 'different', 'a' * 32])
+def test_child_tool_entry_requires_exact_effect_acknowledgement(monkeypatch, echo):
+    from types import SimpleNamespace
+    from lib.tasks_pkg.child_invocation import create_child_invocation
+    from lib.tasks_pkg.executor._effects import ToolEffectDurabilityError
+    from lib.tasks_pkg.invocation_effects import persist_child_effect
+    from lib.tasks_pkg.manager import discard_task
+    from lib.tasks_pkg.worker_binding import bind_conversation_worker
+    parent, owned = task(), context()
+    bind_conversation_worker(parent, owned)
+    births, writes = [], []
+
+    def command(operation, payload, *args):
+        if operation == 'invocation.register_child':
+            assert payload['worker_claim'] == {'worker_id': 'worker', 'fencing_token': 3}
+            identity = {key: value for key, value in payload.items() if key != 'worker_claim'}
+            identity['archive_scope'] = f'invocation:7:{identity["child_task_id"]}'
+            births.append(identity)
+            return identity
+        assert operation == 'task_results.checkpoint'
+        writes.append(payload)
+        return {'owned': True, 'version': 2, 'guard_contract': payload['guard_contract'],
+                'tool_effect_intent': echo}
+
+    def query(operation, payload):
+        if operation == 'conversation.get':
+            return {'id': 'conv'}
+        return {'version': 1, 'value': {'task_id': births[-1]['child_task_id'],
+            'user_id': 7, 'conv_id': 'conv', 'child_invocation': births[-1]}}
+
+    monkeypatch.setattr('lib.storage.get_storage_client',
+                        lambda **kw: SimpleNamespace(command=command, query=query))
+    child = create_child_invocation(parent, model='offline-test', tools=[], objective='child',
+        event_sink=lambda event: None, abort_check=lambda: False)
+    row = {'toolName': 'controlled', 'toolCallId': 'call', 'roundNum': 1,
+           'executionEffect': {'operationId': 'a' * 32, 'scope': 'invocation',
+                               'state': 'entered', 'recovery': 'reconcile'}}
+    try:
+        if echo == 'a' * 32:
+            persist_child_effect(child, row)
+        else:
+            with pytest.raises(ToolEffectDurabilityError, match='acknowledged'):
+                persist_child_effect(child, row)
+        assert writes[0]['tool_effect_intent'] == 'a' * 32
+        assert writes[0]['worker_claim'] == {'worker_id': 'worker', 'fencing_token': 3}
+    finally:
+        discard_task(child['id'])

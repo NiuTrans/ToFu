@@ -8131,6 +8131,8 @@ fn compile_invocation(
         .ok_or(SemanticExecutionError::AuthorityScopeMismatch)?;
     let request = match admitted.operation.name {
         "invocation.register_child" => crate::invocation::Request::RegisterChild {
+            worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
+                .map_err(|_| SemanticExecutionError::InvalidPayload)?,
             conversation_id: required_text(&payload, "conversation_id", 512)?.to_owned(),
             parent_task_id: required_text(&payload, "parent_task_id", 512)?.to_owned(),
             child_task_id: required_text(&payload, "child_task_id", 512)?.to_owned(),
@@ -8935,6 +8937,11 @@ fn compile_task_result(
             }))?);
             (
                 vec![TransactionIrStep::TaskResultCheckpoint {
+                    tool_effect_intent: match payload.get("tool_effect_intent") {
+                        None => None,
+                        Some(Value::String(intent)) if !intent.is_empty() && guarded && require_parent => Some(intent.clone()),
+                        _ => return Err(SemanticExecutionError::InvalidPayload),
+                    },
                     worker_claim: crate::worker_job::PublicationClaim::parse(payload.get("worker_claim"))
                         .map_err(|_| SemanticExecutionError::InvalidPayload)?,
                     task_id,

@@ -47,12 +47,20 @@ reuse the invocation control scope, joined before returning to the durable
 runner. Publication carries the claim through single/batched/coalesced events,
 Flow phases and task checkpoints. Stop withdraws new work but permits the current
 entered owner to drain accepted evidence, preserving FIFO terminal settlement.
+Immutable child births carry the same root claim through nested registration,
+Flow completion and task checkpoints. Storage resolves ancestry even when a
+writer omits its proof; generic record mutation and unfenced replay batches
+cannot bypass that ownership. Initial child tool entry selects one exact
+occurrence in the guarded checkpoint and requires the echoed admission.
+An identical lost-ACK retry rechecks cancellation; ordinary evidence drainage
+does not reauthorize the historical entered occurrences in a snapshot.
 An entered Attempt is never restarted just because its lease was reclaimed.
 Terminal outcome requires both canonical persistence receipts and physical exit;
 unknown process/effect/account outcomes remain with recovery. This adapter is
 not production kind registration or independent process composition. Specs:
 `test_durable_attempt_execution.py`, `test_conversation_worker_binding.py`,
-`test_conversation_worker_publication.py` and worker/event-delivery neighbors.
+`test_conversation_worker_publication.py`, `test_conversation_worker_children.py`
+and worker/event-delivery neighbors.
 Generic thread/executor/async-wrapper rejection settles that same original
 carrier and preserves the launch exception. Background completion retrieves
 and logs failures before the Future can become unobserved; a cancelled worker

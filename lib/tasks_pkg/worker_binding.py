@@ -61,6 +61,28 @@ def bind_conversation_worker(task, context):
     task['_invocationAbortCheck'] = ChildCancellationScope(aborted)
 
 
+def inherit_conversation_worker(parent, child):
+    """Share the trusted root claim; the existing child scope owns cancellation."""
+    context = parent.get('_conversationWorkerContext')
+    if context is None:
+        return
+    if not isinstance(context, WorkerExecutionContext):
+        raise TypeError('invalid conversation worker context')
+    principal = PrincipalContext.from_payload(parent['_principalContext'])
+    child_principal = PrincipalContext.from_payload(child['_principalContext'])
+    if (principal != context.principal or child_principal != principal
+            or child.get('_userId') != principal.require_owner(context='worker child')):
+        raise PermissionError('Worker child principal differs from its root')
+    if (child.get('_parentTaskId') != parent.get('id') or child.get('id') == parent.get('id')
+            or child.get('convId') != parent.get('convId')
+            or parent.get('convId') != context.claim.payload.get('conversationId')):
+        raise ValueError('Worker child lineage differs from its parent')
+    if '_conversationWorkerContext' in child:
+        raise ValueError('Worker child cannot replace existing execution authority')
+    context.checkpoint()
+    child['_conversationWorkerContext'] = context
+
+
 def publication_arguments(task, *, terminal=False):
     context = task.get('_conversationWorkerContext')
     if context is None:

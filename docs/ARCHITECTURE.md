@@ -244,8 +244,16 @@ The delivery dependencies and completion evidence are:
    real authorities; entered/unknown work remains refused for replay.
    Root tool-entry acknowledgement now revalidates cancellation inside the
    same Turn or replay transaction; terminal wrappers cannot turn new entry
-   into cancellation drainage. Child and provider admission still need the
-   same root authority before production qualification. Qualify
+   into cancellation drainage. Registered descendants now resolve the root
+   through immutable birth records inside storage transactions. Birth, nested
+   checkpoints, Flow completion and individual/batched replay require that
+   root's current claim; generic record writes/deletes cannot bypass it.
+   Child tool entry names one exact entered occurrence in the guarded checkpoint
+   and requires its echoed admission. Lost-ACK retries revalidate Stop before
+   granting execution; previously entered observations can still drain while
+   the claim remains valid. No second lineage store or journal is added.
+   Provider admission still needs the same root authority before production
+   qualification. Qualify
    provider calls, tools, terminal accounting, never-entered cancellation and
    unknown acknowledgements with crash injection before registering the kind.
    An uncertain external effect

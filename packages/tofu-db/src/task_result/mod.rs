@@ -372,6 +372,98 @@ fn read_header(
     Ok(Some(header))
 }
 
+/// Immutable birth headers select the root claim without reading child payloads.
+pub(crate) fn worker_root_for_task(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    task_id: &str,
+) -> io::Result<Option<String>> {
+    let mut current = task_id.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    let mut conversation: Option<String> = None;
+    loop {
+        if !seen.insert(current.clone()) {
+            return Err(invalid_data("child invocation ancestry is cyclic"));
+        }
+        if current.starts_with("conversation-attempt:") {
+            return Ok(Some(current));
+        }
+        let Some(header) = read_header(database, transaction, &current)? else {
+            return Ok(None);
+        };
+        let Some(identity) = header.child_invocation.as_ref() else {
+            return Ok(None);
+        };
+        if header.owner_user_id != transaction.owner_user_id() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "task not found"));
+        }
+        let conv = identity["conversation_id"].as_str()
+            .ok_or_else(|| invalid_data("child invocation conversation is malformed"))?;
+        if conv != header.conv_id || conversation.as_ref().is_some_and(|value| value != conv) {
+            return Err(invalid_data("child invocation ancestry is malformed"));
+        }
+        conversation = Some(conv.to_owned());
+        current = identity["parent_task_id"].as_str()
+            .ok_or_else(|| invalid_data("child invocation parent is malformed"))?.to_owned();
+    }
+}
+
+fn tool_rows(value: &Value) -> io::Result<std::borrow::Cow<'_, [Value]>> {
+    use std::borrow::Cow;
+    match value.get("tool_rounds") {
+        None | Some(Value::Null) => Ok(Cow::Owned(Vec::new())),
+        Some(Value::String(text)) if text.is_empty() => Ok(Cow::Owned(Vec::new())),
+        Some(Value::String(text)) => Ok(Cow::Owned(serde_json::from_str::<Vec<Value>>(text)
+            .map_err(|_| invalid_input("invalid child tool receipts"))?)),
+        Some(Value::Array(rows)) => Ok(Cow::Borrowed(rows)),
+        _ => Err(invalid_input("invalid child tool receipts")),
+    }
+}
+
+fn tool_operation_ids(value: &Value, entered_only: bool) -> io::Result<std::collections::HashSet<String>> {
+    let mut operations = std::collections::HashSet::new();
+    for row in tool_rows(value)?.iter() {
+        let Some(effect) = row.get("executionEffect").filter(|value| value.is_object()) else { continue; };
+        let operation = effect.get("operationId").and_then(Value::as_str)
+            .filter(|value| !value.is_empty()).ok_or_else(|| invalid_input("invalid child effect identity"))?;
+        if !entered_only || effect.get("state").and_then(Value::as_str) == Some("entered") {
+            operations.insert(operation.to_owned());
+        }
+    }
+    Ok(operations)
+}
+
+fn starts_new_tool_effect(database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+                         task_id: &str, incoming: &Value, intent: Option<&str>) -> io::Result<bool> {
+    if incoming.get("tool_rounds").is_none() {
+        return if intent.is_some() { Err(invalid_input("tool entry requires its exact invocation receipt")) }
+            else { Ok(false) };
+    }
+    let previous = read_document_value(database, transaction, task_id)?
+        .map(Value::Object).unwrap_or(json!({}));
+    if let Some(intent) = intent {
+        let incoming_rows = tool_rows(incoming)?;
+        let previous_rows = tool_rows(&previous)?;
+        let matches = |row: &&Value| row.get("executionEffect")
+            .and_then(|effect| effect.get("operationId")).and_then(Value::as_str) == Some(intent);
+        let selected: Vec<_> = incoming_rows.iter().filter(matches).collect();
+        if selected.len() != 1 || selected[0].get("taskId").and_then(Value::as_str) != Some(task_id)
+            || selected[0]["executionEffect"].get("scope").and_then(Value::as_str) != Some("invocation")
+            || selected[0]["executionEffect"].get("state").and_then(Value::as_str) != Some("entered")
+            || selected[0]["executionEffect"].get("reconciliation").is_some_and(|value| !value.is_null()) {
+            return Err(invalid_input("tool entry requires its exact invocation receipt"));
+        }
+        let prior: Vec<_> = previous_rows.iter().filter(matches).collect();
+        if !prior.is_empty() && prior != selected {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock,
+                                     "tool effect admission changed its occurrence"));
+        }
+        return Ok(true);
+    }
+    let admitted = tool_operation_ids(&previous, false)?;
+    Ok(tool_operation_ids(incoming, true)?.difference(&admitted).next().is_some())
+}
+
 fn read_replay_projection(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -533,6 +625,7 @@ fn checkpoint_response(task_id: &str, version: u64, updated_at_ms: u64) -> io::R
 }
 
 pub(crate) struct CheckpointGuard {
+    pub tool_effect_intent: Option<String>,
     pub require_parent: bool,
     pub cache_prefix_hwm: Option<u64>,
     pub last_turn_cache_read: Option<u64>,
@@ -567,6 +660,11 @@ fn guarded_checkpoint_response(
         "owned": owned,
         "guard_contract": TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
     });
+    if owned {
+        if let Some(intent) = &guard.tool_effect_intent {
+            response["tool_effect_intent"] = json!(intent);
+        }
+    }
     if guard.cache_settings_requested() {
         response["cache_settings_contract"] = json!(TASK_RESULT_CACHE_SETTINGS_CONTRACT);
         response["cache_settings_committed"] = json!(cache_settings_committed);
@@ -592,14 +690,23 @@ pub(crate) fn checkpoint(
     guard: Option<&CheckpointGuard>,
     worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
-    if task_id.starts_with("conversation-attempt:") || worker_claim.is_some() {
+    let worker_root = worker_root_for_task(database, transaction, task_id)?;
+    let intent = guard.and_then(|guard| guard.tool_effect_intent.as_deref());
+    if intent.is_some() && (worker_root.is_none() || worker_root.as_deref() == Some(task_id)) {
+        return Err(invalid_input("tool admission requires a durable worker descendant"));
+    }
+    if worker_root.is_some() || worker_claim.is_some() {
         let value: Value = serde_json::from_slice(&value_json)
             .map_err(|_| invalid_input("invalid task result worker checkpoint"))?;
+        let root = worker_root.as_deref().unwrap_or(task_id);
+        // Root tool entry belongs to Turn/replay publication. Descendants
+        // persist their write-ahead receipts in this existing checkpoint.
+        let starts_effect = root != task_id && starts_new_tool_effect(database, transaction, task_id, &value, intent)?;
         crate::worker_job::require_conversation_publication_claim(
-            database, transaction, task_id.strip_prefix("conversation-attempt:").unwrap_or(""),
-            task_id, worker_claim,
-            matches!(value.get("status").and_then(Value::as_str),
-                     Some("done" | "error" | "aborted" | "interrupted")), true)?;
+            database, transaction, root.strip_prefix("conversation-attempt:").unwrap_or(""),
+            root, worker_claim,
+            !starts_effect && matches!(value.get("status").and_then(Value::as_str),
+                     Some("done" | "error" | "aborted" | "interrupted")), !starts_effect)?;
     }
     checkpoint_inner(
         database,
@@ -1608,6 +1715,7 @@ mod tests {
             0,
             2,
             Some(&CheckpointGuard {
+                tool_effect_intent: None,
                 require_parent: true,
                 cache_prefix_hwm: None,
                 last_turn_cache_read: None,
