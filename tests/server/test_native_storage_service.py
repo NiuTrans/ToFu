@@ -103,7 +103,7 @@ def test_host_exit_cannot_reset_native_crash_budget_on_reconcile(tmp_path, monke
     monkeypatch.setattr(service, 'prepare', lambda *_: pytest.fail('must not reset crash budget'))
     try:
         with pytest.raises(RuntimeError, match='explicit restart'):
-            manager._recover_native_storage_service()
+            manager._recover_native_storage_service(os.getpid())
         assert service.record()['state'] == 'failed'
     finally:
         manager.close()
@@ -461,6 +461,137 @@ finally:
         stopped = manager.stop()
         manager.close()
         assert stopped['ok'], stopped
+    assert not read_storage_lease_status(tmp_path / 'data')['held']
+
+
+_DEPARTING_MANAGER = '''import json,sys
+import server_manager
+server_manager.run_frontend_preflight=lambda *_: (True, '')
+environment=json.loads(sys.argv[2])
+manager=server_manager.LifecycleManager(sys.argv[1],sys.executable)
+manager._worker_environment=lambda *_: dict(environment)
+started=manager.start(server_env=json.loads(sys.argv[3]))
+print(json.dumps({key: started.get(key) for key in ('ok','launcherPid','message')}),flush=True)
+sys.stdin.readline()
+'''
+
+_STORAGE_WORKER = '''import fcntl,hashlib,json,os,signal,socket,threading,time
+from pathlib import Path
+import lib.storage.supervisor as storage_supervisor
+from lib.storage.runtime import StorageRuntime
+stop=threading.Event()
+signal.signal(signal.SIGTERM,lambda *_:stop.set())
+lock=open('data/.server.lock','w+')
+fcntl.flock(lock,fcntl.LOCK_EX)
+lock.write(str(os.getpid())+'@'+socket.gethostname());lock.flush()
+report=Path('data/worker-storage.json')
+first_generation=not report.exists()
+owner=storage_supervisor.StorageSupervisor(project_root=Path.cwd(),backend='tofudb')
+owner._liveness_interval_seconds=0.05
+runtime=StorageRuntime(owner)
+try:
+    client=runtime.start()
+    if first_generation:
+        client.command('conversation.create',{'conv_id':'preserved-worker','user_id':1,
+            'title':'Survives the manager','settings':{}},'create-preserved-worker')
+    while not stop.wait(0.05):
+        try:
+            title=runtime.client().query('conversation.get',
+                {'conv_id':'preserved-worker','user_id':1})['metadata']['title']
+        except Exception:
+            continue
+        attachment=hashlib.sha256(owner._token.encode()).hexdigest()
+        Path('data/worker-storage.tmp').write_text(json.dumps({'pid':os.getpid(),'attachment':attachment,'title':title}))
+        os.replace('data/worker-storage.tmp',report)
+finally:
+    runtime.stop();lock.close()
+'''
+
+
+@pytest.mark.parametrize('generation', ['unchanged', 'changed'])
+def test_successor_manager_restores_storage_for_the_preserved_worker(
+        tmp_path, native_environment, monkeypatch, generation):
+    """Manager death drains its storage host; the successor must not strand the worker.
+
+    2026-11-05: the watchdog restarted a signalled Supervisor, its host drained
+    on manager EOF, and the successor refused to start the changed storage
+    generation under the live worker without draining it: 1 h 40 min outage.
+    """
+    import server_manager
+    from server_manager import LifecycleManager, pid_is_alive, read_storage_lease_status
+    (tmp_path / 'server.py').write_text(_STORAGE_WORKER)
+    environment = {**native_environment, 'TOFU_MANAGED_BY': 'supervisor', 'TOFU_SERVER_WORKER': '1',
+                   'TOFU_RUNTIME_REPLICA': 'off', 'TOFU_SERVER_PYTHON_CACHE': 'off'}
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        server_env = {'PORT': str(probe.getsockname()[1]), 'TOFU_DATA_DIR': str(tmp_path / 'data')}
+    service = NativeStorageService(str(tmp_path), sys.executable)
+
+    def storage_report():
+        try:
+            return json.loads((tmp_path / 'data/worker-storage.json').read_text())
+        except (OSError, ValueError):
+            return None
+
+    departing = subprocess.Popen(
+        [sys.executable, '-c', _DEPARTING_MANAGER, str(tmp_path), json.dumps(environment),
+         json.dumps(server_env)],
+        cwd=tmp_path, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    successor = None
+    worker_pid = None
+    try:
+        assert select.select([departing.stdout], [], [], NATIVE_SERVICE_PREPARATION_SECONDS)[0]
+        started = json.loads(departing.stdout.readline())
+        assert started['ok'], started
+        worker_pid = started['launcherPid']
+        first = wait_for(lambda: (report := storage_report()) and report['pid'] == worker_pid and report)
+        departed_host = service.record()
+
+        departing.kill()  # Only the manager: the worker is independently owned.
+        departing.wait(timeout=10)
+        wait_for(lambda: not host_matches(departed_host))
+        assert pid_is_alive(worker_pid)
+
+        successor_environment = dict(environment)
+        if generation == 'changed':
+            # Any storage-identity input changed after the departed host started.
+            successor_environment['TOFU_STORAGE_STARTUP_TIMEOUT_SECONDS'] = '120'
+        monkeypatch.setattr(server_manager, 'run_frontend_preflight', lambda *_: (True, ''))
+        successor = LifecycleManager(str(tmp_path), sys.executable)
+        monkeypatch.setattr(successor, '_worker_environment', lambda *_: dict(successor_environment))
+
+        def storage_restored():
+            successor.reconcile()
+            report = storage_report()
+            return report if report and report['attachment'] != first['attachment'] else None
+
+        restored = wait_for(storage_restored)
+        assert restored['title'] == 'Survives the manager'
+        replacement_host = service.record()
+        assert replacement_host['serviceId'] != departed_host['serviceId']
+        assert service.owns_lease(read_storage_lease_status(tmp_path / 'data'))
+        if generation == 'unchanged':
+            assert restored['pid'] == worker_pid
+            assert replacement_host['plan'] == departed_host['plan']
+        else:
+            # The live worker never adopts another generation; it is drained first.
+            assert restored['pid'] != worker_pid
+            assert not pid_is_alive(worker_pid)
+            assert replacement_host['plan'] != departed_host['plan']
+    finally:
+        if departing.poll() is None:
+            departing.kill()
+            departing.wait(timeout=10)
+        departing.stdin.close()
+        departing.stdout.close()
+        if successor is not None:
+            stopped = successor.stop()
+            successor.close()
+            assert stopped['ok'], stopped
+        elif worker_pid and pid_is_alive(worker_pid):
+            os.kill(worker_pid, signal.SIGKILL)
+        if host_matches(service.record()):
+            service.stop()
     assert not read_storage_lease_status(tmp_path / 'data')['held']
 
 

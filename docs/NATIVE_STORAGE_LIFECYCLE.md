@@ -69,7 +69,7 @@ The record is never a substitute for the actual storage authority lease.
 |---|---|
 | Ordinary worker restart/crash | Keep the same host and native PID; reconnect and run the existing application recovery gates. |
 | Manager executable reload | Same manager PID/start identity retains the host and database. |
-| Actual manager death | Host observes lost PID/start identity, joins startup/restart work and drains native storage. A successor waits for the old storage lease before recovery. |
+| Actual manager death | Host observes lost PID/start identity, joins startup/restart work and drains native storage. A successor waits for the old storage lease, then restarts the same generation for the preserved worker; when the generation changed it drains that worker as a planned restart, whose replacement starts the current host first. |
 | Native crash | Existing runtime fences readiness, applies its crash budget, starts the admitted engine from its private copy (whatever a deployment did to the configured path) and publishes a new token/PID. Clients detach on the exited PID and reattach through their existing recovery owner. |
 | Starved but live engine | Neither monitor gives it up before `TOFU_STORAGE_LIVENESS_UNRESPONSIVE_SECONDS` of continuous failure (longer under host overload); clients keep their attachment and resume when it answers. |
 | Repeated native failures | Keep the terminal failure; automatic worker retries cannot reset the database crash budget. Explicit restart may replace the failed host. Attached clients are never latched themselves and reattach once a host publishes a healthy engine. |
@@ -87,6 +87,28 @@ Alternatives rejected: leaving an unowned native child breaks shutdown and
 maintenance; reusing the SQL v1 wire for native storage mismatches protocols;
 skipping recovery/readiness gates can report unusable data as ready; silently
 adopting a new engine under a live worker breaks configuration ownership.
+
+Problem (2026-11-05): a signalled Supervisor's host drained on manager EOF.
+Its successor found the preserved worker alive, but the storage generation had
+changed since that host started (host lifecycle code and generated storage
+semantics). It refused to start another generation under the worker and asked
+for an explicit restart that nothing performed; the worker retried attachment
+for 1 h 40 min. Decision: when the departed host is gone, the authority lease is
+free, its record names this host and a manager that is provably gone, and the
+live worker attaches through that host's private connection file, the successor
+drains the worker with the planned-restart path
+(`stop(keep_desired_running=True)`). The next reconcile's planned recovery
+replaces the record with the current generation, then spawns the worker. An
+unchanged generation still restarts the host for the same worker. Failed
+hosts, foreign hosts, another live manager and unbound workers keep the
+explicit-restart boundary; the planned exit neither consumes nor resets a crash
+budget. Alternatives rejected: starting the changed host under the live worker
+adopts another generation silently (the worker also refuses a different engine
+digest and stays fenced); keeping a host alive across manager death for
+adoption needs a new handoff channel and an adoption timeout; waiting for an
+operator leaves the outage unbounded. Verify
+`test_successor_manager_restores_storage_for_the_preserved_worker` (a real
+manager death with both generations).
 
 The replacement identity is `native_storage_host.prepare_plan`: the admitted
 engine path and digest, the search projection directory, the storage,

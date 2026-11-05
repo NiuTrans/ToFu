@@ -174,6 +174,23 @@ def _verified_legacy_manager_pid(
     return pid
 
 
+def _request_reload(base_url: str, project: str, expected: str) -> dict[str, Any]:
+    try:
+        return request_supervisor_json(
+            base_url,
+            '/reload',
+            {
+                'projectPath': project,
+                'expectedFingerprint': expected,
+                'source': 'source-generation-refresh',
+            },
+            timeout=2.0,
+        )
+    except SupervisorRefreshError as exc:
+        raise SupervisorRefreshError(
+            f'Supervisor reload request failed: {exc}') from exc
+
+
 def _launch_supervisor(
     project_path: str,
     environment: Mapping[str, str],
@@ -214,11 +231,14 @@ def refresh_supervisor(
 ) -> dict[str, Any]:
     """Ensure the live Supervisor has loaded the current source generation.
 
-    Current Supervisors re-exec themselves and leave the worker untouched.
-    A one-time compatibility path retires a pre-protocol Supervisor only after
-    validating its PID, cwd, command line, and project allow-list; its
-    watchdog/systemd owner normally brings the new image back.  If it does
-    not, the canonical detached launcher is invoked once.
+    Current Supervisors re-exec themselves and leave the worker untouched;
+    a refusal from one is a typed error, never a signal, because its exit
+    drains every manager-bound resident service under the preserved worker.
+    A one-time compatibility path retires a pre-protocol Supervisor (no
+    ``protocolVersion``, ``/reload`` answers 404) only after validating its
+    PID, cwd, command line, and project allow-list; its watchdog/systemd
+    owner normally brings the new image back.  If it does not, the canonical
+    detached launcher is invoked once.
     """
     env = dict(os.environ if environment is None else environment)
     project = os.path.realpath(project_path)
@@ -241,21 +261,27 @@ def refresh_supervisor(
     reload_accepted = False
     retired_legacy = False
     if initial_health and initial_health.get('ok') is True:
-        try:
-            response = request_supervisor_json(
-                base_url,
-                '/reload',
-                {
-                    'projectPath': project,
-                    'expectedFingerprint': expected,
-                    'source': 'source-generation-refresh',
-                },
-                timeout=2.0,
-            )
-        except SupervisorRefreshError:
-            response = {'ok': False}
+        response = _request_reload(base_url, project, expected)
+        disk_fingerprint = str(response.get('diskFingerprint') or '')
+        if (response.get('httpStatus') == 409 and disk_fingerprint
+                and disk_fingerprint != initial_health.get('sourceFingerprint')):
+            # The Supervisor hashes disk with its own loaded closure list, so a
+            # generation that changes that list never matches this client's
+            # digest. Its own digest differing from the loaded one proves it
+            # stale: reload to it, then verify the re-executed generation
+            # below with this client's definition.
+            response = _request_reload(base_url, project, disk_fingerprint)
         reload_accepted = response.get('ok') is True
+        if not reload_accepted and initial_health.get('protocolVersion') is not None:
+            raise SupervisorRefreshError(
+                'Supervisor refused the source-generation reload: '
+                + str(response.get('message') or response.get('error')
+                      or f"HTTP {response.get('httpStatus')}"))
         if not reload_accepted:
+            if response.get('httpStatus') != 404:
+                raise SupervisorRefreshError(
+                    'Supervisor source is stale, but it neither accepted the '
+                    'reload nor proved it predates the reload protocol.')
             # Versions before the reload protocol answer 404.  Retire only a
             # process whose host identity we can prove; never signal a bare PID
             # supplied by an untrusted/mismatched endpoint.
