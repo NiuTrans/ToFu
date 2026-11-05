@@ -53,8 +53,6 @@ class RoundState:
 
     # ── llm results (sticky "last round" values, read post-loop) ──
     assistant_msg: dict[str, Any] | None = None
-    original_assistant_content: str = ''
-    terminal_assistant_content: str | None = None
     last_finish_reason: str | None = None
     last_usage: dict[str, Any] | None = None
     last_stream_result: ProviderStreamResult | None = None
