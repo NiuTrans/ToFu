@@ -1193,7 +1193,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                             tool_call_happened, messages, original_messages,
                             all_search_results_text, max_tokens, thinking_enabled, temperature,
                             _loop_exit_reason, _abort_detected_phase, project_path, project_enabled,
-                            round_num, assistant_msg, terminal_assistant_content=None):
+                            round_num, assistant_msg):
     """Post-loop finalization: fallback synthesis, done-event construction, and emit.
 
     Handles the fallback LLM call when the main loop produced no content,
@@ -1221,9 +1221,6 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # abnormal_stop kind alone (which also includes broken transports).
     terminal_error = task.get('error')
     from lib.tasks_pkg.stream_handler._router_silence import silent_turn_declared
-    original_terminal_content = (terminal_assistant_content if terminal_assistant_content is not None
-                                 else (last_stream_result.message.get('content') or '')
-                                 if isinstance(last_stream_result, ProviderStreamResult) else '')
     recoverable_empty_stop = (
         isinstance(terminal_error, dict)
         and terminal_error.get('kind') == 'abnormal_stop'
@@ -1232,14 +1229,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         and last_stream_result.state in {
             ProviderStreamState.EMPTY_RESPONSE, ProviderStreamState.PROVIDER_FINISHED}
         and last_stream_result.provider_finish_reason == 'stop'
-        and not original_terminal_content.strip()
+        and not (last_stream_result.message.get('content') or '').strip()
         and not last_stream_result.message.get('tool_calls')
     )
-    if (isinstance(last_stream_result, ProviderStreamResult)
-            and original_terminal_content != (last_stream_result.message.get('content') or '')):
-        from dataclasses import replace
-        last_stream_result = replace(last_stream_result, message={
-            **last_stream_result.message, 'content': original_terminal_content})
     deliberate_silence = silent_turn_declared(task)
     # ── Fallback: synthesize answer from search results if main loop produced nothing ──
     if (not deliberate_silence and not task['content'].strip() and tool_call_happened

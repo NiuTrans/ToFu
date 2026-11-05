@@ -135,7 +135,6 @@ def _install_script(monkeypatch, state, script, events, *, abort_on_round=None):
     def llm_call(task, current_state, *args, round_num, **kwargs):
         message, finish, usage = next(turns)
         current_state.assistant_msg = message
-        current_state.original_assistant_content = message.get('content') or ''
         current_state.last_finish_reason = finish
         current_state.last_usage = usage
         current_state.api_rounds.append({'roundNum': round_num})

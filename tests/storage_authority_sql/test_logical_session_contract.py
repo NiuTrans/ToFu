@@ -126,9 +126,13 @@ def test_jsondoc_and_binary_survive_actual_backend_replay(pipeline, target_backe
 def test_recorded_worker_claim_retains_backend_lease_authority(pipeline, backend):
     from lib.storage_authority_sql.operations_pkg._worker_jobs import _worker_job_enqueue, _worker_job_claim_next, _worker_job_claim_state
     now = int(time.time()*1000)
+    watched = backend.worker_control.watch({'cursor': None}, time.monotonic()+5)['cursor']
     capture(pipeline, lambda session: _worker_job_enqueue(session, dict(task_id='recorded-job', user_id=7,
         tenant_id='3', task_kind='conversation-attempt', idempotency_key='recorded-job', payload={'conversationId': 'test'},
         now_ms=now)), operation='test.enqueue')
+    # Capture keeps the commit-driven worker wake of the adapter's transaction.
+    assert backend.worker_control.watch(
+        {'cursor': watched}, time.monotonic())['cursor']['queue'] > watched['queue']
     claim = capture(pipeline, lambda session: _worker_job_claim_next(session, dict(worker_id='holder', now_ms=now,
         lease_ms=10000, task_kinds=['conversation-attempt'])), operation='test.claim')
     assert claim['taskId'] == 'recorded-job'

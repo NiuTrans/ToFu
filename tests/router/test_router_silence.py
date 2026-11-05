@@ -133,7 +133,6 @@ def test_complete_root_loop_settles_a_notice_silently_or_recovers_a_human_answer
         round_num=result.last_round_num, accumulated_usage=state.accumulated_usage,
         api_rounds=state.api_rounds, last_finish_reason=state.last_finish_reason,
         last_usage=state.last_usage, last_stream_result=state.last_stream_result,
-        terminal_assistant_content=state.terminal_assistant_content,
         tool_call_happened=state.tool_call_happened, all_search_results_text=[],
         project_path=request.project_path, project_enabled=request.project_enabled,
         loop_exit_reason=state.exit_reason, abort_detected_phase=state.abort_phase)
@@ -205,6 +204,38 @@ def test_router_notice_settles_without_retry_and_empty_notice_still_retries(monk
              '_chunks_received': 20, '_stream_elapsed_ms': 1000})
     assert decision['action'] == 'continue'
     assert '_silentTurn' not in empty
+
+
+@pytest.mark.parametrize('initiator,content,public,action', [
+    ('channel', '[SILENT]\n[END_TURN: done]', '[SILENT]', 'break'),
+    ('human', '[SILENT]', '', 'continue'),
+])
+def test_break_keeps_the_provider_declaration_in_terminal_stream_evidence(
+        monkeypatch, initiator, content, public, action):
+    from lib.llm.stream_result import ProviderStreamResult
+    from lib.tasks_pkg.orchestrator._round_state import RoundState
+    from lib.tasks_pkg.orchestrator._stream_decision import apply_stream_decision
+    _eligible(monkeypatch)
+    _turns(monkeypatch, initiator=initiator)
+    message = {'role': 'assistant', 'content': content}
+    state = RoundState(model='model', preset='p', thinking_enabled=False)
+    state.assistant_msg = message
+    state.last_finish_reason = 'stop'
+    state.last_usage = {'prompt_tokens': 1, 'completion_tokens': 1}
+    # Production shares one message between the public reply and provider evidence.
+    state.last_stream_result = ProviderStreamResult.from_legacy(message, 'stop', state.last_usage)
+    unchanged = state.last_stream_result
+    with patch('lib.tasks_pkg.stream_handler._budget._interruptible_sleep', lambda *_: None):
+        result, _ = apply_stream_decision(
+            _task(), state, round_num=0, tid='router-task', premature_retry_count=0,
+            messages=[NOTICE if initiator == 'channel' else HUMAN])
+    assert result == action
+    assert state.assistant_msg['content'] == public
+    if action == 'break':
+        assert state.last_stream_result.message['content'] == content
+        assert state.last_stream_result.state is unchanged.state
+    else:
+        assert state.last_stream_result is unchanged
 
 
 def test_python_stream_holds_a_candidate_then_discards_it_or_releases_text(monkeypatch):
