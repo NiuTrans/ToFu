@@ -19,7 +19,7 @@ const ts = require('typescript');
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const frontendRoot = path.join(repositoryRoot, 'frontend/src');
 const translationCallNames = new Set([
-  't', '_t', '_tt', '_tf', 'translate', 'moduleTranslate',
+  't', '_t', '_tt', '_tf', 'tr', 'translate', 'moduleTranslate',
 ]);
 const dataAttributePattern = /data-i18n(?:-html|-placeholder|-title)?\s*=\s*["']([^"']+)["']/g;
 const sourceExtensions = new Set(['.ts', '.js']);
