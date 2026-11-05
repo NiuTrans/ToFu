@@ -130,12 +130,33 @@ BootRunner/shutdown. Its generation covers Python application sources and launch
 policy; it excludes frontend artifacts and reveals no secret values. Preparation
 and application construction reject source changes. Lazy imports reuse
 `PinnedImportSource`, retaining its documented limits for late package imports
-and non-Python assets rather than copying a second application tree. Manager
-production composition and durable conversation admission are still pending.
-One preparation measurement covered 2,807 Python files in 7.683 seconds and
-produced a 345-byte plan. The private execution record replaces one fixed file;
+and non-Python assets rather than copying a second application tree. Generation
+discovery follows every importable package in those roots, including standalone
+clients and worker packages; a separate package allowlist omitted valid owners.
+The private execution record replaces one fixed file;
 temporary preparation files are removed, and no source archive or history
-journal is retained. This is an inventory measurement, not a throughput claim.
+journal is retained. A preparation measured 7,614 importable Python files in
+7.842 seconds and a 336-byte compact plan. This is an inventory measurement,
+not a throughput claim.
+
+The personal Linux manager now composes the selected storage, a headless execution
+host and an API host. An automatic native transport resolves to the shared daemon;
+an explicitly embedded transport or separately assigned role retains its declared
+topology. Both generations prepare before any old process drains. An unchanged
+execution host survives API restart; storage replacement joins execution first,
+and full stop joins execution before storage. No configured backend is substituted.
+
+Problem: a healthy API can hide a dead executor. Decision: execution host exits
+consume the manager's existing windowed failure budget once per service identity.
+Recovery replaces only that host and only with the same prepared source/configuration
+generation. API liveness remains visible while readiness reports the execution
+outage. Code changes or an exhausted budget require the existing explicit restart.
+Alternative rejected: giving each replacement a fresh budget permits an endless
+crash loop; retiring the API on execution failure needlessly interrupts clients.
+The bounded recovery record replaces one current value, not a history of tasks.
+Verify `test_execution_composition.py` and `test_execution_application.py`;
+the latter boots the common application against a real SQL authority while the
+HTTP port is occupied, joins execution, and proves storage remains alive.
 
 The resident protocol also passes an inherited manager-control pipe. Only the
 manager owns its writer; its descriptor remains inheritable across manager exec

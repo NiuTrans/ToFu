@@ -1089,6 +1089,7 @@ def test_restart_waits_for_just_stopped_sidecar_lease(
     prepared = starts[0].pop('_prepared_environment')
     assert prepared['TOFU_PROJECT_PATH'] == str(project)
     assert starts[0].pop('_prepared_storage_plan') is None
+    assert starts[0].pop('_prepared_execution_plan') is None
     assert starts == [{
         'server_args': [],
         'server_env': {},

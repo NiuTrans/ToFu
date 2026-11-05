@@ -132,12 +132,12 @@ def start_background_services(
 
     if owns_task_workers:
         try:
-            from lib.automations.runtime import ensure_workers_started
+            from lib.durable_worker.runtime import ensure_workers_started
 
-            if _timed(log, 'automation-workers', lambda: ensure_workers_started(app, environ=env)):
-                log.info('[Server] canonical automation workers armed')
+            if _timed(log, 'durable-workers', lambda: ensure_workers_started(app, environ=env)):
+                log.info('[Server] canonical conversation and automation workers armed')
         except Exception as exc:
-            log.warning('[Server] automation worker start failed: %s', exc)
+            log.warning('[Server] durable worker start failed: %s', exc)
 
         try:
             from lib.integration_control import ensure_worker_started

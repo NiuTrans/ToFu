@@ -142,6 +142,8 @@ def test_claimed_jobs_start_beyond_the_idle_hint_and_leave_no_poll_receipts(sema
         invocation.context.checkpoint()
         return show_task_start_time(invocation.arguments, invocation.event)
     class Client:
+        def worker_watch(self, **kwargs):
+            return factory().worker_watch(**kwargs)
         def query(self, *args, **kwargs):
             return factory().query(*args, **kwargs)
         def command(self, name, payload, receipt):
@@ -174,7 +176,7 @@ def test_idle_service_does_not_preallocate_the_capacity(semantic_authority):
         wait_until(lambda: service.snapshot()['highWater'] == 1)
         time.sleep(.3)
         threads = [thread for thread in threading.enumerate()
-                   if thread.ident not in before and thread.name.startswith('tofu-automation')]
+                   if thread.ident not in before and thread.name.startswith('tofu-durable')]
         assert len(threads) == 2
         assert service.snapshot()['highWater'] == 1
         assert service.stop(timeout=5)
@@ -400,6 +402,8 @@ def test_shutdown_during_initial_proof_defers_before_handler_dispatch(semantic_a
     factory, repo, run = admit(semantic_authority)
     entered, release = threading.Event(), threading.Event()
     class Client:
+        def worker_watch(self, **kwargs):
+            return factory().worker_watch(**kwargs)
         def query(self, name, payload, **kwargs):
             if name == 'worker_job.claim_state':
                 entered.set()

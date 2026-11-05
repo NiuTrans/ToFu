@@ -62,7 +62,7 @@ def test_worker_control_cannot_inherit_an_owner_or_ambient_caller(principal):
 
 
 def test_application_installs_once_and_keeps_its_shutdown_owner(monkeypatch):
-    from lib.automations import runtime
+    from lib.durable_worker import runtime
     calls = []
     class Service:
         running = False
@@ -88,7 +88,7 @@ def test_application_installs_once_and_keeps_its_shutdown_owner(monkeypatch):
 
 @pytest.mark.parametrize('role,expected', [('all', True), ('worker', True), ('api', False), ('scheduler', False)])
 def test_process_role_limits_worker_startup(monkeypatch, role, expected):
-    from lib.automations import runtime
+    from lib.durable_worker import runtime
     from lib.server import server_background_services
     import lib.integration_control as integration
     calls = []
