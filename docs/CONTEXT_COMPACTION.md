@@ -592,9 +592,10 @@ Scope, evidence, opt-out and ranking semantics live in
 absent tenant as an empty string, while `PrincipalContext` represents it as
 `None`. Comparing those representations literally rejects ordinary personal
 tasks before summary dispatch, leaving an overfull request unable to compact.
-**Decision:** the summary route check treats these two absent-tenant values as
-the same scope; explicit tenant names, owner identity and provider pins must
-still match. Identity refusals settle the existing summary attempt with
+**Decision:** the summary route check compares through
+[`lib.identity.tenant_scope`](IDENTITY.md#absent-tenant-scope), which treats
+these two absent-tenant values as the same scope; explicit tenant names, owner
+identity and provider pins must still match. Identity refusals settle the existing summary attempt with
 `summary_route_revalidation_failed`, retain the specific conflict reason in
 route metadata and logs, and preserve the source without provider dispatch.
 **Alternatives rejected:** removing the tenant check would allow conflicting
