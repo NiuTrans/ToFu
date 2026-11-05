@@ -1033,6 +1033,24 @@ means “claim everything”. Every heartbeat, cancellation poll and settlement
 proves task/holder/token and an unexpired lease; expiry revokes the old fence.
 Redis may wake claimers but never decides state or correctness.
 
+`worker_job.active.list` projects complete queued/running/suspended activity
+from the existing queue and lease indexes, ordered by creation time and task ID.
+The internal caller supplies explicit kinds and either an owner ID or null for
+the trusted application system scope. Terminal history, claim credentials and
+principal envelopes are absent. Native reads traverse every physical index page;
+transport failure never becomes a truncated list or an idle answer. No schema,
+index, receipt, cache or additional persistent bytes are introduced.
+
+Problem: an API-local registry cannot see work in the resident executor.
+Decision: `lib/durable_worker/activity.py` supplies the authority projection to
+the existing `list_running_tasks` owner. That owner combines durable work and
+legacy local carriers, grouping by owner and conversation. Remote work does not
+inherit local heartbeat-age guesses. Sidebar and restart protection share that
+result; unavailable storage refuses an ordinary idle restart before approval
+consumption. The existing explicit force/approval path remains available.
+Alternative rejected: another task registry or periodic mirror duplicates
+authority and can report a still-running task as idle after API restart.
+
 `worker_job.claim_horizon` is the read-only half of a claim. For the same
 explicit kinds and the same authority clocks it answers `claimableInMs`: 0 when
 `claim_next` would claim now (a due queued/suspended job, an expired

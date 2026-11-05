@@ -11,7 +11,7 @@
     "slotAdmission": "sparse-usize-identifiers-without-slot-count-quota",
     "literalAdmission": "checked-size-without-aggregate-byte-quota",
     "maximumLegacyDocumentBytes": 8388608,
-    "maximumExecutableOperations": 383
+    "maximumExecutableOperations": 384
   },
   "physicalBounds": {
     "maximumEntityKeyBytes": 3072,
@@ -5959,6 +5959,12 @@
       "name": "turn.visible.sync",
       "kind": "command",
       "table": "conversation_turns",
+      "receiptRequired": false
+    },
+    {
+      "name": "worker_job.active.list",
+      "kind": "query",
+      "table": "storage_worker_jobs",
       "receiptRequired": false
     },
     {

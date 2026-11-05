@@ -4,6 +4,8 @@ from lib.storage_authority_sql import operations as ops
 
 
 OPERATIONS = {
+    'worker_job.active.list': ops.OperationSpec(
+        'query', False, ops._worker_job_active_list),
     'worker_job.get': ops.OperationSpec(
         'query', False, ops._worker_job_get),
     'worker_job.enqueue': ops.OperationSpec(

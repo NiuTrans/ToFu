@@ -851,6 +851,58 @@ pub(crate) fn claim_horizon(
     encoded_json_bytes(&json!({ "claimableInMs": horizon }))
 }
 
+/// Complete activity projection reads only queue/lease indexes, never terminal
+/// documents. Internal pages follow the entity protocol's existing range bound.
+pub(crate) fn active_list(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    task_kinds: &[String],
+    owner: Option<u64>,
+) -> io::Result<Vec<u8>> {
+    let mut jobs = Vec::new();
+    for kind in task_kinds {
+        let prefix = task_kind_prefix(kind)?;
+        for namespace in [WORKER_JOB_QUEUED_INDEX_NAMESPACE, WORKER_JOB_LEASE_INDEX_NAMESPACE] {
+            let (mut cursor, end) = namespace_range(transaction, namespace, &prefix)?;
+            loop {
+                let page = database.entity_scan(transaction, &cursor, &end,
+                    crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS)?;
+                let Some((last, _)) = page.last() else { break; };
+                let mut next = last.key_bytes().to_vec();
+                next.push(0);
+                cursor = EntityKey::new(transaction.tenant_id(), TENANT_GLOBAL_OWNER_ID,
+                    namespace, &next)?;
+                for (key, raw) in page {
+                    let entry: IndexEntry = serde_json::from_slice(&raw)
+                        .map_err(|_| invalid_data("worker activity index is malformed"))?;
+                    let job = read_job(database, transaction, &entry.task_id)?
+                        .ok_or_else(|| invalid_data("worker activity target is missing"))?;
+                    let expected = match job.status.as_str() {
+                        "queued" | "suspended" if namespace == WORKER_JOB_QUEUED_INDEX_NAMESPACE =>
+                            queued_key(transaction, &job)?,
+                        "running" if namespace == WORKER_JOB_LEASE_INDEX_NAMESPACE =>
+                            lease_key(transaction, &job)?,
+                        _ => return Err(invalid_data("worker activity state differs from its index")),
+                    };
+                    if job.task_kind != *kind || entry.task_kind != *kind || expected != key {
+                        return Err(invalid_data("worker activity identity differs from its index"));
+                    }
+                    if owner.is_none_or(|owner| owner == job.user_id) {
+                        jobs.push(job);
+                    }
+                }
+            }
+        }
+    }
+    jobs.sort_by(|left, right| (left.created_at_ms, &left.task_id).cmp(
+        &(right.created_at_ms, &right.task_id)));
+    encoded_json_bytes(&Value::Array(jobs.into_iter().map(|job| json!({
+        "taskId": job.task_id, "userId": job.user_id, "taskKind": job.task_kind,
+        "conversationId": job.payload.get("conversationId").and_then(Value::as_str).unwrap_or(""),
+        "status": job.status, "createdAtMs": job.created_at_ms,
+    })).collect()))
+}
+
 fn live_claim_matches(
     database: &AuthorityDatabase,
     job: &Job,
@@ -1314,6 +1366,29 @@ mod tests {
             database.commit(tx).unwrap();
         }
         response.map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[test]
+    fn active_projection_crosses_queue_pages_and_includes_leased_work_once() {
+        let (_, mut db) = prepared();
+        let count = crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS + 1;
+        for ordinal in 0..count {
+            seed(&mut db, &format!("active-{ordinal:05}"));
+        }
+        let read = |db: &AuthorityDatabase, owner| {
+            let mut tx = db.begin_with_identity_claim_scopes(7, 41).unwrap();
+            serde_json::from_slice::<Value>(&active_list(
+                db, &mut tx, &["lease-kind".into()], owner).unwrap()).unwrap()
+        };
+        let queued = read(&db, Some(41));
+        assert_eq!(queued.as_array().unwrap().len(), count);
+        assert_eq!(queued[0]["taskId"], "active-00000");
+        take(&mut db, "active-holder", 100_000).unwrap();
+        let active = read(&db, None);
+        assert_eq!(active.as_array().unwrap().len(), count);
+        assert_eq!(active.as_array().unwrap().iter()
+            .filter(|row| row["status"] == "running").count(), 1);
+        assert_eq!(read(&db, Some(42)), json!([]));
     }
 
     #[test]

@@ -1204,6 +1204,12 @@ reuse old attempt keys. The caller must prove old-writer quiescence, validate
 receipts and bind the journal observer before restoration. The port grants no
 ownership, settlement or replay and is not yet activated by discovery recovery.
 Verify `tests/agent_core/test_model_account_restore.py` and model budget suites.
+Its sibling `restore_tool_account` continues the last tool-occurrence and
+tool-reservation ordinals of a pristine, observed, uncapped account once, before
+tool admission. It restores no spent slot, so a finite tool cap refuses; the
+restart-paused Worker decision is in
+[PROJECT_COORDINATION.md](PROJECT_COORDINATION.md#restart-paused-worker-continuation).
+Verify `tests/agent_core/test_tool_account_restore.py`.
 
 ### Tool timeout checkpoint round
 

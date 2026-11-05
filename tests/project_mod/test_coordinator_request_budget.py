@@ -345,3 +345,79 @@ def test_worker_validation_reads_its_request_budget_from_its_own_snapshot(runtim
             account['turnId'] = 'another-turn'
     with pytest.raises(PermissionError, match='original request account'):
         r.c.repo.validate(binding)
+
+
+def _run_tool(task, call_id):
+    budget = task['_executionBudget']
+    assert budget.reserve_tool(task) is None
+    event = budget.begin_tool_attempt(task, call_id, 'read_files', 1)
+    budget.finish_tool_attempt(event, phase='executor_returned')
+
+
+def _restart_continuation(r, worker, assignment, *, resumed=True, predecessor='interrupted'):
+    """The accepted Continue of a restart-paused Worker: same root, next attempt."""
+    from lib.project_dispatch import admission
+    old = r.c.repo.read(assignment['id'])['execution']
+    r.attempts[old['attemptId']].update(status='interrupted', taskId=worker['id'])
+    r.attempts['restart-continuation'] = {**r.attempts[old['attemptId']],
+                                          'attemptId': 'restart-continuation', 'status': 'running'}
+    r.c.repo.continue_execution(assignment['id'], old, old['turnId'], 'restart-continuation')
+    r.attempts[old['attemptId']]['status'] = predecessor
+    trusted = admission.TrustedDispatch(r.c.repo.admission(assignment['id']))
+    config = trusted.capture({}, 7, trusted.principal, worker['convId'])
+    config.update(_turnOwnerUserId=7, _turnId=old['turnId'], _attemptId='restart-continuation',
+                  _turnOperation='continue')
+    if resumed:
+        config['_resumeSource'] = {'attemptId': old['attemptId'], 'taskId': worker['id'],
+                                   'status': 'interrupted', 'cause': 'server_restart'}
+    return {**{key: worker[key] for key in ('id', 'convId', 'status', '_userId', '_principalContext', '_attended')},
+            '_turnId': old['turnId'], '_attemptId': 'restart-continuation', 'config': config,
+            'abort_event': threading.Event(), 'usage': {}}
+
+
+def test_restart_resumed_worker_continues_its_tool_reservation_counter(runtime):
+    """Regression for worker-a6fc75aa9a89380be3061b9e: every resume refused to start."""
+    from lib.project_dispatch import admission
+    r = runtime; row = bind(r)
+    worker, assignment = _worker_task(r)
+    spend(worker)
+    for number in range(3):
+        _run_tool(worker, f'before-restart-{number}')
+    counter = r.c.repo.read(assignment['id'])['toolReservations']
+    assert counter['rootTaskId'] == worker['id'] and counter['count'] == 3
+
+    resumed = _restart_continuation(r, worker, assignment)
+    admission.bind_account(resumed)
+    assert r.c.repo.read(assignment['id'])['toolReservations'] == counter
+    _run_tool(resumed, 'after-restart')
+
+    stored = r.c.repo.read(assignment['id'])
+    assert stored['toolReservations'] == {**counter, 'count': 4}
+    assert [(item['tool_ordinal'], item['tool_call_id'], item['phase']) for item in stored['toolAttempts']] == [
+        (1, 'before-restart-0', 'executor_returned'), (2, 'before-restart-1', 'executor_returned'),
+        (3, 'before-restart-2', 'executor_returned'), (4, 'after-restart', 'executor_returned')]
+    assert all(item['account_nonce'] == counter['accountNonce'] for item in stored['toolAttempts'])
+    lease = resumed['_executionBudget'].reserve_model(resumed, input_tokens=1, max_output_tokens=10)
+    assert lease.ordinal == 2
+    lease.settle(unsent=True)
+    assert usage(r, row)['toolCalls'] == 4 and not resumed.get('aborted')
+
+
+@pytest.mark.parametrize('replenish', ['fresh_start', 'foreign_nonce', 'foreign_root', 'settled_predecessor'])
+def test_resumed_worker_cannot_replenish_or_adopt_another_tool_reservation_counter(runtime, replenish):
+    from lib.llm.llm_errors import AbortedError
+    from lib.project_dispatch import admission
+    r = runtime; bind(r)
+    worker, assignment = _worker_task(r)
+    spend(worker)
+    _run_tool(worker, 'before-restart')
+    if replenish in ('foreign_nonce', 'foreign_root'):
+        key, value = (('accountNonce', 'f' * 32) if replenish == 'foreign_nonce'
+                      else ('rootTaskId', 'project-worker:another-assignment'))
+        r.c.repo.mutate(assignment['id'], lambda row: row['toolReservations'].update({key: value}))
+    before = r.c.repo.read(assignment['id'])['toolReservations']
+    resumed = _restart_continuation(r, worker, assignment, resumed=replenish != 'fresh_start',
+                                    predecessor='completed' if replenish == 'settled_predecessor' else 'interrupted')
+    with pytest.raises(AbortedError, match='replenished|interrupted predecessor'):
+        admission.bind_account(resumed)
+    assert r.c.repo.read(assignment['id'])['toolReservations'] == before

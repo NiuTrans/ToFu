@@ -5,6 +5,9 @@ supervision and the demand service. Domain handlers retain invocation, effect,
 accounting and Turn settlement; this package never replays an unknown effect.
 
 - `__init__.py` retains the public runner/context/registration imports.
+- `activity.py` projects active conversation jobs for the existing task
+  visibility/restart owner. It preserves explicit scope and propagates read
+  failures; API-local absence or age never proves remote completion.
 - `runtime.py` is the application composition and lifecycle owner for automation
   and conversation registrations; `contracts/durable_worker_runtime_v1.json`
   retains the existing timing and idle-reuse policy.
