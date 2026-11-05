@@ -20656,6 +20656,15 @@
             }
             revision => panic!("partial Turn steer recovered at revision {revision}"),
         }
+        // Authority reopen alone missed a stale derived byte index. Exercise
+        // the actual application recovery transaction after every crash cell.
+        let before = output["projection"].clone();
+        assert_eq!(recover_owner(&mut recovered, 11, 2_010)["recovered"], 1);
+        let settled = execute(&mut recovered, &request("turn.get", 11,
+            json!({"conversation_id":"fault-turn-steer","user_id":11,
+                "turn_id":output["turnId"]}), None), 2_011).unwrap();
+        assert_eq!(settled["projection"], before);
+        assert_eq!(settled["status"], "interrupted");
     }
 
     #[test]

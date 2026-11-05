@@ -124,6 +124,34 @@ fn recover_owner(database: &mut AuthorityDatabase, owner_user_id: u64, now_ms: u
 }
 
 #[test]
+fn restart_after_live_steer_preserves_injections_and_exact_recovery_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let pair = accepted_executor_pair(&mut database, 11, "steer-recovery", 1_000);
+    let attempt_id = pair["attempt"]["attemptId"].as_str().unwrap();
+    execute(&mut database, &request("turn.attempt.bind", 11,
+        json!({"attempt_id":attempt_id,"task_id":"steer-task","user_id":11}),
+        Some("steer-recovery-bind")), 1_010).unwrap();
+    for index in 0..2 {
+        execute(&mut database, &request("turn.steer.commit", 11,
+            json!({"conversation_id":"steer-recovery","attempt_id":attempt_id,
+                "command_id":format!("steer-{index}"),"text":"继续保留全部内容 🧪",
+                "user_id":11}), Some(&format!("steer-receipt-{index}"))), 1_020 + index).unwrap();
+    }
+    let read = request("turn.get", 11, json!({"conversation_id":"steer-recovery",
+        "turn_id":pair["attempt"]["turnId"],"user_id":11}), None);
+    let before = execute(&mut database, &read, 1_100).unwrap();
+    drop(database);
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    assert_eq!(recover_owner(&mut database, 11, 2_000)["recovered"], 1);
+    let after = execute(&mut database, &read, 2_001).unwrap();
+    assert_eq!(after["status"], "interrupted");
+    assert_eq!(after["projection"], before["projection"]);
+    assert_eq!(after["projection"]["_userSteerInjects"].as_array().unwrap().len(), 2);
+    assert_eq!(recover_owner(&mut database, 11, 2_002)["recovered"], 0);
+}
+
+#[test]
 fn old_worker_turn_recovery_index_retires_without_settlement() {
     let directory = tempfile::tempdir().unwrap();
     let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
