@@ -938,8 +938,8 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
             # Normalize even already-durable receipts from before this fix;
             # their frozen publication identity and bytes remain untouched.
             config = completion_delivery_config(receipts[0].get('config'))
-            from lib.background_command_delivery import settle_revoked_dispatch_completion
-            if settle_revoked_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
+            from lib.background_command_delivery import settle_closed_dispatch_completion
+            if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
                 return None
             if '_projectDispatchAdmission' in config:
                 from lib.project_dispatch.admission import TrustedDispatch
@@ -1335,11 +1335,11 @@ def _dispatch_queued_turn(
     _stamp_queued_turn_initiator(user_msg, payload)
     if item.get('kind') == KIND_WORKFLOW and payload.get('_backgroundBatchWake'):
         from lib.background_command_delivery import (
-            completion_delivery_config, settle_revoked_dispatch_completion,
+            completion_delivery_config, settle_closed_dispatch_completion,
         )
         config = completion_delivery_config(config)
         receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
-        if settle_revoked_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
+        if settle_closed_dispatch_completion(config, receipts, conv_id=conv_id, user_id=user_id):
             _finalize_queue_dispatch(conv_id, item['queueId'], user_id=user_id)
             return None
 

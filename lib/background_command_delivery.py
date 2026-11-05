@@ -117,11 +117,11 @@ def completion_delivery_config(config: dict | None) -> dict:
     return cleaned
 
 
-def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
-    """Attach a revoked Worker's late results without starting another model turn.
+def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
+    """Attach a closed Worker's late results without starting another model turn.
 
-    The cancelled execution remains the evidence owner. Attach before retiring
-    durable delivery intent so an uncertain commit can only replay the same
+    The completed/reviewed or revoked execution remains the evidence owner.
+    Attach before retiring durable intent so an uncertain commit replays the same
     deterministic block; an unrelated human wake cannot race the attachment.
     Results of a turn that ran without the binding in a Worker conversation are
     governed by that conversation's assignment, so they settle the same way.
@@ -144,19 +144,22 @@ def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
     execution = assignment.get('execution')
     if execution is None and not unbound:
         return False
+    revoked = False
     try:
         repository.validate_own(binding)
     except DispatchGrantRevoked:
-        pass
-    else:
-        return False
+        revoked = True
     if execution is None:
-        return True
+        return revoked
     from lib.turn_lifecycle import LifecycleConflict, update_turn_projection
     from lib.background_command_projection import background_command_injection_record
     turn = repository.turn_get(
         conv_id, execution['turnId'], user_id=user_id)
     attempt = repository.get_attempt(execution['attemptId'])
+    if not (revoked or assignment.get('review') is not None
+            or (isinstance(turn, dict) and turn.get('status') == 'completed'
+                and isinstance(attempt, dict) and attempt.get('status') == 'completed')):
+        return False
     if not isinstance(turn, dict) or turn.get('status') in {'pending', 'running'}:
         return True
     if not isinstance(attempt, dict) or attempt.get('status') in {'pending', 'running'}:
@@ -199,9 +202,9 @@ def settle_revoked_dispatch_completion(config, receipts, *, conv_id, user_id):
     try:
         agent_inbox.consume_peer(conv_id, [item['queueId'] for item in deliveries])
     except Exception as error:
-        logger.debug('[BackgroundDelivery] cancelled Worker inbox fence failed: %s', error)
+        logger.debug('[BackgroundDelivery] closed Worker inbox fence failed: %s', error)
     # Late evidence must not claim model consumption. It is retained on the
-    # cancelled Turn; only the automatic synthetic wake is retired.
+    # closed Turn; only the automatic synthetic wake is retired.
     return True
 
 
