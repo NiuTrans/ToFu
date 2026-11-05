@@ -3668,12 +3668,12 @@
     "TOFU_STORAGE_SERVICE_STATE": {
       "status": "documented",
       "owner": "lib/storage_authority_sql/native_launch.py",
-      "description": "Private managed native-storage handoff identity inherited from the service supervisor. The state path and service ID bind project lease verification to the serving Web owner; not a user configuration or an authorization grant."
+      "description": "Private resident storage-host handoff identity inherited by the native launcher and the SQL Sidecar. The state path and service ID bind project lease verification to the serving Web owner; not a user configuration or an authorization grant."
     },
     "TOFU_STORAGE_SERVICE_ID": {
       "status": "documented",
       "owner": "lib/storage_authority_sql/native_launch.py",
-      "description": "Private managed native-storage handoff identity inherited from the service supervisor. The state path and service ID bind project lease verification to the serving Web owner; not a user configuration or an authorization grant."
+      "description": "Private resident storage-host handoff identity inherited by the native launcher and the SQL Sidecar. The state path and service ID bind project lease verification to the serving Web owner; not a user configuration or an authorization grant."
     },
     "TOFU_INDEX_FASTPATH": {
       "status": "documented",

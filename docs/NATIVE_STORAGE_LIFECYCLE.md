@@ -79,14 +79,31 @@ The record is never a substitute for the actual storage authority lease.
 
 The manager excludes a resident authority from orphan reaping only after proving
 same-host manager/host PID identities and the authority's parent relationship.
-Native crash recovery may coexist with a live Web lock only when that Web
-process names the same project and private connection channel owned by the
-verified host. Foreign Web owners and maintenance leases remain fenced.
+A resident authority, native or SQL, may start or recover beside a live Web
+lock only when that Web process names the same project and private connection
+channel owned by the verified host. Foreign Web owners and maintenance leases
+remain fenced, and the storage lease itself stays exclusive.
 
 Alternatives rejected: leaving an unowned native child breaks shutdown and
 maintenance; reusing the SQL v1 wire for native storage mismatches protocols;
 skipping recovery/readiness gates can report unusable data as ready; silently
 adopting a new engine under a live worker breaks configuration ownership.
+
+Problem (2026-11-06): only the native launcher passed that verifier. The manager
+spawns the Web worker right after the storage host, and `server.py` takes
+`data/.server.lock` before application assembly, so the SQL Sidecar refused its
+first start ("A Web process still owns project storage") and every crash or
+successor relaunch under the live worker: a fresh managed Linux install on the
+default SQLite backend never became ready. Unmanaged workers
+(`TOFU_RUN_SERVER=1`) own their Sidecar child and were unaffected. Decision: the
+SQL Sidecar entry point applies the same `serves_web_owner` verification when a
+resident host launched it (`TOFU_STORAGE_SERVICE_ID`/`_STATE` plus its parent
+PID). Alternatives rejected: awaiting storage readiness before spawning the
+worker fixes only the first start and still refuses crash and successor
+relaunches; skipping the Web-lock check for resident launches admits an
+authority beside a foreign Web owner; taking the Web lock only after storage
+attachment reopens the duplicate-worker startup race that lock closes. Verify
+`test_resident_sql_authority_starts_and_recovers_under_its_web_owner`.
 
 Problem (2026-11-05): a signalled Supervisor's host drained on manager EOF.
 Its successor found the preserved worker alive, but the storage generation had

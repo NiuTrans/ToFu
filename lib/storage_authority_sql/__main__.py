@@ -164,8 +164,18 @@ def main() -> int:
             connection_token = secrets.token_urlsafe(48)
             os.environ['TOFU_STORAGE_TOKEN'] = connection_token
         config = SidecarConfig.from_environment()
+        server_owner_verifier = None
+        service_id = os.environ.get('TOFU_STORAGE_SERVICE_ID')
+        service_state = os.environ.get('TOFU_STORAGE_SERVICE_STATE')
+        if expected_parent_pid is not None and service_id and service_state:
+            # A resident host outlives Web workers, so its child usually starts
+            # under a live Web lock. Admit only the owner it verifiably serves.
+            from serverctl_pkg.native_storage_service import serves_web_owner
+            server_owner_verifier = lambda web_pid: serves_web_owner(
+                Path(service_state), service_id, expected_parent_pid, web_pid)
         lease = ProjectLease(
-            config.data_dir, expected_parent_pid=expected_parent_pid)
+            config.data_dir, expected_parent_pid=expected_parent_pid,
+            server_owner_verifier=server_owner_verifier)
         lease.acquire()
         # A co-container publishes readiness through its private connection
         # file, so its stdout remains the legacy final-envelope-only stream.
