@@ -1350,7 +1350,9 @@ additive `tofu.task-results.checkpoint.guard/v1` mode first takes the same
 owner-qualified conversation lifecycle lock used by delete/purge, validates
 the parent in that transaction, then takes the task-result key lock and
 enforces task ownership, terminal regression, abort-tombstone preservation,
-identical replay, and CAS. A missing parent, foreign key collision, or proven
+identical replay, and CAS. A record another Attempt wrote admits only its
+Turn's current bound Attempt ([reused task identities](#restart-readiness-and-recovery)).
+A missing parent, foreign key collision, or proven
 status fence returns one indistinguishable `owned:false` result without
 mutating authority. Only an exact guard echo lets a new manager cache the
 returned version and collapse later checkpoints from three RPCs to one; old
@@ -1671,6 +1673,29 @@ retries cannot repair deterministic errors; dropping history/switching authority
 The SQL orphan probe reads only root task status with each backend's JSON operator and returns an existence bit; nested status text is not recovery authority. Problem: textual LIKE is invalid for PostgreSQL JSONB and can match nested objects. Decision: use typed root-field extraction; casting JSONB to text preserves false positives. Specs: `tests/storage/test_task_recovery_probe.py`, `tests/server/test_server_startup_recovery.py`, `tests/storage/test_storage_warmup.py`,
 `tests/storage/test_storage_warmup_executor.py`, `tests/project_mod/test_project_brain_recovery_pagination.py`,
 `tests/storage/test_boot_recovery_probe.py`.
+
+Reused task identities — **Problem:** a resumed project-dispatch Worker keeps its
+predecessor's workspace task id (`project-worker:<assignmentId>`). Boot recovery
+settles that task result `interrupted`, and the guarded checkpoint fence then
+refused the resumed attempt as well: its terminal result became a "stale terminal
+finalizer", so its workspace delivery record, completion listeners and git
+checkpoint never ran (2026-11-06 restart). **Decision:** a guarded
+`task_results.checkpoint` whose `metadata.attemptId` differs from the record's
+writer, or that names an Attempt over an `interrupted` record, is admitted only
+when that Attempt is its owned Turn's current Attempt bound to exactly this task
+id, the evidence `turn.attempt.start` admits worker entry with. Both authorities
+then apply the ordinary CAS: an `interrupted` record may become `running` again,
+terminal records still never regress, abort tombstones carry over and native
+clears the recovered reason as the SQL document replacement does. The
+interrupted Attempt's own late writes stay fenced, and after a takeover the
+predecessor is no longer the current Attempt. Birth rows name their Attempt, so a
+recovered birth fences its own executor too. **Alternatives rejected:** a
+per-attempt task id breaks the Worker's checkout, receipts and event stream;
+lifting the recovery fence for any later writer, or trusting the named Attempt
+without its Turn binding, lets a stale executor resurrect the record. Specs:
+`tests/tasks_pkg/test_reused_task_result_takeover.py`, the differential script
+`task_results reused identity admits only the current bound attempt` and
+`task_result_reused_identity_admits_only_the_current_bound_attempt`.
 
 Native Project Brain recovery — **Problem:** the 2026-10-20 startup spent 29.078 s
 paging project recovery snapshots; checking active work materialized large terminal

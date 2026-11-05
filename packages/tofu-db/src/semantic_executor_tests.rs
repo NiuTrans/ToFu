@@ -9618,6 +9618,76 @@
         assert_eq!(execute(&mut reopened, &query(11, 11), 3100).unwrap(), recovered);
     }
 
+    /// A resumed Worker keeps its workspace task id. Only its Turn's current
+    /// Attempt bound to that id takes over the record recovery interrupted;
+    /// the interrupted predecessor stays fenced before and after.
+    #[test]
+    fn task_result_reused_identity_admits_only_the_current_bound_attempt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let task = "project-worker:assignment";
+        let pair = execute(&mut database, &request("turn.create_pair", 11, json!({
+            "conversation_id": "worker", "user_id": 11, "command_id": "worker-pair",
+            "input_projection": {"content": "work"}, "config": {"model": "worker-model"},
+            "conversation_defaults": {"allowCreate": true}, "now": 1_000,
+        }), Some("worker-pair-receipt")), 1_000).unwrap();
+        let turn = pair["turn"]["turnId"].as_str().unwrap().to_owned();
+        let predecessor = pair["attempt"]["attemptId"].as_str().unwrap().to_owned();
+        let enter = |database: &mut AuthorityDatabase, attempt: &str, at: u64| {
+            for operation in ["turn.attempt.bind", "turn.attempt.start"] {
+                execute(database, &request(operation, 11,
+                    json!({"attempt_id": attempt, "task_id": task, "user_id": 11}),
+                    Some(&format!("{operation}-{attempt}"))), at).unwrap();
+            }
+        };
+        let write = |database: &mut AuthorityDatabase, attempt: &str, status: &str,
+                     version: u64, at: u64| {
+            execute(database, &request("task_results.checkpoint", 11, json!({
+                "key": task,
+                "value": {"user_id": 11, "task_id": task, "conv_id": "worker",
+                          "status": status, "content": attempt,
+                          "metadata": {"turnId": turn, "attemptId": attempt}},
+                "expected_version": version,
+                "guard_contract": TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+                "require_parent": true,
+            }), Some(&format!("write-{attempt}-{status}-{version}"))), at).unwrap()
+        };
+        enter(&mut database, &predecessor, 1_100);
+        assert_eq!(write(&mut database, &predecessor, "running", 0, 1_200)["owned"], true);
+        execute(&mut database, &request("turn.recover", 11, json!({"user_id": 11}),
+            Some("worker-turn-recover")), 2_000).unwrap();
+        execute(&mut database, &request("task_results.recover_running", 11,
+            json!({"interrupted_reason": "server_restart", "max_rows": 8, "scan_limit": 8}),
+            Some("worker-result-recover")), 2_000).unwrap();
+        assert_eq!(write(&mut database, &predecessor, "done", 2, 2_100)["owned"], false);
+
+        let revision = execute(&mut database, &request("turn.get", 11, json!({
+            "conversation_id": "worker", "turn_id": turn, "user_id": 11,
+        }), None), 2_200).unwrap()["projectionRevision"].clone();
+        let resumed = execute(&mut database, &request("turn.attempt.create", 11, json!({
+            "conversation_id": "worker", "turn_id": turn, "user_id": 11,
+            "command_id": "worker-resume", "operation": "regenerate",
+            "target_actor": "assistant", "target_kind": "reply",
+            "expected_projection_revision": revision, "config": {"model": "worker-model"},
+        }), Some("worker-resume-receipt")), 2_300).unwrap()["attempt"]["attemptId"]
+            .as_str().unwrap().to_owned();
+        // Accepted but not yet bound to the workspace task: no takeover.
+        assert_eq!(write(&mut database, &resumed, "running", 2, 2_400)["owned"], false);
+        enter(&mut database, &resumed, 2_500);
+        let taken = write(&mut database, &resumed, "running", 2, 2_600);
+        assert_eq!((taken["owned"].clone(), taken["version"].clone()), (json!(true), json!(3)));
+        assert_eq!(write(&mut database, &predecessor, "done", 3, 2_700)["owned"], false);
+        assert_eq!(write(&mut database, &resumed, "done", 3, 2_800)["owned"], true);
+
+        let record = execute(&mut database, &request("record.get", 11,
+            json!({"namespace": "task_results", "key": task, "user_id": 11}), None), 2_900)
+            .unwrap();
+        assert_eq!(record["version"], 4);
+        assert_eq!(record["value"]["status"], "done");
+        assert_eq!(record["value"]["content"], resumed.as_str());
+        assert!(record["value"].get("interruptedReason").is_none());
+    }
+
     #[test]
     fn task_result_checkpoint_is_blob_bounded_owner_scoped_and_replay_safe() {
         let directory = tempfile::tempdir().unwrap();

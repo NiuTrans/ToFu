@@ -557,6 +557,15 @@ fn metadata_object(value: Option<&Value>) -> Value {
     }
 }
 
+/// The conversation Attempt one task-result metadata object names as its writer.
+fn writer_attempt(metadata: &Value) -> String {
+    metadata
+        .get("attemptId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn cost_experiment(metadata: &Value) -> Option<(&Map<String, Value>, String)> {
     let outcome = metadata.as_object()?.get("costExperiment")?.as_object()?;
     if outcome.is_empty() {
@@ -853,6 +862,8 @@ fn checkpoint_inner(
             }
         }
     }
+    let metadata = metadata_object(incoming.get("metadata"));
+    let mut taking_over = false;
     if let Some(header) = &current {
         if header.owner_user_id != transaction.owner_user_id() {
             if let Some(guard) = guard {
@@ -865,9 +876,29 @@ fn checkpoint_inner(
         }
         let incoming_status = value_text(incoming.get("status"), "")?;
         if let Some(guard) = guard {
-            if header.status == "interrupted"
-                || matches!(incoming_status.as_str(), "pending" | "running")
+            let writer = writer_attempt(&metadata);
+            let holder = if writer.is_empty() {
+                String::new()
+            } else {
+                writer_attempt(&read_replay_projection(database, transaction, task_id)?.metadata)
+            };
+            let recovered = header.status == "interrupted";
+            // A reused task id (a resumed Worker keeps its workspace identity)
+            // is written by successive Attempts. Writing over another
+            // Attempt's record, or taking over a recovery-interrupted one,
+            // needs the Turn's current Attempt bound to this id; the
+            // predecessor stays fenced.
+            taking_over = !writer.is_empty() && writer != holder
+                && (!holder.is_empty() || recovered);
+            if taking_over && !crate::turn::current_attempt_bound_to_task(
+                database, transaction, &writer, task_id,
+            )? {
+                return guarded_checkpoint_response(task_id, 0, 0, false, guard, false, None);
+            }
+            if (recovered && !taking_over)
+                || (matches!(incoming_status.as_str(), "pending" | "running")
                     && !matches!(header.status.as_str(), "" | "pending" | "running")
+                    && !(recovered && taking_over))
             {
                 return guarded_checkpoint_response(task_id, 0, 0, false, guard, false, None);
             }
@@ -938,7 +969,6 @@ fn checkpoint_inner(
             .checked_add(1)
             .ok_or_else(|| invalid_data("task result version overflow"))
     })?;
-    let metadata = metadata_object(incoming.get("metadata"));
     let cost_experiment_id = cost_experiment(&metadata)
         .map(|(_, experiment_id)| experiment_id)
         .unwrap_or_default();
@@ -971,8 +1001,10 @@ fn checkpoint_inner(
         abort_source: current
             .as_ref()
             .map_or_else(String::new, |header| header.abort_source.clone()),
+        // A taken-over record is no longer the recovered predecessor's.
         interrupted_reason: current
             .as_ref()
+            .filter(|_| !taking_over)
             .map_or_else(String::new, |header| header.interrupted_reason.clone()),
         cost_experiment_id,
         child_invocation: incoming

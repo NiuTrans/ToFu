@@ -11366,6 +11366,28 @@ pub(crate) fn attempt_has_entered(
         .is_some_and(|attempt| attempt.document.get("startedAt").is_some_and(Value::is_u64)))
 }
 
+/// Worker-entry evidence (`turn.attempt.start`): the owned Turn's current
+/// Attempt bound to exactly `task_id`. A later Attempt that reuses a task
+/// identity must present it before it takes over that identity's record.
+pub(crate) fn current_attempt_bound_to_task(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    attempt_id: &str, task_id: &str,
+) -> io::Result<bool> {
+    // No stored Attempt can carry an identity beyond its admission bound.
+    if attempt_id.is_empty() || attempt_id.chars().count() > 128 {
+        return Ok(false);
+    }
+    let Some(loaded) = load_attempt_for_update(database, transaction, attempt_id)? else {
+        return Ok(false);
+    };
+    if loaded.document.get("taskId").and_then(Value::as_str) != Some(task_id) {
+        return Ok(false);
+    }
+    Ok(load_current_turn_header_for_attempt(
+        database, transaction, attempt_id, &loaded.document, &loaded.conversation_id,
+    )?.is_some())
+}
+
 pub(crate) fn attempt_get(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,

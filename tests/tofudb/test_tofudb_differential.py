@@ -6717,6 +6717,8 @@ def _task_results_scripts() -> dict[str, list[Step]]:
                      compare_shape_only=True),
             ]
         ),
+        'task_results reused identity admits only the current bound attempt': build(
+            lambda k: _reused_identity_takeover_steps(k, user)),
         'task_results recover running settles compact state': build(
             lambda k: [
                 Step('task_results.checkpoint', {
@@ -6742,6 +6744,82 @@ def _task_results_scripts() -> dict[str, list[Step]]:
             ]
         ),
     }
+
+
+def _reused_identity_takeover_steps(k: str, user: int) -> list[Step]:
+    """A resumed Worker reuses its workspace task id across Attempts.
+
+    Only the Turn's current Attempt bound to that id takes over the record
+    recovery interrupted; the predecessor's late writes stay fenced. Turn and
+    recovery setup steps are covered by their own scripts and stay
+    uncompared here; every task-result step is compared.
+    """
+    worker = f'{k}_worker'
+    turn = _Ref(0, ('turn', 'turnId'))
+    predecessor = _Ref(0, ('attempt', 'attemptId'))
+    successor = _Ref(8, ('attempt', 'attemptId'))
+
+    def enter(attempt: _Ref) -> list[Step]:
+        return [Step(operation, {
+            'attempt_id': attempt, 'task_id': worker, 'user_id': user,
+        }, command=True, compare=False) for operation in (
+            'turn.attempt.bind', 'turn.attempt.start')]
+
+    def write(attempt: _Ref, status: str, version: int) -> Step:
+        return Step('task_results.checkpoint', {
+            'key': worker,
+            'value': {
+                'user_id': user, 'task_id': worker, 'conv_id': f'{k}_conv',
+                'status': status, 'content': f'{status} checkpoint',
+                'metadata': {'turnId': turn, 'attemptId': attempt},
+            },
+            'expected_version': version,
+            'guard_contract': 'tofu.task-results.checkpoint.guard/v1',
+            'require_parent': True,
+        }, command=True)
+
+    return [
+        Step('turn.create_pair', {
+            'conversation_id': f'{k}_conv', 'user_id': user,
+            'command_id': f'{k}_pair', 'input_projection': {'content': 'work'},
+            'config': {'model': 'worker-model'}, 'now': _TURN_TS + 1000,
+            'conversation_defaults': {
+                'allowCreate': True, 'title': 'Worker', 'createdAt': _TURN_TS,
+                'settings': {},
+            },
+        }, command=True, compare=False),
+        *enter(predecessor),
+        write(predecessor, 'running', 0),
+        # The restart settles the Attempt and its task result.
+        Step('turn.recover', {'user_id': user}, command=True, compare=False),
+        Step('task_results.recover_running', {
+            'interrupted_reason': 'server_restart', 'max_rows': 32,
+            'scan_limit': 10_000,
+        }, command=True, compare=False),
+        write(predecessor, 'done', 2),
+        Step('turn.get', {
+            'conversation_id': f'{k}_conv', 'turn_id': turn, 'user_id': user,
+        }, compare=False),
+        Step('turn.attempt.create', {
+            'conversation_id': f'{k}_conv', 'user_id': user, 'turn_id': turn,
+            'command_id': f'{k}_resume', 'operation': 'regenerate',
+            'target_actor': 'assistant', 'target_kind': 'reply',
+            'expected_projection_revision': _Ref(7, ('projectionRevision',)),
+            'config': {'model': 'worker-model'},
+        }, command=True, compare=False),
+        # Accepted but not yet bound to the workspace task: no takeover.
+        write(successor, 'running', 2),
+        *enter(successor),
+        write(successor, 'running', 2),
+        write(predecessor, 'done', 3),
+        write(successor, 'done', 3),
+        Step('task_results.replay_get', {
+            'key': worker, 'user_id': user, 'include_metadata': True,
+        }),
+        Step('record.get', {
+            'namespace': 'task_results', 'key': worker, 'user_id': user,
+        }),
+    ]
 
 
 def _compaction_archive_scripts() -> dict[str, list[Step]]:
@@ -8855,6 +8933,7 @@ _ACTIVE_TASK_RESULTS_SCRIPTS = (
     'task_results cost experiment scan uses compact owner index',
     'task_results recover running settles compact state',
     'task_results recovery pending probes live state without a scan',
+    'task_results reused identity admits only the current bound attempt',
 )
 
 
@@ -9228,6 +9307,13 @@ def test_operation_matches_legacy_authority(
     tofu_outcomes = _run_script(script, tofudb_daemon)
     for outcomes in (legacy_outcomes, tofu_outcomes):
         _assert_management_outcomes(script_name, outcomes)
+
+    if script_name == 'task_results reused identity admits only the current bound attempt':
+        for outcomes in (legacy_outcomes, tofu_outcomes):
+            assert all(outcome.ok for _, outcome in outcomes)
+            assert [outcome.value['owned'] for step, outcome in outcomes
+                    if step.operation == 'task_results.checkpoint'] == [
+                True, False, False, True, False, True]
 
     if script_name == 'artifact complete conversation and history beyond old count quota':
         for outcomes in (legacy_outcomes, tofu_outcomes):
