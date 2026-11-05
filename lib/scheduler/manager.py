@@ -92,6 +92,34 @@ def _require_agent_command(command) -> None:
         )
 
 
+def _require_code_exec_allowed(task_type) -> None:
+    """task_type='command'/'python' schedule unattended arbitrary code; the
+    SCHEDULER_ALLOW_CODE_EXEC flag can disable that seam entirely."""
+    if task_type in _CODE_EXEC_TASK_TYPES:
+        import lib as _lib
+
+        if not getattr(_lib, "SCHEDULER_ALLOW_CODE_EXEC", True):
+            raise ValueError(
+                f"task_type='{task_type}' is disabled on this deployment "
+                "(SCHEDULER_ALLOW_CODE_EXEC is off). Use task_type='prompt' "
+                "or 'agent' for LLM-driven tasks."
+            )
+
+
+def _require_schedulable_type_change(current_type, new_type) -> None:
+    """A row switches only among the schedulable types; built-in and service
+    rows keep their type, because their handlers run system-scoped work."""
+    from lib.scheduler.tool_defs import SCHEDULABLE_TASK_TYPES
+
+    if current_type not in SCHEDULABLE_TASK_TYPES or new_type not in SCHEDULABLE_TASK_TYPES:
+        raise ValueError(
+            f"task_type cannot change from '{current_type}' to '{new_type}': only "
+            f"{', '.join(SCHEDULABLE_TASK_TYPES)} are interchangeable; built-in and "
+            "service tasks keep the type their owner created."
+        )
+    _require_code_exec_allowed(new_type)
+
+
 def _application_managed_storage_backups_enabled() -> bool:
     """Personal storage is app-owned; distributed PostgreSQL is platform-owned."""
     from runtime_guards import resolve_deployment_mode
@@ -302,23 +330,14 @@ class ScheduledTaskManager:
             raise PermissionError(
                 'scheduled task creation requires agents:scheduler scope')
 
-        # ── Code-execution gate ──
-        # task_type='command'/'python' schedule unattended arbitrary code.
-        # Lock them behind the SCHEDULER_ALLOW_CODE_EXEC feature flag so a
-        # deployment can disable the persistent code-exec seam entirely.
-        if task_type in _CODE_EXEC_TASK_TYPES:
-            import lib as _lib
+        _require_code_exec_allowed(task_type)
 
-            if not getattr(_lib, "SCHEDULER_ALLOW_CODE_EXEC", True):
-                raise ValueError(
-                    f"task_type='{task_type}' is disabled on this deployment "
-                    "(SCHEDULER_ALLOW_CODE_EXEC is off). Use task_type='prompt' "
-                    "or 'agent' for LLM-driven tasks."
-                )
-
-        # ── Agent instruction ──
+        # ── Agent instruction and predicate ──
         if task_type == "agent":
             _require_agent_command(command)
+            from lib.scheduler._shared import validate_condition_regex
+
+            validate_condition_regex(condition_command, condition_regex)
 
         # ── Schedule validation ──
         if schedule.startswith("once:"):
@@ -507,6 +526,8 @@ class ScheduledTaskManager:
             if current is None:
                 return False
             task_type = updates.get("task_type", current["task_type"])
+            if task_type != current["task_type"]:
+                _require_schedulable_type_change(current["task_type"], task_type)
             if task_type == "agent":
                 _require_agent_command(updates.get("command", current["command"]))
             # The predicate is not updatable, so only a real type change can

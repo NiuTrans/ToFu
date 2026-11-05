@@ -1,5 +1,14 @@
 """lib/scheduler/tool_defs.py — LLM tool schema definitions for the scheduler."""
 
+# The task types a model may create or switch a row among. Built-in types
+# (system maintenance) and service types (the Router Watchdog review) are
+# created by their owning service and never change type: their handlers run
+# system-scoped or deployment-wide work.
+SCHEDULABLE_TASK_TYPES = ('command', 'python', 'prompt', 'agent')
+# The fields schedule_manage 'update' may set. Poll/execution bookkeeping,
+# conversation routing and agent tool settings stay with their writers.
+TOOL_UPDATABLE_FIELDS = ('name', 'schedule', 'command', 'task_type', 'description', 'max_runtime')
+
 SCHEDULE_TOOL_CREATE = {
     "type": "function",
     "function": {
@@ -40,7 +49,7 @@ SCHEDULE_TOOL_CREATE = {
                 },
                 "task_type": {
                     "type": "string",
-                    "enum": ["command", "python", "prompt", "agent"],
+                    "enum": list(SCHEDULABLE_TASK_TYPES),
                     "description": (
                         "command (default), python, prompt, or proactive agent."
                     )
@@ -143,7 +152,7 @@ SCHEDULE_TOOL_MANAGE = {
                 },
                 "updates": {
                     "type": "object",
-                    "description": "Fields to update (for 'update' action): name, schedule, command, task_type, description, max_runtime"
+                    "description": "Fields to update (for 'update' action): " + ", ".join(TOOL_UPDATABLE_FIELDS)
                 }
             },
             "required": ["action"]
