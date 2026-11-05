@@ -7,11 +7,11 @@ from tests.turn_lifecycle.test_turn_event_carried_task_event import _running_tas
 pytestmark = pytest.mark.unit
 
 
-def test_terminal_transport_retry_returns_the_original_success(turn_service, storage, monkeypatch):
+def test_terminal_transport_retry_returns_the_original_success(turn_service, storage, monkeypatch):  # noqa: F811
     assert_terminal_transport_retry(turn_service, storage, monkeypatch)
 
 
-def assert_terminal_transport_retry(turn_service, storage, monkeypatch):
+def assert_terminal_transport_retry(turn_service, storage, monkeypatch):  # noqa: F811
     _, task = _running_task(turn_service, storage, 'terminal-retry', 'terminal-retry-task')
     task.update(status='done', finishReason='stop')
     original = storage.client.command

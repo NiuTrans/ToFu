@@ -27,7 +27,7 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def turns(conversation, monkeypatch, tmp_path):
+def turns(conversation, monkeypatch, tmp_path):  # noqa: F811
     """Register owner turns of one conversation; workers settle on start."""
     from lib.tasks_pkg.manager import create_task, discard_task
     monkeypatch.setattr(_logs, 'SWARM_OUTPUT_DIR', str(tmp_path))
@@ -96,7 +96,7 @@ def _named_tenant_denied(turns, code, **args):
 
 
 def test_startup_recovered_run_serves_its_personal_owner(
-        conversation, turns, monkeypatch, tmp_path):
+        conversation, turns, monkeypatch, tmp_path):  # noqa: F811
     conv = conversation
     launch = turns()
     assert launch['_tenant_id'] == '' and launch['_principalContext']['tenant_id'] is None
@@ -131,7 +131,7 @@ def test_startup_recovered_run_serves_its_personal_owner(
     _named_tenant_denied(turns, 'swarm_not_found', agent_id='first', swarm_run_id=run_id)
 
 
-def test_rows_saved_before_task_tenant_identity_stay_readable(conversation, turns):
+def test_rows_saved_before_task_tenant_identity_stay_readable(conversation, turns):  # noqa: F811
     conv = conversation
     legacy = turns()
     del legacy['_tenant_id']  # Registered before task birth carried a tenant.
