@@ -418,7 +418,7 @@ def _persist_task_event_batch(task, entries):
                 reset_persistent_event_projection(task['id'], entry.task_event['event'])
         _refuse_rejected_task_event(task)
     for entry, outcome in zip(entries, outcomes):
-        if outcome != 'carried':
+        if outcome not in ('carried', 'logged'):
             # The authority applied the record without carrying its row.
             try:
                 from lib.tasks_pkg.worker_binding import replay_publication_arguments
@@ -836,7 +836,7 @@ def _append_event_ordered(task, event, *, lane=None):
                         schedule_terminal_turn_translations,
                     )
                     schedule_terminal_turn_translations(task)
-                if outcome != 'carried':
+                if outcome not in ('carried', 'logged'):
                     try:
                         from lib.tasks_pkg.manager._registry import task_user_id
                         append_persistent_event(

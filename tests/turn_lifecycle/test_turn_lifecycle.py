@@ -904,6 +904,50 @@ def test_authority_integrity_failure_signals_cooperative_abort(
     assert abort_event.is_set()
 
 
+def test_settleable_ceiling_refusal_of_a_barrier_frame_fails_to_its_producer(
+        chat_sidecar, monkeypatch):
+    """Only queued frames move to the event log; a barrier never queues."""
+    import threading
+
+    import lib.turn_lifecycle as lifecycle
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg.event_log import read_events
+    from lib.turn_lifecycle import bind_task, record_task_event
+
+    conversation_id = _new_conversation_id()
+    created = _create(conversation_id)
+    attempt_id = created['attempt']['attemptId']
+    task_id = f'ceiling-barrier-{conversation_id}'
+    bind_task(attempt_id, task_id, user_id=1)
+    real_client = lifecycle._turn_client(write=True)
+
+    class CeilingClient:
+        def __getattr__(self, name):
+            return getattr(real_client, name)
+
+        def command(self, operation, payload, command_id, **kwargs):
+            raise StorageError(
+                'database_resource_exhausted',
+                'Turn reconstructed state exceeds its settleable snapshot budget')
+
+    monkeypatch.setattr(lifecycle, '_turn_client', lambda **_kwargs: CeilingClient())
+    task = {
+        '_attemptId': attempt_id, '_userId': 1, 'id': task_id,
+        'status': 'running', 'content': '', 'thinking': '', 'toolRounds': [],
+        'segments': [], 'model': 'gpt-4o', 'config': {'model': 'gpt-4o'},
+        'abort_event': threading.Event(),
+    }
+    request = {'type': 'approval_required', 'toolCallId': 'call-1',
+               'toolName': 'run_command', 'roundNum': 1}
+
+    with pytest.raises(StorageError, match='settleable snapshot budget'):
+        record_task_event(task, request, task_event={
+            'task_id': task_id, 'sequence': 1, 'event': request})
+
+    assert not task.get('aborted') and not task['abort_event'].is_set()
+    assert read_events(task_id, since_event_id=0, limit=10, raise_on_error=True) == []
+
+
 def test_nonterminal_wire_frame_overflow_also_retries_slim(
         chat_sidecar, monkeypatch):
     """The 64 MiB wire-cap error shape gets the same slim retry as the

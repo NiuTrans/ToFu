@@ -167,6 +167,43 @@ breaks the Worker's owned checkout and receipts; letting storage overwrite or
 skip an owned sequence corrupts cold replay. Spec:
 `tests/tasks_pkg/test_reused_task_event_cursor.py`.
 
+## A Turn at its settleable ceiling closes instead of wedging
+
+Problem: the native authority keeps a reserve so every Turn can still settle
+(`validate_settleable_turn_size` in `packages/tofu-db/src/turn.rs`) and refuses
+a non-terminal event that would consume it with a non-retryable
+`database_resource_exhausted` ("Turn reconstructed state exceeds its settleable
+snapshot budget"). The client treated that verdict as an ordinary permanent
+error: the refused frame stayed the failed FIFO head, the next round start
+failed as "Earlier task event is not durable", the terminal event could never
+commit behind it, and terminal maintenance resent the refused head every
+minute (task 68a575b7, a Continue replaying 2269 tool rounds). A batch chunk
+of one entry refused this way raised instead of reaching the single-event rules.
+
+Decision: `record_task_event` persists the exact rows of a refused non-barrier
+carried frame, including progress rows batched before it, to the event log
+only, with the coalesced path's attempt fence (`require_attempts_live`) and
+worker claim, and returns `'logged'`; callers never append those rows again.
+It then stops the task under the existing `storage_frame_overflow` fence and
+stamps a `storage_fence` envelope, so the producer's next frame is cancelled
+and its terminal event, within the reserve, settles the Turn as
+failed/internal_fence_abort. A terminal refused at the ceiling retries once in
+the slim shape, like a frame overflow. A refused batch chunk of one entry takes
+the per-event path; barrier frames still fail to their producer. The Turn
+projection keeps its last accepted revision, while attempt replay keeps every
+row. The SQL authority has no such reserve and never sends this verdict.
+Alternatives rejected: retrying the frame re-wedges the lane; dropping it loses
+evidence; acknowledging it without a durable row breaks commit before push; a
+slim retry of non-terminal frames is still refused once the stored Turn is
+inside the reserve; moving the reserve or ceiling is an engine contract change
+that only moves the cliff. Specs:
+`test_a_turn_at_its_settleable_ceiling_keeps_evidence_and_settles_failed`
+(native engine, real near-limit Turn) in
+`tests/turn_lifecycle/test_task_event_delivery.py` and
+`test_a_settleable_ceiling_inside_a_queued_run_keeps_its_rows_and_still_settles`
+(both authorities, verdict injected at the storage seam) in
+`tests/turn_lifecycle/test_task_event_batch_delivery.py`.
+
 ## Large-backlog persistence and publication
 
 Problem: a large entry could force a batch down to one event, and that count
@@ -708,8 +745,10 @@ conversation-attempt frame that is neither barrier-class nor a post-settlement
 observer. Its entry is exactly the carrier
 the single path would send: the same projected wire (projected once, in FIFO
 order), sequence, detached projection source and preceding progress rows.
-Outcomes map back with the single path's rules: `carried` commits; a record
-applied without its row appends that row standalone; a rejection of a live
+Outcomes map back with the single path's rules: `carried` commits; `logged`
+rows are already durable in the attempt-fenced event log (a Turn at its
+settleable ceiling, below); a record applied without its row appends that row
+standalone; a rejection of a live
 attempt this task still owns raises `database_conflict` and retains the run; a
 stale attempt plants the cooperative abort and revokes the run. Rows that an
 earlier chunk of a revoked run committed stay durable and replayable but are

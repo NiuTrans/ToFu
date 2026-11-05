@@ -118,6 +118,83 @@ def test_large_structural_frame_preserves_projection_event_and_settlement(
         _discard(task)
 
 
+# The literal that packages/tofu-db/src/turn.rs::validate_settleable_turn_size
+# sends when a non-terminal event would consume the terminal reserve.
+_SETTLEABLE_REFUSAL = 'Turn reconstructed state exceeds its settleable snapshot budget'
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize('storage', ['tofudb'], indirect=True)
+def test_a_turn_at_its_settleable_ceiling_keeps_evidence_and_settles_failed(
+        turn_service, storage, owner, monkeypatch):
+    """A near-limit Turn closes as a typed failure instead of wedging its FIFO.
+
+    The native authority refuses a non-terminal event whose reconstructed Turn
+    would leave no room for the terminal settlement it reserves. Task 68a575b7
+    (a Continue replaying 2269 tool rounds) kept that refused frame as its
+    failed FIFO head: the next round start failed as "Earlier task event is
+    not durable" and maintenance resent the refused head every minute, while
+    the terminal event could never commit behind it.
+    """
+    from lib.agent_core.events import EventType, build_event
+    from lib.storage.errors import StorageError
+    from lib.tasks_pkg.orchestrator._post_loop import handle_task_fatal
+    refusals = []
+    original = storage.client.command
+
+    def command(operation, payload, *args, **kwargs):
+        try:
+            return original(operation, payload, *args, **kwargs)
+        except StorageError as exc:
+            refusals.append((operation, exc.code, exc.message))
+            raise
+
+    monkeypatch.setattr(storage.client, 'command', command)
+    _, task = _task(turn_service, storage, 'near-limit-turn')
+    try:
+        # Content and its text segment mirror each other: 2 x 28 MB stays below
+        # the non-terminal ceiling (67,043,328 bytes minus an 8 MiB reserve).
+        for growth in range(4):
+            task['content'] += 'x' * 7_000_000
+            manager.append_event(task, {'type': 'phase', 'phase': 'tool',
+                                        'detail': f'growth {growth}'})
+            event_delivery.flush_task_events(task)
+        assert refusals == []
+        task['content'] += 'y' * 2_000_000
+        manager.append_event(task, {'type': 'phase', 'phase': 'tool', 'detail': 'past the reserve'})
+        event_delivery.flush_task_events(task)
+        assert refusals == [
+            ('turn.event.record', 'database_resource_exhausted', _SETTLEABLE_REFUSAL)]
+        # The refused frame is durable in the attempt's event log, not a failed head.
+        assert _stored_event(storage, task['id'], 4)['event']['detail'] == 'past the reserve'
+        assert event_delivery.task_event_backlog(task) == (0, False)
+        assert task['aborted'] and task['_abort_reason'] == 'storage_frame_overflow'
+        assert task['error']['kind'] == 'storage_fence'
+        running = turn_service.get_turn(task['convId'], task['_turnId'], user_id=1)
+        assert running['status'] == 'running'
+        assert 'y' not in running['projection']['content'][-10:]
+        # The producer stops at its next frame instead of failing as a lost write.
+        with pytest.raises(event_delivery.EventDeliveryCancelled) as stopped:
+            manager.append_event(task, build_event(EventType.ROUND_START, roundNum=1))
+        assert handle_task_fatal(task, stopped.value) is False
+        settled = turn_service.get_turn(task['convId'], task['_turnId'], user_id=1)
+        assert settled['status'] == 'failed'
+        assert settled['settlement']['cause'] == 'internal_fence_abort'
+        assert settled['settlement']['error']['kind'] == 'storage_fence'
+        assert turn_service.get_attempt(task['_attemptId'], user_id=1)['status'] == 'failed'
+        rows = storage.client.query('event.list', {
+            'task_id': task['id'], 'after_sequence': -1, 'limit': 100})
+        assert rows[-1]['event']['type'] == 'done'
+        assert rows[-1]['event']['error']['kind'] == 'storage_fence'
+        # Nothing remains for terminal maintenance to resend.
+        assert not task.get('_terminalTurnPending')
+        assert event_delivery.task_event_backlog(task) == (0, False)
+        assert turn_service.ensure_terminal_task_settled(task) is True
+        assert [operation for operation, *_ in refusals] == ['turn.event.record']
+    finally:
+        _discard(task)
+
+
 def test_retained_storage_reader_follows_replacement_authority(
         turn_service, storage, tmp_path):
     """A late import must not retain the fixture's stopped supervisor."""

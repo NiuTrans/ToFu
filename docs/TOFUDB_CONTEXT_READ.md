@@ -412,7 +412,7 @@ In these runs, `--native-client application` selects the production
 through the production executor, Turn and storage path. It does not exercise
 the complete manager delivery coordinator, progress coalescing or independent
 `StorageEventBatcher`. In `lib/tasks_pkg/manager/_events.py`, the standalone
-append is intentionally guarded by `outcome != 'carried'`; mechanically adding
+append is intentionally guarded by the `carried`/`logged` outcomes; mechanically adding
 a batcher would not establish equivalent delivery semantics. The measured
 `phase` event is outside the progress-coalescing set (`delta`, `program_output`,
 `tool_progress`), and its atomic carried write also bypasses the standalone

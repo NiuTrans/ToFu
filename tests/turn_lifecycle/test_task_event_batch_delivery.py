@@ -19,7 +19,7 @@ from lib.storage.errors import StorageError
 from lib.tasks_pkg import event_delivery
 from lib.tasks_pkg.manager import _events as manager
 from tests.turn_lifecycle.test_task_event_delivery import (
-    _task, _discard, storage as storage, turn_service as turn_service,
+    _SETTLEABLE_REFUSAL, _task, _discard, storage as storage, turn_service as turn_service,
     owner as owner,
 )
 from tests.turn_lifecycle.test_turn_event_carried_task_event import _stored_event
@@ -318,4 +318,77 @@ def test_a_terminal_barrier_commits_the_queued_run_before_its_own_transaction(
         authority.release.set()
         if terminal.is_alive():
             terminal.join(10)
+        _discard(task)
+
+
+def test_a_settleable_ceiling_inside_a_queued_run_keeps_its_rows_and_still_settles(
+        turn_service, storage, owner, monkeypatch):
+    """The native ceiling verdict never wedges the FIFO, on either authority.
+
+    Only the native authority keeps a settleable reserve; its exact verdict is
+    injected here so both authorities show the same evidence and settlement.
+    From sequence 4 the Turn refuses every non-terminal record and the full
+    terminal one, whose own growth no longer fits; the slim terminal fits.
+    """
+    from lib.agent_core.events import EventType, build_event
+    from lib.tasks_pkg.orchestrator._post_loop import handle_task_fatal
+    _, task = _task(turn_service, storage, 'batch-settleable-ceiling')
+    authority = SlowTurnAuthority(storage, monkeypatch, hold='before_commit')
+    try:
+        accepted = storage.client.command
+        refused, fenced = [], {}
+
+        def ceiling(operation, payload, *args, **kwargs):
+            if operation in ('turn.event.record', 'turn.event.record_batch'):
+                entries = payload['entries'] if operation == 'turn.event.record_batch' else [payload]
+                sequences = [(entry.get('task_event') or {}).get('sequence') for entry in entries]
+                if (any(sequence is not None and sequence >= 4 for sequence in sequences)
+                        and not (payload.get('terminal') and payload.get('slim'))):
+                    refused.append((operation, sequences))
+                    raise StorageError('database_resource_exhausted', _SETTLEABLE_REFUSAL)
+            elif operation == 'event.append_batch':
+                fenced.update((row['sequence'], row.get('require_attempts_live'))
+                              for row in payload['events'])
+            elif operation == 'event.append':
+                fenced[payload['sequence']] = payload.get('require_attempts_live')
+            return accepted(operation, payload, *args, **kwargs)
+
+        monkeypatch.setattr(storage.client, 'command', ceiling)
+        pushed, early = _observe_pushes(storage, task, monkeypatch)
+        _emit_structural(task, 0, 1)
+        assert authority.held.wait(5)
+        _emit_structural(task, 2, 1)
+        for text in ('a', 'b', 'c'):
+            task['content'] += text
+            manager.append_event(task, {'type': 'delta', 'content': text})
+        _emit_structural(task, 3, 1)
+        authority.release.set()
+        event_delivery.flush_task_events(task)
+        # Sequences 2-4 are one progress item; it and 5 keep their exact rows
+        # in the attempt-fenced log after one single-event refusal each.
+        assert [sequences for operation, sequences in refused
+                if operation == 'turn.event.record'] == [[4], [5]]
+        assert [row['sequence'] for row in _rows(storage, task)] == list(range(6))
+        assert [row['event'].get('content') for row in _rows(storage, task)[2:5]] == ['a', 'b', 'c']
+        assert {sequence: fenced.get(sequence) for sequence in range(6)} == {
+            0: None, 1: None, **{sequence: [task['_attemptId']] for sequence in range(2, 6)}}
+        assert pushed == list(range(6)) and early == []
+        assert event_delivery.task_event_backlog(task) == (0, False)
+        assert _turn(turn_service, task)['projection']['content'] == 'seed'
+        assert task['_abort_reason'] == 'storage_frame_overflow'
+        with pytest.raises(event_delivery.EventDeliveryCancelled) as stopped:
+            manager.append_event(task, build_event(EventType.ROUND_START, roundNum=3))
+        assert handle_task_fatal(task, stopped.value) is False
+        rows = _rows(storage, task)
+        terminal = rows[-1]
+        assert terminal['event']['type'] == 'done'
+        assert refused[-1] == ('turn.event.record', [terminal['sequence']])
+        settled = _turn(turn_service, task)
+        assert settled['status'] == 'failed'
+        assert settled['settlement']['cause'] == 'internal_fence_abort'
+        assert settled['settlement']['error']['kind'] == 'storage_fence'
+        assert settled['projection']['content'] == 'seedabc'
+        assert not task.get('_terminalTurnPending')
+    finally:
+        authority.release.set()
         _discard(task)

@@ -79,7 +79,9 @@ superseding task) actually requested. Internal storage/attempt fences —
 `storage_frame_overflow`, `turn_attempt_stale_fence`,
 `conversation_attempt_stale_fence`, planted by `lib/turn_lifecycle` /
 `lib/tasks_pkg/manager/_events.py` when the authority deterministically
-rejects this turn's writes, e.g. `database_integrity`) — settle as
+rejects this turn's writes, e.g. `database_integrity`, or refuses to grow a
+Turn into its settleable reserve, which also stamps the `storage_fence`
+envelope before the producer unwinds; see `docs/TASK_EVENT_DELIVERY.md`) — settle as
 `failed/internal_fence_abort` with `evidence: external_authority` and a
 `storage_fence` error envelope (warning, retryable). Mislabeling these as
 `user_abort` once rendered turns as unexplained stops with no recovery path;
