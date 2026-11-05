@@ -19,7 +19,7 @@ import {
   materializeSnapshotReferences,
 } from '../conversation/domain/tool-segment-references';
 import { createLifecycleScope, type LifecycleScope } from '../lifecycle';
-import { conversationConnectionHealth } from './connection-health';
+import { conversationConnectionHealth, SERVER_REPORTED_DEGRADATION } from './connection-health';
 import {
   CONVERSATION_STREAM_EVENT_NAMES,
   conversationStreamRetryDelayMs,
@@ -85,6 +85,9 @@ export interface ConversationSyncConnection {
  * healthy tail-window snapshot yet far below any user tolerating a dead
  * composer. */
 const SNAPSHOT_FETCH_TIMEOUT_MS = 30_000;
+
+/** A stream that delivered no valid frame within reconnectGraceMs. */
+const STREAM_STALL_REASON = 'heartbeat-timeout';
 
 function record(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -164,6 +167,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private serverBootId = '';
   private lastFrameAt: number | undefined;
   private sourceOpenedAt = 0;
+  /* Set by the silence deadline; only a valid frame or released demand clears
+   * it, so a reconnect cannot present a stalled stream as a transient one. */
+  private stalled = false;
   private roundRevision = 0;
   private readonly roundScope = ++roundDirectoryScope;
   private roundOwner = 0;
@@ -201,9 +207,11 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     this.suspended = suspended;
     if (suspended) {
       const wasConnected = this.source !== null;
+      const wasStalled = this.stalled;
+      this.stalled = false;
       this.closeSource();
       this.clearReconnectTimer();
-      if (wasConnected) this.publishHealth('idle', 'transport-suspended');
+      if (wasConnected || wasStalled) this.publishHealth('idle', 'transport-suspended');
     } else if (this.shouldConnect) {
       // The shared read/open path already reports and schedules failures.
       void this.resume().catch(() => undefined);
@@ -476,6 +484,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
   pause(): void {
     this.shouldConnect = false;
+    this.stalled = false;
     this.closeSource();
     this.clearReconnectTimer();
     if (!this.closed) this.publishHealth('idle');
@@ -681,12 +690,13 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     if (event.type === 'sync.heartbeat') {
       /* pushWithheld marks a WRITE-side wedge (authoritative pushes withheld
        * on storage retries) — distinct from the read-side degradation that
-       * `degraded` alone has always meant. Both stall delivery, so both map
-       * to the degraded badge, but the reason tells them apart. */
+       * `degraded` alone has always meant. Both stall this conversation's
+       * delivery, so both publish degraded; the reason tells them apart and,
+       * because this frame arrived, keeps them off the network badge. */
       const wedged = event.pushWithheld === true;
       this.publishHealth(event.degraded || wedged ? 'degraded' : 'live',
-        wedged ? 'storage-write-wedged'
-          : event.degraded ? 'storage-read-degraded' : undefined, 'heartbeat');
+        wedged ? SERVER_REPORTED_DEGRADATION.storageWriteWedged
+          : event.degraded ? SERVER_REPORTED_DEGRADATION.storageRead : undefined, 'heartbeat');
       if (this.closed || generation !== this.generation) return;
       notifyObserver('conversation-push-withheld', this.options.onPushWithheld, wedged);
       return;
@@ -790,6 +800,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   }
 
   private touchFrame(announceLive: boolean): void {
+    this.stalled = false;
     this.lastFrameAt = Date.now();
     this.retryCount = 0;
     // Heartbeats publish their final live/degraded verdict once below. An
@@ -806,10 +817,11 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     this.silenceTimer = setTimeout(() => {
       this.silenceTimer = null;
       if (this.closed || !this.shouldConnect) return;
-      this.publishHealth('degraded', 'heartbeat-timeout');
+      this.stalled = true;
+      this.publishHealth('degraded', STREAM_STALL_REASON);
       this.retryCount += 1;
       this.closeSource();
-      this.scheduleReconnect('heartbeat-timeout');
+      this.scheduleReconnect(STREAM_STALL_REASON);
     }, Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs));
   }
 
@@ -850,14 +862,17 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     if (this.closed && state !== 'closed') return;
     this.hasPublishedHealth = true;
     const now = Date.now();
+    // A stalled stream stays degraded through its reconnect until a valid
+    // frame proves delivery again.
+    const held = this.stalled && (state === 'connecting' || state === 'recovering');
     const health: ConnectionHealth = {
-      state,
+      state: held ? 'degraded' : state,
       transport: 'conversation-sse',
       observedAt: now,
       generation: this.generation,
       retryCount: this.retryCount,
       lastFrameAt: this.lastFrameAt,
-      reason,
+      reason: held ? reason ?? STREAM_STALL_REASON : reason,
     };
     conversationConnectionHealth.set(this.options.conversationId, health);
     if (!this.closed || state === 'closed') {

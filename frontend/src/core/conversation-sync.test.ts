@@ -668,6 +668,61 @@ describe('transport liveness and observer isolation', () => {
   });
 });
 
+describe('network badge aggregate', () => {
+  const aggregateCount = () => conversationConnectionHealth.aggregate().count;
+
+  it('holds a stalled stream degraded through its reconnect until a valid frame arrives', async () => {
+    const { coordinator, sources } = fixture();
+    await coordinator.resume();
+    sources[0].emit('sync.heartbeat', { cursor: 'cursor-1', serverBootId: 'boot', degraded: false });
+    expect(aggregateCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs);
+    expect(sources[0].closed).toBe(true);
+    expect(conversationConnectionHealth.get('conv'))
+      .toMatchObject({ state: 'degraded', reason: 'heartbeat-timeout' });
+    expect(aggregateCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sources).toHaveLength(2);
+    sources[1].onopen?.();
+    sources[1].onerror?.();
+    expect(conversationConnectionHealth.get('conv')?.state).toBe('degraded');
+    expect(aggregateCount()).toBe(1);
+    sources[1].emit('sync.heartbeat', { cursor: 'cursor-1', serverBootId: 'boot', degraded: false });
+    expect(conversationConnectionHealth.get('conv')?.state).toBe('live');
+    expect(aggregateCount()).toBe(0);
+  });
+
+  it('never counts degradation a delivered heartbeat reports as a network fault', async () => {
+    const { coordinator, sources } = fixture();
+    await coordinator.resume();
+    sources[0].emit('sync.heartbeat', { cursor: 'cursor-1', serverBootId: 'boot', degraded: true });
+    expect(conversationConnectionHealth.get('conv'))
+      .toMatchObject({ state: 'degraded', reason: 'storage-read-degraded' });
+    expect(aggregateCount()).toBe(0);
+    sources[0].emit('sync.heartbeat', {
+      cursor: 'cursor-1', serverBootId: 'boot', degraded: true, pushWithheld: true,
+    });
+    expect(conversationConnectionHealth.get('conv'))
+      .toMatchObject({ state: 'degraded', reason: 'storage-write-wedged' });
+    expect(aggregateCount()).toBe(0);
+  });
+
+  it.each(['pause', 'suspend'] as const)('releases a stall verdict on %s', async action => {
+    const { coordinator } = fixture();
+    await coordinator.resume();
+    await vi.advanceTimersByTimeAsync(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs);
+    expect(aggregateCount()).toBe(1);
+    if (action === 'suspend') coordinator.setSuspended(true);
+    else coordinator.pause();
+    expect(conversationConnectionHealth.get('conv')?.state).toBe('idle');
+    expect(aggregateCount()).toBe(0);
+    if (action === 'suspend') coordinator.setSuspended(false);
+    else await coordinator.resume();
+    expect(conversationConnectionHealth.get('conv')?.state).toBe('connecting');
+    expect(aggregateCount()).toBe(0);
+  });
+});
+
 describe('heartbeat acknowledgement integrity', () => {
   it.each(['pause', 'close', 'suspend'] as const)('withdraws remaining heartbeat publication after reentrant %s', async action => {
     const onHealth = vi.fn();

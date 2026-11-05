@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConnectionHealthStore } from './connection-health';
+import { ConnectionHealthStore, SERVER_REPORTED_DEGRADATION } from './connection-health';
 import type { ConnectionHealth } from '../api/conversation-sync.generated';
 
 afterEach(() => vi.restoreAllMocks());
@@ -28,6 +28,21 @@ describe('connection health observer boundary', () => {
     store.clear('other'); store.clear('conv'); store.clear('missing');
     expect(store.aggregate()).toMatchObject({ count: 0, degraded: false });
     expect(aggregate).toHaveBeenCalledTimes(5);
+  });
+
+  it('counts only lost transport toward the network aggregate', () => {
+    const store = new ConnectionHealthStore();
+    store.set('read', { ...health, reason: SERVER_REPORTED_DEGRADATION.storageRead });
+    store.set('write', { ...health, reason: SERVER_REPORTED_DEGRADATION.storageWriteWedged });
+    expect(store.get('write')?.state).toBe('degraded');
+    expect(store.aggregate()).toMatchObject({ degraded: false, count: 0 });
+    store.set('stalled', { ...health, reason: 'heartbeat-timeout' });
+    store.set('offline', { ...health, state: 'offline' });
+    expect(store.aggregate()).toMatchObject({ degraded: true, count: 2 });
+    // A delivered frame that reports server trouble ends the stall.
+    store.set('stalled', { ...health, observedAt: 2, reason: SERVER_REPORTED_DEGRADATION.storageRead });
+    store.clear('read');
+    expect(store.aggregate()).toMatchObject({ degraded: true, count: 1 });
   });
 
   it('does not discard transport-only or observation-only evidence', () => {
