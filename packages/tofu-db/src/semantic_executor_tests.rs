@@ -2731,7 +2731,7 @@
                     "task_id": task_id,
                     "user_id": owner,
                     "tenant_id": "tenant-a",
-                    "task_kind": "conversation-attempt",
+                    "task_kind": "queue-contract-test",
                     "idempotency_key": key,
                     "payload": {"value": value},
                     "priority": priority,
@@ -2749,7 +2749,7 @@
                     "worker_id": worker,
                     "now_ms": now_ms,
                     "lease_ms": 60_000,
-                    "task_kinds": ["conversation-attempt"]
+                    "task_kinds": ["queue-contract-test"]
                 }),
                 Some(command),
             )
@@ -3033,7 +3033,7 @@
             json!({
                 "task_id": "worker-future-clock",
                 "user_id": 41,
-                "task_kind": "conversation-attempt",
+                "task_kind": "queue-contract-test",
                 "idempotency_key": "future-clock-key",
                 "payload": {},
                 "now_ms": 86_461_508_u64
@@ -3050,7 +3050,7 @@
             json!({
                 "task_id": "worker-oversized",
                 "user_id": 41,
-                "task_kind": "conversation-attempt",
+                "task_kind": "queue-contract-test",
                 "idempotency_key": "oversized-key",
                 "payload": {"blob": "x".repeat(MAX_WORKER_JOB_PAYLOAD_BYTES)},
                 "now_ms": 61_507
@@ -20656,6 +20656,15 @@
             }
             revision => panic!("partial Turn steer recovered at revision {revision}"),
         }
+        // Authority reopen alone missed a stale derived byte index. Exercise
+        // the actual application recovery transaction after every crash cell.
+        let before = output["projection"].clone();
+        assert_eq!(recover_owner(&mut recovered, 11, 2_010)["recovered"], 1);
+        let settled = execute(&mut recovered, &request("turn.get", 11,
+            json!({"conversation_id":"fault-turn-steer","user_id":11,
+                "turn_id":output["turnId"]}), None), 2_011).unwrap();
+        assert_eq!(settled["projection"], before);
+        assert_eq!(settled["status"], "interrupted");
     }
 
     #[test]

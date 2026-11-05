@@ -1118,6 +1118,32 @@ already-carried empty patch instead of advancing beyond the revision-fenced
 checkpoint. This keeps unchanged status/heartbeat frames on the same exact
 chain invariant as structural changes without rewriting the checkpoint BLOB. Tofu-DB restart recovery is proportional to unfinished work: pending/running Attempts maintain a compact owner-scoped created-time index, and `turn.recover` reads at most 10,000 index rows while settling at most 500 Turns and 8 MiB of hydrated projections per transaction, always allowing one oversized Turn to progress. Creation-time and live-task guards apply before the byte budget. Attempt/Turn settlement, live-index removal, projection-head retirement, search invalidation, conversation revision, terminal event, sync replay, and outbox publication are one OCC commit; malformed or over-budget indexes fail closed without an authority-wide scan.
 
+Native live-steer recovery (2026-11-05): **Problem.** `turn.steer.commit`
+published appended `_userSteerInjects` and a new revision without refreshing
+the recovery index. Restart then rejected valid durable content as
+`attempt recovery projection byte evidence differs`. The observed Turn had
+10,849 bytes at its last ordinary event and 12,965 bytes after two additional
+steers, with exactly two additional projection revisions.
+**Decision.** The shared direct projection-update owner refreshes the existing
+live Attempt index in the same transaction, covering steer and guidance alike;
+worker-owned Attempts retain their separate recovery lifecycle. Legacy recovery
+accepts only an inline projection whose latest retained, same-owner Attempt
+event independently agrees with the indexed byte count. The revision gap must
+equal an exact suffix of distinct, canonical pending steer records, and removing
+only that suffix in a private proof candidate must reproduce the indexed size.
+Settlement retains the complete original projection and every directive. It
+uses the actual current byte count for pagination and logs the evidenced repair.
+Missing/foreign/malformed evidence or any unexplained mismatch still fails
+closed; the diagnostic includes the Attempt ID and both byte counts.
+**Alternatives rejected.** Ignoring the size fence masks corruption; manually
+rewriting the live index bypasses atomic recovery; scanning all histories adds
+startup work. The legacy path adds only two scoped reads on a mismatch (event
+head and latest event), no new records, fields, retention or tuning settings.
+Persistent index size is unchanged; ordinary updates replace its existing
+integer, and successful recovery removes the row. Verify
+`turn_recovery_bytes_tests.rs`, the live-steer restart specification, and the
+steer commit-fault campaign (including actual `turn.recover` after reopen).
+
 Schema 48 introduced the bounded head counters; schema 49 added the checkpoint
 revision discriminator, while the latest table catalogue creates the checkpoint
 table empty. Neither migration decodes or backfills historical projection
