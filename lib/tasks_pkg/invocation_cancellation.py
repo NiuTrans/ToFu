@@ -6,12 +6,17 @@ observer while borrowed, no global registry and no idle worker. Plain external
 predicates remain supported through a private scope. Local Stop, deadlines and
 delivery failures remain child-owned; a closed watch cannot receive late work.
 
-Dependencies: standard-library threading and the canonical invocation verdicts.
+Dependencies: standard-library threading, ``lib.log`` and the canonical
+invocation verdicts.
 The predicate must only observe its owner's cancellation, never admit effects.
 """
 from __future__ import annotations
 
 import threading
+
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 # Existing child-invocation control-observation cadence, formerly one polling
@@ -156,6 +161,9 @@ class ChildCancellationScope:
                 try:
                     requested = bool(self._abort_check())
                 except Exception as error:
+                    # Children marked aborted here never re-probe the port, so
+                    # this is the only trace of the fail-closed verdict.
+                    logger.warning('Child cancellation scope lost its owner control port: %s', error)
                     failure, requested = error, True
                 with self._lock:
                     watches = tuple(generation.watches)
