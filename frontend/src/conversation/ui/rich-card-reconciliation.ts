@@ -255,7 +255,7 @@ function reconcileChildren(currentParent: ReconciliationParent, nextParent: Reco
 }
 
 /** A synchronous DOM transaction, not a second browser-state authority. */
-function captureReaderState(root: HTMLElement): () => void {
+function captureReaderState(root: HTMLElement, preserveScroll = true): () => void {
   // A new or detached subtree cannot own the document's focus or selection.
   // Reading Selection.anchorNode/scroll offsets here flushed layout between
   // every newly inserted tool card on conversation switch.
@@ -276,9 +276,9 @@ function captureReaderState(root: HTMLElement): () => void {
     anchor, focus, anchorOffset: selection!.anchorOffset, focusOffset: selection!.focusOffset,
     text: selection!.toString(),
   } : null;
-  const scrolled = [root, ...Array.from(root.querySelectorAll<HTMLElement>('*'))]
+  const scrolled = preserveScroll ? [root, ...Array.from(root.querySelectorAll<HTMLElement>('*'))]
     .filter((element) => element.scrollTop !== 0 || element.scrollLeft !== 0)
-    .map((element) => ({ element, top: element.scrollTop, left: element.scrollLeft }));
+    .map((element) => ({ element, top: element.scrollTop, left: element.scrollLeft })) : [];
   return () => {
     if (focused && root.contains(focused)) {
       if (document.activeElement !== focused) focused.focus({ preventScroll: true });
@@ -327,12 +327,15 @@ export function moveRetainedNodeBefore(
   parent: HTMLElement, node: HTMLElement, before: Node | null,
 ): void {
   const movable = parent as MovableParent;
-  // Native moves preserve focus, but Chromium may still clear DOM selection.
-  // Both move paths therefore share the same reader-state transaction.
-  const restore = node.isConnected ? captureReaderState(node) : null;
+  const nativeMove = node.parentNode === parent && node.isConnected
+    ? movable.moveBefore : undefined;
+  // Native moves retain descendant scroll offsets, but Chromium may clear
+  // selection. Keep that transaction without scanning every descendant's
+  // layout; insertBefore and content edits still need the full scroll guard.
+  const restore = node.isConnected ? captureReaderState(node, !nativeMove) : null;
   try {
-    if (movable.moveBefore && node.parentNode === parent && node.isConnected) {
-      movable.moveBefore(node, before);
+    if (nativeMove) {
+      nativeMove.call(parent, node, before);
     } else {
       parent.insertBefore(node, before);
     }
