@@ -494,6 +494,10 @@ this evidence preservation does not reclassify the cancelled attempt as complete
 claim model consumption, or turn an authority refusal into a user Stop. Receipts
 without a binding in a Worker conversation settle the same way through that
 conversation's assignment, and revocation stops every live attempt there.
+A bound batch also settles once as evidence when its settled execution Turn no
+longer offers Continue (a failed attempt start offers only Regenerate), so it never
+re-issues a Continue the Turn authority refuses; a batch whose own deterministic
+Continue already settled is not replayed and leaves its receipts to the next turn.
 
 Accepted resume config carries authority-written `_resumeSource` (exact prior
 attempt/task, status and settlement cause). SQL/native acceptance overwrite any

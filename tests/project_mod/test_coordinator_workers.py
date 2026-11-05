@@ -364,6 +364,127 @@ def test_completed_worker_background_completion_attaches_once_without_resume(
     assert r.c.repo.read(assignment['id']) == before
 
 
+def _idle_background_batch(r, monkeypatch, receipts):
+    from lib import message_queue
+    from lib.tasks_pkg import background_commands
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    monkeypatch.setattr(message_queue, '_background_receipts', lambda *a, **kw: receipts)
+    monkeypatch.setattr(message_queue, 'next_dispatchable_turn', lambda *a, **kw: None)
+    monkeypatch.setattr(background_commands, 'conversation_results_complete', lambda **kw: True)
+    monkeypatch.setattr(chat_task_runtime, 'snapshot_owned', lambda **kw: [])
+
+
+def test_worker_execution_without_continue_settles_its_background_batch_once(
+        runtime, monkeypatch, caplog):
+    """A failed Continue start leaves only Regenerate; the authority refuses every later Continue.
+
+    Re-issuing the batch's Continue on each maintenance tick looped forever on
+    ``database_conflict``. The batch settles once as evidence on that exact Turn.
+    """
+    import logging
+    from lib import message_queue, agent_inbox
+    from lib.background_command_delivery import settle_closed_dispatch_completion
+    from lib.project_dispatch.admission import TrustedDispatch
+    from lib.conversation_sync.runtime import conversation_turn_commands
+    from lib.turn_lifecycle import LifecycleConflict
+
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    conversation = worker['conversation_id']
+    assignment = r.c.repo.read(worker['assignment_id'])
+    execution = assignment['execution']
+    trusted = TrustedDispatch(r.c.repo.admission(assignment['id']))
+    config = trusted.capture({}, 7, trusted.principal, conversation)
+    r.attempts[execution['attemptId']]['status'] = 'failed'
+    turn = r.turns[execution['turnId']]
+    settlement = {'outcome': 'failed', 'cause': 'generation_error',
+                  'error': {'kind': 'task_start_failed',
+                            'raw': 'Worker tool reservations cannot be replenished'},
+                  'resumeOptions': [{'operation': 'regenerate', 'anchor': {'type': 'turn_start'}}]}
+    turn.update(status='failed', settlement=deepcopy(settlement))
+    before = deepcopy(r.c.repo.read(assignment['id']))
+    receipts = [{'queueId': 'late-result', 'timestamp': 1, 'config': config,
+                 'payload': {'text': 'late command output', '_backgroundCommand': 'bg_late'}}]
+    _idle_background_batch(r, monkeypatch, receipts)
+    refused = []
+
+    def resume(conv, turn_id, owner, body, **kwargs):
+        # turn.attempt.create admits only an operation the current settlement offers.
+        refused.append(body['commandId'])
+        raise LifecycleConflict('database_conflict', 'database_conflict')
+    monkeypatch.setattr(conversation_turn_commands, 'resume_turn', resume)
+    attached, consumed = [], []
+
+    def attach(conv, turn_id, *, projection, expected_projection_revision, user_id, **kwargs):
+        assert (conv, turn_id, user_id) == (conversation, execution['turnId'], 7)
+        assert expected_projection_revision == turn['projectionRevision']
+        attached.append(projection)
+        turn.update(projection=projection, projectionRevision=expected_projection_revision + 1)
+    monkeypatch.setattr('lib.turn_lifecycle.update_turn_projection', attach)
+    monkeypatch.setattr(agent_inbox, 'consume_peer', lambda *args: consumed.append(args))
+    with caplog.at_level(logging.INFO, logger='lib.background_command_delivery'):
+        for _ in range(3):  # successive maintenance ticks
+            assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
+    assert refused == []
+    assert len(attached) == 1
+    assert attached[0]['_bgCommandInjects'][0]['previews'][0]['text'] == 'late command output'
+    assert consumed == [(conversation, ['late-result'])]
+    # The failed Turn keeps its own settlement; evidence is not a completion.
+    assert turn['status'] == 'failed' and turn['settlement'] == settlement
+    assert r.c.repo.read(assignment['id']) == before
+    causes = [record.getMessage() for record in caplog.records
+              if 'execution_not_continuable' in record.getMessage()]
+    assert len(causes) == 1 and execution['turnId'] in causes[0] and conversation in causes[0]
+    # Receipts without the binding (human takeover of the Worker) keep the ordinary wake.
+    unbound = {'model': 'model-a', 'projectPath': '/project'}
+    assert settle_closed_dispatch_completion(
+        unbound, [{**receipts[0], 'config': unbound}], conv_id=conversation, user_id=7) is False
+
+
+def test_background_batch_issues_its_continue_once(runtime, monkeypatch):
+    """The deterministic command must not be replayed as a new wake on every tick."""
+    from lib import message_queue
+    from lib.project_dispatch.admission import TrustedDispatch
+    from lib.conversation_sync.runtime import conversation_turn_commands
+
+    r = runtime
+    worker = r.call('delegate_project_work', **r.args)
+    conversation = worker['conversation_id']
+    assignment = r.c.repo.read(worker['assignment_id'])
+    old = assignment['execution']
+    trusted = TrustedDispatch(r.c.repo.admission(assignment['id']))
+    config = trusted.capture({}, 7, trusted.principal, conversation)
+    paused = {'cause': 'server_restart', 'resumeOptions': [{'operation': 'continue', 'anchor': {}}]}
+    r.attempts[old['attemptId']]['status'] = 'interrupted'
+    r.turns[old['turnId']].update(status='interrupted', settlement=deepcopy(paused))
+    receipts = [{'queueId': 'pending-result', 'timestamp': 1, 'config': config,
+                 'payload': {'text': 'command output', '_backgroundCommand': 'bg_pending'}}]
+    _idle_background_batch(r, monkeypatch, receipts)
+    issued = []
+
+    def resume(conv, turn_id, owner, body, **kwargs):
+        issued.append(body['commandId'])
+        replay = next((row for row in r.attempts.values()
+                       if row.get('commandId') == body['commandId']), None)
+        if replay is not None:  # turn.attempt.create replays the command's attempt
+            return SimpleNamespace(value={'attempt': deepcopy(replay), 'idempotentReplay': True})
+        r.attempts['continuation-attempt'] = {
+            'conversationId': conv, 'turnId': turn_id, 'attemptId': 'continuation-attempt',
+            'commandId': body['commandId'], 'taskId': old['taskId'], 'status': 'running'}
+        kwargs['trusted_dispatch'].continue_execution(turn_id, 'continuation-attempt')
+        return SimpleNamespace(value={'attempt': deepcopy(r.attempts['continuation-attempt'])})
+    monkeypatch.setattr(conversation_turn_commands, 'resume_turn', resume)
+    assert message_queue.dispatch_completed_background_batch(
+        conversation, user_id=7) == 'continuation-attempt'
+    # Stopped before its first model round consumed the receipt; Continue stays offered.
+    r.attempts['continuation-attempt']['status'] = 'interrupted'
+    r.turns[old['turnId']].update(settlement={'cause': 'user_abort', 'resumeOptions': paused['resumeOptions']})
+    for _ in range(2):
+        assert message_queue.dispatch_completed_background_batch(conversation, user_id=7) is None
+    assert len(issued) == 1
+    assert r.c.repo.read(assignment['id'])['execution']['attemptId'] == 'continuation-attempt'
+
+
 def test_cancelled_worker_background_completion_preserves_evidence_without_model_turn(
         runtime, monkeypatch, tmp_path):
     from lib import message_queue

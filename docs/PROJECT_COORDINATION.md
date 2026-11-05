@@ -1579,6 +1579,23 @@ completed assignment would reopen accepted work. Stop, a live predecessor,
 changed source or lost
 workspace/lineage evidence refuses recovery rather than starting a second writer.
 
+Problem: a Continue whose executor refused to start (for example `Worker tool
+reservations cannot be replenished`) settles the Turn `failed` with Regenerate as
+its only resume option, so the Turn authority refused every later batch Continue and
+the maintenance tick re-issued it, failing with `database_conflict`, forever.
+Decision: a bound batch resumes only through the Continue its execution Turn offers.
+A settled execution Turn without that option is closed: the batch settles once as
+evidence on it through the same path, logging `cause=execution_not_continuable`
+with the Turn status and settlement cause; the failed settlement stays unchanged.
+A batch whose own deterministic Continue attempt has already settled is not
+replayed; its receipts wait for the next explicit turn. Unbound receipts keep the
+ordinary wake. Alternatives rejected: Regenerate discards the Worker's transcript
+and checkpoint; classifying refusals by retry count or error text adds a knob and
+still re-issues the refused command; a fresh queued turn has no exact
+predecessor/successor association. Specs:
+`tests/project_mod/test_coordinator_workers.py::test_worker_execution_without_continue_settles_its_background_batch_once`
+and `::test_background_batch_issues_its_continue_once`.
+
 `blocked: task_background_commands_running` means that durable publication was
 captured while the Worker's background commands were still running; it is not a
 successful delivery and does not prove those commands survived the old server.

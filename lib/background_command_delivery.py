@@ -117,6 +117,18 @@ def completion_delivery_config(config: dict | None) -> dict:
     return cleaned
 
 
+def _settled_without_continue(turn, attempt):
+    """Whether a settled execution Turn no longer offers the Continue a batch resume issues."""
+    if not (isinstance(turn, dict) and isinstance(attempt, dict)
+            and isinstance(turn.get('status'), str)
+            and turn['status'] not in {'pending', 'running'}
+            and attempt.get('status') not in {'pending', 'running'}):
+        return False
+    options = (turn.get('settlement') or {}).get('resumeOptions') or []
+    return not any(isinstance(option, dict) and option.get('operation') == 'continue'
+                   for option in options)
+
+
 def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
     """Attach a closed Worker's late results without starting another model turn.
 
@@ -125,6 +137,8 @@ def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
     deterministic block; an unrelated human wake cannot race the attachment.
     Results of a turn that ran without the binding in a Worker conversation are
     governed by that conversation's assignment, so they settle the same way.
+    A bound batch resumes only through Continue, so an execution whose settled
+    Turn no longer offers it (a failed start leaves only Regenerate) is closed too.
     """
     from lib.project_dispatch.repository import DispatchGrantRevoked, ProjectDispatchRepository
     binding = (config or {}).get(DISPATCH_ADMISSION_KEY)
@@ -156,9 +170,16 @@ def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
     turn = repository.turn_get(
         conv_id, execution['turnId'], user_id=user_id)
     attempt = repository.get_attempt(execution['attemptId'])
-    if not (revoked or assignment.get('review') is not None
-            or (isinstance(turn, dict) and turn.get('status') == 'completed'
-                and isinstance(attempt, dict) and attempt.get('status') == 'completed')):
+    if revoked:
+        cause = 'dispatch_grant_revoked'
+    elif assignment.get('review') is not None:
+        cause = 'execution_reviewed'
+    elif (isinstance(turn, dict) and turn.get('status') == 'completed'
+            and isinstance(attempt, dict) and attempt.get('status') == 'completed'):
+        cause = 'execution_completed'
+    elif not unbound and _settled_without_continue(turn, attempt):
+        cause = 'execution_not_continuable'
+    else:
         return False
     if not isinstance(turn, dict) or turn.get('status') in {'pending', 'running'}:
         return True
@@ -198,6 +219,11 @@ def settle_closed_dispatch_completion(config, receipts, *, conv_id, user_id):
         if error.code in {'turn_in_progress', 'stale_projection', 'database_conflict'}:
             return True
         raise
+    logger.info('[BackgroundDelivery] settled %d background result(s) as evidence conv=%s '
+                'assignment=%s turn=%s attempt=%s cause=%s turn_status=%s settlement_cause=%s',
+                len(deliveries), conv_id, binding['assignmentId'], execution['turnId'],
+                execution['attemptId'], cause, turn.get('status'),
+                (turn.get('settlement') or {}).get('cause'))
     from lib import agent_inbox
     try:
         agent_inbox.consume_peer(conv_id, [item['queueId'] for item in deliveries])
