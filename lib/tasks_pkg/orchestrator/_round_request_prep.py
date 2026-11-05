@@ -20,6 +20,11 @@ Four steps, in order:
 
 Returns ``(_tools_this_round, body)``: the gated tool list is still
 needed downstream by the round-checkpoint call (slice 20).
+
+Round-prep timing (docs/LOGGING.md) names each sizeable sub-step as a
+``build_body.<name>`` child of the caller's ``build_body`` step:
+``mcp_authority``, ``model_images``, ``request_body``, ``snapshot`` (charged by
+the snapshot adapter itself), ``tool_metadata`` and ``context_telemetry``.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from lib.log import get_logger
 from lib.tasks_pkg.orchestrator._messages_snapshot import (
     emit_messages_snapshot_event,
 )
+from lib.tasks_pkg.round_prep_timing import round_prep_step
 from lib.token_counter.evidence import (
     ADMITTED_INPUT_TOKENS_KEY,
     TEXT_COUNT_VIEW_KEY,
@@ -57,10 +63,12 @@ def build_round_request(task, rs, messages, tool_list, *,
     LLM-call writeback, so read fresh each round).
     """
     from lib.tasks_pkg.orchestrator._tool_assembly_prep import refresh_root_mcp_authority
-    refresh_root_mcp_authority(task)
+    with round_prep_step(task, 'build_body.mcp_authority'):
+        refresh_root_mcp_authority(task)
     _tools_this_round = tool_list
     from lib.tasks_pkg.model_images import pin_model_images, task_image_reuse
-    pin_model_images(messages, model=rs.model, user_id=task.get('_userId'))
+    with round_prep_step(task, 'build_body.model_images'):
+        pin_model_images(messages, model=rs.model, user_id=task.get('_userId'))
 
     _snapshot_arguments = {
         'tid': tid,
@@ -75,26 +83,27 @@ def build_round_request(task, rs, messages, tool_list, *,
         'tools': _tools_this_round,
     }
     try:
-        from lib.tasks_pkg.compaction._tokens import _get_context_limit
-        budget_task = dict(task, config=dict(task.get('config') or {}, model=rs.model))
-        body = orchestrator_ports.build_request_body(
-            rs.model, messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            thinking_enabled=rs.thinking_enabled,
-            preset=rs.preset,
-            thinking_depth=thinking_depth,
+        with round_prep_step(task, 'build_body.request_body'):
+            from lib.tasks_pkg.compaction._tokens import _get_context_limit
+            budget_task = dict(task, config=dict(task.get('config') or {}, model=rs.model))
+            body = orchestrator_ports.build_request_body(
+                rs.model, messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_enabled=rs.thinking_enabled,
+                preset=rs.preset,
+                thinking_depth=thinking_depth,
 
-            # The task chooses intent; only a selected slot owns its dialect.
-            defer_reasoning=True,
-            context_window=_get_context_limit(budget_task),
-            tools=_tools_this_round,
-            response_format=response_format,
-            stream=True,
-            precomputed_input_tokens=admitted_input_tokens,
-            image_reuse=task_image_reuse(task, model=rs.model),
-            image_user_id=task.get('_userId'),
-        )
+                # The task chooses intent; only a selected slot owns its dialect.
+                defer_reasoning=True,
+                context_window=_get_context_limit(budget_task),
+                tools=_tools_this_round,
+                response_format=response_format,
+                stream=True,
+                precomputed_input_tokens=admitted_input_tokens,
+                image_reuse=task_image_reuse(task, model=rs.model),
+                image_user_id=task.get('_userId'),
+            )
     except Exception:
         # Retain the failed preflight in the inspector, but never replace the
         # body builder's typed failure with diagnostic work.
@@ -153,8 +162,9 @@ def build_round_request(task, rs, messages, tool_list, *,
     # Request-local authority latches must never survive a failed policy
     # lookup into the next round.
     from lib.tasks_pkg.orchestrator._tool_request_metadata import attach_tool_request_metadata
-    attach_tool_request_metadata(task, body, messages, _tools_this_round,
-        model=rs.model, round_num=round_num, tid=tid)
+    with round_prep_step(task, 'build_body.tool_metadata'):
+        attach_tool_request_metadata(task, body, messages, _tools_this_round,
+            model=rs.model, round_num=round_num, tid=tid)
     # OpenAI recommends a stable, privacy-preserving end-user identifier.
     # Never send a raw tenant/user value; anonymous personal-mode tasks omit
     # the field rather than inventing a cross-user identity.
@@ -165,32 +175,33 @@ def build_round_request(task, rs, messages, tool_list, *,
             ('tofu-safety:' + str(_principal)).encode('utf-8')
         ).hexdigest()[:32]
     try:
-        from lib.context_telemetry import (
-            TOOL_SCHEMA_EVIDENCE_KEY,
-            build_tool_schema_evidence,
-            capture_round_context,
-        )
-        # The opaque sidecar proves only this body-builder call. The existing
-        # immutable wire-catalog copy is the later identity baseline, avoiding
-        # another schema/list copy while provider projections remain free to
-        # invalidate the count by replacing any element.
-        if body.get('tools') is _tools_this_round:
-            _schema_evidence = build_tool_schema_evidence(
-                body.get('_tool_wire_catalog'),
-                admitted_tool_schema_tokens,
-                model=rs.model,
-                source_fingerprint=admitted_tool_schema_fingerprint,
+        with round_prep_step(task, 'build_body.context_telemetry'):
+            from lib.context_telemetry import (
+                TOOL_SCHEMA_EVIDENCE_KEY,
+                build_tool_schema_evidence,
+                capture_round_context,
             )
-            if _schema_evidence is not None:
-                body[TOOL_SCHEMA_EVIDENCE_KEY] = _schema_evidence
-        capture_round_context(
-            task, body.get('messages') or [], _tools_this_round,
-            round_num=round_num,
-            model=rs.model,
-            precomputed_tool_schema_tokens=admitted_tool_schema_tokens,
-            reusable_text_token_counts_by_identity=(
-                reusable_text_token_counts_by_identity),
-        )
+            # The opaque sidecar proves only this body-builder call. The existing
+            # immutable wire-catalog copy is the later identity baseline, avoiding
+            # another schema/list copy while provider projections remain free to
+            # invalidate the count by replacing any element.
+            if body.get('tools') is _tools_this_round:
+                _schema_evidence = build_tool_schema_evidence(
+                    body.get('_tool_wire_catalog'),
+                    admitted_tool_schema_tokens,
+                    model=rs.model,
+                    source_fingerprint=admitted_tool_schema_fingerprint,
+                )
+                if _schema_evidence is not None:
+                    body[TOOL_SCHEMA_EVIDENCE_KEY] = _schema_evidence
+            capture_round_context(
+                task, body.get('messages') or [], _tools_this_round,
+                round_num=round_num,
+                model=rs.model,
+                precomputed_tool_schema_tokens=admitted_tool_schema_tokens,
+                reusable_text_token_counts_by_identity=(
+                    reusable_text_token_counts_by_identity),
+            )
     except Exception as e:
         logger.debug('[Task %s] round context telemetry skipped: %s', tid, e)
 
