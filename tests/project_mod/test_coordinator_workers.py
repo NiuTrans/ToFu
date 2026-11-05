@@ -1,5 +1,6 @@
 """One human request creates independent workers under conserved source policy."""
 from copy import deepcopy
+import sys
 from types import SimpleNamespace
 import threading
 import time
@@ -119,6 +120,26 @@ def test_project_history_lists_worker_without_delegation_and_exact_lookup_keeps_
     assert r.c.repo.read(result['assignment_id'])['request'] == stored
 
 
+def test_coordinator_source_reads_carry_turn_metadata_and_keep_the_human_body_fence(runtime):
+    r = runtime
+    reads, read_turn = [], r.c.repo.turn_get
+    def recorded(conversation, turn, **kwargs):
+        reads.append((turn, kwargs.get('include_projection', True)))
+        return read_turn(conversation, turn, **kwargs)
+    r.c.repo.turn_get = recorded
+    result = r.call('delegate_project_work', **r.args)
+    assert result.get('dispatch') == 'accepted', result
+    delegated = set(reads)
+    # Its parent supplies only identity/revision before validate_human_source reads the body.
+    assert ('human-turn', False) in delegated
+    reads.clear()
+    r.c.repo.validate(r.c.repo.admission(result['assignment_id']))
+    for observed in (delegated, set(reads)):
+        # Coordinator Turn identity/parent are metadata; the human source keeps its body fence.
+        assert ('coordinator-turn', False) in observed and ('human-turn', True) in observed
+        assert ('coordinator-turn', True) not in observed
+
+
 @pytest.mark.parametrize('violation', ['synthetic', 'unattended', 'source', 'attempt', 'parent', 'plan', 'readonly', 'binding', 'no-policy', 'model-argument'])
 def test_invalid_source_never_creates_conversation_or_grant(runtime, violation):
     r = runtime
@@ -223,7 +244,18 @@ def test_background_completion_continues_same_assignment_and_moves_result_to_new
     if attempt_lookup == 'default':
         monkeypatch.setattr('lib.turn_lifecycle.get_attempt', r.c.repo.attempt_get)
         monkeypatch.setattr(r.c.repo, 'attempt_get', None)
+    worker_turn_reads, read_turn = [], r.c.repo.turn_get
+    def recorded_turn_get(conversation, turn, **kwargs):
+        if turn == old['turnId']:
+            worker_turn_reads.append((sys._getframe(1).f_globals['__name__'],
+                                      kwargs.get('include_projection', True)))
+        return read_turn(conversation, turn, **kwargs)
+    monkeypatch.setattr(r.c.repo, 'turn_get', recorded_turn_get)
     assert dispatch_completed_background_batch(assignment['request']['recipientId'], user_id=7) == 'continuation-attempt'
+    # The resume fence needs only the Worker Turn's revision, never its body.
+    assert ('lib.message_queue', False) in worker_turn_reads
+    assert ('lib.message_queue', True) not in worker_turn_reads
+    monkeypatch.setattr(r.c.repo, 'turn_get', read_turn)
     continued = r.c.repo.read(assignment['id'])['execution']
     assert continued['turnId'] == old['turnId'] and continued['attemptId'] == 'continuation-attempt'
     assert continued['taskId'] == old['taskId']
