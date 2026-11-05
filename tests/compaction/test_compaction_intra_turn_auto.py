@@ -1152,6 +1152,9 @@ def test_auto_realized_low_yield_candidate_is_not_committed(
         lambda *a, **k: telemetry_calls.append((a, k)))
     monkeypatch.setattr(
         token_counter, 'invalidate', lambda conv: invalidations.append(conv))
+    import lib.tasks_pkg.manager as manager
+    events = []
+    monkeypatch.setattr(manager, 'append_event', lambda task, event: events.append(event))
 
     meta = {}
     result = force_compact_if_needed(msgs, task=task, _result_meta=meta)
@@ -1166,8 +1169,18 @@ def test_auto_realized_low_yield_candidate_is_not_committed(
     assert invalidations == []
     assert conv_id not in _summary_cooldowns
     assert '_contextEvidenceLedger' not in task
-    assert not any(e.get('type') in ('compaction', 'compaction_done')
-                   for e in task.get('events', []))
+    # The compacting beat announced before summary I/O settles as a decline:
+    # no archive, no failed fact, and no Turn row left "compressing".
+    assert any(e.get('type') == 'phase' and e.get('phase') == 'compacting' for e in events)
+    assert not any(e.get('type') == 'compaction' for e in events)
+    [done] = [e for e in events if e.get('type') == 'compaction_done']
+    assert (done['receipt']['status'], done['receipt']['outcomeReason']) == (
+        'declined', 'low_yield')
+    from lib.turn_activity_timeline import fold_activity_timeline
+    timeline = None
+    for event in events:
+        timeline = fold_activity_timeline(timeline, event, task)
+    assert not (timeline or {}).get('entries')
 
 
 @pytest.mark.unit

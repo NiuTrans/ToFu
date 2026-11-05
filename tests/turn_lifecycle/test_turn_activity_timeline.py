@@ -534,6 +534,108 @@ def _settled_compaction(timeline, task, archive_id, seq):
     }, task)
 
 
+
+def _compaction_start_after(timeline, task, block_id, seq):
+    """Fold one L2 start beat right after a newly produced tool occurrence."""
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task.setdefault('segments', []).append({
+        'type': 'tool_use', 'blockId': block_id,
+        'taskId': task['id'], 'attemptId': task['_attemptId']})
+    return fold_activity_timeline(timeline, {
+        'type': EventType.PHASE, 'phase': Phase.COMPACTING, 'seq': seq,
+        'emittedAt': 1_000 * seq, 'detailKey': 'stream.phase.compactingWindow',
+    }, task)
+
+
+def test_a_start_that_earned_no_receipt_cannot_strand_later_compactions():
+    """mw1sawbtu8xr3h: one start beat left open behind a later one made every
+    later receipt skip its own start, so each compaction kept a permanent
+    "compressing" row and showed its result at the producer start instead of
+    where it happened."""
+    task = _task()
+    timeline = _compaction_start_after(None, task, 'tool:declined', 1)
+    timeline = _compaction_start_after(timeline, task, 'tool:adopted', 3)
+    timeline = _settled_compaction(timeline, task, 'archive-adopted', 5)
+
+    [row] = timeline['entries']
+    assert row['archiveId'] == 'archive-adopted'
+    assert row['status'] == 'succeeded'
+    assert (row['anchorBlockId'], row['anchorPosition']) == ('tool:adopted', 'after')
+    assert row['startedAt'] == 3_000
+
+
+def test_summary_declined_after_generation_retires_its_start_without_a_row():
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    timeline = _compaction_start_after(None, task, 'tool:a', 1)
+    timeline = fold_activity_timeline(timeline, {
+        'type': EventType.COMPACTION_DONE, 'seq': 2, 'emittedAt': 2_000,
+        'archiveId': 'summary-declined:task-a:0', 'convId': 'conv-a',
+        'trigger': 'working_set', 'tokensBefore': 94_801, 'tokensAfter': 94_801,
+        'receipt': {'status': 'declined', 'outcomeReason': 'low_yield'},
+    }, task)
+    assert not (timeline or {}).get('entries')
+
+    # The next accepted compaction still pairs with its own start.
+    timeline = _compaction_start_after(timeline, task, 'tool:b', 3)
+    timeline = _settled_compaction(timeline, task, 'archive-b', 5)
+    [row] = timeline['entries']
+    assert (row['archiveId'], row['anchorBlockId'], row['status']) == (
+        'archive-b', 'tool:b', 'succeeded')
+
+
+def _legacy_stranded_timeline():
+    """Rows folded before starts were retired (mw1sawbtu8xr3h, R1336-R1403)."""
+    def row(seq, **values):
+        return {'id': f'activity:{seq}', 'spanId': f'span:{seq}', 'seq': seq,
+                'kind': 'status', 'severity': 'info', 'phase': Phase.COMPACTING,
+                'taskId': 'task-a', 'attemptId': 'attempt-a',
+                'occurredAt': 1_000 * seq, 'startedAt': 1_000 * seq, **values}
+
+    def start(seq, block_id):
+        return row(seq, status='running', reasonCode=Phase.COMPACTING,
+                   summaryKey='stream.phase.compactingWindow',
+                   anchorBlockId=block_id, anchorPosition='after', endedAt=1_000 * seq)
+
+    def receipt(seq, archive_id):
+        return row(seq, status='succeeded', reasonCode='context_compaction',
+                   summaryKey='activity.compaction.succeeded', archiveId=archive_id,
+                   anchorPosition='producer-start', endedAt=1_000 * seq + 500,
+                   durationMs=500)
+
+    return {'blockId': 'activity-timeline', 'version': 1, 'entries': [
+        start(10, 'tool:declined'), start(20, 'tool:b'), receipt(22, 'archive-b'),
+        start(30, 'tool:c'), receipt(32, 'archive-c')]}
+
+
+@pytest.mark.parametrize('next_fact', ['compaction_start', 'turn_done'])
+def test_stranded_compaction_starts_heal_on_the_next_fold(next_fact):
+    from lib.turn_activity_timeline import fold_activity_timeline
+
+    task = _task()
+    if next_fact == 'compaction_start':
+        timeline = _compaction_start_after(_legacy_stranded_timeline(), task, 'tool:d', 40)
+    else:
+        timeline = fold_activity_timeline(_legacy_stranded_timeline(), {
+            'type': EventType.DONE, 'seq': 40, 'emittedAt': 40_000}, task)
+
+    receipts = {row['archiveId']: row for row in timeline['entries'] if row.get('archiveId')}
+    # Each receipt returns to the boundary and start time its own start witnessed.
+    for archive_id, block_id, started_at in (
+            ('archive-b', 'tool:b', 20_000), ('archive-c', 'tool:c', 30_000)):
+        row = receipts[archive_id]
+        assert (row['anchorBlockId'], row['anchorPosition']) == (block_id, 'after')
+        assert row['status'] == 'succeeded'
+        assert row['startedAt'] == started_at
+        assert row['durationMs'] == row['endedAt'] - started_at
+    # A start that earned no receipt is never kept or reported as an outcome;
+    # only a genuinely newer start stays in flight.
+    starts = [row for row in timeline['entries'] if row['reasonCode'] == Phase.COMPACTING]
+    assert [(row['anchorBlockId'], row['status']) for row in starts] == (
+        [('tool:d', 'running')] if next_fact == 'compaction_start' else [])
+
 def test_rebuilt_request_size_settles_only_the_compaction_row_it_names():
     from lib.conversation_sync.validation import decode
     from lib.turn_activity_timeline import fold_activity_timeline
