@@ -1677,6 +1677,34 @@ owner/project/task-matching durable `delivered` receipt, not completion, accepta
 candidate `merged` or a publish request. Automatic byte delivery need not change HEAD.
 Alternatives rejected: acceptance-as-publication and UI-only fencing lose authority.
 
+### Dispatch storage waits
+
+Problem: a transient storage `deadline_elapsed` while validating a grant or
+recording a physical occurrence stopped a healthy Worker as
+`dispatch_authority_lost`, even when the authority recovered moments later.
+Decision: live dispatch validation and its model/tool occurrence observers use
+the shared `lib/tasks_pkg/persistence_wait.py` lifecycle. Typed transient storage
+failures wait with the existing backoff and liveness witness, without an
+agent-attempt ceiling. Only the read or idempotent occurrence mutation repeats;
+no model request, tool effect, grant or execution account is recreated.
+Repository contention errors retain the final storage cause, so their bounded
+CAS loop cannot erase the distinction between transient pressure and a permanent
+refusal. Malformed config is refused before a workspace ownership lookup.
+Validation rereads live authority on recovery, and new intents revalidate after
+their durable ACK before allowing effects. Stop cancels admission waits; already
+observed model/tool settlement continues to ACK after Stop. Shutdown retains the
+existing persistence-debt failure behavior. Permanent integrity/permission
+failures and real revocations still fail closed with their original causes.
+An uncertain ACK reuses the exact occurrence; an existing identical finite-grant
+intent consumes no second allowance.
+
+Alternatives rejected: ignoring a failed authority check could execute without
+authorization; retrying the whole turn could repeat paid or external effects;
+another retry count/deadline would kill work during longer storage outages.
+Specifications: `tests/project_mod/test_project_dispatch_persistence.py`,
+`tests/storage/test_project_dispatch_persistence.py` and the existing dispatch
+runtime, occurrence accounting and stop-cause contracts.
+
 ### Dispatch authority stop causes
 
 Problem: a dispatched task halts through the abort lane when its grant is revoked

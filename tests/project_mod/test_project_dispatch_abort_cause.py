@@ -106,7 +106,7 @@ def test_revoked_grant_at_tool_admission_settles_grant_revoked(runtime, monkeypa
 
 @pytest.mark.parametrize('failure, cause, message', [
     ('revoked', 'dispatch_grant_revoked', 'revocation refuses'),
-    ('unwritable', 'dispatch_authority_lost', 'durably acknowledged'),
+    ('integrity', 'dispatch_authority_lost', 'durably acknowledged'),
 ])
 def test_intent_record_failure_after_the_presend_check_names_its_cause(
         runtime, monkeypatch, failure, cause, message):
@@ -118,8 +118,8 @@ def test_intent_record_failure_after_the_presend_check_names_its_cause(
     def intent_record(assignment_id, callback, **kwargs):
         # The pre-send check passed; the grant changes or the record fails in the CAS.
         calls.append(assignment_id)
-        if len(calls) == 1 and failure == 'unwritable':
-            raise StorageError('database_unavailable', 'dispatch record unwritable')
+        if len(calls) == 1 and failure == 'integrity':
+            raise StorageError('database_integrity', 'dispatch record corrupt')
         if len(calls) == 1:
             r.c.repo.revoke(r.assignment['id'], 1)
         return mutate(assignment_id, callback, **kwargs)

@@ -466,13 +466,15 @@ class ProjectDispatchRepository:
     def _load(self, selected=None):
         if self.storage_version == 2:
             from .segmented import SegmentedDispatch
+            last_storage_error = None
             for _ in range(LIMITS['casAttempts']):
                 try:
                     return SegmentedDispatch(self).load(selected)
                 except StorageError as error:
                     if error.code != 'database_conflict' and not error.retryable:
                         raise
-            raise DispatchContention('Concurrent/uncertain dispatch snapshot; retry reading')
+                    last_storage_error = error
+            raise DispatchContention('Concurrent/uncertain dispatch snapshot; retry reading') from last_storage_error
         row = self.client().query('record.get', {'namespace': NAMESPACE, 'key': self.key})
         if row is None:
             return {'binding': copy.deepcopy(self.binding), 'assignments': []}, 0
@@ -495,6 +497,7 @@ class ProjectDispatchRepository:
 
     def _change(self, update, *, selected=None):
         from .segmented import SegmentedDispatch, Snapshot
+        last_storage_error = None
         for _ in range(LIMITS['casAttempts']):
             original, version = self._load(selected)
             value = copy.deepcopy(original)
@@ -534,7 +537,8 @@ class ProjectDispatchRepository:
             except StorageError as exc:
                 if exc.code != 'database_conflict' and not exc.retryable:
                     raise
-        raise DispatchContention('Concurrent/uncertain dispatch update; read before retrying')
+                last_storage_error = exc
+        raise DispatchContention('Concurrent/uncertain dispatch update; read before retrying') from last_storage_error
 
     def _conversation(self, conversation_id):
         snapshot = self.conversations.get(conversation_id, user_id=self.owner,
