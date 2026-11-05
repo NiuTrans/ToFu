@@ -694,6 +694,49 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
     !frag(html).querySelector('.ptool-rejected-params'));
 }
 
+// ── 3e. the parameters panel speaks the UI language ──
+// t() answers a key absent from the catalog with the key itself, so the
+// panel's copy must resolve from every source catalog, never as a raw key.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const stubT = global.t;
+  const clippedArgs = JSON.stringify({ edits: [{ path: '', operation: 'replace',
+    anchor: 'A', content: 'z'.repeat(5000) }] });
+  for (const lang of ['zh', 'en']) {
+    const messages = JSON.parse(fs.readFileSync(path.join(
+      process.argv[3], 'frontend/src/i18n/locales', `${lang}.json`), 'utf8'));
+    global.t = window.t = (key, params) => {
+      const value = Object.prototype.hasOwnProperty.call(messages, key) ? messages[key] : key;
+      if (!params || typeof params !== 'object') return value;
+      return value.replace(/\{([A-Za-z0-9_]+)\}/g, (token, name) => (
+        Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : token));
+    };
+    const html = renderToolRoundsHTML([
+      { roundNum: 5, toolName: 'edit_file', status: 'rejected', toolArgs: clippedArgs,
+        rejection: { kind: 'tool_contract_invalid', tool: 'edit_file',
+          code: 'invalid_argument_length', path: '$.edits[0].path',
+          reason: 'ERROR: clipped payload' },
+        results: [] },
+    ], false);
+    const d = frag(html);
+    const summary = d.querySelector('.ptool-rejected-params > summary');
+    const pre = d.querySelector('.ptool-reject-args');
+    const note = d.querySelector('.ptool-reject-args-more');
+    const label = messages['tool.requestParams'];
+    const clipNote = messages['tool.requestParamsTruncated'];
+    check(`rejected_args_label_resolves_from_${lang}_catalog`,
+      typeof label === 'string' && !!summary
+      && summary.textContent.startsWith(label)
+      && !html.includes('tool.requestParams'));
+    check(`rejected_args_clip_note_names_its_size_in_${lang}`,
+      typeof clipNote === 'string' && !!pre && !!note
+      && note.textContent === clipNote.replace(
+        '{size}', String(Math.round(pre.textContent.length / 1024))));
+  }
+  global.t = window.t = stubT;
+}
+
 // ── 4. ask_human skipped (task ended unanswered) → .hg-skipped-line ──
 {
   const html = renderToolRoundsHTML([
@@ -1289,6 +1332,6 @@ def test_tool_result_owner_and_retained_round_adapter():
             os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js'),
             os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'),
         ],
-        expect_pass=126,
+        expect_pass=130,
         label='tool_rounds render',
     )

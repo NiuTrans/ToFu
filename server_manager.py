@@ -1301,6 +1301,8 @@ class LifecycleManager:
         self.worker_log = self.logs_dir / 'server-console.log'
         from serverctl_pkg.native_storage_service import NativeStorageService
         self._native_storage = NativeStorageService(self.project, self.python)
+        from serverctl_pkg.execution_service import ExecutionService
+        self._execution = ExecutionService(self.project, self.python)
         self._last_log_maintenance_at = 0.0
         self._last_monitor_error = ''
         self._trace_requested_at: float | None = None
@@ -1363,6 +1365,7 @@ class LifecycleManager:
             # counters start at this version's accounting epoch instead of
             # laundering that historical ambiguity into precise telemetry.
             'workerFailureCount': 0,
+            'executionRecovery': {},
             'plannedExitCount': 0,
             'exitAccountingSince': _now(),
             'lastWorkerExitAt': 0.0,
@@ -1489,6 +1492,7 @@ class LifecycleManager:
         self._state['failureHistory'] = []
         self._state['activeFailureAt'] = 0.0
         self._state['nextRetryAt'] = 0.0
+        self._state['executionRecovery'] = {}
 
     def _storage_data_dir(self) -> Path:
         """Resolve the worker's declared authority root without app imports."""
@@ -1531,6 +1535,50 @@ class LifecycleManager:
         if not plan or record.get('plan') != plan:
             raise RuntimeError('native storage configuration changed; drain/restart the worker to replace it')
         self._native_storage.ensure(plan, environment)
+
+    def _recover_execution_service(self) -> bool:
+        """Recover the same execution generation without retiring the live API."""
+        record = self._execution.record()
+        if not record:
+            return True  # Explicit/legacy topology has its own execution owner.
+        if self._execution.host_matches(record):
+            if record.get('state') == 'ready':
+                self._state['executionRecovery'] = {}
+                return True
+            self._set_observed('degraded', str(record.get('error') or 'execution service is starting'))
+            return False
+        recovery = self._state.get('executionRecovery') or {}
+        if recovery.get('serviceId') != record.get('serviceId'):
+            now, recent, consecutive = self._account_failure()
+            exhausted = recent >= self.max_failures
+            recovery = {
+                'serviceId': record.get('serviceId'),
+                'retryAt': now + self._failure_retry_delay(consecutive, recent),
+                'requiresRestart': exhausted,
+                'error': ('execution recovery paused; explicit restart required' if exhausted
+                          else 'execution service exited; waiting for recovery'),
+            }
+            self._state['executionRecovery'] = recovery
+            self._state['lastFailureReason'] = recovery['error']
+            self._state['lastExitCause'] = 'execution_exit'
+        if recovery.get('requiresRestart') or _now() < recovery['retryAt']:
+            self._set_observed('crashloop' if recovery.get('requiresRestart') else 'degraded',
+                               recovery['error'])
+            return False
+        try:
+            environment = self._worker_environment(self._state.get('serverEnv') or {}, self.port)
+            environment.setdefault('TOFU_STORAGE_CONNECTION_FILE', self._native_storage.result_path())
+            plan = self._execution.prepare(environment)
+            if record.get('plan') != plan:
+                raise RuntimeError('execution configuration or code changed; explicit restart required')
+            self._execution.stop()
+            self._execution.ensure(plan, environment)
+        except Exception as exc:
+            recovery.update(requiresRestart=True, error=f'execution recovery failed: {exc}')
+            self._set_observed('degraded', recovery['error'])
+            return False
+        self._set_observed('degraded', 'execution service is starting')
+        return False
 
     def _clean_exit_marker_for_remembered_worker(self) -> dict[str, Any]:
         """Return a fresh PID-bound clean-exit certificate, or an empty dict.
@@ -2490,6 +2538,18 @@ class LifecycleManager:
                 last_error = str(
                     probe.get('readinessError') if liveness
                     else probe.get('livenessError') or last_error)
+            execution_record = self._execution.record()
+            execution_error = ''
+            if (desired == 'running' and execution_record and
+                    (execution_record.get('state') != 'ready'
+                     or not self._execution.host_matches(execution_record))):
+                execution_error = str((self._state.get('executionRecovery') or {}).get('error')
+                                      or execution_record.get('error')
+                                      or 'execution service is not ready')
+                ready = False
+                last_error = execution_error
+                if observed not in {'conflict', 'stopping', 'crashloop'}:
+                    observed = 'degraded'
             worker_resource_budget = worker_resource_budget_snapshot(
                 low.get('pid'))
             return {
@@ -2505,13 +2565,17 @@ class LifecycleManager:
                 'ready': ready,
                 'probeScheme': probe.get('scheme'),
                 'livenessError': probe.get('livenessError') or '',
-                'readinessError': probe.get('readinessError') or '',
+                'readinessError': execution_error or probe.get('readinessError') or '',
                 'readinessState': probe.get('readinessState'),
                 'storageState': probe.get('storageState'),
                 'storageLease': storage_lease or None,
                 'nativeStorageService': {
                     key: value for key, value in self._native_storage.record().items()
                     if key in {'state', 'pid', 'nativePid', 'serviceId', 'error'}
+                } or None,
+                'executionService': {
+                    key: value for key, value in execution_record.items()
+                    if key in {'state', 'pid', 'serviceId', 'error'}
                 } or None,
                 'owner': 'tofu-manager',
                 'managerPid': os.getpid(),
@@ -2603,7 +2667,7 @@ class LifecycleManager:
 
     def _worker_environment(self, server_env: dict[str, str], port: int) -> dict[str, str]:
         """Compose the same launch environment for preparation and spawning."""
-        return managed_worker_environment(self.project, {
+        environment = managed_worker_environment(self.project, {
             'TOFU_SERVER_WORKER': '1',
             'TOFU_MANAGED_BY': 'supervisor',
             'TOFU_EXTERNAL_CONSOLE_LOG': str(self.worker_log),
@@ -2614,6 +2678,44 @@ class LifecycleManager:
             'TOFU_PROJECT_PATH': self.project,
             'PORT': str(port),
         }, server_env)
+        return (self._native_storage.shared_environment(environment)
+                if self._execution.enabled(environment) else environment)
+
+    def _prepare_resident_services(self, environment: dict[str, str]):
+        """Prepare every generation before replacing any serving process."""
+        independent = self._execution.enabled(environment)
+        env = (self._native_storage.shared_environment(environment)
+               if independent else dict(environment))
+        storage_plan = self._native_storage.prepare(env)
+        execution_plan = None
+        if independent:
+            execution_env = dict(env)
+            if storage_plan:
+                execution_env['TOFU_STORAGE_CONNECTION_FILE'] = self._native_storage.result_path()
+            if not execution_env.get('TOFU_STORAGE_CONNECTION_FILE'):
+                raise RuntimeError('Independent execution requires a shared storage endpoint')
+            execution_plan = self._execution.prepare(execution_env)
+        return env, storage_plan, execution_plan
+
+    def _ensure_resident_services(self, environment, storage_plan, execution_plan, *, reset_failed=False):
+        """Reuse unchanged execution; replace dependencies only after joined drain."""
+        env = dict(environment)
+        storage_changes = self._native_storage.needs_replacement(storage_plan, reset_failed=reset_failed)
+        execution_changes = self._execution.needs_replacement(execution_plan, reset_failed=reset_failed)
+        if storage_changes or execution_changes:
+            self._execution.stop()
+        if storage_changes:
+            self._native_storage.stop()
+        if storage_plan:
+            env['TOFU_STORAGE_CONNECTION_FILE'] = self._native_storage.ensure(storage_plan, env)
+        if execution_plan:
+            self._execution.ensure(execution_plan, env)
+            env['TOFU_PROCESS_ROLE'] = 'api'
+        return env
+
+    def _stop_resident_services(self):
+        self._execution.stop()
+        self._native_storage.stop()
 
     def _restart_configuration(self) -> str:
         """Detect another lifecycle operation while preparation releases the lock."""
@@ -2630,6 +2732,7 @@ class LifecycleManager:
     def _spawn(self, source: str, *,
                prepared_environment: dict[str, str] | None = None,
                prepared_storage_plan: dict | None = None,
+               prepared_execution_plan: dict | None = None,
                reset_failed_storage: bool = False) -> dict[str, Any]:
         # A persisted planned-recovery intent is consumed by this exact spawn
         # attempt.  If process creation itself fails, _spawn latches a real
@@ -2672,14 +2775,14 @@ class LifecycleManager:
             logger.error('%s', message)
             return {'ok': False, 'message': message}
         try:
-            storage_plan = (prepared_storage_plan if prepared_environment is not None
-                            else self._native_storage.prepare(env))
-            if self._native_storage.needs_replacement(storage_plan, reset_failed=reset_failed_storage):
-                self._native_storage.stop()
-            if storage_plan:
-                env['TOFU_STORAGE_CONNECTION_FILE'] = self._native_storage.ensure(storage_plan, env)
+            if prepared_environment is None:
+                env, storage_plan, execution_plan = self._prepare_resident_services(env)
+            else:
+                storage_plan, execution_plan = prepared_storage_plan, prepared_execution_plan
+            env = self._ensure_resident_services(env, storage_plan, execution_plan,
+                                                reset_failed=reset_failed_storage)
         except Exception as exc:
-            message = f'native storage service preparation failed: {exc}'
+            message = f'resident service preparation failed: {exc}'
             self._set_observed('crashloop', message)
             self._save()
             return {'ok': False, 'message': message}
@@ -2801,7 +2904,8 @@ class LifecycleManager:
               server_env: dict[str, str] | None = None,
               source: str = 'cli', explicit: bool = True,
               _prepared_environment: dict[str, str] | None = None,
-              _prepared_storage_plan: dict | None = None) -> dict[str, Any]:
+              _prepared_storage_plan: dict | None = None,
+              _prepared_execution_plan: dict | None = None) -> dict[str, Any]:
         with self._lock:
             if server_args is not None and not isinstance(server_args, list):
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
@@ -2892,6 +2996,7 @@ class LifecycleManager:
             if _prepared_environment is not None:
                 return self._spawn(source, prepared_environment=_prepared_environment,
                                    prepared_storage_plan=_prepared_storage_plan,
+                                   prepared_execution_plan=_prepared_execution_plan,
                                    reset_failed_storage=explicit)
             return self._spawn(source, reset_failed_storage=explicit)
 
@@ -3006,9 +3111,9 @@ class LifecycleManager:
             ok, killed, message = self._terminate(status)
             if ok and not keep_desired_running:
                 try:
-                    self._native_storage.stop()
+                    self._stop_resident_services()
                 except Exception as exc:
-                    ok, message = False, f'native storage shutdown incomplete: {exc}'
+                    ok, message = False, f'resident service shutdown incomplete: {exc}'
             if ok:
                 if was_running:
                     self._record_planned_exit(
@@ -3073,9 +3178,10 @@ class LifecycleManager:
         if not ready:
             return {'ok': False, 'message': error}
         try:
-            storage_plan = self._native_storage.prepare(preparation_environment)
+            preparation_environment, storage_plan, execution_plan = self._prepare_resident_services(
+                preparation_environment)
         except Exception as exc:
-            return {'ok': False, 'message': f'native storage preparation failed before shutdown: {exc}'}
+            return {'ok': False, 'message': f'resident service preparation failed before shutdown: {exc}'}
         with self._lock:
             if configuration != self._restart_configuration():
                 return {'ok': False, 'message': (
@@ -3105,7 +3211,8 @@ class LifecycleManager:
                                 server_env=self._state.get('serverEnv') or {},
                                 source=source, explicit=True,
                                 _prepared_environment=preparation_environment,
-                                _prepared_storage_plan=storage_plan)
+                                _prepared_storage_plan=storage_plan,
+                                _prepared_execution_plan=execution_plan)
             if result.get('ok'):
                 logger.info(
                     'worker restart replacement spawned in %.1fs%s',
@@ -3169,9 +3276,9 @@ class LifecycleManager:
                         return
                 self._settle_departed_worker()
                 try:
-                    self._native_storage.stop()
+                    self._stop_resident_services()
                 except Exception as exc:
-                    self._set_observed('conflict', f'native storage shutdown incomplete: {exc}')
+                    self._set_observed('conflict', f'resident service shutdown incomplete: {exc}')
                     self._save()
                     return
                 self._state['pendingWorkerExitIntent'] = {}
@@ -3187,8 +3294,12 @@ class LifecycleManager:
                     self._save()
                     return
                 self._remember_worker(status)
+                execution_ready = self._recover_execution_service()
                 probe = self._http_probe(int(status['pid']))
                 if probe.get('liveness') and probe.get('ready'):
+                    if not execution_ready:
+                        self._save()
+                        return
                     recovered_from = float(self._state.get('activeFailureAt') or 0)
                     now = _now()
                     if recovered_from:
@@ -3435,11 +3546,28 @@ class LifecycleManager:
                 'start/restart is required to reset the crash-loop budget',
                 recent_failures, self.failure_window)
             return
-        delay = min(60.0, float(2 ** max(failures, recent_failures)))
+        delay = self._failure_retry_delay(failures, recent_failures)
         self._state['nextRetryAt'] = now + delay
         self._set_observed('starting', f'worker exited; retrying in {delay:.0f}s')
         self._save()
         self._reap_retired_worker(retired_worker)
+
+    @staticmethod
+    def _failure_retry_delay(consecutive: int, recent: int) -> float:
+        # Existing manager retry contract, shared by API and execution hosts.
+        return min(60.0, float(2 ** max(consecutive, recent)))
+
+    def _account_failure(self) -> tuple[float, int, int]:
+        now = _now()
+        history = self._recent_failure_times(now)
+        history.append(now)
+        history = history[-DEFAULT_FAILURE_HISTORY_KEEP:]
+        failures = int(self._state.get('consecutiveFailures') or 0) + 1
+        self._state['failureHistory'] = history
+        self._state['activeFailureAt'] = float(self._state.get('activeFailureAt') or 0) or now
+        self._state['lastFailureAt'] = now
+        self._state['consecutiveFailures'] = failures
+        return now, len(history), failures
 
     def _account_worker_failure(
         self,
@@ -3449,12 +3577,7 @@ class LifecycleManager:
         exited_at: float | None,
     ) -> tuple[float, int, int, dict[str, Any]]:
         """Record one failed generation's exit; retry policy stays with callers."""
-        now = _now()
-        history = self._recent_failure_times(now)
-        history.append(now)
-        history = history[-DEFAULT_FAILURE_HISTORY_KEEP:]
-        recent_failures = len(history)
-        failures = int(self._state.get('consecutiveFailures') or 0) + 1
+        now, recent_failures, failures = self._account_failure()
         prior_oom = self._state.get('lastCgroupOomKillCount')
         current_oom = cgroup_oom_kill_count()
         oom_delta = 0
@@ -3487,17 +3610,12 @@ class LifecycleManager:
             classified_exit_cause = 'unexpected_exit'
             classified_failure_reason = (
                 prior_error or 'worker exited unexpectedly')
-        self._state['failureHistory'] = history
-        self._state['activeFailureAt'] = (
-            float(self._state.get('activeFailureAt') or 0) or now)
-        self._state['lastFailureAt'] = now
         self._state['lastFailureReason'] = classified_failure_reason
         self._state['lastExitCause'] = classified_exit_cause
         self._state['lastWorkerExitAt'] = now if exited_at is None else exited_at
         self._state['lastWorkerExitKind'] = 'failure'
         self._state['lastWorkerExitReason'] = classified_exit_cause
         self._state['lastCgroupOomDelta'] = oom_delta
-        self._state['consecutiveFailures'] = failures
         self._state['restartCount'] = int(self._state.get('restartCount') or 0) + 1
         self._state['workerFailureCount'] = int(
             self._state.get('workerFailureCount') or 0) + 1

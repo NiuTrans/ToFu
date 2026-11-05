@@ -1036,6 +1036,47 @@ completion deletes transport records, never messages.
 
 ### Stable capabilities, discoverable conversations and diagnosis
 
+#### Session execution control
+
+Problem: a Coordinator could read transcripts and manage its own assignments,
+but could not inspect or operate a concrete existing conversation as the owner
+could through Continue and Stop. Decision: `get_conversation_status` and
+`control_conversation` share `lib/conversations/session_control.py`. The Global
+Router can address the owner's conversations; a project Coordinator addresses
+conversations in its project. The live binding and owner are checked on every
+call. The Watchdog and ordinary Workers receive neither control capability.
+
+Status reads the canonical synchronization snapshot and exposes Turn/Attempt
+identities, revisions, settlement/resume options, queue and active phase without
+execution config. An explicit Turn ID reads that Turn; `get_conversation` remains
+the transcript reader. Status is passive and is never cached as authorization.
+
+Control supports `continue`, `checkpoint_resume`, `regenerate` and exact-attempt
+`stop`. It validates the current authorized Coordinator request through the
+existing delegation boundary, then reuses the conversation command service used
+by the browser. Resumes retain the target's accepted model/config and identity;
+they add no human message, answer, approval or enlarged tool grant. Dispatch
+attempts retain their exact `TrustedDispatch` admission; an automatic Coordinator
+continuation may control only its original request's dispatched Workers.
+Ordinary session resumes retain their existing human-authorized execution.
+Nonhuman notifications without an authorized request cannot issue controls.
+
+Callers pin the source Attempt, Turn revision and idempotency key. A retry uses
+the same command identity and stored source config; conflicts require a fresh
+status read, never a silently selected successor. Stop targets only the named
+current Attempt and uses the ordinary Stop/withdrawal owner; a terminal Attempt
+is a no-op so replay cannot withdraw newer work. Resuming an earlier Turn has the
+same later-history removal semantics as the browser command. A lost mutation ACK
+is reported as uncertain, not as proof that nothing started. Read-only sessions
+cannot be mutated. The tool call and ordinary command receipts retain provenance.
+
+Alternatives rejected: generating a new user message would change the meaning of
+Continue; starting a private executor would split lifecycle authority; granting
+an arbitrary synthetic user the owner's identity would bypass dispatch grants.
+Session settings, new messages, human confirmations and deletion remain separate
+commands. Verification: `tests/project_mod/test_coordinator_session_control.py`
+and `tests/conversation/test_coordinator_session_control.py`.
+
 Problem: permitted Coordinator tools were absent from default keyword-routed
 wire schemas and had to be rediscovered on every new task. Decision:
 `coordinator_policy.prepare_coordinator_tool_surface` derives required-direct
@@ -1540,6 +1581,23 @@ revoked assignments. Alternative rejected: allowing Continue on a reviewed or
 completed assignment would reopen accepted work. Stop, a live predecessor,
 changed source or lost
 workspace/lineage evidence refuses recovery rather than starting a second writer.
+
+Problem: a Continue whose executor refused to start (for example `Worker tool
+reservations cannot be replenished`) settles the Turn `failed` with Regenerate as
+its only resume option, so the Turn authority refused every later batch Continue and
+the maintenance tick re-issued it, failing with `database_conflict`, forever.
+Decision: a bound batch resumes only through the Continue its execution Turn offers.
+A settled execution Turn without that option is closed: the batch settles once as
+evidence on it through the same path, logging `cause=execution_not_continuable`
+with the Turn status and settlement cause; the failed settlement stays unchanged.
+A batch whose own deterministic Continue attempt has already settled is not
+replayed; its receipts wait for the next explicit turn. Unbound receipts keep the
+ordinary wake. Alternatives rejected: Regenerate discards the Worker's transcript
+and checkpoint; classifying refusals by retry count or error text adds a knob and
+still re-issues the refused command; a fresh queued turn has no exact
+predecessor/successor association. Specs:
+`tests/project_mod/test_coordinator_workers.py::test_worker_execution_without_continue_settles_its_background_batch_once`
+and `::test_background_batch_issues_its_continue_once`.
 
 `blocked: task_background_commands_running` means that durable publication was
 captured while the Worker's background commands were still running; it is not a

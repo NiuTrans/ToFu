@@ -2,6 +2,7 @@ AGENTS.md
 README.md
 __init__.py
 _crc32c_accelerator.py
+_frame_body.py
 _loopback.py
 embedded.py
 generated_checkpoint_control.py
@@ -13,6 +14,7 @@ wire.py
 ./_crc32c_accelerator.py
 ./_frame_body.py
 ./_loopback.py
+./_request_cancellation.py
 ./embedded.py
 ./generated_checkpoint_control.py
 ./generated_contract.py

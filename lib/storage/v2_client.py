@@ -709,14 +709,15 @@ class StorageV2Client:
         return self._request_once(operation, payload, timeout=remaining,
                                   command_id=None, deadline_unix_ms=deadline_unix_ms)
 
-    def worker_watch(self, *, cursor, deadline_unix_ms):
+    def worker_watch(self, *, cursor, deadline_unix_ms, cancellation=None):
         """Wait for authority-committed queue/control changes without a DB read."""
         from lib.storage.generated_worker_control import WATCH_OPERATION
         remaining = deadline_unix_ms / 1000 - time.time()
         if remaining <= 0:
             raise StorageError('database_timeout', 'Worker watch deadline elapsed')
         return self._request_once(WATCH_OPERATION, {'cursor': cursor}, timeout=remaining,
-                                  command_id=None, deadline_unix_ms=deadline_unix_ms)
+                                  command_id=None, deadline_unix_ms=deadline_unix_ms,
+                                  cancellation=cancellation)
 
     def native_checkpoint_available(self, *, user_id: int) -> bool:
         return self._checkpoint_port.available(user_id=user_id)
@@ -740,7 +741,8 @@ class StorageV2Client:
         return self._request_once(operation, body, timeout=timeout,
                                   command_id=command_id, deadline_unix_ms=deadline_unix_ms)
 
-    def _request_once(self, operation, body, *, timeout, command_id, deadline_unix_ms):
+    def _request_once(self, operation, body, *, timeout, command_id, deadline_unix_ms,
+                      cancellation=None):
         """One pooled transport attempt; replay policy belongs to the caller."""
         stop_at = time.monotonic() + timeout
         session = None
@@ -760,13 +762,12 @@ class StorageV2Client:
                 set_timeout(remaining + _SOCKET_TIMEOUT_SLACK_S)
             # Only a complete exchange proves alignment. Cancellation and
             # unexpected callback errors can interrupt any send/read phase.
-            broken = True
-            response = session.request(
-                operation,
-                body,
-                command_id=command_id,
-                deadline_unix_ms=deadline_unix_ms,
-            )
+            from contextlib import nullcontext
+            binding = cancellation.bind(session.interrupt) if cancellation is not None else nullcontext()
+            with binding:
+                broken = True
+                response = session.request(
+                    operation, body, command_id=command_id, deadline_unix_ms=deadline_unix_ms)
             broken = False
             if response.status != 0:
                 raise self._to_storage_error(response, operation)
@@ -844,7 +845,8 @@ class StorageV2Client:
             ) from exc
         finally:
             if session is not None:
-                self._pool.release(session, broken=broken)
+                self._pool.release(session, broken=broken or (
+                    cancellation is not None and cancellation.cancelled))
 
     @staticmethod
     def _to_storage_error(exc: StorageV2Error | Any,

@@ -135,6 +135,8 @@ class DurableWorkerService:
             thread = self._thread
             self._stop.set()
             self._wake.set()
+        if self._wake_source is not None:
+            self._wake_source.interrupt()
         if thread is not None:
             if thread is threading.current_thread():
                 raise RuntimeError('Durable worker service cannot join its coordinator from itself')

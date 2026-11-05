@@ -5316,6 +5316,8 @@
   "tool.blocked": "Blockiert",
   "tool.blockedTip": "Eine Sicherheits- oder Berechtigungsprüfung hat dieses gültige Tool vor der Ausführung blockiert.",
   "tool.didYouMean": "meinten Sie",
+  "tool.requestParams": "Anfrageparameter",
+  "tool.requestParamsTruncated": "… auf {size} KB gekürzt; die ursprüngliche Anfrage enthält die vollständigen Argumente",
   "agentDock.allMessages": "Gesamte Kommunikation",
   "swarm.messagesReceiptDetails": "Zustellungsdetails",
   "swarm.messagesRunId": "Ausführungs-ID",
@@ -7080,5 +7082,7 @@
   "toolHumanGuidance.repliedInChat": "Im Chat beantwortet",
   "toolHumanGuidance.replyDrafted": "Ihre Antwort steht im Eingabefeld – senden Sie sie, wenn Sie bereit sind",
   "toolHumanGuidance.supersededRow": "Nicht beantwortet · Sie haben im Chat geantwortet",
-  "toolsInv.tool.update_task_progress": "Die Aufgabenübersicht aktualisieren, die dem Benutzer über der Koordinator-Unterhaltung angezeigt wird."
+  "toolsInv.tool.update_task_progress": "Die Aufgabenübersicht aktualisieren, die dem Benutzer über der Koordinator-Unterhaltung angezeigt wird.",
+  "toolsInv.tool.get_conversation_status": "Ausführungsstatus einer Unterhaltung und verfügbare Aktionen zum Fortsetzen prüfen.",
+  "toolsInv.tool.control_conversation": "Die Generierung in einer autorisierten Unterhaltung mit dem vorhandenen Kontext fortsetzen, wiederholen oder beenden."
 }

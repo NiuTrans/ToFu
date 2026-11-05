@@ -5316,6 +5316,8 @@
   "tool.blocked": "Bloqué",
   "tool.blockedTip": "Une vérification de sécurité ou d’autorisation a bloqué cet outil valide avant son exécution.",
   "tool.didYouMean": "vouliez-vous dire",
+  "tool.requestParams": "Paramètres de la requête",
+  "tool.requestParamsTruncated": "… tronqué à {size} Ko ; la requête d’origine conserve l’intégralité des arguments",
   "agentDock.allMessages": "Toutes les communications",
   "swarm.messagesReceiptDetails": "Détails de remise",
   "swarm.messagesRunId": "ID d’exécution",
@@ -7080,5 +7082,7 @@
   "toolHumanGuidance.repliedInChat": "Répondu dans la conversation",
   "toolHumanGuidance.replyDrafted": "Votre réponse est dans la zone de saisie — envoyez-la quand vous êtes prêt",
   "toolHumanGuidance.supersededRow": "Sans réponse · vous avez répondu dans la conversation",
-  "toolsInv.tool.update_task_progress": "Mettre à jour le tableau des tâches affiché à l’utilisateur au-dessus de la conversation du coordinateur."
+  "toolsInv.tool.update_task_progress": "Mettre à jour le tableau des tâches affiché à l’utilisateur au-dessus de la conversation du coordinateur.",
+  "toolsInv.tool.get_conversation_status": "Consulter l’état d’exécution d’une conversation et les actions disponibles pour la poursuivre.",
+  "toolsInv.tool.control_conversation": "Poursuivre, relancer ou arrêter une conversation autorisée en conservant son contexte existant."
 }

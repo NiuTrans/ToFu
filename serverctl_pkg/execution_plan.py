@@ -12,10 +12,6 @@ import json
 from pathlib import Path
 import sys
 
-# Application import owners, excluding tests, local vendored code and user data.
-APPLICATION_PACKAGES = ('lib', 'routes', 'bootstrap_pkg', 'serverctl_pkg', 'rootless_vm', 'tofu')
-
-
 def prepare_plan(project: Path, environment: dict[str, str], *, python: str = sys.executable) -> dict:
     from lib.runtime.pinned_import_source import _importable_sources
 
@@ -24,13 +20,8 @@ def prepare_plan(project: Path, environment: dict[str, str], *, python: str = sy
     search = Path(environment.get('TOFU_SEARCH_PATH') or project / 'packages/tofu-search')
     if search.is_dir():
         roots.append(search.resolve())
-    sources = {Path(path) for path in _importable_sources(str(project), recurse=False, ignore_errors=False)}
-    for name in APPLICATION_PACKAGES:
-        package = project / name
-        if (package / '__init__.py').is_file():
-            sources.update(Path(path) for path in _importable_sources(str(package), recurse=True, ignore_errors=False))
-    for root in roots[1:]:
-        sources.update(Path(path) for path in _importable_sources(str(root), recurse=True, ignore_errors=False))
+    sources = {Path(path) for root in roots
+               for path in _importable_sources(str(root), recurse=True, ignore_errors=False)}
 
     identity = hashlib.sha256()
     for path in sorted(sources):

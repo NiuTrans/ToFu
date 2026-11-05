@@ -977,7 +977,7 @@ The `fields` map is prose; prose cannot fail CI. The `rawToolTokens`
 incident proved the gap: a field rode the wire undeclared — emitted by the
 pipeline, consumed by the frontend badge, absent from the contract — and was
 discovered by a user. `EventSpec.schema` (a tuple of `FieldSpec(name, kind,
-required)`) makes the field contract machine-readable, and three gates
+required)`) makes the field contract machine-readable, and four gates
 enforce it:
 
 | Gate | Catches |
@@ -985,6 +985,23 @@ enforce it:
 | `build_event` construction validation | An **undeclared field**, a **missing required field**, or a **type mismatch** raises `EventContractError` at the emitting line under pytest (default) or `TOFU_EVENT_SCHEMA=strict`; production defaults to `warn` (logged once per signature, never fails a turn); `off` disables. |
 | `append_event` delivery-seam `check_event` | Fields stamped by **post-construction mutation** (the pipeline adds `status` / `rejection` / compaction fields after building `tool_complete`) — validated on the final frame that actually reaches the wire. |
 | `tests/events/test_event_schema.py` | Schema ↔ prose **exact key sync** (a field declared in one but not the other fails), closed kind vocabulary, plus a REAL scripted `execute_tool_pipeline` round whose every emitted frame must conform. |
+| `tests/events/test_event_emitter_conformance.py` | **Build-then-mutate emitters** whose unit tests capture frames at the emitter's own sink, before the delivery seam: the swarm worker's `swarm_agent_progress` / `swarm_agent_tool_call` frames, the swarm driver's terminal `swarm_phase` frames and the `done` checkpoint file merge. Each REAL emitter's final frames must conform. |
+
+**Problem:** those emitters stamp their fields after construction, so drift
+surfaced only as a production delivery-seam warning: worker `model`, tool-call
+inspector/truncation/edit/result-metadata fields and the documented driver
+settlement aggregate (`outcome`, `outcomeCounts`, `reasonCodes`) rode the wire
+undeclared, and `done.modifiedFiles` was declared as a path list although every
+emitter sends the changed-path count that `TurnProjection.modifiedFiles`
+(integer) stores. **Decision:** declare the fields the emitters, browser
+reducers and task-engine documentation already rely on, correct the `done`
+declaration to `int` (plus the emitted `modifiedFilesTruncated`), and drive the
+real emitters in the conformance suite. The wire itself is unchanged, so
+`EVENT_CONTRACT_VERSION` stays 1. **Alternatives rejected:** removing the
+fields from emitters would drop the browser's tool-call model update and the
+swarm settlement contract; emitting a list for `done.modifiedFiles` would
+break the integer Turn projection and duplicate `modifiedFileList`; bumping
+the version would announce a wire change that never happened.
 
 `kind` is a tiny closed DSL: `str` / `bool` / `int` / `number` / `dict` /
 `list` / `None`, `|`-separated for unions (`'int | None'`). `bool` is NOT an

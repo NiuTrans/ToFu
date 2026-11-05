@@ -12,6 +12,32 @@ pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api
 
 
+def test_watch_close_interrupts_only_its_owned_transport(semantic_authority):
+    from lib.durable_worker.runtime_policy import runtime_policy
+    from lib.storage.worker_wake import StorageWorkerWakeSource
+    factory, _owner, _engine = semantic_authority
+    waiting = threading.Event()
+    class Client:
+        def __init__(self, client):
+            self.client = client
+        def worker_watch(self, *, cursor, **kwargs):
+            if cursor is not None:
+                waiting.set()
+            return self.client.worker_watch(cursor=cursor, **kwargs)
+    source = StorageWorkerWakeSource(lambda: Client(factory()), runtime_policy())
+    source.start(lambda operation: None)
+    try:
+        assert waiting.wait(5)
+        with ThreadPoolExecutor() as executor:
+            executor.submit(source.close).result(5)
+        # Closing a subscription cannot close the shared client's other RPCs.
+        assert factory().query('worker_job.claim_horizon', {
+            'task_kinds': ['unrelated-control-test'], 'now_ms': int(time.time() * 1000),
+        })['claimableInMs'] is None
+    finally:
+        source.close()
+
+
 def test_committed_job_wakes_independent_client_and_gap_is_not_lost(semantic_authority):
     factory, owner, _engine = semantic_authority
     client = factory()
