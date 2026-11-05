@@ -90,6 +90,38 @@ def test_inline_worker_isolates_request_context_and_preserves_future(failure, do
     assert domain['preserved'] == [task]
 
 
+@pytest.mark.parametrize('failure', [None, RuntimeError('joined runner failed')])
+def test_durable_worker_runs_in_its_owned_thread_until_domain_exit(failure, domain):
+    task = {'id': 'durable-chat', 'status': 'pending', '_userId': 7}
+    request = contextvars.ContextVar('durable-request', default=None)
+    caller = threading.get_ident()
+    token = request.set('http-resource')
+    seen = []
+
+    def run(carrier):
+        assert carrier is task
+        assert threading.get_ident() == caller
+        assert request.get() is None
+        seen.append('entered')
+        if failure:
+            raise failure
+        return 'settled'
+
+    try:
+        if failure:
+            with pytest.raises(RuntimeError) as caught:
+                spawn.run_task_inline(task, runner=run)
+            assert caught.value is failure
+        else:
+            assert spawn.run_task_inline(task, runner=run) == 'settled'
+        assert request.get() == 'http-resource'
+    finally:
+        request.reset(token)
+    assert seen == ['entered']
+    assert domain['preserved'] == [task]
+    assert domain['run_errors'] == ([str(failure)] if failure else [])
+
+
 @pytest.mark.parametrize('entered', [False, True])
 def test_submission_and_admission_failure_keep_start_attribution(monkeypatch, domain, entered):
     error = RuntimeError('worker admission refused')

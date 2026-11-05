@@ -19,7 +19,9 @@ physical worker observation. Decision: chat supplies its existing durable
 admission callable, failure settlement and queue observer to TaskRuntime.
 `spawn_owned_worker` owns background serving-loop/default-executor/thread
 submission; `submit_owned_worker` returns an embedding's original executor
-Future, preserving its exception and cancellation. Both use the same envelope
+Future, preserving its exception and cancellation. `run_owned_worker` executes
+on an already-owned worker thread and returns only after physical exit. All
+three use the same envelope
 as ordinary `spawn` and owner-aware `submit_worker`: an explicit carrier,
 inert request correlation, fresh Context and unconditional worker exit.
 Async wrappers and queue observers also start without request resources.
@@ -30,11 +32,27 @@ Chat still owns birth/CAS, workspace binding, cooperative Stop, native terminal
 acknowledgement and its existing terminal finalizer. A submission/entry failure
 uses rejected-start settlement; failures after committed entry remain runner
 owned. No new registry, executor, thread, retry or admission limit is added.
-Every accepted job crosses one executor submission and one worker envelope.
+Every accepted job crosses one physical worker envelope; a durable claim owner
+does not submit a second detached task.
 Automatic generic crash settlement compares the captured carrier under the
 existing `finish` claim lock (`expected_task`); a retired worker cannot finish
 a new carrier reusing its ID. Alternative rejected: retaining parallel wrappers
 with matching tests leaves isolation, lifecycle and failure ownership divergent.
+
+Claimed conversation execution is composed through
+`lib/conversation_sync/worker_execution.py` and `lib/tasks_pkg/worker_binding.py`.
+The exact claimed identity and principal are injected before task birth;
+configuration cannot install worker authority. Root, child and tool cancellation
+reuse the invocation control scope, joined before returning to the durable
+runner. Publication carries the claim through single/batched/coalesced events,
+Flow phases and task checkpoints. Stop withdraws new work but permits the current
+entered owner to drain accepted evidence, preserving FIFO terminal settlement.
+An entered Attempt is never restarted just because its lease was reclaimed.
+Terminal outcome requires both canonical persistence receipts and physical exit;
+unknown process/effect/account outcomes remain with recovery. This adapter is
+not production kind registration or independent process composition. Specs:
+`test_durable_attempt_execution.py`, `test_conversation_worker_binding.py`,
+`test_conversation_worker_publication.py` and worker/event-delivery neighbors.
 Generic thread/executor/async-wrapper rejection settles that same original
 carrier and preserves the launch exception. Background completion retrieves
 and logs failures before the Future can become unobserved; a cancelled worker

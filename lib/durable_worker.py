@@ -326,14 +326,17 @@ class WorkerExecutionContext:
     def mark_authority_lost(self) -> None:
         self._authority_lost.set()
 
-    def publication_claim(self, *, terminal: bool = False) -> dict[str, Any]:
+    def publication_claim(self, *, terminal: bool = False, draining: bool = False) -> dict[str, Any]:
         """Carry this claim into a domain's atomic publication operation.
 
         This local check is an accelerator only. The storage transaction must
         revalidate ownership and lease time; possession never permits replay
         of an external effect or replaces domain terminal settlement.
         """
-        self.checkpoint(allow_cancelled=terminal)
+        # Accepted evidence outlives Stop; the authority must still prove that
+        # execution entered before permitting its nonterminal drain. This does
+        # not relax checkpoint(), which gates new execution/effect admission.
+        self.checkpoint(allow_cancelled=terminal or draining)
         return {'worker_id': self.claim.worker_id,
                 'fencing_token': self.claim.fencing_token}
 

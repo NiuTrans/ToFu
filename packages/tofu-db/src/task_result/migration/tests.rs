@@ -125,6 +125,7 @@ fn task_result_snapshot_preserves_metadata_and_live_semantics_continue() {
         7,
         200_000,
         None,
+        None,
     )
     .unwrap();
     database.commit(transaction).unwrap();

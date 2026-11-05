@@ -59,6 +59,7 @@ pub struct IndexedStreamAppendItem {
     /// (2026-09-18 stream-churn fix; mirrors the SQL sidecar's
     /// `require_attempts_live` in `_records._append_event_row`).
     pub require_attempts_live: Vec<String>,
+    pub worker_claim: Option<crate::worker_job::PublicationClaim>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,7 +92,20 @@ fn execute_fenced_indexed_append(
     transaction: &mut AuthorityTransaction,
     request: &crate::indexed_stream::AppendRequest,
     require_attempts_live: &[String],
+    worker_claim: Option<&crate::worker_job::PublicationClaim>,
 ) -> io::Result<Vec<u8>> {
+    if request.task_id.starts_with("conversation-attempt:") || worker_claim.is_some() {
+        let attempt_id = request.task_id.strip_prefix("conversation-attempt:").unwrap_or("");
+        if let Err(error) = crate::worker_job::require_conversation_publication_claim(
+            database, transaction, attempt_id, &request.task_id, worker_claim,
+            matches!(request.event_type.as_str(), "done" | "error" | "aborted"), true) {
+            if error.kind() != io::ErrorKind::AlreadyExists { return Err(error); }
+            return serde_json::to_vec(&json!({"inserted": false,
+                "rejected": "worker_claim_stale", "task_id": request.task_id,
+                "sequence": request.application_sequence}))
+                .map_err(|_| invalid_input("worker event rejection cannot be encoded"));
+        }
+    }
     if !require_attempts_live.is_empty()
         && !crate::turn::attempts_all_live(database, transaction, require_attempts_live)?
     {
@@ -493,6 +507,7 @@ pub enum TransactionIrStep {
         slot: usize,
     },
     TaskResultCheckpoint {
+        worker_claim: Option<crate::worker_job::PublicationClaim>,
         task_id: String,
         value_json: Vec<u8>,
         expected_version: u64,
@@ -1228,6 +1243,7 @@ pub enum TransactionIrStep {
         payload_json: Vec<u8>,
         created_at_ms: i64,
         require_attempts_live: Vec<String>,
+        worker_claim: Option<crate::worker_job::PublicationClaim>,
         slot: usize,
     },
     IndexedStreamAppendBatch {
@@ -1886,6 +1902,7 @@ impl TransactionIr {
                     *initialized = true;
                 }
                 TransactionIrStep::TaskResultCheckpoint {
+                    worker_claim,
                     task_id,
                     value_json,
                     updated_at_ms,
@@ -1896,6 +1913,11 @@ impl TransactionIr {
                     slot,
                     ..
                 } => {
+                    if let Some(claim) = worker_claim {
+                        claim.validate()?;
+                        literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     validate_worker_job_slot(&mut initialized_slots, *slot)?;
                     task_result_bytes = task_result_bytes
                         .checked_add(value_json.len())
@@ -3208,6 +3230,7 @@ impl TransactionIr {
                     payload_json,
                     created_at_ms,
                     require_attempts_live,
+                    worker_claim,
                     slot,
                     ..
                 } => {
@@ -3221,6 +3244,11 @@ impl TransactionIr {
                         return Err(invalid_input("invalid indexed stream append"));
                     }
                     validate_attempt_fence(require_attempts_live)?;
+                    if let Some(claim) = worker_claim {
+                        claim.validate()?;
+                        literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
                         .and_then(|bytes| bytes.checked_add(payload_json.len()))
@@ -3248,6 +3276,11 @@ impl TransactionIr {
                             return Err(invalid_input("invalid indexed stream batch item"));
                         }
                         validate_attempt_fence(&item.require_attempts_live)?;
+                        if let Some(claim) = &item.worker_claim {
+                            claim.validate()?;
+                            literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                                .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                        }
                         literal_bytes = literal_bytes
                             .checked_add(item.task_id.len())
                             .and_then(|bytes| bytes.checked_add(item.payload_json.len()))
@@ -4028,6 +4061,11 @@ impl TransactionIr {
                     )?;
                 }
                 TransactionIrStep::TurnVisibleSync { request, slot } => {
+                    if let Some(claim) = &request.worker_claim {
+                        claim.validate()?;
+                        literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                            .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
                     let initialized = initialized_slots
                         .get_or_insert(*slot as usize);
                     if *initialized {
@@ -4320,6 +4358,13 @@ impl TransactionIr {
                         claim.validate()?;
                         literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
                             .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                    }
+                    for item in request.task_event.iter().chain(request.preceding_task_events.iter()) {
+                        if let Some(claim) = &item.worker_claim {
+                            claim.validate()?;
+                            literal_bytes = literal_bytes.checked_add(claim.worker_id.len())
+                                .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
+                        }
                     }
                     let initialized = initialized_slots
                         .get_or_insert(*slot as usize);
@@ -5996,12 +6041,12 @@ fn prepare_transaction_ir_mode(
         // A fenced stream append resolves attempt identity claims in the
         // tenant-global namespace, like the turn steps above.
         TransactionIrStep::IndexedStreamAppend {
-            require_attempts_live,
+            require_attempts_live, task_id, worker_claim,
             ..
-        } => !require_attempts_live.is_empty(),
+        } => !require_attempts_live.is_empty() || task_id.starts_with("conversation-attempt:") || worker_claim.is_some(),
         TransactionIrStep::IndexedStreamAppendBatch { items, .. } => items
             .iter()
-            .any(|item| !item.require_attempts_live.is_empty()),
+            .any(|item| !item.require_attempts_live.is_empty() || item.task_id.starts_with("conversation-attempt:") || item.worker_claim.is_some()),
         _ => false,
     });
     // Only document IR admits its shared capacity namespace. Unrelated semantic
@@ -7762,6 +7807,7 @@ fn prepare_transaction_ir_mode(
                 )?);
             }
             TransactionIrStep::TaskResultCheckpoint {
+                worker_claim,
                 task_id,
                 value_json,
                 expected_version,
@@ -7785,6 +7831,7 @@ fn prepare_transaction_ir_mode(
                     *expected_version,
                     *updated_at_ms,
                     guard.as_ref(),
+                    worker_claim.as_ref(),
                 )?));
             }
             TransactionIrStep::TaskResultRecordGet {
@@ -8531,6 +8578,7 @@ fn prepare_transaction_ir_mode(
                 payload_json,
                 created_at_ms,
                 require_attempts_live,
+                worker_claim,
                 slot,
             } => {
                 slots[*slot as usize] = Some(Some(execute_fenced_indexed_append(
@@ -8544,12 +8592,13 @@ fn prepare_transaction_ir_mode(
                         created_at_ms: *created_at_ms,
                     },
                     require_attempts_live,
+                    worker_claim.as_ref(),
                 )?));
             }
             TransactionIrStep::IndexedStreamAppendBatch { items, slot } => {
                 if items
                     .iter()
-                    .any(|item| !item.require_attempts_live.is_empty())
+                    .any(|item| !item.require_attempts_live.is_empty() || item.task_id.starts_with("conversation-attempt:") || item.worker_claim.is_some())
                 {
                     // Fenced items need a per-row verdict, so run the same
                     // single-append path per item and rebuild the aggregate
@@ -8569,6 +8618,7 @@ fn prepare_transaction_ir_mode(
                                 created_at_ms: item.created_at_ms,
                             },
                             &item.require_attempts_live,
+                            item.worker_claim.as_ref(),
                         )?;
                         let result: Value = serde_json::from_slice(&encoded)
                             .map_err(|_| invalid_input("indexed event append result is invalid"))?;
@@ -9367,6 +9417,7 @@ mod tests {
     ) -> IndexedStreamAppendItem {
         IndexedStreamAppendItem {
             task_id: task_id.to_owned(),
+            worker_claim: None,
             application_sequence: sequence,
             event_type: "delta".to_owned(),
             payload_json: br#"{"type":"delta","text":"x"}"#.to_vec(),
@@ -9391,6 +9442,7 @@ mod tests {
             payload_json: item.payload_json,
             created_at_ms: item.created_at_ms,
             require_attempts_live: item.require_attempts_live,
+            worker_claim: item.worker_claim,
             slot: 0,
         }
     }

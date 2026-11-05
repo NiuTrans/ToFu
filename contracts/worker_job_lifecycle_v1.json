@@ -60,16 +60,35 @@
     "Only the current backend epoch and backend-owned advancing clock prove or extend a live lease; delayed or forged caller clocks cannot revive one."
   ],
   "conversationPublication": {
-    "operations": ["turn.attempt.start", "turn.event.record", "turn.event.record_batch"],
+    "operations": ["turn.attempt.start", "turn.event.record", "turn.event.record_batch", "turn.visible.sync", "task_results.checkpoint"],
     "binding": "conversation-attempt:{attemptId}, established only by turn.attempt.dispatch_worker",
     "proofField": "worker_claim",
     "proof": {"worker_id": "string:1..256", "fencing_token": "positive-signed-64-bit-integer"},
     "atomic": "Validate the bound job, user, kind, attempt, live holder/token and backend lease epoch/time in the same transaction as publication. SQL holds the worker row until commit; native records its OCC dependency.",
     "missingOrStale": "database_conflict; no Turn, task event, replay or terminal accounting writes; omission cannot select legacy authority",
-    "cancelled": "A current claim may publish terminal domain settlement only; start and nonterminal progress are refused.",
+    "cancelled": "Start is refused. A current claim may drain evidence and checkpoints only after durable startedAt proves entry; an unentered cancelled attempt permits terminal cleanup only. Cancellation never revokes the obligation to commit received evidence. Lost or expired claims remain refused for every write.",
+    "flow": "Visible phases and their progress/terminal events borrow the immutable root attempt's worker claim; caller-supplied root hints never grant authority.",
     "batch": "Each entry carries the proof. Any refusal rolls back the entire batch including a valid prefix.",
     "legacy": "An attempt with a non-durable binding retains its existing authority and accepts no worker claim.",
     "scope": "Publication authority only. This does not authorize external effects or crash replay, and does not qualify conversation-attempt as a production worker kind."
+  },
+  "conversationReplayPublication": {
+    "operations": ["event.append", "event.append_batch"],
+    "proofField": "worker_claim",
+    "binding": "A conversation-attempt:{attemptId} task stream always requires its current worker claim, even when require_attempts_live is omitted.",
+    "owner": "Standalone replay producers carry explicit user_id alongside worker_claim; batching retains each row's owner.",
+    "atomic": "Validate the same worker authority inside the append transaction. Turn-carried replay rows use the enclosing Turn publication proof.",
+    "stale": "Return inserted=false,rejected=worker_claim_stale for that row; preserve independent sibling results. Invalid proof shape refuses the transaction.",
+    "cancelled": "An entered attempt's current claim may drain already-produced evidence. Without durable entry, only done, error and aborted replay frames may pass.",
+    "legacy": "Non-worker streams retain their existing semantics; they cannot carry worker_claim."
+  },
+  "conversationCancellation": {
+    "kind": "conversation-attempt",
+    "reason": "Human Stop uses user_stop. Internal cancellation serializes {contract: tofu.conversation-cancel/v1, reason, detail} into the existing opaque reason field, subject to its existing wire limit without truncation. The first durable request wins; local and remote carriers consume that acknowledged cause, not a later caller's cause.",
+    "admission": "Stop commits worker_job.request_cancel before signalling a local carrier; registry absence never grants terminal publication authority.",
+    "queued": "Retain the queued job and make cancellation immediately claimable. The domain cancel handler must commit the terminal Turn before transport completion; queued cancellation cannot orphan a pending Turn.",
+    "unentered": "A current cancelled claim plus an attempt with no startedAt permits terminal cleanup without model context, prompt hooks, task registration or model/tool execution.",
+    "entered": "The original invocation must join and discharge domain/account persistence, or recovery must supply that evidence. Lease ownership alone never authorizes effect replay or completion."
   },
   "leaseAuthority": {
     "clock": "backend-owned UTC-offset high-water plus monotonic elapsed time",

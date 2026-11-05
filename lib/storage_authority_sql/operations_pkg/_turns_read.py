@@ -765,6 +765,10 @@ def _turn_visible_sync(session: Session, payload: Mapping[str, Any]) -> Any:
             or root["current_attempt_id"] != attempt_id):
         return None
     root_base_revision = int(root["projection_revision"] or 0)
+    from ._worker_jobs import _require_conversation_publication_claim
+    _require_conversation_publication_claim(
+        session, attempt_id=attempt_id, task_id=str(attempt['task_id'] or ''),
+        user_id=user_id, proof=payload.get('worker_claim'), terminal=not live, drain_entered=True)
     root_projection_before = projection_from_turn_row(session, root)
     if not isinstance(root_projection_before, Mapping):
         root_projection_before = {}
@@ -916,6 +920,7 @@ def _turn_visible_sync(session: Session, payload: Mapping[str, Any]) -> Any:
                 live_projection=projection_from_turn_row(session, existing),
                 seal_live=True, status=phase_status)
             result = _turn_event_record(session, {
+                'worker_claim': payload.get('worker_claim'),
                 "attempt_id": child_attempt_id, "user_id": user_id,
                 "flow_root_attempt_id": attempt_id,
                 "terminal": True, "status": phase_status,

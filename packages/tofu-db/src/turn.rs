@@ -276,6 +276,7 @@ pub struct RelatedAnnounceRequest {
 
 #[derive(Clone, Debug)]
 pub struct VisibleSyncRequest {
+    pub worker_claim: Option<crate::worker_job::PublicationClaim>,
     pub conversation_id: String,
     pub attempt_id: String,
     pub root_turn_id: String,
@@ -7324,6 +7325,10 @@ pub(crate) fn visible_sync(
     if root.document.get("turnId").and_then(Value::as_str) != Some(request.root_turn_id.as_str()) {
         return encode_response(&Value::Null);
     }
+    crate::worker_job::require_conversation_publication_claim(
+        database, transaction, &request.attempt_id,
+        attempt.document.get("taskId").and_then(Value::as_str).unwrap_or(""),
+        request.worker_claim.as_ref(), !request.live, true)?;
     let root_base_revision = root
         .document
         .get("projectionRevision")
@@ -7524,7 +7529,7 @@ pub(crate) fn visible_sync(
                         database,
                         transaction,
                         &EventRecordRequest {
-                            worker_claim: None, model_continuation: Value::Null,
+                            worker_claim: request.worker_claim.clone(), model_continuation: Value::Null,
                             attempt_id: child_attempt_id.clone(),
                             task_id: String::new(),
                             terminal: true,
@@ -11311,6 +11316,14 @@ fn stage_attempt_turn_transition(
     })
 }
 
+/// Cancellation withdraws new execution; an entered owner still drains evidence.
+pub(crate) fn attempt_has_entered(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction, attempt_id: &str,
+) -> io::Result<bool> {
+    Ok(load_attempt_for_update(database, transaction, attempt_id)?
+        .is_some_and(|attempt| attempt.document.get("startedAt").is_some_and(Value::is_u64)))
+}
+
 pub(crate) fn attempt_get(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -13282,7 +13295,7 @@ pub(crate) fn attempt_start_with_automation(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_data("attempt status is malformed"))?;
     crate::worker_job::require_conversation_publication_claim(
-        database, transaction, attempt_id, task_id, worker_claim, false)?;
+        database, transaction, attempt_id, task_id, worker_claim, false, false)?;
     if status == "running" {
         return encode_response(&public_attempt(&loaded.document)?);
     }
@@ -13598,6 +13611,10 @@ fn load_event_record_state(
         let parent_current_and_live =
             match load_attempt_for_update(database, transaction, attempt_flow_root)? {
                 Some(parent) => {
+                    crate::worker_job::require_conversation_publication_claim(
+                        database, transaction, attempt_flow_root,
+                        parent.document.get("taskId").and_then(Value::as_str).unwrap_or(""),
+                        request.worker_claim.as_ref(), request.terminal, true)?;
                     attempt_is_live(&parent.document)
                         && parent.conversation_id == loaded_attempt.conversation_id
                         && load_current_turn_for_attempt(
@@ -13638,9 +13655,11 @@ fn load_event_record_state(
         return Ok(None);
     }
 
-    crate::worker_job::require_conversation_publication_claim(
-        database, transaction, &request.attempt_id, stored_task_id,
-        request.worker_claim.as_ref(), request.terminal)?;
+    if attempt_flow_root.is_empty() {
+        crate::worker_job::require_conversation_publication_claim(
+            database, transaction, &request.attempt_id, stored_task_id,
+            request.worker_claim.as_ref(), request.terminal, true)?;
+    }
 
     Ok(Some((loaded_attempt, loaded_turn)))
 }

@@ -399,7 +399,9 @@ def _persist_task_event_batch(task, entries):
         if outcome != 'carried':
             # The authority applied the record without carrying its row.
             try:
-                append_persistent_event(task['id'], entry.sequence, entry.task_event['event'])
+                from lib.tasks_pkg.worker_binding import replay_publication_arguments
+                append_persistent_event(task['id'], entry.sequence, entry.task_event['event'],
+                                        **replay_publication_arguments(task))
             except EventAttemptStaleError:
                 _revoke_stale_attempt(task)
 
@@ -714,7 +716,9 @@ def _append_event_ordered(task, event, *, lane=None):
                     # back to this exact standalone replay append.  Preserve
                     # durable-before-visible ordering without re-entering the
                     # closed attempt authority.
-                    append_persistent_event(task['id'], _seq, durable_wire)
+                    from lib.tasks_pkg.worker_binding import replay_publication_arguments
+                    append_persistent_event(task['id'], _seq, durable_wire,
+                                            **replay_publication_arguments(task, terminal=True))
                     return
                 from lib.turn_lifecycle import record_task_event
                 # One frame = one authority transaction (2026-08-20
@@ -767,10 +771,13 @@ def _append_event_ordered(task, event, *, lane=None):
                     schedule_terminal_turn_translations(task)
                 if outcome != 'carried':
                     try:
+                        from lib.tasks_pkg.manager._registry import task_user_id
                         append_persistent_event(
                             task['id'], _seq, durable_wire,
                             require_attempts_live=(
-                                fence.get('require_attempts_live')))
+                                fence.get('require_attempts_live')),
+                            **({'worker_claim': fence['worker_claim'], 'user_id': task_user_id(task)}
+                               if 'worker_claim' in fence else {}))
                     except EventAttemptStaleError:
                         # The append transaction proved the attempt stale —
                         # the exact verdict the old per-frame pre-read
