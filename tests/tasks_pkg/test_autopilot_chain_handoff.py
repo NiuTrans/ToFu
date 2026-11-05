@@ -182,7 +182,7 @@ def test_done_carries_no_baton_fields(flask_client, put_task, reset_index):
 
 # ── The client's single attach signal, warm and cold (supersedes hold test) ──
 @pytest.mark.api
-def test_conv_live_task_points_at_running_vu(put_task, reset_index):
+def test_conv_live_task_points_at_running_vu(flask_app, put_task, reset_index):
     """`_conv_has_live_task(conv)` is True while the VU/follow-up runs — the
     client's ONE attach signal, identical warm (SSE) and cold (reload), because
     both read the same index. No decision-window withhold is needed."""

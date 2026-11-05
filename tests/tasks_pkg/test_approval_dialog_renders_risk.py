@@ -75,6 +75,10 @@ CASES: dict[str, tuple[dict, str]] = {
     'browser_check': ({'tab_id': '7', 'selector': '#subscribe', 'checked': False}, '#subscribe'),
     'browser_select_option': ({'tab_id': '7', 'selector': '#region', 'option': 'Europe'}, 'Europe'),
     'consider_project_message': ({'message_id': 'message-7', 'decision': 'accepted', 'note': 'Run scoped parser check', 'expected_revision': 1}, 'Run scoped parser check'),
+    'control_conversation': ({
+        'conversation_id': 'conversation-7', 'turn_id': 'turn-7', 'attempt_id': 'attempt-7',
+        'action': 'stop', 'idempotency_key': 'control-7',
+    }, 'attempt-7'),
     'create_conversation': ({
         'title': 'Review parser migration', 'idempotency_key': 'create-7',
     }, 'Review parser migration'),
