@@ -33,9 +33,9 @@ SCHEDULE_TOOL_CREATE = {
                 "command": {
                     "type": "string",
                     "description": (
-                        "Shell/Python/prompt payload; for agent, the standing "
-                        "trigger and action instruction. For a pure-code agent with "
-                        "condition_command, pass an empty string."
+                        "Shell/Python/prompt payload. For agent: required, never "
+                        "empty; the instruction its turn executes when ready. Without "
+                        "condition_command the poll LLM also decides readiness from it."
                     )
                 },
                 "task_type": {
@@ -83,11 +83,11 @@ SCHEDULE_TOOL_CREATE = {
                 "condition_command": {
                     "type": "string",
                     "description": (
-                        "Agent-only decisive shell predicate: exit 0 acts, or "
-                        "condition_regex matches stdout. With empty command it is "
-                        "zero-LLM code polling; with a standing instruction it is "
-                        "hybrid and auto-promotes to code after agreement. Prefer "
-                        "for deterministic triggers."
+                        "Agent-only decisive shell predicate, zero-LLM polls: exit 0 "
+                        "(and a condition_regex stdout match, if set) runs command; "
+                        "exit 1 or no match waits; other errors never act, and "
+                        "sustained errors hand readiness to the poll LLM (hybrid). "
+                        "Prefer for deterministic triggers."
                     )
                 },
                 "condition_regex": {
