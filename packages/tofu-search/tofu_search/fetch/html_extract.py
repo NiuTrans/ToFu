@@ -466,6 +466,17 @@ def _prepare_article_tree(html):
     return tree
 
 
+_NOISE_CLASS_NAME = re.compile(r'\b(cookie|popup|modal|banner|advert|sidebar|menu|nav)\b', re.I)
+# A bracketed part of a class token is a CSS value or selector (Tailwind
+# arbitrary values such as pt-[calc(10rem+var(--banner-height))]), not a
+# component name; matching it removed whole content wrappers.
+_CLASS_CSS_VALUE = re.compile(r'\[[^\]]*\]')
+
+
+def _noise_class(value):
+    return bool(value) and bool(_NOISE_CLASS_NAME.search(_CLASS_CSS_VALUE.sub('', value)))
+
+
 def _sanitized_soup(html, *, rendering=None):
     """Use one visibility/navigation boundary for scopes and full documents."""
     soup = _get_bs4()(html, 'html.parser')
@@ -476,8 +487,7 @@ def _sanitized_soup(html, *, rendering=None):
             element.decompose()
     for element in soup.find_all(_explicitly_hidden):
         element.decompose()
-    for element in soup.find_all(class_=re.compile(
-            r'\b(cookie|popup|modal|banner|advert|sidebar|menu|nav)\b', re.I)):
+    for element in soup.find_all(class_=_noise_class):
         element.decompose()
     if rendering is not None:
         rendering.update(rendering_signals(soup, requires_javascript=requires_javascript))
