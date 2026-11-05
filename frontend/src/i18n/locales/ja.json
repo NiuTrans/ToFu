@@ -5316,6 +5316,8 @@
   "tool.blocked": "実行前にブロック",
   "tool.blockedTip": "このツールは有効ですが、安全性または権限のチェックにより実行前にブロックされました。",
   "tool.didYouMean": "もしかして",
+  "tool.requestParams": "リクエストパラメーター",
+  "tool.requestParamsTruncated": "…{size} KB に切り詰めて表示しています。完全な引数は元のリクエストに保持されています",
   "agentDock.allMessages": "すべての通信",
   "swarm.messagesReceiptDetails": "配信の詳細",
   "swarm.messagesRunId": "実行ID",

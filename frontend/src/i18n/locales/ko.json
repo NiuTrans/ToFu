@@ -5316,6 +5316,8 @@
   "tool.blocked": "차단됨",
   "tool.blockedTip": "유효한 도구이지만 안전 또는 권한 검사에 의해 실행 전에 차단되었습니다.",
   "tool.didYouMean": "다음을 사용하려고 하셨습니까?",
+  "tool.requestParams": "요청 매개 변수",
+  "tool.requestParamsTruncated": "…표시가 {size}KB로 잘렸습니다. 전체 인수는 원래 요청에 그대로 남아 있습니다",
   "agentDock.allMessages": "모든 통신",
   "swarm.messagesReceiptDetails": "전달 세부 정보",
   "swarm.messagesRunId": "실행 ID",

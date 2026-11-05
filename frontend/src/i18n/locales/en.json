@@ -5316,6 +5316,8 @@
   "tool.blocked": "blocked",
   "tool.blockedTip": "A safety or authority check blocked this valid tool before execution.",
   "tool.didYouMean": "did you mean",
+  "tool.requestParams": "request parameters",
+  "tool.requestParamsTruncated": "… truncated to {size} KB; the wire keeps the full arguments",
   "agentDock.allMessages": "All communications",
   "swarm.messagesReceiptDetails": "Delivery details",
   "swarm.messagesRunId": "Run ID",

@@ -5316,6 +5316,8 @@
   "tool.blocked": "执行前已拦截",
   "tool.blockedTip": "该工具真实存在，但在执行前被安全或权限规则拦截。",
   "tool.didYouMean": "是否想用",
+  "tool.requestParams": "请求参数",
+  "tool.requestParamsTruncated": "…已截断至 {size} KB，完整参数仍保留在原始请求中",
   "agentDock.allMessages": "全部通信",
   "swarm.messagesReceiptDetails": "投递详情",
   "swarm.messagesRunId": "运行 ID",
