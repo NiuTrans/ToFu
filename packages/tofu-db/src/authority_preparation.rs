@@ -150,16 +150,13 @@ impl AuthorityDatabase {
         self.preparation.is_some()
     }
 
-    /// Whether `transaction` still commits as one ordinary overlay delta whose
-    /// new blocks ride in its WAL record: neither the structural tree path,
-    /// which first drains the authority-wide overlay, nor the oversized spill,
-    /// which synchronizes every referenced loose block under the authority.
-    /// Measured on the transaction's own staged blobs and stream bytes with
-    /// the composition headroom; commit remains authoritative.
-    pub(crate) fn commits_as_one_ordinary_delta(
+    /// New payload `transaction` would carry in its WAL record: its own staged
+    /// blob bytes plus stream bytes. Private preparation bytes count exactly
+    /// like pending writer blocks.
+    pub(crate) fn carried_payload_bytes(
         &self,
         transaction: &AuthorityTransaction,
-    ) -> io::Result<bool> {
+    ) -> io::Result<usize> {
         let staged_blob_bytes = match &transaction.prepared_blobs {
             Some(blobs) => blobs.staged_bytes()?,
             None => {
@@ -171,10 +168,24 @@ impl AuthorityDatabase {
                 total
             }
         };
-        let carried_bytes = staged_blob_bytes.saturating_add(transaction.stream_bytes);
-        Ok(self.entities.commits_without_overlay_drain(&transaction.entity)
+        Ok(staged_blob_bytes.saturating_add(transaction.stream_bytes))
+    }
+
+    /// Whether `transaction` still commits as one ordinary overlay delta whose
+    /// new blocks ride in its WAL record: neither the structural tree path,
+    /// which first drains the authority-wide overlay, nor the oversized spill,
+    /// which synchronizes every referenced loose block under the authority.
+    /// `carried_bytes` is the part of `carried_payload_bytes` that must ride in
+    /// that record, tested with the composition headroom; commit remains
+    /// authoritative.
+    pub(crate) fn commits_as_one_ordinary_delta(
+        &self,
+        transaction: &AuthorityTransaction,
+        carried_bytes: usize,
+    ) -> bool {
+        self.entities.commits_without_overlay_drain(&transaction.entity)
             && carried_bytes <= crate::transaction::MAX_CARRIED_PAYLOAD_BYTES
-                - crate::transaction::CARRIED_TRANSACTION_HEADROOM_BYTES)
+                - crate::transaction::CARRIED_TRANSACTION_HEADROOM_BYTES
     }
 
     pub(crate) fn defer_index_update(

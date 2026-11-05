@@ -284,13 +284,18 @@ fn turn_event_batch_noise(state: &mut u64, bytes: usize) -> Vec<u8> {
     }).collect()
 }
 
+/// Deterministic text a block codec shrinks only to about three quarters.
+fn turn_event_batch_noise_text(state: &mut u64, bytes: usize) -> String {
+    const SYMBOLS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    turn_event_batch_noise(state, bytes).into_iter()
+        .map(|byte| char::from(SYMBOLS[usize::from(byte & 63)])).collect()
+}
+
 /// Distinct, poorly compressible tool-start entries chained from `base`.
 fn turn_event_batch_bulky_entries(attempt_id: &str, base: u64, count: u64, detail_bytes: usize) -> Vec<Value> {
-    const SYMBOLS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     (0..count).map(|offset| {
-        let detail = turn_event_batch_noise(&mut state, detail_bytes).into_iter()
-            .map(|byte| char::from(SYMBOLS[usize::from(byte & 63)])).collect::<String>();
+        let detail = turn_event_batch_noise_text(&mut state, detail_bytes);
         json!({
             "attempt_id": attempt_id, "user_id": 11, "task_id": TURN_EVENT_BATCH_TASK,
             "terminal": false, "status": "running", "settlement": {}, "error": {},
@@ -316,9 +321,10 @@ fn turn_event_record_batch_beyond_one_ordinary_commit_is_refused_and_its_halves_
     vfs.sync_directory(Path::new("/")).unwrap();
     let mut database = AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
     let (attempt_id, turn_id, base) = turn_event_batch_fixture(&mut database, "split-conv");
-    // 64 rows of 24 KiB carry more than the composition capacity of one
-    // WAL-carried commit before any projection or index bytes are counted.
-    let entries = turn_event_batch_bulky_entries(&attempt_id, base, 64, 24 * 1024);
+    // 64 rows of 32 KiB exceed the composition capacity of one WAL-carried
+    // commit even without the one largest row, before any projection or
+    // index bytes are counted.
+    let entries = turn_event_batch_bulky_entries(&attempt_id, base, 64, 32 * 1024);
     let before = turn_event_batch_state(&mut database, "split-conv", &turn_id, &attempt_id);
     let before_sequence = database.writer_engine().unwrap().next_sequence().unwrap();
     let batch = |entries: &[Value], name: &str| request("turn.event.record_batch", 11,
@@ -367,7 +373,7 @@ fn turn_event_record_batch_beyond_one_ordinary_commit_is_refused_and_its_halves_
     let mut sequential = AuthorityDatabase::initialize(sequential_directory.path()).unwrap();
     let (sequential_attempt, sequential_turn, sequential_base) = turn_event_batch_fixture(&mut sequential, "split-conv");
     assert_eq!(sequential_base, base);
-    for (index, entry) in turn_event_batch_bulky_entries(&sequential_attempt, base, 64, 24 * 1024).into_iter().enumerate() {
+    for (index, entry) in turn_event_batch_bulky_entries(&sequential_attempt, base, 64, 32 * 1024).into_iter().enumerate() {
         assert_eq!(execute(&mut sequential, &request("turn.event.record", 11, entry,
             Some(&format!("split-sequential-{index}"))), 2_000).unwrap()["applied"], true);
     }
@@ -386,22 +392,290 @@ fn turn_event_record_batch_beyond_one_ordinary_commit_is_refused_and_its_halves_
     assert_eq!(result[0]["applied"], true);
 }
 
+/// `turn_event_batch_entries` from `base` whose entries at `large_at` each
+/// carry more than one ordinary commit by themselves: 2 MiB of high-entropy
+/// tool output folds the projection into a checkpoint blob beside an
+/// attempt-event blob of the same patch, or a 2.5 MiB row takes its own blob.
+fn turn_event_batch_with_large_entries(attempt_id: &str, base: u64, large: &str, large_at: &[usize]) -> Vec<Value> {
+    let mut entries = turn_event_batch_entries(attempt_id, base, 0);
+    let mut state = 0x5851_f42d_4c95_7f2d_u64;
+    for &index in large_at {
+        if large == "projection_checkpoint" {
+            entries[index]["projection_patch"]["operations"] = json!([{"op": "set", "path": ["toolRounds"],
+                "value": [{"roundNum": index, "toolCallId": format!("call-{index}"), "toolName": "read_file",
+                    "status": "done", "toolContent": turn_event_batch_noise_text(&mut state, 2 * 1024 * 1024)}]}]);
+        } else {
+            entries[index]["task_event"]["event"]["detail"] =
+                json!(turn_event_batch_noise_text(&mut state, 2560 * 1024));
+        }
+    }
+    entries
+}
+
+/// Grows the projection by 3 MiB of high-entropy tool output, then streams
+/// text: the next structural record retires that text tail and writes the
+/// whole projection as one checkpoint, like a long-running Turn. Returns the
+/// committed revision.
+fn turn_event_batch_stream_after_a_large_projection(database: &mut AuthorityDatabase, attempt_id: &str, base: u64) -> u64 {
+    let mut state = 0x7c15_9e37_79b9_7f4a_u64;
+    let operations = [
+        json!([{"op": "set", "path": ["toolRounds"], "value": [{"roundNum": 0, "toolCallId": "call-0",
+            "toolName": "read_file", "status": "done",
+            "toolContent": turn_event_batch_noise_text(&mut state, 3 * 1024 * 1024)}]}]),
+        json!([{"op": "append_text", "path": ["content"], "value": "streamed text"}]),
+    ];
+    for (offset, operations) in (0_u64..).zip(operations) {
+        let result = execute(database, &request("turn.event.record", 11, json!({
+            "attempt_id": attempt_id, "user_id": 11, "task_id": TURN_EVENT_BATCH_TASK,
+            "terminal": false, "status": "running", "settlement": {}, "error": {},
+            "event_type": "projection_updated",
+            "event_payload": {"phase": "calling", "updateKind": "tool_start"},
+            "projection_patch": {"version": 1, "baseRevision": base + offset,
+                "targetRevision": base + offset + 1, "operations": operations},
+            "now": 1_500 + offset
+        }), Some(&format!("stream-{offset}"))), 1_500).unwrap();
+        assert_eq!(result["applied"], true);
+    }
+    base + 2
+}
+
+/// Records `entries` like `turn_lifecycle._record_task_events_locked`: a
+/// refused composite bisects only that interval, in FIFO order. Returns the
+/// per-entry results and the numbers of refused and committed batches.
+fn turn_event_batch_record_like_the_producer(database: &mut AuthorityDatabase, entries: &[Value], name: &str)
+    -> (Vec<Value>, usize, usize)
+{
+    let (mut results, mut refused, mut committed) = (Vec::new(), 0, 0);
+    let mut intervals = vec![0..entries.len()];
+    while let Some(interval) = intervals.pop() {
+        let part = &entries[interval.clone()];
+        let batch = request("turn.event.record_batch", 11, json!({"user_id": 11, "entries": part}),
+            Some(&format!("{name}-{}-{}", interval.start, interval.end)));
+        match execute(database, &batch, 2_000) {
+            Ok(result) => {
+                results.extend(result.as_array().unwrap().iter().cloned());
+                committed += 1;
+            }
+            Err(error) if error.code() == "database_resource_exhausted" && part.len() > 1 => {
+                refused += 1;
+                let half = interval.start + part.len() / 2;
+                intervals.push(half..interval.end);
+                intervals.push(interval.start..half);
+            }
+            Err(error) => panic!("{name}: unexpected refusal: {error:?}"),
+        }
+    }
+    (results, refused, committed)
+}
+
+#[test]
+fn turn_event_record_batch_commits_one_entry_beyond_one_ordinary_commit_with_its_small_followers() {
+    let capacity = crate::transaction::MAX_CARRIED_PAYLOAD_BYTES
+        - crate::transaction::CARRIED_TRANSACTION_HEADROOM_BYTES;
+    for large in ["text_tail_checkpoint", "projection_checkpoint", "task_event_row"] {
+        let sequential_directory = tempfile::tempdir().unwrap();
+        let batched_directory = tempfile::tempdir().unwrap();
+        let mut sequential = AuthorityDatabase::initialize(sequential_directory.path()).unwrap();
+        let mut batched = AuthorityDatabase::initialize(batched_directory.path()).unwrap();
+        let (attempt_id, turn_id, mut base) = turn_event_batch_fixture(&mut sequential, "large-conv");
+        let (batched_attempt, batched_turn, mut batched_base) = turn_event_batch_fixture(&mut batched, "large-conv");
+        let entries_for = |attempt_id: &str, base: u64| match large {
+            // The first structural entry after streamed text is the large one.
+            "text_tail_checkpoint" => turn_event_batch_entries(attempt_id, base, 0),
+            _ => turn_event_batch_with_large_entries(attempt_id, base, large, &[0]),
+        };
+        if large == "text_tail_checkpoint" {
+            base = turn_event_batch_stream_after_a_large_projection(&mut sequential, &attempt_id, base);
+            batched_base = turn_event_batch_stream_after_a_large_projection(&mut batched, &batched_attempt, batched_base);
+        }
+        assert_eq!((&batched_turn, batched_base), (&turn_id, base));
+
+        // The preparation lane admits a composite beyond one ordinary commit.
+        let ir = compile_admitted_transaction(admit_request(&request("turn.event.record_batch", 11,
+            json!({"user_id": 11, "entries": entries_for(&attempt_id, base)}), Some("large-prepared")),
+            NegotiatedProtocol { protocol_version: PROTOCOL_VERSION, schema_id: STORAGE_SCHEMA_VERSION },
+            AuthenticatedScope { owner_id: 11, tenant_id: Some(7) }, 2_000).unwrap(), 2_000).unwrap();
+        let mut replica = sequential.build_preparation_replica().unwrap();
+        let prepared = crate::transaction_ir::prepare_transaction_ir_with_deadline(
+            &mut replica, &ir, std::time::Duration::from_secs(600))
+            .unwrap_or_else(|error| panic!("{large}: the preparation lane refused the composite: {error:?}"));
+        let carried = replica.carried_payload_bytes(prepared.transaction.as_ref().unwrap()).unwrap();
+        assert!(carried > capacity, "{large}: {carried} carried bytes fit one ordinary commit");
+        drop(prepared);
+        drop(replica);
+
+        // Through the producer's bisection rule the whole run commits once;
+        // the large entry is never re-executed in a refused interval.
+        let entries = entries_for(&batched_attempt, batched_base);
+        let before_commits = batched.writer_engine().unwrap().next_sequence().unwrap();
+        let started = std::time::Instant::now();
+        let (results, refused, committed) = turn_event_batch_record_like_the_producer(&mut batched, &entries, large);
+        assert_eq!((refused, committed), (0, 1),
+            "{large}: {refused} refused and {committed} committed batches in {:?}", started.elapsed());
+        assert_eq!(batched.writer_engine().unwrap().next_sequence().unwrap(), before_commits + 1,
+            "{large}: the whole batch must commit as one transaction");
+        let sequential_results = entries_for(&attempt_id, base).into_iter().enumerate()
+            .map(|(index, entry)| execute(&mut sequential, &request("turn.event.record", 11, entry,
+                Some(&format!("{large}-sequential-{index}"))), 2_000).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results, sequential_results, "{large}");
+        assert!(results.iter().all(|item| item["applied"] == true && item["task_event_count"] == 1), "{large}");
+
+        let sequential_state = turn_event_batch_state(&mut sequential, "large-conv", &turn_id, &attempt_id);
+        let batched_state = turn_event_batch_state(&mut batched, "large-conv", &batched_turn, &batched_attempt);
+        assert_eq!(batched_state.0["projectionRevision"], base + 4, "{large}");
+        assert_eq!(turn_event_batch_comparable(&batched_state), turn_event_batch_comparable(&sequential_state),
+            "{large}");
+        drop(batched);
+        let mut reopened = AuthorityDatabase::open(batched_directory.path()).unwrap();
+        let reopened_state = turn_event_batch_state(&mut reopened, "large-conv", &batched_turn, &batched_attempt);
+        assert_eq!(turn_event_batch_comparable(&reopened_state), turn_event_batch_comparable(&sequential_state),
+            "{large}");
+    }
+}
+
+#[test]
+fn turn_event_record_batch_exempts_at_most_one_entry_beyond_one_ordinary_commit() {
+    for case in ["two_checkpoints", "two_rows", "large_row_and_bulky_rows"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let (attempt_id, turn_id, base) = turn_event_batch_fixture(&mut database, "exempt-conv");
+        let entries = match case {
+            "two_checkpoints" => turn_event_batch_with_large_entries(&attempt_id, base, "projection_checkpoint", &[0, 2]),
+            "two_rows" => turn_event_batch_with_large_entries(&attempt_id, base, "task_event_row", &[0, 2]),
+            _ => {
+                // The exempt entry never widens the others' budget: 2 MiB of
+                // small rows still exceed one ordinary commit beside it.
+                let mut entries = turn_event_batch_bulky_entries(&attempt_id, base, 65, 32 * 1024);
+                let mut state = 0x5851_f42d_4c95_7f2d_u64;
+                entries[0]["task_event"]["event"]["detail"] = json!(turn_event_batch_noise_text(&mut state, 2560 * 1024));
+                entries
+            }
+        };
+        let before = turn_event_batch_state(&mut database, "exempt-conv", &turn_id, &attempt_id);
+        let before_sequence = database.writer_engine().unwrap().next_sequence().unwrap();
+        let error = execute(&mut database, &request("turn.event.record_batch", 11,
+            json!({"user_id": 11, "entries": entries}), Some(case)), 2_000).unwrap_err();
+        assert_eq!(error.code(), "database_resource_exhausted", "{case}: {error:?}");
+        assert_eq!(database.writer_engine().unwrap().next_sequence().unwrap(), before_sequence, "{case}");
+        let after = turn_event_batch_state(&mut database, "exempt-conv", &turn_id, &attempt_id);
+        assert_eq!(turn_event_batch_comparable(&after), turn_event_batch_comparable(&before), "{case}");
+    }
+}
+
+#[test]
+fn turn_event_record_batch_failure_after_the_exempt_entry_writes_nothing() {
+    for invalid in ["stale_base", "late_entry_stale_attempt"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let (attempt_id, turn_id, base) = turn_event_batch_fixture(&mut database, "exempt-rollback-conv");
+        let mut entries = turn_event_batch_with_large_entries(&attempt_id, base, "projection_checkpoint", &[0]);
+        if invalid == "stale_base" {
+            entries[2]["projection_patch"]["baseRevision"] = json!(base + 1);
+            entries[2]["projection_patch"]["targetRevision"] = json!(base + 2);
+        }
+        let before = turn_event_batch_state(&mut database, "exempt-rollback-conv", &turn_id, &attempt_id);
+        let before_sequence = database.writer_engine().unwrap().next_sequence().unwrap();
+        let mut ir = compile_admitted_transaction(admit_request(&request("turn.event.record_batch", 11,
+            json!({"user_id": 11, "entries": entries}), Some("exempt-rollback")),
+            NegotiatedProtocol { protocol_version: PROTOCOL_VERSION, schema_id: STORAGE_SCHEMA_VERSION },
+            AuthenticatedScope { owner_id: 11, tenant_id: Some(7) }, 2_000).unwrap(), 2_000).unwrap();
+        if invalid == "late_entry_stale_attempt" {
+            let TransactionIrStep::TurnEventRecord { request, .. } = &mut ir.steps[3] else { panic!() };
+            request.attempt_id = "missing-attempt".to_owned();
+        }
+        let error = crate::transaction_ir::execute_transaction_ir(&mut database, &ir).unwrap_err();
+        let expected = match invalid {
+            "stale_base" => SemanticExecutionError::TurnProjectionStale,
+            _ => SemanticExecutionError::Conflict,
+        };
+        assert_eq!(map_storage_error(error), expected, "{invalid}");
+        assert_eq!(database.writer_engine().unwrap().next_sequence().unwrap(), before_sequence, "{invalid}");
+        let after = turn_event_batch_state(&mut database, "exempt-rollback-conv", &turn_id, &attempt_id);
+        assert_eq!(turn_event_batch_comparable(&after), turn_event_batch_comparable(&before), "{invalid}");
+    }
+}
+
+#[test]
+fn turn_event_record_batch_commit_faults_beside_the_exempt_entry_recover_all_or_nothing() {
+    use crate::vfs::{DeterministicVfs, FaultAction, FaultRule, Operation, Vfs};
+    use std::path::Path;
+    use std::sync::Arc;
+    let fixture = || {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        vfs.create_dir(Path::new("/data")).unwrap();
+        vfs.sync_directory(Path::new("/")).unwrap();
+        let mut database = AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        let identity = turn_event_batch_fixture(&mut database, "fault-conv");
+        (vfs, database, identity)
+    };
+    let batch = |attempt_id: &str, base: u64| request("turn.event.record_batch", 11, json!({"user_id": 11,
+        "entries": turn_event_batch_with_large_entries(attempt_id, base, "projection_checkpoint", &[0])}),
+        Some("fault-batch"));
+    let comparable = |database: &mut AuthorityDatabase, (attempt_id, turn_id, _): &(String, String, u64)|
+        turn_event_batch_comparable(&turn_event_batch_state(database, "fault-conv", turn_id, attempt_id));
+
+    let (vfs, mut baseline, identity) = fixture();
+    let before = comparable(&mut baseline, &identity);
+    vfs.arm_fault(None).unwrap();
+    execute(&mut baseline, &batch(&identity.0, identity.2), 2_000).unwrap();
+    let trace = vfs.trace().unwrap();
+    let after = comparable(&mut baseline, &identity);
+    drop(baseline);
+    assert!(trace.iter().filter(|operation| **operation == Operation::SyncAll).count() > 1,
+        "the composite spills its loose blocks before the WAL record");
+
+    // The first and last barrier of each kind: spilled blocks, their
+    // directories and the WAL record.
+    let mut barriers = Vec::new();
+    for kind in [Operation::SyncAll, Operation::SyncDirectory, Operation::SyncData] {
+        let positions = trace.iter().enumerate().filter(|(_, operation)| **operation == kind)
+            .map(|(index, _)| index).collect::<Vec<_>>();
+        barriers.extend(positions.first().into_iter().chain(positions.last()).copied());
+    }
+    barriers.sort_unstable();
+    barriers.dedup();
+    let mut recovered_before = 0;
+    for index in barriers {
+        let operation = trace[index];
+        let (vfs, mut database, identity) = fixture();
+        vfs.arm_fault(Some(FaultRule {
+            operation_number: index as u64 + 1,
+            action: FaultAction::ErrorBefore(std::io::ErrorKind::Other),
+        })).unwrap();
+        let committed = execute(&mut database, &batch(&identity.0, identity.2), 2_000).is_ok();
+        drop(database);
+        vfs.crash().unwrap();
+        vfs.arm_fault(None).unwrap();
+        let mut recovered = AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        let state = comparable(&mut recovered, &identity);
+        assert!(state == after || (!committed && state == before),
+            "fault at {operation:?} #{} recovered a partial batch", index + 1);
+        recovered_before += usize::from(state == before);
+    }
+    assert!(recovered_before > 0, "some fault must precede the durable WAL record");
+}
+
 #[test]
 fn one_ordinary_commit_counts_the_overlay_delta_and_new_carried_blocks() {
     let directory = tempfile::tempdir().unwrap();
     let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
     let key = |index: usize| crate::entity::EntityKey::new(7, 11, "commit_shape_probe",
         format!("{index:08}").as_bytes()).unwrap();
+    let ordinary = |database: &AuthorityDatabase, transaction: &crate::authority::AuthorityTransaction|
+        database.commits_as_one_ordinary_delta(transaction, database.carried_payload_bytes(transaction).unwrap());
     let mut transaction = database.begin(7, 11).unwrap();
     database.entity_put(&mut transaction, key(0), vec![b'v'; 1024]).unwrap();
-    assert!(database.commits_as_one_ordinary_delta(&transaction).unwrap());
+    assert!(ordinary(&database, &transaction));
     // 201 KiB of values leave no room for the overlay envelope reserve.
     for index in 1..=200 {
         database.entity_put(&mut transaction, key(index), vec![b'v'; 1024]).unwrap();
     }
-    assert!(!database.commits_as_one_ordinary_delta(&transaction).unwrap());
+    assert!(!ordinary(&database, &transaction));
+    assert!(!database.commits_as_one_ordinary_delta(&transaction, 0),
+        "no carried share exempts an entity delta beyond the overlay envelope");
     database.set_write_overlay_enabled(false);
-    assert!(database.commits_as_one_ordinary_delta(&transaction).unwrap(),
+    assert!(ordinary(&database, &transaction),
         "without the overlay a tree commit is the ordinary commit");
     database.set_write_overlay_enabled(true);
     drop(transaction);
@@ -414,9 +688,12 @@ fn one_ordinary_commit_counts_the_overlay_delta_and_new_carried_blocks() {
     let mut transaction = database.begin(7, 11).unwrap();
     database.entity_put(&mut transaction, key(0), vec![b'v'; 16]).unwrap();
     database.stage_blob(&mut transaction, &mut small.as_slice(), 1 << 30).unwrap();
-    assert!(database.commits_as_one_ordinary_delta(&transaction).unwrap());
+    assert!(ordinary(&database, &transaction));
+    assert!(database.carried_payload_bytes(&transaction).unwrap() >= small.len());
+    assert!(database.commits_as_one_ordinary_delta(&transaction, capacity));
+    assert!(!database.commits_as_one_ordinary_delta(&transaction, capacity + 1));
     database.stage_blob(&mut transaction, &mut large.as_slice(), 1 << 30).unwrap();
-    assert!(!database.commits_as_one_ordinary_delta(&transaction).unwrap());
+    assert!(!ordinary(&database, &transaction));
     drop(transaction);
 
     // Private preparation bytes count exactly like pending writer blocks.
@@ -425,7 +702,7 @@ fn one_ordinary_commit_counts_the_overlay_delta_and_new_carried_blocks() {
     let mut transaction = replica.begin(7, 11).unwrap();
     replica.entity_put(&mut transaction, key(1), vec![b'v'; 16]).unwrap();
     replica.stage_blob(&mut transaction, &mut small.as_slice(), 1 << 30).unwrap();
-    assert!(replica.commits_as_one_ordinary_delta(&transaction).unwrap());
+    assert!(ordinary(&replica, &transaction));
     replica.stage_blob(&mut transaction, &mut fresh.as_slice(), 1 << 30).unwrap();
-    assert!(!replica.commits_as_one_ordinary_delta(&transaction).unwrap());
+    assert!(!ordinary(&replica, &transaction));
 }

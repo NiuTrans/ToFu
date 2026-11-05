@@ -1029,11 +1029,14 @@ operation in one session and publishes each entry's sync change in order; a
 failure discards that attempt's reconstructible projection-cache baseline.
 Native TofuDB additionally refuses (`database_resource_exhausted`, nothing
 written) a multi-entry batch once its entity delta leaves the overlay envelope
-or its new blobs and rows exceed the WAL-carried ceiling minus the composition
-headroom (`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit
-would otherwise drain the authority-wide overlay and synchronize every new
-loose block under the authority. The producer splits the refused batch; a
-single entry is never refused for its size. Rationale and measurements:
+or its new blobs and rows, less the carried payload of its single largest
+entry, exceed the WAL-carried ceiling minus the composition headroom
+(`AuthorityDatabase::carried_payload_bytes` and
+`AuthorityDatabase::commits_as_one_ordinary_delta`). Such a commit would
+otherwise drain the authority-wide overlay and synchronize every new loose
+block under the authority. The producer splits the refused batch; a single
+entry is never refused for its size, and one such entry commits together with
+followers that still fit one ordinary commit. Rationale and measurements:
 [`TOFUDB_EXECUTION_FRAMES.md`](TOFUDB_EXECUTION_FRAMES.md#batched-structural-events-2026-11-01).
 
 Full-fold application commands use that same versioned projection-patch
