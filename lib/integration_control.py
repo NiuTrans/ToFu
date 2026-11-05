@@ -2387,3 +2387,9 @@ def settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
                           outcome: str) -> dict | None:
     from lib.project_mod.delivery import settle_task_workspace as settle
     return settle(project_path, task_id, user_id=user_id, outcome=outcome)
+
+
+def record_task_workspace_intent(project_path: str, task_id: str, *, user_id: int,
+                                  outcome: str) -> dict | None:
+    from lib.project_mod.delivery import record_task_workspace_intent as record
+    return record(project_path, task_id, user_id=user_id, outcome=outcome)

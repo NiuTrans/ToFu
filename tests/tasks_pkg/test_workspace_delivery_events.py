@@ -88,7 +88,7 @@ def test_startup_terminal_outcomes_preserve_owner_and_do_not_authorize_failed_re
     def settle(task, root):
         calls.append((task, root, delivery.task_outcome(task)))
     monkeypatch.setattr(startup, 'get_storage_client', lambda **kw: Client())
-    monkeypatch.setattr(delivery, 'settle_task_workspaces', settle)
+    monkeypatch.setattr(delivery, 'record_task_workspace_intents', settle)
     assert startup.recover_active_work_items() == 1
     assert calls[0][0]['_userId'] == 7
     assert calls[0][1:] == ('/project', expected)

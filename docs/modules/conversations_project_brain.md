@@ -23,6 +23,12 @@ Schema: [`project_brain_v1.schema.json`](../../contracts/project_brain_v1.schema
 | Git candidate/quarantine and canonical delivery | `lib/integration_control.py`, `lib/project_mod/delivery.py` |
 | Registered task roots and terminal delivery intent | `lib/tasks_pkg/workspace_delivery.py` |
 
+Restart recovery records workspace terminal intent through
+`workspace_delivery.record_task_workspace_intents`; it does not run checkpoint
+capture or canonical delivery on the readiness path. The integration worker
+resumes the persisted pending receipt. Work outcome and delivery confirmation
+remain distinct; see [restart handoff](../CONTINUOUS_DELIVERY.md#decision-and-execution).
+
 ## Authority and identity
 
 - `storage_events` is the only event authority. Every project event carries an

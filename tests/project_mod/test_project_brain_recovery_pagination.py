@@ -89,7 +89,7 @@ def test_recovery_deduplicates_acknowledged_work_without_aliasing_owners(monkeyp
                              payload['work_id']))
 
     monkeypatch.setattr(startup, 'get_storage_client', lambda **kw: Client())
-    monkeypatch.setattr(delivery, 'settle_task_workspaces',
+    monkeypatch.setattr(delivery, 'record_task_workspace_intents',
                         lambda task, root: intents.append((task['_userId'], root)))
 
     assert startup.recover_active_work_items() == 3
@@ -240,7 +240,7 @@ def test_startup_preserves_active_work_until_intent_acknowledged(monkeypatch, fa
         return {'repositories': [{'status': 'intent_recorded'}]}
 
     monkeypatch.setattr(startup, 'get_storage_client', lambda **kwargs: Client())
-    monkeypatch.setattr(delivery, 'settle_task_workspaces', settle)
+    monkeypatch.setattr(delivery, 'record_task_workspace_intents', settle)
     assert startup.recover_active_work_items() == 1
     assert active == {'pending': 'task-pending'}
     assert [item['work_id'] for item in finishes] == ['healthy']
@@ -298,7 +298,7 @@ def test_startup_does_not_synthesize_publication_authority(monkeypatch, stored, 
         return {'repositories': [{'status': 'intent_recorded'}]}
 
     monkeypatch.setattr(startup, 'get_storage_client', lambda **kwargs: Client())
-    monkeypatch.setattr(delivery, 'settle_task_workspaces', settle)
+    monkeypatch.setattr(delivery, 'record_task_workspace_intents', settle)
     assert startup.recover_active_work_items() == 1
     assert outcomes == [expected]
     assert finishes[0]['status'] == expected

@@ -15,6 +15,7 @@ remain cooperative: this adapter is not an all-tool filesystem sandbox.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
@@ -722,11 +723,37 @@ def settle_task_workspaces(task: dict, project_path: str = '', project_paths=Non
     Integration owns idempotency, terminal intent and restart recovery. Failures
     here become explicit receipt data, not a successful-delivery assertion.
     """
+    def settle_workspace(*args, **kwargs):
+        from lib.integration_control import settle_task_workspace
+        return settle_task_workspace(*args, **kwargs)
+
+    return _settle_task_workspaces(
+        task, project_path, project_paths, evidence=evidence,
+        settle_workspace=settle_workspace,
+        acknowledgement_key='_workspaceDeliveryAcknowledgedOutcome')
+
+
+def record_task_workspace_intents(task: dict, project_path: str = '') -> dict | None:
+    """Persist boot handoff before work.finish, without capturing old checkouts."""
+    def record_intent(*args, **kwargs):
+        from lib.integration_control import record_task_workspace_intent
+        return record_task_workspace_intent(*args, **kwargs)
+
+    return _settle_task_workspaces(
+        task, project_path, settle_workspace=record_intent,
+        acknowledgement_key='_workspaceDeliveryIntentAcknowledgedOutcome')
+
+
+def _settle_task_workspaces(task: dict, project_path: str = '', project_paths=None,
+                            *, evidence: dict | None = None,
+                            settle_workspace: Callable[..., dict | None],
+                            acknowledgement_key: str) -> dict | None:
+    """Share registration, outcome, receipt and failure handling across receivers."""
     if (task.get('_transientRuntime') or not task.get('id')
             or task.get('_workspaceDeliveryOwnershipRejected')):
         return None
     outcome = task_outcome(task)
-    if task.get('_workspaceDeliveryAcknowledgedOutcome') == outcome:
+    if task.get(acknowledgement_key) == outcome:
         return task.get('_workspaceDelivery')
     # Intent admission needs roots and explicit owner/task registrations.
     # Diagnostics are captured by the round commit owner before tool release;
@@ -761,8 +788,7 @@ def settle_task_workspaces(task: dict, project_path: str = '', project_paths=Non
             # Retain the identity even if the checkpoint/storage operation fails.
             known[root] = row
             row.update(status='pending', outcome=outcome)
-            from lib.integration_control import settle_task_workspace
-            result = settle_task_workspace(
+            result = settle_workspace(
                 row['canonicalRoot'], str(task['id']), user_id=_owner(task), outcome=outcome)
             if not isinstance(result, dict):
                 raise WorkspaceBindingError('Registered workspace settlement returned no receipt')
@@ -783,7 +809,7 @@ def settle_task_workspaces(task: dict, project_path: str = '', project_paths=Non
             errors.append({'path': path, 'status': 'error', 'detail': str(exc)[:500]})
             logger.warning('[WorkspaceDelivery] task=%s path=%s: %s', task['id'], path, exc)
     if not errors:
-        task['_workspaceDeliveryAcknowledgedOutcome'] = outcome
+        task[acknowledgement_key] = outcome
     if not known and not errors:
         # Supersede an earlier attempt's errors: the acknowledged outcome makes
         # every later retry return this receipt instead of settling again.

@@ -51,7 +51,7 @@ def ensure_project_brain_cutover() -> dict:
 def recover_active_work_items() -> int:
     """Finish orphaned work only after its workspace intent is acknowledged."""
     from lib.tasks_pkg.workspace_delivery import (
-        settle_task_workspaces, task_outcome, work_result_summary,
+        record_task_workspace_intents, task_outcome, work_result_summary,
     )
 
     client = get_storage_client(write=True)
@@ -122,7 +122,7 @@ def recover_active_work_items() -> int:
                 recovery_task['config'] = dict(
                     (task or {}).get('config') or {}, projectPath=project_key)
                 try:
-                    receipt = settle_task_workspaces(recovery_task, project_key)
+                    receipt = record_task_workspace_intents(recovery_task, project_key)
                     if receipt and (receipt.get('errors') or receipt.get('status') == 'error'):
                         raise RuntimeError('Workspace terminal intent remains unacknowledged')
                 except Exception as exc:

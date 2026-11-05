@@ -673,6 +673,7 @@ starts: an interrupted `subprocess.run` kills its child. Helpers add no tighter
 deadline; explicit deadlines remain where no hang guard runs (collection-time
 compilation) or where the deadline is the behavior under test. Expensive
 read-only results such as the suite-health census are computed once per module.
+Workspace registration and delivery-contention specs follow the same rule: their holders stay fenced until the owning test releases them in `finally`, and event/future rendezvous use the per-test hang guard. A 10-second pre-capture wait can expire during valid Git preparation, and a 15-second holder timer can silently remove the very contention being tested. Verify the registration/cancellation and source-writer cases in `tests/storage/test_integration_delivery.py`.
 When the code under test owns the timer, the spec keeps its budget and
 injects that module's clock instead: the clock stands still until the scenario
 reaches the state under test, then advances (the synthetic app-server has
