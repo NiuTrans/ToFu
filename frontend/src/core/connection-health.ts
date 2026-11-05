@@ -1,9 +1,10 @@
 /** Declared state owner for conversation and background-task transport health. */
 
-import type { ConnectionHealth, ConnectionHealthState } from
-  '../api/conversation-sync.generated';
+import type { ConnectionHealth } from '../api/conversation-sync.generated';
 import { notifyObserver } from './observer';
 
+/** Conversations whose stream has lost its transport (stalled or offline);
+ * the topbar network badge projects this. */
 export interface AggregateConnectionHealth {
   degraded: boolean;
   count: number;
@@ -13,7 +14,21 @@ export interface AggregateConnectionHealth {
 type HealthListener = (health: ConnectionHealth) => void;
 type AggregateListener = (health: AggregateConnectionHealth) => void;
 
-const DEGRADED_STATES = new Set<ConnectionHealthState>(['degraded', 'offline']);
+/** Degradation that a server heartbeat reports. The frame carrying it proves
+ * the stream delivers, so it describes that conversation (its Surface shows
+ * it), never the page's network. */
+export const SERVER_REPORTED_DEGRADATION = Object.freeze({
+  storageRead: 'storage-read-degraded',
+  storageWriteWedged: 'storage-write-wedged',
+} as const);
+
+const SERVER_REPORTED_REASONS: ReadonlySet<string> = new Set(
+  Object.values(SERVER_REPORTED_DEGRADATION));
+
+function lostTransport(health: ConnectionHealth): boolean {
+  return health.state === 'offline' || (health.state === 'degraded'
+    && !SERVER_REPORTED_REASONS.has(health.reason ?? ''));
+}
 
 export class ConnectionHealthStore {
   private readonly states = new Map<string, ConnectionHealth>();
@@ -37,8 +52,8 @@ export class ConnectionHealthStore {
         && previous.retryCount === health.retryCount) return;
     const published = Object.freeze({ ...health });
     this.states.set(conversationId, published);
-    this.degradedCount += Number(DEGRADED_STATES.has(published.state))
-      - Number(Boolean(previous && DEGRADED_STATES.has(previous.state)));
+    this.degradedCount += Number(lostTransport(published))
+      - Number(Boolean(previous && lostTransport(previous)));
     for (const listener of [...this.listeners.get(conversationId) ?? []]) {
       // A listener can synchronously replace/clear this record. Later listeners
       // must not see older evidence after the nested publication completed.
@@ -75,7 +90,7 @@ export class ConnectionHealthStore {
     const previous = this.states.get(conversationId);
     if (!previous) return;
     this.states.delete(conversationId);
-    this.degradedCount -= Number(DEGRADED_STATES.has(previous.state));
+    this.degradedCount -= Number(lostTransport(previous));
     this.emitAggregate();
   }
 

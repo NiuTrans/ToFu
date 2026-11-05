@@ -1641,9 +1641,33 @@ mutations do not enter that loop.
 ## Health
 
 Visible conversation heartbeat frames own `conversation-sse` health.
-`connecting` and `recovering` are transient; only `degraded` and `offline`
-affect the aggregate badge. Background task streams use the separate
-`task-sse` transport and cannot overwrite a conversation coordinator's state.
+Background task streams use the separate `task-sse` transport and cannot
+overwrite a conversation coordinator's state.
+
+The aggregate (`ConnectionHealthStore.aggregate`, shown as the topbar network
+badge's "Reconnecting") counts only streams that lost their transport:
+`offline`, or `degraded` that is not server-reported. `connecting` and
+`recovering` are transient for a delivering stream. When the silence deadline
+(`reconnectGraceMs` without a valid frame) expires, the coordinator marks the
+stream stalled and publishes its reconnect states as `degraded` until a valid
+frame arrives or demand is released (pause or suspension). A `degraded`
+reading from a heartbeat that arrived (`SERVER_REPORTED_DEGRADATION`:
+`storage-read-degraded`, `storage-write-wedged`) describes that conversation
+and is presented on its Surface, never on the network badge.
+
+Problem: the badge counted every live stream (the active conversation and
+every background conversation with a running Turn), and its persistent
+`degraded` readings were server reports on frames that had just arrived, so
+one wedged task elsewhere held "Reconnecting" on a healthy network, while a
+genuine stall was replaced by `recovering` in the same call and never showed.
+Decision: classify by evidence; a received frame proves the transport, an
+expired silence deadline disproves it until the next valid frame.
+Alternatives considered: counting only the active conversation (hides a
+stalled background stream and keeps the storage false positive for the
+visible one); counting `recovering` (brief native flaps would poison the
+badge); a new schema field for the stall (duplicates `state` and `reason`).
+Pins: `connection-health.test.ts` and the "network badge aggregate" suite in
+`conversation-sync.test.ts`.
 
 Heartbeats and snapshots also carry `pushWithheld` (always explicit, both
 ways). It is the READ-side probe of a WRITE-side delivery wedge: while the
