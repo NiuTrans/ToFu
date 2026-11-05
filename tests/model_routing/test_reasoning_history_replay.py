@@ -23,11 +23,13 @@ def _profile(**reasoning):
     return {'reasoning': {'support': 'supported', **reasoning}}
 
 
-@pytest.mark.parametrize('model', [
-    'hy4', 'tencent/hy4', 'glm-5.3', 'glm-5.2', 'kimi-k2.7-code',
-    'deepseek-v4-flash', 'deepseek-v4-pro',
-])
+@pytest.mark.parametrize('model', ['glm-5.3', 'glm-5.2', 'zai-org/glm-5.3', 'kimi-k2.7-code'])
 def test_maintained_declarations_require_replay(model):
+    assert requires_replay(model)
+
+
+@pytest.mark.parametrize('model', ['deepseek-v4-flash', 'deepseek-v4-pro'])
+def test_undeclared_deepseek_models_keep_the_family_rule(model):
     assert requires_replay(model)
 
 
@@ -46,7 +48,7 @@ def test_the_selected_route_profile_decides_first():
     assert requires_replay('unseen-model-9000', inference_profile=_profile(preserve_history='replay'))
     assert not requires_replay('deepseek-v4-flash', inference_profile=_profile(preserve_history='none'))
     # A route profile without the declaration defers to maintained knowledge.
-    assert requires_replay('hy4', inference_profile=_profile())
+    assert requires_replay('glm-5.3', inference_profile=_profile())
     assert not requires_replay('gpt-6.1-sol', inference_profile=_profile())
 
 
@@ -72,7 +74,7 @@ def _thinking_tool_loop(rounds):
 
 
 @pytest.mark.parametrize(('model', 'kept'), [
-    ('hy4', True), ('glm-5.3', True), ('deepseek-v4-flash', True), ('gpt-6.1-sol', False),
+    ('kimi-k2.7-code', True), ('glm-5.3', True), ('deepseek-v4-flash', True), ('gpt-6.1-sol', False),
 ])
 def test_compaction_keeps_a_declared_trace_and_strips_the_rest(model, kept):
     import lib.tasks_pkg.compaction._constants as constants
@@ -86,7 +88,7 @@ def test_compaction_keeps_a_declared_trace_and_strips_the_rest(model, kept):
     assert (blanked == 0) is kept
 
 
-@pytest.mark.parametrize(('model', 'kept'), [('hy4', True), ('gpt-6.1-sol', False)])
+@pytest.mark.parametrize(('model', 'kept'), [('glm-5.3', True), ('gpt-6.1-sol', False)])
 def test_a_previous_final_answer_carries_its_trace_only_when_declared(model, kept):
     from lib.tasks_pkg.conv_message_builder._transform import _build_assistant_messages
 

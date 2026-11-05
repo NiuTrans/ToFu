@@ -361,8 +361,9 @@ and `no_think`, so `no_think` is the in-ladder `disabled_effort` and every
 enabled depth resolves to `high`. The
 [tool-call guide](https://intl.cloud.tencent.com/zh/document/product/1300/80638)
 asks callers to return `reasoning_content` within a tool-call loop and accepts
-only `auto` and `none` for `tool_choice`, so the profile declares
-`preserve_history: replay` (see "Declared inference profiles"). `hy4` is a substring of
+only `auto` and `none` for `tool_choice`. That is a `preserve_history: replay`
+fact (see "Declared inference profiles"); it is withheld from the maintained
+defaults until the server has restarted onto boot-pinned defaults. `hy4` is a substring of
 `hy4-preview`, so the Hy4 release and context needles follow the preview's;
 the preview's own reasoning profile stays unregistered. OpenRouter's public
 catalogue lists `tencent/hy4`, and the dynamic feed carries that wire.
@@ -721,6 +722,17 @@ extending a model-name list (a second place every registration must
 remember), and replaying every trace (it keeps tokens no vendor asked for in
 every request). Specification:
 `tests/model_routing/test_reasoning_history_replay.py`.
+
+A new vocabulary value reaches maintained defaults only after every running
+server has restarted onto boot-pinned defaults (`a44c8054d`). Problem: a
+server started earlier re-read `model_inference_defaults.json` on each
+authority load and validated it with its own boot-time schema, so declaring
+`replay` for Hy4 and DeepSeek V4 made every model-routing read on the live
+server fail (`inference_profile: invalid inference profile`) from 12:29 on
+2026-11-05. Decision: those two declarations were withdrawn the same day,
+returning the data to its last accepted form; they return once the server
+has restarted. Until then DeepSeek keeps its family rule and Hy4 replays no
+prior reasoning.
 
 DeepSeek V4 Pro on the Baidu wire (checked 2026-11-03): the creator's
 [thinking-mode guide](https://api-docs.deepseek.com/guides/thinking_mode/)

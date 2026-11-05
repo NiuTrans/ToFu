@@ -86,28 +86,11 @@
             "high"
           ],
           "default_effort": "high",
-          "disabled_effort": "no_think",
-          "preserve_history": "replay"
+          "disabled_effort": "no_think"
         }
       },
       "evidence_url": "https://intl.cloud.tencent.com/zh/document/product/1300/80637",
-      "checked_at": "2026-11-05",
-      "previous_profiles": [
-        {
-          "source": "official",
-          "reasoning": {
-            "support": "supported",
-            "wire_format": "reasoning_effort",
-            "can_disable": true,
-            "supported_efforts": [
-              "no_think",
-              "high"
-            ],
-            "default_effort": "high",
-            "disabled_effort": "no_think"
-          }
-        }
-      ]
+      "checked_at": "2026-11-05"
     },
     {
       "creator_id": "moonshot",
@@ -1075,32 +1058,11 @@
             "xhigh": "high",
             "ultra": "max",
             "minimal": "low"
-          },
-          "preserve_history": "replay"
+          }
         }
       },
       "evidence_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
       "previous_profiles": [
-        {
-          "source": "official",
-          "reasoning": {
-            "support": "supported",
-            "wire_format": "thinking_type",
-            "can_disable": true,
-            "supported_efforts": [
-              "low",
-              "high",
-              "max"
-            ],
-            "default_effort": "high",
-            "effort_map": {
-              "medium": "high",
-              "xhigh": "high",
-              "ultra": "max",
-              "minimal": "low"
-            }
-          }
-        },
         {
           "source": "official",
           "reasoning": {
