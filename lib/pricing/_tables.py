@@ -453,7 +453,9 @@ def pricing_for_model(model_id):
 
 # ── Qwen tiered pricing (CNY per 1M tokens) ──
 # The MODEL_PRICING above uses the cheapest tier converted to USD.
-# For precise CNY cost, use these per-model tiers directly:
+# For precise CNY cost, use these per-model tiers directly. Rows declare
+# per-context input/output; cache multipliers come from the model's
+# MODEL_PRICING row unless a row here declares its own.
 QWEN_PRICING_CNY = {
     'qwen3.6-plus':     {'input': [(256_000, 2.0), (1_000_000, 8.0)],       'output': [(256_000, 12.0), (1_000_000, 48.0)]},
     'qwen3.5-plus':     {'input': [(128_000, 0.8), (256_000, 2.0), (1_000_000, 4.0)], 'output': [(128_000, 4.8), (256_000, 12.0), (1_000_000, 24.0)]},
@@ -483,8 +485,11 @@ QWEN_PRICING_CNY = {
                                  'output': [(16_000, 4.0), (32_000, 6.4), (256_000, 8.0)]},
     # Tencent Hunyuan HY4 Preview — flat ¥6/¥18 per 1M regardless of context
     'hy4-preview':              {'input': [(1_000_000, 6.0)],  'output': [(1_000_000, 18.0)]},
-    'deepseek-r1':      {'input': [(1_000_000, 4.0)],  'output': [(1_000_000, 16.0)]},
+    # No MODEL_PRICING row: these two keep the cache-write rate the tier
+    # translation always applied (implicit caching bills no write premium).
+    'deepseek-r1':      {'input': [(1_000_000, 4.0)],  'output': [(1_000_000, 16.0)], 'cacheWriteMul': 1.0},
     'glm-5v-turbo':     {'input': [(32_000, 5.0), (1_000_000, 7.0)],  'output': [(32_000, 22.0), (1_000_000, 26.0)]},
-    '_default':         {'input': [(128_000, 0.8), (256_000, 2.0), (1_000_000, 4.0)], 'output': [(128_000, 4.8), (256_000, 12.0), (1_000_000, 24.0)]},
+    '_default':         {'input': [(128_000, 0.8), (256_000, 2.0), (1_000_000, 4.0)], 'output': [(128_000, 4.8), (256_000, 12.0), (1_000_000, 24.0)],
+                         'cacheWriteMul': 1.0},
 }
 QWEN_PRICING_CNY = RevisionedTable(QWEN_PRICING_CNY)
