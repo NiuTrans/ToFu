@@ -299,6 +299,39 @@ both terminal-event tails worsened. The pooled gain therefore does not establish
 stable per-event tail latency or release-wide performance readiness. Retain both
 pairs; do not publish the first pair's 73% P95 reduction as a general guarantee.
 
+The terminal ownership follow-up uses a separately frozen common source base
+`dc39725cc`: control `3b56e65a1cb6…`, candidate `18745a3e4efd…`.
+It removes the terminal lane update's second verified history reconstruction
+and transfers the projection into its stored Turn instead of deep-cloning it.
+See [the native ownership contract](TOFUDB_EXECUTION_FRAMES.md#terminal-reconstruction-and-ownership-2026-11-05),
+including the rejected sealed-head format experiment. Four fresh FUSE/strict
+processes again ran candidate/control/control/candidate on the complete 25
+histories, 625 events each. No task-owned build or regression process overlapped
+these measurements; unrelated host activity remained uncontrolled.
+
+| Concurrent queued metric | Candidate then control: control → candidate | Control then candidate: control → candidate |
+|---|---:|---:|
+| Cohort completion | 32.24 → 18.52 s | 33.53 → 24.43 s |
+| Event median | 1.343 → 0.791 s | 1.322 → 0.720 s |
+| Event P95 | 12.18 → 7.58 s | 11.81 → 9.50 s |
+| Terminal-event median | 0.493 → 0.644 s | 1.360 → 0.572 s |
+| Terminal-event P95 | 7.71 → 2.93 s | 12.39 → 3.59 s |
+| Reconstructed checkpoint inputs | 6,940,426,870 → 5,336,002,861 B | 6,632,169,252 → 5,883,736,636 B |
+| Producer delivery runs | 142 → 224 | 183 → 209 |
+| WAL encoded bytes | 65,068,963 → 58,190,995 B | 68,234,407 → 69,375,368 B |
+
+All four runs passed exact durable-work comparison, ordered ACK/publication,
+SIGKILL/reopen and offline integrity. Cohort completion improved 27.1–42.5%,
+event P95 19.5–37.8%, and terminal P95 62.0–71.0%. The first terminal median
+regressed, and WAL bytes increased in the reverse pair. The isolated work
+specification proves one reconstruction instead of two; producer grouping and
+scheduling also changed, so the entire queue speedup is not a per-function
+CPU claim. This is a controlled continuation on selected slow histories,
+not original model/tool replay, an all-user sample, or a production tail SLO.
+Raw reports and artifact manifests for both the accepted and rejected arms are
+retained under `/tmp/tofu-storage-terminal-results-20261105/`; the frozen
+control/candidate directories use `/tmp/tofu-storage-terminal-{control,reuse}-20261105/`.
+
 Merged-source verification passed 35 native event/batch/worker-fence/fault tests,
 one isolated checkpoint-work counter test, 17 native application delivery tests
 with no skips, and 48 Python harness/resource/SQL checks. The broad native run
