@@ -14,6 +14,7 @@ const _push = (() => {
   let _connectedAt = 0;            // set on onopen, cleared on onclose; gate for attempt-counter reset
   let _reconnectAttempt = 0;
   let _everConnected = false;      // true once the FIRST onopen fired — distinguishes a genuine RECONNECT from the initial connect
+  let _policyRefused = false;      // passive browser wake cannot bypass a 1008 refusal
   let _reconnectListeners = new Set();  // fn() called after a genuine reconnect (not the first connect)
   let _pendingSends = [];          // control messages queued while disconnected ()
   // Correlated requests never use _pendingSends: replaying an RPC after a
@@ -290,7 +291,12 @@ const _push = (() => {
   }
 
   function _refreshPingCadence() {
-    if (!_connected) return;
+    if (!_connected) {
+      // Activation is fresh demand even after a clean proxy close. Consume a
+      // throttled retry now; connect() coalesces repeated browser wake signals.
+      if (!_pageHidden() && !_policyRefused && (_everConnected || _reconnectTimer)) connect();
+      return;
+    }
     if (_pingTimer) clearInterval(_pingTimer);
     _pingTimer = setInterval(_sendPing, _pingIntervalMs());
     if (_lastPingSentAt) {
@@ -327,6 +333,10 @@ const _push = (() => {
 
   if (typeof document !== 'undefined' && document.addEventListener) {
     document.addEventListener('visibilitychange', _refreshPingCadence);
+  }
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('online', _refreshPingCadence);
+    window.addEventListener('pageshow', _refreshPingCadence);
   }
 
   function _key(channel, taskId) { return `${channel}:${taskId}`; }
@@ -382,6 +392,7 @@ const _push = (() => {
     // Explicit demand consumes an already-scheduled retry. Leaving it alive
     // can reconnect again after this attempt receives a terminal 1008 close.
     if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    _policyRefused = false;
     const url = _buildUrl();
     // A CLOSING/CLOSED socket may not have delivered onclose yet. Clear its
     // logical ownership before constructing the replacement so senders queue
@@ -503,6 +514,8 @@ const _push = (() => {
     };
 
     socket.onclose = (e) => {
+      if (_ws !== socket) return;
+      _policyRefused = e.code === 1008;
       // connect() is allowed to replace a CLOSING socket before its delayed
       // close event arrives. That old event cannot clear the new connection.
       // Reset attempt counter only when the connection actually held long

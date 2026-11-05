@@ -22,6 +22,9 @@ let now = 1000000, nextTimer = 1;
 Date.now = () => now;
 Math.random = () => 0.5;
 const timers = new Map(), intervals = new Map(), sockets = [];
+const wakeListeners = {};
+global.document = {hidden:false, addEventListener(name, callback) {wakeListeners[name]=callback;}};
+global.addEventListener = (name, callback) => {wakeListeners[name]=callback;};
 global.setTimeout = (fn,ms) => {const id=nextTimer++; timers.set(id,{fn,ms}); return id;};
 global.clearTimeout = id => timers.delete(id);
 global.setInterval = fn => {const id=nextTimer++; intervals.set(id,fn); return id;};
@@ -57,6 +60,26 @@ function runReconnect() {
   fireTimer(timer); return sockets.at(-1);
 }
 async function run() {
+  if (scenario==='foreground-recovery') {
+    const socket=open(); socket.remoteClose(Number(closeMode));
+    document.hidden=true; wakeListeners.visibilitychange();
+    assert.equal(sockets.length,1,'a background notification must not create a socket');
+    document.hidden=false;
+    for (const signal of ['visibilitychange','online','pageshow']) {
+      assert.equal(typeof wakeListeners[signal],'function');
+      wakeListeners[signal]();
+    }
+    if (closeMode==='1008') {
+      assert.equal(sockets.length,1,'activation cannot bypass a policy refusal');
+      assert.equal(timers.size,0);
+    } else {
+      assert.equal(sockets.length,2,'activation starts exactly one replacement without waiting for a timer');
+      assert.equal(timers.size,0,'activation consumes the old retry');
+      sockets.at(-1).open();
+      assert.equal(pushIsConnected(),true);
+    }
+    return {reconnects:sockets.length-1};
+  }
   if (scenario==='transient-close') {
     const socket=open(); socket.remoteClose(1011);
     assert.equal(pushIsConnected(),false);
@@ -167,6 +190,13 @@ def test_internal_error_reconnects_but_policy_refusal_stays_terminal():
 
 def test_remote_normal_close_stays_terminal():
     assert _run("normal-close") == {"reconnects": 0}
+
+
+@pytest.mark.parametrize("close_code", ["1000", "1006", "1008"])
+def test_foreground_activation_recovers_disconnect_without_bypassing_policy(close_code):
+    assert _run("foreground-recovery", close_code) == {
+        "reconnects": 0 if close_code == "1008" else 1,
+    }
 
 
 def test_explicit_connection_consumes_retry_before_a_terminal_policy_close():

@@ -103,26 +103,71 @@ function explicitTarget(entry: TurnActivityEntry): boolean {
 export function resolveActivityOccurrence(
   blocks: ReadonlyArray<ConversationBlockViewModel>, entry: TurnActivityEntry,
 ): number | null {
+  return resolveOccurrence(blocks, entry);
+}
+
+function resolveOccurrence(
+  blocks: ReadonlyArray<ConversationBlockViewModel>, entry: TurnActivityEntry,
+  candidates?: readonly number[],
+): number | null {
   const exact = explicitTarget(entry);
   if (!exact && !entry.toolCallId) return null;
   const producer = entryProducer(entry);
-  const matches: number[] = [];
-  blocks.forEach((block, index) => {
-    if (block.kind === 'activity-event') return;
+  let match: number | null = null;
+  for (let offset = 0; offset < (candidates?.length ?? blocks.length); offset += 1) {
+    const index = candidates ? candidates[offset] : offset;
+    const block = blocks[index];
+    if (block.kind === 'activity-event') continue;
     const candidateProducer = blockProducer(block);
-    if (!candidateProducer || !compatibleProducer(producer, candidateProducer)) return;
+    if (!candidateProducer || !compatibleProducer(producer, candidateProducer)) continue;
     const source = block.source as BlockSource;
-    if (entry.anchorBlockId != null && source.blockId !== entry.anchorBlockId) return;
+    if (entry.anchorBlockId != null && source.blockId !== entry.anchorBlockId) continue;
     if (entry.anchorToolRoundNum != null) {
-      if (block.kind !== 'tool' && block.kind !== 'program') return;
+      if (block.kind !== 'tool' && block.kind !== 'program') continue;
       const ordinal = source.roundNum ?? block.round?.roundNum;
       if (!Number.isSafeInteger(entry.anchorToolRoundNum) || entry.anchorToolRoundNum < 0
-          || ordinal !== entry.anchorToolRoundNum) return;
+          || ordinal !== entry.anchorToolRoundNum) continue;
     }
-    if (!exact && (block.kind !== 'tool' || block.toolCallId !== entry.toolCallId)) return;
-    matches.push(index);
+    if (!exact && (block.kind !== 'tool' || block.toolCallId !== entry.toolCallId)) continue;
+    if (match !== null) return null;
+    match = index;
+  }
+  return match;
+}
+
+/** Invocation-local narrowing only. The original scope/ambiguity checks still
+ * decide identity; discard this resolver before inserting/removing blocks. */
+function createActivityOccurrenceResolver(
+  blocks: ReadonlyArray<ConversationBlockViewModel>,
+): (entry: TurnActivityEntry) => number | null {
+  const byBlock = new Map<string, number[]>();
+  const byRound = new Map<number, number[]>();
+  const byCall = new Map<string, number[]>();
+  const add = <K>(map: Map<K, number[]>, key: K, index: number): void => {
+    const bucket = map.get(key);
+    if (bucket) bucket.push(index);
+    else map.set(key, [index]);
+  };
+  blocks.forEach((block, index) => {
+    if (block.kind === 'activity-event') return;
+    const source = block.source as BlockSource;
+    if (source.blockId != null) add(byBlock, source.blockId, index);
+    if (block.kind === 'tool' || block.kind === 'program') {
+      const ordinal = source.roundNum ?? block.round?.roundNum;
+      if (ordinal != null) add(byRound, ordinal, index);
+    }
+    if (block.kind === 'tool') add(byCall, block.toolCallId, index);
   });
-  return matches.length === 1 ? matches[0] : null;
+  return entry => {
+    let candidates: readonly number[] | undefined;
+    if (entry.anchorBlockId != null) candidates = byBlock.get(entry.anchorBlockId) ?? [];
+    if (entry.anchorToolRoundNum != null) {
+      const rounds = byRound.get(entry.anchorToolRoundNum) ?? [];
+      if (!candidates || rounds.length < candidates.length) candidates = rounds;
+    }
+    if (!explicitTarget(entry)) candidates = byCall.get(entry.toolCallId ?? '') ?? [];
+    return resolveOccurrence(blocks, entry, candidates);
+  };
 }
 
 export function activityAnchorWindows(
@@ -131,11 +176,15 @@ export function activityAnchorWindows(
 ): Map<string, ActivityAnchorWindow> {
   const entries = timeline.entries ?? [];
   const windows = new Map<string, ActivityAnchorWindow>();
+  if (!entries.length) return windows;
+  const resolve = createActivityOccurrenceResolver(blocks);
+  const occurrences = entries.map(resolve);
   let spine: TurnActivityEntry | undefined;
   let spineIndex = -1;
-  for (const entry of entries) {
+  for (let offset = 0; offset < entries.length; offset += 1) {
+    const entry = entries[offset];
     windows.set(entry.id, spine ? { after: spine } : {});
-    const index = resolveActivityOccurrence(blocks, entry);
+    const index = occurrences[offset];
     if (index != null && index >= spineIndex) {
       spine = entry;
       spineIndex = index;
@@ -146,7 +195,7 @@ export function activityAnchorWindows(
   for (let offset = entries.length - 1; offset >= 0; offset -= 1) {
     const entry = entries[offset];
     if (limit) windows.get(entry.id)!.before = limit;
-    const index = resolveActivityOccurrence(blocks, entry);
+    const index = occurrences[offset];
     if (index != null && index <= limitIndex) {
       limit = entry;
       limitIndex = index;
