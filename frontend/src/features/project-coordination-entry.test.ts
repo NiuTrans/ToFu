@@ -34,7 +34,7 @@ it('mounts the leader above date groups using explicit binding without promoting
     const entry = document.getElementById('projectCoordinatorEntry')!;
     expect(entry.nextElementSibling?.id).toBe('convList');
     const row = entry.querySelector<HTMLElement>('.coordination-leader')!;
-    expect(row.querySelector('button')).toBeNull();
+    expect([...row.querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual(['sidebar.copyConvId']);
     row.click();
     expect(details).not.toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledWith('leader');

@@ -177,9 +177,9 @@ class EventDeliveryCoordinator:
     A failed head stays retained; no later frame can overtake it. Transient
     pressure retains the exact head under the shared agent wait owner. Model/
     tool/round barriers pause execution without silently skipping evidence.
-    A pump that takes an unstarted head claims the contiguous unstarted run
-    of its batch scope behind it and persists the run in one call
-    (``_claim_run``).
+    A pump that takes an unstarted head claims a contiguous prefix within the
+    existing RPC row bound and persists it in one call (``_claim_run``).
+    Each acknowledged prefix publishes before the next storage call.
     """
     def __init__(self, *, workers=None, capacity=None, byte_capacity=None,
                  retry_attempts=8, retry_delay=0.1, idle_timeout=1.0, profile_every=None):
@@ -200,6 +200,7 @@ class EventDeliveryCoordinator:
         self.capacity = self.byte_capacity = 0  # Legacy hints grant no admission quota.
         self.progress_batch_limit = min(budget.batch_max_events, PROGRESS_BATCH_MAX_FRAMES)
         self.progress_batch_byte_limit = min(budget.batch_max_bytes, PROGRESS_BATCH_MAX_WIRE_BYTES)
+        self.structural_batch_limit = budget.batch_max_events
         self.retry_attempts = max(1, retry_attempts)
         self.retry_delay = max(0.0, retry_delay)
         self.idle_timeout = idle_timeout
@@ -608,8 +609,8 @@ class EventDeliveryCoordinator:
     def _claim_run(self, lane):
         """Under the lock: the items one storage call persists, head first.
 
-        An unstarted head claims every following unstarted item of its batch
-        scope that is already queued, never waiting for more, and each is
+        An unstarted head claims following items of its batch scope within
+        the existing RPC row bound, never waiting for more, and each is
         marked started so none absorbs later progress. An unacknowledged
         attempt may already be committed: a started head keeps exactly the
         run it froze through failure and explicit repair. Items without a
@@ -618,11 +619,15 @@ class EventDeliveryCoordinator:
         head = lane.pending[0]
         if not head.persistence_started:
             length = 1
+            rows = head.event_count
             if head.persist_batch is not None:
                 for item in islice(lane.pending, 1, None):
                     if item.persist_batch is None or item.batch_scope != head.batch_scope:
                         break
+                    if rows + item.event_count > self.structural_batch_limit:
+                        break
                     length += 1
+                    rows += item.event_count
             head.run_length = length
             for item in islice(lane.pending, length):
                 item.persistence_started = True

@@ -1,5 +1,24 @@
 # Storage operations and verification
 
+## Large-history event persistence
+
+The projection witness's version 2 recovery-size evidence adds one optional
+JSON integer to the existing projection head; it adds no record, index, worker
+or retention policy. The canonical native fixture measures 20 additional
+encoded head bytes compared with version 1. Decimal width depends on the
+encoded recovery settlement size. The head is replaced through the existing
+transaction/WAL and checkpoint lifecycle, so this is logical metadata growth,
+not allocated filesystem bytes. No event or recovery history is discarded.
+Invalidating a recovery input removes the size evidence until materialization
+can mint it again. See [execution frames](TOFUDB_EXECUTION_FRAMES.md#recovery-size-evidence-for-large-histories)
+for compatibility, admission checks and the paired large-history regression.
+
+Task event delivery publishes each acknowledged prefix within the existing
+RPC row bound. A refused chunk is bisected without carrying its reduced size
+into unrelated later chunks. This changes neither durable event counts nor
+retention; failed/unknown prefixes retain their original reconciliation rules.
+See [task event delivery](TASK_EVENT_DELIVERY.md).
+
 ## Durable conversation publication
 
 The worker claim is request-scoped evidence against the existing job, not a new

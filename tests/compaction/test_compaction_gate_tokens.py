@@ -266,22 +266,55 @@ def test_gate_no_tool_schema_key_is_safe():
 
 
 @pytest.mark.unit
-def test_economic_working_set_bounds_large_context_by_default(monkeypatch):
+def test_default_compaction_uses_the_route_window_not_a_fixed_working_set(monkeypatch):
     monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
     effective, window_safety, working_set = _compaction_trigger_threshold(
         {'config': {'model': 'kimi-k3'}}, context_limit=1_000_000)
-    assert working_set == 128_000
-    assert effective == 128_000
-    assert window_safety > effective
+    assert working_set == 0
+    assert effective == window_safety
+    assert effective > 150_000
 
 
 @pytest.mark.unit
-def test_default_working_set_stays_below_any_declared_price_cliff(monkeypatch):
+def test_price_cliff_does_not_implicitly_enable_lossy_compaction(monkeypatch):
     monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
 
     assert _working_set_token_limit({
         'config': {'model': 'gpt-5.6-sol'},
-    }) == 244_800
+    }) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('invalid', ['not-a-number', '', None])
+def test_invalid_working_set_falls_back_to_window_safety(monkeypatch, invalid):
+    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
+    effective, window_safety, working_set = _compaction_trigger_threshold(
+        {'config': {'compaction': {'workingSetTokens': invalid}}},
+        context_limit=1_000_000)
+    assert working_set == 0
+    assert effective == window_safety
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(('prompt_tokens', 'working_set', 'expected'), [
+    (150_000, None, False),
+    (150_000, 128_000, True),
+    (900_000, None, True),
+])
+def test_automatic_gate_preserves_evidence_until_window_pressure_or_opt_in(
+        monkeypatch, prompt_tokens, working_set, expected):
+    from lib.tasks_pkg.compaction import _tokens as owner
+
+    monkeypatch.delenv('TOFU_WORKING_CONTEXT_TOKENS', raising=False)
+    monkeypatch.setattr(owner, '_get_context_limit', lambda task: 1_000_000)
+    monkeypatch.setattr(owner, '_count_tokens_authoritative',
+                        lambda *a, **k: (prompt_tokens, 'provider_exact'))
+    config = {} if working_set is None else {
+        'compaction': {'workingSetTokens': working_set}}
+    assert owner._should_force_compact(
+        [{'role': 'user', 'content': 'Continue the authorized task.'}],
+        {'id': 'window-pressure-test', 'convId': 'window-pressure-test',
+         'config': config}) is expected
 
 
 @pytest.mark.unit

@@ -31,6 +31,67 @@ fn commit_step(
 }
 
 #[test]
+fn execution_frame_large_history_reuses_recovery_proof_for_small_events() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let mut runtime = AuthorityDatabase::initialize(a.path()).unwrap();
+    let mut control = AuthorityDatabase::initialize(b.path()).unwrap();
+    let mut projection = canonical_projection();
+    projection["largeStableEvidence"] = json!("s".repeat(40 * 1024 * 1024));
+    let revision = seed_projection(&mut runtime, projection.clone(), true);
+    seed_projection(&mut control, projection, false);
+    let mut warm = producer_shaped_step(revision, 0, "hot");
+    commit_step(&mut runtime, &warm, true).unwrap();
+    commit_step(&mut control, &warm, false).unwrap();
+    warm.projection_patch.as_mut().unwrap()["baseRevision"] = json!(revision + 1);
+    warm.projection_patch.as_mut().unwrap()["targetRevision"] = json!(revision + 2);
+    let mut tx = runtime.begin_with_identity_claim_scopes(7, 11).unwrap();
+    let (_, loaded) = load_event_record_state(&runtime, &mut tx, &warm, false)
+        .unwrap().unwrap();
+    assert!(execution_frame::append_from_witness(
+        &runtime, &mut tx, &loaded, &warm, CONVERSATION, TURN).unwrap().is_some(),
+        "an unchanged large history must not be decoded for an empty patch");
+    drop(tx);
+    let mut runtime_ms = Vec::new();
+    let mut control_ms = Vec::new();
+    for index in 1..=3 {
+        let command = producer_shaped_step(revision + index, index as usize, "hot");
+        let started = std::time::Instant::now();
+        let actual = commit_step(&mut runtime, &command, true).unwrap();
+        runtime_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        let started = std::time::Instant::now();
+        let expected = commit_step(&mut control, &command, false).unwrap();
+        control_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(actual, expected);
+    }
+    println!("large_history_event_ms={}", json!({"runtime": runtime_ms, "materialized": control_ms}));
+    // A recovery input change invalidates the size proof even if the
+    // structural normalizer would otherwise permit the patch.
+    let mut changed = producer_shaped_step(revision + 4, 4, "hot");
+    changed.projection_patch.as_mut().unwrap()["operations"] =
+        json!([{"op":"set","path":["thinking"],"value":"new reasoning"}]);
+    let mut tx = runtime.begin_with_identity_claim_scopes(7, 11).unwrap();
+    let (_, loaded) = load_event_record_state(&runtime, &mut tx, &changed, false)
+        .unwrap().unwrap();
+    assert!(execution_frame::append_from_witness(
+        &runtime, &mut tx, &loaded, &changed, CONVERSATION, TURN).unwrap().is_none());
+    drop(tx);
+    assert_eq!(commit_step(&mut runtime, &changed, true).unwrap(),
+               commit_step(&mut control, &changed, false).unwrap());
+    // Read the complete large Turn once per arm. Hydrating every historical
+    // event would duplicate this same 40 MiB prefix for each row; the nearby
+    // small-history parity tests already compare all those replay surfaces.
+    let read = |database: &AuthorityDatabase| {
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        get(database, &mut tx, CONVERSATION, TURN).unwrap()
+    };
+    let expected = read(&control);
+    assert_eq!(read(&runtime), expected);
+    drop(runtime);
+    assert_eq!(read(&AuthorityDatabase::open(a.path()).unwrap()), expected);
+}
+
+#[test]
 fn execution_frame_runtime_matches_original_before_at_and_after_checkpoint_threshold() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -469,6 +530,21 @@ fn execution_frame_runtime_witness_depth_corruption_and_legacy_version_fallback(
             .unwrap()
             .unwrap();
     let encoded = serde_json::to_value(&witness).unwrap();
+    assert_eq!(encoded["version"], 2);
+    assert_eq!(encoded["recoveryBytes"], serde_json::to_vec(
+        &restart_settlement(projection.as_object().unwrap())).unwrap().len());
+    let mut legacy = encoded.clone();
+    legacy["version"] = json!(1);
+    legacy.as_object_mut().unwrap().remove("recoveryBytes");
+    println!("recovery_witness_added_bytes={}", serde_json::to_vec(&encoded).unwrap().len()
+        - serde_json::to_vec(&legacy).unwrap().len());
+    assert!(ProjectionWitness::decode(&legacy, 7).unwrap().is_some());
+    let mut corrupt_recovery = encoded.clone();
+    corrupt_recovery["recoveryBytes"] = json!(1);
+    assert!(ProjectionWitness::decode(&corrupt_recovery, 7).unwrap().unwrap()
+        .verify(projection.as_object().unwrap(), "assistant", "running").is_err());
+    corrupt_recovery["recoveryBytes"] = json!(0);
+    assert!(ProjectionWitness::decode(&corrupt_recovery, 7).is_err());
     assert!(ProjectionWitness::decode(&encoded, 8).is_err());
     let mut future = encoded.clone();
     future["version"] = json!(99);

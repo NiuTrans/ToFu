@@ -149,6 +149,25 @@ barriers weakens recovery and consumption ordering.
 
 `scripts/gen_task_event_delivery_contract.py` derives shared Python/Rust bounds.
 
+## Large-backlog persistence and publication
+
+Problem: a large entry could force a batch down to one event, and that count
+was then reused for thousands of unrelated small followers. The delivery pump
+also withheld every committed prefix until the entire claimed backlog finished.
+Decision: bisect only a definitively refused RPC interval and process its
+independent siblings in FIFO order. The pump claims at most the existing RPC
+row bound, counting progress-prefix frames, so acknowledged prefixes publish
+before later batches. Admission still accepts every event; there is no new
+count/byte quota, timeout, worker or tuning parameter. Ambiguous writes retain
+exact frozen carriers and reconcile their rows before replay. Permanent errors,
+owner fences, rollback and commit-before-push remain unchanged.
+Alternatives rejected: retaining a learned count treats one payload as evidence
+about different payloads; increasing retry deadlines cannot reduce the work;
+publishing before the storage acknowledgement would lose durability.
+Specs: `test_a_large_head_does_not_force_small_followers_into_single_event_commits`
+and `test_committed_rpc_prefix_is_published_while_a_later_batch_is_blocked`,
+plus the existing batch lost-ACK, stale-attempt and native no-spill cases.
+
 ## Pre-request checkpoint never awaits diagnostics
 
 Problem: every root model request first drained the task FIFO, so a paid call
@@ -440,14 +459,14 @@ no delivery path called them.
 Decision: a FIFO item may carry a batch port: a `batch_scope`, a `batch_entry`
 that freezes the item's entry and a `persist_batch` that persists a FIFO run of
 entries in one storage call. A pump that takes a lane whose head has not
-started claims the head and every following unstarted item of the same scope
-already queued (`_claim_run`). It never waits for more arrivals, and each
+started claims a prefix of already queued unstarted items of the same scope,
+within the existing RPC row bound (`_claim_run`). It never waits for more arrivals, and each
 claimed item is marked started so none absorbs later progress. At the run's
 first attempt the entries freeze once, in FIFO order, and the head's
 `persist_batch` persists them through the existing `wait_for_persistence`.
 After it returns, every frame of every member publishes in FIFO order and the
-run settles as one unit: each member is released once and completed counts
-advance together. A run of one persists through its own port, so single
+run settles as one unit before another prefix enters storage: each member is
+released once and completed counts advance together. A run of one persists through its own port, so single
 frames, merged progress batches and their coalescing are unchanged; inside a
 longer run a progress batch is carried as its own Turn revision rather than
 coalesced. Items

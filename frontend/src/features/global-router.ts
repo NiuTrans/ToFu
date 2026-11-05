@@ -14,6 +14,7 @@ import type { RouterState } from '../api/router.generated';
 import { t } from '../i18n';
 import { createRouterInstructions, type RouterInstructionPorts } from './router-instructions';
 import { createRouterWorkerModel, type RouterWorkerModelControl, type RouterWorkerModelPorts } from './router-worker-model';
+import { createCoordinatorConversationId } from './coordinator-conversation-id';
 import '../styles/application/33-project-coordination.css';
 
 export interface GlobalRouterPorts {
@@ -92,7 +93,9 @@ export function createGlobalRouterEntry(ports: GlobalRouterPorts, hosts: GlobalR
   go.className = 'coordination-leader-go';
   go.setAttribute('aria-hidden', 'true');
   go.textContent = '›';
-  card.append(mark, body, go);
+  const copyId = createCoordinatorConversationId(() => state?.conversationId ?? '');
+  copyId.hidden = true;
+  card.append(mark, body, copyId, go);
   hosts.sidebar.append(card);
 
   const header = document.createElement('header');
@@ -126,6 +129,7 @@ export function createGlobalRouterEntry(ports: GlobalRouterPorts, hosts: GlobalR
 
   function refresh() {
     if (!alive) return;
+    copyId.hidden = !state;
     const active = !!state && ports.activeConversationId() === state.conversationId;
     header.hidden = !active;
     if (active) card.setAttribute('aria-current', 'page');
@@ -151,6 +155,7 @@ export function createGlobalRouterEntry(ports: GlobalRouterPorts, hosts: GlobalR
   }
   card.addEventListener('click', () => { void activate(); });
   card.addEventListener('keydown', (event) => {
+    if (event.target !== card) return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault(); void activate();
   });

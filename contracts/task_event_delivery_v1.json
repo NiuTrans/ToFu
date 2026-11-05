@@ -59,11 +59,11 @@
     "order": "rows-strictly-ascending-across-entries",
     "commit": "one-transaction-of-ordinary-turn-event-record-steps-all-or-nothing",
     "nativeCommitShape": "a-multi-entry-batch-that-no-longer-fits-one-ordinary-overlay-commit-carrying-its-new-blocks-is-refused-database-resource-exhausted-nothing-written-a-single-entry-never",
-    "split": "the-producer-records-the-first-half-of-a-refused-chunk-alone-later-chunks-start-at-the-committed-size",
+    "split": "bisect-only-the-definitively-refused-chunk-in-fifo-order-each-unwritten-sibling-retains-its-own-size-no-run-wide-count-ceiling",
     "acknowledgement": "one-ordinary-turn-event-record-result-per-entry-before-visibility",
     "reconciliation": "after-an-unknown-outcome-read-the-exact-rows-all-identical-committed-none-resend-some-fail-closed",
     "capability": "an-authority-without-the-command-falls-back-to-the-per-event-path",
-    "delivery": "a-pump-taking-an-unstarted-fifo-head-claims-every-already-queued-unstarted-item-of-its-batch-scope-persists-the-run-in-one-call-and-retries-exactly-that-frozen-run"
+    "delivery": "a-pump-claims-an-already-queued-prefix-of-one-batch-scope-within-the-existing-rpc-row-bound-publishes-that-committed-prefix-before-later-batches-and-retries-exactly-the-frozen-run"
   },
   "generator": "scripts/gen_task_event_delivery_contract.py",
   "performanceProfile": {

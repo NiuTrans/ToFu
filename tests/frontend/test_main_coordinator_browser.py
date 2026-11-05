@@ -58,6 +58,10 @@ def test_main_coordinator_card_header_and_health_checks(page, monkeypatch, tmp_p
     router = page.request.get(origin + '/api/v4/router').json()['data']
     assert router['availability'] == 'available', router
     page.wait_for_function('(id) => window.activeConvId === id', arg=router['conversationId'])
+    page.context.grant_permissions(['clipboard-read', 'clipboard-write'], origin=origin)
+    card.get_by_role('button', name='Copy conversation ID', exact=True).click()
+    assert page.evaluate('navigator.clipboard.readText()') == router['conversationId']
+    assert page.evaluate('window.activeConvId') == router['conversationId']
     header = page.locator('.global-router-header')
     expect(header).to_be_visible()
     expect(header).to_contain_text('reach the main coordinator first')
@@ -107,6 +111,7 @@ def test_main_coordinator_card_header_and_health_checks(page, monkeypatch, tmp_p
     page.reload()
     _dismiss_onboarding_modals(page)
     expect(card.locator('.coordination-leader-label')).to_have_text('总负责人', timeout=20000)
+    expect(card.get_by_role('button', name='复制会话ID', exact=True)).to_be_visible()
     card.click()
     page.wait_for_function('(id) => window.activeConvId === id', arg=router['conversationId'])
     expect(page.locator('#topbarTitle')).to_have_text('总负责人')

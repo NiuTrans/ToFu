@@ -569,7 +569,12 @@ coordinator (项目负责人), with the same card in the same place: the leader
 slot above the conversation list holds the project's coordinator when the
 listed conversations belong to a project, and the main coordinator otherwise
 (an uncategorized or plain folder view, or a router-managed chat). Neither
-chat is also a list row. The Watchdog has no entry of its own: health checks
+chat is also a list row. Both available coordinator cards expose a localized
+"Copy conversation ID" action, without requiring debug mode. The dedicated
+cards had removed the ordinary row's diagnostic action; reintroducing a second
+conversation row was rejected. Copy reads the current binding without opening
+or creating a conversation, and a clipboard failure exposes the exact ID for
+manual copying. The Watchdog has no entry of its own: health checks
 (故障巡检) are a compact setting in the main coordinator's header next to the
 Worker model and standing instructions, where the owner turns them on, sets
 the periodic review and opens the Watchdog chat (which offers a way back). The

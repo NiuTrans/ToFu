@@ -30,6 +30,34 @@ function fixture(mode?: 'sidebar' | 'canvas') {
     conversation: (id: string) => { current = id; }, path: (value: string) => { path = value; } };
 }
 
+it('copies a project Coordinator ID and preserves it for manual copying if the clipboard fails', async () => {
+  const writeText = vi.fn(async (_value: string) => {});
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  const f = fixture('sidebar');
+  try {
+    await f.surface.refresh();
+    const copy = f.sidebar.querySelector<HTMLButtonElement>('[data-coordination-focus="copy-coordinator-id"]')!;
+    expect(copy).not.toBeNull();
+    expect(copy.getAttribute('aria-label')).toBe('sidebar.copyConvId');
+    copy.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    copy.click();
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('leader'));
+    expect(f.ports.navigate).not.toHaveBeenCalled();
+    expect(f.create).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(copy.disabled).toBe(false));
+    writeText.mockRejectedValueOnce(new Error('permission denied'));
+    copy.click();
+    await vi.waitFor(() => expect(document.querySelector('.ui-toast--warning')?.textContent).toContain('leader'));
+    expect(document.querySelector('.ui-toast--warning')?.textContent).toContain('projectCoordination.referenceCopyFailed');
+    expect(f.ports.navigate).not.toHaveBeenCalled();
+  } finally {
+    f.surface.destroy();
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  }
+});
+
 it('opens the sidebar Coordinator as soon as its binding resolves while details are stalled', async () => {
   const f = fixture('sidebar');
   let finish!: (value: CoordinatorProgressState) => void;
@@ -233,9 +261,9 @@ it('pins only the task board atop the Coordinator chat: no sessions, references,
   for (const retired of ['.coordination-work-list', '.coordination-topology', '.coordination-reference',
     '.coordinator-budget', '.coordinator-plan', '.coordination-report']) expect(f.canvas.querySelector(retired)).toBeNull();
   expect(f.ports.board).not.toHaveBeenCalled();
-  // The sidebar row is one quiet navigation target that summarizes the board.
+  // The sidebar summarizes the board and retains its diagnostic copy action.
   const row = f.sidebar.querySelector<HTMLElement>('.coordination-leader')!;
-  expect(row.querySelector('button')).toBeNull();
+  expect([...row.querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual(['sidebar.copyConvId']);
   expect(row.querySelector('.coordination-leader-meta')?.textContent).toBe('coordinatorProgress.sidebar.active');
   expect(row.title).toContain(BOARD.summary);
   row.click();

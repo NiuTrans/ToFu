@@ -427,8 +427,7 @@ def test_runs_beyond_the_existing_rpc_budget_commit_in_ordered_transactions(
 
 
 def test_a_refused_composite_commit_is_recorded_in_fifo_halves(turn_service, storage, monkeypatch):
-    """``database_resource_exhausted`` proves nothing was written; later
-    chunks of the same call start at the size that committed."""
+    """A definitive refusal splits that interval into independently tried halves."""
     _, task = _task(turn_service, storage, 'batch-split')
     try:
         assert turn_service.record_task_event(task, {'type': 'phase', 'phase': 'starting'})
@@ -452,6 +451,46 @@ def test_a_refused_composite_commit_is_recorded_in_fifo_halves(turn_service, sto
         assert _turn(turn_service, task)['projectionRevision'] == base + len(entries)
         assert [row['sequence'] for row in _rows(storage, task)] == list(range(len(entries)))
         assert len(_sync_changes(storage, task, sync_before)) == len(entries)
+    finally:
+        _discard(task)
+
+
+@pytest.mark.parametrize('lost_ack', [False, True])
+def test_a_large_head_does_not_force_small_followers_into_single_event_commits(
+        turn_service, storage, monkeypatch, lost_ack):
+    _, task = _task(turn_service, storage, 'batch-heterogeneous')
+    try:
+        assert turn_service.record_task_event(task, {'type': 'phase', 'phase': 'starting'})
+        original = storage.client.command
+        accepted = []
+        lose_ack = [lost_ack]
+
+        def command(operation, payload, *args, **kwargs):
+            if operation != 'turn.event.record_batch':
+                return original(operation, payload, *args, **kwargs)
+            sequences = [entry['task_event']['sequence'] for entry in payload['entries']]
+            # One independently admissible large entry needs its own ordinary
+            # commit. This says nothing about the later small entries.
+            if sequences[0] == 0 and len(sequences) > 1:
+                raise StorageError('database_resource_exhausted',
+                                   'Turn event batch exceeds one ordinary commit')
+            result = original(operation, payload, *args, **kwargs)
+            accepted.append(sequences)
+            if lose_ack and lose_ack.pop():
+                raise StorageError('database_timeout', 'injected lost split acknowledgement', True)
+            return result
+
+        monkeypatch.setattr(storage.client, 'command', command)
+        script = [(lambda task: None, {'type': 'phase', 'phase': 'calling'})] * 32
+        entries = _entries(turn_service, task, script)
+        if lost_ack:
+            with pytest.raises(StorageError, match='lost split acknowledgement'):
+                turn_service.record_task_events(task, entries)
+        assert turn_service.record_task_events(task, entries) == ['carried'] * len(entries)
+        assert accepted[0] == [0]
+        assert any(len(part) > 1 for part in accepted[1:])
+        assert [seq for part in accepted for seq in part] == list(range(32))
+        assert [row['sequence'] for row in _rows(storage, task)] == list(range(32))
     finally:
         _discard(task)
 

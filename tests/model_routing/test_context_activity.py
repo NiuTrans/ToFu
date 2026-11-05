@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from tests.model_routing.test_model_continuation_policy import replay_store
+from tests.model_routing.test_model_continuation_policy import replay_store as replay_store
 from tests.model_routing.test_model_replay_stability import _turn
 
 pytestmark = pytest.mark.unit

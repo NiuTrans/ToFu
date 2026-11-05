@@ -646,6 +646,14 @@ accepted attempt config already is the durable authority). Cost: one source
 attempt read per continuation admission. Spec:
 `tests/project_mod/test_coordinator_replay_policy.py`.
 
+Background completion resumes read both predecessor and successor attempts
+through the repository's owner-scoped `get_attempt` port. Its default resolves
+the selected lifecycle store lazily, just as an injected test reader does.
+Calling the optional injected reader directly was rejected: ordinary production
+repositories omit it, so a durable successor could be created but never bound
+back to its assignment. The worker continuation specification exercises both
+reader configurations and preserves the exact predecessor/successor fences.
+
 A continuation that ends without changed work/review/delivery evidence (including
 a failed Coordinator turn) is retried after `stallRetrySeconds` backoff
 (30 s, 2 min, 10 min, 30 min, 60 min); only after `maxStalledTurns` (6) such turns
@@ -946,6 +954,13 @@ messages. Owner, project, Coordinator identity and binding revision are checked;
 replacement withdraws pending transport while preserving old conversation history.
 Reports can be ingested during the ordinary Coordinator attempt without replacing
 that attempt or preventing its settlement.
+
+The attention head is a projection, not an independent transcript. If its Turn
+has been deleted, reads return empty attention after rechecking the binding;
+they do not rewrite history or the read watermark. Storage failures and a
+present Turn with mismatched identity still fail visibly. Treating a missing
+Turn as an internal error was rejected because a legitimate history deletion
+would break every subsequent report poll.
 
 Model view. Problem: a report Turn is ingested after the still-running reply
 that published it. Replaying it as one more assistant message after that reply
@@ -1676,6 +1691,34 @@ or worker is introduced. `canonicalDelivery=true` derives only from the exact
 owner/project/task-matching durable `delivered` receipt, not completion, acceptance,
 candidate `merged` or a publish request. Automatic byte delivery need not change HEAD.
 Alternatives rejected: acceptance-as-publication and UI-only fencing lose authority.
+
+### Dispatch storage waits
+
+Problem: a transient storage `deadline_elapsed` while validating a grant or
+recording a physical occurrence stopped a healthy Worker as
+`dispatch_authority_lost`, even when the authority recovered moments later.
+Decision: live dispatch validation and its model/tool occurrence observers use
+the shared `lib/tasks_pkg/persistence_wait.py` lifecycle. Typed transient storage
+failures wait with the existing backoff and liveness witness, without an
+agent-attempt ceiling. Only the read or idempotent occurrence mutation repeats;
+no model request, tool effect, grant or execution account is recreated.
+Repository contention errors retain the final storage cause, so their bounded
+CAS loop cannot erase the distinction between transient pressure and a permanent
+refusal. Malformed config is refused before a workspace ownership lookup.
+Validation rereads live authority on recovery, and new intents revalidate after
+their durable ACK before allowing effects. Stop cancels admission waits; already
+observed model/tool settlement continues to ACK after Stop. Shutdown retains the
+existing persistence-debt failure behavior. Permanent integrity/permission
+failures and real revocations still fail closed with their original causes.
+An uncertain ACK reuses the exact occurrence; an existing identical finite-grant
+intent consumes no second allowance.
+
+Alternatives rejected: ignoring a failed authority check could execute without
+authorization; retrying the whole turn could repeat paid or external effects;
+another retry count/deadline would kill work during longer storage outages.
+Specifications: `tests/project_mod/test_project_dispatch_persistence.py`,
+`tests/storage/test_project_dispatch_persistence.py` and the existing dispatch
+runtime, occurrence accounting and stop-cause contracts.
 
 ### Dispatch authority stop causes
 

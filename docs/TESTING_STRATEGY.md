@@ -64,6 +64,11 @@ imports preserve each consumer's SQL/native cases regardless of collection
 order. Verify the provider module followed by `test_turn_event_encode_once.py`
 with `-k test_snapshot_delta_is_encoded_once`, plus the batch delivery tests.
 
+Fixtures imported only for pytest argument injection use an explicit re-export
+(`from owner import fixture as fixture`, or the module's `__all__`). This keeps
+pytest discovery and lint usage aligned; removing the import would break fixture
+resolution. `tests/model_routing/test_context_activity.py` exercises that form.
+
 The lean installer portability job installs every plugin explicitly loaded by
 the repository's pytest configuration, even with `--noconftest` and plugin
 autoload disabled. `tests/installer/test_installer_portability_workflow.py`

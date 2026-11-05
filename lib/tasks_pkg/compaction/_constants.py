@@ -116,26 +116,16 @@ _USER_VERBATIM_MAX_MESSAGES = 8
 Keeps the retained block scannable; the newest N instructions are the ones
 most likely to still bind the current work."""
 
-_DEFAULT_WORKING_SET_TOKENS = 128_000
-"""Fallback economic ceiling for the repeatedly replayed prompt working set.
+_DEFAULT_WORKING_SET_TOKENS = 0
+"""Economic compaction is opt-in; automatic compaction follows window safety.
 
-The context-window trigger above is a correctness guard: on a 1M model it
-does not compact until roughly 778K input tokens.  That is safe but extremely
-expensive for agent loops, where the same prefix is submitted dozens of times
-and cache reads still have a non-zero price.  The working-set ceiling is a
-second, lower trigger whose purpose is cost and latency rather than avoiding a
-hard context overflow.
-
-128K is deliberately large enough for a coding hot tail plus structured
-summary, while bounding a 1M-capable model's repeated input. Since 2026-09-01,
-an active provider/model rate card with a proven price increase replaces this
-fallback with 90% of the preceding cheaper tier; no model name is hard-coded.
-User sign-off is the 2026-08-08 request to maximize context-cache efficiency
-and the 2026-09-01 request for the general tier/cadence repair; the read site
-emits a one-time ``audit_log('config_change', approved_by='user')``.
-Override per request with ``compaction.workingSetTokens`` or process-wide with
-``TOFU_WORKING_CONTEXT_TOKENS``.  Set either to ``0`` to restore the former
-context-window-only behavior.
+The 2026-11-05 owner decision prioritizes execution continuity over speculative
+prompt savings. A fixed working set or a pricing tier does not prove that
+discarding visible evidence improves task completion. Zero leaves the existing
+route-window/output-reserve guard authoritative. Explicit positive
+``compaction.workingSetTokens`` or ``TOFU_WORKING_CONTEXT_TOKENS`` values retain
+the economic policy and its candidate/ROI checks. No task execution limit is
+implied by either policy.
 """
 
 _SUMMARY_MAX_TOKENS = 2200

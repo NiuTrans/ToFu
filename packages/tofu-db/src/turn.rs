@@ -13519,6 +13519,7 @@ fn validate_settleable_turn_size(
     projection: &Map<String, Value>,
     projection_bytes: usize,
     terminal: bool,
+    recovery_bytes: Option<usize>,
 ) -> io::Result<()> {
     let envelope: std::collections::BTreeMap<&str, &Value> = turn.iter()
         .filter(|(key, _)| key.as_str() != "projection" && key.as_str() != "_projectionHead")
@@ -13536,8 +13537,11 @@ fn validate_settleable_turn_size(
         // A restart anchor can duplicate part of that history but not more than
         // the projection plus its bounded envelope. Inspect it near the ceiling.
         if materialized_bytes.saturating_add(projection_bytes).saturating_add(reserve) > limit {
-            let recovery_bytes = serde_json::to_vec(&restart_settlement(projection))
-                .map_err(|_| invalid_data("Turn recovery settlement cannot be encoded"))?.len();
+            let recovery_bytes = match recovery_bytes {
+                Some(bytes) => bytes,
+                None => serde_json::to_vec(&restart_settlement(projection))
+                    .map_err(|_| invalid_data("Turn recovery settlement cannot be encoded"))?.len(),
+            };
             reserve = reserve.max(recovery_bytes.saturating_add(1024));
         }
     }
@@ -13939,6 +13943,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     }
     validate_settleable_turn_size(
         &turn, &next_projection, projection_bytes, request.terminal,
+        frame_update.as_ref().and_then(|update| update.recovery_bytes),
     )?;
 
     let mut next_projection_head = if let Some(update) = &text_update {

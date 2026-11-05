@@ -156,7 +156,7 @@ pub(crate) fn record(
         document.insert("updatedAt".to_owned(), Value::from(request.now_ms));
         document.insert("status".to_owned(), Value::String(request.status.clone()));
         document.insert("settlement".to_owned(), Value::Object(Map::new()));
-        validate_settleable_turn_size(&document, &projection, witness.total, false)?;
+        validate_settleable_turn_size(&document, &projection, witness.total, false, None)?;
         current_head = store_event_projection(database, transaction, request,
             &attempt.conversation_id, document["turnId"].as_str().unwrap(), revision, next,
             current_head.as_ref(), &previous, &projection, witness.total, patch)?;
